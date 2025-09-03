@@ -1,7 +1,6 @@
 import Foundation
 import Combine
 import CoreData
-import CryptoKit
 
 final class GmailSendService: ObservableObject {
     private let apiClient = GmailAPIClient.shared
@@ -136,15 +135,25 @@ final class GmailSendService: ObservableObject {
             message.snippet = String(body.prefix(120))
             message.gmThreadId = threadId ?? ""
             
-            let conversationKey = computeConversationKey(recipients: recipients)
-            let conversation = findOrCreateConversation(key: conversationKey, recipients: recipients)
+            // Get account info for myAliases
+            let accountRequest = Account.fetchRequest()
+            accountRequest.fetchLimit = 1
+            guard let account = try? viewContext.fetch(accountRequest).first else {
+                // Fallback: create conversation with recipients only
+                let conversation = findOrCreateConversation(recipients: recipients, myAliases: [])
+                message.conversation = conversation
+                optimisticMessage = message
+                return
+            }
+            
+            let myAliases = Set(([account.email] + account.aliasesArray).map(normalizedEmail))
+            let conversation = findOrCreateConversation(recipients: recipients, myAliases: myAliases)
             message.conversation = conversation
             
             // Update conversation to bump it to the top
             conversation.lastMessageDate = Date()
             conversation.snippet = message.snippet
-            // Mark conversation as having inbox messages since we're sending
-            conversation.hasInbox = true
+            // IMPORTANT: do NOT set conversation.hasInbox = true here for outgoing messages
             
             do {
                 if viewContext.hasChanges {
@@ -189,21 +198,13 @@ final class GmailSendService: ObservableObject {
         }
     }
     
-    private func computeConversationKey(recipients: [String]) -> String {
-        // Use the same logic as ConversationGrouper for consistency
-        let normalized = recipients.map { EmailNormalizer.normalize($0) }
-        let sorted = normalized.sorted()
-        let key = sorted.joined(separator: "|")
+    private func findOrCreateConversation(recipients: [String], myAliases: Set<String>) -> Conversation {
+        // Build minimal headers for identity: From + To
+        let identityHeaders = recipients.map { MessageHeader(name: "To", value: $0) }
+        let identity = makeConversationIdentity(from: identityHeaders, myAliases: myAliases)
         
-        // Hash the key using SHA256, same as ConversationGrouper
-        let data = Data(key.utf8)
-        let hash = SHA256.hash(data: data)
-        return hash.compactMap { String(format: "%02x", $0) }.joined()
-    }
-    
-    private func findOrCreateConversation(key: String, recipients: [String]) -> Conversation {
         let request: NSFetchRequest<Conversation> = Conversation.fetchRequest()
-        request.predicate = NSPredicate(format: "keyHash == %@", key)
+        request.predicate = NSPredicate(format: "keyHash == %@", identity.keyHash)
         request.fetchLimit = 1
         
         if let existing = try? viewContext.fetch(request).first {
@@ -212,13 +213,35 @@ final class GmailSendService: ObservableObject {
         
         let conversation = Conversation(context: viewContext)
         conversation.id = UUID()
-        conversation.keyHash = key
-        conversation.conversationType = recipients.count > 1 ? .group : .oneToOne
+        conversation.keyHash = identity.keyHash
+        conversation.conversationType = identity.type
         conversation.lastMessageDate = Date()
         conversation.inboxUnreadCount = 0
-        conversation.hasInbox = true  // Set to true since we're creating it for sending
+        conversation.hasInbox = false  // IMPORTANT: do NOT set to true for outgoing messages
         conversation.hidden = false
         conversation.displayName = recipients.joined(separator: ", ")
+        
+        // Create participants
+        for email in identity.participants {
+            let personRequest = Person.fetchRequest()
+            personRequest.predicate = NSPredicate(format: "email == %@", email)
+            personRequest.fetchLimit = 1
+            
+            let person: Person
+            if let existingPerson = try? viewContext.fetch(personRequest).first {
+                person = existingPerson
+            } else {
+                person = Person(context: viewContext)
+                person.id = UUID()
+                person.email = email
+            }
+            
+            let participant = ConversationParticipant(context: viewContext)
+            participant.id = UUID()
+            participant.participantRole = .normal
+            participant.person = person
+            participant.conversation = conversation
+        }
         
         return conversation
     }

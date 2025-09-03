@@ -11,7 +11,7 @@ class SyncEngine: ObservableObject {
     
     private let apiClient = GmailAPIClient.shared
     private let coreDataStack = CoreDataStack.shared
-    private var conversationGrouper: ConversationGrouper?
+    private var myAliases: Set<String> = []
     private var cancellables = Set<AnyCancellable>()
     
     private init() {}
@@ -36,7 +36,8 @@ class SyncEngine: ObservableObject {
                 .filter { $0.treatAsAlias == true || $0.isPrimary == true }
                 .map { $0.sendAsEmail }
             
-            conversationGrouper = ConversationGrouper(myEmail: profile.emailAddress, aliases: aliases)
+            // Build myAliases set with normalized emails
+            myAliases = Set(([profile.emailAddress] + aliases).map(normalizedEmail))
             
             _ = await saveAccount(profile: profile, aliases: aliases, in: context)
             
@@ -124,8 +125,8 @@ class SyncEngine: ObservableObject {
             return
         }
         
-        // Initialize conversation grouper with stored aliases
-        conversationGrouper = ConversationGrouper(myEmail: email, aliases: aliases)
+        // Initialize myAliases with stored aliases
+        myAliases = Set(([email] + aliases).map(normalizedEmail))
         
         await MainActor.run {
             self.isSyncing = true
@@ -198,8 +199,7 @@ class SyncEngine: ObservableObject {
     
     private func saveMessage(_ gmailMessage: GmailMessage, in context: NSManagedObjectContext) async {
         guard let payload = gmailMessage.payload,
-              let headers = payload.headers,
-              let grouper = conversationGrouper else { return }
+              let headers = payload.headers else { return }
         
         let request = Message.fetchRequest()
         request.predicate = NSPredicate(format: "id == %@", gmailMessage.id)
@@ -207,12 +207,12 @@ class SyncEngine: ObservableObject {
             return
         }
         
-        let (conversationKey, conversationType, participants) = grouper.computeConversationKey(from: headers)
+        let identity = makeConversationIdentity(from: headers, myAliases: myAliases)
         
         let conversation = await findOrCreateConversation(
-            keyHash: conversationKey,
-            type: conversationType,
-            participants: participants,
+            keyHash: identity.keyHash,
+            type: identity.type,
+            participants: Set(identity.participants),
             in: context
         )
         
@@ -234,7 +234,9 @@ class SyncEngine: ObservableObject {
             case "subject":
                 message.subject = header.value
             case "from":
-                message.isFromMe = grouper.isFromMe(header.value)
+                if let email = EmailNormalizer.extractEmail(from: header.value) {
+                    message.isFromMe = myAliases.contains(normalizedEmail(email))
+                }
                 await saveParticipant(from: header.value, kind: .from, for: message, in: context)
             case "to":
                 await saveParticipants(from: header.value, kind: .to, for: message, in: context)
@@ -529,67 +531,64 @@ class SyncEngine: ObservableObject {
     }
     
     private func removeDuplicateConversations(in context: NSManagedObjectContext) async {
-        let request = NSFetchRequest<NSFetchRequestResult>(entityName: "Conversation")
-        request.resultType = .dictionaryResultType
-        request.propertiesToFetch = ["keyHash", "id"]
-        request.returnsDistinctResults = false
+        let request = Conversation.fetchRequest()
+        guard let conversations = try? context.fetch(request) else { return }
         
-        guard let results = try? context.fetch(request) as? [[String: Any]] else { return }
-        
-        var seenKeys = [String: UUID]()
-        var conversationsToMerge = [(keep: UUID, delete: UUID)]()
-        
-        for result in results {
-            if let keyHash = result["keyHash"] as? String,
-               let id = result["id"] as? UUID {
-                if let existingId = seenKeys[keyHash] {
-                    // Found duplicate - mark for merging
-                    conversationsToMerge.append((keep: existingId, delete: id))
-                } else {
-                    seenKeys[keyHash] = id
-                }
-            }
+        // Group conversations by keyHash
+        var groupedByKey = [String: [Conversation]]()
+        for conversation in conversations {
+            groupedByKey[conversation.keyHash, default: []].append(conversation)
         }
         
-        // Merge duplicates
-        for (keepId, deleteId) in conversationsToMerge {
-            let keepRequest = Conversation.fetchRequest()
-            keepRequest.predicate = NSPredicate(format: "id == %@", keepId as CVarArg)
+        // Process each group with duplicates
+        for (_, group) in groupedByKey where group.count > 1 {
+            // Select winner: most messages, then latest lastMessageDate
+            let winner = group.max { (a, b) in
+                let aCount = a.messages?.count ?? 0
+                let bCount = b.messages?.count ?? 0
+                if aCount != bCount { return aCount < bCount }
+                return (a.lastMessageDate ?? .distantPast) < (b.lastMessageDate ?? .distantPast)
+            }!
             
-            let deleteRequest = Conversation.fetchRequest()
-            deleteRequest.predicate = NSPredicate(format: "id == %@", deleteId as CVarArg)
+            let losers = group.filter { $0 != winner }
             
-            if let keepConv = try? context.fetch(keepRequest).first,
-               let deleteConv = try? context.fetch(deleteRequest).first {
-                
-                // Move all messages from delete to keep
-                if let messages = deleteConv.messages {
+            for loser in losers {
+                // Reassign all messages from loser to winner
+                if let messages = loser.messages {
                     for message in messages {
-                        message.conversation = keepConv
+                        message.conversation = winner
                     }
                 }
                 
-                // Update lastMessageDate if needed
-                if let deleteDate = deleteConv.lastMessageDate,
-                   keepConv.lastMessageDate == nil || deleteDate > keepConv.lastMessageDate! {
-                    keepConv.lastMessageDate = deleteDate
-                    keepConv.snippet = deleteConv.snippet
+                // Merge rollups
+                winner.lastMessageDate = max(winner.lastMessageDate ?? .distantPast,
+                                            loser.lastMessageDate ?? .distantPast)
+                
+                if winner.snippet == nil || 
+                   (loser.lastMessageDate ?? .distantPast) > (winner.lastMessageDate ?? .distantPast) {
+                    winner.snippet = loser.snippet
                 }
                 
-                // Merge inbox status
-                if deleteConv.hasInbox {
-                    keepConv.hasInbox = true
-                }
-                keepConv.inboxUnreadCount = max(keepConv.inboxUnreadCount, deleteConv.inboxUnreadCount)
+                winner.hasInbox = winner.hasInbox || loser.hasInbox
+                winner.inboxUnreadCount += loser.inboxUnreadCount
                 
-                // Delete the duplicate
-                context.delete(deleteConv)
+                if let loserLatestInboxDate = loser.latestInboxDate {
+                    winner.latestInboxDate = max(winner.latestInboxDate ?? .distantPast, loserLatestInboxDate)
+                }
+                
+                // Preserve pinned status
+                winner.pinned = winner.pinned || loser.pinned
+                
+                // Delete the loser
+                context.delete(loser)
             }
         }
         
-        if !conversationsToMerge.isEmpty {
+        // Save once at the end
+        if groupedByKey.values.contains(where: { $0.count > 1 }) {
             coreDataStack.save(context: context)
-            print("Merged \(conversationsToMerge.count) duplicate conversations")
+            let mergedCount = groupedByKey.values.map { max(0, $0.count - 1) }.reduce(0, +)
+            print("Merged \(mergedCount) duplicate conversations")
         }
     }
     
