@@ -5,7 +5,7 @@
 ## User settings
 xcuserdata/
 
-## compatibility with Xcode 8 and earlier (ignoring not required starting Xcode 9)
+## Xcode 8 and earlier
 *.xcscmblueprint
 *.xccheckout
 
@@ -88,8 +88,38 @@ fastlane/test_output
 
 iOSInjectionProject/
 
-# Mac OS
+# macOS
 .DS_Store
+.AppleDouble
+.LSOverride
 
-# Claude
-.claude/
+# Icon must end with two \r
+Icon
+
+# Thumbnails
+._*
+
+# Files that might appear in the root of a volume
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Directories potentially created on remote AFP share
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Sensitive Information
+Config/Secrets.swift
+GoogleService-Info.plist
+*.p12
+*.mobileprovision
+
+# Build artifacts
+/tmp/
