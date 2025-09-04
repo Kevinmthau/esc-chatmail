@@ -35,6 +35,7 @@
     </entity>
     <entity name="Message" representedClassName="Message" syncable="YES">
         <attribute name="bodyStorageURI" optional="YES" attributeType="String"/>
+        <attribute name="cleanedSnippet" optional="YES" attributeType="String"/>
         <attribute name="gmThreadId" attributeType="String"/>
         <attribute name="hasAttachments" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="id" attributeType="String"/>

@@ -133,6 +133,7 @@ final class GmailSendService: ObservableObject {
             message.isFromMe = true
             message.internalDate = Date()
             message.snippet = String(body.prefix(120))
+            message.cleanedSnippet = EmailTextProcessor.createCleanSnippet(from: body)
             message.gmThreadId = threadId ?? ""
             
             // Get account info for myAliases
@@ -152,7 +153,7 @@ final class GmailSendService: ObservableObject {
             
             // Update conversation to bump it to the top
             conversation.lastMessageDate = Date()
-            conversation.snippet = message.snippet
+            conversation.snippet = message.cleanedSnippet ?? message.snippet
             // IMPORTANT: do NOT set conversation.hasInbox = true here for outgoing messages
             
             do {

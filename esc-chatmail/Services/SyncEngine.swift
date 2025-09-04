@@ -222,6 +222,20 @@ class SyncEngine: ObservableObject {
         message.snippet = gmailMessage.snippet
         message.conversation = conversation
         
+        // Process and clean email content for better display
+        if let htmlBody = extractHTMLBody(from: payload) {
+            // Clean HTML and create snippet
+            let cleanedHTML = EmailTextProcessor.removeQuotedFromHTML(htmlBody)
+            let plainFromHTML = EmailTextProcessor.extractPlainFromHTML(cleanedHTML ?? htmlBody)
+            message.cleanedSnippet = EmailTextProcessor.createCleanSnippet(from: plainFromHTML)
+        } else if let plainBody = extractPlainTextBody(from: payload) {
+            // Use plain text if no HTML available
+            message.cleanedSnippet = EmailTextProcessor.createCleanSnippet(from: plainBody)
+        } else {
+            // Fallback to Gmail's snippet
+            message.cleanedSnippet = EmailTextProcessor.createCleanSnippet(from: gmailMessage.snippet)
+        }
+        
         if let internalDateStr = gmailMessage.internalDate,
            let internalDateMs = Double(internalDateStr) {
             message.internalDate = Date(timeIntervalSince1970: internalDateMs / 1000)
@@ -260,7 +274,9 @@ class SyncEngine: ObservableObject {
         }
         
         if let bodyHtml = extractHTMLBody(from: payload) {
-            let fileURL = saveHTMLToFile(html: bodyHtml, messageId: gmailMessage.id)
+            // Save the cleaned HTML for display
+            let cleanedHTML = EmailTextProcessor.removeQuotedFromHTML(bodyHtml) ?? bodyHtml
+            let fileURL = saveHTMLToFile(html: cleanedHTML, messageId: gmailMessage.id)
             message.bodyStorageURI = fileURL?.absoluteString
         }
         
@@ -269,7 +285,7 @@ class SyncEngine: ObservableObject {
         // Update conversation's lastMessageDate to bump it to the top
         if conversation.lastMessageDate == nil || message.internalDate > conversation.lastMessageDate! {
             conversation.lastMessageDate = message.internalDate
-            conversation.snippet = message.snippet
+            conversation.snippet = message.cleanedSnippet ?? message.snippet
         }
     }
     
@@ -404,7 +420,7 @@ class SyncEngine: ObservableObject {
             
             if let latestMessage = messages.max(by: { $0.internalDate < $1.internalDate }) {
                 conversation.lastMessageDate = latestMessage.internalDate
-                conversation.snippet = latestMessage.snippet
+                conversation.snippet = latestMessage.cleanedSnippet ?? latestMessage.snippet
             }
             
             let inboxMessages = messages.filter { message in
@@ -499,6 +515,35 @@ class SyncEngine: ObservableObject {
             for subpart in parts {
                 if let html = extractHTMLBody(from: subpart) {
                     return html
+                }
+            }
+        }
+        
+        return nil
+    }
+    
+    private func extractPlainTextBody(from part: MessagePart) -> String? {
+        if part.mimeType == "text/plain", let data = part.body?.data {
+            let base64String = data.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+            
+            var paddedBase64 = base64String
+            let remainder = base64String.count % 4
+            if remainder > 0 {
+                paddedBase64 = base64String + String(repeating: "=", count: 4 - remainder)
+            }
+            
+            guard let decodedData = Data(base64Encoded: paddedBase64) else {
+                print("Failed to decode Base64 for text part")
+                return nil
+            }
+            
+            return String(data: decodedData, encoding: .utf8)
+        }
+        
+        if let parts = part.parts {
+            for subpart in parts {
+                if let text = extractPlainTextBody(from: subpart) {
+                    return text
                 }
             }
         }

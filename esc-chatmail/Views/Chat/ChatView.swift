@@ -278,7 +278,7 @@ struct MessageBubble: View {
                         .fontWeight(.semibold)
                 }
                 
-                Text(message.snippet ?? "")
+                Text(message.cleanedSnippet ?? message.snippet ?? "")
                     .padding(10)
                     .background(message.isFromMe ? Color.blue : Color.gray.opacity(0.2))
                     .foregroundColor(message.isFromMe ? .white : .primary)

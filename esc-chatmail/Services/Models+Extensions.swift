@@ -87,6 +87,7 @@ extension Message {
     @NSManaged public var internalDate: Date
     @NSManaged public var subject: String?
     @NSManaged public var snippet: String?
+    @NSManaged public var cleanedSnippet: String?
     @NSManaged public var isFromMe: Bool
     @NSManaged public var isUnread: Bool
     @NSManaged public var hasAttachments: Bool
