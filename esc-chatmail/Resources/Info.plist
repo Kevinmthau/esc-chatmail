@@ -72,5 +72,10 @@
 	</array>
 	<key>NSContactsUsageDescription</key>
 	<string>Inbox Chat uses your contacts to show names and photos.</string>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.esc.inboxchat.refresh</string>
+		<string>com.esc.inboxchat.processing</string>
+	</array>
 </dict>
 </plist>

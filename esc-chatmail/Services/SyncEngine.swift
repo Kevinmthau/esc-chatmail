@@ -197,7 +197,7 @@ class SyncEngine: ObservableObject {
         }
     }
     
-    private func saveMessage(_ gmailMessage: GmailMessage, in context: NSManagedObjectContext) async {
+    func saveMessage(_ gmailMessage: GmailMessage, in context: NSManagedObjectContext) async {
         guard let payload = gmailMessage.payload,
               let headers = payload.headers else { return }
         
@@ -395,7 +395,7 @@ class SyncEngine: ObservableObject {
         } as Void
     }
     
-    private func updateConversationRollups(in context: NSManagedObjectContext) async {
+    func updateConversationRollups(in context: NSManagedObjectContext) async {
         let request = Conversation.fetchRequest()
         guard let conversations = try? context.fetch(request) else { return }
         
