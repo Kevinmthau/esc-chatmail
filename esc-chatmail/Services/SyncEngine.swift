@@ -11,6 +11,9 @@ class SyncEngine: ObservableObject {
     
     private let apiClient = GmailAPIClient.shared
     private let coreDataStack = CoreDataStack.shared
+    private let messageProcessor = MessageProcessor()
+    private let htmlContentHandler = HTMLContentHandler()
+    private let conversationManager = ConversationManager()
     private var myAliases: Set<String> = []
     private var cancellables = Set<AnyCancellable>()
     
@@ -198,89 +201,62 @@ class SyncEngine: ObservableObject {
     }
     
     func saveMessage(_ gmailMessage: GmailMessage, in context: NSManagedObjectContext) async {
-        guard let payload = gmailMessage.payload,
-              let headers = payload.headers else { return }
+        // Process the Gmail message
+        guard let processedMessage = messageProcessor.processGmailMessage(gmailMessage, myAliases: myAliases, in: context) else {
+            return
+        }
         
+        // Check for duplicates
         let request = Message.fetchRequest()
-        request.predicate = NSPredicate(format: "id == %@", gmailMessage.id)
+        request.predicate = NSPredicate(format: "id == %@", processedMessage.id)
         if (try? context.fetch(request).first) != nil {
             return
         }
         
-        let identity = makeConversationIdentity(from: headers, myAliases: myAliases)
+        // Create conversation identity and find/create conversation
+        let identity = conversationManager.createConversationIdentity(from: processedMessage.headers, myAliases: myAliases)
+        let conversation = await conversationManager.findOrCreateConversation(for: identity, in: context)
         
-        let conversation = await findOrCreateConversation(
-            keyHash: identity.keyHash,
-            type: identity.type,
-            participants: Set(identity.participants),
-            in: context
-        )
-        
+        // Create Core Data message entity
         let message = NSEntityDescription.insertNewObject(forEntityName: "Message", into: context) as! Message
-        message.id = gmailMessage.id
-        message.gmThreadId = gmailMessage.threadId ?? ""
-        message.snippet = gmailMessage.snippet
+        message.id = processedMessage.id
+        message.gmThreadId = processedMessage.gmThreadId
+        message.snippet = processedMessage.snippet
+        message.cleanedSnippet = processedMessage.cleanedSnippet
         message.conversation = conversation
+        message.internalDate = processedMessage.internalDate
+        message.subject = processedMessage.headers.subject
+        message.isFromMe = processedMessage.headers.isFromMe
+        message.isUnread = processedMessage.isUnread
+        message.hasAttachments = processedMessage.hasAttachments
         
-        // Process and clean email content for better display
-        if let htmlBody = extractHTMLBody(from: payload) {
-            // Clean HTML and create snippet
-            let cleanedHTML = EmailTextProcessor.removeQuotedFromHTML(htmlBody)
-            let plainFromHTML = EmailTextProcessor.extractPlainFromHTML(cleanedHTML ?? htmlBody)
-            message.cleanedSnippet = EmailTextProcessor.createCleanSnippet(from: plainFromHTML)
-        } else if let plainBody = extractPlainTextBody(from: payload) {
-            // Use plain text if no HTML available
-            message.cleanedSnippet = EmailTextProcessor.createCleanSnippet(from: plainBody)
-        } else {
-            // Fallback to Gmail's snippet
-            message.cleanedSnippet = EmailTextProcessor.createCleanSnippet(from: gmailMessage.snippet)
+        // Save participants
+        if let from = processedMessage.headers.from {
+            await saveParticipant(from: from, kind: .from, for: message, in: context)
+        }
+        for recipient in processedMessage.headers.to {
+            await saveParticipant(from: "\(recipient.displayName ?? "") <\(recipient.email)>", kind: .to, for: message, in: context)
+        }
+        for recipient in processedMessage.headers.cc {
+            await saveParticipant(from: "\(recipient.displayName ?? "") <\(recipient.email)>", kind: .cc, for: message, in: context)
+        }
+        for recipient in processedMessage.headers.bcc {
+            await saveParticipant(from: "\(recipient.displayName ?? "") <\(recipient.email)>", kind: .bcc, for: message, in: context)
         }
         
-        if let internalDateStr = gmailMessage.internalDate,
-           let internalDateMs = Double(internalDateStr) {
-            message.internalDate = Date(timeIntervalSince1970: internalDateMs / 1000)
-        } else {
-            message.internalDate = Date()
-        }
-        
-        for header in headers {
-            switch header.name.lowercased() {
-            case "subject":
-                message.subject = header.value
-            case "from":
-                if let email = EmailNormalizer.extractEmail(from: header.value) {
-                    message.isFromMe = myAliases.contains(normalizedEmail(email))
-                }
-                await saveParticipant(from: header.value, kind: .from, for: message, in: context)
-            case "to":
-                await saveParticipants(from: header.value, kind: .to, for: message, in: context)
-            case "cc":
-                await saveParticipants(from: header.value, kind: .cc, for: message, in: context)
-            case "bcc":
-                await saveParticipants(from: header.value, kind: .bcc, for: message, in: context)
-            default:
-                break
+        // Save labels
+        for labelId in processedMessage.labelIds {
+            if let label = await findLabel(id: labelId, in: context) {
+                message.addToLabels(label)
             }
         }
         
-        if let labelIds = gmailMessage.labelIds {
-            message.isUnread = labelIds.contains("UNREAD")
-            
-            for labelId in labelIds {
-                if let label = await findLabel(id: labelId, in: context) {
-                    message.addToLabels(label)
-                }
+        // Save HTML content if present
+        if let htmlBody = processedMessage.htmlBody {
+            if let fileURL = htmlContentHandler.saveHTML(htmlBody, for: processedMessage.id) {
+                message.bodyStorageURI = fileURL.absoluteString
             }
         }
-        
-        if let bodyHtml = extractHTMLBody(from: payload) {
-            // Save the cleaned HTML for display
-            let cleanedHTML = EmailTextProcessor.removeQuotedFromHTML(bodyHtml) ?? bodyHtml
-            let fileURL = saveHTMLToFile(html: cleanedHTML, messageId: gmailMessage.id)
-            message.bodyStorageURI = fileURL?.absoluteString
-        }
-        
-        message.hasAttachments = hasAttachments(in: payload)
         
         // Update conversation's lastMessageDate to bump it to the top
         if conversation.lastMessageDate == nil || message.internalDate > conversation.lastMessageDate! {
@@ -294,7 +270,7 @@ class SyncEngine: ObservableObject {
         let normalizedEmail = EmailNormalizer.normalize(email)
         let displayName = EmailNormalizer.extractDisplayName(from: headerValue)
         
-        let person = await findOrCreatePerson(email: normalizedEmail, displayName: displayName, in: context)
+        let person = conversationManager.findOrCreatePerson(email: normalizedEmail, displayName: displayName, in: context)
         
         let participant = NSEntityDescription.insertNewObject(forEntityName: "MessageParticipant", into: context) as! MessageParticipant
         participant.id = UUID()
@@ -310,48 +286,7 @@ class SyncEngine: ObservableObject {
         }
     }
     
-    private func findOrCreatePerson(email: String, displayName: String?, in context: NSManagedObjectContext) async -> Person {
-        let request = Person.fetchRequest()
-        request.predicate = NSPredicate(format: "email == %@", email)
-        
-        if let existing = try? context.fetch(request).first {
-            if displayName != nil && existing.displayName == nil {
-                existing.displayName = displayName
-            }
-            return existing
-        }
-        
-        let person = NSEntityDescription.insertNewObject(forEntityName: "Person", into: context) as! Person
-        person.id = UUID()
-        person.email = email
-        person.displayName = displayName
-        return person
-    }
     
-    private func findOrCreateConversation(keyHash: String, type: ConversationType, participants: Set<String>, in context: NSManagedObjectContext) async -> Conversation {
-        let request = Conversation.fetchRequest()
-        request.predicate = NSPredicate(format: "keyHash == %@", keyHash)
-        
-        if let existing = try? context.fetch(request).first {
-            return existing
-        }
-        
-        let conversation = NSEntityDescription.insertNewObject(forEntityName: "Conversation", into: context) as! Conversation
-        conversation.id = UUID()
-        conversation.keyHash = keyHash
-        conversation.conversationType = type
-        
-        for email in participants {
-            let person = await findOrCreatePerson(email: email, displayName: nil, in: context)
-            let participant = NSEntityDescription.insertNewObject(forEntityName: "ConversationParticipant", into: context) as! ConversationParticipant
-            participant.id = UUID()
-            participant.participantRole = .normal
-            participant.person = person
-            participant.conversation = conversation
-        }
-        
-        return conversation
-    }
     
     private func findLabel(id: String, in context: NSManagedObjectContext) async -> Label? {
         let request = Label.fetchRequest()
@@ -412,34 +347,7 @@ class SyncEngine: ObservableObject {
     }
     
     func updateConversationRollups(in context: NSManagedObjectContext) async {
-        let request = Conversation.fetchRequest()
-        guard let conversations = try? context.fetch(request) else { return }
-        
-        for conversation in conversations {
-            guard let messages = conversation.messages else { continue }
-            
-            if let latestMessage = messages.max(by: { $0.internalDate < $1.internalDate }) {
-                conversation.lastMessageDate = latestMessage.internalDate
-                conversation.snippet = latestMessage.cleanedSnippet ?? latestMessage.snippet
-            }
-            
-            let inboxMessages = messages.filter { message in
-                guard let labels = message.labels else { return false }
-                return labels.contains { $0.id == "INBOX" }
-            }
-            
-            conversation.hasInbox = !inboxMessages.isEmpty
-            conversation.inboxUnreadCount = Int32(inboxMessages.filter { $0.isUnread }.count)
-            
-            if let latestInboxMessage = inboxMessages.max(by: { $0.internalDate < $1.internalDate }) {
-                conversation.latestInboxDate = latestInboxMessage.internalDate
-            }
-            
-            if let participants = conversation.participants {
-                let names = participants.compactMap { $0.person?.displayName ?? $0.person?.email }
-                conversation.displayName = names.joined(separator: ", ")
-            }
-        }
+        await conversationManager.updateAllConversationRollups(in: context)
     }
     
     private func processHistoryRecord(_ record: HistoryRecord, in context: NSManagedObjectContext) async {
@@ -493,148 +401,9 @@ class SyncEngine: ObservableObject {
         }
     }
     
-    private func extractHTMLBody(from part: MessagePart) -> String? {
-        if part.mimeType == "text/html", let data = part.body?.data {
-            let base64String = data.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-            
-            var paddedBase64 = base64String
-            let remainder = base64String.count % 4
-            if remainder > 0 {
-                paddedBase64 = base64String + String(repeating: "=", count: 4 - remainder)
-            }
-            
-            guard let decodedData = Data(base64Encoded: paddedBase64) else {
-                print("Failed to decode Base64 for message part")
-                return nil
-            }
-            
-            return String(data: decodedData, encoding: .utf8)
-        }
-        
-        if let parts = part.parts {
-            for subpart in parts {
-                if let html = extractHTMLBody(from: subpart) {
-                    return html
-                }
-            }
-        }
-        
-        return nil
-    }
-    
-    private func extractPlainTextBody(from part: MessagePart) -> String? {
-        if part.mimeType == "text/plain", let data = part.body?.data {
-            let base64String = data.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-            
-            var paddedBase64 = base64String
-            let remainder = base64String.count % 4
-            if remainder > 0 {
-                paddedBase64 = base64String + String(repeating: "=", count: 4 - remainder)
-            }
-            
-            guard let decodedData = Data(base64Encoded: paddedBase64) else {
-                print("Failed to decode Base64 for text part")
-                return nil
-            }
-            
-            return String(data: decodedData, encoding: .utf8)
-        }
-        
-        if let parts = part.parts {
-            for subpart in parts {
-                if let text = extractPlainTextBody(from: subpart) {
-                    return text
-                }
-            }
-        }
-        
-        return nil
-    }
-    
-    private func saveHTMLToFile(html: String, messageId: String) -> URL? {
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let messagesDir = documentsPath.appendingPathComponent("Messages")
-        
-        try? FileManager.default.createDirectory(at: messagesDir, withIntermediateDirectories: true)
-        
-        let fileURL = messagesDir.appendingPathComponent("\(messageId).html")
-        try? html.write(to: fileURL, atomically: true, encoding: .utf8)
-        
-        return fileURL
-    }
-    
-    private func hasAttachments(in part: MessagePart) -> Bool {
-        if part.body?.attachmentId != nil {
-            return true
-        }
-        
-        if let parts = part.parts {
-            return parts.contains { hasAttachments(in: $0) }
-        }
-        
-        return false
-    }
     
     private func removeDuplicateConversations(in context: NSManagedObjectContext) async {
-        let request = Conversation.fetchRequest()
-        guard let conversations = try? context.fetch(request) else { return }
-        
-        // Group conversations by keyHash
-        var groupedByKey = [String: [Conversation]]()
-        for conversation in conversations {
-            groupedByKey[conversation.keyHash, default: []].append(conversation)
-        }
-        
-        // Process each group with duplicates
-        for (_, group) in groupedByKey where group.count > 1 {
-            // Select winner: most messages, then latest lastMessageDate
-            let winner = group.max { (a, b) in
-                let aCount = a.messages?.count ?? 0
-                let bCount = b.messages?.count ?? 0
-                if aCount != bCount { return aCount < bCount }
-                return (a.lastMessageDate ?? .distantPast) < (b.lastMessageDate ?? .distantPast)
-            }!
-            
-            let losers = group.filter { $0 != winner }
-            
-            for loser in losers {
-                // Reassign all messages from loser to winner
-                if let messages = loser.messages {
-                    for message in messages {
-                        message.conversation = winner
-                    }
-                }
-                
-                // Merge rollups
-                winner.lastMessageDate = max(winner.lastMessageDate ?? .distantPast,
-                                            loser.lastMessageDate ?? .distantPast)
-                
-                if winner.snippet == nil || 
-                   (loser.lastMessageDate ?? .distantPast) > (winner.lastMessageDate ?? .distantPast) {
-                    winner.snippet = loser.snippet
-                }
-                
-                winner.hasInbox = winner.hasInbox || loser.hasInbox
-                winner.inboxUnreadCount += loser.inboxUnreadCount
-                
-                if let loserLatestInboxDate = loser.latestInboxDate {
-                    winner.latestInboxDate = max(winner.latestInboxDate ?? .distantPast, loserLatestInboxDate)
-                }
-                
-                // Preserve pinned status
-                winner.pinned = winner.pinned || loser.pinned
-                
-                // Delete the loser
-                context.delete(loser)
-            }
-        }
-        
-        // Save once at the end
-        if groupedByKey.values.contains(where: { $0.count > 1 }) {
-            coreDataStack.save(context: context)
-            let mergedCount = groupedByKey.values.map { max(0, $0.count - 1) }.reduce(0, +)
-            print("Merged \(mergedCount) duplicate conversations")
-        }
+        await conversationManager.removeDuplicateConversations(in: context)
     }
     
     private func removeDuplicateMessages(in context: NSManagedObjectContext) async {
