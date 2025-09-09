@@ -12,6 +12,7 @@ class CoreDataStack {
             }
         }
         container.viewContext.automaticallyMergesChangesFromParent = true
+        container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
         return container
     }()
     
@@ -20,7 +21,9 @@ class CoreDataStack {
     }
     
     func newBackgroundContext() -> NSManagedObjectContext {
-        persistentContainer.newBackgroundContext()
+        let context = persistentContainer.newBackgroundContext()
+        context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+        return context
     }
     
     func save(context: NSManagedObjectContext) {
