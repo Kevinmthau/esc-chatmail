@@ -13,8 +13,9 @@ struct ContentView: View {
     var body: some View {
         Group {
             if authSession.isAuthenticated {
-                MainTabView()
-                    .environment(\.managedObjectContext, CoreDataStack.shared.viewContext)
+                NavigationStack {
+                    ConversationListView()
+                }
             } else {
                 SignInView()
             }

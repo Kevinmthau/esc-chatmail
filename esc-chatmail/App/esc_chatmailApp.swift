@@ -17,11 +17,14 @@ struct esc_chatmailApp: App {
     init() {
         configureGoogleSignIn()
         configureBackgroundTasks()
+        // Initialize Core Data stack early
+        _ = CoreDataStack.shared.persistentContainer
     }
     
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environment(\.managedObjectContext, CoreDataStack.shared.viewContext)
                 .environmentObject(authSession)
                 .onOpenURL { url in
                     GIDSignIn.sharedInstance.handle(url)

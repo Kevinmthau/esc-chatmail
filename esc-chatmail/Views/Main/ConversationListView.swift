@@ -15,10 +15,10 @@ struct ConversationListView: View {
     @State private var selectedConversation: Conversation?
     @State private var searchText = ""
     @State private var showingComposer = false
+    @State private var showingSettings = false
     
     var body: some View {
-        NavigationStack {
-            List {
+        List {
                 if syncEngine.isSyncing {
                     HStack {
                         ProgressView()
@@ -48,16 +48,15 @@ struct ConversationListView: View {
             .navigationTitle("Chats")
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button(action: { showingComposer = true }) {
-                        Image(systemName: "square.and.pencil")
+                    Button(action: { showingSettings = true }) {
+                        Image(systemName: "gear")
                     }
                 }
                 
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: refresh) {
-                        Image(systemName: "arrow.clockwise")
+                    Button(action: { showingComposer = true }) {
+                        Image(systemName: "square.and.pencil")
                     }
-                    .disabled(syncEngine.isSyncing)
                 }
             }
             .searchable(text: $searchText)
@@ -66,6 +65,23 @@ struct ConversationListView: View {
             }
             .sheet(isPresented: $showingComposer) {
                 NewMessageComposerView()
+            }
+            .sheet(isPresented: $showingSettings) {
+                NavigationStack {
+                    SettingsView()
+                }
+            }
+            .onAppear {
+                performInitialSync()
+            }
+    }
+    
+    private func performInitialSync() {
+        Task {
+            do {
+                try await syncEngine.performInitialSync()
+            } catch {
+                print("Initial sync error: \(error)")
             }
         }
     }
