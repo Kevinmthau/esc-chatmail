@@ -123,6 +123,7 @@ final class GmailSendService: ObservableObject {
     func createOptimisticMessage(
         to recipients: [String],
         body: String,
+        subject: String? = nil,
         threadId: String? = nil
     ) -> Message {
         var optimisticMessage: Message!
@@ -135,6 +136,7 @@ final class GmailSendService: ObservableObject {
             message.snippet = String(body.prefix(120))
             message.cleanedSnippet = EmailTextProcessor.createCleanSnippet(from: body)
             message.gmThreadId = threadId ?? ""
+            message.subject = subject
             
             // Get account info for myAliases
             let accountRequest = Account.fetchRequest()

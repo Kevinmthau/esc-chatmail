@@ -206,6 +206,7 @@ struct ChatView: View {
             sendService.createOptimisticMessage(
                 to: replyData.recipients,
                 body: replyText,
+                subject: replyData.subject,
                 threadId: replyData.threadId
             )
         }
@@ -272,10 +273,12 @@ struct MessageBubble: View {
                         .foregroundColor(.secondary)
                 }
                 
+                // Show subject for both sent and received messages
                 if let subject = message.subject, !subject.isEmpty {
                     Text(subject)
                         .font(.caption)
                         .fontWeight(.semibold)
+                        .foregroundColor(message.isFromMe ? .secondary : .primary)
                 }
                 
                 Text(message.cleanedSnippet ?? message.snippet ?? "")
