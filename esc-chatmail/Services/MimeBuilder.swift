@@ -1,21 +1,19 @@
 import Foundation
 
+struct AttachmentData {
+    let data: Data
+    let filename: String
+    let mimeType: String
+}
+
 struct MimeBuilder {
     
-    static func buildNew(to: [String], from: String, body: String) -> Data {
-        var mime = ""
-        
-        mime += "From: \(from)\r\n"
-        mime += "To: \(to.joined(separator: ", "))\r\n"
-        mime += "Date: \(formatDate(Date()))\r\n"
-        mime += "Message-ID: \(generateMessageId())\r\n"
-        mime += "MIME-Version: 1.0\r\n"
-        mime += "Content-Type: text/plain; charset=UTF-8\r\n"
-        mime += "Content-Transfer-Encoding: 8bit\r\n"
-        mime += "\r\n"
-        mime += body
-        
-        return mime.data(using: .utf8) ?? Data()
+    static func buildNew(to: [String], from: String, body: String, attachments: [AttachmentData] = []) -> Data {
+        if attachments.isEmpty {
+            return buildSimpleMessage(to: to, from: from, body: body, subject: nil, inReplyTo: nil, references: [])
+        } else {
+            return buildMultipartMessage(to: to, from: from, body: body, subject: nil, inReplyTo: nil, references: [], attachments: attachments)
+        }
     }
     
     static func buildReply(
@@ -24,6 +22,22 @@ struct MimeBuilder {
         body: String,
         subject: String,
         inReplyTo: String?,
+        references: [String],
+        attachments: [AttachmentData] = []
+    ) -> Data {
+        if attachments.isEmpty {
+            return buildSimpleMessage(to: to, from: from, body: body, subject: subject, inReplyTo: inReplyTo, references: references)
+        } else {
+            return buildMultipartMessage(to: to, from: from, body: body, subject: subject, inReplyTo: inReplyTo, references: references, attachments: attachments)
+        }
+    }
+    
+    private static func buildSimpleMessage(
+        to: [String],
+        from: String,
+        body: String,
+        subject: String?,
+        inReplyTo: String?,
         references: [String]
     ) -> Data {
         var mime = ""
@@ -31,7 +45,7 @@ struct MimeBuilder {
         mime += "From: \(from)\r\n"
         mime += "To: \(to.joined(separator: ", "))\r\n"
         
-        if !subject.isEmpty {
+        if let subject = subject, !subject.isEmpty {
             let encodedSubject = encodeHeaderIfNeeded(subject)
             mime += "Subject: \(encodedSubject)\r\n"
         }
@@ -55,6 +69,75 @@ struct MimeBuilder {
         mime += body
         
         return mime.data(using: .utf8) ?? Data()
+    }
+    
+    private static func buildMultipartMessage(
+        to: [String],
+        from: String,
+        body: String,
+        subject: String?,
+        inReplyTo: String?,
+        references: [String],
+        attachments: [AttachmentData]
+    ) -> Data {
+        var mime = ""
+        let boundary = generateBoundary()
+        
+        // Headers
+        mime += "From: \(from)\r\n"
+        mime += "To: \(to.joined(separator: ", "))\r\n"
+        
+        if let subject = subject, !subject.isEmpty {
+            let encodedSubject = encodeHeaderIfNeeded(subject)
+            mime += "Subject: \(encodedSubject)\r\n"
+        }
+        
+        mime += "Date: \(formatDate(Date()))\r\n"
+        mime += "Message-ID: \(generateMessageId())\r\n"
+        
+        if let inReplyTo = inReplyTo, !inReplyTo.isEmpty {
+            mime += "In-Reply-To: \(inReplyTo)\r\n"
+        }
+        
+        if !references.isEmpty {
+            let referencesHeader = references.joined(separator: " ")
+            mime += "References: \(referencesHeader)\r\n"
+        }
+        
+        mime += "MIME-Version: 1.0\r\n"
+        mime += "Content-Type: multipart/mixed; boundary=\"\(boundary)\"\r\n"
+        mime += "\r\n"
+        
+        // Text part
+        mime += "--\(boundary)\r\n"
+        mime += "Content-Type: text/plain; charset=UTF-8\r\n"
+        mime += "Content-Transfer-Encoding: 8bit\r\n"
+        mime += "\r\n"
+        mime += body
+        mime += "\r\n"
+        
+        // Attachments
+        for attachment in attachments {
+            mime += "--\(boundary)\r\n"
+            mime += "Content-Type: \(attachment.mimeType); name=\"\(attachment.filename)\"\r\n"
+            mime += "Content-Transfer-Encoding: base64\r\n"
+            mime += "Content-Disposition: attachment; filename=\"\(attachment.filename)\"\r\n"
+            mime += "\r\n"
+            
+            // Convert to standard base64 (not base64url)
+            let base64String = attachment.data.base64EncodedString(options: .lineLength64Characters)
+            mime += base64String
+            mime += "\r\n"
+        }
+        
+        // Closing boundary
+        mime += "--\(boundary)--\r\n"
+        
+        return mime.data(using: .utf8) ?? Data()
+    }
+    
+    private static func generateBoundary() -> String {
+        return "----Boundary\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
     }
     
     static func formatDate(_ date: Date) -> String {
@@ -102,5 +185,20 @@ struct MimeBuilder {
         }
         
         return "Re: \(trimmed)"
+    }
+    
+    static func buildNew(to: [String], from: String, body: String) -> Data {
+        return buildNew(to: to, from: from, body: body, attachments: [])
+    }
+    
+    static func buildReply(
+        to: [String],
+        from: String,
+        body: String,
+        subject: String,
+        inReplyTo: String?,
+        references: [String]
+    ) -> Data {
+        return buildReply(to: to, from: from, body: body, subject: subject, inReplyTo: inReplyTo, references: references, attachments: [])
     }
 }

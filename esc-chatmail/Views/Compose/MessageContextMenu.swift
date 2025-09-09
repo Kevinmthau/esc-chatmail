@@ -165,8 +165,8 @@ struct EnhancedChatView: View {
                 replyText: $replyText,
                 replyingTo: $replyingTo,
                 conversation: conversation,
-                onSend: {
-                    await sendReply()
+                onSend: { attachments in
+                    await sendReply(with: attachments)
                 }
             )
             .background(Color(UIColor.systemBackground))
@@ -195,13 +195,14 @@ struct EnhancedChatView: View {
         return "Chat"
     }
     
-    private func sendReply() async {
-        guard !replyText.isEmpty else { return }
+    private func sendReply(with attachments: [Attachment]) async {
+        guard !replyText.isEmpty || !attachments.isEmpty else { return }
         
         let replyData = ChatReplyBar.ReplyData(
             from: conversation,
             replyingTo: replyingTo,
             body: replyText,
+            attachments: attachments,
             currentUserEmail: AuthSession.shared.userEmail ?? ""
         )
         
@@ -211,7 +212,9 @@ struct EnhancedChatView: View {
             sendService.createOptimisticMessage(
                 to: replyData.recipients,
                 body: replyText,
-                threadId: replyData.threadId
+                subject: replyData.subject,
+                threadId: replyData.threadId,
+                attachments: attachments
             )
         }
         
@@ -225,12 +228,14 @@ struct EnhancedChatView: View {
                     subject: subject,
                     threadId: replyData.threadId ?? "",
                     inReplyTo: replyData.inReplyTo,
-                    references: replyData.references
+                    references: replyData.references,
+                    attachments: attachments
                 )
             } else {
                 result = try await sendService.sendNew(
                     to: replyData.recipients,
-                    body: replyText
+                    body: replyText,
+                    attachments: attachments
                 )
             }
             

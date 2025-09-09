@@ -39,6 +39,7 @@ class MessageProcessor {
         
         // Check for attachments
         processedMessage.hasAttachments = checkForAttachments(in: payload)
+        processedMessage.attachmentInfo = extractAttachments(from: payload)
         
         return processedMessage
     }
@@ -155,6 +156,31 @@ class MessageProcessor {
         
         return false
     }
+    
+    private func extractAttachments(from part: MessagePart) -> [AttachmentInfo] {
+        var attachments: [AttachmentInfo] = []
+        
+        func traverse(_ part: MessagePart) {
+            if let attachmentId = part.body?.attachmentId {
+                let attachment = AttachmentInfo(
+                    id: attachmentId,
+                    filename: part.filename ?? "attachment",
+                    mimeType: part.mimeType ?? "application/octet-stream",
+                    size: part.body?.size ?? 0
+                )
+                attachments.append(attachment)
+            }
+            
+            if let parts = part.parts {
+                for subpart in parts {
+                    traverse(subpart)
+                }
+            }
+        }
+        
+        traverse(part)
+        return attachments
+    }
 }
 
 // MARK: - Data Models
@@ -171,6 +197,7 @@ class ProcessedMessage {
     var labelIds: [String] = []
     var isUnread: Bool = false
     var hasAttachments: Bool = false
+    var attachmentInfo: [AttachmentInfo] = []
 }
 
 struct ProcessedHeaders {
@@ -188,4 +215,11 @@ struct ProcessedHeaders {
 struct EmailAddress {
     let email: String
     let displayName: String?
+}
+
+struct AttachmentInfo {
+    let id: String
+    let filename: String
+    let mimeType: String
+    let size: Int
 }

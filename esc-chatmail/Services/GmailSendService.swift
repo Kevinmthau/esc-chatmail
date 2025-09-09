@@ -33,18 +33,28 @@ final class GmailSendService: ObservableObject {
         self.viewContext = viewContext
     }
     
-    func sendNew(to recipients: [String], body: String) async throws -> SendResult {
+    func sendNew(to recipients: [String], body: String, attachments: [Attachment] = []) async throws -> SendResult {
         guard let fromEmail = authSession.userEmail else {
             throw SendError.authenticationFailed
         }
         
+        let attachmentData = try await prepareAttachments(attachments)
         let mimeData = MimeBuilder.buildNew(
             to: recipients,
             from: fromEmail,
-            body: body
+            body: body,
+            attachments: attachmentData
         )
         
-        return try await sendMessage(mimeData: mimeData, threadId: nil)
+        let result = try await sendMessage(mimeData: mimeData, threadId: nil)
+        
+        // Mark attachments as uploaded on success
+        for attachment in attachments {
+            attachment.state = .uploaded
+        }
+        CoreDataStack.shared.save(context: viewContext)
+        
+        return result
     }
     
     func sendReply(
@@ -53,22 +63,59 @@ final class GmailSendService: ObservableObject {
         subject: String,
         threadId: String,
         inReplyTo: String?,
-        references: [String]
+        references: [String],
+        attachments: [Attachment] = []
     ) async throws -> SendResult {
         guard let fromEmail = authSession.userEmail else {
             throw SendError.authenticationFailed
         }
         
+        let attachmentData = try await prepareAttachments(attachments)
         let mimeData = MimeBuilder.buildReply(
             to: recipients,
             from: fromEmail,
             body: body,
             subject: subject,
             inReplyTo: inReplyTo,
-            references: references
+            references: references,
+            attachments: attachmentData
         )
         
-        return try await sendMessage(mimeData: mimeData, threadId: threadId)
+        let result = try await sendMessage(mimeData: mimeData, threadId: threadId)
+        
+        // Mark attachments as uploaded on success
+        for attachment in attachments {
+            attachment.state = .uploaded
+        }
+        CoreDataStack.shared.save(context: viewContext)
+        
+        return result
+    }
+    
+    private func prepareAttachments(_ attachments: [Attachment]) async throws -> [AttachmentData] {
+        var attachmentData: [AttachmentData] = []
+        
+        for attachment in attachments {
+            let localURL = attachment.value(forKey: "localURL") as? String
+            guard let data = AttachmentPaths.loadData(from: localURL) else {
+                let filename = (attachment.value(forKey: "filename") as? String) ?? ""
+                throw SendError.apiError("Failed to load attachment: \(filename)")
+            }
+            
+            let filename = (attachment.value(forKey: "filename") as? String) ?? "attachment"
+            let mimeType = (attachment.value(forKey: "mimeType") as? String) ?? "application/octet-stream"
+            
+            attachmentData.append(AttachmentData(
+                data: data,
+                filename: filename,
+                mimeType: mimeType
+            ))
+            
+            // Update attachment state to uploading
+            attachment.state = .uploading
+        }
+        
+        return attachmentData
     }
     
     private func sendMessage(mimeData: Data, threadId: String?) async throws -> SendResult {
@@ -124,7 +171,8 @@ final class GmailSendService: ObservableObject {
         to recipients: [String],
         body: String,
         subject: String? = nil,
-        threadId: String? = nil
+        threadId: String? = nil,
+        attachments: [Attachment] = []
     ) -> Message {
         var optimisticMessage: Message!
         
@@ -137,6 +185,13 @@ final class GmailSendService: ObservableObject {
             message.cleanedSnippet = EmailTextProcessor.createCleanSnippet(from: body)
             message.gmThreadId = threadId ?? ""
             message.subject = subject
+            message.hasAttachments = !attachments.isEmpty
+            
+            // Add attachments to message
+            for attachment in attachments {
+                attachment.setValue(message, forKey: "message")
+                attachment.state = .queued
+            }
             
             // Get account info for myAliases
             let accountRequest = Account.fetchRequest()

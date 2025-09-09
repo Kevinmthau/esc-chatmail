@@ -76,8 +76,8 @@ struct ChatView: View {
                 replyText: $replyText,
                 replyingTo: $replyingTo,
                 conversation: conversation,
-                onSend: {
-                    await sendReply()
+                onSend: { attachments in
+                    await sendReply(with: attachments)
                 }
             )
         }
@@ -190,13 +190,14 @@ struct ChatView: View {
         }
     }
     
-    private func sendReply() async {
-        guard !replyText.isEmpty else { return }
+    private func sendReply(with attachments: [Attachment]) async {
+        guard !replyText.isEmpty || !attachments.isEmpty else { return }
         
         let replyData = ChatReplyBar.ReplyData(
             from: conversation,
             replyingTo: replyingTo,
             body: replyText,
+            attachments: attachments,
             currentUserEmail: AuthSession.shared.userEmail ?? ""
         )
         
@@ -207,7 +208,8 @@ struct ChatView: View {
                 to: replyData.recipients,
                 body: replyText,
                 subject: replyData.subject,
-                threadId: replyData.threadId
+                threadId: replyData.threadId,
+                attachments: attachments
             )
         }
         
@@ -222,12 +224,14 @@ struct ChatView: View {
                     subject: subject,
                     threadId: replyData.threadId ?? "",
                     inReplyTo: replyData.inReplyTo,
-                    references: replyData.references
+                    references: replyData.references,
+                    attachments: attachments
                 )
             } else {
                 result = try await sendService.sendNew(
                     to: replyData.recipients,
-                    body: replyText
+                    body: replyText,
+                    attachments: attachments
                 )
             }
             
@@ -281,18 +285,23 @@ struct MessageBubble: View {
                         .foregroundColor(message.isFromMe ? .secondary : .primary)
                 }
                 
-                Text(message.cleanedSnippet ?? message.snippet ?? "")
-                    .padding(10)
-                    .background(message.isFromMe ? Color.blue : Color.gray.opacity(0.2))
-                    .foregroundColor(message.isFromMe ? .white : .primary)
-                    .cornerRadius(12)
+                // Attachments
+                if let attachmentSet = message.value(forKey: "attachments") as? NSSet,
+                   let attachments = attachmentSet.allObjects as? [Attachment], !attachments.isEmpty {
+                    AttachmentGridView(attachments: attachments)
+                        .frame(maxWidth: UIScreen.main.bounds.width * 0.65)
+                }
+                
+                // Text content
+                if let text = message.cleanedSnippet ?? message.snippet, !text.isEmpty {
+                    Text(text)
+                        .padding(10)
+                        .background(message.isFromMe ? Color.blue : Color.gray.opacity(0.2))
+                        .foregroundColor(message.isFromMe ? .white : .primary)
+                        .cornerRadius(12)
+                }
                 
                 HStack(spacing: 8) {
-                    if message.hasAttachments {
-                        Image(systemName: "paperclip")
-                            .font(.footnote)
-                    }
-                    
                     if message.isUnread {
                         Circle()
                             .fill(Color.blue)

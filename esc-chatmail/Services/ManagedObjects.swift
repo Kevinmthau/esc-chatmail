@@ -5,6 +5,10 @@ import CoreData
 public class Account: NSManagedObject {
 }
 
+@objc(Attachment)
+public class Attachment: NSManagedObject, Identifiable {
+}
+
 @objc(Person)  
 public class Person: NSManagedObject, Identifiable {
 }
@@ -29,6 +33,36 @@ public class MessageParticipant: NSManagedObject, Identifiable {
 public class Label: NSManagedObject, Identifiable {
 }
 
+extension Attachment {
+    enum State: String {
+        case queued = "queued"
+        case uploading = "uploading"
+        case uploaded = "uploaded"
+        case failed = "failed"
+        case downloaded = "downloaded"
+    }
+    
+    var state: State {
+        get {
+            let stateRawValue = value(forKey: "stateRaw") as? String ?? "queued"
+            return State(rawValue: stateRawValue) ?? .queued
+        }
+        set {
+            setValue(newValue.rawValue, forKey: "stateRaw")
+        }
+    }
+    
+    var isImage: Bool {
+        let mimeTypeValue = value(forKey: "mimeType") as? String
+        return mimeTypeValue?.starts(with: "image/") ?? false
+    }
+    
+    var isPDF: Bool {
+        let mimeTypeValue = value(forKey: "mimeType") as? String
+        return mimeTypeValue == "application/pdf"
+    }
+}
+
 extension Message {
     func addToLabels(_ value: Label) {
         let items = self.mutableSetValue(forKey: "labels")
@@ -37,6 +71,16 @@ extension Message {
     
     func removeFromLabels(_ value: Label) {
         let items = self.mutableSetValue(forKey: "labels")
+        items.remove(value)
+    }
+    
+    func addToAttachments(_ value: Attachment) {
+        let items = self.mutableSetValue(forKey: "attachments")
+        items.add(value)
+    }
+    
+    func removeFromAttachments(_ value: Attachment) {
+        let items = self.mutableSetValue(forKey: "attachments")
         items.remove(value)
     }
 }

@@ -19,6 +19,8 @@ struct esc_chatmailApp: App {
         configureBackgroundTasks()
         // Initialize Core Data stack early
         _ = CoreDataStack.shared.persistentContainer
+        // Setup attachment directories
+        AttachmentPaths.setupDirectories()
     }
     
     var body: some Scene {

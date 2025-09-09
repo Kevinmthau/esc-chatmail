@@ -66,87 +66,113 @@ class ConversationManager {
     }
     
     func updateConversationRollups(for conversation: Conversation) {
-        guard let messages = conversation.messages else { return }
+        guard let context = conversation.managedObjectContext else { return }
         
-        // Update last message date and snippet
-        if let latestMessage = messages.max(by: { $0.internalDate < $1.internalDate }) {
-            conversation.lastMessageDate = latestMessage.internalDate
-            conversation.snippet = latestMessage.cleanedSnippet ?? latestMessage.snippet
-        }
-        
-        // Update inbox status
-        let inboxMessages = messages.filter { message in
-            guard let labels = message.labels else { return false }
-            return labels.contains { $0.id == "INBOX" }
-        }
-        
-        conversation.hasInbox = !inboxMessages.isEmpty
-        conversation.inboxUnreadCount = Int32(inboxMessages.filter { $0.isUnread }.count)
-        
-        if let latestInboxMessage = inboxMessages.max(by: { $0.internalDate < $1.internalDate }) {
-            conversation.latestInboxDate = latestInboxMessage.internalDate
-        }
-        
-        // Update display name from participants
-        if let participants = conversation.participants {
-            let names = participants.compactMap { $0.person?.displayName ?? $0.person?.email }
-            conversation.displayName = names.joined(separator: ", ")
+        context.performAndWait {
+            guard let messages = conversation.value(forKey: "messages") as? Set<Message> else { return }
+            
+            // Update last message date and snippet
+            let sortedMessages = messages.sorted { $0.internalDate < $1.internalDate }
+            if let latestMessage = sortedMessages.last {
+                conversation.lastMessageDate = latestMessage.internalDate
+                conversation.snippet = latestMessage.cleanedSnippet ?? latestMessage.snippet
+            }
+            
+            // Update inbox status
+            var inboxMessages: [Message] = []
+            for message in messages {
+                if let labels = message.value(forKey: "labels") as? Set<NSManagedObject> {
+                    let hasInbox = labels.contains { label in
+                        (label.value(forKey: "id") as? String) == "INBOX"
+                    }
+                    if hasInbox {
+                        inboxMessages.append(message)
+                    }
+                }
+            }
+            
+            conversation.hasInbox = !inboxMessages.isEmpty
+            conversation.inboxUnreadCount = Int32(inboxMessages.filter { $0.isUnread }.count)
+            
+            if let latestInboxMessage = inboxMessages.max(by: { $0.internalDate < $1.internalDate }) {
+                conversation.latestInboxDate = latestInboxMessage.internalDate
+            }
+            
+            // Update display name from participants
+            if let participants = conversation.value(forKey: "participants") as? Set<ConversationParticipant> {
+                let names = participants.compactMap { participant in
+                    if let person = participant.value(forKey: "person") as? Person {
+                        return (person.value(forKey: "displayName") as? String) ?? (person.value(forKey: "email") as? String)
+                    }
+                    return nil
+                }
+                conversation.displayName = names.joined(separator: ", ")
+            }
         }
     }
     
     func updateAllConversationRollups(in context: NSManagedObjectContext) async {
-        let request = Conversation.fetchRequest()
-        guard let conversations = try? context.fetch(request) else { return }
-        
-        for conversation in conversations {
-            updateConversationRollups(for: conversation)
+        await context.perform {
+            let request = Conversation.fetchRequest()
+            guard let conversations = try? context.fetch(request) else { return }
+            
+            for conversation in conversations {
+                self.updateConversationRollups(for: conversation)
+            }
         }
     }
     
     func removeDuplicateConversations(in context: NSManagedObjectContext) async {
-        let request = Conversation.fetchRequest()
-        guard let conversations = try? context.fetch(request) else { return }
-        
-        // Group conversations by keyHash
-        var groupedByKey = [String: [Conversation]]()
-        for conversation in conversations {
-            groupedByKey[conversation.keyHash, default: []].append(conversation)
-        }
-        
-        var mergedCount = 0
-        
-        // Process each group with duplicates
-        for (_, group) in groupedByKey where group.count > 1 {
-            let winner = selectWinnerConversation(from: group)
-            let losers = group.filter { $0 != winner }
+        await context.perform {
+            let request = Conversation.fetchRequest()
+            guard let conversations = try? context.fetch(request) else { return }
             
-            for loser in losers {
-                mergeConversation(from: loser, into: winner)
-                context.delete(loser)
-                mergedCount += 1
+            // Group conversations by keyHash
+            var groupedByKey = [String: [Conversation]]()
+            for conversation in conversations {
+                let keyHash = conversation.value(forKey: "keyHash") as? String ?? ""
+                groupedByKey[keyHash, default: []].append(conversation)
             }
-        }
-        
-        if mergedCount > 0 {
-            coreDataStack.save(context: context)
-            print("Merged \(mergedCount) duplicate conversations")
+            
+            var mergedCount = 0
+            
+            // Process each group with duplicates
+            for (_, group) in groupedByKey where group.count > 1 {
+                let winner = self.selectWinnerConversation(from: group)
+                let losers = group.filter { $0 != winner }
+                
+                for loser in losers {
+                    self.mergeConversation(from: loser, into: winner)
+                    context.delete(loser)
+                    mergedCount += 1
+                }
+            }
+            
+            if mergedCount > 0 {
+                self.coreDataStack.save(context: context)
+                print("Merged \(mergedCount) duplicate conversations")
+            }
         }
     }
     
     private func selectWinnerConversation(from group: [Conversation]) -> Conversation {
         return group.max { (a, b) in
-            let aCount = a.messages?.count ?? 0
-            let bCount = b.messages?.count ?? 0
+            let aMessages = a.value(forKey: "messages") as? Set<Message>
+            let bMessages = b.value(forKey: "messages") as? Set<Message>
+            let aCount = aMessages?.count ?? 0
+            let bCount = bMessages?.count ?? 0
             if aCount != bCount { return aCount < bCount }
-            return (a.lastMessageDate ?? .distantPast) < (b.lastMessageDate ?? .distantPast)
+            let aDate = a.value(forKey: "lastMessageDate") as? Date ?? .distantPast
+            let bDate = b.value(forKey: "lastMessageDate") as? Date ?? .distantPast
+            return aDate < bDate
         }!
     }
     
     private func mergeConversation(from loser: Conversation, into winner: Conversation) {
         // Reassign all messages from loser to winner
-        if let messages = loser.messages {
+        if let messages = loser.value(forKey: "messages") as? Set<Message> {
             for message in messages {
-                message.conversation = winner
+                message.setValue(winner, forKey: "conversation")
             }
         }
         
@@ -162,12 +188,15 @@ class ConversationManager {
         winner.hasInbox = winner.hasInbox || loser.hasInbox
         winner.inboxUnreadCount += loser.inboxUnreadCount
         
-        if let loserLatestInboxDate = loser.latestInboxDate {
-            winner.latestInboxDate = max(winner.latestInboxDate ?? .distantPast, loserLatestInboxDate)
+        if let loserLatestInboxDate = loser.value(forKey: "latestInboxDate") as? Date {
+            let winnerLatestInboxDate = winner.value(forKey: "latestInboxDate") as? Date ?? .distantPast
+            winner.setValue(max(winnerLatestInboxDate, loserLatestInboxDate), forKey: "latestInboxDate")
         }
         
         // Preserve pinned status
-        winner.pinned = winner.pinned || loser.pinned
+        let winnerPinned = winner.value(forKey: "pinned") as? Bool ?? false
+        let loserPinned = loser.value(forKey: "pinned") as? Bool ?? false
+        winner.setValue(winnerPinned || loserPinned, forKey: "pinned")
     }
     
     func createConversationIdentity(from headers: ProcessedHeaders, myAliases: Set<String>) -> ConversationIdentity {

@@ -14,6 +14,7 @@ class SyncEngine: ObservableObject {
     private let messageProcessor = MessageProcessor()
     private let htmlContentHandler = HTMLContentHandler()
     private let conversationManager = ConversationManager()
+    private let attachmentDownloader = AttachmentDownloader.shared
     private var myAliases: Set<String> = []
     private var cancellables = Set<AnyCancellable>()
     
@@ -99,6 +100,11 @@ class SyncEngine: ObservableObject {
             
             // Update account's historyId in the main context
             await updateAccountHistoryId(profile.historyId)
+            
+            // Start downloading attachments in the background
+            Task {
+                await attachmentDownloader.enqueueAllPendingAttachments()
+            }
             
             await MainActor.run {
                 self.syncProgress = 1.0
@@ -256,6 +262,17 @@ class SyncEngine: ObservableObject {
             if let fileURL = htmlContentHandler.saveHTML(htmlBody, for: processedMessage.id) {
                 message.bodyStorageURI = fileURL.absoluteString
             }
+        }
+        
+        // Save attachment info
+        for attachmentInfo in processedMessage.attachmentInfo {
+            let attachment = NSEntityDescription.insertNewObject(forEntityName: "Attachment", into: context) as! Attachment
+            attachment.setValue(attachmentInfo.id, forKey: "id")
+            attachment.setValue(attachmentInfo.filename, forKey: "filename")
+            attachment.setValue(attachmentInfo.mimeType, forKey: "mimeType")
+            attachment.setValue(Int64(attachmentInfo.size), forKey: "byteSize")
+            attachment.setValue("queued", forKey: "stateRaw")
+            attachment.setValue(message, forKey: "message")
         }
         
         // Update conversation's lastMessageDate to bump it to the top

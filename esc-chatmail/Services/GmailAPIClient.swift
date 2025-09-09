@@ -97,6 +97,46 @@ class GmailAPIClient {
         let response = try JSONDecoder().decode(SendAsListResponse.self, from: data)
         return response.sendAs ?? []
     }
+    
+    func getAttachment(messageId: String, attachmentId: String) async throws -> Data {
+        let url = URL(string: APIEndpoints.attachment(messageId: messageId, attachmentId: attachmentId))!
+        let request = try await authenticatedRequest(url: url)
+        let (data, _) = try await session.data(for: request)
+        
+        struct AttachmentResponse: Codable {
+            let size: Int
+            let data: String
+        }
+        
+        let response = try JSONDecoder().decode(AttachmentResponse.self, from: data)
+        
+        guard let attachmentData = Data(base64UrlEncoded: response.data) else {
+            throw NSError(domain: "GmailAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to decode attachment data"])
+        }
+        
+        return attachmentData
+    }
+}
+
+extension Data {
+    init?(base64UrlEncoded: String) {
+        var base64 = base64UrlEncoded
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        
+        while base64.count % 4 != 0 {
+            base64.append("=")
+        }
+        
+        self.init(base64Encoded: base64)
+    }
+    
+    func base64UrlEncodedString() -> String {
+        return self.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
 }
 
 struct GmailProfile: Codable {

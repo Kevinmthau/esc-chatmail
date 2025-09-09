@@ -49,4 +49,8 @@ struct APIEndpoints {
     static func sendAs() -> String {
         "\(baseURL)/users/me/settings/sendAs"
     }
+    
+    static func attachment(messageId: String, attachmentId: String) -> String {
+        "\(baseURL)/users/me/messages/\(messageId)/attachments/\(attachmentId)"
+    }
 }
