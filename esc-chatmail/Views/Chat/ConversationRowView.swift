@@ -151,9 +151,7 @@ struct ConversationRowView: View {
     }
     
     private func formatDate(_ date: Date) -> String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: date, relativeTo: Date())
+        return TimestampFormatter.format(date)
     }
 }
 
