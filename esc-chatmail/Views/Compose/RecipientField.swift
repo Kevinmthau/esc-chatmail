@@ -92,12 +92,12 @@ struct RecipientChip: View {
     var body: some View {
         HStack(spacing: 4) {
             Text(recipient.display)
-                .font(.system(size: 14))
+                .font(.subheadline)
                 .foregroundColor(recipient.isValid ? .primary : .red)
             
             Button(action: onRemove) {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 14))
+                    .font(.subheadline)
                     .foregroundColor(.secondary)
             }
             .buttonStyle(.plain)

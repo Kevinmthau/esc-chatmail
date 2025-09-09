@@ -276,7 +276,7 @@ struct MessageBubble: View {
                 // Show subject for both sent and received messages
                 if let subject = message.subject, !subject.isEmpty {
                     Text(subject)
-                        .font(.caption)
+                        .font(.footnote)
                         .fontWeight(.semibold)
                         .foregroundColor(message.isFromMe ? .secondary : .primary)
                 }
@@ -290,7 +290,7 @@ struct MessageBubble: View {
                 HStack(spacing: 8) {
                     if message.hasAttachments {
                         Image(systemName: "paperclip")
-                            .font(.caption)
+                            .font(.footnote)
                     }
                     
                     if message.isUnread {

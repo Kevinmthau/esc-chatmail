@@ -65,17 +65,17 @@ struct EnhancedMessageBubble: View {
             VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 4) {
                 if let subject = message.subject, !subject.isEmpty {
                     Text(subject)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.caption.weight(.medium))
                         .foregroundColor(message.isFromMe ? .white.opacity(0.9) : .secondary)
                 }
                 
                 Text(message.snippet ?? "")
-                    .font(.system(size: 15))
+                    .font(.body)
                     .foregroundColor(message.isFromMe ? .white : .primary)
                     .multilineTextAlignment(message.isFromMe ? .trailing : .leading)
                 
                 Text(formatMessageTime(message.internalDate))
-                    .font(.system(size: 11))
+                    .font(.caption2)
                     .foregroundColor(message.isFromMe ? .white.opacity(0.7) : .secondary)
             }
             .padding(.horizontal, 12)

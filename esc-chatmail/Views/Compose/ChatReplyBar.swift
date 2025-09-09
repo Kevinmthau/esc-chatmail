@@ -34,11 +34,11 @@ struct ChatReplyBar: View {
     private func replyingToIndicator(message: Message) -> some View {
         HStack {
             Image(systemName: "arrow.turn.up.left")
-                .font(.system(size: 12))
+                .font(.caption)
                 .foregroundColor(.secondary)
             
             Text("Replying to: \(message.subject ?? message.snippet ?? "")")
-                .font(.system(size: 12))
+                .font(.caption)
                 .foregroundColor(.secondary)
                 .lineLimit(1)
             
@@ -50,7 +50,7 @@ struct ChatReplyBar: View {
                 }
             }) {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 14))
+                    .font(.subheadline)
                     .foregroundColor(.secondary)
             }
         }
@@ -109,7 +109,7 @@ struct ChatReplyBar: View {
                         .scaleEffect(0.6)
                 } else {
                     Image(systemName: "arrow.up")
-                        .font(.system(size: 16, weight: .bold))
+                        .font(.callout.weight(.bold))
                         .foregroundColor(.white)
                 }
             }

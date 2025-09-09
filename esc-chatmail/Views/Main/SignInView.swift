@@ -11,6 +11,7 @@ struct SignInView: View {
             VStack(spacing: 20) {
                 Image(systemName: "envelope.fill")
                     .font(.system(size: 80))
+                    .symbolRenderingMode(.multicolor)
                     .foregroundColor(.blue)
                 
                 Text("ESC Chatmail")

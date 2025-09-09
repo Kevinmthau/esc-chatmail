@@ -76,23 +76,23 @@ struct ContactRow: View {
                         .frame(width: 32, height: 32)
                         .overlay(
                             Text(contact.displayName.prefix(1).uppercased())
-                                .font(.system(size: 14, weight: .medium))
+                                .font(.subheadline.weight(.medium))
                                 .foregroundColor(.gray)
                         )
                 }
                 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(contact.displayName)
-                        .font(.system(size: 14, weight: .medium))
+                        .font(.subheadline.weight(.medium))
                         .foregroundColor(.primary)
                     
                     if contact.emails.count == 1 {
                         Text(contact.primaryEmail)
-                            .font(.system(size: 12))
+                            .font(.caption)
                             .foregroundColor(.secondary)
                     } else {
                         Text("\(contact.emails.count) email addresses")
-                            .font(.system(size: 12))
+                            .font(.caption)
                             .foregroundColor(.secondary)
                     }
                 }
@@ -101,7 +101,7 @@ struct ContactRow: View {
                 
                 if contact.emails.count > 1 {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 12))
+                        .font(.caption)
                         .foregroundColor(.secondary)
                 }
             }
@@ -133,7 +133,7 @@ struct MultiEmailContactRow: View {
                         .frame(width: 32, height: 32)
                         .overlay(
                             Text(contact.displayName.prefix(1).uppercased())
-                                .font(.system(size: 14, weight: .medium))
+                                .font(.subheadline.weight(.medium))
                                 .foregroundColor(.gray)
                         )
                 }
@@ -154,7 +154,7 @@ struct MultiEmailContactRow: View {
                     }) {
                         HStack {
                             Text(email)
-                                .font(.system(size: 13))
+                                .font(.footnote)
                                 .foregroundColor(.secondary)
                             Spacer()
                         }

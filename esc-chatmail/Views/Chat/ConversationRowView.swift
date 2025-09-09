@@ -21,12 +21,12 @@ struct ConversationRowView: View {
                 HStack {
                     if conversation.pinned {
                         Image(systemName: "pin.fill")
-                            .font(.caption)
+                            .font(.footnote)
                             .foregroundColor(.orange)
                     }
                     
                     Text(displayName)
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(.headline)
                         .lineLimit(1)
                     
                     Spacer()
@@ -34,11 +34,11 @@ struct ConversationRowView: View {
                     if let date = conversation.lastMessageDate {
                         HStack(spacing: 4) {
                             Text(formatDate(date))
-                                .font(.system(size: 15))
+                                .font(.subheadline)
                                 .foregroundColor(.secondary)
                             
                             Image(systemName: "chevron.right")
-                                .font(.system(size: 14, weight: .medium))
+                                .font(.footnote.weight(.medium))
                                 .foregroundColor(Color(.tertiaryLabel))
                         }
                     }
@@ -53,7 +53,7 @@ struct ConversationRowView: View {
                     }
                     
                     Text(conversation.snippet ?? "No messages")
-                        .font(.system(size: 15))
+                        .font(.subheadline)
                         .foregroundColor(.secondary)
                         .lineLimit(2)
                 }
@@ -224,7 +224,7 @@ struct InitialsView: View {
                 .fill(backgroundColor)
             
             Text(initials)
-                .font(.system(size: 14, weight: .semibold))
+                .font(.footnote.weight(.semibold))
                 .foregroundColor(.white)
         }
         .overlay(Circle().stroke(Color.white, lineWidth: 2))
