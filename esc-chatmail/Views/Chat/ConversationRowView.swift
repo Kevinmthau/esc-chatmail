@@ -14,10 +14,10 @@ struct ConversationRowView: View {
         HStack(spacing: 12) {
             // Avatar stack
             AvatarStackView(avatarData: avatarData, participants: participantNames)
-                .frame(width: 48, height: 48)
+                .frame(width: 60, height: 60)
             
-            VStack(alignment: .leading, spacing: 4) {
-                // Top row: Name and date
+            VStack(alignment: .leading, spacing: 3) {
+                // Top row: Name, date, and chevron
                 HStack {
                     if conversation.pinned {
                         Image(systemName: "pin.fill")
@@ -26,34 +26,41 @@ struct ConversationRowView: View {
                     }
                     
                     Text(displayName)
-                        .font(.headline)
+                        .font(.system(size: 17, weight: .semibold))
                         .lineLimit(1)
                     
                     Spacer()
                     
                     if let date = conversation.lastMessageDate {
-                        Text(formatDate(date))
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                        HStack(spacing: 4) {
+                            Text(formatDate(date))
+                                .font(.system(size: 15))
+                                .foregroundColor(.secondary)
+                            
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundColor(Color(.tertiaryLabel))
+                        }
                     }
                 }
                 
                 // Bottom row: Unread indicator and snippet
-                HStack {
+                HStack(spacing: 6) {
                     if conversation.inboxUnreadCount > 0 {
                         Circle()
                             .fill(Color.blue)
-                            .frame(width: 8, height: 8)
+                            .frame(width: 10, height: 10)
                     }
                     
                     Text(conversation.snippet ?? "No messages")
-                        .font(.subheadline)
+                        .font(.system(size: 15))
                         .foregroundColor(.secondary)
                         .lineLimit(2)
                 }
             }
         }
-        .padding(.vertical, 4)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
         .task {
             await loadContactInfo()
         }
@@ -165,24 +172,24 @@ struct AvatarStackView: View {
                         Image(uiImage: uiImage)
                             .resizable()
                             .scaledToFill()
-                            .frame(width: 30, height: 30)
+                            .frame(width: 40, height: 40)
                             .clipShape(Circle())
                             .overlay(Circle().stroke(Color.white, lineWidth: 2))
-                            .offset(x: CGFloat(index) * 12)
+                            .offset(x: CGFloat(index) * 15)
                     }
                 }
             } else if !participants.isEmpty {
                 // Show initials
                 ForEach(0..<min(participants.count, 2), id: \.self) { index in
                     InitialsView(name: participants[index])
-                        .frame(width: 30, height: 30)
-                        .offset(x: CGFloat(index) * 12)
+                        .frame(width: 40, height: 40)
+                        .offset(x: CGFloat(index) * 15)
                 }
             } else {
                 // Default avatar
                 Image(systemName: "person.circle.fill")
                     .resizable()
-                    .frame(width: 40, height: 40)
+                    .frame(width: 60, height: 60)
                     .foregroundColor(.gray)
             }
         }

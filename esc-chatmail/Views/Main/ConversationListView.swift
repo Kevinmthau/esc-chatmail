@@ -27,15 +27,24 @@ struct ConversationListView: View {
                             .foregroundColor(.secondary)
                     }
                     .padding(.vertical, 8)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
                 }
                 
                 ForEach(filteredConversations) { conversation in
-                    NavigationLink(destination: ChatView(conversation: conversation)) {
+                    ZStack {
+                        NavigationLink(destination: ChatView(conversation: conversation)) {
+                            EmptyView()
+                        }
+                        .opacity(0)
+                        
                         ConversationRowView(conversation: conversation)
                     }
+                    .listRowInsets(EdgeInsets())
+                    .listRowSeparator(.visible)
                 }
                 .onDelete(perform: deleteConversations)
             }
+            .listStyle(.plain)
             .navigationTitle("Chats")
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
