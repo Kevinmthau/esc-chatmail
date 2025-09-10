@@ -82,8 +82,11 @@ struct ImageAttachmentBubble: View {
     let attachment: Attachment
     @ObservedObject var downloader: AttachmentDownloader
     let onTap: () -> Void
+    @State private var thumbnailImage: UIImage?
+    @State private var isLoadingImage = false
     
     private let maxWidth = UIScreen.main.bounds.width * 0.65
+    private let cache = AttachmentCache.shared
     
     var isDownloading: Bool {
         if let attachmentId = attachment.value(forKey: "id") as? String {
@@ -95,10 +98,8 @@ struct ImageAttachmentBubble: View {
     var body: some View {
         Button(action: onTap) {
             ZStack {
-                if let previewURL = attachment.value(forKey: "previewURL") as? String,
-                   let previewData = AttachmentPaths.loadData(from: previewURL),
-                   let uiImage = UIImage(data: previewData) {
-                    Image(uiImage: uiImage)
+                if let image = thumbnailImage {
+                    Image(uiImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
                         .frame(maxWidth: maxWidth)
@@ -106,6 +107,14 @@ struct ImageAttachmentBubble: View {
                         .overlay(
                             RoundedRectangle(cornerRadius: 14)
                                 .stroke(Color.gray.opacity(0.2), lineWidth: 0.5)
+                        )
+                } else if isLoadingImage {
+                    RoundedRectangle(cornerRadius: 14)
+                        .fill(Color.gray.opacity(0.1))
+                        .frame(width: 200, height: 150)
+                        .overlay(
+                            ProgressView()
+                                .progressViewStyle(CircularProgressViewStyle())
                         )
                 } else {
                     RoundedRectangle(cornerRadius: 14)
@@ -134,9 +143,35 @@ struct ImageAttachmentBubble: View {
         .opacity((attachment.value(forKey: "stateRaw") as? String) == "downloaded" ? 1.0 : 0.7)
         .disabled((attachment.value(forKey: "stateRaw") as? String) != "downloaded")
         .onAppear {
+            loadThumbnail()
             if (attachment.value(forKey: "stateRaw") as? String) == "queued" {
                 Task {
                     await downloader.downloadAttachmentIfNeeded(for: attachment)
+                }
+            }
+        }
+        .onDisappear {
+            // Cancel loading if view disappears
+            isLoadingImage = false
+        }
+    }
+    
+    private func loadThumbnail() {
+        guard thumbnailImage == nil,
+              !isLoadingImage,
+              let attachmentId = attachment.value(forKey: "id") as? String else { return }
+        
+        isLoadingImage = true
+        Task {
+            let previewPath = attachment.value(forKey: "previewURL") as? String
+            if let image = await cache.loadThumbnail(for: attachmentId, from: previewPath) {
+                await MainActor.run {
+                    self.thumbnailImage = image
+                    self.isLoadingImage = false
+                }
+            } else {
+                await MainActor.run {
+                    self.isLoadingImage = false
                 }
             }
         }
@@ -147,6 +182,9 @@ struct PDFAttachmentCard: View {
     let attachment: Attachment
     @ObservedObject var downloader: AttachmentDownloader
     let onTap: () -> Void
+    @State private var thumbnailImage: UIImage?
+    @State private var isLoadingImage = false
+    private let cache = AttachmentCache.shared
     
     var body: some View {
         Button(action: onTap) {
@@ -219,9 +257,31 @@ struct PDFAttachmentCard: View {
         }
         .buttonStyle(PlainButtonStyle())
         .onAppear {
+            loadThumbnail()
             if (attachment.value(forKey: "stateRaw") as? String) == "queued" {
                 Task {
                     await downloader.downloadAttachmentIfNeeded(for: attachment)
+                }
+            }
+        }
+    }
+    
+    private func loadThumbnail() {
+        guard thumbnailImage == nil,
+              !isLoadingImage,
+              let attachmentId = attachment.value(forKey: "id") as? String else { return }
+        
+        isLoadingImage = true
+        Task {
+            let previewPath = attachment.value(forKey: "previewURL") as? String
+            if let image = await cache.loadThumbnail(for: attachmentId, from: previewPath) {
+                await MainActor.run {
+                    self.thumbnailImage = image
+                    self.isLoadingImage = false
+                }
+            } else {
+                await MainActor.run {
+                    self.isLoadingImage = false
                 }
             }
         }
@@ -266,6 +326,9 @@ struct AttachmentGridItem: View {
     let showOverlay: Bool
     let overlayCount: Int
     let onTap: () -> Void
+    @State private var thumbnailImage: UIImage?
+    @State private var isLoadingImage = false
+    private let cache = AttachmentCache.shared
     
     var body: some View {
         Button(action: {
@@ -276,10 +339,8 @@ struct AttachmentGridItem: View {
         }) {
             GeometryReader { geometry in
                 ZStack {
-                    if let previewURL = attachment.value(forKey: "previewURL") as? String,
-                       let previewData = AttachmentPaths.loadData(from: previewURL),
-                       let uiImage = UIImage(data: previewData) {
-                        Image(uiImage: uiImage)
+                    if let image = thumbnailImage {
+                        Image(uiImage: image)
                             .resizable()
                             .aspectRatio(contentMode: .fill)
                             .frame(width: geometry.size.width, height: geometry.size.height)
@@ -288,8 +349,16 @@ struct AttachmentGridItem: View {
                         Rectangle()
                             .fill(Color.gray.opacity(0.1))
                             .overlay(
-                                Image(systemName: attachment.isPDF ? "doc.fill" : "photo")
-                                    .foregroundColor(.gray)
+                                Group {
+                                    if isLoadingImage {
+                                        ProgressView()
+                                            .progressViewStyle(CircularProgressViewStyle())
+                                            .scaleEffect(0.6)
+                                    } else {
+                                        Image(systemName: attachment.isPDF ? "doc.fill" : "photo")
+                                            .foregroundColor(.gray)
+                                    }
+                                }
                             )
                     }
                     
@@ -314,9 +383,50 @@ struct AttachmentGridItem: View {
         }
         .buttonStyle(PlainButtonStyle())
         .onAppear {
+            loadThumbnail()
             if (attachment.value(forKey: "stateRaw") as? String) == "queued" {
                 Task {
                     await downloader.downloadAttachmentIfNeeded(for: attachment)
+                }
+            }
+        }
+    }
+    
+    private func loadThumbnail() {
+        guard thumbnailImage == nil,
+              !isLoadingImage,
+              let attachmentId = attachment.value(forKey: "id") as? String else { return }
+        
+        isLoadingImage = true
+        Task {
+            let previewPath = attachment.value(forKey: "previewURL") as? String
+            let targetSize = CGSize(width: 200, height: 200) // Grid items are small
+            
+            // Try to load downsampled for grid view
+            if let localPath = attachment.value(forKey: "localURL") as? String,
+               attachment.isImage {
+                if let image = await cache.loadDownsampledImage(
+                    for: attachmentId,
+                    from: localPath,
+                    targetSize: targetSize
+                ) {
+                    await MainActor.run {
+                        self.thumbnailImage = image
+                        self.isLoadingImage = false
+                    }
+                    return
+                }
+            }
+            
+            // Fall back to preview
+            if let image = await cache.loadThumbnail(for: attachmentId, from: previewPath) {
+                await MainActor.run {
+                    self.thumbnailImage = image
+                    self.isLoadingImage = false
+                }
+            } else {
+                await MainActor.run {
+                    self.isLoadingImage = false
                 }
             }
         }

@@ -166,14 +166,14 @@ struct ChatReplyBar: View {
 struct AttachmentThumbnail: View {
     let attachment: Attachment
     let onRemove: () -> Void
+    @State private var thumbnailImage: UIImage?
+    private let cache = AttachmentCache.shared
     
     var body: some View {
         ZStack(alignment: .topTrailing) {
             // Thumbnail
-            if let previewURL = attachment.value(forKey: "previewURL") as? String,
-               let previewData = AttachmentPaths.loadData(from: previewURL),
-               let uiImage = UIImage(data: previewData) {
-                Image(uiImage: uiImage)
+            if let image = thumbnailImage {
+                Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
                     .frame(width: 60, height: 60)
@@ -196,6 +196,23 @@ struct AttachmentThumbnail: View {
                     .background(Circle().fill(Color.black.opacity(0.5)))
             }
             .offset(x: 4, y: -4)
+        }
+        .onAppear {
+            loadThumbnail()
+        }
+    }
+    
+    private func loadThumbnail() {
+        guard thumbnailImage == nil,
+              let attachmentId = attachment.value(forKey: "id") as? String else { return }
+        
+        Task {
+            let previewPath = attachment.value(forKey: "previewURL") as? String
+            if let image = await cache.loadThumbnail(for: attachmentId, from: previewPath) {
+                await MainActor.run {
+                    self.thumbnailImage = image
+                }
+            }
         }
     }
     

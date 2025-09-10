@@ -90,13 +90,14 @@ struct ImageDetailView: View {
     @Binding var lastScale: CGFloat
     @Binding var offset: CGSize
     @Binding var lastOffset: CGSize
+    @State private var fullImage: UIImage?
+    @State private var isLoadingImage = false
+    private let cache = AttachmentCache.shared
     
     var body: some View {
         GeometryReader { geometry in
-            if let localURL = attachment.value(forKey: "localURL") as? String,
-               let data = AttachmentPaths.loadData(from: localURL),
-               let uiImage = UIImage(data: data) {
-                Image(uiImage: uiImage)
+            if let image = fullImage {
+                Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .scaleEffect(zoomScale)
@@ -143,16 +144,43 @@ struct ImageDetailView: View {
                             }
                         }
                     }
-            } else if let previewURL = attachment.value(forKey: "previewURL") as? String,
-                      let previewData = AttachmentPaths.loadData(from: previewURL),
-                      let uiImage = UIImage(data: previewData) {
-                // Fallback to preview if original not available
-                Image(uiImage: uiImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
             } else {
                 ProgressView()
                     .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                    .onAppear {
+                        loadFullImage()
+                    }
+            }
+        }
+    }
+    
+    private func loadFullImage() {
+        guard fullImage == nil,
+              !isLoadingImage,
+              let attachmentId = attachment.value(forKey: "id") as? String else { return }
+        
+        isLoadingImage = true
+        Task {
+            let localPath = attachment.value(forKey: "localURL") as? String
+            
+            if let image = await cache.loadFullImage(for: attachmentId, from: localPath) {
+                await MainActor.run {
+                    self.fullImage = image
+                    self.isLoadingImage = false
+                }
+            } else {
+                // Fallback to preview if full image fails
+                let previewPath = attachment.value(forKey: "previewURL") as? String
+                if let image = await cache.loadThumbnail(for: attachmentId, from: previewPath) {
+                    await MainActor.run {
+                        self.fullImage = image
+                        self.isLoadingImage = false
+                    }
+                } else {
+                    await MainActor.run {
+                        self.isLoadingImage = false
+                    }
+                }
             }
         }
     }
