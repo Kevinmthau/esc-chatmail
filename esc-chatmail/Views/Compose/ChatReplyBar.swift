@@ -84,6 +84,9 @@ struct ChatReplyBar: View {
                 .padding(.vertical, 4)
                 .frame(minHeight: 36, maxHeight: 120)
                 .fixedSize(horizontal: false, vertical: true)
+                .onTapGesture {
+                    isTextFieldFocused = true
+                }
         }
         .background(
             RoundedRectangle(cornerRadius: 18)

@@ -81,7 +81,8 @@ class ConversationManager {
             // Update inbox status
             var inboxMessages: [Message] = []
             for message in messages {
-                if let labels = message.value(forKey: "labels") as? Set<NSManagedObject> {
+                if let labelsSet = message.value(forKey: "labels") as? NSSet,
+                   let labels = labelsSet.allObjects as? [NSManagedObject] {
                     let hasInbox = labels.contains { label in
                         (label.value(forKey: "id") as? String) == "INBOX"
                     }

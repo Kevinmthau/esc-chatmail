@@ -8,11 +8,12 @@ struct ChatView: View {
     @FetchRequest private var messages: FetchedResults<Message>
     @StateObject private var messageActions = MessageActions()
     @StateObject private var sendService: GmailSendService
+    @StateObject private var keyboard = KeyboardResponder()
     @State private var selectedMessage: Message?
     @State private var showingWebView = false
     @State private var replyText = ""
     @State private var replyingTo: Message?
-    @State private var scrollToMessage: String?
+    @Namespace private var bottomID
     
     init(conversation: Conversation) {
         self.conversation = conversation
@@ -27,59 +28,71 @@ struct ChatView: View {
     }
     
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 8) {
-                        ForEach(messages) { message in
-                            MessageBubble(message: message, conversation: conversation)
-                                .id(message.id)
-                                .onTapGesture {
-                                    selectedMessage = message
-                                    showingWebView = true
-                                }
-                                .contextMenu {
-                                    messageContextMenu(for: message)
-                                }
-                        }
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    ForEach(messages) { message in
+                        MessageBubble(message: message, conversation: conversation)
+                            .id(message.id)
+                            .onTapGesture {
+                                selectedMessage = message
+                                showingWebView = true
+                            }
+                            .contextMenu {
+                                messageContextMenu(for: message)
+                            }
                     }
-                    .padding()
+                    // Bottom anchor for scrolling
+                    Color.clear
+                        .frame(height: 1)
+                        .id(bottomID)
                 }
-                .onAppear {
-                    markConversationAsRead()
-                    if let lastMessage = messages.last {
-                        proxy.scrollTo(lastMessage.id, anchor: .bottom)
-                    }
+                .padding(.horizontal)
+                .padding(.top, 8)
+                .padding(.bottom, 8)
+            }
+            .onAppear {
+                markConversationAsRead()
+                // Initial scroll to bottom
+                withAnimation {
+                    proxy.scrollTo(bottomID, anchor: .bottom)
                 }
-                .onChange(of: scrollToMessage) { _, messageId in
-                    if let messageId = messageId {
-                        withAnimation {
-                            proxy.scrollTo(messageId, anchor: .bottom)
-                        }
-                        // Reset after scrolling
-                        scrollToMessage = nil
-                    }
-                }
-                .onChange(of: messages.count) { _, _ in
-                    // Scroll to bottom when new messages appear
-                    if let lastMessage = messages.last {
-                        withAnimation {
-                            proxy.scrollTo(lastMessage.id, anchor: .bottom)
+            }
+            .onChange(of: messages.count) { oldCount, newCount in
+                // Scroll to bottom when new messages appear
+                if newCount > oldCount {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        withAnimation(.easeOut(duration: 0.25)) {
+                            proxy.scrollTo(bottomID, anchor: .bottom)
                         }
                     }
                 }
             }
-            
-            Divider()
-            
-            ChatReplyBar(
-                replyText: $replyText,
-                replyingTo: $replyingTo,
-                conversation: conversation,
-                onSend: { attachments in
-                    await sendReply(with: attachments)
+            .onChange(of: keyboard.currentHeight) { _, newHeight in
+                if newHeight > 0 {
+                    // Scroll to bottom anchor when keyboard appears
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        withAnimation(.easeOut(duration: 0.25)) {
+                            proxy.scrollTo(bottomID, anchor: .bottom)
+                        }
+                    }
                 }
-            )
+            }
+            .safeAreaInset(edge: .bottom) {
+                // Reply bar at bottom
+                VStack(spacing: 0) {
+                    Divider()
+                    ChatReplyBar(
+                        replyText: $replyText,
+                        replyingTo: $replyingTo,
+                        conversation: conversation,
+                        onSend: { attachments in
+                            await sendReply(with: attachments)
+                        }
+                    )
+                    .background(Color(UIColor.systemBackground))
+                }
+            }
         }
         .navigationTitle(conversation.displayName ?? "Chat")
         .navigationBarTitleDisplayMode(.inline)
@@ -239,12 +252,10 @@ struct ChatView: View {
                 sendService.updateOptimisticMessage(optimisticMessage, with: result)
                 replyText = ""
                 replyingTo = nil
-                // Scroll to the new message after sending
-                scrollToMessage = result.messageId
             }
             
             // Trigger sync to fetch the sent message from Gmail
-            Task {
+            Task.detached {
                 try? await SyncEngine.shared.performIncrementalSync()
             }
         } catch {
