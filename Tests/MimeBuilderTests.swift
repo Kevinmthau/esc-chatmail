@@ -21,8 +21,8 @@ final class MimeBuilderTests: XCTestCase {
         XCTAssertTrue(mimeString.contains("\r\n\r\n"))
         XCTAssertTrue(mimeString.hasSuffix(body))
         
-        let lines = mimeString.components(separatedBy: "\r\n")
-        XCTAssertFalse(lines.contains { $0.hasPrefix("Subject:") })
+        // Now an empty Subject header should be added
+        XCTAssertTrue(mimeString.contains("Subject: \r\n"))
     }
     
     func testBuildReplyMessage() {

@@ -13,6 +13,10 @@ struct NewMessageView: View {
     @State private var showingAttachmentPicker = false
     @State private var isSearching = false
     @State private var isSending = false
+    @State private var errorMessage: String?
+    @State private var showError = false
+    
+    private let sendService = GmailSendService(viewContext: CoreDataStack.shared.viewContext)
     
     @FocusState private var focusedField: Field?
     
@@ -118,6 +122,11 @@ struct NewMessageView: View {
                 // Handle attachments
             }
         }
+        .alert("Error", isPresented: $showError) {
+            Button("OK") { }
+        } message: {
+            Text(errorMessage ?? "Failed to send message")
+        }
         .onAppear {
             focusedField = .recipients
         }
@@ -134,108 +143,47 @@ struct NewMessageView: View {
         let trimmedMessage = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
         let recipientEmails = recipients.map { $0.email }
         
-        // Create or find conversation
         Task {
+            await MainActor.run {
+                isSending = true
+            }
+            
+            // Create optimistic message
+            let optimisticMessage = await MainActor.run {
+                sendService.createOptimisticMessage(
+                    to: recipientEmails,
+                    body: trimmedMessage,
+                    subject: nil
+                )
+            }
+            
             do {
-                let conversation = try await findOrCreateConversation(with: recipientEmails)
+                // Send via Gmail API
+                let result = try await sendService.sendNew(
+                    to: recipientEmails,
+                    body: trimmedMessage,
+                    subject: nil
+                )
                 
-                // Create message optimistically
                 await MainActor.run {
-                    let message = Message(context: viewContext)
-                    message.id = UUID().uuidString
-                    message.gmThreadId = UUID().uuidString
-                    message.internalDate = Date()
-                    message.snippet = trimmedMessage
-                    message.cleanedSnippet = trimmedMessage
-                    message.isFromMe = true
-                    message.conversation = conversation
-                    message.isUnread = false
-                    message.hasAttachments = false
-                    
-                    conversation.lastMessageTime = Date()
-                    conversation.lastMessagePreview = trimmedMessage
-                    
-                    do {
-                        try viewContext.save()
-                        dismiss()
-                    } catch {
-                        print("Failed to save message: \(error)")
-                        isSending = false
-                    }
+                    // Update optimistic message with real IDs
+                    sendService.updateOptimisticMessage(optimisticMessage, with: result)
+                    dismiss()
                 }
                 
-                // TODO: Send via API when available
-                // if let userEmail = session.userEmail {
-                //     try await MessageAPI.shared.sendMessage(
-                //         from: userEmail,
-                //         to: recipientEmails,
-                //         content: trimmedMessage
-                //     )
-                // }
+                // Trigger sync to fetch the sent message
+                Task {
+                    try? await SyncEngine.shared.performIncrementalSync()
+                }
             } catch {
-                print("Failed to send message: \(error)")
                 await MainActor.run {
+                    // Delete optimistic message on failure
+                    sendService.deleteOptimisticMessage(optimisticMessage)
+                    errorMessage = error.localizedDescription
+                    showError = true
                     isSending = false
                 }
             }
-        }
-    }
-    
-    @MainActor
-    private func findOrCreateConversation(with emails: [String]) async throws -> Conversation {
-        let userEmail = session.userEmail
-        return try await viewContext.perform {
-            // Try to find existing conversation with exact participants
-            let request: NSFetchRequest<Conversation> = Conversation.fetchRequest()
-            let conversations = try viewContext.fetch(request)
-            
-            // Check for matching conversation
-            for conversation in conversations {
-                let participants = conversation.participantsArray
-                if Set(participants) == Set(emails) {
-                    return conversation
-                }
-            }
-            
-            // Create new conversation
-            let conversation = Conversation(context: viewContext)
-            conversation.id = UUID()
-            conversation.keyHash = emails.sorted().joined(separator: ",").data(using: .utf8)?.base64EncodedString() ?? ""
-            conversation.conversationType = emails.count > 1 ? .group : .oneToOne
-            conversation.displayName = emails.count == 1 ? emails.first : "Group Conversation"
-            conversation.lastMessageDate = Date()
-            conversation.hidden = false
-            conversation.pinned = false
-            conversation.muted = false
-            conversation.hasInbox = false
-            conversation.inboxUnreadCount = 0
-            
-            // Create participants
-            for email in emails {
-                let participant = ConversationParticipant(context: viewContext)
-                participant.id = UUID()
-                participant.participantRole = email == userEmail ? .me : .normal
-                
-                // Find or create person
-                let personRequest: NSFetchRequest<Person> = Person.fetchRequest()
-                personRequest.predicate = NSPredicate(format: "email == %@", email)
-                let existingPerson = try? viewContext.fetch(personRequest).first
-                
-                if let person = existingPerson {
-                    participant.person = person
-                } else {
-                    let newPerson = Person(context: viewContext)
-                    newPerson.id = UUID()
-                    newPerson.email = email
-                    newPerson.displayName = email
-                    participant.person = newPerson
-                }
-                
-                participant.conversation = conversation
-            }
-            
-            try viewContext.save()
-            return conversation
         }
     }
 }

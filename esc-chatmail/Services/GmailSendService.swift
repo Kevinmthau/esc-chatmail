@@ -33,7 +33,7 @@ final class GmailSendService: ObservableObject {
         self.viewContext = viewContext
     }
     
-    func sendNew(to recipients: [String], body: String, attachments: [Attachment] = []) async throws -> SendResult {
+    func sendNew(to recipients: [String], body: String, subject: String? = nil, attachments: [Attachment] = []) async throws -> SendResult {
         guard let fromEmail = authSession.userEmail else {
             throw SendError.authenticationFailed
         }
@@ -43,6 +43,7 @@ final class GmailSendService: ObservableObject {
             to: recipients,
             from: fromEmail,
             body: body,
+            subject: subject,
             attachments: attachmentData
         )
         
@@ -119,7 +120,16 @@ final class GmailSendService: ObservableObject {
     }
     
     private func sendMessage(mimeData: Data, threadId: String?) async throws -> SendResult {
+        // Debug: Print MIME message
+        if let mimeString = String(data: mimeData, encoding: .utf8) {
+            print("DEBUG: Sending MIME message:")
+            print("---START MIME---")
+            print(mimeString)
+            print("---END MIME---")
+        }
+        
         let rawMessage = MimeBuilder.base64UrlEncode(mimeData)
+        print("DEBUG: Base64 encoded message length: \(rawMessage.count)")
         
         var requestBody: [String: Any] = ["raw": rawMessage]
         if let threadId = threadId {
@@ -153,6 +163,11 @@ final class GmailSendService: ObservableObject {
                 throw SendError.authenticationFailed
             }
             
+            print("DEBUG: Gmail API Response Status: \(httpResponse.statusCode)")
+            if let responseString = String(data: data, encoding: .utf8) {
+                print("DEBUG: Gmail API Response: \(responseString)")
+            }
+            
             guard httpResponse.statusCode == 200 else {
                 let errorMessage = String(data: data, encoding: .utf8) ?? "Unknown error"
                 throw SendError.apiError("Failed to send message: \(errorMessage)")
@@ -164,6 +179,7 @@ final class GmailSendService: ObservableObject {
                 throw SendError.apiError("Invalid response format")
             }
         
+        print("DEBUG: Message sent successfully - ID: \(messageId), ThreadID: \(returnedThreadId)")
         return SendResult(messageId: messageId, threadId: returnedThreadId)
     }
     

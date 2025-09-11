@@ -8,11 +8,11 @@ struct AttachmentData {
 
 struct MimeBuilder {
     
-    static func buildNew(to: [String], from: String, body: String, attachments: [AttachmentData] = []) -> Data {
+    static func buildNew(to: [String], from: String, body: String, subject: String? = nil, attachments: [AttachmentData] = []) -> Data {
         if attachments.isEmpty {
-            return buildSimpleMessage(to: to, from: from, body: body, subject: nil, inReplyTo: nil, references: [])
+            return buildSimpleMessage(to: to, from: from, body: body, subject: subject, inReplyTo: nil, references: [])
         } else {
-            return buildMultipartMessage(to: to, from: from, body: body, subject: nil, inReplyTo: nil, references: [], attachments: attachments)
+            return buildMultipartMessage(to: to, from: from, body: body, subject: subject, inReplyTo: nil, references: [], attachments: attachments)
         }
     }
     
@@ -48,6 +48,9 @@ struct MimeBuilder {
         if let subject = subject, !subject.isEmpty {
             let encodedSubject = encodeHeaderIfNeeded(subject)
             mime += "Subject: \(encodedSubject)\r\n"
+        } else {
+            // Add empty subject header if none provided
+            mime += "Subject: \r\n"
         }
         
         mime += "Date: \(formatDate(Date()))\r\n"
@@ -90,6 +93,9 @@ struct MimeBuilder {
         if let subject = subject, !subject.isEmpty {
             let encodedSubject = encodeHeaderIfNeeded(subject)
             mime += "Subject: \(encodedSubject)\r\n"
+        } else {
+            // Add empty subject header if none provided
+            mime += "Subject: \r\n"
         }
         
         mime += "Date: \(formatDate(Date()))\r\n"
@@ -188,7 +194,7 @@ struct MimeBuilder {
     }
     
     static func buildNew(to: [String], from: String, body: String) -> Data {
-        return buildNew(to: to, from: from, body: body, attachments: [])
+        return buildNew(to: to, from: from, body: body, subject: nil, attachments: [])
     }
     
     static func buildReply(

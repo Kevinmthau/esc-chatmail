@@ -8,6 +8,7 @@ struct NewMessageComposerView: View {
     @StateObject private var contactsService = ContactsService()
     @State private var recipients: [RecipientField.Recipient] = []
     @State private var recipientInput = ""
+    @State private var subject = ""
     @State private var messageBody = ""
     @State private var isSending = false
     @State private var errorMessage: String?
@@ -35,6 +36,10 @@ struct NewMessageComposerView: View {
         NavigationView {
             VStack(spacing: 0) {
                 recipientSection
+                
+                Divider()
+                
+                subjectSection
                 
                 Divider()
                 
@@ -107,6 +112,20 @@ struct NewMessageComposerView: View {
     }
     
     @ViewBuilder
+    private var subjectSection: some View {
+        HStack {
+            Text("Subject:")
+                .foregroundColor(.gray)
+                .padding(.leading, 16)
+            
+            TextField("", text: $subject)
+                .textFieldStyle(PlainTextFieldStyle())
+                .padding(.trailing, 16)
+        }
+        .frame(height: 44)
+    }
+    
+    @ViewBuilder
     private var bodySection: some View {
         TextEditor(text: $messageBody)
             .focused($bodyFieldFocused)
@@ -164,18 +183,21 @@ struct NewMessageComposerView: View {
         
         let recipientEmails = recipients.map { $0.email }
         let body = messageBody
+        let messageSubject = subject.isEmpty ? nil : subject
         
         let optimisticMessage = await MainActor.run {
             sendService.createOptimisticMessage(
                 to: recipientEmails,
-                body: body
+                body: body,
+                subject: messageSubject
             )
         }
         
         do {
             let result = try await sendService.sendNew(
                 to: recipientEmails,
-                body: body
+                body: body,
+                subject: messageSubject
             )
             
             await MainActor.run {
