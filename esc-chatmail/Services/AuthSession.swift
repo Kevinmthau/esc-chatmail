@@ -11,10 +11,9 @@ class AuthSession: ObservableObject {
     @Published var accessToken: String?
     
     private init() {
-        // Only restore previous sign-in if this is not a fresh install
-        if UserDefaults.standard.bool(forKey: "hasRunBefore") {
-            restorePreviousSignIn()
-        }
+        // Always try to restore previous sign-in
+        // The fresh install check in esc_chatmailApp will handle clearing on app deletion
+        restorePreviousSignIn()
     }
     
     var refreshToken: String? {
@@ -58,6 +57,8 @@ class AuthSession: ObservableObject {
                     self?.userEmail = result.user.profile?.email
                     self?.isAuthenticated = true
                     self?.accessToken = result.user.accessToken.tokenString
+                    // Mark that user has successfully signed in
+                    UserDefaults.standard.set(true, forKey: "hasCompletedSignIn")
                 }
                 
                 continuation.resume()
@@ -72,6 +73,8 @@ class AuthSession: ObservableObject {
         userEmail = nil
         isAuthenticated = false
         accessToken = nil
+        // Clear the sign-in flag
+        UserDefaults.standard.removeObject(forKey: "hasCompletedSignIn")
     }
     
     @MainActor
@@ -89,6 +92,8 @@ class AuthSession: ObservableObject {
         userEmail = nil
         isAuthenticated = false
         accessToken = nil
+        // Clear the sign-in flag
+        UserDefaults.standard.removeObject(forKey: "hasCompletedSignIn")
     }
     
     func withFreshToken() async throws -> String {

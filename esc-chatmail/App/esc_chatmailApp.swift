@@ -175,36 +175,13 @@ struct esc_chatmailApp: App {
 class AppDelegate: NSObject, UIApplicationDelegate {
     func applicationWillTerminate(_ application: UIApplication) {
         // This is called when the app is about to terminate
-        // Clean up all user data and sign out
-        cleanupOnTermination()
+        // Only clear memory cache, but preserve user session
+        // Full cleanup only happens on fresh install detection
+        AttachmentCache.shared.clearCache(level: .moderate)
     }
     
-    private func cleanupOnTermination() {
-        // Clear attachment memory cache first
-        AttachmentCache.shared.clearCache(level: .aggressive)
-        
-        // Sign out from Google and revoke tokens
-        Task { @MainActor in
-            AuthSession.shared.signOutAndDisconnect { error in
-                if let error = error {
-                    print("Error disconnecting from Google: \(error.localizedDescription)")
-                }
-            }
-        }
-        
-        // Clear all Core Data
-        CoreDataStack.shared.destroyAllData()
-        
-        // Clear attachment files from disk
-        clearAttachmentFiles()
-        
-        // Clear user defaults
-        clearUserDefaults()
-        
-        // Clear keychain items if any
-        clearKeychain()
-    }
-    
+    // These methods are preserved but only called during fresh install cleanup
+    // They are NOT called on normal app termination to preserve user session
     private func clearKeychain() {
         // Clear any keychain items associated with the app
         let secItemClasses = [
