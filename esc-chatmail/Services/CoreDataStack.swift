@@ -39,4 +39,27 @@ class CoreDataStack {
             }
         }
     }
+    
+    func destroyAllData() {
+        let coordinator = persistentContainer.persistentStoreCoordinator
+        
+        for store in coordinator.persistentStores {
+            do {
+                let storeURL = store.url
+                try coordinator.remove(store)
+                
+                if let storeURL = storeURL {
+                    try FileManager.default.removeItem(at: storeURL)
+                    
+                    // Also remove the journal files (-wal and -shm files for SQLite)
+                    let walURL = storeURL.appendingPathExtension("wal")
+                    let shmURL = storeURL.appendingPathExtension("shm") 
+                    try? FileManager.default.removeItem(at: walURL)
+                    try? FileManager.default.removeItem(at: shmURL)
+                }
+            } catch {
+                print("Failed to destroy Core Data store: \(error)")
+            }
+        }
+    }
 }

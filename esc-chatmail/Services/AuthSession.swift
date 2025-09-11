@@ -11,7 +11,10 @@ class AuthSession: ObservableObject {
     @Published var accessToken: String?
     
     private init() {
-        restorePreviousSignIn()
+        // Only restore previous sign-in if this is not a fresh install
+        if UserDefaults.standard.bool(forKey: "hasRunBefore") {
+            restorePreviousSignIn()
+        }
     }
     
     var refreshToken: String? {
@@ -19,13 +22,16 @@ class AuthSession: ObservableObject {
     }
     
     func restorePreviousSignIn() {
-        GIDSignIn.sharedInstance.restorePreviousSignIn { [weak self] user, error in
-            DispatchQueue.main.async {
-                if let user = user {
-                    self?.currentUser = user
-                    self?.userEmail = user.profile?.email
-                    self?.isAuthenticated = true
-                    self?.accessToken = user.accessToken.tokenString
+        // First check if we have a valid previous session
+        if GIDSignIn.sharedInstance.hasPreviousSignIn() {
+            GIDSignIn.sharedInstance.restorePreviousSignIn { [weak self] user, error in
+                DispatchQueue.main.async {
+                    if let user = user {
+                        self?.currentUser = user
+                        self?.userEmail = user.profile?.email
+                        self?.isAuthenticated = true
+                        self?.accessToken = user.accessToken.tokenString
+                    }
                 }
             }
         }
@@ -62,6 +68,23 @@ class AuthSession: ObservableObject {
     @MainActor
     func signOut() {
         GIDSignIn.sharedInstance.signOut()
+        currentUser = nil
+        userEmail = nil
+        isAuthenticated = false
+        accessToken = nil
+    }
+    
+    @MainActor
+    func signOutAndDisconnect(completion: ((Error?) -> Void)? = nil) {
+        // First sign out
+        GIDSignIn.sharedInstance.signOut()
+        
+        // Then disconnect to revoke tokens
+        GIDSignIn.sharedInstance.disconnect { error in
+            completion?(error)
+        }
+        
+        // Clear local state
         currentUser = nil
         userEmail = nil
         isAuthenticated = false
