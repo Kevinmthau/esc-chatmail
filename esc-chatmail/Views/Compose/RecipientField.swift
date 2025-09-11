@@ -152,6 +152,11 @@ struct WrappingHStack: Layout {
         var sizes: [CGSize] = []
         
         init(in maxWidth: CGFloat, subviews: Subviews, spacing: CGFloat) {
+            guard maxWidth > 0 && maxWidth.isFinite else {
+                self.size = .zero
+                return
+            }
+            
             var x: CGFloat = 0
             var y: CGFloat = 0
             var lineHeight: CGFloat = 0
@@ -159,6 +164,13 @@ struct WrappingHStack: Layout {
             
             for subview in subviews {
                 let size = subview.sizeThatFits(.unspecified)
+                
+                // Validate size is finite
+                guard size.width.isFinite && size.height.isFinite && 
+                      size.width >= 0 && size.height >= 0 else {
+                    continue
+                }
+                
                 sizes.append(size)
                 
                 if x + size.width > maxWidth && x > 0 {
@@ -173,7 +185,13 @@ struct WrappingHStack: Layout {
                 maxX = max(maxX, x - spacing)
             }
             
-            self.size = CGSize(width: maxX, height: y + lineHeight)
+            let finalWidth = max(0, maxX)
+            let finalHeight = max(0, y + lineHeight)
+            
+            self.size = CGSize(
+                width: finalWidth.isFinite ? finalWidth : 0,
+                height: finalHeight.isFinite ? finalHeight : 0
+            )
         }
     }
 }

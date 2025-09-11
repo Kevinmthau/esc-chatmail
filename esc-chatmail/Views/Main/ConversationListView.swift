@@ -64,7 +64,7 @@ struct ConversationListView: View {
                 await performSync()
             }
             .sheet(isPresented: $showingComposer) {
-                NewMessageComposerView()
+                NewMessageView()
             }
             .sheet(isPresented: $showingSettings) {
                 NavigationStack {

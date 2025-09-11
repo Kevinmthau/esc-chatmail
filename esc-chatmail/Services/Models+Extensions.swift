@@ -33,6 +33,10 @@ extension Person {
     @NSManaged public var avatarURL: String?
     @NSManaged public var conversationParticipations: Set<ConversationParticipant>?
     @NSManaged public var messageParticipations: Set<MessageParticipant>?
+    
+    var name: String? {
+        return displayName
+    }
 }
 
 extension Conversation {
@@ -58,6 +62,21 @@ extension Conversation {
     var conversationType: ConversationType {
         get { ConversationType(rawValue: type) ?? .oneToOne }
         set { type = newValue.rawValue }
+    }
+    
+    var participantsArray: [String] {
+        guard let participants = participants else { return [] }
+        return participants.compactMap { $0.person?.email }
+    }
+    
+    var lastMessageTime: Date? {
+        get { lastMessageDate }
+        set { lastMessageDate = newValue }
+    }
+    
+    var lastMessagePreview: String? {
+        get { snippet }
+        set { snippet = newValue }
     }
 }
 
@@ -95,6 +114,16 @@ extension Message {
     @NSManaged public var conversation: Conversation?
     @NSManaged public var labels: Set<Label>?
     @NSManaged public var participants: Set<MessageParticipant>?
+    
+    var content: String? {
+        get { cleanedSnippet }
+        set { cleanedSnippet = newValue }
+    }
+    
+    var timestamp: Date {
+        get { internalDate }
+        set { internalDate = newValue }
+    }
 }
 
 extension MessageParticipant {
