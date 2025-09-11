@@ -6,7 +6,7 @@ struct ChatReplyBar: View {
     @Binding var replyingTo: Message?
     let conversation: Conversation
     let onSend: ([Attachment]) async -> Void
-    @FocusState private var isTextFieldFocused: Bool
+    var focusBinding: FocusState<Bool>.Binding
     @State private var isSending = false
     @State private var attachments: [Attachment] = []
     @Environment(\.managedObjectContext) private var viewContext
@@ -78,14 +78,14 @@ struct ChatReplyBar: View {
             }
             
             TextEditor(text: $replyText)
-                .focused($isTextFieldFocused)
+                .focused(focusBinding)
                 .scrollContentBackground(.hidden)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .frame(minHeight: 36, maxHeight: 120)
                 .fixedSize(horizontal: false, vertical: true)
                 .onTapGesture {
-                    isTextFieldFocused = true
+                    focusBinding.wrappedValue = true
                 }
         }
         .background(

@@ -13,6 +13,7 @@ struct ChatView: View {
     @State private var showingWebView = false
     @State private var replyText = ""
     @State private var replyingTo: Message?
+    @FocusState private var isTextFieldFocused: Bool
     @Namespace private var bottomID
     
     init(conversation: Conversation) {
@@ -50,7 +51,13 @@ struct ChatView: View {
                 .padding(.horizontal)
                 .padding(.top, 8)
                 .padding(.bottom, 8)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    // Dismiss keyboard when tapping empty space
+                    isTextFieldFocused = false
+                }
             }
+            .scrollDismissesKeyboard(.interactively)
             .onAppear {
                 markConversationAsRead()
                 // Initial scroll to bottom
@@ -68,10 +75,20 @@ struct ChatView: View {
                     }
                 }
             }
-            .onChange(of: keyboard.currentHeight) { _, newHeight in
-                if newHeight > 0 {
-                    // Scroll to bottom anchor when keyboard appears
+            .onChange(of: keyboard.currentHeight) { oldHeight, newHeight in
+                // Scroll to bottom when keyboard appears or disappears
+                if newHeight > 0 || (oldHeight > 0 && newHeight == 0) {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        withAnimation(.easeOut(duration: 0.25)) {
+                            proxy.scrollTo(bottomID, anchor: .bottom)
+                        }
+                    }
+                }
+            }
+            .onChange(of: isTextFieldFocused) { _, isFocused in
+                // Also scroll when focus changes (handles tap dismissal)
+                if !isFocused {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                         withAnimation(.easeOut(duration: 0.25)) {
                             proxy.scrollTo(bottomID, anchor: .bottom)
                         }
@@ -88,7 +105,8 @@ struct ChatView: View {
                         conversation: conversation,
                         onSend: { attachments in
                             await sendReply(with: attachments)
-                        }
+                        },
+                        focusBinding: $isTextFieldFocused
                     )
                     .background(Color(UIColor.systemBackground))
                 }
@@ -97,6 +115,17 @@ struct ChatView: View {
         .navigationTitle(conversation.displayName ?? "Chat")
         .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                // Add tap gesture to navigation bar area
+                ToolbarItem(placement: .principal) {
+                    Text(conversation.displayName ?? "Chat")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            isTextFieldFocused = false
+                        }
+                }
+                
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
                     Menu {
                         Button(action: { archiveConversation() }) {

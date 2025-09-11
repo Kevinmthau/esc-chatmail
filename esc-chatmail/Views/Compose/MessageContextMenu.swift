@@ -122,6 +122,7 @@ struct EnhancedMessageBubble: View {
 struct EnhancedChatView: View {
     let conversation: Conversation
     @StateObject private var sendService: GmailSendService
+    @StateObject private var keyboard = KeyboardResponder()
     @State private var replyText = ""
     @State private var replyingTo: Message?
     @State private var scrollToMessageId: String?
@@ -149,11 +150,39 @@ struct EnhancedChatView: View {
                         }
                     }
                     .padding(.vertical, 12)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        // Dismiss keyboard when tapping empty space
+                        isReplyFieldFocused = false
+                    }
                 }
+                .scrollDismissesKeyboard(.interactively)
                 .onChange(of: scrollToMessageId) { _, messageId in
                     if let messageId = messageId {
                         withAnimation(.easeInOut(duration: 0.3)) {
                             proxy.scrollTo(messageId, anchor: .bottom)
+                        }
+                    }
+                }
+                .onChange(of: keyboard.currentHeight) { oldHeight, newHeight in
+                    // Scroll to bottom when keyboard appears or disappears
+                    if let lastMessageId = sortedMessages.last?.id {
+                        if newHeight > 0 || (oldHeight > 0 && newHeight == 0) {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                withAnimation(.easeOut(duration: 0.25)) {
+                                    proxy.scrollTo(lastMessageId, anchor: .bottom)
+                                }
+                            }
+                        }
+                    }
+                }
+                .onChange(of: isReplyFieldFocused) { _, isFocused in
+                    // Also scroll when focus changes (handles tap dismissal)
+                    if !isFocused, let lastMessageId = sortedMessages.last?.id {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            withAnimation(.easeOut(duration: 0.25)) {
+                                proxy.scrollTo(lastMessageId, anchor: .bottom)
+                            }
                         }
                     }
                 }
@@ -167,7 +196,8 @@ struct EnhancedChatView: View {
                 conversation: conversation,
                 onSend: { attachments in
                     await sendReply(with: attachments)
-                }
+                },
+                focusBinding: $isReplyFieldFocused
             )
             .background(Color(UIColor.systemBackground))
         }
