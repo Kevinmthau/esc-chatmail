@@ -1,6 +1,11 @@
 import Foundation
 import CoreData
 import Combine
+import Network
+
+extension Notification.Name {
+    static let syncCompleted = Notification.Name("com.esc.inboxchat.syncCompleted")
+}
 
 class SyncEngine: ObservableObject {
     static let shared = SyncEngine()
@@ -17,8 +22,29 @@ class SyncEngine: ObservableObject {
     private let attachmentDownloader = AttachmentDownloader.shared
     private var myAliases: Set<String> = []
     private var cancellables = Set<AnyCancellable>()
+    private let networkMonitor = NWPathMonitor()
+    private let monitorQueue = DispatchQueue(label: "NetworkMonitor")
+    private var isNetworkReachable = true
     
-    private init() {}
+    private init() {
+        setupNetworkMonitoring()
+    }
+    
+    private func setupNetworkMonitoring() {
+        networkMonitor.pathUpdateHandler = { [weak self] path in
+            self?.isNetworkReachable = (path.status == .satisfied)
+            if !path.isExpensive && path.status == .satisfied {
+                print("Network is reachable")
+            } else {
+                print("Network status: \(path.status), expensive: \(path.isExpensive)")
+            }
+        }
+        networkMonitor.start(queue: monitorQueue)
+    }
+    
+    private func isNetworkAvailable() async -> Bool {
+        return isNetworkReachable
+    }
     
     func performInitialSync() async throws {
         await MainActor.run {
@@ -122,14 +148,30 @@ class SyncEngine: ObservableObject {
     }
     
     func performIncrementalSync() async throws {
-        guard let account = try await fetchAccount() else { return }
+        // Check network connectivity first
+        guard await isNetworkAvailable() else {
+            print("Network not available, skipping sync")
+            await MainActor.run {
+                self.syncStatus = "Network unavailable"
+                self.isSyncing = false
+            }
+            return
+        }
+        
+        guard let account = try await fetchAccount() else { 
+            print("No account found for incremental sync")
+            return 
+        }
         
         // Extract account properties while still on the main thread
         let historyId = await MainActor.run { account.historyId }
         let email = await MainActor.run { account.email }
         let aliases = await MainActor.run { account.aliasesArray }
         
+        print("Starting incremental sync with historyId: \(historyId ?? "nil")")
+        
         guard let historyId = historyId else {
+            print("No historyId found, falling back to initial sync")
             try await performInitialSync()
             return
         }
@@ -152,12 +194,16 @@ class SyncEngine: ObservableObject {
                 let response = try await apiClient.listHistory(startHistoryId: historyId, pageToken: pageToken)
                 
                 if let history = response.history {
+                    print("Received \(history.count) history records")
                     for record in history {
                         await processHistoryRecord(record, in: context)
                     }
+                } else {
+                    print("No history records in response")
                 }
                 
                 if let newHistoryId = response.historyId {
+                    print("Updating historyId from \(latestHistoryId) to \(newHistoryId)")
                     latestHistoryId = newHistoryId
                 }
                 
@@ -172,9 +218,14 @@ class SyncEngine: ObservableObject {
             
             coreDataStack.save(context: context)
             
+            // Force refresh the view context to ensure UI updates
             await MainActor.run {
+                self.coreDataStack.viewContext.refreshAllObjects()
                 self.syncStatus = "Sync complete"
                 self.isSyncing = false
+                
+                // Post notification to update UI
+                NotificationCenter.default.post(name: .syncCompleted, object: nil)
             }
             
         } catch {
@@ -212,10 +263,24 @@ class SyncEngine: ObservableObject {
             return
         }
         
-        // Check for duplicates
+        // Check for existing message and update if needed
         let request = Message.fetchRequest()
         request.predicate = NSPredicate(format: "id == %@", processedMessage.id)
-        if (try? context.fetch(request).first) != nil {
+        if let existingMessage = try? context.fetch(request).first {
+            // Update existing message properties that might have changed
+            existingMessage.isUnread = processedMessage.isUnread
+            existingMessage.snippet = processedMessage.snippet
+            existingMessage.cleanedSnippet = processedMessage.cleanedSnippet
+            
+            // Update labels
+            existingMessage.labels = nil
+            for labelId in processedMessage.labelIds {
+                if let label = await findLabel(id: labelId, in: context) {
+                    existingMessage.addToLabels(label)
+                }
+            }
+            
+            print("Updated existing message: \(processedMessage.id)")
             return
         }
         
@@ -369,8 +434,17 @@ class SyncEngine: ObservableObject {
     
     private func processHistoryRecord(_ record: HistoryRecord, in context: NSManagedObjectContext) async {
         if let messagesAdded = record.messagesAdded {
+            print("Processing \(messagesAdded.count) new messages from history")
             for added in messagesAdded {
-                await saveMessage(added.message, in: context)
+                // History API returns partial messages - fetch full details
+                if let fullMessage = try? await apiClient.getMessage(id: added.message.id) {
+                    print("Fetched full message: \(fullMessage.id)")
+                    await saveMessage(fullMessage, in: context)
+                } else {
+                    print("Failed to fetch full message for ID: \(added.message.id)")
+                    // Fall back to partial message data
+                    await saveMessage(added.message, in: context)
+                }
                 // The conversation lastMessageDate will be updated in saveMessage
             }
         }

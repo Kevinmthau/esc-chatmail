@@ -16,6 +16,7 @@ struct ConversationListView: View {
     @State private var searchText = ""
     @State private var showingComposer = false
     @State private var showingSettings = false
+    @State private var syncTimer: Timer?
     
     var body: some View {
         List {
@@ -73,6 +74,10 @@ struct ConversationListView: View {
             }
             .onAppear {
                 performInitialSync()
+                startPeriodicSync()
+            }
+            .onDisappear {
+                stopPeriodicSync()
             }
     }
     
@@ -117,5 +122,30 @@ struct ConversationListView: View {
             conversation.hidden = true
         }
         CoreDataStack.shared.save(context: CoreDataStack.shared.viewContext)
+    }
+    
+    private func startPeriodicSync() {
+        // Stop any existing timer
+        stopPeriodicSync()
+        
+        // Start a new timer that fires every 30 seconds
+        syncTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { _ in
+            Task {
+                // Only sync if not already syncing
+                if await !self.syncEngine.isSyncing {
+                    print("Performing periodic sync")
+                    do {
+                        try await self.syncEngine.performIncrementalSync()
+                    } catch {
+                        print("Periodic sync error: \(error)")
+                    }
+                }
+            }
+        }
+    }
+    
+    private func stopPeriodicSync() {
+        syncTimer?.invalidate()
+        syncTimer = nil
     }
 }
