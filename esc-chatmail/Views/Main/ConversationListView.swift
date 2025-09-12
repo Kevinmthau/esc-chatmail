@@ -20,17 +20,6 @@ struct ConversationListView: View {
     
     var body: some View {
         List {
-                if syncEngine.isSyncing {
-                    HStack {
-                        ProgressView()
-                        Text(syncEngine.syncStatus)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.vertical, 8)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
-                }
-                
                 ForEach(filteredConversations) { conversation in
                     ZStack {
                         NavigationLink(destination: ChatView(conversation: conversation)) {
