@@ -155,7 +155,12 @@ struct ChatView: View {
                     MessageWebView(message: message)
                 }
             }
+            .sheet(item: $messageToForward) { message in
+                NewMessageView(forwardedMessage: message)
+            }
     }
+    
+    @State private var messageToForward: Message?
     
     @ViewBuilder
     private func messageContextMenu(for message: Message) -> some View {
@@ -165,17 +170,10 @@ struct ChatView: View {
             SwiftUI.Label("Reply", systemImage: "arrow.turn.up.left")
         }
         
-        Button(action: { toggleMessageRead(message) }) {
-            SwiftUI.Label(message.isUnread ? "Mark as Read" : "Mark as Unread",
-                  systemImage: message.isUnread ? "envelope.open" : "envelope")
-        }
-        
-        Button(action: { archiveMessage(message) }) {
-            SwiftUI.Label("Archive", systemImage: "archivebox")
-        }
-        
-        Button(action: { starMessage(message) }) {
-            SwiftUI.Label("Star", systemImage: "star")
+        Button(action: { 
+            messageToForward = message
+        }) {
+            SwiftUI.Label("Forward", systemImage: "arrow.turn.up.right")
         }
     }
     

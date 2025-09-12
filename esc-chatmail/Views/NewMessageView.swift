@@ -16,7 +16,13 @@ struct NewMessageView: View {
     @State private var errorMessage: String?
     @State private var showError = false
     
+    let forwardedMessage: Message?
+    
     private let sendService = GmailSendService(viewContext: CoreDataStack.shared.viewContext)
+    
+    init(forwardedMessage: Message? = nil) {
+        self.forwardedMessage = forwardedMessage
+    }
     
     @FocusState private var focusedField: Field?
     
@@ -128,6 +134,9 @@ struct NewMessageView: View {
             Text(errorMessage ?? "Failed to send message")
         }
         .onAppear {
+            if let forwardedMessage = forwardedMessage {
+                setupForwardedMessage(forwardedMessage)
+            }
             focusedField = .recipients
         }
     }
@@ -143,6 +152,19 @@ struct NewMessageView: View {
         let trimmedMessage = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
         let recipientEmails = recipients.map { $0.email }
         
+        // Determine subject for forwarded message
+        var messageSubject: String?
+        if let forwardedMessage = forwardedMessage,
+           let originalSubject = forwardedMessage.subject,
+           !originalSubject.isEmpty {
+            // Add "Fwd: " prefix if not already present
+            if originalSubject.lowercased().hasPrefix("fwd:") || originalSubject.lowercased().hasPrefix("fw:") {
+                messageSubject = originalSubject
+            } else {
+                messageSubject = "Fwd: \(originalSubject)"
+            }
+        }
+        
         Task {
             await MainActor.run {
                 isSending = true
@@ -153,7 +175,7 @@ struct NewMessageView: View {
                 sendService.createOptimisticMessage(
                     to: recipientEmails,
                     body: trimmedMessage,
-                    subject: nil
+                    subject: messageSubject
                 )
             }
             
@@ -162,7 +184,7 @@ struct NewMessageView: View {
                 let result = try await sendService.sendNew(
                     to: recipientEmails,
                     body: trimmedMessage,
-                    subject: nil
+                    subject: messageSubject
                 )
                 
                 await MainActor.run {
@@ -185,6 +207,56 @@ struct NewMessageView: View {
                 }
             }
         }
+    }
+    
+    private func setupForwardedMessage(_ message: Message) {
+        // Create quoted MIME format for forwarded message
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        
+        var quotedText = "\n\n---------- Forwarded message ---------\n"
+        
+        // Get sender info from conversation participants
+        let participants = Array(message.conversation?.participants ?? [])
+        
+        // Determine sender based on isFromMe flag
+        if message.isFromMe {
+            quotedText += "From: \(AuthSession.shared.userEmail ?? "Me")\n"
+        } else {
+            // Find the other participant (not the current user)
+            if let otherParticipant = participants.first(where: { participant in
+                let email = participant.person?.email ?? ""
+                return EmailNormalizer.normalize(email) != EmailNormalizer.normalize(AuthSession.shared.userEmail ?? "")
+            })?.person {
+                quotedText += "From: \(otherParticipant.name ?? otherParticipant.email)\n"
+            }
+        }
+        
+        // Add Date
+        quotedText += "Date: \(formatter.string(from: message.internalDate))\n"
+        
+        // Add Subject if exists
+        if let subject = message.subject, !subject.isEmpty {
+            quotedText += "Subject: \(subject)\n"
+        }
+        
+        // Add recipients
+        let recipientList = participants.compactMap { $0.person?.email }
+            .filter { EmailNormalizer.normalize($0) != EmailNormalizer.normalize(AuthSession.shared.userEmail ?? "") }
+        
+        if !recipientList.isEmpty {
+            quotedText += "To: \(recipientList.joined(separator: ", "))\n"
+        }
+        
+        quotedText += "\n"
+        
+        // Add message body
+        if let snippet = message.snippet {
+            quotedText += snippet
+        }
+        
+        messageText = quotedText
     }
 }
 
