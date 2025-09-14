@@ -97,12 +97,12 @@ class AttachmentDownloader: ObservableObject {
             }
             
             // Save context
-            coreDataStack.save(context: context)
+            coreDataStack.saveIfNeeded(context: context)
             
         } catch {
             print("Failed to download attachment \(attachmentId): \(error)")
             attachment.setValue("failed", forKey: "stateRaw")
-            coreDataStack.save(context: context)
+            coreDataStack.saveIfNeeded(context: context)
         }
         
         await MainActor.run {
@@ -119,7 +119,7 @@ class AttachmentDownloader: ObservableObject {
         guard let attachmentInContext = try? context.existingObject(with: attachment.objectID) as? Attachment else { return }
         
         attachmentInContext.setValue("queued", forKey: "stateRaw")
-        coreDataStack.save(context: context)
+        coreDataStack.saveIfNeeded(context: context)
         
         await downloadAttachment(attachmentInContext, messageId: messageId, in: context)
     }

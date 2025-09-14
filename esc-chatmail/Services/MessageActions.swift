@@ -7,26 +7,26 @@ class MessageActions: ObservableObject {
     
     func markAsRead(message: Message) async throws {
         message.isUnread = false
-        coreDataStack.save(context: coreDataStack.viewContext)
+        coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
         
         do {
             _ = try await apiClient.modifyMessage(id: message.id, removeLabelIds: ["UNREAD"])
         } catch {
             message.isUnread = true
-            coreDataStack.save(context: coreDataStack.viewContext)
+            coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
             throw error
         }
     }
     
     func markAsUnread(message: Message) async throws {
         message.isUnread = true
-        coreDataStack.save(context: coreDataStack.viewContext)
+        coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
         
         do {
             _ = try await apiClient.modifyMessage(id: message.id, addLabelIds: ["UNREAD"])
         } catch {
             message.isUnread = false
-            coreDataStack.save(context: coreDataStack.viewContext)
+            coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
             throw error
         }
     }
@@ -36,7 +36,7 @@ class MessageActions: ObservableObject {
             let inboxLabel = labels.first { $0.id == "INBOX" }
             if let inboxLabel = inboxLabel {
                 message.removeFromLabels(inboxLabel)
-                coreDataStack.save(context: coreDataStack.viewContext)
+                coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
                 
                 do {
                     _ = try await apiClient.modifyMessage(id: message.id, removeLabelIds: ["INBOX"])
@@ -46,7 +46,7 @@ class MessageActions: ObservableObject {
                     }
                 } catch {
                     message.addToLabels(inboxLabel)
-                    coreDataStack.save(context: coreDataStack.viewContext)
+                    coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
                     throw error
                 }
             }
@@ -72,7 +72,7 @@ class MessageActions: ObservableObject {
             for message in inboxMessages {
                 message.removeFromLabels(inboxLabel)
             }
-            coreDataStack.save(context: context)
+            coreDataStack.saveIfNeeded(context: context)
             
             do {
                 try await apiClient.batchModify(ids: messageIds, removeLabelIds: ["INBOX"])
@@ -81,7 +81,7 @@ class MessageActions: ObservableObject {
                 for message in inboxMessages {
                     message.addToLabels(inboxLabel)
                 }
-                coreDataStack.save(context: context)
+                coreDataStack.saveIfNeeded(context: context)
                 throw error
             }
         }
@@ -110,7 +110,7 @@ class MessageActions: ObservableObject {
         
         if !messageIds.isEmpty {
             conversation.hidden = true
-            coreDataStack.save(context: coreDataStack.viewContext)
+            coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
             
             do {
                 try await apiClient.batchModify(
@@ -120,7 +120,7 @@ class MessageActions: ObservableObject {
                 )
             } catch {
                 conversation.hidden = false
-                coreDataStack.save(context: coreDataStack.viewContext)
+                coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
                 throw error
             }
         }
@@ -143,6 +143,6 @@ class MessageActions: ObservableObject {
             conversation.latestInboxDate = nil
         }
         
-        coreDataStack.save(context: coreDataStack.viewContext)
+        coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
     }
 }

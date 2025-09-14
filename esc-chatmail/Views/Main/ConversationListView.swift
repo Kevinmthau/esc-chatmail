@@ -110,7 +110,12 @@ struct ConversationListView: View {
             let conversation = filteredConversations[index]
             conversation.hidden = true
         }
-        CoreDataStack.shared.save(context: CoreDataStack.shared.viewContext)
+        do {
+            try CoreDataStack.shared.save(context: CoreDataStack.shared.viewContext)
+        } catch {
+            print("Failed to delete conversation: \(error)")
+            // Show error to user
+        }
     }
     
     private func startPeriodicSync() {

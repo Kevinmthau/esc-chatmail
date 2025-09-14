@@ -150,7 +150,7 @@ class ConversationManager {
             }
             
             if mergedCount > 0 {
-                self.coreDataStack.save(context: context)
+                self.coreDataStack.saveIfNeeded(context: context)
                 print("Merged \(mergedCount) duplicate conversations")
             }
         }

@@ -206,12 +206,24 @@ struct ChatView: View {
     
     private func togglePin() {
         conversation.pinned.toggle()
-        CoreDataStack.shared.save(context: CoreDataStack.shared.viewContext)
+        do {
+            try CoreDataStack.shared.save(context: CoreDataStack.shared.viewContext)
+        } catch {
+            print("Failed to toggle pin: \(error)")
+            // Revert change on failure
+            conversation.pinned.toggle()
+        }
     }
     
     private func toggleMute() {
         conversation.muted.toggle()
-        CoreDataStack.shared.save(context: CoreDataStack.shared.viewContext)
+        do {
+            try CoreDataStack.shared.save(context: CoreDataStack.shared.viewContext)
+        } catch {
+            print("Failed to toggle mute: \(error)")
+            // Revert change on failure
+            conversation.muted.toggle()
+        }
     }
     
     private func deleteConversation() {

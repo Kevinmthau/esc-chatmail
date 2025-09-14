@@ -53,7 +53,12 @@ final class GmailSendService: ObservableObject {
         for attachment in attachments {
             attachment.state = .uploaded
         }
-        CoreDataStack.shared.save(context: viewContext)
+        do {
+            try CoreDataStack.shared.save(context: viewContext)
+        } catch {
+            print("Failed to save attachment state: \(error)")
+            // Non-critical error - continue
+        }
         
         return result
     }
@@ -88,7 +93,12 @@ final class GmailSendService: ObservableObject {
         for attachment in attachments {
             attachment.state = .uploaded
         }
-        CoreDataStack.shared.save(context: viewContext)
+        do {
+            try CoreDataStack.shared.save(context: viewContext)
+        } catch {
+            print("Failed to save attachment state: \(error)")
+            // Non-critical error - continue
+        }
         
         return result
     }

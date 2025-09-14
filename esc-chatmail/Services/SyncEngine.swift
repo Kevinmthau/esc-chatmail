@@ -122,7 +122,12 @@ class SyncEngine: ObservableObject {
             await updateConversationRollups(in: context)
             
             // Save the background context first
-            coreDataStack.save(context: context)
+            do {
+                try coreDataStack.save(context: context)
+            } catch {
+                print("Failed to save sync data: \(error)")
+                throw error // Propagate sync errors
+            }
             
             // Update account's historyId in the main context
             await updateAccountHistoryId(profile.historyId)
@@ -215,8 +220,13 @@ class SyncEngine: ObservableObject {
             
             // Update account's historyId in the proper context
             await updateAccountHistoryId(latestHistoryId)
-            
-            coreDataStack.save(context: context)
+
+            do {
+                try coreDataStack.save(context: context)
+            } catch {
+                print("Failed to save incremental sync: \(error)")
+                throw error // Propagate sync errors
+            }
             
             // Force refresh the view context to ensure UI updates
             await MainActor.run {
@@ -421,7 +431,12 @@ class SyncEngine: ObservableObject {
                 request.fetchLimit = 1
                 if let account = try? context.fetch(request).first {
                     account.historyId = historyId
-                    self.coreDataStack.save(context: context)
+                    do {
+                        try self.coreDataStack.save(context: context)
+                    } catch {
+                        print("Failed to save history ID: \(error)")
+                        // Non-critical - continue
+                    }
                 }
                 continuation.resume()
             }
@@ -529,8 +544,13 @@ class SyncEngine: ObservableObject {
         }
         
         if !duplicateIds.isEmpty {
-            coreDataStack.save(context: context)
-            print("Removed \(duplicateIds.count) duplicate messages")
+            do {
+                try coreDataStack.save(context: context)
+                print("Removed \(duplicateIds.count) duplicate messages")
+            } catch {
+                print("Failed to save after removing duplicates: \(error)")
+                // Non-critical - continue
+            }
         }
     }
 }

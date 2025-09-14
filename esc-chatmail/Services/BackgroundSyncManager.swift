@@ -212,7 +212,7 @@ class BackgroundSyncManager {
             await fetchAndStoreMessages(messageIds: Array(messagesToFetch))
         }
         
-        coreDataStack.save(context: context)
+        coreDataStack.saveIfNeeded(context: context)
     }
     
     private func fetchAndStoreMessages(messageIds: [String]) async {
@@ -236,7 +236,7 @@ class BackgroundSyncManager {
         }
         
         await syncEngine.updateConversationRollups(in: context)
-        coreDataStack.save(context: context)
+        coreDataStack.saveIfNeeded(context: context)
     }
     
     private func deleteMessages(messageIds: [String], in context: NSManagedObjectContext) async {
@@ -278,7 +278,7 @@ class BackgroundSyncManager {
             let accounts = try context.fetch(fetchRequest)
             if let account = accounts.first {
                 account.historyId = historyId
-                coreDataStack.save(context: context)
+                coreDataStack.saveIfNeeded(context: context)
             }
         } catch {
             print("Failed to store historyId: \(error)")
