@@ -49,7 +49,7 @@ struct InboxListView: View {
             }
             .sheet(isPresented: $showingWebView) {
                 if let message = selectedMessage {
-                    MessageWebView(message: message)
+                    HTMLMessageView(message: message)
                 }
             }
             .sheet(isPresented: $showingComposer) {

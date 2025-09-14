@@ -10,7 +10,6 @@ struct ChatView: View {
     @StateObject private var sendService: GmailSendService
     @StateObject private var keyboard = KeyboardResponder()
     @State private var selectedMessage: Message?
-    @State private var showingWebView = false
     @State private var replyText = ""
     @State private var replyingTo: Message?
     @FocusState private var isTextFieldFocused: Bool
@@ -35,10 +34,6 @@ struct ChatView: View {
                     ForEach(messages) { message in
                         MessageBubble(message: message, conversation: conversation)
                             .id(message.id)
-                            .onTapGesture {
-                                selectedMessage = message
-                                showingWebView = true
-                            }
                             .contextMenu {
                                 messageContextMenu(for: message)
                             }
@@ -148,11 +143,6 @@ struct ChatView: View {
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
-                }
-            }
-            .sheet(isPresented: $showingWebView) {
-                if let message = selectedMessage {
-                    MessageWebView(message: message)
                 }
             }
             .sheet(item: $messageToForward) { message in
@@ -299,6 +289,8 @@ struct MessageBubble: View {
     let conversation: Conversation
     @StateObject private var contactsResolver = ContactsResolver.shared
     @State private var senderName: String?
+    @State private var showingHTMLView = false
+    @State private var hasRichContent = false
     
     var body: some View {
         HStack {
@@ -332,11 +324,33 @@ struct MessageBubble: View {
                 
                 // Text content
                 if let text = message.cleanedSnippet ?? message.snippet, !text.isEmpty {
-                    Text(text)
-                        .padding(10)
-                        .background(message.isFromMe ? Color.blue : Color.gray.opacity(0.2))
-                        .foregroundColor(message.isFromMe ? .white : .primary)
-                        .cornerRadius(12)
+                    VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 8) {
+                        Text(text)
+                            .padding(10)
+                            .background(message.isFromMe ? Color.blue : Color.gray.opacity(0.2))
+                            .foregroundColor(message.isFromMe ? .white : .primary)
+                            .cornerRadius(12)
+
+                        // View More button for rich HTML content
+                        if hasRichContent {
+                            Button(action: {
+                                showingHTMLView = true
+                            }) {
+                                HStack(spacing: 4) {
+                                    Text("View More")
+                                        .font(.caption)
+                                        .fontWeight(.medium)
+                                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                        .font(.caption2)
+                                }
+                                .foregroundColor(.blue)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color.blue.opacity(0.1))
+                                .cornerRadius(8)
+                            }
+                        }
+                    }
                 }
                 
                 HStack(spacing: 8) {
@@ -361,6 +375,10 @@ struct MessageBubble: View {
             if !message.isFromMe && isGroupConversation {
                 await loadSenderName()
             }
+            checkForRichContent()
+        }
+        .sheet(isPresented: $showingHTMLView) {
+            HTMLMessageView(message: message)
         }
     }
     
@@ -400,53 +418,23 @@ struct MessageBubble: View {
     private func formatTime(_ date: Date) -> String {
         return TimestampFormatter.format(date)
     }
-}
 
-struct MessageWebView: View {
-    let message: Message
-    @Environment(\.dismiss) private var dismiss
-    
-    var body: some View {
-        NavigationStack {
-            Group {
-                if let urlString = message.bodyStorageURI,
-                   let url = URL(string: urlString) {
-                    WebView(url: url)
-                } else {
-                    Text("No content available")
-                        .foregroundColor(.secondary)
-                }
-            }
-            .navigationTitle("Message")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") {
-                        dismiss()
-                    }
-                }
+    private func checkForRichContent() {
+        // Check if we have HTML content stored
+        if let urlString = message.bodyStorageURI,
+           let _ = URL(string: urlString) {
+            // Check if HTML file exists
+            let htmlHandler = HTMLContentHandler()
+            let messageId = message.id
+            hasRichContent = htmlHandler.htmlFileExists(for: messageId)
+
+            // Additionally analyze complexity if HTML exists
+            if hasRichContent,
+               let html = htmlHandler.loadHTML(for: messageId) {
+                let complexity = HTMLSanitizerService.shared.analyzeComplexity(html)
+                // Only show View More for moderate to complex HTML
+                hasRichContent = complexity != .simple
             }
         }
-    }
-}
-
-struct WebView: UIViewRepresentable {
-    let url: URL
-    
-    func makeUIView(context: Context) -> WKWebView {
-        let webView = WKWebView()
-        webView.navigationDelegate = context.coordinator
-        return webView
-    }
-    
-    func updateUIView(_ webView: WKWebView, context: Context) {
-        webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
-    }
-    
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
-    
-    class Coordinator: NSObject, WKNavigationDelegate {
     }
 }

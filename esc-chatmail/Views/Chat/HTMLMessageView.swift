@@ -1,0 +1,217 @@
+import SwiftUI
+import WebKit
+
+struct HTMLMessageView: View {
+    let message: Message
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var htmlContent: String?
+    @State private var isLoading = true
+
+    private let htmlContentHandler = HTMLContentHandler()
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if isLoading {
+                    ProgressView("Loading...")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let html = htmlContent {
+                    HTMLWebView(
+                        htmlContent: html,
+                        isDarkMode: colorScheme == .dark
+                    )
+                } else {
+                    ContentUnavailableView(
+                        "No Content",
+                        systemImage: "doc.text",
+                        description: Text("The original email content is not available")
+                    )
+                }
+            }
+            .navigationTitle("Original Email")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .task {
+            await loadHTMLContent()
+        }
+    }
+
+    private func loadHTMLContent() async {
+        // Add timeout to prevent hangs
+        let timeoutTask = Task {
+            try? await Task.sleep(nanoseconds: 5_000_000_000) // 5 second timeout
+            await MainActor.run {
+                if self.isLoading {
+                    self.isLoading = false
+                }
+            }
+        }
+
+        defer { timeoutTask.cancel() }
+
+        // First try to load from stored HTML file
+        if let urlString = message.bodyStorageURI,
+           let url = URL(string: urlString) {
+            if let html = htmlContentHandler.loadHTML(from: url) {
+                let wrappedHTML = HTMLSanitizerService.shared.wrapHTMLForDisplay(
+                    html,
+                    isDarkMode: colorScheme == .dark
+                )
+                await MainActor.run {
+                    self.htmlContent = wrappedHTML
+                    self.isLoading = false
+                }
+                return
+            }
+        }
+
+        // If no HTML file, try to reconstruct from message content
+        let messageId = message.id
+        if let html = htmlContentHandler.loadHTML(for: messageId) {
+            let wrappedHTML = HTMLSanitizerService.shared.wrapHTMLForDisplay(
+                html,
+                isDarkMode: colorScheme == .dark
+            )
+            await MainActor.run {
+                self.htmlContent = wrappedHTML
+                self.isLoading = false
+            }
+            return
+        }
+
+        // No HTML content available
+        await MainActor.run {
+            self.isLoading = false
+        }
+    }
+}
+
+struct HTMLWebView: UIViewRepresentable {
+    let htmlContent: String
+    let isDarkMode: Bool
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.allowsInlineMediaPlayback = true
+        configuration.dataDetectorTypes = [.phoneNumber, .link, .address]
+
+        // Enable JavaScript for proper rendering using WKWebpagePreferences
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+
+        // Allow content to load properly
+        configuration.allowsAirPlayForMediaPlayback = true
+        configuration.mediaTypesRequiringUserActionForPlayback = []
+
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = context.coordinator
+        webView.scrollView.contentInsetAdjustmentBehavior = .automatic
+        webView.isOpaque = false
+        webView.backgroundColor = .clear
+        webView.scrollView.backgroundColor = .clear
+
+        // Set custom user agent to ensure proper rendering
+        webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
+
+        // Load content immediately
+        context.coordinator.loadContent(in: webView)
+
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        // Only reload if content has changed
+        if context.coordinator.lastLoadedContent != htmlContent {
+            context.coordinator.loadContent(in: webView)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    class Coordinator: NSObject, WKNavigationDelegate {
+        var parent: HTMLWebView
+        var lastLoadedContent: String = ""
+        private var isLoading = false
+
+        init(_ parent: HTMLWebView) {
+            self.parent = parent
+        }
+
+        func loadContent(in webView: WKWebView) {
+            guard !isLoading else { return }
+            isLoading = true
+            lastLoadedContent = parent.htmlContent
+
+            // Use https base URL for better compatibility
+            let baseURL = URL(string: "https://localhost/")
+            webView.loadHTMLString(parent.htmlContent, baseURL: baseURL)
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            // Allow initial load and resource loads
+            if navigationAction.navigationType == .other || navigationAction.navigationType == .reload {
+                decisionHandler(.allow)
+                return
+            }
+
+            // Handle link clicks
+            if navigationAction.navigationType == .linkActivated,
+               let url = navigationAction.request.url {
+                // Don't open localhost links
+                if url.host != "localhost" {
+                    UIApplication.shared.open(url)
+                }
+                decisionHandler(.cancel)
+                return
+            }
+
+            decisionHandler(.allow)
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            isLoading = false
+
+            // Inject JavaScript to ensure images load
+            let jsCode = """
+                // Force image loading
+                var images = document.getElementsByTagName('img');
+                for (var i = 0; i < images.length; i++) {
+                    var img = images[i];
+                    if (img.src && !img.complete) {
+                        var newImg = new Image();
+                        newImg.src = img.src;
+                    }
+                }
+
+                // Ensure proper viewport scaling
+                var meta = document.querySelector('meta[name="viewport"]');
+                if (!meta) {
+                    meta = document.createElement('meta');
+                    meta.name = 'viewport';
+                    meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=yes';
+                    document.head.appendChild(meta);
+                }
+            """
+            webView.evaluateJavaScript(jsCode, completionHandler: nil)
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            isLoading = false
+            print("WebView navigation failed: \(error)")
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            isLoading = false
+            print("WebView provisional navigation failed: \(error)")
+        }
+    }
+}
