@@ -55,9 +55,16 @@ struct ChatView: View {
             .scrollDismissesKeyboard(.interactively)
             .onAppear {
                 markConversationAsRead()
-                // Initial scroll to bottom
-                withAnimation {
-                    proxy.scrollTo(bottomID, anchor: .bottom)
+                // Delay initial scroll to ensure messages are loaded
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    withAnimation(.easeOut(duration: 0.25)) {
+                        // Try to scroll to last message or bottom anchor
+                        if let lastMessage = messages.last {
+                            proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                        } else {
+                            proxy.scrollTo(bottomID, anchor: .bottom)
+                        }
+                    }
                 }
             }
             .onChange(of: messages.count) { oldCount, newCount in
