@@ -175,10 +175,24 @@ class HTMLSanitizerService: HTMLSanitizerProtocol {
 
         for match in srcMatches.reversed() {
             if let range = Range(match.range(at: 1), in: result) {
-                let url = String(result[range])
-                if !isURLSafe(url) && !isDataURL(url) {
+                let url = String(result[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                // Skip empty URLs or replace with transparent pixel
+                if url.isEmpty {
                     let fullRange = Range(match.range, in: result)!
-                    result.replaceSubrange(fullRange, with: "src=\"\"")
+                    // Use a transparent 1x1 pixel data URL to prevent errors
+                    result.replaceSubrange(fullRange, with: "src=\"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7\"")
+                } else if !isURLSafe(url) && !isDataURL(url) {
+                    let fullRange = Range(match.range, in: result)!
+                    // Use a transparent 1x1 pixel data URL to prevent errors
+                    result.replaceSubrange(fullRange, with: "src=\"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7\"")
+                } else if !url.hasPrefix("http") && !url.hasPrefix("data:") && !url.hasPrefix("/") {
+                    // Fix relative URLs that might be malformed
+                    let fullRange = Range(match.range, in: result)!
+                    if url.contains(":") && !url.hasPrefix("mailto:") && !url.hasPrefix("tel:") {
+                        // Likely a malformed URL, replace with transparent pixel
+                        result.replaceSubrange(fullRange, with: "src=\"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7\"")
+                    }
                 }
             }
         }
@@ -220,7 +234,8 @@ class HTMLSanitizerService: HTMLSanitizerProtocol {
     }
 
     private func isDataURL(_ url: String) -> Bool {
-        let safeDataURLPattern = "^data:image\\/(png|jpeg|jpg|gif|webp|svg\\+xml);base64,"
+        // Support more image formats including WEBP and BMP
+        let safeDataURLPattern = "^data:image\\/(png|jpeg|jpg|gif|webp|bmp|svg\\+xml|x-icon|vnd\\.microsoft\\.icon)(;base64)?,"
         return url.range(of: safeDataURLPattern, options: [.regularExpression, .caseInsensitive]) != nil
     }
 
@@ -475,7 +490,8 @@ class HTMLSanitizerService: HTMLSanitizerProtocol {
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=yes">
-            <meta http-equiv="Content-Security-Policy" content="default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; script-src * data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src * data: blob: 'unsafe-inline'; img-src * data: blob: 'unsafe-inline'; frame-src * data: blob: ; style-src * data: blob: 'unsafe-inline';">
+            <!-- Relaxed CSP to allow all image sources -->
+            <meta http-equiv="Content-Security-Policy" content="default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; script-src 'none'; connect-src * data: blob:; img-src * data: blob: http: https:; frame-src 'none'; style-src * 'unsafe-inline';">
             <style>
                 * {
                     box-sizing: border-box;

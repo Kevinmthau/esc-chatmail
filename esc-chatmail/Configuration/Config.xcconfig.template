@@ -1,0 +1,15 @@
+// Configuration Template
+// Copy this file to Debug.xcconfig and Release.xcconfig
+// Fill in your actual values
+// DO NOT commit the actual config files to version control
+
+// Google OAuth Configuration
+GOOGLE_CLIENT_ID = your-client-id-here
+GOOGLE_API_KEY = your-api-key-here
+GOOGLE_PROJECT_NUMBER = your-project-number-here
+GOOGLE_PROJECT_ID = your-project-id-here
+GOOGLE_REDIRECT_URI = your-redirect-uri-here
+
+// App Configuration
+APP_BUNDLE_ID = com.your.bundle.id
+APP_NAME = Your App Name

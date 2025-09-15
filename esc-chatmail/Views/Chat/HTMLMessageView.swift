@@ -110,6 +110,10 @@ struct HTMLWebView: UIViewRepresentable {
         configuration.allowsAirPlayForMediaPlayback = true
         configuration.mediaTypesRequiringUserActionForPlayback = []
 
+        // Add custom URL scheme handler for better error handling
+        configuration.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+        configuration.setValue(true, forKey: "allowUniversalAccessFromFileURLs")
+
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.scrollView.contentInsetAdjustmentBehavior = .automatic
@@ -157,6 +161,25 @@ struct HTMLWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            // Check for malformed URLs
+            if let url = navigationAction.request.url {
+                let urlString = url.absoluteString
+
+                // Block obviously malformed URLs
+                if urlString.isEmpty || urlString == "about:blank" {
+                    decisionHandler(.cancel)
+                    return
+                }
+
+                // Block unsupported schemes that cause errors
+                let scheme = url.scheme?.lowercased() ?? ""
+                let unsupportedSchemes = ["javascript", "vbscript", "file", "x-apple-data-detectors"]
+                if unsupportedSchemes.contains(scheme) {
+                    decisionHandler(.cancel)
+                    return
+                }
+            }
+
             // Allow initial load and resource loads
             if navigationAction.navigationType == .other || navigationAction.navigationType == .reload {
                 decisionHandler(.allow)
@@ -167,7 +190,7 @@ struct HTMLWebView: UIViewRepresentable {
             if navigationAction.navigationType == .linkActivated,
                let url = navigationAction.request.url {
                 // Don't open localhost links
-                if url.host != "localhost" {
+                if url.host != "localhost" && url.scheme?.hasPrefix("http") == true {
                     UIApplication.shared.open(url)
                 }
                 decisionHandler(.cancel)
@@ -180,15 +203,36 @@ struct HTMLWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             isLoading = false
 
-            // Inject JavaScript to ensure images load
+            // Inject JavaScript to handle images better
             let jsCode = """
-                // Force image loading
+                // Add error handling for images
                 var images = document.getElementsByTagName('img');
                 for (var i = 0; i < images.length; i++) {
                     var img = images[i];
-                    if (img.src && !img.complete) {
-                        var newImg = new Image();
-                        newImg.src = img.src;
+
+                    // Add error handler
+                    img.onerror = function() {
+                        // Replace broken images with a placeholder
+                        this.style.display = 'none';
+                        this.onerror = null;
+                    };
+
+                    // Handle WEBP images that might not be supported
+                    if (img.src && img.src.includes('.webp')) {
+                        // Create a test image to check WEBP support
+                        var testImg = new Image();
+                        testImg.onerror = function() {
+                            // WEBP not supported, hide the image
+                            img.style.display = 'none';
+                        };
+                        testImg.src = 'data:image/webp;base64,UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoBAAEAAwA0JaQAA3AA/vuUAAA=';
+                    }
+
+                    // Try to reload incomplete images
+                    if (img.src && !img.complete && img.naturalWidth === 0) {
+                        var src = img.src;
+                        img.src = '';
+                        img.src = src;
                     }
                 }
 
@@ -200,6 +244,14 @@ struct HTMLWebView: UIViewRepresentable {
                     meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=yes';
                     document.head.appendChild(meta);
                 }
+
+                // Log any remaining errors for debugging
+                window.addEventListener('error', function(e) {
+                    if (e.target.tagName === 'IMG') {
+                        console.log('Image load error:', e.target.src);
+                        e.target.style.display = 'none';
+                    }
+                }, true);
             """
             webView.evaluateJavaScript(jsCode, completionHandler: nil)
         }

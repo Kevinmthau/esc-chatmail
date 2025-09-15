@@ -1,5 +1,22 @@
 # ESC ChatMail - Developer Notes
 
+## Sign Out Cleanup
+
+When a user signs out from the app, the following cleanup actions are performed to ensure complete data isolation between accounts:
+
+### Cleanup Actions on Sign Out
+- **Google Authentication**: Signs out from Google Sign-In and clears OAuth tokens
+- **Core Data**: Completely destroys and resets all persistent stores (emails, conversations, etc.)
+- **Attachment Cache**: Clears all memory caches (thumbnails, full images, data)
+- **Attachment Files**: Removes all downloaded files from:
+  - ApplicationSupport/Attachments directory
+  - ApplicationSupport/Previews directory
+  - Caches/AttachmentCache directory
+- **Keychain**: Clears stored credentials and tokens
+- **User Defaults**: Removes sign-in flags
+
+This ensures that when signing in with a different account, no data from the previous account persists.
+
 ## App Deletion & Reinstall Cleanup
 
 When the app is deleted and reinstalled, the following cleanup actions are performed automatically on first launch:

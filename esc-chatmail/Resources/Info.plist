@@ -55,14 +55,14 @@
 			<string>com.esc.InboxChat</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>com.googleusercontent.apps.999923476073-b4m4r3o96gv30rqmo71qo210oa46au74</string>
+				<string>$(GOOGLE_REDIRECT_URI)</string>
 			</array>
 		</dict>
 	</array>
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>google</string>
-		<string>com.googleusercontent.apps.999923476073-b4m4r3o96gv30rqmo71qo210oa46au74</string>
+		<string>$(GOOGLE_REDIRECT_URI)</string>
 	</array>
 	<key>UIBackgroundModes</key>
 	<array>
@@ -124,5 +124,15 @@
 	</dict>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Inbox Chat needs access to your photos to attach images to messages.</string>
+	<key>GOOGLE_CLIENT_ID</key>
+	<string>$(GOOGLE_CLIENT_ID)</string>
+	<key>GOOGLE_API_KEY</key>
+	<string>$(GOOGLE_API_KEY)</string>
+	<key>GOOGLE_PROJECT_NUMBER</key>
+	<string>$(GOOGLE_PROJECT_NUMBER)</string>
+	<key>GOOGLE_PROJECT_ID</key>
+	<string>$(GOOGLE_PROJECT_ID)</string>
+	<key>GOOGLE_REDIRECT_URI</key>
+	<string>$(GOOGLE_REDIRECT_URI)</string>
 </dict>
 </plist>

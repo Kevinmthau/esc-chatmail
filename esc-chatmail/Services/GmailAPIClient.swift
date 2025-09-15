@@ -1,10 +1,36 @@
 import Foundation
 
+enum APIError: LocalizedError {
+    case invalidURL(String)
+    case networkError(Error)
+    case decodingError(Error)
+    case authenticationError
+    case rateLimited
+    case serverError(Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL(let url):
+            return "Invalid URL: \(url)"
+        case .networkError(let error):
+            return "Network error: \(error.localizedDescription)"
+        case .decodingError(let error):
+            return "Failed to decode response: \(error.localizedDescription)"
+        case .authenticationError:
+            return "Authentication failed"
+        case .rateLimited:
+            return "Rate limited by server"
+        case .serverError(let code):
+            return "Server error: \(code)"
+        }
+    }
+}
+
 class GmailAPIClient {
     static let shared = GmailAPIClient()
     private let session: URLSession
-    private let authSession = AuthSession.shared
-    
+    private let tokenManager = TokenManager.shared
+
     private init() {
         // Configure URLSession with timeout and retry settings
         let configuration = URLSessionConfiguration.default
@@ -12,22 +38,54 @@ class GmailAPIClient {
         configuration.timeoutIntervalForResource = 60.0 // 60 second resource timeout
         configuration.waitsForConnectivity = true // Wait for network connectivity
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        
+
         self.session = URLSession(configuration: configuration)
     }
-    
+
     private func authenticatedRequest(url: URL) async throws -> URLRequest {
+        // Validate URL before creating request
+        guard isValidURL(url) else {
+            throw APIError.invalidURL(url.absoluteString)
+        }
+
         var request = URLRequest(url: url)
-        let token = try await authSession.withFreshToken()
+        // Use TokenManager with automatic retry on auth failure
+        let token = try await tokenManager.getCurrentToken()
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         return request
+    }
+
+    private func isValidURL(_ url: URL) -> Bool {
+        // Check for valid scheme
+        guard let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme) else {
+            return false
+        }
+
+        // Check for valid host
+        guard let host = url.host, !host.isEmpty else {
+            return false
+        }
+
+        // Check URL string is not malformed
+        let urlString = url.absoluteString
+        if urlString.isEmpty || urlString.contains(" ") {
+            return false
+        }
+
+        return true
     }
     
     private func performRequestWithRetry<T: Decodable>(_ request: URLRequest, maxRetries: Int = 3) async throws -> T {
         var lastError: Error?
         var retryDelay: TimeInterval = 1.0
-        
+
+        // Validate request URL
+        guard let url = request.url, isValidURL(url) else {
+            throw APIError.invalidURL(request.url?.absoluteString ?? "unknown")
+        }
+
         for attempt in 0..<maxRetries {
             do {
                 let (data, response) = try await session.data(for: request)
@@ -67,6 +125,10 @@ class GmailAPIClient {
                             retryDelay = min(retryDelay * 2, 10.0)
                             continue
                         }
+                    case .unsupportedURL:
+                        // Don't retry unsupported URLs
+                        print("Unsupported URL error - not retrying")
+                        throw APIError.invalidURL(request.url?.absoluteString ?? "unknown")
                     default:
                         throw error
                     }

@@ -45,37 +45,47 @@ struct esc_chatmailApp: App {
     private func checkAndClearKeychainOnFreshInstall() {
         let installationKey = "AppInstallationID"
         let userDefaults = UserDefaults.standard
-        
+        let keychainService = KeychainService.shared
+
         // Check if we have a stored installation ID
         if let storedID = userDefaults.string(forKey: installationKey) {
             // Check if this ID exists in keychain - if not, it's a fresh install
-            if !verifyInstallationInKeychain(storedID) {
+            if !keychainService.verifyInstallationId(storedID) {
                 performFreshInstallCleanup()
                 // Generate and store new installation ID
-                let newID = UUID().uuidString
+                let newID = keychainService.getOrCreateInstallationId()
                 userDefaults.set(newID, forKey: installationKey)
-                saveInstallationToKeychain(newID)
             }
         } else {
             // No installation ID found - this is definitely a fresh install
             performFreshInstallCleanup()
             // Generate and store new installation ID
-            let newID = UUID().uuidString
+            let newID = keychainService.getOrCreateInstallationId()
             userDefaults.set(newID, forKey: installationKey)
-            saveInstallationToKeychain(newID)
         }
     }
     
     private func performFreshInstallCleanup() {
-        // Clear all keychain items
-        clearAllKeychainItems()
-        
+        // Clear all keychain items using KeychainService
+        do {
+            try KeychainService.shared.clearAll()
+        } catch {
+            print("Failed to clear keychain: \(error)")
+        }
+
+        // Clear tokens using TokenManager
+        do {
+            try TokenManager.shared.clearTokens()
+        } catch {
+            print("Failed to clear tokens: \(error)")
+        }
+
         // Sign out and disconnect from Google
         GIDSignIn.sharedInstance.signOut()
         GIDSignIn.sharedInstance.disconnect { _ in
             // Ignore errors - we're just ensuring cleanup
         }
-        
+
         // Clear any cached authentication state
         AuthSession.shared.currentUser = nil
         AuthSession.shared.isAuthenticated = false
@@ -83,65 +93,11 @@ struct esc_chatmailApp: App {
         AuthSession.shared.accessToken = nil
     }
     
-    private func verifyInstallationInKeychain(_ installID: String) -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: "AppInstallationID",
-            kSecAttrService as String: Bundle.main.bundleIdentifier ?? "com.esc.inboxchat",
-            kSecReturnData as String: true
-        ]
-        
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
-        if status == errSecSuccess,
-           let data = result as? Data,
-           let storedID = String(data: data, encoding: .utf8) {
-            return storedID == installID
-        }
-        
-        return false
-    }
-    
-    private func saveInstallationToKeychain(_ installID: String) {
-        guard let data = installID.data(using: .utf8) else { return }
-        
-        // Delete any existing item first
-        let deleteQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: "AppInstallationID",
-            kSecAttrService as String: Bundle.main.bundleIdentifier ?? "com.esc.inboxchat"
-        ]
-        SecItemDelete(deleteQuery as CFDictionary)
-        
-        // Add new item
-        let addQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: "AppInstallationID",
-            kSecAttrService as String: Bundle.main.bundleIdentifier ?? "com.esc.inboxchat",
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        ]
-        SecItemAdd(addQuery as CFDictionary, nil)
-    }
-    
-    private func clearAllKeychainItems() {
-        // Clear all keychain items that might contain Google Sign-In data
-        let secItemClasses = [
-            kSecClassGenericPassword,
-            kSecClassInternetPassword,
-            kSecClassCertificate,
-            kSecClassKey,
-            kSecClassIdentity
-        ]
-        
-        for itemClass in secItemClasses {
-            let spec: NSDictionary = [kSecClass: itemClass]
-            SecItemDelete(spec)
-        }
-    }
-    
     private func configureGoogleSignIn() {
+        #if DEBUG
+        GoogleConfig.printConfigurationStatus()
+        #endif
+
         GIDSignIn.sharedInstance.configuration = GIDConfiguration(
             clientID: GoogleConfig.clientId
         )
