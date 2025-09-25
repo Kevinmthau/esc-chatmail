@@ -105,9 +105,10 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
 
             // Convert timestamp to Gmail query format (epoch seconds)
             let epochSeconds = Int(installationTimestamp.timeIntervalSince1970)
-            let gmailQuery = "after:\(epochSeconds)"
+            // Exclude spam messages from the query
+            let gmailQuery = "after:\(epochSeconds) -label:spam"
 
-            print("Syncing only messages after installation: \(installationTimestamp)")
+            print("Syncing only non-spam messages after installation: \(installationTimestamp)")
 
             var allMessageIds: [String] = []
             var pageToken: String? = nil
@@ -293,6 +294,12 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
     }
     
     func saveMessage(_ gmailMessage: GmailMessage, in context: NSManagedObjectContext) async {
+        // Skip messages in SPAM folder
+        if let labelIds = gmailMessage.labelIds, labelIds.contains("SPAM") {
+            print("Skipping spam message: \(gmailMessage.id)")
+            return
+        }
+
         // Process the Gmail message
         guard let processedMessage = messageProcessor.processGmailMessage(gmailMessage, myAliases: myAliases, in: context) else {
             return
@@ -484,6 +491,12 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
         if let messagesAdded = record.messagesAdded {
             print("Processing \(messagesAdded.count) new messages from history")
             for added in messagesAdded {
+                // Skip spam messages
+                if let labelIds = added.message.labelIds, labelIds.contains("SPAM") {
+                    print("Skipping spam message from history: \(added.message.id)")
+                    continue
+                }
+
                 // History API returns partial messages - fetch full details
                 if let fullMessage = try? await apiClient.getMessage(id: added.message.id) {
                     print("Fetched full message: \(fullMessage.id)")

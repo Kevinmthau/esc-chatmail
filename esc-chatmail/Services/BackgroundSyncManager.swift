@@ -152,8 +152,9 @@ class BackgroundSyncManager {
     private func performPartialSync(isProcessingTask: Bool) async -> Bool {
         do {
             let maxResults = isProcessingTask ? 100 : 50
-            let response = try await apiClient.listMessages(maxResults: maxResults)
-            
+            // Exclude spam messages from the query
+            let response = try await apiClient.listMessages(maxResults: maxResults, query: "-label:spam")
+
             if let messages = response.messages {
                 await fetchAndStoreMessages(messageIds: messages.map { $0.id })
             }
@@ -180,6 +181,11 @@ class BackgroundSyncManager {
         for history in histories {
             if let messagesAdded = history.messagesAdded {
                 for messageAdded in messagesAdded {
+                    // Skip spam messages
+                    if let labelIds = messageAdded.message.labelIds, labelIds.contains("SPAM") {
+                        print("Skipping spam message from history: \(messageAdded.message.id)")
+                        continue
+                    }
                     messagesToFetch.insert(messageAdded.message.id)
                 }
             }
