@@ -68,48 +68,57 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
             self.syncProgress = 0.0
             self.syncStatus = "Starting sync..."
         }
-        
+
         let context = coreDataStack.newBackgroundContext()
         await removeDuplicateMessages(in: context)
         await removeDuplicateConversations(in: context)
-        
+
         do {
             let profile = try await apiClient.getProfile()
-            
+
             // Fetch user aliases from Gmail settings
             let sendAsList = try await apiClient.listSendAs()
             let aliases = sendAsList
                 .filter { $0.treatAsAlias == true || $0.isPrimary == true }
                 .map { $0.sendAsEmail }
-            
+
             // Build myAliases set with normalized emails
             myAliases = Set(([profile.emailAddress] + aliases).map(normalizedEmail))
-            
+
             _ = await saveAccount(profile: profile, aliases: aliases, in: context)
-            
+
             await MainActor.run {
                 self.syncStatus = "Fetching labels..."
                 self.syncProgress = 0.1
             }
-            
+
             let labels = try await apiClient.listLabels()
             await saveLabels(labels, in: context)
-            
+
             await MainActor.run {
                 self.syncStatus = "Fetching messages..."
                 self.syncProgress = 0.2
             }
-            
+
+            // Get installation timestamp to filter messages
+            let installationTimestamp = KeychainService.shared.getOrCreateInstallationTimestamp()
+
+            // Convert timestamp to Gmail query format (epoch seconds)
+            let epochSeconds = Int(installationTimestamp.timeIntervalSince1970)
+            let gmailQuery = "after:\(epochSeconds)"
+
+            print("Syncing only messages after installation: \(installationTimestamp)")
+
             var allMessageIds: [String] = []
             var pageToken: String? = nil
-            
+
             repeat {
-                let response = try await apiClient.listMessages(pageToken: pageToken, maxResults: 500)
+                let response = try await apiClient.listMessages(pageToken: pageToken, maxResults: 500, query: gmailQuery)
                 if let messages = response.messages {
                     allMessageIds.append(contentsOf: messages.map { $0.id })
                 }
                 pageToken = response.nextPageToken
-                
+
                 let currentCount = allMessageIds.count
                 await MainActor.run {
                     self.syncProgress = min(0.4, 0.2 + (Double(currentCount) / 10000.0) * 0.2)
@@ -288,7 +297,14 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
         guard let processedMessage = messageProcessor.processGmailMessage(gmailMessage, myAliases: myAliases, in: context) else {
             return
         }
-        
+
+        // Check if message is from before installation
+        let installationTimestamp = KeychainService.shared.getOrCreateInstallationTimestamp()
+        if processedMessage.internalDate < installationTimestamp {
+            print("Skipping message from before installation: \(processedMessage.id) (\(processedMessage.internalDate) < \(installationTimestamp))")
+            return
+        }
+
         // Check for existing message and update if needed
         let request = Message.fetchRequest()
         request.predicate = NSPredicate(format: "id == %@", processedMessage.id)
@@ -297,7 +313,7 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
             existingMessage.isUnread = processedMessage.isUnread
             existingMessage.snippet = processedMessage.snippet
             existingMessage.cleanedSnippet = processedMessage.cleanedSnippet
-            
+
             // Update labels
             existingMessage.labels = nil
             for labelId in processedMessage.labelIds {
@@ -305,7 +321,7 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
                     existingMessage.addToLabels(label)
                 }
             }
-            
+
             print("Updated existing message: \(processedMessage.id)")
             return
         }

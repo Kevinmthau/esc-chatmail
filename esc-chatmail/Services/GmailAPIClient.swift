@@ -157,7 +157,7 @@ class GmailAPIClient {
         return response.labels ?? []
     }
     
-    nonisolated func listMessages(pageToken: String? = nil, maxResults: Int = 100) async throws -> MessagesListResponse {
+    nonisolated func listMessages(pageToken: String? = nil, maxResults: Int = 100, query: String? = nil) async throws -> MessagesListResponse {
         var components = URLComponents(string: APIEndpoints.messages())!
         components.queryItems = [
             URLQueryItem(name: "maxResults", value: String(maxResults))
@@ -165,7 +165,10 @@ class GmailAPIClient {
         if let pageToken = pageToken {
             components.queryItems?.append(URLQueryItem(name: "pageToken", value: pageToken))
         }
-        
+        if let query = query {
+            components.queryItems?.append(URLQueryItem(name: "q", value: query))
+        }
+
         let request = try await authenticatedRequest(url: components.url!)
         return try await performRequestWithRetry(request)
     }

@@ -80,6 +80,7 @@ final class KeychainService: KeychainServiceProtocol {
 
         // App State
         case installationId = "com.esc.inboxchat.installationId"
+        case installationTimestamp = "com.esc.inboxchat.installationTimestamp"
         case lastSyncToken = "com.esc.inboxchat.lastSyncToken"
         case encryptionKey = "com.esc.inboxchat.encryptionKey"
 
@@ -294,6 +295,10 @@ extension KeychainService {
 
         let newId = UUID().uuidString
         try? saveString(newId, for: .installationId, withAccess: .afterFirstUnlockThisDeviceOnly)
+
+        // Also create installation timestamp when creating new installation ID
+        setInstallationTimestamp()
+
         return newId
     }
 
@@ -302,5 +307,29 @@ extension KeychainService {
             return false
         }
         return storedId == id
+    }
+
+    func getOrCreateInstallationTimestamp() -> Date {
+        if let timestamp = getInstallationTimestamp() {
+            return timestamp
+        }
+
+        // Create new timestamp if it doesn't exist
+        let now = Date()
+        setInstallationTimestamp(now)
+        return now
+    }
+
+    func getInstallationTimestamp() -> Date? {
+        guard let timestampString = try? loadString(for: .installationTimestamp),
+              let timestamp = Double(timestampString) else {
+            return nil
+        }
+        return Date(timeIntervalSince1970: timestamp)
+    }
+
+    func setInstallationTimestamp(_ date: Date = Date()) {
+        let timestamp = date.timeIntervalSince1970
+        try? saveString(String(timestamp), for: .installationTimestamp, withAccess: .afterFirstUnlockThisDeviceOnly)
     }
 }

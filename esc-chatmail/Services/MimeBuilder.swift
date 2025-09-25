@@ -8,17 +8,18 @@ struct AttachmentData {
 
 struct MimeBuilder {
     
-    static func buildNew(to: [String], from: String, body: String, subject: String? = nil, attachments: [AttachmentData] = []) -> Data {
+    static func buildNew(to: [String], from: String, fromName: String? = nil, body: String, subject: String? = nil, attachments: [AttachmentData] = []) -> Data {
         if attachments.isEmpty {
-            return buildSimpleMessage(to: to, from: from, body: body, subject: subject, inReplyTo: nil, references: [])
+            return buildSimpleMessage(to: to, from: from, fromName: fromName, body: body, subject: subject, inReplyTo: nil, references: [])
         } else {
-            return buildMultipartMessage(to: to, from: from, body: body, subject: subject, inReplyTo: nil, references: [], attachments: attachments)
+            return buildMultipartMessage(to: to, from: from, fromName: fromName, body: body, subject: subject, inReplyTo: nil, references: [], attachments: attachments)
         }
     }
     
     static func buildReply(
         to: [String],
         from: String,
+        fromName: String? = nil,
         body: String,
         subject: String,
         inReplyTo: String?,
@@ -26,23 +27,25 @@ struct MimeBuilder {
         attachments: [AttachmentData] = []
     ) -> Data {
         if attachments.isEmpty {
-            return buildSimpleMessage(to: to, from: from, body: body, subject: subject, inReplyTo: inReplyTo, references: references)
+            return buildSimpleMessage(to: to, from: from, fromName: fromName, body: body, subject: subject, inReplyTo: inReplyTo, references: references)
         } else {
-            return buildMultipartMessage(to: to, from: from, body: body, subject: subject, inReplyTo: inReplyTo, references: references, attachments: attachments)
+            return buildMultipartMessage(to: to, from: from, fromName: fromName, body: body, subject: subject, inReplyTo: inReplyTo, references: references, attachments: attachments)
         }
     }
     
     private static func buildSimpleMessage(
         to: [String],
         from: String,
+        fromName: String?,
         body: String,
         subject: String?,
         inReplyTo: String?,
         references: [String]
     ) -> Data {
         var mime = ""
-        
-        mime += "From: \(from)\r\n"
+
+        let fromHeader = formatFromHeader(email: from, name: fromName)
+        mime += "From: \(fromHeader)\r\n"
         mime += "To: \(to.joined(separator: ", "))\r\n"
         
         if let subject = subject, !subject.isEmpty {
@@ -77,6 +80,7 @@ struct MimeBuilder {
     private static func buildMultipartMessage(
         to: [String],
         from: String,
+        fromName: String?,
         body: String,
         subject: String?,
         inReplyTo: String?,
@@ -85,9 +89,10 @@ struct MimeBuilder {
     ) -> Data {
         var mime = ""
         let boundary = generateBoundary()
-        
+
         // Headers
-        mime += "From: \(from)\r\n"
+        let fromHeader = formatFromHeader(email: from, name: fromName)
+        mime += "From: \(fromHeader)\r\n"
         mime += "To: \(to.joined(separator: ", "))\r\n"
         
         if let subject = subject, !subject.isEmpty {
@@ -166,10 +171,28 @@ struct MimeBuilder {
         if asciiOnly {
             return text
         }
-        
+
         guard let data = text.data(using: .utf8) else { return text }
         let base64 = data.base64EncodedString()
         return "=?UTF-8?B?\(base64)?="
+    }
+
+    static func formatFromHeader(email: String, name: String?) -> String {
+        guard let name = name, !name.isEmpty else {
+            return email
+        }
+
+        // Check if name needs encoding for non-ASCII characters
+        let encodedName = encodeHeaderIfNeeded(name)
+
+        // Format as "Name <email@example.com>"
+        // If name contains special characters, quote it
+        if name.contains(where: { $0 == "\"" || $0 == "<" || $0 == ">" || $0 == "," || $0 == "@" }) {
+            let quotedName = name.replacingOccurrences(of: "\"", with: "\\\"")
+            return "\"\(quotedName)\" <\(email)>"
+        } else {
+            return "\(encodedName) <\(email)>"
+        }
     }
     
     static func base64UrlEncode(_ data: Data) -> String {
@@ -194,9 +217,9 @@ struct MimeBuilder {
     }
     
     static func buildNew(to: [String], from: String, body: String) -> Data {
-        return buildNew(to: to, from: from, body: body, subject: nil, attachments: [])
+        return buildNew(to: to, from: from, fromName: nil, body: body, subject: nil, attachments: [])
     }
-    
+
     static func buildReply(
         to: [String],
         from: String,
@@ -205,6 +228,6 @@ struct MimeBuilder {
         inReplyTo: String?,
         references: [String]
     ) -> Data {
-        return buildReply(to: to, from: from, body: body, subject: subject, inReplyTo: inReplyTo, references: references, attachments: [])
+        return buildReply(to: to, from: from, fromName: nil, body: body, subject: subject, inReplyTo: inReplyTo, references: references, attachments: [])
     }
 }

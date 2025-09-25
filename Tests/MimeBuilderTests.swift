@@ -126,18 +126,67 @@ final class MimeBuilderTests: XCTestCase {
         let to = ["test@example.com"]
         let from = "sender@example.com"
         let body = "Line 1\nLine 2\nLine 3"
-        
+
         let mimeData = MimeBuilder.buildNew(to: to, from: from, body: body)
         let mimeString = String(data: mimeData, encoding: .utf8)!
-        
+
         let headerBody = mimeString.components(separatedBy: "\r\n\r\n")
         XCTAssertEqual(headerBody.count, 2)
-        
+
         let headers = headerBody[0]
         let headerLines = headers.components(separatedBy: "\r\n")
-        
+
         for line in headerLines where !line.isEmpty {
             XCTAssertFalse(line.contains("\n") && !line.contains("\r\n"))
         }
+    }
+
+    func testFromHeaderWithName() {
+        let to = ["alice@example.com"]
+        let from = "sender@example.com"
+        let fromName = "John Doe"
+        let body = "Test message with name"
+
+        let mimeData = MimeBuilder.buildNew(to: to, from: from, fromName: fromName, body: body)
+        let mimeString = String(data: mimeData, encoding: .utf8)!
+
+        XCTAssertTrue(mimeString.contains("From: John Doe <sender@example.com>\r\n"))
+    }
+
+    func testFromHeaderWithSpecialCharacterName() {
+        let to = ["alice@example.com"]
+        let from = "sender@example.com"
+        let fromName = "John \"Johnny\" Doe"
+        let body = "Test message with special name"
+
+        let mimeData = MimeBuilder.buildNew(to: to, from: from, fromName: fromName, body: body)
+        let mimeString = String(data: mimeData, encoding: .utf8)!
+
+        XCTAssertTrue(mimeString.contains("From: \"John \\\"Johnny\\\" Doe\" <sender@example.com>\r\n"))
+    }
+
+    func testFromHeaderWithUnicodeName() {
+        let to = ["alice@example.com"]
+        let from = "sender@example.com"
+        let fromName = "José García"
+        let body = "Test message with unicode name"
+
+        let mimeData = MimeBuilder.buildNew(to: to, from: from, fromName: fromName, body: body)
+        let mimeString = String(data: mimeData, encoding: .utf8)!
+
+        // The name should be encoded as it contains non-ASCII characters
+        XCTAssertTrue(mimeString.contains("=?UTF-8?B?") && mimeString.contains("<sender@example.com>"))
+    }
+
+    func testFromHeaderWithoutName() {
+        let to = ["alice@example.com"]
+        let from = "sender@example.com"
+        let body = "Test message without name"
+
+        let mimeData = MimeBuilder.buildNew(to: to, from: from, fromName: nil, body: body)
+        let mimeString = String(data: mimeData, encoding: .utf8)!
+
+        // Should just have the email without angle brackets
+        XCTAssertTrue(mimeString.contains("From: sender@example.com\r\n"))
     }
 }

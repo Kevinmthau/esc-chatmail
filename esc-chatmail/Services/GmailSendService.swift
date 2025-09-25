@@ -41,7 +41,7 @@ final class GmailSendService: ObservableObject {
     }
     
     nonisolated func sendNew(to recipients: [String], body: String, subject: String? = nil, attachmentInfos: [AttachmentInfo] = []) async throws -> SendResult {
-        let fromEmail = await MainActor.run { authSession.userEmail }
+        let (fromEmail, fromName) = await MainActor.run { (authSession.userEmail, authSession.userName) }
         guard let fromEmail = fromEmail else {
             throw SendError.authenticationFailed
         }
@@ -50,6 +50,7 @@ final class GmailSendService: ObservableObject {
         let mimeData = MimeBuilder.buildNew(
             to: recipients,
             from: fromEmail,
+            fromName: fromName,
             body: body,
             subject: subject,
             attachments: attachmentData
@@ -71,7 +72,7 @@ final class GmailSendService: ObservableObject {
         references: [String],
         attachmentInfos: [AttachmentInfo] = []
     ) async throws -> SendResult {
-        let fromEmail = await MainActor.run { authSession.userEmail }
+        let (fromEmail, fromName) = await MainActor.run { (authSession.userEmail, authSession.userName) }
         guard let fromEmail = fromEmail else {
             throw SendError.authenticationFailed
         }
@@ -80,6 +81,7 @@ final class GmailSendService: ObservableObject {
         let mimeData = MimeBuilder.buildReply(
             to: recipients,
             from: fromEmail,
+            fromName: fromName,
             body: body,
             subject: subject,
             inReplyTo: inReplyTo,

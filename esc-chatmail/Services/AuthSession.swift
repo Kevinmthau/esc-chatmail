@@ -9,6 +9,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     @Published var isAuthenticated = false
     @Published var currentUser: GIDGoogleUser?
     @Published var userEmail: String?
+    @Published var userName: String?
     @Published var accessToken: String?
     
     private init() {
@@ -29,6 +30,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                     if let user = user {
                         self?.currentUser = user
                         self?.userEmail = user.profile?.email
+                        self?.userName = user.profile?.name
                         self?.isAuthenticated = true
                         self?.accessToken = user.accessToken.tokenString
                     }
@@ -56,6 +58,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                 DispatchQueue.main.async { [weak self] in
                     self?.currentUser = result.user
                     self?.userEmail = result.user.profile?.email
+                    self?.userName = result.user.profile?.name
                     self?.isAuthenticated = true
                     self?.accessToken = result.user.accessToken.tokenString
 
@@ -89,6 +92,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         GIDSignIn.sharedInstance.signOut()
         currentUser = nil
         userEmail = nil
+        userName = nil
         isAuthenticated = false
         accessToken = nil
 
@@ -161,6 +165,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         // Clear local state
         currentUser = nil
         userEmail = nil
+        userName = nil
         isAuthenticated = false
         accessToken = nil
 
