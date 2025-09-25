@@ -70,6 +70,7 @@ final class GmailSendService: ObservableObject {
         threadId: String,
         inReplyTo: String?,
         references: [String],
+        originalMessage: QuotedMessage? = nil,
         attachmentInfos: [AttachmentInfo] = []
     ) async throws -> SendResult {
         let (fromEmail, fromName) = await MainActor.run { (authSession.userEmail, authSession.userName) }
@@ -86,6 +87,7 @@ final class GmailSendService: ObservableObject {
             subject: subject,
             inReplyTo: inReplyTo,
             references: references,
+            originalMessage: originalMessage,
             attachments: attachmentData
         )
         

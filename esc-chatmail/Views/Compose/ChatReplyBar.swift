@@ -234,6 +234,7 @@ extension ChatReplyBar {
         let inReplyTo: String?
         let references: [String]
         let attachments: [Attachment]
+        let originalMessage: QuotedMessage?
         
         init(from conversation: Conversation, replyingTo: Message?, body: String, attachments: [Attachment], currentUserEmail: String) {
             // Extract participants from conversation participants relationship
@@ -247,17 +248,35 @@ extension ChatReplyBar {
             if let replyingTo = replyingTo {
                 self.subject = replyingTo.subject.map { MimeBuilder.prefixSubjectForReply($0) }
                 self.threadId = replyingTo.gmThreadId
-                self.inReplyTo = nil // Message ID not stored in current model
-                self.references = [] // References not stored in current model
+                self.inReplyTo = replyingTo.value(forKey: "messageId") as? String
+
+                // Build references chain from previous references + message ID
+                var refs: [String] = []
+                if let previousRefs = replyingTo.value(forKey: "references") as? String, !previousRefs.isEmpty {
+                    refs = previousRefs.split(separator: " ").map(String.init)
+                }
+                if let messageId = replyingTo.value(forKey: "messageId") as? String {
+                    refs.append(messageId)
+                }
+                self.references = refs
+
+                // Store original message info for quoting
+                self.originalMessage = QuotedMessage(
+                    senderName: replyingTo.value(forKey: "senderName") as? String,
+                    senderEmail: (replyingTo.value(forKey: "senderEmail") as? String) ?? "",
+                    date: replyingTo.internalDate,
+                    body: replyingTo.value(forKey: "bodyText") as? String
+                )
             } else {
                 let latestMessage = Array(conversation.messages ?? [])
                     .sorted { $0.internalDate > $1.internalDate }
                     .first
-                
+
                 self.subject = nil
                 self.threadId = latestMessage?.gmThreadId
                 self.inReplyTo = nil
                 self.references = []
+                self.originalMessage = nil
             }
         }
     }

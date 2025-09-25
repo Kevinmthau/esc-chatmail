@@ -280,6 +280,7 @@ struct ChatView: View {
                     threadId: replyData.threadId ?? "",
                     inReplyTo: replyData.inReplyTo,
                     references: replyData.references,
+                    originalMessage: replyData.originalMessage,
                     attachmentInfos: attachmentInfos
                 )
             } else {

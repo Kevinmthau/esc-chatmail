@@ -349,6 +349,23 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
         message.isFromMe = processedMessage.headers.isFromMe
         message.isUnread = processedMessage.isUnread
         message.hasAttachments = processedMessage.hasAttachments
+
+        // Store message threading headers
+        message.setValue(processedMessage.headers.messageId, forKey: "messageId")
+        message.setValue(processedMessage.headers.references.joined(separator: " "), forKey: "references")
+
+        // Store plain text body for quoting in replies
+        message.setValue(processedMessage.plainTextBody, forKey: "bodyText")
+
+        // Store sender information for reply attribution
+        if let from = processedMessage.headers.from {
+            if let email = EmailNormalizer.extractEmail(from: from) {
+                message.setValue(email, forKey: "senderEmail")
+            }
+            if let displayName = EmailNormalizer.extractDisplayName(from: from) {
+                message.setValue(displayName, forKey: "senderName")
+            }
+        }
         
         // Save participants
         if let from = processedMessage.headers.from {

@@ -48,6 +48,7 @@
     </entity>
     <entity name="Message" representedClassName="Message" syncable="YES">
         <attribute name="bodyStorageURI" optional="YES" attributeType="String"/>
+        <attribute name="bodyText" optional="YES" attributeType="String"/>
         <attribute name="cleanedSnippet" optional="YES" attributeType="String"/>
         <attribute name="gmThreadId" attributeType="String"/>
         <attribute name="hasAttachments" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
@@ -55,6 +56,10 @@
         <attribute name="internalDate" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="isFromMe" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="isUnread" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="messageId" optional="YES" attributeType="String"/>
+        <attribute name="references" optional="YES" attributeType="String"/>
+        <attribute name="senderEmail" optional="YES" attributeType="String"/>
+        <attribute name="senderName" optional="YES" attributeType="String"/>
         <attribute name="snippet" optional="YES" attributeType="String"/>
         <attribute name="subject" optional="YES" attributeType="String"/>
         <relationship name="attachments" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="Attachment" inverseName="message" inverseEntity="Attachment"/>

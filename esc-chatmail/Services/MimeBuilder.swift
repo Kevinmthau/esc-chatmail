@@ -6,6 +6,13 @@ struct AttachmentData {
     let mimeType: String
 }
 
+struct QuotedMessage {
+    let senderName: String?
+    let senderEmail: String
+    let date: Date
+    let body: String?
+}
+
 struct MimeBuilder {
     
     static func buildNew(to: [String], from: String, fromName: String? = nil, body: String, subject: String? = nil, attachments: [AttachmentData] = []) -> Data {
@@ -24,12 +31,14 @@ struct MimeBuilder {
         subject: String,
         inReplyTo: String?,
         references: [String],
+        originalMessage: QuotedMessage? = nil,
         attachments: [AttachmentData] = []
     ) -> Data {
+        let bodyWithQuote = formatReplyBody(body: body, originalMessage: originalMessage)
         if attachments.isEmpty {
-            return buildSimpleMessage(to: to, from: from, fromName: fromName, body: body, subject: subject, inReplyTo: inReplyTo, references: references)
+            return buildSimpleMessage(to: to, from: from, fromName: fromName, body: bodyWithQuote, subject: subject, inReplyTo: inReplyTo, references: references)
         } else {
-            return buildMultipartMessage(to: to, from: from, fromName: fromName, body: body, subject: subject, inReplyTo: inReplyTo, references: references, attachments: attachments)
+            return buildMultipartMessage(to: to, from: from, fromName: fromName, body: bodyWithQuote, subject: subject, inReplyTo: inReplyTo, references: references, attachments: attachments)
         }
     }
     
@@ -208,12 +217,47 @@ struct MimeBuilder {
         if trimmed.isEmpty {
             return ""
         }
-        
+
         if trimmed.lowercased().hasPrefix("re:") {
             return trimmed
         }
-        
+
         return "Re: \(trimmed)"
+    }
+
+    static func formatReplyBody(body: String, originalMessage: QuotedMessage?) -> String {
+        guard let originalMessage = originalMessage else {
+            return body
+        }
+
+        var formattedBody = body
+
+        // Add a blank line after the new message
+        if !body.isEmpty {
+            formattedBody += "\r\n\r\n"
+        }
+
+        // Add attribution line
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, yyyy 'at' h:mm a"
+        formatter.timeZone = TimeZone.current
+        let dateString = formatter.string(from: originalMessage.date)
+
+        let senderDisplay = originalMessage.senderName ?? originalMessage.senderEmail
+        formattedBody += "On \(dateString), \(senderDisplay) wrote:\r\n"
+
+        // Quote the original message
+        if let originalBody = originalMessage.body {
+            // Split the original message into lines and prefix each with "> "
+            let lines = originalBody.components(separatedBy: .newlines)
+            for line in lines {
+                formattedBody += "> \(line)\r\n"
+            }
+        } else {
+            formattedBody += "> [Original message text not available]\r\n"
+        }
+
+        return formattedBody
     }
     
     static func buildNew(to: [String], from: String, body: String) -> Data {
@@ -228,6 +272,6 @@ struct MimeBuilder {
         inReplyTo: String?,
         references: [String]
     ) -> Data {
-        return buildReply(to: to, from: from, fromName: nil, body: body, subject: subject, inReplyTo: inReplyTo, references: references, attachments: [])
+        return buildReply(to: to, from: from, fromName: nil, body: body, subject: subject, inReplyTo: inReplyTo, references: references, originalMessage: nil, attachments: [])
     }
 }
