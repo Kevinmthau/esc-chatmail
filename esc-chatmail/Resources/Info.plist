@@ -55,14 +55,14 @@
 			<string>com.esc.InboxChat</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>$(GOOGLE_REDIRECT_URI)</string>
+				<string>com.googleusercontent.apps.999923476073-b4m4r3o96gv30rqmo71qo210oa46au74</string>
 			</array>
 		</dict>
 	</array>
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>google</string>
-		<string>$(GOOGLE_REDIRECT_URI)</string>
+		<string>com.googleusercontent.apps.999923476073-b4m4r3o96gv30rqmo71qo210oa46au74</string>
 	</array>
 	<key>UIBackgroundModes</key>
 	<array>

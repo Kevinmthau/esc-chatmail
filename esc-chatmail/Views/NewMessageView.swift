@@ -171,12 +171,13 @@ struct NewMessageView: View {
             }
             
             // Create optimistic message
-            let optimisticMessage = await MainActor.run {
-                sendService.createOptimisticMessage(
+            let optimisticMessageID = await MainActor.run {
+                let message = sendService.createOptimisticMessage(
                     to: recipientEmails,
                     body: trimmedMessage,
                     subject: messageSubject
                 )
+                return message.id
             }
             
             do {
@@ -184,12 +185,15 @@ struct NewMessageView: View {
                 let result = try await sendService.sendNew(
                     to: recipientEmails,
                     body: trimmedMessage,
-                    subject: messageSubject
+                    subject: messageSubject,
+                    attachmentInfos: []
                 )
                 
                 await MainActor.run {
                     // Update optimistic message with real IDs
-                    sendService.updateOptimisticMessage(optimisticMessage, with: result)
+                    if let optimisticMessage = sendService.fetchMessage(byID: optimisticMessageID) {
+                        sendService.updateOptimisticMessage(optimisticMessage, with: result)
+                    }
                     dismiss()
                 }
                 
@@ -200,7 +204,9 @@ struct NewMessageView: View {
             } catch {
                 await MainActor.run {
                     // Delete optimistic message on failure
-                    sendService.deleteOptimisticMessage(optimisticMessage)
+                    if let optimisticMessage = sendService.fetchMessage(byID: optimisticMessageID) {
+                        sendService.deleteOptimisticMessage(optimisticMessage)
+                    }
                     errorMessage = error.localizedDescription
                     showError = true
                     isSending = false

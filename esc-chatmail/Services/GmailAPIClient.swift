@@ -26,6 +26,7 @@ enum APIError: LocalizedError {
     }
 }
 
+@MainActor
 class GmailAPIClient {
     static let shared = GmailAPIClient()
     private let session: URLSession
@@ -42,7 +43,7 @@ class GmailAPIClient {
         self.session = URLSession(configuration: configuration)
     }
 
-    private func authenticatedRequest(url: URL) async throws -> URLRequest {
+    private nonisolated func authenticatedRequest(url: URL) async throws -> URLRequest {
         // Validate URL before creating request
         guard isValidURL(url) else {
             throw APIError.invalidURL(url.absoluteString)
@@ -56,7 +57,7 @@ class GmailAPIClient {
         return request
     }
 
-    private func isValidURL(_ url: URL) -> Bool {
+    private nonisolated func isValidURL(_ url: URL) -> Bool {
         // Check for valid scheme
         guard let scheme = url.scheme?.lowercased(),
               ["http", "https"].contains(scheme) else {
@@ -77,7 +78,7 @@ class GmailAPIClient {
         return true
     }
     
-    private func performRequestWithRetry<T: Decodable>(_ request: URLRequest, maxRetries: Int = 3) async throws -> T {
+    private nonisolated func performRequestWithRetry<T: Decodable>(_ request: URLRequest, maxRetries: Int = 3) async throws -> T {
         var lastError: Error?
         var retryDelay: TimeInterval = 1.0
 
@@ -143,20 +144,20 @@ class GmailAPIClient {
         throw lastError ?? URLError(.unknown)
     }
     
-    func getProfile() async throws -> GmailProfile {
+    nonisolated func getProfile() async throws -> GmailProfile {
         let url = URL(string: APIEndpoints.profile())!
         let request = try await authenticatedRequest(url: url)
         return try await performRequestWithRetry(request)
     }
     
-    func listLabels() async throws -> [GmailLabel] {
+    nonisolated func listLabels() async throws -> [GmailLabel] {
         let url = URL(string: APIEndpoints.labels())!
         let request = try await authenticatedRequest(url: url)
         let response: LabelsResponse = try await performRequestWithRetry(request)
         return response.labels ?? []
     }
     
-    func listMessages(pageToken: String? = nil, maxResults: Int = 100) async throws -> MessagesListResponse {
+    nonisolated func listMessages(pageToken: String? = nil, maxResults: Int = 100) async throws -> MessagesListResponse {
         var components = URLComponents(string: APIEndpoints.messages())!
         components.queryItems = [
             URLQueryItem(name: "maxResults", value: String(maxResults))
@@ -169,7 +170,7 @@ class GmailAPIClient {
         return try await performRequestWithRetry(request)
     }
     
-    func getMessage(id: String, format: String = "full") async throws -> GmailMessage {
+    nonisolated func getMessage(id: String, format: String = "full") async throws -> GmailMessage {
         var components = URLComponents(string: APIEndpoints.message(id: id))!
         components.queryItems = [URLQueryItem(name: "format", value: format)]
         
@@ -177,7 +178,7 @@ class GmailAPIClient {
         return try await performRequestWithRetry(request)
     }
     
-    func modifyMessage(id: String, addLabelIds: [String]? = nil, removeLabelIds: [String]? = nil) async throws -> GmailMessage {
+    nonisolated func modifyMessage(id: String, addLabelIds: [String]? = nil, removeLabelIds: [String]? = nil) async throws -> GmailMessage {
         let url = URL(string: APIEndpoints.modifyMessage(id: id))!
         var request = try await authenticatedRequest(url: url)
         request.httpMethod = "POST"
@@ -189,7 +190,7 @@ class GmailAPIClient {
         return try JSONDecoder().decode(GmailMessage.self, from: data)
     }
     
-    func batchModify(ids: [String], addLabelIds: [String]? = nil, removeLabelIds: [String]? = nil) async throws {
+    nonisolated func batchModify(ids: [String], addLabelIds: [String]? = nil, removeLabelIds: [String]? = nil) async throws {
         let url = URL(string: APIEndpoints.batchModify())!
         var request = try await authenticatedRequest(url: url)
         request.httpMethod = "POST"
@@ -200,7 +201,7 @@ class GmailAPIClient {
         let (_, _) = try await session.data(for: request)
     }
     
-    func listHistory(startHistoryId: String, pageToken: String? = nil) async throws -> HistoryResponse {
+    nonisolated func listHistory(startHistoryId: String, pageToken: String? = nil) async throws -> HistoryResponse {
         var components = URLComponents(string: APIEndpoints.history())!
         components.queryItems = [
             URLQueryItem(name: "startHistoryId", value: startHistoryId)
@@ -213,7 +214,7 @@ class GmailAPIClient {
         return try await performRequestWithRetry(request)
     }
     
-    func listSendAs() async throws -> [SendAs] {
+    nonisolated func listSendAs() async throws -> [SendAs] {
         let url = URL(string: APIEndpoints.sendAs())!
         let request = try await authenticatedRequest(url: url)
         let (data, _) = try await session.data(for: request)
@@ -221,7 +222,7 @@ class GmailAPIClient {
         return response.sendAs ?? []
     }
     
-    func getAttachment(messageId: String, attachmentId: String) async throws -> Data {
+    nonisolated func getAttachment(messageId: String, attachmentId: String) async throws -> Data {
         let url = URL(string: APIEndpoints.attachment(messageId: messageId, attachmentId: attachmentId))!
         let request = try await authenticatedRequest(url: url)
         let (data, _) = try await session.data(for: request)

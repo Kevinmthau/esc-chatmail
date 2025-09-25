@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import CoreData
 
+@MainActor
 final class GmailSendService: ObservableObject {
     private let apiClient = GmailAPIClient.shared
     private let authSession = AuthSession.shared
@@ -10,6 +11,12 @@ final class GmailSendService: ObservableObject {
     struct SendResult {
         let messageId: String
         let threadId: String
+    }
+
+    struct AttachmentInfo: Sendable {
+        let localURL: String?
+        let filename: String
+        let mimeType: String
     }
     
     enum SendError: LocalizedError {
@@ -33,12 +40,13 @@ final class GmailSendService: ObservableObject {
         self.viewContext = viewContext
     }
     
-    func sendNew(to recipients: [String], body: String, subject: String? = nil, attachments: [Attachment] = []) async throws -> SendResult {
-        guard let fromEmail = authSession.userEmail else {
+    nonisolated func sendNew(to recipients: [String], body: String, subject: String? = nil, attachmentInfos: [AttachmentInfo] = []) async throws -> SendResult {
+        let fromEmail = await MainActor.run { authSession.userEmail }
+        guard let fromEmail = fromEmail else {
             throw SendError.authenticationFailed
         }
-        
-        let attachmentData = try await prepareAttachments(attachments)
+
+        let attachmentData = try await prepareAttachmentInfos(attachmentInfos)
         let mimeData = MimeBuilder.buildNew(
             to: recipients,
             from: fromEmail,
@@ -48,35 +56,27 @@ final class GmailSendService: ObservableObject {
         )
         
         let result = try await sendMessage(mimeData: mimeData, threadId: nil)
-        
-        // Mark attachments as uploaded on success
-        for attachment in attachments {
-            attachment.state = .uploaded
-        }
-        do {
-            try CoreDataStack.shared.save(context: viewContext)
-        } catch {
-            print("Failed to save attachment state: \(error)")
-            // Non-critical error - continue
-        }
-        
+
+        // Attachment state updates are now handled in attachmentToInfo()
+
         return result
     }
     
-    func sendReply(
+    nonisolated func sendReply(
         to recipients: [String],
         body: String,
         subject: String,
         threadId: String,
         inReplyTo: String?,
         references: [String],
-        attachments: [Attachment] = []
+        attachmentInfos: [AttachmentInfo] = []
     ) async throws -> SendResult {
-        guard let fromEmail = authSession.userEmail else {
+        let fromEmail = await MainActor.run { authSession.userEmail }
+        guard let fromEmail = fromEmail else {
             throw SendError.authenticationFailed
         }
-        
-        let attachmentData = try await prepareAttachments(attachments)
+
+        let attachmentData = try await prepareAttachmentInfos(attachmentInfos)
         let mimeData = MimeBuilder.buildReply(
             to: recipients,
             from: fromEmail,
@@ -88,8 +88,44 @@ final class GmailSendService: ObservableObject {
         )
         
         let result = try await sendMessage(mimeData: mimeData, threadId: threadId)
-        
-        // Mark attachments as uploaded on success
+
+        // Attachment state updates are now handled in attachmentToInfo()
+
+        return result
+    }
+    
+    private nonisolated func prepareAttachmentInfos(_ attachmentInfos: [AttachmentInfo]) async throws -> [AttachmentData] {
+        var attachmentData: [AttachmentData] = []
+
+        for info in attachmentInfos {
+            guard let data = AttachmentPaths.loadData(from: info.localURL) else {
+                throw SendError.apiError("Failed to load attachment: \(info.filename)")
+            }
+
+            attachmentData.append(AttachmentData(
+                data: data,
+                filename: info.filename,
+                mimeType: info.mimeType
+            ))
+        }
+
+        return attachmentData
+    }
+
+    // Helper function to convert Attachment to AttachmentInfo
+    func attachmentToInfo(_ attachment: Attachment) -> AttachmentInfo {
+        // Update attachment state to uploading (will be marked as uploaded after successful send)
+        attachment.state = .uploading
+
+        return AttachmentInfo(
+            localURL: attachment.value(forKey: "localURL") as? String,
+            filename: (attachment.value(forKey: "filename") as? String) ?? "attachment",
+            mimeType: (attachment.value(forKey: "mimeType") as? String) ?? "application/octet-stream"
+        )
+    }
+
+    // Helper function to mark attachments as uploaded
+    func markAttachmentsAsUploaded(_ attachments: [Attachment]) {
         for attachment in attachments {
             attachment.state = .uploaded
         }
@@ -97,39 +133,10 @@ final class GmailSendService: ObservableObject {
             try CoreDataStack.shared.save(context: viewContext)
         } catch {
             print("Failed to save attachment state: \(error)")
-            // Non-critical error - continue
         }
-        
-        return result
     }
     
-    private func prepareAttachments(_ attachments: [Attachment]) async throws -> [AttachmentData] {
-        var attachmentData: [AttachmentData] = []
-        
-        for attachment in attachments {
-            let localURL = attachment.value(forKey: "localURL") as? String
-            guard let data = AttachmentPaths.loadData(from: localURL) else {
-                let filename = (attachment.value(forKey: "filename") as? String) ?? ""
-                throw SendError.apiError("Failed to load attachment: \(filename)")
-            }
-            
-            let filename = (attachment.value(forKey: "filename") as? String) ?? "attachment"
-            let mimeType = (attachment.value(forKey: "mimeType") as? String) ?? "application/octet-stream"
-            
-            attachmentData.append(AttachmentData(
-                data: data,
-                filename: filename,
-                mimeType: mimeType
-            ))
-            
-            // Update attachment state to uploading
-            attachment.state = .uploading
-        }
-        
-        return attachmentData
-    }
-    
-    private func sendMessage(mimeData: Data, threadId: String?) async throws -> SendResult {
+    private nonisolated func sendMessage(mimeData: Data, threadId: String?) async throws -> SendResult {
         // Debug: Print MIME message
         if let mimeString = String(data: mimeData, encoding: .utf8) {
             print("DEBUG: Sending MIME message:")
@@ -200,89 +207,92 @@ final class GmailSendService: ObservableObject {
         threadId: String? = nil,
         attachments: [Attachment] = []
     ) -> Message {
-        var optimisticMessage: Message!
-        
-        viewContext.performAndWait {
-            let message = Message(context: viewContext)
-            message.id = UUID().uuidString
-            message.isFromMe = true
-            message.internalDate = Date()
-            message.snippet = String(body.prefix(120))
-            message.cleanedSnippet = EmailTextProcessor.createCleanSnippet(from: body)
-            message.gmThreadId = threadId ?? ""
-            message.subject = subject
-            message.hasAttachments = !attachments.isEmpty
-            
-            // Add attachments to message
-            for attachment in attachments {
-                attachment.setValue(message, forKey: "message")
-                attachment.state = .queued
-            }
-            
-            // Get account info for myAliases
-            let accountRequest = Account.fetchRequest()
-            accountRequest.fetchLimit = 1
-            guard let account = try? viewContext.fetch(accountRequest).first else {
-                // Fallback: create conversation with recipients only
-                let conversation = findOrCreateConversation(recipients: recipients, myAliases: [])
-                message.conversation = conversation
-                optimisticMessage = message
-                return
-            }
-            
-            let myAliases = Set(([account.email] + account.aliasesArray).map(normalizedEmail))
-            let conversation = findOrCreateConversation(recipients: recipients, myAliases: myAliases)
-            message.conversation = conversation
-            
-            // Update conversation to bump it to the top
-            conversation.lastMessageDate = Date()
-            conversation.snippet = message.cleanedSnippet ?? message.snippet
-            // IMPORTANT: do NOT set conversation.hasInbox = true here for outgoing messages
-            
-            do {
-                if viewContext.hasChanges {
-                    try viewContext.save()
-                }
-            } catch {
-                print("Failed to save optimistic message: \(error)")
-            }
-            
-            optimisticMessage = message
+        let message = Message(context: viewContext)
+        message.id = UUID().uuidString
+        message.isFromMe = true
+        message.internalDate = Date()
+        message.snippet = String(body.prefix(120))
+        message.cleanedSnippet = EmailTextProcessor.createCleanSnippet(from: body)
+        message.gmThreadId = threadId ?? ""
+        message.subject = subject
+        message.hasAttachments = !attachments.isEmpty
+
+        // Add attachments to message
+        for attachment in attachments {
+            attachment.setValue(message, forKey: "message")
+            attachment.state = .queued
         }
-        
-        return optimisticMessage
+
+        // Get account info for myAliases
+        let accountRequest = Account.fetchRequest()
+        accountRequest.fetchLimit = 1
+
+        let myAliases: Set<String>
+        if let account = try? viewContext.fetch(accountRequest).first {
+            myAliases = Set(([account.email] + account.aliasesArray).map(normalizedEmail))
+        } else {
+            myAliases = []
+        }
+
+        // Create the conversation - we're already on MainActor with viewContext
+        let conversation = findOrCreateConversation(recipients: recipients, myAliases: myAliases, in: viewContext)
+        message.conversation = conversation
+
+        // Update conversation to bump it to the top
+        conversation.lastMessageDate = Date()
+        conversation.snippet = message.cleanedSnippet ?? message.snippet
+        // IMPORTANT: do NOT set conversation.hasInbox = true here for outgoing messages
+
+        do {
+            if viewContext.hasChanges {
+                try viewContext.save()
+            }
+        } catch {
+            print("Failed to save optimistic message: \(error)")
+        }
+
+        return message
     }
     
+    func fetchMessage(byID messageID: String) -> Message? {
+        let request = Message.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", messageID)
+        request.fetchLimit = 1
+
+        do {
+            return try viewContext.fetch(request).first
+        } catch {
+            print("Failed to fetch message: \(error)")
+            return nil
+        }
+    }
+
     func updateOptimisticMessage(_ message: Message, with result: SendResult) {
-        viewContext.performAndWait {
-            message.id = result.messageId
-            message.gmThreadId = result.threadId
-            
-            do {
-                if viewContext.hasChanges {
-                    try viewContext.save()
-                }
-            } catch {
-                print("Failed to update message with Gmail ID: \(error)")
+        message.id = result.messageId
+        message.gmThreadId = result.threadId
+
+        do {
+            if viewContext.hasChanges {
+                try viewContext.save()
             }
+        } catch {
+            print("Failed to update message with Gmail ID: \(error)")
         }
     }
     
     func deleteOptimisticMessage(_ message: Message) {
-        viewContext.performAndWait {
-            viewContext.delete(message)
-            
-            do {
-                if viewContext.hasChanges {
-                    try viewContext.save()
-                }
-            } catch {
-                print("Failed to delete optimistic message: \(error)")
+        viewContext.delete(message)
+
+        do {
+            if viewContext.hasChanges {
+                try viewContext.save()
             }
+        } catch {
+            print("Failed to delete optimistic message: \(error)")
         }
     }
     
-    private func findOrCreateConversation(recipients: [String], myAliases: Set<String>) -> Conversation {
+    private nonisolated func findOrCreateConversation(recipients: [String], myAliases: Set<String>, in context: NSManagedObjectContext) -> Conversation {
         // Build minimal headers for identity: From + To
         let identityHeaders = recipients.map { MessageHeader(name: "To", value: $0) }
         let identity = makeConversationIdentity(from: identityHeaders, myAliases: myAliases)
@@ -290,12 +300,12 @@ final class GmailSendService: ObservableObject {
         let request: NSFetchRequest<Conversation> = Conversation.fetchRequest()
         request.predicate = NSPredicate(format: "keyHash == %@", identity.keyHash)
         request.fetchLimit = 1
-        
-        if let existing = try? viewContext.fetch(request).first {
+
+        if let existing = try? context.fetch(request).first {
             return existing
         }
-        
-        let conversation = Conversation(context: viewContext)
+
+        let conversation = Conversation(context: context)
         conversation.id = UUID()
         conversation.keyHash = identity.keyHash
         conversation.conversationType = identity.type

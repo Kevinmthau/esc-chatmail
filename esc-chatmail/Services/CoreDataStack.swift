@@ -7,6 +7,7 @@ enum CoreDataError: LocalizedError {
     case saveFailed(Error)
     case transientFailure(Error)
     case persistentFailure(Error)
+    case stackDestroyed
 
     var errorDescription: String? {
         switch self {
@@ -20,12 +21,14 @@ enum CoreDataError: LocalizedError {
             return "Temporary data error: \(error.localizedDescription)"
         case .persistentFailure(let error):
             return "Critical data error: \(error.localizedDescription)"
+        case .stackDestroyed:
+            return "Data stack has been destroyed"
         }
     }
 
     var recoverySuggestion: String? {
         switch self {
-        case .storeLoadFailed, .migrationFailed, .persistentFailure:
+        case .storeLoadFailed, .migrationFailed, .persistentFailure, .stackDestroyed:
             return "Please restart the app. If the problem persists, you may need to reinstall."
         case .saveFailed, .transientFailure:
             return "Please try again. Your data is safe."
@@ -33,7 +36,7 @@ enum CoreDataError: LocalizedError {
     }
 }
 
-class CoreDataStack {
+final class CoreDataStack: @unchecked Sendable {
     static let shared = CoreDataStack()
 
     private var loadAttempts = 0
@@ -260,11 +263,15 @@ class CoreDataStack {
     }
 
     func saveAsync(context: NSManagedObjectContext) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            context.perform {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            context.perform { [weak self] in
+                guard let self = self else {
+                    continuation.resume(throwing: CoreDataError.stackDestroyed)
+                    return
+                }
                 do {
                     try self.save(context: context)
-                    continuation.resume()
+                    continuation.resume(returning: ())
                 } catch {
                     continuation.resume(throwing: error)
                 }

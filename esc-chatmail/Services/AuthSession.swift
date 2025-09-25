@@ -2,7 +2,8 @@ import Foundation
 import GoogleSignIn
 import UIKit
 
-class AuthSession: ObservableObject {
+@MainActor
+final class AuthSession: ObservableObject, @unchecked Sendable {
     static let shared = AuthSession()
     
     @Published var isAuthenticated = false
@@ -52,7 +53,7 @@ class AuthSession: ObservableObject {
                     return
                 }
 
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
                     self?.currentUser = result.user
                     self?.userEmail = result.user.profile?.email
                     self?.isAuthenticated = true
@@ -190,7 +191,7 @@ class AuthSession: ObservableObject {
         clearAttachmentFiles()
     }
     
-    func withFreshToken() async throws -> String {
+    nonisolated func withFreshToken() async throws -> String {
         // Delegate to TokenManager for centralized token management
         return try await TokenManager.shared.getCurrentToken()
     }

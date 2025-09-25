@@ -16,9 +16,9 @@ class BackgroundSyncManager {
     private var currentRetryCount = 0
     private var currentBackoff: TimeInterval = 30
     
-    private let apiClient = GmailAPIClient.shared
+    @MainActor private lazy var apiClient = GmailAPIClient.shared
     private let coreDataStack = CoreDataStack.shared
-    private let syncEngine = SyncEngine.shared
+    @MainActor private lazy var syncEngine = SyncEngine.shared
     
     private init() {}
     

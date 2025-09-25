@@ -234,31 +234,35 @@ final class ContactsResolver: ObservableObject, ContactsResolving, @unchecked Se
     }
     
     private func updatePerson(email: String, match: ContactMatch) async {
+        // Extract match properties outside the closure
+        let displayName = match.displayName
+        let imageData = match.imageData
+
         await withCheckedContinuation { continuation in
             viewContext.perform { [weak self] in
                 guard let self = self else {
                     continuation.resume()
                     return
                 }
-                
+
                 let request = Person.fetchRequest()
                 request.predicate = NSPredicate(format: "email == %@", email)
-                
+
                 do {
                     if let person = try self.viewContext.fetch(request).first {
                         var hasChanges = false
-                        
+
                         // Only update if we have new data and existing is empty
                         if person.displayName == nil || person.displayName?.isEmpty == true,
-                           let displayName = match.displayName {
+                           let displayName = displayName {
                             person.displayName = displayName
                             hasChanges = true
                         }
-                        
-                        if person.avatarURL == nil && match.imageData != nil {
+
+                        if person.avatarURL == nil && imageData != nil {
                             // Store image data as base64 URL for now
                             // In production, save to file and store URL
-                            if let imageData = match.imageData {
+                            if let imageData = imageData {
                                 let base64String = imageData.base64EncodedString()
                                 person.avatarURL = "data:image/png;base64,\(base64String)"
                                 hasChanges = true

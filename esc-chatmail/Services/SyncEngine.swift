@@ -7,7 +7,21 @@ extension Notification.Name {
     static let syncCompleted = Notification.Name("com.esc.inboxchat.syncCompleted")
 }
 
-class SyncEngine: ObservableObject {
+// MARK: - Network Reachable Actor
+private actor NetworkReachableActor {
+    private var _isReachable = true
+
+    func setReachable(_ reachable: Bool) {
+        _isReachable = reachable
+    }
+
+    func isReachable() -> Bool {
+        return _isReachable
+    }
+}
+
+@MainActor
+final class SyncEngine: ObservableObject, @unchecked Sendable {
     static let shared = SyncEngine()
     
     @Published var isSyncing = false
@@ -24,7 +38,7 @@ class SyncEngine: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private let networkMonitor = NWPathMonitor()
     private let monitorQueue = DispatchQueue(label: "NetworkMonitor")
-    private var isNetworkReachable = true
+    private let networkReachableActor = NetworkReachableActor()
     
     private init() {
         setupNetworkMonitoring()
@@ -32,7 +46,9 @@ class SyncEngine: ObservableObject {
     
     private func setupNetworkMonitoring() {
         networkMonitor.pathUpdateHandler = { [weak self] path in
-            self?.isNetworkReachable = (path.status == .satisfied)
+            Task {
+                await self?.networkReachableActor.setReachable(path.status == .satisfied)
+            }
             if !path.isExpensive && path.status == .satisfied {
                 print("Network is reachable")
             } else {
@@ -42,8 +58,8 @@ class SyncEngine: ObservableObject {
         networkMonitor.start(queue: monitorQueue)
     }
     
-    private func isNetworkAvailable() async -> Bool {
-        return isNetworkReachable
+    private nonisolated func isNetworkAvailable() async -> Bool {
+        return await networkReachableActor.isReachable()
     }
     
     func performInitialSync() async throws {
@@ -169,9 +185,9 @@ class SyncEngine: ObservableObject {
         }
         
         // Extract account properties while still on the main thread
-        let historyId = await MainActor.run { account.historyId }
-        let email = await MainActor.run { account.email }
-        let aliases = await MainActor.run { account.aliasesArray }
+        let historyId = account.historyId
+        let email = account.email
+        let aliases = account.aliasesArray
         
         print("Starting incremental sync with historyId: \(historyId ?? "nil")")
         
@@ -411,7 +427,7 @@ class SyncEngine: ObservableObject {
         return account
     }
     
-    private func fetchAccount() async throws -> Account? {
+    private nonisolated func fetchAccount() async throws -> Account? {
         return await withCheckedContinuation { continuation in
             let context = coreDataStack.viewContext
             context.perform {
@@ -423,10 +439,11 @@ class SyncEngine: ObservableObject {
         }
     }
     
-    private func updateAccountHistoryId(_ historyId: String) async {
+    private nonisolated func updateAccountHistoryId(_ historyId: String) async {
         await withCheckedContinuation { continuation in
             let context = coreDataStack.viewContext
-            context.perform {
+            context.perform { [weak self] in
+                guard let self = self else { return }
                 let request = Account.fetchRequest()
                 request.fetchLimit = 1
                 if let account = try? context.fetch(request).first {
@@ -443,7 +460,7 @@ class SyncEngine: ObservableObject {
         } as Void
     }
     
-    func updateConversationRollups(in context: NSManagedObjectContext) async {
+    nonisolated func updateConversationRollups(in context: NSManagedObjectContext) async {
         await conversationManager.updateAllConversationRollups(in: context)
     }
     

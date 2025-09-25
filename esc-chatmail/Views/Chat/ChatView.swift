@@ -252,20 +252,26 @@ struct ChatView: View {
         
         guard !replyData.recipients.isEmpty else { return }
         
-        let optimisticMessage = await MainActor.run {
-            sendService.createOptimisticMessage(
+        let optimisticMessageID = await MainActor.run {
+            let message = sendService.createOptimisticMessage(
                 to: replyData.recipients,
                 body: replyText,
                 subject: replyData.subject,
                 threadId: replyData.threadId,
                 attachments: attachments
             )
+            return message.id
         }
         
         
         do {
             let result: GmailSendService.SendResult
-            
+
+            // Convert attachments to AttachmentInfo
+            let attachmentInfos = await MainActor.run {
+                attachments.map { sendService.attachmentToInfo($0) }
+            }
+
             if let subject = replyData.subject {
                 result = try await sendService.sendReply(
                     to: replyData.recipients,
@@ -274,18 +280,24 @@ struct ChatView: View {
                     threadId: replyData.threadId ?? "",
                     inReplyTo: replyData.inReplyTo,
                     references: replyData.references,
-                    attachments: attachments
+                    attachmentInfos: attachmentInfos
                 )
             } else {
                 result = try await sendService.sendNew(
                     to: replyData.recipients,
                     body: replyText,
-                    attachments: attachments
+                    attachmentInfos: attachmentInfos
                 )
             }
             
             await MainActor.run {
-                sendService.updateOptimisticMessage(optimisticMessage, with: result)
+                if let optimisticMessage = sendService.fetchMessage(byID: optimisticMessageID) {
+                    sendService.updateOptimisticMessage(optimisticMessage, with: result)
+                }
+                // Mark attachments as uploaded after successful send
+                if !attachments.isEmpty {
+                    sendService.markAttachmentsAsUploaded(attachments)
+                }
                 replyText = ""
                 replyingTo = nil
             }
@@ -296,7 +308,9 @@ struct ChatView: View {
             }
         } catch {
             await MainActor.run {
-                sendService.deleteOptimisticMessage(optimisticMessage)
+                if let optimisticMessage = sendService.fetchMessage(byID: optimisticMessageID) {
+                    sendService.deleteOptimisticMessage(optimisticMessage)
+                }
                 print("Failed to send reply: \(error)")
             }
         }

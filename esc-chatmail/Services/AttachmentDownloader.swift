@@ -8,7 +8,7 @@ class AttachmentDownloader: ObservableObject {
     @Published var downloadProgress: [String: Double] = [:]
     @Published var activeDownloads: Set<String> = []
     
-    private let apiClient = GmailAPIClient.shared
+    @MainActor private lazy var apiClient = GmailAPIClient.shared
     private let coreDataStack = CoreDataStack.shared
     private let downloadQueue = DispatchQueue(label: "com.esc.attachment.download", attributes: .concurrent)
     private let semaphore = DispatchSemaphore(value: 2)  // Limit concurrent downloads

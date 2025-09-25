@@ -2,7 +2,7 @@ import Foundation
 import CoreData
 
 class MessageActions: ObservableObject {
-    private let apiClient = GmailAPIClient.shared
+    @MainActor private lazy var apiClient = GmailAPIClient.shared
     private let coreDataStack = CoreDataStack.shared
     
     func markAsRead(message: Message) async throws {

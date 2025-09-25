@@ -185,23 +185,27 @@ struct NewMessageComposerView: View {
         let body = messageBody
         let messageSubject = subject.isEmpty ? nil : subject
         
-        let optimisticMessage = await MainActor.run {
-            sendService.createOptimisticMessage(
+        let optimisticMessageID = await MainActor.run {
+            let message = sendService.createOptimisticMessage(
                 to: recipientEmails,
                 body: body,
                 subject: messageSubject
             )
+            return message.id
         }
         
         do {
             let result = try await sendService.sendNew(
                 to: recipientEmails,
                 body: body,
-                subject: messageSubject
+                subject: messageSubject,
+                attachmentInfos: []
             )
             
             await MainActor.run {
-                sendService.updateOptimisticMessage(optimisticMessage, with: result)
+                if let optimisticMessage = sendService.fetchMessage(byID: optimisticMessageID) {
+                    sendService.updateOptimisticMessage(optimisticMessage, with: result)
+                }
                 dismiss()
             }
             
@@ -211,7 +215,9 @@ struct NewMessageComposerView: View {
             }
         } catch {
             await MainActor.run {
-                sendService.deleteOptimisticMessage(optimisticMessage)
+                if let optimisticMessage = sendService.fetchMessage(byID: optimisticMessageID) {
+                    sendService.deleteOptimisticMessage(optimisticMessage)
+                }
                 errorMessage = error.localizedDescription
                 showError = true
                 isSending = false

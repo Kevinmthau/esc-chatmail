@@ -1,7 +1,7 @@
 import Foundation
 import CoreData
 
-class ConversationManager {
+final class ConversationManager: @unchecked Sendable {
     private let coreDataStack = CoreDataStack.shared
     
     func findOrCreateConversation(
@@ -113,10 +113,11 @@ class ConversationManager {
     }
     
     func updateAllConversationRollups(in context: NSManagedObjectContext) async {
-        await context.perform {
+        await context.perform { [weak self] in
+            guard let self = self else { return }
             let request = Conversation.fetchRequest()
             guard let conversations = try? context.fetch(request) else { return }
-            
+
             for conversation in conversations {
                 self.updateConversationRollups(for: conversation)
             }
@@ -124,24 +125,25 @@ class ConversationManager {
     }
     
     func removeDuplicateConversations(in context: NSManagedObjectContext) async {
-        await context.perform {
+        await context.perform { [weak self] in
+            guard let self = self else { return }
             let request = Conversation.fetchRequest()
             guard let conversations = try? context.fetch(request) else { return }
-            
+
             // Group conversations by keyHash
             var groupedByKey = [String: [Conversation]]()
             for conversation in conversations {
                 let keyHash = conversation.value(forKey: "keyHash") as? String ?? ""
                 groupedByKey[keyHash, default: []].append(conversation)
             }
-            
+
             var mergedCount = 0
-            
+
             // Process each group with duplicates
             for (_, group) in groupedByKey where group.count > 1 {
                 let winner = self.selectWinnerConversation(from: group)
                 let losers = group.filter { $0 != winner }
-                
+
                 for loser in losers {
                     self.mergeConversation(from: loser, into: winner)
                     context.delete(loser)
