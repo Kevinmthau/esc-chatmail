@@ -11,7 +11,7 @@ struct ConversationRowView: View {
     @State private var participantNames: [String] = []
     
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: 8) {
             // Unread indicator with fixed width container
             ZStack {
                 if conversation.inboxUnreadCount > 0 {
@@ -24,7 +24,7 @@ struct ConversationRowView: View {
 
             // Avatar stack
             AvatarStackView(avatarData: avatarData, participants: participantNames)
-                .frame(width: 60, height: 60)
+                .frame(width: 50, height: 50)
 
             VStack(alignment: .leading, spacing: 3) {
                 // Top row: Name, date, and chevron
@@ -86,8 +86,8 @@ struct ConversationRowView: View {
             return normalized != normalizedMyEmail ? email : nil
         }
         
-        // Limit to top 3 participants for display
-        let topParticipants = Array(nonMeParticipants.prefix(3))
+        // Limit to top 4 participants for display (for group avatar)
+        let topParticipants = Array(nonMeParticipants.prefix(4))
         
         // Resolve names and avatars
         var resolvedNames: [String] = []
@@ -164,37 +164,191 @@ struct ConversationRowView: View {
 struct AvatarStackView: View {
     let avatarData: [Data]
     let participants: [String]
-    
+
+    var body: some View {
+        if participants.count > 1 {
+            // Group conversation - show multiple small avatars in a circle
+            GroupAvatarView(avatarData: avatarData, participants: participants)
+        } else {
+            // Single conversation - show single large avatar
+            SingleAvatarView(avatarData: avatarData.first, participant: participants.first)
+        }
+    }
+}
+
+// MARK: - Single Avatar View
+
+struct SingleAvatarView: View {
+    let avatarData: Data?
+    let participant: String?
+
+    var body: some View {
+        if let avatarData = avatarData,
+           let uiImage = UIImage(data: avatarData) {
+            Image(uiImage: uiImage)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 50, height: 50)
+                .clipShape(Circle())
+        } else if let participant = participant {
+            InitialsView(name: participant)
+                .frame(width: 50, height: 50)
+        } else {
+            Image(systemName: "person.circle.fill")
+                .resizable()
+                .frame(width: 50, height: 50)
+                .foregroundColor(.gray)
+        }
+    }
+}
+
+// MARK: - Group Avatar View (iMessage style)
+
+struct GroupAvatarView: View {
+    let avatarData: [Data]
+    let participants: [String]
+
+    private let mainSize: CGFloat = 50
+    private let smallSize: CGFloat = 22
+    private let positions: [(x: CGFloat, y: CGFloat)] = [
+        (x: -9, y: -9),   // Top left
+        (x: 9, y: -9),    // Top right
+        (x: 9, y: 9),     // Bottom right
+        (x: -9, y: 9)     // Bottom left
+    ]
+
     var body: some View {
         ZStack {
-            if !avatarData.isEmpty {
-                // Show actual avatars
-                ForEach(0..<min(avatarData.count, 2), id: \.self) { index in
-                    if let uiImage = UIImage(data: avatarData[index]) {
+            // Background circle
+            Circle()
+                .fill(Color(UIColor.systemGray6))
+                .frame(width: mainSize, height: mainSize)
+
+            // Show up to 4 small avatars
+            let maxAvatars = min(4, participants.count)
+
+            ForEach(0..<maxAvatars, id: \.self) { index in
+                ZStack {
+                    if index < avatarData.count,
+                       let uiImage = UIImage(data: avatarData[index]) {
+                        // Show actual avatar image
                         Image(uiImage: uiImage)
                             .resizable()
                             .scaledToFill()
-                            .frame(width: 44, height: 44)
+                            .frame(width: smallSize, height: smallSize)
                             .clipShape(Circle())
-                            .overlay(Circle().stroke(Color.white, lineWidth: 2))
-                            .offset(x: CGFloat(index) * 15)
+                            .overlay(
+                                Circle()
+                                    .stroke(Color(UIColor.systemBackground), lineWidth: 1.5)
+                            )
+                    } else if index < participants.count {
+                        // Show initials
+                        SmallInitialsView(name: participants[index])
+                            .frame(width: smallSize, height: smallSize)
+                    } else {
+                        // Fallback to person icon
+                        Circle()
+                            .fill(Color(UIColor.systemGray4))
+                            .frame(width: smallSize, height: smallSize)
+                            .overlay(
+                                Image(systemName: "person.fill")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.white)
+                            )
+                            .overlay(
+                                Circle()
+                                    .stroke(Color(UIColor.systemBackground), lineWidth: 1.5)
+                            )
                     }
                 }
-            } else if !participants.isEmpty {
-                // Show initials
-                ForEach(0..<min(participants.count, 2), id: \.self) { index in
-                    InitialsView(name: participants[index])
-                        .frame(width: 44, height: 44)
-                        .offset(x: CGFloat(index) * 15)
-                }
-            } else {
-                // Default avatar
-                Image(systemName: "person.circle.fill")
-                    .resizable()
-                    .frame(width: 60, height: 60)
-                    .foregroundColor(.gray)
+                .offset(
+                    x: getPositionX(index: index, total: maxAvatars),
+                    y: getPositionY(index: index, total: maxAvatars)
+                )
             }
         }
+        .frame(width: mainSize, height: mainSize)
+    }
+
+    private func getPositionX(index: Int, total: Int) -> CGFloat {
+        switch total {
+        case 2:
+            // Two avatars: left and right
+            return index == 0 ? -9 : 9
+        case 3:
+            // Three avatars: triangle arrangement
+            switch index {
+            case 0: return 0      // Top center
+            case 1: return -9     // Bottom left
+            case 2: return 9      // Bottom right
+            default: return 0
+            }
+        case 4:
+            // Four avatars: corners
+            return positions[index].x
+        default:
+            return 0
+        }
+    }
+
+    private func getPositionY(index: Int, total: Int) -> CGFloat {
+        switch total {
+        case 2:
+            // Two avatars: centered vertically
+            return 0
+        case 3:
+            // Three avatars: triangle arrangement
+            switch index {
+            case 0: return -9     // Top
+            case 1, 2: return 9   // Bottom
+            default: return 0
+            }
+        case 4:
+            // Four avatars: corners
+            return positions[index].y
+        default:
+            return 0
+        }
+    }
+}
+
+// MARK: - Small Initials View for Group Avatars
+
+struct SmallInitialsView: View {
+    let name: String
+
+    private var initials: String {
+        let components = name.split(separator: " ")
+        if components.count >= 2 {
+            let first = String(components[0].prefix(1))
+            let last = String(components[1].prefix(1))
+            return (first + last).uppercased()
+        } else if let first = components.first {
+            return String(first.prefix(1)).uppercased()
+        }
+        return "?"
+    }
+
+    private var backgroundColor: Color {
+        // Generate consistent color based on name
+        let hash = name.hashValue
+        let hue = Double(abs(hash) % 360) / 360.0
+        return Color(hue: hue, saturation: 0.5, brightness: 0.8)
+    }
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(backgroundColor)
+
+            Text(initials)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(.white)
+        }
+        .overlay(
+            Circle()
+                .stroke(Color(UIColor.systemBackground), lineWidth: 1.5)
+        )
     }
 }
 
