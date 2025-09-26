@@ -2,11 +2,16 @@ import SwiftUI
 import CoreData
 
 struct InboxListView: View {
-    @FetchRequest(
-        entity: Message.entity(),
-        sortDescriptors: [NSSortDescriptor(keyPath: \Message.internalDate, ascending: false)],
-        predicate: NSPredicate(format: "ANY labels.id == %@", "INBOX")
-    ) private var messages: FetchedResults<Message>
+    @FetchRequest private var messages: FetchedResults<Message>
+
+    init() {
+        let request = NSFetchRequest<Message>(entityName: "Message")
+        request.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: false)]
+        // Only show inbox messages that are not drafts
+        request.predicate = NSPredicate(format: "ANY labels.id == %@ AND NOT (ANY labels.id == %@)", "INBOX", "DRAFTS")
+        request.fetchBatchSize = 25  // Load messages in batches for better performance
+        _messages = FetchRequest(fetchRequest: request)
+    }
     
     @StateObject private var messageActions = MessageActions()
     @State private var searchText = ""

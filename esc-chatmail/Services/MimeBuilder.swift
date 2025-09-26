@@ -61,8 +61,8 @@ struct MimeBuilder {
             let encodedSubject = encodeHeaderIfNeeded(subject)
             mime += "Subject: \(encodedSubject)\r\n"
         } else {
-            // Add empty subject header if none provided
-            mime += "Subject: \r\n"
+            // Add default subject if none provided
+            mime += "Subject: (No Subject)\r\n"
         }
         
         mime += "Date: \(formatDate(Date()))\r\n"
@@ -108,8 +108,8 @@ struct MimeBuilder {
             let encodedSubject = encodeHeaderIfNeeded(subject)
             mime += "Subject: \(encodedSubject)\r\n"
         } else {
-            // Add empty subject header if none provided
-            mime += "Subject: \r\n"
+            // Add default subject if none provided
+            mime += "Subject: (No Subject)\r\n"
         }
         
         mime += "Date: \(formatDate(Date()))\r\n"

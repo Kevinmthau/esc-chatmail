@@ -158,11 +158,25 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         GIDSignIn.sharedInstance.signOut()
 
         // Then disconnect to revoke tokens
-        GIDSignIn.sharedInstance.disconnect { error in
-            completion?(error)
+        GIDSignIn.sharedInstance.disconnect { [weak self] error in
+            Task { @MainActor in
+                guard let self = self else {
+                    completion?(error)
+                    return
+                }
+
+                // Clear local state
+                self.currentUser = nil
+                self.userEmail = nil
+                self.userName = nil
+                self.isAuthenticated = false
+                self.accessToken = nil
+
+                completion?(error)
+            }
         }
 
-        // Clear local state
+        // Clear local state immediately as well
         currentUser = nil
         userEmail = nil
         userName = nil

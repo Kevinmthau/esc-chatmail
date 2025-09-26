@@ -17,11 +17,14 @@ struct ChatView: View {
     
     init(conversation: Conversation) {
         self.conversation = conversation
-        self._messages = FetchRequest(
-            entity: Message.entity(),
-            sortDescriptors: [NSSortDescriptor(keyPath: \Message.internalDate, ascending: true)],
-            predicate: NSPredicate(format: "conversation == %@", conversation)
-        )
+
+        let request = NSFetchRequest<Message>(entityName: "Message")
+        request.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: true)]
+        // Exclude draft messages from the conversation view
+        request.predicate = NSPredicate(format: "conversation == %@ AND NOT (ANY labels.id == %@)", conversation, "DRAFTS")
+        request.fetchBatchSize = 30  // Load messages in batches for better performance
+        self._messages = FetchRequest(fetchRequest: request)
+
         self._sendService = StateObject(wrappedValue: GmailSendService(
             viewContext: CoreDataStack.shared.viewContext
         ))

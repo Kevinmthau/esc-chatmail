@@ -12,6 +12,7 @@ final class ConversationManager: @unchecked Sendable {
             let request = Conversation.fetchRequest()
             request.predicate = NSPredicate(format: "keyHash == %@", identity.keyHash)
             request.fetchLimit = 1
+            request.fetchBatchSize = 1  // Single object fetch
 
             if let existing = try? context.fetch(request).first {
                 return existing
@@ -51,6 +52,7 @@ final class ConversationManager: @unchecked Sendable {
         let request = Person.fetchRequest()
         request.predicate = NSPredicate(format: "email == %@", email)
         request.fetchLimit = 1
+        request.fetchBatchSize = 1  // Single object fetch
         
         if let existing = try? context.fetch(request).first {
             // Update display name if we have a new one and the existing one is nil
@@ -72,9 +74,21 @@ final class ConversationManager: @unchecked Sendable {
         
         context.performAndWait {
             guard let messages = conversation.value(forKey: "messages") as? Set<Message> else { return }
-            
-            // Update last message date and snippet
-            let sortedMessages = messages.sorted { $0.internalDate < $1.internalDate }
+
+            // Filter out draft messages
+            let nonDraftMessages = messages.filter { message in
+                if let labelsSet = message.value(forKey: "labels") as? NSSet,
+                   let labels = labelsSet.allObjects as? [NSManagedObject] {
+                    let isDraft = labels.contains { label in
+                        (label.value(forKey: "id") as? String) == "DRAFTS"
+                    }
+                    return !isDraft
+                }
+                return true
+            }
+
+            // Update last message date and snippet (excluding drafts)
+            let sortedMessages = nonDraftMessages.sorted { $0.internalDate < $1.internalDate }
             if let latestMessage = sortedMessages.last {
                 conversation.lastMessageDate = latestMessage.internalDate
                 conversation.snippet = latestMessage.cleanedSnippet ?? latestMessage.snippet
@@ -118,6 +132,7 @@ final class ConversationManager: @unchecked Sendable {
         await context.perform { [weak self] in
             guard let self = self else { return }
             let request = Conversation.fetchRequest()
+            request.fetchBatchSize = 50  // Process conversations in batches
             guard let conversations = try? context.fetch(request) else { return }
 
             for conversation in conversations {
@@ -130,6 +145,7 @@ final class ConversationManager: @unchecked Sendable {
         await context.perform { [weak self] in
             guard let self = self else { return }
             let request = Conversation.fetchRequest()
+            request.fetchBatchSize = 50  // Process conversations in batches
             guard let conversations = try? context.fetch(request) else { return }
 
             // Group conversations by keyHash

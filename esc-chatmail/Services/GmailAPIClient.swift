@@ -197,11 +197,16 @@ class GmailAPIClient {
         let url = URL(string: APIEndpoints.batchModify())!
         var request = try await authenticatedRequest(url: url)
         request.httpMethod = "POST"
-        
+
         let body = BatchModifyRequest(ids: ids, addLabelIds: addLabelIds, removeLabelIds: removeLabelIds)
         request.httpBody = try JSONEncoder().encode(body)
-        
+
         let (_, _) = try await session.data(for: request)
+    }
+
+    nonisolated func archiveMessages(ids: [String]) async throws {
+        // Archive by removing INBOX label
+        try await batchModify(ids: ids, removeLabelIds: ["INBOX"])
     }
     
     nonisolated func listHistory(startHistoryId: String, pageToken: String? = nil) async throws -> HistoryResponse {

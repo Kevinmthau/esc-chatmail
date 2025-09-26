@@ -160,8 +160,8 @@ class BackgroundSyncManager {
     private func performPartialSync(isProcessingTask: Bool) async -> Bool {
         do {
             let maxResults = isProcessingTask ? 100 : 50
-            // Exclude spam messages from the query
-            let response = try await apiClient.listMessages(maxResults: maxResults, query: "-label:spam")
+            // Exclude spam and draft messages from the query
+            let response = try await apiClient.listMessages(maxResults: maxResults, query: "-label:spam -label:drafts")
 
             if let messages = response.messages {
                 await fetchAndStoreMessages(messageIds: messages.map { $0.id })

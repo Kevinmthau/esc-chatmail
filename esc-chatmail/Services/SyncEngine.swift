@@ -162,10 +162,10 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
 
             // Convert timestamp to Gmail query format (epoch seconds)
             let epochSeconds = Int(installationTimestamp.timeIntervalSince1970)
-            // Exclude spam messages from the query
-            let gmailQuery = "after:\(epochSeconds) -label:spam"
+            // Exclude spam and draft messages from the query
+            let gmailQuery = "after:\(epochSeconds) -label:spam -label:drafts"
 
-            print("Syncing only non-spam messages after installation: \(installationTimestamp)")
+            print("Syncing only sent messages (excluding spam and drafts) after installation: \(installationTimestamp)")
 
             var allMessageIds: [String] = []
             var pageToken: String? = nil
@@ -708,13 +708,63 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
     
     private func removeDuplicateConversations(in context: NSManagedObjectContext) async {
         await conversationManager.removeDuplicateConversations(in: context)
+        await removeEmptyConversations(in: context)
+        await removeDraftMessages(in: context)
+    }
+
+    private func removeDraftMessages(in context: NSManagedObjectContext) async {
+        await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "ANY labels.id == %@", "DRAFTS")
+            request.fetchBatchSize = 50
+
+            guard let draftMessages = try? context.fetch(request) else { return }
+
+            var removedCount = 0
+            for message in draftMessages {
+                context.delete(message)
+                removedCount += 1
+            }
+
+            if removedCount > 0 {
+                print("Removed \(removedCount) draft messages")
+                self.coreDataStack.saveIfNeeded(context: context)
+            }
+        }
+    }
+
+    private func removeEmptyConversations(in context: NSManagedObjectContext) async {
+        await context.perform {
+            let request = Conversation.fetchRequest()
+            request.fetchBatchSize = 50
+
+            guard let conversations = try? context.fetch(request) else { return }
+
+            var removedCount = 0
+            for conversation in conversations {
+                // Remove conversations with no participants or no messages
+                let hasParticipants = (conversation.participants?.count ?? 0) > 0
+                let hasMessages = (conversation.messages?.count ?? 0) > 0
+
+                if !hasParticipants && !hasMessages {
+                    context.delete(conversation)
+                    removedCount += 1
+                }
+            }
+
+            if removedCount > 0 {
+                print("Removed \(removedCount) empty conversations")
+                self.coreDataStack.saveIfNeeded(context: context)
+            }
+        }
     }
     
     private func removeDuplicateMessages(in context: NSManagedObjectContext) async {
         let request = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
         request.resultType = .dictionaryResultType
-        request.propertiesToFetch = ["id"]
+        request.propertiesToFetch = ["objectID", "id"]  // Include objectID for batch fetching
         request.returnsDistinctResults = false
+        request.fetchBatchSize = 100  // Process duplicates in batches
         
         guard let results = try? context.fetch(request) as? [[String: Any]] else { return }
         
@@ -735,6 +785,7 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
             let deleteRequest = Message.fetchRequest()
             deleteRequest.predicate = NSPredicate(format: "id == %@", duplicateId)
             deleteRequest.fetchLimit = 1
+            deleteRequest.fetchBatchSize = 1  // Single object fetch
             
             if let duplicates = try? context.fetch(deleteRequest), let duplicate = duplicates.first {
                 context.delete(duplicate)

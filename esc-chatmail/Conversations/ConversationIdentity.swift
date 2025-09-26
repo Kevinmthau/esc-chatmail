@@ -45,13 +45,31 @@ func makeConversationIdentity(from headers: [MessageHeader],
     }
     
     let raw = values("From") + values("To") + values("Cc")
-    let parts = Set(raw.compactMap { EmailNormalizer.extractEmail(from: $0) }
+    let allEmails = Set(raw.compactMap { EmailNormalizer.extractEmail(from: $0) }
                       .map(normalizedEmail)
-                      .filter { !$0.isEmpty && !myAliases.contains($0) })
-    let sorted = parts.sorted()
+                      .filter { !$0.isEmpty })
+
+    // Keep at least one participant (even if it's the user) for self-conversations
+    let parts = allEmails.filter { !myAliases.contains($0) }
+    let sorted: [String]
+
+    if parts.isEmpty {
+        // Self-conversation: include the sender if all participants are the user
+        if let firstAlias = myAliases.first {
+            sorted = [firstAlias]
+        } else if let firstEmail = allEmails.first {
+            sorted = [firstEmail]
+        } else {
+            // Fallback: should rarely happen, but prevents empty conversations
+            sorted = ["unknown@email.com"]
+        }
+    } else {
+        sorted = parts.sorted()
+    }
+
     let key = sorted.joined(separator: "|")
     let hash = SHA256.hash(data: Data(key.utf8)).map { String(format:"%02x", $0) }.joined()
     let type: ConversationType = sorted.count <= 1 ? .oneToOne : .group
-    
+
     return ConversationIdentity(key: key, keyHash: hash, type: type, participants: sorted)
 }

@@ -74,7 +74,7 @@ class HTMLContentHandler {
     
     func cleanupOldFiles(olderThan days: Int) {
         let cutoffDate = Date().addingTimeInterval(-Double(days * 24 * 60 * 60))
-        
+
         if let enumerator = FileManager.default.enumerator(at: messagesDirectory,
                                                           includingPropertiesForKeys: [.creationDateKey],
                                                           options: [.skipsHiddenFiles]) {
@@ -85,5 +85,31 @@ class HTMLContentHandler {
                 }
             }
         }
+    }
+
+    func migrateIfNeeded(from oldPath: String) -> Bool {
+        // Check if the old path exists and the new one doesn't
+        guard oldPath.contains("/Documents/Messages/"),
+              let messageId = oldPath.components(separatedBy: "/").last?.replacingOccurrences(of: ".html", with: ""),
+              !messageId.isEmpty else {
+            return false
+        }
+
+        // Check if file already exists in current location
+        if htmlFileExists(for: messageId) {
+            return true // Already migrated
+        }
+
+        // Try to extract from old file URL if it exists
+        if oldPath.starts(with: "file://") {
+            if let url = URL(string: oldPath),
+               FileManager.default.fileExists(atPath: url.path),
+               let html = loadHTML(from: url) {
+                // Save to new location
+                return saveHTML(html, for: messageId) != nil
+            }
+        }
+
+        return false
     }
 }

@@ -10,6 +10,17 @@ struct ConversationListView: View {
         ],
         predicate: NSPredicate(format: "hidden == NO")
     ) private var conversations: FetchedResults<Conversation>
+
+    init() {
+        let request = NSFetchRequest<Conversation>(entityName: "Conversation")
+        request.sortDescriptors = [
+            NSSortDescriptor(keyPath: \Conversation.pinned, ascending: false),
+            NSSortDescriptor(keyPath: \Conversation.lastMessageDate, ascending: false)
+        ]
+        request.predicate = NSPredicate(format: "hidden == NO")
+        request.fetchBatchSize = 20  // Load conversations in batches for better memory usage
+        _conversations = FetchRequest(fetchRequest: request)
+    }
     
     @StateObject private var syncEngine = SyncEngine.shared
     @State private var selectedConversation: Conversation?
@@ -118,15 +129,38 @@ struct ConversationListView: View {
     }
     
     private func deleteConversations(at offsets: IndexSet) {
-        for index in offsets {
-            let conversation = filteredConversations[index]
-            conversation.hidden = true
+        Task {
+            for index in offsets {
+                let conversation = filteredConversations[index]
+
+                // Archive in Gmail first
+                await archiveConversationInGmail(conversation)
+
+                // Then hide locally
+                conversation.hidden = true
+            }
+            do {
+                try CoreDataStack.shared.save(context: CoreDataStack.shared.viewContext)
+            } catch {
+                print("Failed to delete conversation: \(error)")
+                // Show error to user
+            }
         }
+    }
+
+    private func archiveConversationInGmail(_ conversation: Conversation) async {
+        // Get all message IDs from the conversation
+        guard let messages = conversation.value(forKey: "messages") as? Set<Message> else { return }
+        let messageIds = messages.compactMap { $0.value(forKey: "id") as? String }
+
+        guard !messageIds.isEmpty else { return }
+
         do {
-            try CoreDataStack.shared.save(context: CoreDataStack.shared.viewContext)
+            try await GmailAPIClient.shared.archiveMessages(ids: messageIds)
+            print("Archived \(messageIds.count) messages in Gmail")
         } catch {
-            print("Failed to delete conversation: \(error)")
-            // Show error to user
+            print("Failed to archive messages in Gmail: \(error)")
+            // Continue with local deletion even if Gmail archive fails
         }
     }
     
