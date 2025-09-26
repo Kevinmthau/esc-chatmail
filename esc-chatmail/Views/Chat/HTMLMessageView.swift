@@ -271,34 +271,69 @@ struct HTMLWebView: UIViewRepresentable {
 
             // Inject JavaScript to handle images better
             let jsCode = """
-                // Add error handling for images
+                // Comprehensive image error handling for modern formats
                 var images = document.getElementsByTagName('img');
+                var unsupportedFormats = ['.webp', '.avif', '.jxl', '.heic', '.heif'];
+
                 for (var i = 0; i < images.length; i++) {
                     var img = images[i];
 
-                    // Add error handler
-                    img.onerror = function() {
-                        // Replace broken images with a placeholder
-                        this.style.display = 'none';
-                        this.onerror = null;
-                    };
-
-                    // Handle WEBP images that might not be supported
-                    if (img.src && img.src.includes('.webp')) {
-                        // Create a test image to check WEBP support
-                        var testImg = new Image();
-                        testImg.onerror = function() {
-                            // WEBP not supported, hide the image
-                            img.style.display = 'none';
-                        };
-                        testImg.src = 'data:image/webp;base64,UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoBAAEAAwA0JaQAA3AA/vuUAAA=';
+                    // Store original display style
+                    if (!img.dataset.originalDisplay) {
+                        img.dataset.originalDisplay = img.style.display || 'inline';
                     }
 
-                    // Try to reload incomplete images
-                    if (img.src && !img.complete && img.naturalWidth === 0) {
-                        var src = img.src;
-                        img.src = '';
-                        img.src = src;
+                    // Add error handler
+                    img.onerror = function() {
+                        var src = this.src || '';
+                        var isUnsupportedFormat = false;
+
+                        // Check if it's an unsupported format
+                        for (var j = 0; j < unsupportedFormats.length; j++) {
+                            if (src.toLowerCase().includes(unsupportedFormats[j])) {
+                                isUnsupportedFormat = true;
+                                break;
+                            }
+                        }
+
+                        if (isUnsupportedFormat) {
+                            // For unsupported formats, hide immediately
+                            this.style.display = 'none';
+                            this.alt = this.alt || 'Image format not supported';
+                        } else if (!this.dataset.retryCount || parseInt(this.dataset.retryCount) < 1) {
+                            // Try reloading once for other formats
+                            this.dataset.retryCount = (parseInt(this.dataset.retryCount) || 0) + 1;
+                            var originalSrc = this.src;
+                            this.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+                            setTimeout(function(img, src) {
+                                img.src = src;
+                            }.bind(null, this, originalSrc), 100);
+                        } else {
+                            // Hide after retry failed
+                            this.style.display = 'none';
+                        }
+                        this.onerror = null; // Prevent infinite loop
+                    };
+
+                    // Check for modern format support proactively
+                    var src = img.src || '';
+                    if (src) {
+                        for (var j = 0; j < unsupportedFormats.length; j++) {
+                            if (src.toLowerCase().includes(unsupportedFormats[j])) {
+                                // Test format support
+                                var format = unsupportedFormats[j].substring(1);
+                                if (!window['supports_' + format]) {
+                                    // Format likely unsupported, trigger error handler
+                                    img.onerror();
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    // Check if image failed to load initially
+                    if (img.complete && img.naturalWidth === 0) {
+                        img.onerror();
                     }
                 }
 
@@ -311,11 +346,23 @@ struct HTMLWebView: UIViewRepresentable {
                     document.head.appendChild(meta);
                 }
 
-                // Log any remaining errors for debugging
+                // Suppress console errors for unsupported image formats
                 window.addEventListener('error', function(e) {
-                    if (e.target.tagName === 'IMG') {
-                        console.log('Image load error:', e.target.src);
+                    if (e.target && e.target.tagName === 'IMG') {
+                        var src = e.target.src || '';
+                        // Don't log errors for known unsupported formats
+                        var isUnsupported = false;
+                        for (var i = 0; i < unsupportedFormats.length; i++) {
+                            if (src.toLowerCase().includes(unsupportedFormats[i])) {
+                                isUnsupported = true;
+                                break;
+                            }
+                        }
+                        if (!isUnsupported) {
+                            console.log('Image load error:', src);
+                        }
                         e.target.style.display = 'none';
+                        e.preventDefault(); // Prevent error propagation
                     }
                 }, true);
             """

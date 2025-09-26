@@ -90,14 +90,14 @@ class MessageProcessor {
     private func extractContent(from part: MessagePart) -> (html: String?, plainText: String?) {
         var html: String? = nil
         var plainText: String? = nil
-        
+
         func traverse(_ part: MessagePart) {
             if part.mimeType == "text/html", let data = part.body?.data {
                 html = decodeBase64(data)
             } else if part.mimeType == "text/plain", let data = part.body?.data {
                 plainText = decodeBase64(data)
             }
-            
+
             if let parts = part.parts {
                 for subpart in parts {
                     traverse(subpart)
@@ -105,14 +105,12 @@ class MessageProcessor {
                 }
             }
         }
-        
+
         traverse(part)
-        
-        // Clean HTML if present
-        if let htmlContent = html {
-            html = emailTextProcessor.removeQuotedFromHTML(htmlContent) ?? htmlContent
-        }
-        
+
+        // Don't clean HTML content here - preserve original for display
+        // The cleaning will be done only when creating snippets
+
         return (html, plainText)
     }
     
@@ -136,7 +134,9 @@ class MessageProcessor {
     
     private func createCleanedSnippet(html: String?, plainText: String?, snippet: String?) -> String? {
         if let html = html {
-            let plainFromHTML = emailTextProcessor.extractPlainFromHTML(html)
+            // First try to remove quoted content for snippets
+            let cleanedHTML = emailTextProcessor.removeQuotedFromHTML(html) ?? html
+            let plainFromHTML = emailTextProcessor.extractPlainFromHTML(cleanedHTML)
             return emailTextProcessor.createCleanSnippet(from: plainFromHTML)
         } else if let plainText = plainText {
             return emailTextProcessor.createCleanSnippet(from: plainText)
@@ -185,7 +185,7 @@ class MessageProcessor {
 
 // MARK: - Data Models
 
-class ProcessedMessage {
+final class ProcessedMessage: @unchecked Sendable {
     var id: String = ""
     var gmThreadId: String = ""
     var snippet: String?
@@ -200,7 +200,7 @@ class ProcessedMessage {
     var attachmentInfo: [AttachmentInfo] = []
 }
 
-struct ProcessedHeaders {
+struct ProcessedHeaders: Sendable {
     var subject: String?
     var from: String?
     var to: [EmailAddress] = []
@@ -212,12 +212,12 @@ struct ProcessedHeaders {
     var messageId: String?
 }
 
-struct EmailAddress {
+struct EmailAddress: Sendable {
     let email: String
     let displayName: String?
 }
 
-struct AttachmentInfo {
+struct AttachmentInfo: Sendable {
     let id: String
     let filename: String
     let mimeType: String

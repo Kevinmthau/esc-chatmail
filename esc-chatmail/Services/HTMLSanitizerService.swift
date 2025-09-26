@@ -168,7 +168,7 @@ class HTMLSanitizerService: HTMLSanitizerProtocol {
             }
         }
 
-        // Sanitize src attributes
+        // Sanitize src attributes - be more lenient with newsletter images
         let srcPattern = "src\\s*=\\s*[\"']([^\"']*)[\"']"
         let srcRegex = try? NSRegularExpression(pattern: srcPattern, options: .caseInsensitive)
         let srcMatches = srcRegex?.matches(in: result, range: NSRange(result.startIndex..., in: result)) ?? []
@@ -177,23 +177,17 @@ class HTMLSanitizerService: HTMLSanitizerProtocol {
             if let range = Range(match.range(at: 1), in: result) {
                 let url = String(result[range]).trimmingCharacters(in: .whitespacesAndNewlines)
 
-                // Skip empty URLs or replace with transparent pixel
+                // Skip empty URLs but don't replace valid newsletter tracking pixels
                 if url.isEmpty {
                     let fullRange = Range(match.range, in: result)!
                     // Use a transparent 1x1 pixel data URL to prevent errors
                     result.replaceSubrange(fullRange, with: "src=\"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7\"")
-                } else if !isURLSafe(url) && !isDataURL(url) {
+                } else if url.hasPrefix("javascript:") || url.hasPrefix("vbscript:") {
+                    // Only block explicitly dangerous URLs
                     let fullRange = Range(match.range, in: result)!
-                    // Use a transparent 1x1 pixel data URL to prevent errors
                     result.replaceSubrange(fullRange, with: "src=\"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7\"")
-                } else if !url.hasPrefix("http") && !url.hasPrefix("data:") && !url.hasPrefix("/") {
-                    // Fix relative URLs that might be malformed
-                    let fullRange = Range(match.range, in: result)!
-                    if url.contains(":") && !url.hasPrefix("mailto:") && !url.hasPrefix("tel:") {
-                        // Likely a malformed URL, replace with transparent pixel
-                        result.replaceSubrange(fullRange, with: "src=\"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7\"")
-                    }
                 }
+                // Allow all other URLs including tracking pixels and newsletter images
             }
         }
 
@@ -501,14 +495,14 @@ class HTMLSanitizerService: HTMLSanitizerProtocol {
                     overflow: auto;
                     -webkit-overflow-scrolling: touch;
                 }
-                /* Default body styles - can be overridden by email styles */
+                /* Default body styles - preserve email's own styling when possible */
                 body {
                     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
                     font-size: 16px;
                     line-height: 1.5;
                     color: \(textColor);
                     background-color: \(backgroundColor);
-                    padding: 16px;
+                    padding: 8px;
                     margin: 0;
                     word-wrap: break-word;
                     -webkit-text-size-adjust: 100%;
@@ -521,24 +515,35 @@ class HTMLSanitizerService: HTMLSanitizerProtocol {
                 a:hover {
                     text-decoration: underline;
                 }
-                /* Ensure images are responsive */
+                /* Ensure images are responsive but respect their intended size */
                 img {
                     max-width: 100% !important;
                     height: auto !important;
                     border: 0;
+                    display: block;
                 }
-                /* Table improvements */
+                /* Respect table layouts for newsletters */
                 table {
                     max-width: 100% !important;
-                    width: auto !important;
+                    border-collapse: collapse;
                 }
-                /* Fix for nested tables */
+                /* Fix for nested tables in newsletters */
                 table table {
                     width: 100% !important;
                 }
-                /* Ensure text contrast in dark mode */
+                /* Preserve newsletter cell styling */
+                td, th {
+                    vertical-align: top;
+                }
+                /* Ensure text contrast in dark mode only when needed */
                 \(isDarkMode ? """
-                p, span, div, td, th, li {
+                /* Only override text color if not already specified */
+                p:not([style*="color"]),
+                span:not([style*="color"]),
+                div:not([style*="color"]),
+                td:not([style*="color"]),
+                th:not([style*="color"]),
+                li:not([style*="color"]) {
                     color: \(textColor) !important;
                 }
                 """ : "")
@@ -546,14 +551,37 @@ class HTMLSanitizerService: HTMLSanitizerProtocol {
             <script>
                 // Wait for DOM and images
                 window.addEventListener('load', function() {
-                    // Force image reload if needed
+                    // Handle modern image formats that may not be supported
                     var images = document.getElementsByTagName('img');
                     for (var i = 0; i < images.length; i++) {
                         var img = images[i];
-                        if (img.naturalWidth === 0) {
-                            var src = img.src;
-                            img.src = '';
-                            img.src = src;
+
+                        // Add comprehensive error handling
+                        img.onerror = function() {
+                            // Check if it's a modern format that needs fallback
+                            var src = this.src || '';
+                            if (src.includes('.webp') || src.includes('.avif') || src.includes('.jxl')) {
+                                // Hide unsupported format images
+                                this.style.display = 'none';
+                                this.alt = this.alt || 'Image not available';
+                            } else if (this.naturalWidth === 0) {
+                                // Try one reload for other formats
+                                if (!this.dataset.retried) {
+                                    this.dataset.retried = 'true';
+                                    var originalSrc = this.src;
+                                    this.src = '';
+                                    this.src = originalSrc;
+                                } else {
+                                    // Hide if still failing
+                                    this.style.display = 'none';
+                                }
+                            }
+                            this.onerror = null; // Prevent infinite loop
+                        };
+
+                        // Check if image failed to load initially
+                        if (img.complete && img.naturalWidth === 0) {
+                            img.onerror();
                         }
                     }
 

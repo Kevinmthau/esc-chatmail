@@ -34,6 +34,24 @@
         <attribute name="type" attributeType="String"/>
         <relationship name="messages" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="Message" inverseName="conversation" inverseEntity="Message"/>
         <relationship name="participants" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="ConversationParticipant" inverseName="conversation" inverseEntity="ConversationParticipant"/>
+        <fetchIndex name="byKeyHashIndex">
+            <fetchIndexElement property="keyHash" type="Binary" order="ascending"/>
+        </fetchIndex>
+        <fetchIndex name="byLastMessageDateIndex">
+            <fetchIndexElement property="lastMessageDate" type="Binary" order="descending"/>
+        </fetchIndex>
+        <fetchIndex name="byPinnedAndDateIndex">
+            <fetchIndexElement property="pinned" type="Binary" order="descending"/>
+            <fetchIndexElement property="lastMessageDate" type="Binary" order="descending"/>
+        </fetchIndex>
+        <fetchIndex name="byHiddenIndex">
+            <fetchIndexElement property="hidden" type="Binary" order="ascending"/>
+        </fetchIndex>
+        <uniquenessConstraints>
+            <uniquenessConstraint>
+                <constraint value="keyHash"/>
+            </uniquenessConstraint>
+        </uniquenessConstraints>
     </entity>
     <entity name="ConversationParticipant" representedClassName="ConversationParticipant" syncable="YES">
         <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
@@ -66,6 +84,23 @@
         <relationship name="conversation" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="Conversation" inverseName="messages" inverseEntity="Conversation"/>
         <relationship name="labels" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="Label" inverseName="messages" inverseEntity="Label"/>
         <relationship name="participants" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="MessageParticipant" inverseName="message" inverseEntity="MessageParticipant"/>
+        <fetchIndex name="byGmThreadIdIndex">
+            <fetchIndexElement property="gmThreadId" type="Binary" order="ascending"/>
+        </fetchIndex>
+        <fetchIndex name="byInternalDateIndex">
+            <fetchIndexElement property="internalDate" type="Binary" order="descending"/>
+        </fetchIndex>
+        <fetchIndex name="byIdIndex">
+            <fetchIndexElement property="id" type="Binary" order="ascending"/>
+        </fetchIndex>
+        <fetchIndex name="byIsUnreadIndex">
+            <fetchIndexElement property="isUnread" type="Binary" order="ascending"/>
+        </fetchIndex>
+        <uniquenessConstraints>
+            <uniquenessConstraint>
+                <constraint value="id"/>
+            </uniquenessConstraint>
+        </uniquenessConstraints>
     </entity>
     <entity name="MessageParticipant" representedClassName="MessageParticipant" syncable="YES">
         <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
