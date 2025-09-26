@@ -25,7 +25,8 @@ class AttachmentDownloader: ObservableObject {
         let context = coreDataStack.newBackgroundContext()
         let request = NSFetchRequest<Attachment>(entityName: "Attachment")
         request.predicate = NSPredicate(format: "stateRaw == %@", "queued")
-        
+        request.fetchBatchSize = 10  // Process attachments in small batches to reduce memory usage
+
         guard let attachments = try? context.fetch(request) else { return }
         
         for attachment in attachments {
@@ -213,7 +214,8 @@ class AttachmentDownloader: ObservableObject {
         
         let context = coreDataStack.viewContext
         let request = NSFetchRequest<NSManagedObject>(entityName: "Attachment")
-        
+        request.fetchBatchSize = 50  // Process in batches for better memory usage
+
         guard let attachments = try? context.fetch(request) else { return }
         
         let validFiles = Set(attachments.compactMap { attachment -> [String] in

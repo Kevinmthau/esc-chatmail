@@ -75,10 +75,19 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
     private init() {
         setupNetworkMonitoring()
     }
-    
+
+    deinit {
+        // Cleanup network monitor and cancellables
+        networkMonitor.cancel()
+        cancellables.forEach { $0.cancel() }
+        cancellables.removeAll()
+        // Note: syncStateActor cleanup is not needed as SyncEngine is a singleton
+        // that lives for the entire app lifetime
+    }
+
     private func setupNetworkMonitoring() {
         networkMonitor.pathUpdateHandler = { [weak self] path in
-            Task {
+            Task { [weak self] in
                 await self?.networkReachableActor.setReachable(path.status == .satisfied)
             }
             if !path.isExpensive && path.status == .satisfied {

@@ -2,14 +2,7 @@ import SwiftUI
 import CoreData
 
 struct ConversationListView: View {
-    @FetchRequest(
-        entity: Conversation.entity(),
-        sortDescriptors: [
-            NSSortDescriptor(keyPath: \Conversation.pinned, ascending: false),
-            NSSortDescriptor(keyPath: \Conversation.lastMessageDate, ascending: false)
-        ],
-        predicate: NSPredicate(format: "hidden == NO")
-    ) private var conversations: FetchedResults<Conversation>
+    @FetchRequest private var conversations: FetchedResults<Conversation>
 
     init() {
         let request = NSFetchRequest<Conversation>(entityName: "Conversation")

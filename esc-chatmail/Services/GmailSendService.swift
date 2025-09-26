@@ -230,6 +230,7 @@ final class GmailSendService: ObservableObject {
         // Get account info for myAliases
         let accountRequest = Account.fetchRequest()
         accountRequest.fetchLimit = 1
+        accountRequest.fetchBatchSize = 1  // Single object fetch
 
         let myAliases: Set<String>
         if let account = try? viewContext.fetch(accountRequest).first {
@@ -262,6 +263,7 @@ final class GmailSendService: ObservableObject {
         let request = Message.fetchRequest()
         request.predicate = NSPredicate(format: "id == %@", messageID)
         request.fetchLimit = 1
+        request.fetchBatchSize = 1  // Single object fetch
 
         do {
             return try viewContext.fetch(request).first
@@ -304,6 +306,7 @@ final class GmailSendService: ObservableObject {
         let request: NSFetchRequest<Conversation> = Conversation.fetchRequest()
         request.predicate = NSPredicate(format: "keyHash == %@", identity.keyHash)
         request.fetchLimit = 1
+        request.fetchBatchSize = 1  // Single object fetch
 
         if let existing = try? context.fetch(request).first {
             return existing
@@ -324,6 +327,7 @@ final class GmailSendService: ObservableObject {
             let personRequest = Person.fetchRequest()
             personRequest.predicate = NSPredicate(format: "email == %@", email)
             personRequest.fetchLimit = 1
+            personRequest.fetchBatchSize = 1  // Single object fetch
             
             let person: Person
             if let existingPerson = try? viewContext.fetch(personRequest).first {
