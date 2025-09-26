@@ -3,8 +3,8 @@ import WebKit
 import CoreData
 
 struct ChatView: View {
-    let conversation: Conversation
-    
+    @ObservedObject var conversation: Conversation
+
     @FetchRequest private var messages: FetchedResults<Message>
     @StateObject private var messageActions = MessageActions()
     @StateObject private var sendService: GmailSendService
@@ -178,10 +178,26 @@ struct ChatView: View {
     }
     
     private func markConversationAsRead() {
+        // Immediately clear the unread count to remove the indicator
+        let context = conversation.managedObjectContext ?? CoreDataStack.shared.viewContext
+        conversation.inboxUnreadCount = 0
+
+        do {
+            try context.save()
+        } catch {
+            print("Failed to save conversation unread count: \(error)")
+        }
+
+        // Then mark individual messages as read
         Task {
             let unreadMessages = messages.filter { $0.isUnread }
             for message in unreadMessages {
                 try? await messageActions.markAsRead(message: message)
+            }
+            // Update the conversation's unread count again after marking messages
+            await MainActor.run {
+                conversation.inboxUnreadCount = 0
+                try? context.save()
             }
         }
     }
