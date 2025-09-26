@@ -62,26 +62,34 @@ class BackgroundSyncManager {
     
     private func handleAppRefresh(task: BGAppRefreshTask) {
         scheduleAppRefresh()
-        
-        let backgroundTask = Task {
-            let success = await performDeltaSync(isProcessingTask: false)
+
+        let backgroundTask = Task { [weak self] in
+            guard let self = self else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            let success = await self.performDeltaSync(isProcessingTask: false)
             task.setTaskCompleted(success: success)
         }
-        
+
         task.expirationHandler = {
             backgroundTask.cancel()
             task.setTaskCompleted(success: false)
         }
     }
-    
+
     private func handleProcessing(task: BGProcessingTask) {
         scheduleProcessingTask()
-        
-        let backgroundTask = Task {
-            let success = await performDeltaSync(isProcessingTask: true)
+
+        let backgroundTask = Task { [weak self] in
+            guard let self = self else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            let success = await self.performDeltaSync(isProcessingTask: true)
             task.setTaskCompleted(success: success)
         }
-        
+
         task.expirationHandler = {
             backgroundTask.cancel()
             task.setTaskCompleted(success: false)
@@ -224,7 +232,7 @@ class BackgroundSyncManager {
     private func fetchAndStoreMessages(messageIds: [String]) async {
         let context = coreDataStack.newBackgroundContext()
         let batchSize = 10
-        
+
         for batch in messageIds.chunked(into: batchSize) {
             await withTaskGroup(of: GmailMessage?.self) { group in
                 for messageId in batch {
@@ -232,7 +240,7 @@ class BackgroundSyncManager {
                         try? await self?.apiClient.getMessage(id: messageId)
                     }
                 }
-                
+
                 for await message in group {
                     if let message = message {
                         await syncEngine.saveMessage(message, in: context)
@@ -240,54 +248,63 @@ class BackgroundSyncManager {
                 }
             }
         }
-        
+
         await syncEngine.updateConversationRollups(in: context)
         coreDataStack.saveIfNeeded(context: context)
     }
     
     private func deleteMessages(messageIds: [String], in context: NSManagedObjectContext) async {
-        for messageId in messageIds {
-            let fetchRequest: NSFetchRequest<Message> = Message.fetchRequest()
-            fetchRequest.predicate = NSPredicate(format: "id == %@", messageId)
-            
-            do {
-                let messages = try context.fetch(fetchRequest)
-                for message in messages {
-                    context.delete(message)
+        await context.perform {
+            for messageId in messageIds {
+                let fetchRequest: NSFetchRequest<Message> = Message.fetchRequest()
+                fetchRequest.predicate = NSPredicate(format: "id == %@", messageId)
+
+                do {
+                    let messages = try context.fetch(fetchRequest)
+                    for message in messages {
+                        context.delete(message)
+                    }
+                } catch {
+                    print("Failed to delete message \(messageId): \(error)")
                 }
-            } catch {
-                print("Failed to delete message \(messageId): \(error)")
             }
         }
     }
     
     private func getStoredHistoryId() -> String? {
-        let context = coreDataStack.viewContext
-        let fetchRequest: NSFetchRequest<Account> = Account.fetchRequest()
-        fetchRequest.fetchLimit = 1
-        
-        do {
-            let accounts = try context.fetch(fetchRequest)
-            return accounts.first?.historyId
-        } catch {
-            print("Failed to fetch historyId: \(error)")
-            return nil
+        var historyId: String? = nil
+        let context = coreDataStack.newBackgroundContext()
+        context.performAndWait {
+            let fetchRequest: NSFetchRequest<Account> = Account.fetchRequest()
+            fetchRequest.fetchLimit = 1
+
+            do {
+                let accounts = try context.fetch(fetchRequest)
+                historyId = accounts.first?.historyId
+            } catch {
+                print("Failed to fetch historyId: \(error)")
+            }
         }
+        return historyId
     }
     
     private func storeHistoryId(_ historyId: String) {
-        let context = coreDataStack.viewContext
-        let fetchRequest: NSFetchRequest<Account> = Account.fetchRequest()
-        fetchRequest.fetchLimit = 1
-        
-        do {
-            let accounts = try context.fetch(fetchRequest)
-            if let account = accounts.first {
-                account.historyId = historyId
-                coreDataStack.saveIfNeeded(context: context)
+        Task {
+            do {
+                try await coreDataStack.performBackgroundTask { [weak self] context in
+                    guard let self = self else { return }
+                    let fetchRequest: NSFetchRequest<Account> = Account.fetchRequest()
+                    fetchRequest.fetchLimit = 1
+
+                    let accounts = try context.fetch(fetchRequest)
+                    if let account = accounts.first {
+                        account.historyId = historyId
+                        try self.coreDataStack.save(context: context)
+                    }
+                }
+            } catch {
+                print("Failed to store historyId: \(error)")
             }
-        } catch {
-            print("Failed to store historyId: \(error)")
         }
     }
     

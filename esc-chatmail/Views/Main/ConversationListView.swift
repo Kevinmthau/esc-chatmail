@@ -17,6 +17,7 @@ struct ConversationListView: View {
     @State private var showingComposer = false
     @State private var showingSettings = false
     @State private var syncTimer: Timer?
+    @State private var hasPerformedInitialSync = false
     
     var body: some View {
         List {
@@ -71,9 +72,20 @@ struct ConversationListView: View {
     }
     
     private func performInitialSync() {
+        guard !hasPerformedInitialSync else { return }
+
+        // Only mark as performed if we're actually authenticated
+        guard AuthSession.shared.isAuthenticated else {
+            print("Skipping initial sync - not authenticated")
+            return
+        }
+
+        hasPerformedInitialSync = true
+
         Task {
             do {
-                try await syncEngine.performInitialSync()
+                // Try incremental sync first, it will fall back to initial sync if needed
+                try await syncEngine.performIncrementalSync()
             } catch {
                 print("Initial sync error: \(error)")
             }
@@ -121,13 +133,14 @@ struct ConversationListView: View {
     private func startPeriodicSync() {
         // Stop any existing timer
         stopPeriodicSync()
-        
-        // Start a new timer that fires every 30 seconds
-        syncTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { _ in
+
+        // Start a new timer that fires every 60 seconds (increased from 30)
+        // Note: SwiftUI Views are structs, so we don't need weak references
+        syncTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { _ in
             Task {
                 // Only sync if not already syncing
                 if await !self.syncEngine.isSyncing {
-                    print("Performing periodic sync")
+                    print("Performing periodic sync at \(Date())")
                     do {
                         try await self.syncEngine.performIncrementalSync()
                     } catch {

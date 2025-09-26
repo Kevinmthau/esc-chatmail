@@ -8,28 +8,54 @@ struct ImageProcessor {
     static let jpegCompressionQuality: CGFloat = 0.85
     
     static func processImage(data: Data, maxDimension: CGFloat = maxFullSizeDimension) -> (processed: Data?, size: CGSize?) {
-        guard let image = UIImage(data: data) else { return (nil, nil) }
-        
+        // Validate data is not empty
+        guard !data.isEmpty else {
+            print("ImageProcessor: Empty data provided")
+            return (nil, nil)
+        }
+
+        // Try to create image from data
+        guard let image = UIImage(data: data) else {
+            print("ImageProcessor: Failed to create UIImage from data of size \(data.count)")
+            return (nil, nil)
+        }
+
+        // Validate image dimensions
         let size = image.size
+        guard size.width > 0 && size.height > 0 else {
+            print("ImageProcessor: Invalid image dimensions \(size)")
+            return (nil, nil)
+        }
+
         let scale = min(maxDimension / max(size.width, size.height), 1.0)
-        
+
         if scale >= 1.0 {
             return (data, size)
         }
-        
+
         let newSize = CGSize(width: size.width * scale, height: size.height * scale)
-        
-        UIGraphicsBeginImageContextWithOptions(newSize, false, 1.0)
-        defer { UIGraphicsEndImageContext() }
-        
-        image.draw(in: CGRect(origin: .zero, size: newSize))
-        
-        guard let resizedImage = UIGraphicsGetImageFromCurrentImageContext(),
-              let jpegData = resizedImage.jpegData(compressionQuality: jpegCompressionQuality) else {
-            return (nil, nil)
+
+        // Use newer rendering API if available
+        if #available(iOS 10.0, *) {
+            let renderer = UIGraphicsImageRenderer(size: newSize)
+            let jpegData = renderer.jpegData(withCompressionQuality: jpegCompressionQuality) { context in
+                image.draw(in: CGRect(origin: .zero, size: newSize))
+            }
+            return (jpegData, newSize)
+        } else {
+            // Fallback for older iOS versions
+            UIGraphicsBeginImageContextWithOptions(newSize, false, 1.0)
+            defer { UIGraphicsEndImageContext() }
+
+            image.draw(in: CGRect(origin: .zero, size: newSize))
+
+            guard let resizedImage = UIGraphicsGetImageFromCurrentImageContext(),
+                  let jpegData = resizedImage.jpegData(compressionQuality: jpegCompressionQuality) else {
+                return (nil, nil)
+            }
+
+            return (jpegData, newSize)
         }
-        
-        return (jpegData, newSize)
     }
     
     static func generateThumbnail(from data: Data, mimeType: String) -> Data? {

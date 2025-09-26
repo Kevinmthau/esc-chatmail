@@ -20,14 +20,45 @@ private actor NetworkReachableActor {
     }
 }
 
+// MARK: - Sync State Actor for Thread Safety
+private actor SyncStateActor {
+    private var isCurrentlySyncing = false
+    private var syncTask: Task<Void, Error>?
+
+    func beginSync() async -> Bool {
+        guard !isCurrentlySyncing else {
+            print("Sync already in progress, skipping")
+            return false
+        }
+        isCurrentlySyncing = true
+        return true
+    }
+
+    func endSync() {
+        isCurrentlySyncing = false
+        syncTask = nil
+    }
+
+    func setSyncTask(_ task: Task<Void, Error>?) {
+        syncTask?.cancel()
+        syncTask = task
+    }
+
+    func cancelCurrentSync() {
+        syncTask?.cancel()
+        syncTask = nil
+        isCurrentlySyncing = false
+    }
+}
+
 @MainActor
 final class SyncEngine: ObservableObject, @unchecked Sendable {
     static let shared = SyncEngine()
-    
+
     @Published var isSyncing = false
     @Published var syncProgress: Double = 0.0
     @Published var syncStatus: String = ""
-    
+
     private let apiClient = GmailAPIClient.shared
     private let coreDataStack = CoreDataStack.shared
     private let messageProcessor = MessageProcessor()
@@ -39,7 +70,8 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
     private let networkMonitor = NWPathMonitor()
     private let monitorQueue = DispatchQueue(label: "NetworkMonitor")
     private let networkReachableActor = NetworkReachableActor()
-    
+    private let syncStateActor = SyncStateActor()
+
     private init() {
         setupNetworkMonitoring()
     }
@@ -63,6 +95,31 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
     }
     
     func performInitialSync() async throws {
+        // Ensure only one sync runs at a time
+        guard await syncStateActor.beginSync() else {
+            print("Sync already in progress, skipping initial sync")
+            return
+        }
+
+        defer {
+            Task {
+                await syncStateActor.endSync()
+            }
+        }
+
+        do {
+            try await performInitialSyncLogic()
+        } catch {
+            print("Initial sync failed: \(error)")
+            await MainActor.run {
+                self.syncStatus = "Sync failed: \(error.localizedDescription)"
+                self.isSyncing = false
+            }
+            // Don't rethrow here to avoid propagation issues
+        }
+    }
+
+    private func performInitialSyncLogic() async throws {
         await MainActor.run {
             self.isSyncing = true
             self.syncProgress = 0.0
@@ -179,6 +236,18 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
     }
     
     func performIncrementalSync() async throws {
+        // Ensure only one sync runs at a time
+        guard await syncStateActor.beginSync() else {
+            print("Sync already in progress, skipping incremental sync")
+            return
+        }
+
+        defer {
+            Task {
+                await syncStateActor.endSync()
+            }
+        }
+
         // Check network connectivity first
         guard await isNetworkAvailable() else {
             print("Network not available, skipping sync")
@@ -188,24 +257,36 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
             }
             return
         }
-        
-        guard let account = try await fetchAccount() else { 
+
+        // Fetch account data in a thread-safe way
+        let accountData = try await fetchAccountData()
+        guard let accountData = accountData else {
             print("No account found for incremental sync")
-            return 
+            return
         }
-        
-        // Extract account properties while still on the main thread
-        let historyId = account.historyId
-        let email = account.email
-        let aliases = account.aliasesArray
+
+        let historyId = accountData.historyId
+        let email = accountData.email
+        let aliases = accountData.aliases
         
         print("Starting incremental sync with historyId: \(historyId ?? "nil")")
         
-        guard let historyId = historyId else {
-            print("No historyId found, falling back to initial sync")
-            try await performInitialSync()
+        if historyId == nil {
+            print("No historyId found, performing full sync")
+            // Perform initial sync logic inline to avoid re-entrancy
+            do {
+                try await performInitialSyncLogic()
+            } catch {
+                print("Initial sync during incremental failed: \(error)")
+                await MainActor.run {
+                    self.syncStatus = "Sync failed: \(error.localizedDescription)"
+                    self.isSyncing = false
+                }
+            }
             return
         }
+
+        guard let historyId = historyId else { return }
         
         // Initialize myAliases with stored aliases
         myAliases = Set(([email] + aliases).map(normalizedEmail))
@@ -266,13 +347,46 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
             
         } catch {
             if error.localizedDescription.contains("too old") {
-                try await performInitialSync()
+                print("History too old, need to perform full sync")
+                // Perform initial sync logic inline to avoid re-entrancy
+                do {
+                    try await performInitialSyncLogic()
+                } catch {
+                    print("Initial sync after history error failed: \(error)")
+                    await MainActor.run {
+                        self.syncStatus = "Sync failed: \(error.localizedDescription)"
+                        self.isSyncing = false
+                    }
+                }
             } else {
+                // Better error handling for different error types
+                let errorMessage: String
+                if let urlError = error as? URLError {
+                    switch urlError.code {
+                    case .unsupportedURL:
+                        errorMessage = "Invalid URL configuration"
+                    case .notConnectedToInternet:
+                        errorMessage = "No internet connection"
+                    case .timedOut:
+                        errorMessage = "Request timed out"
+                    case .networkConnectionLost:
+                        errorMessage = "Network connection lost"
+                    default:
+                        errorMessage = "Network error: \(urlError.localizedDescription)"
+                    }
+                } else {
+                    errorMessage = error.localizedDescription
+                }
+
                 await MainActor.run {
-                    self.syncStatus = "Sync failed: \(error.localizedDescription)"
+                    self.syncStatus = "Sync failed: \(errorMessage)"
                     self.isSyncing = false
                 }
-                throw error
+
+                // Don't throw for recoverable errors
+                if !(error is URLError) {
+                    throw error
+                }
             }
         }
     }
@@ -453,51 +567,72 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
     private func saveAccount(profile: GmailProfile, aliases: [String], in context: NSManagedObjectContext) async -> Account {
         let request = Account.fetchRequest()
         request.predicate = NSPredicate(format: "email == %@", profile.emailAddress)
-        
+
         if let existing = try? context.fetch(request).first {
             existing.aliasesArray = aliases
+            existing.historyId = profile.historyId  // Update historyId for existing account
+            print("Updated existing account: \(profile.emailAddress)")
             return existing
         }
-        
+
         let account = NSEntityDescription.insertNewObject(forEntityName: "Account", into: context) as! Account
         account.id = profile.emailAddress
         account.email = profile.emailAddress
         account.historyId = profile.historyId
         account.aliasesArray = aliases
+        print("Created new account: \(profile.emailAddress) with historyId: \(profile.historyId)")
         return account
     }
     
-    private nonisolated func fetchAccount() async throws -> Account? {
-        return await withCheckedContinuation { continuation in
-            let context = coreDataStack.viewContext
-            context.perform {
-                let request = Account.fetchRequest()
-                request.fetchLimit = 1
-                let account = try? context.fetch(request).first
-                continuation.resume(returning: account)
+    private struct AccountData {
+        let historyId: String?
+        let email: String
+        let aliases: [String]
+    }
+
+    private nonisolated func fetchAccountData() async throws -> AccountData? {
+        return try await coreDataStack.performBackgroundTask { context in
+            let request = Account.fetchRequest()
+            request.fetchLimit = 1
+            let accounts = try context.fetch(request)
+            print("fetchAccountData found \(accounts.count) account(s)")
+            guard let account = accounts.first else {
+                print("No account found in database")
+                return nil
             }
+            // Extract data while still in the correct context
+            print("Found account: \(account.email) with historyId: \(account.historyId ?? "nil")")
+            return AccountData(
+                historyId: account.historyId,
+                email: account.email,
+                aliases: account.aliasesArray
+            )
         }
     }
-    
+
+    private nonisolated func fetchAccount() async throws -> Account? {
+        return try await coreDataStack.performBackgroundTask { context in
+            let request = Account.fetchRequest()
+            request.fetchLimit = 1
+            return try context.fetch(request).first
+        }
+    }
+
     private nonisolated func updateAccountHistoryId(_ historyId: String) async {
-        await withCheckedContinuation { continuation in
-            let context = coreDataStack.viewContext
-            context.perform { [weak self] in
+        do {
+            try await coreDataStack.performBackgroundTask { [weak self] context in
                 guard let self = self else { return }
                 let request = Account.fetchRequest()
                 request.fetchLimit = 1
-                if let account = try? context.fetch(request).first {
+                if let account = try context.fetch(request).first {
                     account.historyId = historyId
-                    do {
-                        try self.coreDataStack.save(context: context)
-                    } catch {
-                        print("Failed to save history ID: \(error)")
-                        // Non-critical - continue
-                    }
+                    try self.coreDataStack.save(context: context)
                 }
-                continuation.resume()
             }
-        } as Void
+        } catch {
+            print("Failed to save history ID: \(error)")
+            // Non-critical - continue
+        }
     }
     
     nonisolated func updateConversationRollups(in context: NSManagedObjectContext) async {

@@ -8,15 +8,17 @@ final class ConversationManager: @unchecked Sendable {
         for identity: ConversationIdentity,
         in context: NSManagedObjectContext
     ) async -> Conversation {
-        let request = Conversation.fetchRequest()
-        request.predicate = NSPredicate(format: "keyHash == %@", identity.keyHash)
-        request.fetchLimit = 1
-        
-        if let existing = try? context.fetch(request).first {
-            return existing
+        return await context.perform {
+            let request = Conversation.fetchRequest()
+            request.predicate = NSPredicate(format: "keyHash == %@", identity.keyHash)
+            request.fetchLimit = 1
+
+            if let existing = try? context.fetch(request).first {
+                return existing
+            }
+
+            return self.createNewConversation(for: identity, in: context)
         }
-        
-        return createNewConversation(for: identity, in: context)
     }
     
     private func createNewConversation(
