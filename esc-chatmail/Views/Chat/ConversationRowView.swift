@@ -11,56 +11,60 @@ struct ConversationRowView: View {
     @State private var participantNames: [String] = []
     
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 3) {
+            // Unread indicator with fixed width container
+            ZStack {
+                if conversation.inboxUnreadCount > 0 {
+                    Circle()
+                        .fill(Color.blue)
+                        .frame(width: 10, height: 10)
+                }
+            }
+            .frame(width: 10, height: 10)
+
             // Avatar stack
             AvatarStackView(avatarData: avatarData, participants: participantNames)
                 .frame(width: 60, height: 60)
-            
+
             VStack(alignment: .leading, spacing: 3) {
                 // Top row: Name, date, and chevron
                 HStack {
-                    if conversation.pinned {
-                        Image(systemName: "pin.fill")
-                            .font(.footnote)
-                            .foregroundColor(.orange)
+                    HStack(spacing: 4) {
+                        if conversation.pinned {
+                            Image(systemName: "pin.fill")
+                                .font(.footnote)
+                                .foregroundColor(.orange)
+                        }
+
+                        Text(displayName)
+                            .font(.headline)
+                            .lineLimit(1)
                     }
-                    
-                    Text(displayName)
-                        .font(.headline)
-                        .lineLimit(1)
-                    
+
                     Spacer()
-                    
+
                     if let date = conversation.lastMessageDate {
                         HStack(spacing: 4) {
                             Text(formatDate(date))
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
-                            
+
                             Image(systemName: "chevron.right")
                                 .font(.footnote.weight(.medium))
                                 .foregroundColor(Color(.tertiaryLabel))
                         }
                     }
                 }
-                
-                // Bottom row: Unread indicator and snippet
-                HStack(spacing: 6) {
-                    if conversation.inboxUnreadCount > 0 {
-                        Circle()
-                            .fill(Color.blue)
-                            .frame(width: 10, height: 10)
-                    }
-                    
-                    Text(conversation.snippet ?? "No messages")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                        .lineLimit(2)
-                }
+
+                // Bottom row: snippet only
+                Text(conversation.snippet ?? "No messages")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
         .task {
             await loadContactInfo()
         }
@@ -170,7 +174,7 @@ struct AvatarStackView: View {
                         Image(uiImage: uiImage)
                             .resizable()
                             .scaledToFill()
-                            .frame(width: 40, height: 40)
+                            .frame(width: 44, height: 44)
                             .clipShape(Circle())
                             .overlay(Circle().stroke(Color.white, lineWidth: 2))
                             .offset(x: CGFloat(index) * 15)
@@ -180,7 +184,7 @@ struct AvatarStackView: View {
                 // Show initials
                 ForEach(0..<min(participants.count, 2), id: \.self) { index in
                     InitialsView(name: participants[index])
-                        .frame(width: 40, height: 40)
+                        .frame(width: 44, height: 44)
                         .offset(x: CGFloat(index) * 15)
                 }
             } else {
