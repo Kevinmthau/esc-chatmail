@@ -42,7 +42,7 @@ final class ConversationListState: ObservableObject {
         ]
         request.predicate = NSPredicate(format: "hidden == NO")
         request.fetchBatchSize = 30
-        request.relationshipKeyPathsForPrefetching = ["messages", "participants"]
+        request.relationshipKeyPathsForPrefetching = ["messages", "participants", "participants.person"]
 
         do {
             let fetchedConversations = try context.fetch(request)
@@ -50,6 +50,15 @@ final class ConversationListState: ObservableObject {
 
             // Warm cache with recent conversations
             cache.warmCache(with: Array(fetchedConversations.prefix(10)))
+
+            // Prefetch Person data for all participants to avoid N+1 queries
+            let allEmails = fetchedConversations.prefix(30).flatMap { conversation -> [String] in
+                guard let participants = conversation.participants else {
+                    return []
+                }
+                return participants.compactMap { $0.person?.email }
+            }
+            await PersonCache.shared.prefetch(emails: Array(Set(allEmails)))
 
             isLoading = false
         } catch {
@@ -183,8 +192,9 @@ struct EnhancedConversationListView: View {
                         listState.selectConversation(conversation)
                     }
 
-                    Divider()
-                        .padding(.leading, 74)
+                    Rectangle()
+                        .fill(Color(.separator))
+                        .frame(height: 1)
                 }
             }
         }
@@ -315,7 +325,7 @@ struct OptimizedConversationRow: View {
             }
         }
         .padding(.horizontal)
-        .padding(.vertical, 12)
+        .padding(.vertical, 20)
         .background(Color(.systemBackground))
         .onAppear {
             onAppear()
@@ -373,8 +383,9 @@ struct ConversationListSkeletonView: View {
             LazyVStack(spacing: 0) {
                 ForEach(0..<10) { _ in
                     ConversationRowSkeleton()
-                    Divider()
-                        .padding(.leading, 74)
+                    Rectangle()
+                        .fill(Color(.separator))
+                        .frame(height: 1)
                 }
             }
         }

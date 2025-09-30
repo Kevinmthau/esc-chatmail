@@ -12,6 +12,7 @@ struct ConversationListView: View {
         ]
         request.predicate = NSPredicate(format: "hidden == NO")
         request.fetchBatchSize = 20  // Load conversations in batches for better memory usage
+        request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]  // Prefetch to avoid N+1
         _conversations = FetchRequest(fetchRequest: request)
     }
     
@@ -69,6 +70,7 @@ struct ConversationListView: View {
             .onAppear {
                 performInitialSync()
                 startPeriodicSync()
+                prefetchPersonData()
             }
             .onDisappear {
                 stopPeriodicSync()
@@ -162,14 +164,14 @@ struct ConversationListView: View {
         stopPeriodicSync()
 
         // Start a new timer that fires every 60 seconds (increased from 30)
-        // Note: SwiftUI Views are structs, so we don't need weak references
-        syncTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { _ in
-            Task {
+        syncTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak syncEngine] _ in
+            Task { @MainActor [weak syncEngine] in
+                guard let syncEngine = syncEngine else { return }
                 // Only sync if not already syncing
-                if await !self.syncEngine.isSyncing {
+                if !syncEngine.isSyncing {
                     print("Performing periodic sync at \(Date())")
                     do {
-                        try await self.syncEngine.performIncrementalSync()
+                        try await syncEngine.performIncrementalSync()
                     } catch {
                         print("Periodic sync error: \(error)")
                     }
@@ -181,5 +183,18 @@ struct ConversationListView: View {
     private func stopPeriodicSync() {
         syncTimer?.invalidate()
         syncTimer = nil
+    }
+
+    private func prefetchPersonData() {
+        Task {
+            // Prefetch Person data for visible conversations to avoid N+1 queries
+            let allEmails = conversations.prefix(30).flatMap { conversation -> [String] in
+                guard let participants = conversation.participants else {
+                    return []
+                }
+                return participants.compactMap { $0.person?.email }
+            }
+            await PersonCache.shared.prefetch(emails: Array(Set(allEmails)))
+        }
     }
 }

@@ -17,15 +17,21 @@ struct esc_chatmailApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
     init() {
-        // Check if this is a fresh install and clear keychain if needed
+        // IMPORTANT: Check for fresh install FIRST, before any auth restoration
         checkAndClearKeychainOnFreshInstall()
-        
+
         configureGoogleSignIn()
         configureBackgroundTasks()
+
         // Initialize Core Data stack early
         _ = CoreDataStack.shared.persistentContainer
+
         // Setup attachment directories
         AttachmentPaths.setupDirectories()
+
+        // NOW restore previous sign-in (after fresh install check)
+        // This ensures we don't restore a session from a deleted app
+        AuthSession.shared.restorePreviousSignIn()
     }
     
     var body: some Scene {
@@ -47,50 +53,150 @@ struct esc_chatmailApp: App {
         let userDefaults = UserDefaults.standard
         let keychainService = KeychainService.shared
 
-        // Check if we have a stored installation ID
-        if let storedID = userDefaults.string(forKey: installationKey) {
-            // Check if this ID exists in keychain - if not, it's a fresh install
-            if !keychainService.verifyInstallationId(storedID) {
-                performFreshInstallCleanup()
-                // Generate and store new installation ID
-                let newID = keychainService.getOrCreateInstallationId()
-                userDefaults.set(newID, forKey: installationKey)
+        // Check if we have a stored installation ID in UserDefaults
+        let hasUserDefaultsID = userDefaults.string(forKey: installationKey) != nil
+
+        // Check if we have keychain data (indicating previous installation)
+        let hasKeychainData = (try? keychainService.loadString(for: .installationId)) != nil
+
+        // Detect fresh install: No UserDefaults but has Keychain data
+        // This happens when app is deleted and reinstalled
+        if !hasUserDefaultsID {
+            print("🔍 Fresh install detected - UserDefaults cleared")
+
+            if hasKeychainData {
+                print("⚠️  Keychain data from previous installation found - cleaning up")
             }
-        } else {
-            // No installation ID found - this is definitely a fresh install
+
+            // Perform cleanup regardless of keychain state
             performFreshInstallCleanup()
+
             // Generate and store new installation ID
             let newID = keychainService.getOrCreateInstallationId()
+
+            // Ensure we can write to UserDefaults after domain removal
             userDefaults.set(newID, forKey: installationKey)
+            userDefaults.set(true, forKey: "isFreshInstall")
+            userDefaults.synchronize()
+
+            // Verify the write succeeded
+            if userDefaults.string(forKey: installationKey) == nil {
+                print("⚠️  UserDefaults write failed, retrying...")
+                Thread.sleep(forTimeInterval: 0.1)
+                userDefaults.set(newID, forKey: installationKey)
+                userDefaults.set(true, forKey: "isFreshInstall")
+                userDefaults.synchronize()
+            }
+
+            print("✅ Fresh install setup complete with new ID: \(newID.prefix(8))...")
+        } else if let storedID = userDefaults.string(forKey: installationKey) {
+            // Verify the stored ID matches keychain
+            if !keychainService.verifyInstallationId(storedID) {
+                print("⚠️  Installation ID mismatch - performing cleanup")
+                performFreshInstallCleanup()
+                let newID = keychainService.getOrCreateInstallationId()
+                userDefaults.set(newID, forKey: installationKey)
+                userDefaults.synchronize()
+            }
         }
     }
     
     private func performFreshInstallCleanup() {
-        // Clear all keychain items using KeychainService
+        print("🧹 Performing fresh install cleanup...")
+
+        // 1. Sign out from Google (synchronous, safe to call during init)
+        print("  → Signing out from Google")
+        GIDSignIn.sharedInstance.signOut()
+
+        // Note: We skip disconnect() during app init as it's async and blocks the UI
+        // The signOut() above is sufficient to clear the local session
+        // Disconnect will happen automatically on next sign-in if needed
+
+        // 2. Clear AuthSession state
+        print("  → Clearing AuthSession")
+        Task { @MainActor in
+            AuthSession.shared.currentUser = nil
+            AuthSession.shared.isAuthenticated = false
+            AuthSession.shared.userEmail = nil
+            AuthSession.shared.userName = nil
+            AuthSession.shared.accessToken = nil
+        }
+
+        // 3. Clear all keychain items
+        print("  → Clearing keychain")
         do {
             try KeychainService.shared.clearAll()
+            print("  ✓ Keychain cleared")
         } catch {
-            print("Failed to clear keychain: \(error)")
+            print("  ⚠️  Failed to clear keychain: \(error)")
         }
 
-        // Clear tokens using TokenManager
+        // 4. Clear tokens using TokenManager
+        print("  → Clearing tokens")
         do {
             try TokenManager.shared.clearTokens()
+            print("  ✓ Tokens cleared")
         } catch {
-            print("Failed to clear tokens: \(error)")
+            print("  ⚠️  Failed to clear tokens: \(error)")
         }
 
-        // Sign out and disconnect from Google
-        GIDSignIn.sharedInstance.signOut()
-        GIDSignIn.sharedInstance.disconnect { _ in
-            // Ignore errors - we're just ensuring cleanup
+        // 5. Clear UserDefaults completely
+        print("  → Clearing UserDefaults")
+        if let bundleIdentifier = Bundle.main.bundleIdentifier {
+            UserDefaults.standard.removePersistentDomain(forName: bundleIdentifier)
+            // Force synchronization to ensure persistent domain removal completes
+            UserDefaults.standard.synchronize()
+            // Small delay to ensure filesystem operations complete
+            Thread.sleep(forTimeInterval: 0.05)
+            print("  ✓ UserDefaults cleared")
         }
 
-        // Clear any cached authentication state
-        AuthSession.shared.currentUser = nil
-        AuthSession.shared.isAuthenticated = false
-        AuthSession.shared.userEmail = nil
-        AuthSession.shared.accessToken = nil
+        // 6. Clear Core Data
+        print("  → Clearing Core Data")
+        Task {
+            do {
+                try await CoreDataStack.shared.resetStore()
+                print("  ✓ Core Data cleared")
+            } catch {
+                print("  ⚠️  Failed to clear Core Data: \(error)")
+            }
+        }
+
+        // 7. Clear attachment caches
+        print("  → Clearing attachment caches")
+        AttachmentCache.shared.clearCache(level: .aggressive)
+        clearAttachmentFiles()
+        print("  ✓ Attachment caches cleared")
+
+        print("✅ Fresh install cleanup complete")
+    }
+
+    private func clearAttachmentFiles() {
+        let fileManager = FileManager.default
+
+        // Clear Documents/Attachments
+        if let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first {
+            let attachmentsURL = documentsURL.appendingPathComponent("Attachments")
+            try? fileManager.removeItem(at: attachmentsURL)
+
+            let messagesURL = documentsURL.appendingPathComponent("Messages")
+            try? fileManager.removeItem(at: messagesURL)
+        }
+
+        // Clear Application Support
+        if let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            let attachmentsURL = appSupportURL.appendingPathComponent("Attachments")
+            try? fileManager.removeItem(at: attachmentsURL)
+
+            let previewsURL = appSupportURL.appendingPathComponent("Previews")
+            try? fileManager.removeItem(at: previewsURL)
+        }
+
+        // Clear Caches
+        if let cacheURL = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first {
+            let attachmentCacheURL = cacheURL.appendingPathComponent("AttachmentCache")
+            try? fileManager.removeItem(at: attachmentCacheURL)
+        }
     }
     
     private func configureGoogleSignIn() {
@@ -134,54 +240,5 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         // Only clear memory cache, but preserve user session
         // Full cleanup only happens on fresh install detection
         AttachmentCache.shared.clearCache(level: .moderate)
-    }
-    
-    // These methods are preserved but only called during fresh install cleanup
-    // They are NOT called on normal app termination to preserve user session
-    private func clearKeychain() {
-        // Clear any keychain items associated with the app
-        let secItemClasses = [
-            kSecClassGenericPassword,
-            kSecClassInternetPassword,
-            kSecClassCertificate,
-            kSecClassKey,
-            kSecClassIdentity
-        ]
-        
-        for itemClass in secItemClasses {
-            let spec: NSDictionary = [kSecClass: itemClass]
-            SecItemDelete(spec)
-        }
-    }
-    
-    private func clearAttachmentFiles() {
-        // Clear attachment directories
-        let fileManager = FileManager.default
-        
-        if let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first {
-            let attachmentsURL = documentsURL.appendingPathComponent("Attachments")
-            try? fileManager.removeItem(at: attachmentsURL)
-        }
-        
-        // Clear cache directory
-        if let cacheURL = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first {
-            let attachmentCacheURL = cacheURL.appendingPathComponent("AttachmentCache")
-            try? fileManager.removeItem(at: attachmentCacheURL)
-        }
-        
-        // Clear temporary directory
-        let tempURL = fileManager.temporaryDirectory
-        if let contents = try? fileManager.contentsOfDirectory(at: tempURL, includingPropertiesForKeys: nil) {
-            for url in contents {
-                try? fileManager.removeItem(at: url)
-            }
-        }
-    }
-    
-    private func clearUserDefaults() {
-        if let bundleIdentifier = Bundle.main.bundleIdentifier {
-            UserDefaults.standard.removePersistentDomain(forName: bundleIdentifier)
-            UserDefaults.standard.synchronize()
-        }
     }
 }

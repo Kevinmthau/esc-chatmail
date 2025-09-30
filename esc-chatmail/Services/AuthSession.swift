@@ -13,9 +13,8 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     @Published var accessToken: String?
     
     private init() {
-        // Always try to restore previous sign-in
-        // The fresh install check in esc_chatmailApp will handle clearing on app deletion
-        restorePreviousSignIn()
+        // Don't auto-restore on init
+        // The app will call restorePreviousSignIn() AFTER fresh install check
     }
     
     var refreshToken: String? {

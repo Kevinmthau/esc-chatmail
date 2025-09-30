@@ -169,8 +169,9 @@ struct HTMLWebView: UIViewRepresentable {
         configuration.allowsInlineMediaPlayback = true
         configuration.dataDetectorTypes = [.phoneNumber, .link, .address]
 
-        // Enable JavaScript for proper rendering using WKWebpagePreferences
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        // SECURITY: Disable JavaScript to prevent XSS attacks from malicious emails
+        // HTML emails should render fine with just CSS. Any dynamic content is a security risk.
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
 
         // Allow content to load properly
         configuration.allowsAirPlayForMediaPlayback = true
@@ -269,7 +270,10 @@ struct HTMLWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             isLoading = false
 
-            // Inject JavaScript to handle images better
+            // NOTE: JavaScript is disabled for security. Image error handling must be done via HTML/CSS.
+            // Unsupported image formats should be filtered during HTML sanitization instead.
+
+            /* JavaScript injection disabled for security - keeping for reference
             let jsCode = """
                 // Comprehensive image error handling for modern formats
                 var images = document.getElementsByTagName('img');
@@ -367,6 +371,7 @@ struct HTMLWebView: UIViewRepresentable {
                 }, true);
             """
             webView.evaluateJavaScript(jsCode, completionHandler: nil)
+            */
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {

@@ -77,8 +77,7 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
 
     private let keychainService: KeychainServiceProtocol
     private let authSession: AuthSession
-    @MainActor private var refreshTask: Task<String, Error>?
-    private let refreshQueue = DispatchQueue(label: "com.esc.tokenmanager.refresh")
+    private let refreshCoordinator = TokenRefreshCoordinator()
     private let refreshBackoffActor = RefreshBackoffActor()
 
     // Token refresh configuration
@@ -123,55 +122,32 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
     }
 
     nonisolated func refreshToken() async throws -> String {
-        // Use an actor to synchronize refresh attempts
-        return try await withCheckedThrowingContinuation { continuation in
-            Task { @MainActor [weak self] in
+        // Use actor-based coordinator to atomically check-and-set refresh task
+        let task = await refreshCoordinator.getOrCreateTask { [weak self] in
+            Task<String, Error> {
                 guard let self = self else {
-                    continuation.resume(throwing: TokenManagerError.noValidToken)
-                    return
+                    throw TokenManagerError.noValidToken
                 }
 
-                // Prevent multiple simultaneous refresh attempts
-                if let existingTask = self.refreshTask {
-                    do {
-                        let result = try await existingTask.value
-                        continuation.resume(returning: result)
-                    } catch {
-                        continuation.resume(throwing: error)
-                    }
-                    return
+                await MainActor.run {
+                    self.isRefreshing = true
+                    self.lastRefreshError = nil
                 }
 
-                let task = Task<String, Error> { [weak self] in
-                    guard let self = self else {
-                        throw TokenManagerError.noValidToken
+                defer {
+                    Task { @MainActor in
+                        self.isRefreshing = false
                     }
-
-                    await MainActor.run {
-                        self.isRefreshing = true
-                        self.lastRefreshError = nil
+                    Task {
+                        await self.refreshCoordinator.clearTask()
                     }
-
-                    defer {
-                        Task { @MainActor in
-                            self.isRefreshing = false
-                            self.refreshTask = nil
-                        }
-                    }
-
-                    return try await self.performTokenRefresh()
                 }
 
-                self.refreshTask = task
-
-                do {
-                    let result = try await task.value
-                    continuation.resume(returning: result)
-                } catch {
-                    continuation.resume(throwing: error)
-                }
+                return try await self.performTokenRefresh()
             }
         }
+
+        return try await task.value
     }
 
     nonisolated func saveTokens(access: String, refresh: String?, expirationDate: Date) throws {
@@ -318,6 +294,25 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
         ]
 
         return networkErrorCodes.contains(nsError.code)
+    }
+}
+
+// MARK: - Token Refresh Coordinator Actor
+// Ensures atomic check-and-set of refresh task to prevent race conditions
+private actor TokenRefreshCoordinator {
+    private var currentTask: Task<String, Error>?
+
+    func getOrCreateTask(_ factory: () -> Task<String, Error>) async -> Task<String, Error> {
+        if let existing = currentTask {
+            return existing
+        }
+        let new = factory()
+        currentTask = new
+        return new
+    }
+
+    func clearTask() {
+        currentTask = nil
     }
 }
 

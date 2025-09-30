@@ -452,6 +452,21 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
                 }
             }
 
+            // Only add attachments if the message doesn't already have them
+            // This prevents duplicate attachments for sent messages where we already created them locally
+            let existingAttachments = existingMessage.value(forKey: "attachments") as? NSSet
+            if existingAttachments == nil || existingAttachments!.count == 0 {
+                for attachmentInfo in processedMessage.attachmentInfo {
+                    let attachment = NSEntityDescription.insertNewObject(forEntityName: "Attachment", into: context) as! Attachment
+                    attachment.setValue(attachmentInfo.id, forKey: "id")
+                    attachment.setValue(attachmentInfo.filename, forKey: "filename")
+                    attachment.setValue(attachmentInfo.mimeType, forKey: "mimeType")
+                    attachment.setValue(Int64(attachmentInfo.size), forKey: "byteSize")
+                    attachment.setValue("queued", forKey: "stateRaw")
+                    attachment.setValue(existingMessage, forKey: "message")
+                }
+            }
+
             print("Updated existing message: \(processedMessage.id)")
             return
         }
@@ -640,7 +655,23 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
             }
         } catch {
             print("Failed to save history ID: \(error)")
-            // Non-critical - continue
+            // Attempt retry once
+            do {
+                try await Task.sleep(nanoseconds: 500_000_000) // 0.5s delay
+                try await coreDataStack.performBackgroundTask { [weak self] context in
+                    guard let self = self else { return }
+                    let request = Account.fetchRequest()
+                    request.fetchLimit = 1
+                    if let account = try context.fetch(request).first {
+                        account.historyId = historyId
+                        try self.coreDataStack.save(context: context)
+                        print("Successfully saved history ID on retry")
+                    }
+                }
+            } catch {
+                print("Failed to save history ID after retry: \(error)")
+                // This could cause missed updates, but we'll pick them up in next full sync
+            }
         }
     }
     
@@ -807,7 +838,11 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
                 print("Removed \(duplicateIds.count) duplicate messages")
             } catch {
                 print("Failed to save after removing duplicates: \(error)")
-                // Non-critical - continue
+                // This IS critical - duplicates will persist and cause UI issues
+                // Attempt rollback and log for investigation
+                context.rollback()
+                print("Rolled back duplicate removal transaction. Duplicates remain in database.")
+                // Consider notifying user or triggering a database maintenance task
             }
         }
     }

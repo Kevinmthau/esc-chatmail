@@ -40,6 +40,14 @@ class AttachmentDownloader: ObservableObject {
     func downloadAttachment(_ attachment: Attachment, messageId: String, in context: NSManagedObjectContext) async {
         guard let attachmentId = attachment.value(forKey: "id") as? String else { return }
 
+        // Skip downloading attachments with local IDs - these are from sent messages and don't exist on Gmail
+        if attachmentId.hasPrefix("local_") {
+            print("Skipping download for local attachment: \(attachmentId)")
+            attachment.setValue("downloaded", forKey: "stateRaw")
+            coreDataStack.saveIfNeeded(context: context)
+            return
+        }
+
         await downloadAttachmentWithRetry(attachment, messageId: messageId, attachmentId: attachmentId, in: context)
     }
 

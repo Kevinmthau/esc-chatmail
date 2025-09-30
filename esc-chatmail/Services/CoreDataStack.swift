@@ -39,12 +39,32 @@ enum CoreDataError: LocalizedError {
 final class CoreDataStack: @unchecked Sendable {
     static let shared = CoreDataStack()
 
-    private var loadAttempts = 0
+    // Synchronize access to mutable state using serial queue
+    private let isolationQueue = DispatchQueue(label: "com.esc.coreDataStack.isolation")
+    private var _loadAttempts = 0
     private let maxLoadAttempts = 3
     private let retryDelay: TimeInterval = 2.0
 
-    private(set) var isStoreLoaded = false
-    private var storeLoadError: Error?
+    private var _isStoreLoaded = false
+    private var _storeLoadError: Error?
+
+    var isStoreLoaded: Bool {
+        isolationQueue.sync { _isStoreLoaded }
+    }
+
+    private var loadAttempts: Int {
+        get { isolationQueue.sync { _loadAttempts } }
+        set { isolationQueue.sync { _loadAttempts = newValue } }
+    }
+
+    private var storeLoadError: Error? {
+        get { isolationQueue.sync { _storeLoadError } }
+        set { isolationQueue.sync { _storeLoadError = newValue } }
+    }
+
+    private func setStoreLoaded(_ loaded: Bool) {
+        isolationQueue.sync { _isStoreLoaded = loaded }
+    }
 
     lazy var persistentContainer: NSPersistentContainer = {
         let container = NSPersistentContainer(name: "ESCChatmail")
@@ -73,7 +93,7 @@ final class CoreDataStack: @unchecked Sendable {
                 self.storeLoadError = error
                 self.handleStoreLoadError(error, for: container)
             } else {
-                self.isStoreLoaded = true
+                self.setStoreLoaded(true)
                 self.loadAttempts = 0
                 print("Core Data store loaded successfully: \(storeDescription)")
             }
@@ -304,7 +324,7 @@ final class CoreDataStack: @unchecked Sendable {
         }
 
         // Reset state
-        isStoreLoaded = false
+        setStoreLoaded(false)
         loadAttempts = 0
 
         if !errors.isEmpty {

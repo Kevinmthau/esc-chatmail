@@ -236,16 +236,16 @@ class GmailAPIClient {
         let (data, _) = try await session.data(for: request)
         
         struct AttachmentResponse: Codable {
-            let size: Int
+            let size: Int?
             let data: String
         }
-        
+
         let response = try JSONDecoder().decode(AttachmentResponse.self, from: data)
-        
+
         guard let attachmentData = Data(base64UrlEncoded: response.data) else {
             throw NSError(domain: "GmailAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to decode attachment data"])
         }
-        
+
         return attachmentData
     }
 }

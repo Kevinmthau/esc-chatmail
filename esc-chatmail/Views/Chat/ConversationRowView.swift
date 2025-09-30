@@ -2,10 +2,11 @@ import SwiftUI
 import CoreData
 
 struct ConversationRowView: View {
-    let conversation: Conversation
+    @ObservedObject var conversation: Conversation
     @StateObject private var contactsResolver = ContactsResolver.shared
     @StateObject private var authSession = AuthSession.shared
-    
+    @StateObject private var personCache = PersonCache.shared
+
     @State private var displayName: String = ""
     @State private var avatarData: [Data] = []
     @State private var participantNames: [String] = []
@@ -63,8 +64,8 @@ struct ConversationRowView: View {
                     .lineLimit(2)
             }
         }
+        .frame(height: 96)
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
         .task {
             await loadContactInfo()
         }
@@ -133,24 +134,20 @@ struct ConversationRowView: View {
     }
     
     private func getPersonDisplayName(for email: String) -> String {
+        // Use PersonCache to avoid N+1 query problem
         let normalized = EmailNormalizer.normalize(email)
-        
-        // Try to get from Core Data Person
-        let request = Person.fetchRequest()
-        request.predicate = NSPredicate(format: "email == %@", normalized)
-        request.fetchLimit = 1
-        
-        if let person = try? CoreDataStack.shared.viewContext.fetch(request).first,
-           let displayName = person.displayName,
-           !displayName.isEmpty {
-            return displayName
+
+        // Try cache first (synchronous)
+        if let cachedName = personCache.getCachedDisplayName(for: normalized) {
+            return cachedName
         }
-        
-        // Fallback to email local part
+
+        // Fallback to email local part if not in cache
+        // The cache will be populated by prefetching in the list view
         if let atIndex = normalized.firstIndex(of: "@") {
             return String(normalized[..<atIndex])
         }
-        
+
         return email
     }
     
