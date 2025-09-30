@@ -38,8 +38,6 @@
 		F9CAD6772E68ADEE00AE9CDF /* Exceptions for "esc-chatmail" folder in "esc-chatmail" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
-				Configuration/Debug.xcconfig,
-				Configuration/Release.xcconfig,
 				Resources/Info.plist,
 			);
 			target = F9399FE02E66521800A7578D /* esc-chatmail */;

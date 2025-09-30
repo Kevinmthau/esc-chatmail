@@ -1,5 +1,5 @@
 import XCTest
-@testable import YourAppModule
+@testable import esc_chatmail
 
 final class MimeBuilderTests: XCTestCase {
     
