@@ -194,26 +194,27 @@ class EmailTextProcessor {
     }
     
     // MARK: - Snippet Creation
-    
+
     /// Creates a clean snippet from email content
-    static func createCleanSnippet(from text: String?, maxLength: Int = 150) -> String {
+    /// Default maxLength is set to 5000 to show ALL newly written text without truncation
+    static func createCleanSnippet(from text: String?, maxLength: Int = 5000) -> String {
         guard let text = text, !text.isEmpty else { return "" }
-        
+
         // Clean the text
         let cleanedText = removeQuotedFromPlainText(text) ?? text
-        
+
         // Remove excessive whitespace and newlines
         let condensed = cleanedText
             .components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
             .joined(separator: " ")
-        
+
         // Truncate if needed
         if condensed.count > maxLength {
             let endIndex = condensed.index(condensed.startIndex, offsetBy: maxLength)
             return String(condensed[..<endIndex]) + "..."
         }
-        
+
         return condensed
     }
     

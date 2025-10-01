@@ -441,30 +441,34 @@ class HTMLSanitizerService: HTMLSanitizerProtocol {
     func analyzeComplexity(_ html: String) -> HTMLComplexity {
         let lowercased = html.lowercased()
 
-        // Check for complex elements
-        if lowercased.contains("<table") ||
-           lowercased.contains("<img") ||
-           lowercased.contains("<video") ||
-           lowercased.contains("<iframe") {
+        // Only mark as complex if it has rich media elements that truly need a web view
+        // These are elements that can't be properly rendered in a text bubble
+        let hasTable = lowercased.contains("<table")
+        let hasImage = lowercased.contains("<img")
+        let hasVideo = lowercased.contains("<video")
+        let hasAudio = lowercased.contains("<audio")
+        let hasIframe = lowercased.contains("<iframe")
+        let hasCanvas = lowercased.contains("<canvas")
+        let hasSvg = lowercased.contains("<svg")
+
+        if hasTable || hasImage || hasVideo || hasAudio || hasIframe || hasCanvas || hasSvg {
             return .complex
         }
 
-        // Check for moderate complexity
-        if lowercased.contains("<div") && lowercased.contains("style") {
-            return .moderate
-        }
-
-        // Count total tags
+        // Count total tags - newsletters typically have 100+ tags
         let tagPattern = "<[^>]+>"
         let regex = try? NSRegularExpression(pattern: tagPattern)
         let matches = regex?.matches(in: html, range: NSRange(html.startIndex..., in: html)) ?? []
 
-        if matches.count > 50 {
+        // Only mark as moderate/complex if there are MANY tags (newsletters, heavy HTML emails)
+        if matches.count > 100 {
             return .complex
-        } else if matches.count > 20 {
+        } else if matches.count > 75 {
             return .moderate
         }
 
+        // Everything else is simple
+        // This includes basic Gmail replies with quoted text (typically 15-40 tags)
         return .simple
     }
 

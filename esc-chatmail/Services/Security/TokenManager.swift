@@ -158,11 +158,11 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
             scope: GoogleConfig.scopes.joined(separator: " ")
         )
 
-        // Save to keychain
-        try keychainService.saveCodable(tokenInfo, for: KeychainService.Key.googleAccessToken.rawValue, withAccess: .whenUnlockedThisDeviceOnly)
+        // Save to keychain with afterFirstUnlock to allow background sync when device is locked
+        try keychainService.saveCodable(tokenInfo, for: KeychainService.Key.googleAccessToken.rawValue, withAccess: .afterFirstUnlockThisDeviceOnly)
 
         if let refresh = refresh {
-            try keychainService.saveString(refresh, for: KeychainService.Key.googleRefreshToken.rawValue, withAccess: .whenUnlockedThisDeviceOnly)
+            try keychainService.saveString(refresh, for: KeychainService.Key.googleRefreshToken.rawValue, withAccess: .afterFirstUnlockThisDeviceOnly)
         }
 
         // Update memory cache

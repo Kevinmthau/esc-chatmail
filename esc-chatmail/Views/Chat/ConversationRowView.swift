@@ -101,15 +101,15 @@ struct ConversationRowView: View {
                     resolvedNames.append(name)
                 } else {
                     // Fallback to Person displayName or email
-                    resolvedNames.append(getPersonDisplayName(for: email))
+                    resolvedNames.append(await getPersonDisplayName(for: email))
                 }
-                
+
                 if let imageData = match.imageData {
                     resolvedAvatars.append(imageData)
                 }
             } else {
                 // Fallback to Person displayName or email
-                resolvedNames.append(getPersonDisplayName(for: email))
+                resolvedNames.append(await getPersonDisplayName(for: email))
             }
         }
         
@@ -133,22 +133,9 @@ struct ConversationRowView: View {
         avatarData = resolvedAvatars
     }
     
-    private func getPersonDisplayName(for email: String) -> String {
-        // Use PersonCache to avoid N+1 query problem
-        let normalized = EmailNormalizer.normalize(email)
-
-        // Try cache first (synchronous)
-        if let cachedName = personCache.getCachedDisplayName(for: normalized) {
-            return cachedName
-        }
-
-        // Fallback to email local part if not in cache
-        // The cache will be populated by prefetching in the list view
-        if let atIndex = normalized.firstIndex(of: "@") {
-            return String(normalized[..<atIndex])
-        }
-
-        return email
+    private func getPersonDisplayName(for email: String) async -> String {
+        // Use PersonCache which fetches from database if not cached
+        return await personCache.getDisplayName(for: email)
     }
     
     private func formatDate(_ date: Date) -> String {

@@ -100,7 +100,7 @@ extension Message {
     @nonobjc public class func fetchRequest() -> NSFetchRequest<Message> {
         return NSFetchRequest<Message>(entityName: "Message")
     }
-    
+
     @NSManaged public var id: String
     @NSManaged public var gmThreadId: String
     @NSManaged public var internalDate: Date
@@ -114,15 +114,48 @@ extension Message {
     @NSManaged public var conversation: Conversation?
     @NSManaged public var labels: Set<Label>?
     @NSManaged public var participants: Set<MessageParticipant>?
-    
+
     var content: String? {
         get { cleanedSnippet }
         set { cleanedSnippet = newValue }
     }
-    
+
     var timestamp: Date {
         get { internalDate }
         set { internalDate = newValue }
+    }
+
+    /// Checks if the message is a forwarded email by looking for forward indicators
+    var isForwardedEmail: Bool {
+        // Check subject line for "FW:" or "Fwd:" prefix
+        if let subject = subject, !subject.isEmpty {
+            let subjectLower = subject.lowercased()
+            if subjectLower.hasPrefix("fwd:") ||
+               subjectLower.hasPrefix("fw:") ||
+               subjectLower.contains("fwd:") ||
+               subjectLower.contains("fw:") {
+                return true
+            }
+        }
+
+        // Check body content for strong forward indicators
+        let bodyText = [snippet, cleanedSnippet].compactMap { $0 }.joined(separator: " ")
+
+        let strongForwardIndicators = [
+            "Begin forwarded message:",
+            "---------- Forwarded message",
+            "------ Original Message ------",
+            "-----Original Message-----",
+            "Forwarded message from"
+        ]
+
+        for indicator in strongForwardIndicators {
+            if bodyText.range(of: indicator, options: .caseInsensitive) != nil {
+                return true
+            }
+        }
+
+        return false
     }
 }
 

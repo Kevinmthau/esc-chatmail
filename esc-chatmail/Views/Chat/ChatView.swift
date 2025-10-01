@@ -473,19 +473,26 @@ struct MessageBubble: View {
     }
 
     private func checkForRichContent() {
+        // Start with false by default
+        hasRichContent = false
+
+        // Check if message is a forwarded email - always show View More for these
+        if message.isForwardedEmail {
+            hasRichContent = true
+            return
+        }
+
         // Check if we have HTML content stored
         if let urlString = message.bodyStorageURI,
            let _ = URL(string: urlString) {
-            // Check if HTML file exists
             let htmlHandler = HTMLContentHandler()
             let messageId = message.id
-            hasRichContent = htmlHandler.htmlFileExists(for: messageId)
 
-            // Additionally analyze complexity if HTML exists
-            if hasRichContent,
+            // Only show View More if HTML exists AND can be loaded AND is not simple
+            if htmlHandler.htmlFileExists(for: messageId),
                let html = htmlHandler.loadHTML(for: messageId) {
                 let complexity = HTMLSanitizerService.shared.analyzeComplexity(html)
-                // Only show View More for moderate to complex HTML
+                // Only show View More for moderate to complex HTML (not simple)
                 hasRichContent = complexity != .simple
             }
         }
