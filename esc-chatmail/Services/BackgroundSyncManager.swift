@@ -231,6 +231,10 @@ class BackgroundSyncManager {
     
     private func fetchAndStoreMessages(messageIds: [String]) async {
         let context = coreDataStack.newBackgroundContext()
+
+        // Prefetch labels for efficient lookups
+        let labelCache = await syncEngine.prefetchLabelsForBackground(in: context)
+
         let batchSize = 10
 
         for batch in messageIds.chunked(into: batchSize) {
@@ -243,7 +247,7 @@ class BackgroundSyncManager {
 
                 for await message in group {
                     if let message = message {
-                        await syncEngine.saveMessage(message, in: context)
+                        await syncEngine.saveMessage(message, labelCache: labelCache, in: context)
                     }
                 }
             }

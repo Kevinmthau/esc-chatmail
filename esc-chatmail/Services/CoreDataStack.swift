@@ -146,16 +146,45 @@ final class CoreDataStack: @unchecked Sendable {
         loadPersistentStores(for: container)
     }
 
+    private func createTimestampedBackup(at storeURL: URL) throws -> URL {
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let backupURL = storeURL.deletingPathExtension().appendingPathExtension("backup-\(timestamp).sqlite")
+
+        // Create backups directory if it doesn't exist
+        let backupsDir = storeURL.deletingLastPathComponent().appendingPathComponent("Backups")
+        try? FileManager.default.createDirectory(at: backupsDir, withIntermediateDirectories: true)
+
+        let backupPath = backupsDir.appendingPathComponent(backupURL.lastPathComponent)
+
+        // Copy main store file
+        try FileManager.default.copyItem(at: storeURL, to: backupPath)
+
+        // Copy associated SQLite files (-wal and -shm)
+        let walURL = storeURL.appendingPathExtension("wal")
+        let shmURL = storeURL.appendingPathExtension("shm")
+        let backupWalURL = backupPath.appendingPathExtension("wal")
+        let backupShmURL = backupPath.appendingPathExtension("shm")
+
+        try? FileManager.default.copyItem(at: walURL, to: backupWalURL)
+        try? FileManager.default.copyItem(at: shmURL, to: backupShmURL)
+
+        print("Created timestamped backup at: \(backupPath)")
+        return backupPath
+    }
+
     private func attemptMigrationRecovery(for container: NSPersistentContainer, error: NSError) {
         // Try loading with manual migration
         if let storeURL = container.persistentStoreDescriptions.first?.url {
             do {
-                // Backup existing store
-                let backupURL = storeURL.appendingPathExtension("backup")
-                try? FileManager.default.copyItem(at: storeURL, to: backupURL)
+                // Create timestamped backup before attempting recovery
+                let backupURL = try createTimestampedBackup(at: storeURL)
+                print("Created backup before migration recovery: \(backupURL.path)")
 
                 // Remove problematic store
                 try FileManager.default.removeItem(at: storeURL)
+                // Also remove journal files
+                try? FileManager.default.removeItem(at: storeURL.appendingPathExtension("wal"))
+                try? FileManager.default.removeItem(at: storeURL.appendingPathExtension("shm"))
 
                 // Retry loading
                 loadPersistentStores(for: container)
@@ -170,10 +199,20 @@ final class CoreDataStack: @unchecked Sendable {
         // Last resort: delete and recreate store
         if let storeURL = container.persistentStoreDescriptions.first?.url {
             do {
+                // Create timestamped backup before destroying data
+                let backupURL = try createTimestampedBackup(at: storeURL)
+                print("Created backup before store reset: \(backupURL.path)")
+
+                // Remove problematic store
                 try FileManager.default.removeItem(at: storeURL)
+                // Also remove journal files
+                try? FileManager.default.removeItem(at: storeURL.appendingPathExtension("wal"))
+                try? FileManager.default.removeItem(at: storeURL.appendingPathExtension("shm"))
+
                 loadPersistentStores(for: container)
             } catch {
                 // Store is completely broken - notify user
+                print("Store reset failed even after backup: \(error)")
                 notifyUserOfCriticalError(error)
             }
         }

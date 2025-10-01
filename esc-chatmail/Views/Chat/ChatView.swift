@@ -8,7 +8,7 @@ struct ChatView: View {
     @FetchRequest private var messages: FetchedResults<Message>
     @StateObject private var messageActions = MessageActions()
     @StateObject private var sendService: GmailSendService
-    @StateObject private var keyboard = KeyboardResponder()
+    @ObservedObject private var keyboard = KeyboardResponder.shared
     @State private var selectedMessage: Message?
     @State private var replyText = ""
     @State private var replyingTo: Message?

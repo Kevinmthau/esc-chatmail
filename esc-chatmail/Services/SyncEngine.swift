@@ -110,15 +110,11 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
             return
         }
 
-        defer {
-            Task {
-                await syncStateActor.endSync()
-            }
-        }
-
         do {
             try await performInitialSyncLogic()
+            await syncStateActor.endSync()
         } catch {
+            await syncStateActor.endSync()
             print("Initial sync failed: \(error)")
             await MainActor.run {
                 self.syncStatus = "Sync failed: \(error.localizedDescription)"
@@ -161,6 +157,9 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
             let labels = try await apiClient.listLabels()
             await saveLabels(labels, in: context)
 
+            // Prefetch all labels into cache for efficient lookups
+            let labelCache = await prefetchLabels(in: context)
+
             await MainActor.run {
                 self.syncStatus = "Fetching messages..."
                 self.syncProgress = 0.2
@@ -176,39 +175,40 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
 
             print("Syncing only sent messages (excluding spam and drafts) after installation: \(installationTimestamp)")
 
-            var allMessageIds: [String] = []
+            // Stream process messages in batches to avoid memory issues with large mailboxes
             var pageToken: String? = nil
+            var totalProcessed = 0
+            let batchSize = 50
+
+            await MainActor.run {
+                self.syncStatus = "Fetching messages..."
+                self.syncProgress = 0.3
+            }
 
             repeat {
                 let response = try await apiClient.listMessages(pageToken: pageToken, maxResults: 500, query: gmailQuery)
-                if let messages = response.messages {
-                    allMessageIds.append(contentsOf: messages.map { $0.id })
-                }
-                pageToken = response.nextPageToken
 
-                let currentCount = allMessageIds.count
-                await MainActor.run {
-                    self.syncProgress = min(0.4, 0.2 + (Double(currentCount) / 10000.0) * 0.2)
+                if let messages = response.messages {
+                    let messageIds = messages.map { $0.id }
+
+                    // Process this page in batches immediately
+                    for batch in messageIds.chunked(into: batchSize) {
+                        await processBatchOfMessages(batch, labelCache: labelCache, in: context)
+                        totalProcessed += batch.count
+
+                        await MainActor.run {
+                            self.syncProgress = min(0.9, 0.3 + (Double(totalProcessed) / 10000.0) * 0.6)
+                            self.syncStatus = "Processing messages... \(totalProcessed)"
+                        }
+                    }
                 }
+
+                pageToken = response.nextPageToken
             } while pageToken != nil
-            
-            let totalMessages = allMessageIds.count
+
             await MainActor.run {
-                self.syncStatus = "Processing \(totalMessages) messages..."
-                self.syncProgress = 0.4
-            }
-            
-            let batchSize = 50
-            let totalBatches = max(1, (totalMessages + batchSize - 1) / batchSize)  // Prevent division by zero
-            for (index, batch) in allMessageIds.chunked(into: batchSize).enumerated() {
-                await processBatchOfMessages(batch, in: context)
-                
-                let progress = 0.4 + (Double(index) / Double(totalBatches)) * 0.5
-                let processedCount = min((index + 1) * batchSize, totalMessages)
-                await MainActor.run {
-                    self.syncProgress = min(0.9, progress)
-                    self.syncStatus = "Processing messages... \(processedCount)/\(totalMessages)"
-                }
+                self.syncStatus = "Processed \(totalProcessed) messages"
+                self.syncProgress = 0.9
             }
             
             await updateConversationRollups(in: context)
@@ -251,14 +251,9 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
             return
         }
 
-        defer {
-            Task {
-                await syncStateActor.endSync()
-            }
-        }
-
         // Check network connectivity first
         guard await isNetworkAvailable() else {
+            await syncStateActor.endSync()
             print("Network not available, skipping sync")
             await MainActor.run {
                 self.syncStatus = "Network unavailable"
@@ -269,23 +264,20 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
 
         // Fetch account data in a thread-safe way
         let accountData = try await fetchAccountData()
-        guard let accountData = accountData else {
-            print("No account found for incremental sync")
-            return
-        }
 
-        let historyId = accountData.historyId
-        let email = accountData.email
-        let aliases = accountData.aliases
-        
-        print("Starting incremental sync with historyId: \(historyId ?? "nil")")
-        
-        if historyId == nil {
-            print("No historyId found, performing full sync")
-            // Perform initial sync logic inline to avoid re-entrancy
+        // If no account exists or no historyId, perform initial sync instead
+        if accountData == nil || accountData?.historyId == nil {
+            if accountData == nil {
+                print("No account found, performing initial sync")
+            } else {
+                print("No historyId found, performing initial sync")
+            }
+
             do {
                 try await performInitialSyncLogic()
+                await syncStateActor.endSync()
             } catch {
+                await syncStateActor.endSync()
                 print("Initial sync during incremental failed: \(error)")
                 await MainActor.run {
                     self.syncStatus = "Sync failed: \(error.localizedDescription)"
@@ -295,8 +287,12 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
             return
         }
 
-        guard let historyId = historyId else { return }
-        
+        let historyId = accountData!.historyId!
+        let email = accountData!.email
+        let aliases = accountData!.aliases
+
+        print("Starting incremental sync with historyId: \(historyId)")
+
         // Initialize myAliases with stored aliases
         myAliases = Set(([email] + aliases).map(normalizedEmail))
         
@@ -304,30 +300,33 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
             self.isSyncing = true
             self.syncStatus = "Checking for updates..."
         }
-        
+
         let context = coreDataStack.newBackgroundContext()
-        
+
+        // Prefetch all labels into cache for efficient lookups
+        let labelCache = await prefetchLabels(in: context)
+
         do {
             var pageToken: String? = nil
             var latestHistoryId = historyId
-            
+
             repeat {
                 let response = try await apiClient.listHistory(startHistoryId: historyId, pageToken: pageToken)
-                
+
                 if let history = response.history {
                     print("Received \(history.count) history records")
                     for record in history {
-                        await processHistoryRecord(record, in: context)
+                        await processHistoryRecord(record, labelCache: labelCache, in: context)
                     }
                 } else {
                     print("No history records in response")
                 }
-                
+
                 if let newHistoryId = response.historyId {
                     print("Updating historyId from \(latestHistoryId) to \(newHistoryId)")
                     latestHistoryId = newHistoryId
                 }
-                
+
                 pageToken = response.nextPageToken
             } while pageToken != nil
             
@@ -349,18 +348,22 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
                 self.coreDataStack.viewContext.refreshAllObjects()
                 self.syncStatus = "Sync complete"
                 self.isSyncing = false
-                
+
                 // Post notification to update UI
                 NotificationCenter.default.post(name: .syncCompleted, object: nil)
             }
-            
+
+            await syncStateActor.endSync()
+
         } catch {
             if error.localizedDescription.contains("too old") {
                 print("History too old, need to perform full sync")
                 // Perform initial sync logic inline to avoid re-entrancy
                 do {
                     try await performInitialSyncLogic()
+                    await syncStateActor.endSync()
                 } catch {
+                    await syncStateActor.endSync()
                     print("Initial sync after history error failed: \(error)")
                     await MainActor.run {
                         self.syncStatus = "Sync failed: \(error.localizedDescription)"
@@ -392,6 +395,8 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
                     self.isSyncing = false
                 }
 
+                await syncStateActor.endSync()
+
                 // Don't throw for recoverable errors
                 if !(error is URLError) {
                     throw error
@@ -400,23 +405,70 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
         }
     }
     
-    private func processBatchOfMessages(_ ids: [String], in context: NSManagedObjectContext) async {
-        await withTaskGroup(of: GmailMessage?.self) { group in
+    private func processBatchOfMessages(_ ids: [String], labelCache: [String: Label], in context: NSManagedObjectContext) async {
+        var failedIds: [String] = []
+
+        // First attempt
+        await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
             for id in ids {
                 group.addTask { [weak self] in
-                    try? await self?.apiClient.getMessage(id: id)
+                    guard let self = self else {
+                        return (id, .failure(NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "SyncEngine deallocated"])))
+                    }
+                    do {
+                        let message = try await self.apiClient.getMessage(id: id)
+                        return (id, .success(message))
+                    } catch {
+                        print("Failed to fetch message \(id): \(error.localizedDescription)")
+                        return (id, .failure(error))
+                    }
                 }
             }
-            
-            for await message in group {
-                if let message = message {
-                    await saveMessage(message, in: context)
+
+            for await (id, result) in group {
+                switch result {
+                case .success(let message):
+                    await saveMessage(message, labelCache: labelCache, in: context)
+                case .failure:
+                    failedIds.append(id)
+                }
+            }
+        }
+
+        // Retry failed messages once with backoff
+        if !failedIds.isEmpty {
+            print("Retrying \(failedIds.count) failed messages...")
+            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second backoff
+
+            await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
+                for id in failedIds {
+                    group.addTask { [weak self] in
+                        guard let self = self else {
+                            return (id, .failure(NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "SyncEngine deallocated"])))
+                        }
+                        do {
+                            let message = try await self.apiClient.getMessage(id: id)
+                            return (id, .success(message))
+                        } catch {
+                            print("Retry failed for message \(id): \(error.localizedDescription)")
+                            return (id, .failure(error))
+                        }
+                    }
+                }
+
+                for await (id, result) in group {
+                    switch result {
+                    case .success(let message):
+                        await saveMessage(message, labelCache: labelCache, in: context)
+                    case .failure(let error):
+                        print("Permanently failed to fetch message \(id): \(error.localizedDescription)")
+                    }
                 }
             }
         }
     }
     
-    func saveMessage(_ gmailMessage: GmailMessage, in context: NSManagedObjectContext) async {
+    func saveMessage(_ gmailMessage: GmailMessage, labelCache: [String: Label]? = nil, in context: NSManagedObjectContext) async {
         // Skip messages in SPAM folder
         if let labelIds = gmailMessage.labelIds, labelIds.contains("SPAM") {
             print("Skipping spam message: \(gmailMessage.id)")
@@ -447,7 +499,13 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
             // Update labels
             existingMessage.labels = nil
             for labelId in processedMessage.labelIds {
-                if let label = await findLabel(id: labelId, in: context) {
+                let label: Label?
+                if let cache = labelCache {
+                    label = cache[labelId]
+                } else {
+                    label = await findLabel(id: labelId, in: context)
+                }
+                if let label = label {
                     existingMessage.addToLabels(label)
                 }
             }
@@ -521,7 +579,13 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
         
         // Save labels
         for labelId in processedMessage.labelIds {
-            if let label = await findLabel(id: labelId, in: context) {
+            let label: Label?
+            if let cache = labelCache {
+                label = cache[labelId]
+            } else {
+                label = await findLabel(id: labelId, in: context)
+            }
+            if let label = label {
                 message.addToLabels(label)
             }
         }
@@ -578,6 +642,28 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
         let request = Label.fetchRequest()
         request.predicate = NSPredicate(format: "id == %@", id)
         return try? context.fetch(request).first
+    }
+
+    // Prefetch all labels into a dictionary for efficient lookups during sync
+    private func prefetchLabels(in context: NSManagedObjectContext) async -> [String: Label] {
+        return await context.perform {
+            let request = Label.fetchRequest()
+            request.fetchBatchSize = 100
+            guard let labels = try? context.fetch(request) else {
+                return [:]
+            }
+            var labelCache: [String: Label] = [:]
+            for label in labels {
+                labelCache[label.id] = label
+            }
+            print("Prefetched \(labelCache.count) labels into cache")
+            return labelCache
+        }
+    }
+
+    // Public method for BackgroundSyncManager to prefetch labels
+    nonisolated func prefetchLabelsForBackground(in context: NSManagedObjectContext) async -> [String: Label] {
+        return await prefetchLabels(in: context)
     }
     
     private func saveLabels(_ gmailLabels: [GmailLabel], in context: NSManagedObjectContext) async {
@@ -679,7 +765,7 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
         await conversationManager.updateAllConversationRollups(in: context)
     }
     
-    private func processHistoryRecord(_ record: HistoryRecord, in context: NSManagedObjectContext) async {
+    private func processHistoryRecord(_ record: HistoryRecord, labelCache: [String: Label], in context: NSManagedObjectContext) async {
         if let messagesAdded = record.messagesAdded {
             print("Processing \(messagesAdded.count) new messages from history")
             for added in messagesAdded {
@@ -692,16 +778,16 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
                 // History API returns partial messages - fetch full details
                 if let fullMessage = try? await apiClient.getMessage(id: added.message.id) {
                     print("Fetched full message: \(fullMessage.id)")
-                    await saveMessage(fullMessage, in: context)
+                    await saveMessage(fullMessage, labelCache: labelCache, in: context)
                 } else {
                     print("Failed to fetch full message for ID: \(added.message.id)")
                     // Fall back to partial message data
-                    await saveMessage(added.message, in: context)
+                    await saveMessage(added.message, labelCache: labelCache, in: context)
                 }
                 // The conversation lastMessageDate will be updated in saveMessage
             }
         }
-        
+
         if let messagesDeleted = record.messagesDeleted {
             for deleted in messagesDeleted {
                 let request = Message.fetchRequest()
@@ -711,14 +797,15 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
                 }
             }
         }
-        
+
         if let labelsAdded = record.labelsAdded {
             for added in labelsAdded {
                 let request = Message.fetchRequest()
                 request.predicate = NSPredicate(format: "id == %@", added.message.id)
                 if let message = try? context.fetch(request).first {
                     for labelId in added.labelIds {
-                        if let label = await findLabel(id: labelId, in: context) {
+                        let label = labelCache[labelId]
+                        if let label = label {
                             message.addToLabels(label)
                         }
                     }
