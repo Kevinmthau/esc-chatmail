@@ -25,56 +25,119 @@ struct ConversationListView: View {
     @State private var hasPerformedInitialSync = false
     
     var body: some View {
-        List {
-                ForEach(filteredConversations) { conversation in
-                    ZStack {
-                        NavigationLink(destination: ChatView(conversation: conversation)) {
-                            EmptyView()
+        ZStack {
+            List {
+                    ForEach(filteredConversations) { conversation in
+                        ZStack {
+                            NavigationLink(destination: ChatView(conversation: conversation)) {
+                                EmptyView()
+                            }
+                            .opacity(0)
+
+                            ConversationRowView(conversation: conversation)
                         }
-                        .opacity(0)
-                        
-                        ConversationRowView(conversation: conversation)
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.visible)
                     }
-                    .listRowInsets(EdgeInsets())
-                    .listRowSeparator(.visible)
+                    .onDelete(perform: deleteConversations)
                 }
-                .onDelete(perform: deleteConversations)
-            }
-            .listStyle(.plain)
-            .navigationTitle("Chats")
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button(action: { showingSettings = true }) {
-                        Image(systemName: "gear")
+                .listStyle(.plain)
+                .scrollDismissesKeyboard(.interactively)
+                .navigationTitle("Chats")
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button(action: { showingSettings = true }) {
+                            Image(systemName: "gear")
+                        }
                     }
                 }
-                
-                ToolbarItem(placement: .navigationBarTrailing) {
+                .refreshable {
+                    await performSync()
+                }
+                .sheet(isPresented: $showingComposer) {
+                    NewMessageView()
+                }
+                .sheet(isPresented: $showingSettings) {
+                    NavigationStack {
+                        SettingsView()
+                    }
+                }
+                .onAppear {
+                    performInitialSync()
+                    startPeriodicSync()
+                    prefetchPersonData()
+                }
+                .onDisappear {
+                    stopPeriodicSync()
+                }
+                .safeAreaInset(edge: .bottom) {
+                    Color.clear.frame(height: 68)
+                }
+                .onTapGesture {
+                    hideKeyboard()
+                }
+
+            // Floating search bar with compose button
+            VStack {
+                Spacer()
+                HStack(spacing: 8) {
+                    // Search bar
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(.secondary)
+                            .font(.system(size: 16))
+
+                        TextField("Search", text: $searchText)
+                            .textFieldStyle(.plain)
+
+                        if !searchText.isEmpty {
+                            Button(action: { searchText = "" }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.secondary)
+                                    .font(.system(size: 16))
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(.ultraThinMaterial)
+                    .cornerRadius(10)
+                    .shadow(color: .black.opacity(0.1), radius: 10, x: 0, y: 4)
+
+                    // Compose button with clear liquid glass design
                     Button(action: { showingComposer = true }) {
-                        Image(systemName: "square.and.pencil")
+                        ZStack {
+                            // Clear liquid glass background
+                            Circle()
+                                .fill(.ultraThinMaterial)
+                                .overlay(
+                                    Circle()
+                                        .strokeBorder(
+                                            LinearGradient(
+                                                gradient: Gradient(colors: [
+                                                    Color.white.opacity(0.6),
+                                                    Color.white.opacity(0.2)
+                                                ]),
+                                                startPoint: .topLeading,
+                                                endPoint: .bottomTrailing
+                                            ),
+                                            lineWidth: 1.5
+                                        )
+                                )
+                                .shadow(color: .black.opacity(0.1), radius: 10, x: 0, y: 4)
+
+                            // Pencil icon
+                            Image(systemName: "square.and.pencil")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundColor(.primary)
+                        }
+                        .frame(width: 44, height: 44)
                     }
                 }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
             }
-            .searchable(text: $searchText)
-            .refreshable {
-                await performSync()
-            }
-            .sheet(isPresented: $showingComposer) {
-                NewMessageView()
-            }
-            .sheet(isPresented: $showingSettings) {
-                NavigationStack {
-                    SettingsView()
-                }
-            }
-            .onAppear {
-                performInitialSync()
-                startPeriodicSync()
-                prefetchPersonData()
-            }
-            .onDisappear {
-                stopPeriodicSync()
-            }
+        }
     }
     
     private func performInitialSync() {
@@ -196,5 +259,9 @@ struct ConversationListView: View {
             }
             await PersonCache.shared.prefetch(emails: Array(Set(allEmails)))
         }
+    }
+
+    private func hideKeyboard() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 }
