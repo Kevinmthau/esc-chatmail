@@ -186,6 +186,11 @@ class HTMLSanitizerService: HTMLSanitizerProtocol {
                     // Only block explicitly dangerous URLs
                     let fullRange = Range(match.range, in: result)!
                     result.replaceSubrange(fullRange, with: "src=\"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7\"")
+                } else if url.hasPrefix("cid:") {
+                    // Replace cid: (Content-ID) URLs with transparent placeholder
+                    // These are inline email attachments that WKWebView can't load directly
+                    let fullRange = Range(match.range, in: result)!
+                    result.replaceSubrange(fullRange, with: "src=\"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7\"")
                 }
                 // Allow all other URLs including tracking pixels and newsletter images
             }

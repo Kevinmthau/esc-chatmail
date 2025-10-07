@@ -240,7 +240,7 @@ struct HTMLWebView: UIViewRepresentable {
 
                 // Block unsupported schemes that cause errors
                 let scheme = url.scheme?.lowercased() ?? ""
-                let unsupportedSchemes = ["javascript", "vbscript", "file", "x-apple-data-detectors"]
+                let unsupportedSchemes = ["javascript", "vbscript", "file", "x-apple-data-detectors", "cid"]
                 if unsupportedSchemes.contains(scheme) {
                     decisionHandler(.cancel)
                     return
