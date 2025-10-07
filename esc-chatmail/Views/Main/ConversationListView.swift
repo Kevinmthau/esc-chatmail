@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreData
+import Contacts
 
 struct ConversationListView: View {
     @FetchRequest private var conversations: FetchedResults<Conversation>
@@ -15,14 +16,32 @@ struct ConversationListView: View {
         request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]  // Prefetch to avoid N+1
         _conversations = FetchRequest(fetchRequest: request)
     }
-    
+
+    enum ConversationFilter: String, CaseIterable {
+        case all = "All"
+        case contacts = "Contacts"
+        case other = "Other"
+
+        var icon: String {
+            switch self {
+            case .all: return "line.3.horizontal.decrease.circle"
+            case .contacts: return "person.crop.circle"
+            case .other: return "person.crop.circle.badge.questionmark"
+            }
+        }
+    }
+
     @StateObject private var syncEngine = SyncEngine.shared
+    @StateObject private var contactsService = ContactsService()
     @State private var selectedConversation: Conversation?
     @State private var searchText = ""
     @State private var showingComposer = false
     @State private var showingSettings = false
     @State private var syncTimer: Timer?
     @State private var hasPerformedInitialSync = false
+    @State private var currentFilter: ConversationFilter = .all
+    @State private var showingFilterMenu = false
+    @State private var contactEmailsCache: Set<String> = []
     
     var body: some View {
         ZStack {
@@ -50,6 +69,19 @@ struct ConversationListView: View {
                             Image(systemName: "gear")
                         }
                     }
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button(action: { showingFilterMenu = true }) {
+                            Image(systemName: currentFilter.icon)
+                                .foregroundColor(currentFilter == .all ? .primary : .blue)
+                        }
+                    }
+                }
+                .confirmationDialog("Filter Conversations", isPresented: $showingFilterMenu) {
+                    ForEach(ConversationFilter.allCases, id: \.self) { filter in
+                        Button(filter.rawValue) {
+                            currentFilter = filter
+                        }
+                    }
                 }
                 .refreshable {
                     await performSync()
@@ -66,6 +98,8 @@ struct ConversationListView: View {
                     performInitialSync()
                     startPeriodicSync()
                     prefetchPersonData()
+                    loadContactsCache()
+                    refreshConversationNames()
                 }
                 .onDisappear {
                     stopPeriodicSync()
@@ -159,14 +193,40 @@ struct ConversationListView: View {
     }
     
     private var filteredConversations: [Conversation] {
-        if searchText.isEmpty {
-            return Array(conversations)
-        } else {
-            return conversations.filter { conversation in
+        var result = Array(conversations)
+
+        // Apply search filter
+        if !searchText.isEmpty {
+            result = result.filter { conversation in
                 conversation.displayName?.localizedCaseInsensitiveContains(searchText) ?? false ||
                 conversation.snippet?.localizedCaseInsensitiveContains(searchText) ?? false
             }
         }
+
+        // Apply contact filter
+        switch currentFilter {
+        case .all:
+            break
+        case .contacts:
+            result = result.filter { isConversationWithContact($0) }
+        case .other:
+            result = result.filter { !isConversationWithContact($0) }
+        }
+
+        return result
+    }
+
+    private func isConversationWithContact(_ conversation: Conversation) -> Bool {
+        guard let participants = conversation.participants else { return false }
+
+        for participant in participants {
+            if let email = participant.person?.email {
+                if contactEmailsCache.contains(email.lowercased()) {
+                    return true
+                }
+            }
+        }
+        return false
     }
     
     private func refresh() {
@@ -260,5 +320,49 @@ struct ConversationListView: View {
 
     private func hideKeyboard() {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+
+    private func loadContactsCache() {
+        Task.detached {
+            // Request access if not authorized
+            let authStatus = await MainActor.run { self.contactsService.authorizationStatus }
+            if authStatus != .authorized {
+                let granted = await self.contactsService.requestAccess()
+                if !granted { return }
+            }
+
+            // Load all contact emails on background thread
+            let contactStore = CNContactStore()
+            let keysToFetch = [CNContactEmailAddressesKey as CNKeyDescriptor]
+            let request = CNContactFetchRequest(keysToFetch: keysToFetch)
+
+            do {
+                var emails: Set<String> = []
+                try contactStore.enumerateContacts(with: request) { contact, _ in
+                    for emailAddress in contact.emailAddresses {
+                        emails.insert((emailAddress.value as String).lowercased())
+                    }
+                }
+                let finalEmails = emails
+                await MainActor.run {
+                    self.contactEmailsCache = finalEmails
+                }
+            } catch {
+                print("Failed to load contacts: \(error)")
+            }
+        }
+    }
+
+    private func refreshConversationNames() {
+        // One-time refresh of all conversation display names to use new format
+        let hasRefreshedKey = "hasRefreshedConversationNamesV1"
+        guard !UserDefaults.standard.bool(forKey: hasRefreshedKey) else { return }
+
+        Task {
+            let conversationManager = ConversationManager()
+            await conversationManager.updateAllConversationRollups(in: CoreDataStack.shared.viewContext)
+            UserDefaults.standard.set(true, forKey: hasRefreshedKey)
+            print("Refreshed all conversation names to new format")
+        }
     }
 }

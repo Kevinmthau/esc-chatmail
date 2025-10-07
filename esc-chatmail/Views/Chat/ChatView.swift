@@ -48,7 +48,7 @@ struct ChatView: View {
                 }
                 .padding(.horizontal)
                 .padding(.top, 8)
-                .padding(.bottom, 8)
+                .padding(.bottom, 80)
                 .contentShape(Rectangle())
                 .onTapGesture {
                     // Dismiss keyboard when tapping empty space
@@ -344,6 +344,9 @@ struct MessageBubble: View {
     @State private var senderName: String?
     @State private var showingHTMLView = false
     @State private var hasRichContent = false
+    @State private var fullTextContent: String?
+
+    private let htmlContentHandler = HTMLContentHandler()
     
     var body: some View {
         HStack {
@@ -367,40 +370,62 @@ struct MessageBubble: View {
                         .fontWeight(.semibold)
                         .foregroundColor(message.isFromMe ? .secondary : .primary)
                 }
-                
+
                 // Attachments
                 if let attachmentSet = message.value(forKey: "attachments") as? NSSet,
                    let attachments = attachmentSet.allObjects as? [Attachment], !attachments.isEmpty {
                     AttachmentGridView(attachments: attachments)
                         .frame(maxWidth: UIScreen.main.bounds.width * 0.65)
                 }
-                
-                // Text content
-                if let text = message.cleanedSnippet ?? message.snippet, !text.isEmpty {
-                    VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 8) {
-                        Text(text)
-                            .padding(10)
-                            .background(message.isFromMe ? Color.blue : Color.gray.opacity(0.2))
-                            .foregroundColor(message.isFromMe ? .white : .primary)
-                            .cornerRadius(12)
 
-                        // View More button for rich HTML content
-                        if hasRichContent {
-                            Button(action: {
-                                showingHTMLView = true
-                            }) {
-                                HStack(spacing: 4) {
-                                    Text("View More")
-                                        .font(.caption)
-                                        .fontWeight(.medium)
-                                    Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                        .font(.caption2)
+                // For newsletters/promotional emails, only show View More button
+                if message.isNewsletter {
+                    Button(action: {
+                        showingHTMLView = true
+                    }) {
+                        HStack(spacing: 4) {
+                            Text("View More")
+                                .font(.caption)
+                                .fontWeight(.medium)
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.caption2)
+                        }
+                        .foregroundColor(.blue)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color.blue.opacity(0.1))
+                        .cornerRadius(8)
+                    }
+                } else {
+                    // For regular emails, show the full text content
+                    // Text content - use fullTextContent if loaded, otherwise bodyText, fallback to snippet
+                    if let rawText = fullTextContent ?? (message.value(forKey: "bodyText") as? String) ?? message.cleanedSnippet ?? message.snippet, !rawText.isEmpty {
+                        let text = message.isFromMe ? stripQuotedText(from: rawText) : rawText
+                        VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 8) {
+                            Text(text)
+                                .padding(10)
+                                .background(message.isFromMe ? Color.blue : Color.gray.opacity(0.2))
+                                .foregroundColor(message.isFromMe ? .white : .primary)
+                                .cornerRadius(12)
+
+                            // View More button for rich HTML content
+                            if hasRichContent {
+                                Button(action: {
+                                    showingHTMLView = true
+                                }) {
+                                    HStack(spacing: 4) {
+                                        Text("View More")
+                                            .font(.caption)
+                                            .fontWeight(.medium)
+                                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                            .font(.caption2)
+                                    }
+                                    .foregroundColor(.blue)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .background(Color.blue.opacity(0.1))
+                                    .cornerRadius(8)
                                 }
-                                .foregroundColor(.blue)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(Color.blue.opacity(0.1))
-                                .cornerRadius(8)
                             }
                         }
                     }
@@ -428,6 +453,7 @@ struct MessageBubble: View {
             if !message.isFromMe && isGroupConversation {
                 await loadSenderName()
             }
+            await loadFullTextContent()
             checkForRichContent()
         }
         .sheet(isPresented: $showingHTMLView) {
@@ -439,6 +465,57 @@ struct MessageBubble: View {
         conversation.conversationType == .group || conversation.conversationType == .list
     }
     
+    private func loadFullTextContent() async {
+        // Try to load the full text content from HTML if available
+        let messageId = message.id
+
+        // Check if HTML file exists
+        if htmlContentHandler.htmlFileExists(for: messageId),
+           let html = htmlContentHandler.loadHTML(for: messageId) {
+            // Extract plain text from HTML
+            let plainText = extractPlainText(from: html)
+            if !plainText.isEmpty {
+                fullTextContent = plainText
+                return
+            }
+        }
+
+        // Otherwise use bodyText if available
+        fullTextContent = message.value(forKey: "bodyText") as? String
+    }
+
+    private func extractPlainText(from html: String) -> String {
+        // Simple HTML to plain text conversion
+        var text = html
+
+        // Remove script and style tags and their content
+        text = text.replacingOccurrences(of: "<script[^>]*>[\\s\\S]*?</script>", with: "", options: .regularExpression, range: nil)
+        text = text.replacingOccurrences(of: "<style[^>]*>[\\s\\S]*?</style>", with: "", options: .regularExpression, range: nil)
+
+        // Convert common block elements to newlines
+        text = text.replacingOccurrences(of: "<br[^>]*>", with: "\n", options: .regularExpression, range: nil)
+        text = text.replacingOccurrences(of: "</p>", with: "\n\n", options: .regularExpression, range: nil)
+        text = text.replacingOccurrences(of: "</div>", with: "\n", options: .regularExpression, range: nil)
+        text = text.replacingOccurrences(of: "</h[1-6]>", with: "\n\n", options: .regularExpression, range: nil)
+
+        // Remove all HTML tags
+        text = text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression, range: nil)
+
+        // Decode HTML entities
+        text = text.replacingOccurrences(of: "&nbsp;", with: " ")
+        text = text.replacingOccurrences(of: "&amp;", with: "&")
+        text = text.replacingOccurrences(of: "&lt;", with: "<")
+        text = text.replacingOccurrences(of: "&gt;", with: ">")
+        text = text.replacingOccurrences(of: "&quot;", with: "\"")
+        text = text.replacingOccurrences(of: "&#39;", with: "'")
+
+        // Clean up excessive whitespace
+        text = text.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression, range: nil)
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return text
+    }
+
     private func loadSenderName() async {
         // Find the 'from' participant
         guard let participants = message.participants else { return }
@@ -501,5 +578,28 @@ struct MessageBubble: View {
                 hasRichContent = complexity != .simple
             }
         }
+    }
+
+    private func stripQuotedText(from text: String) -> String {
+        let lines = text.components(separatedBy: .newlines)
+        var newMessageLines: [String] = []
+
+        for (index, line) in lines.enumerated() {
+            let trimmedLine = line.trimmingCharacters(in: .whitespaces)
+
+            // Stop at common quoted text markers
+            if trimmedLine.starts(with: ">") ||
+               (trimmedLine.starts(with: "On ") && trimmedLine.contains("wrote:")) ||
+               (trimmedLine.starts(with: "From:") && index > 0) ||
+               trimmedLine == "..." ||
+               trimmedLine.contains("---------- Forwarded message ---------") ||
+               trimmedLine.contains("________________________________") {
+                break
+            }
+
+            newMessageLines.append(line)
+        }
+
+        return newMessageLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

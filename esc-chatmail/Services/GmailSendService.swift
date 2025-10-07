@@ -322,7 +322,7 @@ final class GmailSendService: ObservableObject {
         conversation.inboxUnreadCount = 0
         conversation.hasInbox = false  // IMPORTANT: do NOT set to true for outgoing messages
         conversation.hidden = false
-        conversation.displayName = recipients.joined(separator: ", ")
+        conversation.displayName = formatGroupNames(recipients)
         
         // Create participants
         for email in identity.participants {
@@ -348,5 +348,30 @@ final class GmailSendService: ObservableObject {
         }
         
         return conversation
+    }
+
+    private nonisolated func formatGroupNames(_ names: [String]) -> String {
+        // Extract first names only
+        let firstNames = names.map { name in
+            // Split by space and take the first component
+            let components = name.components(separatedBy: " ")
+            return components.first ?? name
+        }
+
+        switch firstNames.count {
+        case 0:
+            return ""
+        case 1:
+            return firstNames[0]
+        case 2:
+            return "\(firstNames[0]) & \(firstNames[1])"
+        case 3:
+            return "\(firstNames[0]), \(firstNames[1]) & \(firstNames[2])"
+        default:
+            // 4 or more: "John, Jane, Bob & Alice"
+            let allButLast = firstNames.dropLast()
+            let last = firstNames.last!
+            return "\(allButLast.joined(separator: ", ")) & \(last)"
+        }
     }
 }

@@ -128,11 +128,36 @@ final class ConversationManager: @unchecked Sendable {
                     }
                     return nil
                 }
-                conversation.displayName = names.joined(separator: ", ")
+                conversation.displayName = self.formatGroupNames(names)
             }
         }
     }
-    
+
+    private func formatGroupNames(_ names: [String]) -> String {
+        // Extract first names only
+        let firstNames = names.map { name in
+            // Split by space and take the first component
+            let components = name.components(separatedBy: " ")
+            return components.first ?? name
+        }
+
+        switch firstNames.count {
+        case 0:
+            return ""
+        case 1:
+            return firstNames[0]
+        case 2:
+            return "\(firstNames[0]) & \(firstNames[1])"
+        case 3:
+            return "\(firstNames[0]), \(firstNames[1]) & \(firstNames[2])"
+        default:
+            // 4 or more: "John, Jane, Bob & Alice"
+            let allButLast = firstNames.dropLast()
+            let last = firstNames.last!
+            return "\(allButLast.joined(separator: ", ")) & \(last)"
+        }
+    }
+
     func updateAllConversationRollups(in context: NSManagedObjectContext) async {
         await context.perform { [weak self] in
             guard let self = self else { return }

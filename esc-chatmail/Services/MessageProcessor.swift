@@ -178,17 +178,12 @@ class MessageProcessor {
             // First try to remove quoted content for snippets
             let cleanedHTML = emailTextProcessor.removeQuotedFromHTML(html) ?? html
             let plainFromHTML = emailTextProcessor.extractPlainFromHTML(cleanedHTML)
-            // For HTML emails, only show the first sentence in the bubble for received messages
-            // Sent messages should show full content without any length limit
-            if isFromMe {
-                return emailTextProcessor.createCleanSnippet(from: plainFromHTML, maxLength: Int.max, firstSentenceOnly: false)
-            } else {
-                return emailTextProcessor.createCleanSnippet(from: plainFromHTML, firstSentenceOnly: true)
-            }
+            // Show full content for all emails without any length limit
+            return emailTextProcessor.createCleanSnippet(from: plainFromHTML, maxLength: Int.max, firstSentenceOnly: false)
         } else if let plainText = plainText {
-            return emailTextProcessor.createCleanSnippet(from: plainText)
+            return emailTextProcessor.createCleanSnippet(from: plainText, maxLength: Int.max, firstSentenceOnly: false)
         } else {
-            return emailTextProcessor.createCleanSnippet(from: snippet)
+            return emailTextProcessor.createCleanSnippet(from: snippet, maxLength: Int.max, firstSentenceOnly: false)
         }
     }
     

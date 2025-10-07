@@ -117,15 +117,24 @@ struct ConversationRowView: View {
         if resolvedNames.isEmpty {
             displayName = conversation.displayName ?? "No participants"
         } else if resolvedNames.count == 1 {
+            // Single participant - use full name
             displayName = resolvedNames[0]
-        } else if resolvedNames.count == 2 {
-            displayName = "\(resolvedNames[0]), \(resolvedNames[1])"
         } else {
-            let remaining = nonMeParticipants.count - 2
-            if remaining > 0 {
-                displayName = "\(resolvedNames[0]), \(resolvedNames[1]) +\(remaining)"
+            // Group conversation - extract first names only
+            let firstNames = resolvedNames.map { name in
+                let components = name.components(separatedBy: " ")
+                return components.first ?? name
+            }
+
+            if firstNames.count == 2 {
+                displayName = "\(firstNames[0]), \(firstNames[1])"
             } else {
-                displayName = "\(resolvedNames[0]), \(resolvedNames[1])"
+                let remaining = nonMeParticipants.count - 2
+                if remaining > 0 {
+                    displayName = "\(firstNames[0]), \(firstNames[1]) +\(remaining)"
+                } else {
+                    displayName = "\(firstNames[0]), \(firstNames[1])"
+                }
             }
         }
         

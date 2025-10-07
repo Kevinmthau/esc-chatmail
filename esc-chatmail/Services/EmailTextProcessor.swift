@@ -8,28 +8,41 @@ class EmailTextProcessor {
     /// Removes quoted text from HTML email content
     static func removeQuotedFromHTML(_ html: String?) -> String? {
         guard let html = html else { return nil }
-        
+
         var cleanedHTML = html
-        
+
         // Remove common HTML quote blocks
         let htmlQuotePatterns = [
             // Gmail quote blocks
             "<div class=\"gmail_quote\">.*?</div>",
             "<blockquote[^>]*>.*?</blockquote>",
-            
+
             // Outlook/Office 365
             "<div class=\"OutlookMessageHeader\">.*?</div>",
             "<div style=\"border:none;border-top:solid #E1E1E1[^>]*>.*?</div>",
-            
+
             // Apple Mail
             "<br><div><br><blockquote type=\"cite\">.*?</blockquote></div>",
-            
+
             // Generic quoted sections
             "<div style=\"[^\"]*border-left:[^\"]*\">.*?</div>",
             "<!-- originalMessage -->.*?<!-- /originalMessage -->",
-            "<div class=\"moz-cite-prefix\">.*?</div>"
+            "<div class=\"moz-cite-prefix\">.*?</div>",
+
+            // Email footers and boilerplate
+            "<div[^>]*class=\"[^\"]*footer[^\"]*\"[^>]*>.*?</div>",
+            "<table[^>]*class=\"[^\"]*footer[^\"]*\"[^>]*>.*?</table>",
+            "<div[^>]*id=\"[^\"]*footer[^\"]*\"[^>]*>.*?</div>",
+
+            // Social media and icon sections
+            "<table[^>]*class=\"[^\"]*social[^\"]*\"[^>]*>.*?</table>",
+            "<div[^>]*class=\"[^\"]*social[^\"]*\"[^>]*>.*?</div>",
+
+            // Unsubscribe sections
+            "<div[^>]*class=\"[^\"]*unsubscribe[^\"]*\"[^>]*>.*?</div>",
+            "<p[^>]*class=\"[^\"]*unsubscribe[^\"]*\"[^>]*>.*?</p>"
         ]
-        
+
         // Remove quote patterns
         for pattern in htmlQuotePatterns {
             if let regex = try? NSRegularExpression(
@@ -45,14 +58,14 @@ class EmailTextProcessor {
                 )
             }
         }
-        
+
         // Remove "On ... wrote:" patterns and everything after
         let writePatterns = [
             "On .+? wrote:",
             "From:</strong>.*?Subject:</strong>",
             "-----Original Message-----"
         ]
-        
+
         for pattern in writePatterns {
             if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
                 let range = NSRange(location: 0, length: cleanedHTML.utf16.count)
@@ -64,7 +77,7 @@ class EmailTextProcessor {
                 }
             }
         }
-        
+
         return cleanedHTML
     }
     
@@ -168,29 +181,85 @@ class EmailTextProcessor {
         return cleanText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     
-    /// Removes common email signatures
+    /// Removes common email signatures, disclaimers, and boilerplate
     private static func removeEmailSignature(from text: String) -> String {
         let signaturePatterns = [
+            // Standard signature delimiters
             "\n--\n",
             "\n-- \n",
             "\n---\n",
+            "\n___\n",
+
+            // Mobile signatures
             "\nSent from my iPhone",
             "\nSent from my iPad",
             "\nSent from my Android",
             "\nSent from Mail for Windows",
             "\nSent from Outlook",
-            "\nGet Outlook for"
+            "\nGet Outlook for",
+            "\nSent from Yahoo Mail",
+            "\nSent via ",
+            "\nSent using ",
+
+            // Unsubscribe and preference links
+            "\nUnsubscribe",
+            "\nUpdate your email preferences",
+            "\nManage your subscription",
+            "\nClick here to unsubscribe",
+            "\nTo stop receiving",
+            "\nOpt out of future",
+            "\nView this email in your browser",
+            "\nHaving trouble viewing this email",
+            "\nIf you wish to unsubscribe",
+            "\nYou are receiving this",
+            "\nYou received this email because",
+
+            // Legal disclaimers
+            "\nThis email and any attachments",
+            "\nThis message is intended",
+            "\nThis communication is confidential",
+            "\nConfidentiality Notice:",
+            "\nDISCLAIMER:",
+            "\nLegal Disclaimer:",
+            "\nIMPORTANT:",
+            "\nPlease consider the environment",
+            "\nThink before you print",
+
+            // Social media and footer links
+            "\nFollow us on",
+            "\nConnect with us",
+            "\nJoin us on",
+            "\nFind us on",
+            "\nVisit our website",
+            "\nPrivacy Policy",
+            "\nTerms of Service",
+            "\nCopyright ©",
+            "\n© 20", // Catches "© 2024" etc
+
+            // Marketing boilerplate
+            "\nForward to a friend",
+            "\nShare this email",
+            "\nReply STOP to unsubscribe"
         ]
-        
+
         var cleanText = text
-        
+        var earliestCutIndex = cleanText.count
+
+        // Find the earliest occurrence of any signature pattern
         for pattern in signaturePatterns {
             if let range = cleanText.range(of: pattern, options: [.caseInsensitive]) {
-                cleanText = String(cleanText[..<range.lowerBound])
+                let index = cleanText.distance(from: cleanText.startIndex, to: range.lowerBound)
+                earliestCutIndex = min(earliestCutIndex, index)
             }
         }
-        
-        return cleanText
+
+        // Cut at the earliest signature marker
+        if earliestCutIndex < cleanText.count {
+            let endIndex = cleanText.index(cleanText.startIndex, offsetBy: earliestCutIndex)
+            cleanText = String(cleanText[..<endIndex])
+        }
+
+        return cleanText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     
     // MARK: - Snippet Creation
