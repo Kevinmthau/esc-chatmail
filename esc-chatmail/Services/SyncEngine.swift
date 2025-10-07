@@ -544,6 +544,7 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
         message.subject = processedMessage.headers.subject
         message.isFromMe = processedMessage.headers.isFromMe
         message.isUnread = processedMessage.isUnread
+        message.isNewsletter = processedMessage.isNewsletter
         message.hasAttachments = processedMessage.hasAttachments
 
         // Store message threading headers
@@ -611,7 +612,12 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
         // Update conversation's lastMessageDate to bump it to the top
         if conversation.lastMessageDate == nil || message.internalDate > conversation.lastMessageDate! {
             conversation.lastMessageDate = message.internalDate
-            conversation.snippet = message.cleanedSnippet ?? message.snippet
+            // For newsletters, show subject. For personal emails or sent messages, show snippet.
+            if message.isNewsletter, let subject = message.subject, !subject.isEmpty {
+                conversation.snippet = subject
+            } else {
+                conversation.snippet = message.cleanedSnippet ?? message.snippet
+            }
         }
     }
     

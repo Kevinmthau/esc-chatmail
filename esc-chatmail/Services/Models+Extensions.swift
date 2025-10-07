@@ -109,6 +109,7 @@ extension Message {
     @NSManaged public var cleanedSnippet: String?
     @NSManaged public var isFromMe: Bool
     @NSManaged public var isUnread: Bool
+    @NSManaged public var isNewsletter: Bool
     @NSManaged public var hasAttachments: Bool
     @NSManaged public var bodyStorageURI: String?
     @NSManaged public var conversation: Conversation?

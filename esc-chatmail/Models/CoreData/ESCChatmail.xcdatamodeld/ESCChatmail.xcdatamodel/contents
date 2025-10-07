@@ -73,6 +73,7 @@
         <attribute name="id" attributeType="String"/>
         <attribute name="internalDate" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="isFromMe" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="isNewsletter" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="isUnread" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="messageId" optional="YES" attributeType="String"/>
         <attribute name="references" optional="YES" attributeType="String"/>

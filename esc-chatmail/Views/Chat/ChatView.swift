@@ -476,6 +476,11 @@ struct MessageBubble: View {
         // Start with false by default
         hasRichContent = false
 
+        // Never show View More for sent messages - always show full content
+        if message.isFromMe {
+            return
+        }
+
         // Check if message is a forwarded email - always show View More for these
         if message.isForwardedEmail {
             hasRichContent = true

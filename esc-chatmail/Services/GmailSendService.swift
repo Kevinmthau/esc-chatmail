@@ -216,7 +216,8 @@ final class GmailSendService: ObservableObject {
         message.isFromMe = true
         message.internalDate = Date()
         message.snippet = String(body.prefix(120))
-        message.cleanedSnippet = EmailTextProcessor.createCleanSnippet(from: body)
+        // Sent messages should show full content without any length limit
+        message.cleanedSnippet = EmailTextProcessor.createCleanSnippet(from: body, maxLength: Int.max, firstSentenceOnly: false)
         message.gmThreadId = threadId ?? ""
         message.subject = subject
         message.hasAttachments = !attachments.isEmpty
@@ -245,6 +246,7 @@ final class GmailSendService: ObservableObject {
 
         // Update conversation to bump it to the top
         conversation.lastMessageDate = Date()
+        // For sent messages, always show the reply snippet
         conversation.snippet = message.cleanedSnippet ?? message.snippet
         // IMPORTANT: do NOT set conversation.hasInbox = true here for outgoing messages
 

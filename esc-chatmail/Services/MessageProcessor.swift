@@ -29,24 +29,59 @@ class MessageProcessor {
         let content = extractContent(from: payload)
         processedMessage.htmlBody = content.html
         processedMessage.plainTextBody = content.plainText
-        processedMessage.cleanedSnippet = createCleanedSnippet(html: content.html, plainText: content.plainText, snippet: gmailMessage.snippet)
+        processedMessage.cleanedSnippet = createCleanedSnippet(html: content.html, plainText: content.plainText, snippet: gmailMessage.snippet, isFromMe: processedMessage.headers.isFromMe)
         
         // Process labels
         if let labelIds = gmailMessage.labelIds {
             processedMessage.labelIds = labelIds
             processedMessage.isUnread = labelIds.contains("UNREAD")
         }
-        
+
+        // Detect if this is a newsletter/promotion
+        processedMessage.isNewsletter = isNewsletterOrPromotion(
+            labelIds: processedMessage.labelIds,
+            headers: processedMessage.headers
+        )
+
         // Check for attachments
         processedMessage.hasAttachments = checkForAttachments(in: payload)
         processedMessage.attachmentInfo = extractAttachments(from: payload)
-        
+
         return processedMessage
+    }
+
+    private func isNewsletterOrPromotion(labelIds: [String], headers: ProcessedHeaders) -> Bool {
+        // Check Gmail's automatic categorization
+        let promotionLabels = ["CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS"]
+        if labelIds.contains(where: { promotionLabels.contains($0) }) {
+            return true
+        }
+
+        // Check for mailing list headers
+        if headers.listUnsubscribe != nil || headers.listId != nil {
+            return true
+        }
+
+        // Check precedence header
+        if let precedence = headers.precedence?.lowercased(),
+           ["bulk", "list", "junk"].contains(precedence) {
+            return true
+        }
+
+        // Check for no-reply sender
+        if let from = headers.from?.lowercased() {
+            let noReplyPatterns = ["noreply@", "no-reply@", "donotreply@", "do-not-reply@", "newsletter@", "notifications@"]
+            if noReplyPatterns.contains(where: { from.contains($0) }) {
+                return true
+            }
+        }
+
+        return false
     }
     
     private func extractHeaders(from headers: [MessageHeader], myAliases: Set<String>) -> ProcessedHeaders {
         var processedHeaders = ProcessedHeaders()
-        
+
         for header in headers {
             switch header.name.lowercased() {
             case "subject":
@@ -68,11 +103,17 @@ class MessageProcessor {
                 processedHeaders.references = header.value.split(separator: " ").map(String.init)
             case "message-id":
                 processedHeaders.messageId = header.value
+            case "list-unsubscribe":
+                processedHeaders.listUnsubscribe = header.value
+            case "list-id":
+                processedHeaders.listId = header.value
+            case "precedence":
+                processedHeaders.precedence = header.value
             default:
                 break
             }
         }
-        
+
         return processedHeaders
     }
     
@@ -132,12 +173,18 @@ class MessageProcessor {
         return String(data: decodedData, encoding: .utf8)
     }
     
-    private func createCleanedSnippet(html: String?, plainText: String?, snippet: String?) -> String? {
+    private func createCleanedSnippet(html: String?, plainText: String?, snippet: String?, isFromMe: Bool) -> String? {
         if let html = html {
             // First try to remove quoted content for snippets
             let cleanedHTML = emailTextProcessor.removeQuotedFromHTML(html) ?? html
             let plainFromHTML = emailTextProcessor.extractPlainFromHTML(cleanedHTML)
-            return emailTextProcessor.createCleanSnippet(from: plainFromHTML)
+            // For HTML emails, only show the first sentence in the bubble for received messages
+            // Sent messages should show full content without any length limit
+            if isFromMe {
+                return emailTextProcessor.createCleanSnippet(from: plainFromHTML, maxLength: Int.max, firstSentenceOnly: false)
+            } else {
+                return emailTextProcessor.createCleanSnippet(from: plainFromHTML, firstSentenceOnly: true)
+            }
         } else if let plainText = plainText {
             return emailTextProcessor.createCleanSnippet(from: plainText)
         } else {
@@ -196,6 +243,7 @@ final class ProcessedMessage: @unchecked Sendable {
     var plainTextBody: String?
     var labelIds: [String] = []
     var isUnread: Bool = false
+    var isNewsletter: Bool = false
     var hasAttachments: Bool = false
     var attachmentInfo: [AttachmentInfo] = []
 }
@@ -210,6 +258,9 @@ struct ProcessedHeaders: Sendable {
     var inReplyTo: String?
     var references: [String] = []
     var messageId: String?
+    var listUnsubscribe: String?
+    var listId: String?
+    var precedence: String?
 }
 
 struct EmailAddress: Sendable {
