@@ -73,9 +73,6 @@ struct ConversationListView: View {
                 .safeAreaInset(edge: .bottom) {
                     Color.clear.frame(height: 68)
                 }
-                .onTapGesture {
-                    hideKeyboard()
-                }
 
             // Floating search bar with compose button
             VStack {
