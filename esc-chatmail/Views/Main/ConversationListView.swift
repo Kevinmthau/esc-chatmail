@@ -24,7 +24,7 @@ struct ConversationListView: View {
 
         var icon: String {
             switch self {
-            case .all: return "line.3.horizontal.decrease.circle"
+            case .all: return "line.3.horizontal.decrease"
             case .contacts: return "person.crop.circle"
             case .other: return "person.crop.circle.badge.questionmark"
             }
@@ -229,30 +229,15 @@ struct ConversationListView: View {
                         } label: {
                             ZStack {
                                 Circle()
-                                    .fill(Color.white.opacity(0.25))
-                                    .background(
-                                        Circle()
-                                            .fill(.ultraThinMaterial)
-                                            .opacity(0.5)
-                                    )
+                                    .fill(Color(UIColor.systemBackground).opacity(0.85))
                                     .overlay(
                                         Circle()
-                                            .strokeBorder(
-                                                LinearGradient(
-                                                    gradient: Gradient(colors: [
-                                                        Color.white.opacity(0.7),
-                                                        Color.white.opacity(0.2)
-                                                    ]),
-                                                    startPoint: .topLeading,
-                                                    endPoint: .bottomTrailing
-                                                ),
-                                                lineWidth: 1.5
-                                            )
+                                            .strokeBorder(Color.gray.opacity(0.3), lineWidth: 0.5)
                                     )
-                                    .shadow(color: .black.opacity(0.08), radius: 12, x: 0, y: 4)
+                                    .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 2)
 
                                 Image(systemName: currentFilter.icon)
-                                    .font(.system(size: 22, weight: .medium))
+                                    .font(.system(size: 26, weight: .regular))
                                     .foregroundColor(.primary)
                             }
                             .frame(width: 56, height: 56)
@@ -262,24 +247,24 @@ struct ConversationListView: View {
                         HStack(spacing: 10) {
                             Image(systemName: "magnifyingglass")
                                 .foregroundColor(.secondary)
-                                .font(.system(size: 18))
+                                .font(.system(size: 20, weight: .medium))
 
                             TextField("Search", text: $searchText)
                                 .textFieldStyle(.plain)
-                                .font(.system(size: 17))
+                                .font(.system(size: 19, weight: .regular))
 
                             if !searchText.isEmpty {
                                 Button(action: { searchText = "" }) {
                                     Image(systemName: "xmark.circle.fill")
                                         .foregroundColor(.secondary)
-                                        .font(.system(size: 18))
+                                        .font(.system(size: 20, weight: .medium))
                                 }
                             }
 
                             // Microphone button
                             Button(action: { }) {
                                 Image(systemName: "mic")
-                                    .font(.system(size: 20))
+                                    .font(.system(size: 22, weight: .medium))
                                     .foregroundColor(.secondary)
                             }
                         }
@@ -312,30 +297,15 @@ struct ConversationListView: View {
                         Button(action: { showingComposer = true }) {
                             ZStack {
                                 Circle()
-                                    .fill(Color.white.opacity(0.25))
-                                    .background(
-                                        Circle()
-                                            .fill(.ultraThinMaterial)
-                                            .opacity(0.5)
-                                    )
+                                    .fill(Color(UIColor.systemBackground).opacity(0.85))
                                     .overlay(
                                         Circle()
-                                            .strokeBorder(
-                                                LinearGradient(
-                                                    gradient: Gradient(colors: [
-                                                        Color.white.opacity(0.7),
-                                                        Color.white.opacity(0.2)
-                                                    ]),
-                                                    startPoint: .topLeading,
-                                                    endPoint: .bottomTrailing
-                                                ),
-                                                lineWidth: 1.5
-                                            )
+                                            .strokeBorder(Color.gray.opacity(0.3), lineWidth: 0.5)
                                     )
-                                    .shadow(color: .black.opacity(0.08), radius: 12, x: 0, y: 4)
+                                    .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 2)
 
                                 Image(systemName: "square.and.pencil")
-                                    .font(.system(size: 24, weight: .semibold))
+                                    .font(.system(size: 26, weight: .regular))
                                     .foregroundColor(.primary)
                             }
                             .frame(width: 56, height: 56)

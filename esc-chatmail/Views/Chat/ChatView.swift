@@ -1,6 +1,8 @@
 import SwiftUI
 import WebKit
 import CoreData
+import Contacts
+import ContactsUI
 
 struct ChatView: View {
     @ObservedObject var conversation: Conversation
@@ -14,6 +16,7 @@ struct ChatView: View {
     @State private var replyingTo: Message?
     @FocusState private var isTextFieldFocused: Bool
     @Namespace private var bottomID
+    @State private var contactToAdd: ContactWrapper?
     
     init(conversation: Conversation) {
         self.conversation = conversation
@@ -128,6 +131,7 @@ struct ChatView: View {
                         .contentShape(Rectangle())
                         .onTapGesture {
                             isTextFieldFocused = false
+                            prepareContactToAdd()
                         }
                 }
                 
@@ -157,6 +161,9 @@ struct ChatView: View {
             }
             .sheet(item: $messageToForward) { message in
                 NewMessageView(forwardedMessage: message)
+            }
+            .sheet(item: $contactToAdd) { wrapper in
+                AddContactView(contact: wrapper.contact)
             }
     }
     
@@ -333,6 +340,80 @@ struct ChatView: View {
                 }
                 print("Failed to send reply: \(error)")
             }
+        }
+    }
+
+    private func prepareContactToAdd() {
+        // Get the primary participant (not the current user)
+        guard let participants = conversation.participants else { return }
+
+        let currentUserEmail = AuthSession.shared.userEmail?.lowercased() ?? ""
+
+        // Find the first participant that's not the current user
+        for participant in participants {
+            guard let person = participant.person else { continue }
+            let email = person.email
+            guard email.lowercased() != currentUserEmail else { continue }
+
+            let contact = CNMutableContact()
+
+            // Set name from display name
+            if let displayName = person.displayName, !displayName.isEmpty {
+                let components = displayName.components(separatedBy: " ")
+                if components.count >= 2 {
+                    contact.givenName = components[0]
+                    contact.familyName = components.dropFirst().joined(separator: " ")
+                } else {
+                    contact.givenName = displayName
+                }
+            }
+
+            // Set email
+            contact.emailAddresses = [CNLabeledValue(label: CNLabelWork, value: email as NSString)]
+
+            contactToAdd = ContactWrapper(contact: contact)
+            return
+        }
+    }
+}
+
+// MARK: - Contact Wrapper for Identifiable
+struct ContactWrapper: Identifiable {
+    let id = UUID()
+    let contact: CNMutableContact
+}
+
+// MARK: - Add Contact View
+struct AddContactView: UIViewControllerRepresentable {
+    let contact: CNMutableContact
+    @Environment(\.dismiss) private var dismiss
+
+    func makeUIViewController(context: Context) -> UINavigationController {
+        let contactVC = CNContactViewController(forNewContact: contact)
+        contactVC.contactStore = CNContactStore()
+        contactVC.delegate = context.coordinator
+
+        // Wrap in navigation controller for proper display
+        let navController = UINavigationController(rootViewController: contactVC)
+        navController.modalPresentationStyle = .formSheet
+        return navController
+    }
+
+    func updateUIViewController(_ uiViewController: UINavigationController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(dismiss: dismiss)
+    }
+
+    class Coordinator: NSObject, CNContactViewControllerDelegate {
+        let dismiss: DismissAction
+
+        init(dismiss: DismissAction) {
+            self.dismiss = dismiss
+        }
+
+        func contactViewController(_ viewController: CNContactViewController, didCompleteWith contact: CNContact?) {
+            dismiss()
         }
     }
 }
