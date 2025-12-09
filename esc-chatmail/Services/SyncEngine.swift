@@ -2,9 +2,78 @@ import Foundation
 import CoreData
 import Combine
 import Network
+import os.signpost
 
 extension Notification.Name {
     static let syncCompleted = Notification.Name("com.esc.inboxchat.syncCompleted")
+}
+
+// MARK: - Core Data Performance Logger
+final class CoreDataPerformanceLogger: @unchecked Sendable {
+    static let shared = CoreDataPerformanceLogger()
+
+    private let log = OSLog(subsystem: "com.esc.inboxchat", category: "CoreData")
+    private let signpostLog = OSLog(subsystem: "com.esc.inboxchat", category: .pointsOfInterest)
+
+    #if DEBUG
+    private let isEnabled = true
+    #else
+    private let isEnabled = false
+    #endif
+
+    private init() {}
+
+    /// Start timing an operation
+    func beginOperation(_ name: StaticString) -> OSSignpostID {
+        let signpostID = OSSignpostID(log: signpostLog)
+        if isEnabled {
+            os_signpost(.begin, log: signpostLog, name: name, signpostID: signpostID)
+        }
+        return signpostID
+    }
+
+    /// End timing an operation
+    func endOperation(_ name: StaticString, signpostID: OSSignpostID) {
+        if isEnabled {
+            os_signpost(.end, log: signpostLog, name: name, signpostID: signpostID)
+        }
+    }
+
+    /// Log a fetch operation with details
+    func logFetch(entity: String, count: Int, duration: TimeInterval, predicate: String? = nil) {
+        guard isEnabled else { return }
+
+        let predicateInfo = predicate ?? "none"
+        os_log(.info, log: log,
+               "📊 FETCH %{public}@: %d objects in %.3fs (predicate: %{public}@)",
+               entity, count, duration, predicateInfo)
+    }
+
+    /// Log a save operation
+    func logSave(insertions: Int, updates: Int, deletions: Int, duration: TimeInterval) {
+        guard isEnabled else { return }
+
+        os_log(.info, log: log,
+               "📊 SAVE: +%d ~%d -%d in %.3fs",
+               insertions, updates, deletions, duration)
+    }
+
+    /// Log a batch operation
+    func logBatchOperation(type: String, entity: String, count: Int, duration: TimeInterval) {
+        guard isEnabled else { return }
+
+        os_log(.info, log: log,
+               "📊 BATCH %{public}@ %{public}@: %d objects in %.3fs",
+               type, entity, count, duration)
+    }
+
+    /// Log sync metrics summary
+    func logSyncSummary(messagesProcessed: Int, conversationsUpdated: Int, totalDuration: TimeInterval) {
+        os_log(.info, log: log,
+               "📊 SYNC COMPLETE: %d messages, %d conversations in %.2fs (%.0f msg/s)",
+               messagesProcessed, conversationsUpdated, totalDuration,
+               totalDuration > 0 ? Double(messagesProcessed) / totalDuration : 0)
+    }
 }
 
 // MARK: - Network Reachable Actor
@@ -65,6 +134,7 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
     private let htmlContentHandler = HTMLContentHandler()
     private let conversationManager = ConversationManager()
     private let attachmentDownloader = AttachmentDownloader.shared
+    private let performanceLogger = CoreDataPerformanceLogger.shared
     private var myAliases: Set<String> = []
     private var cancellables = Set<AnyCancellable>()
     private let networkMonitor = NWPathMonitor()
@@ -125,6 +195,9 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
     }
 
     private func performInitialSyncLogic() async throws {
+        let syncStartTime = CFAbsoluteTimeGetCurrent()
+        let signpostID = performanceLogger.beginOperation("InitialSync")
+
         await MainActor.run {
             self.isSyncing = true
             self.syncProgress = 0.0
@@ -210,32 +283,58 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
                 self.syncStatus = "Processed \(totalProcessed) messages"
                 self.syncProgress = 0.9
             }
-            
+
+            let rollupStartTime = CFAbsoluteTimeGetCurrent()
             await updateConversationRollups(in: context)
-            
+            let rollupDuration = CFAbsoluteTimeGetCurrent() - rollupStartTime
+
+            // Count conversations for logging
+            let conversationCount = await context.perform {
+                let request = NSFetchRequest<NSNumber>(entityName: "Conversation")
+                request.resultType = .countResultType
+                return (try? context.fetch(request).first?.intValue) ?? 0
+            }
+
             // Save the background context first
+            let saveStartTime = CFAbsoluteTimeGetCurrent()
             do {
                 try coreDataStack.save(context: context)
+                let saveDuration = CFAbsoluteTimeGetCurrent() - saveStartTime
+                performanceLogger.logSave(insertions: totalProcessed, updates: 0, deletions: 0, duration: saveDuration)
             } catch {
                 print("Failed to save sync data: \(error)")
                 throw error // Propagate sync errors
             }
-            
+
             // Update account's historyId in the main context
             await updateAccountHistoryId(profile.historyId)
-            
+
             // Start downloading attachments in the background
             Task {
                 await attachmentDownloader.enqueueAllPendingAttachments()
             }
-            
+
+            // Log sync summary
+            let totalDuration = CFAbsoluteTimeGetCurrent() - syncStartTime
+            performanceLogger.endOperation("InitialSync", signpostID: signpostID)
+            performanceLogger.logSyncSummary(
+                messagesProcessed: totalProcessed,
+                conversationsUpdated: conversationCount,
+                totalDuration: totalDuration
+            )
+
+            #if DEBUG
+            print("📊 Conversation rollup took \(String(format: "%.2f", rollupDuration))s")
+            #endif
+
             await MainActor.run {
                 self.syncProgress = 1.0
                 self.syncStatus = "Sync complete"
                 self.isSyncing = false
             }
-            
+
         } catch {
+            performanceLogger.endOperation("InitialSync", signpostID: signpostID)
             await MainActor.run {
                 self.syncStatus = "Sync failed: \(error.localizedDescription)"
                 self.isSyncing = false
@@ -846,97 +945,183 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
     }
 
     private func removeDraftMessages(in context: NSManagedObjectContext) async {
+        let startTime = CFAbsoluteTimeGetCurrent()
+
         await context.perform {
-            let request = Message.fetchRequest()
-            request.predicate = NSPredicate(format: "ANY labels.id == %@", "DRAFTS")
-            request.fetchBatchSize = 50
+            // Use NSBatchDeleteRequest for efficient bulk deletion
+            let fetchRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
+            fetchRequest.predicate = NSPredicate(format: "ANY labels.id == %@", "DRAFTS")
 
-            guard let draftMessages = try? context.fetch(request) else { return }
+            let batchDeleteRequest = NSBatchDeleteRequest(fetchRequest: fetchRequest)
+            batchDeleteRequest.resultType = .resultTypeCount
 
-            var removedCount = 0
-            for message in draftMessages {
-                context.delete(message)
-                removedCount += 1
+            do {
+                let result = try context.execute(batchDeleteRequest) as? NSBatchDeleteResult
+                let deletedCount = result?.result as? Int ?? 0
+
+                if deletedCount > 0 {
+                    // Reset context to reflect changes
+                    context.reset()
+
+                    let duration = CFAbsoluteTimeGetCurrent() - startTime
+                    print("📊 Removed \(deletedCount) draft messages in \(String(format: "%.3f", duration))s")
+                }
+            } catch {
+                print("Failed to batch delete draft messages: \(error)")
+                // Fall back to individual deletion
+                self.removeDraftMessagesFallback(in: context)
             }
+        }
+    }
 
-            if removedCount > 0 {
-                print("Removed \(removedCount) draft messages")
-                self.coreDataStack.saveIfNeeded(context: context)
-            }
+    nonisolated private func removeDraftMessagesFallback(in context: NSManagedObjectContext) {
+        let request = Message.fetchRequest()
+        request.predicate = NSPredicate(format: "ANY labels.id == %@", "DRAFTS")
+        request.fetchBatchSize = 50
+
+        guard let draftMessages = try? context.fetch(request) else { return }
+
+        var removedCount = 0
+        for message in draftMessages {
+            context.delete(message)
+            removedCount += 1
+        }
+
+        if removedCount > 0 {
+            print("Removed \(removedCount) draft messages (fallback)")
+            coreDataStack.saveIfNeeded(context: context)
         }
     }
 
     private func removeEmptyConversations(in context: NSManagedObjectContext) async {
+        let startTime = CFAbsoluteTimeGetCurrent()
+
         await context.perform {
-            let request = Conversation.fetchRequest()
-            request.fetchBatchSize = 50
+            // Step 1: Find conversations with no messages using a subquery
+            // This is more efficient than loading all conversations and checking relationships
+            let request = NSFetchRequest<NSFetchRequestResult>(entityName: "Conversation")
+            request.predicate = NSPredicate(format: "messages.@count == 0 AND participants.@count == 0")
+            request.resultType = .managedObjectIDResultType
 
-            guard let conversations = try? context.fetch(request) else { return }
-
-            var removedCount = 0
-            for conversation in conversations {
-                // Remove conversations with no participants or no messages
-                let hasParticipants = (conversation.participants?.count ?? 0) > 0
-                let hasMessages = (conversation.messages?.count ?? 0) > 0
-
-                if !hasParticipants && !hasMessages {
-                    context.delete(conversation)
-                    removedCount += 1
+            do {
+                guard let objectIDs = try context.fetch(request) as? [NSManagedObjectID],
+                      !objectIDs.isEmpty else {
+                    return
                 }
-            }
 
-            if removedCount > 0 {
-                print("Removed \(removedCount) empty conversations")
-                self.coreDataStack.saveIfNeeded(context: context)
+                // Use NSBatchDeleteRequest for efficient bulk deletion
+                let batchDeleteRequest = NSBatchDeleteRequest(objectIDs: objectIDs)
+                batchDeleteRequest.resultType = .resultTypeObjectIDs
+
+                let result = try context.execute(batchDeleteRequest) as? NSBatchDeleteResult
+                if let deletedIDs = result?.result as? [NSManagedObjectID] {
+                    // Merge changes to view context
+                    let changes = [NSDeletedObjectsKey: deletedIDs]
+                    NSManagedObjectContext.mergeChanges(
+                        fromRemoteContextSave: changes,
+                        into: [self.coreDataStack.viewContext]
+                    )
+
+                    let duration = CFAbsoluteTimeGetCurrent() - startTime
+                    print("📊 Removed \(deletedIDs.count) empty conversations in \(String(format: "%.3f", duration))s")
+                }
+            } catch {
+                print("Failed to batch delete empty conversations: \(error)")
+                // Fall back to individual deletion
+                self.removeEmptyConversationsFallback(in: context)
             }
+        }
+    }
+
+    nonisolated private func removeEmptyConversationsFallback(in context: NSManagedObjectContext) {
+        let request = Conversation.fetchRequest()
+        request.fetchBatchSize = 50
+
+        guard let conversations = try? context.fetch(request) else { return }
+
+        var removedCount = 0
+        for conversation in conversations {
+            let hasParticipants = (conversation.participants?.count ?? 0) > 0
+            let hasMessages = (conversation.messages?.count ?? 0) > 0
+
+            if !hasParticipants && !hasMessages {
+                context.delete(conversation)
+                removedCount += 1
+            }
+        }
+
+        if removedCount > 0 {
+            print("Removed \(removedCount) empty conversations (fallback)")
+            coreDataStack.saveIfNeeded(context: context)
         }
     }
     
     private func removeDuplicateMessages(in context: NSManagedObjectContext) async {
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        // Step 1: Find duplicate message IDs using a lightweight dictionary fetch
         let request = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
         request.resultType = .dictionaryResultType
-        request.propertiesToFetch = ["objectID", "id"]  // Include objectID for batch fetching
+        request.propertiesToFetch = ["id"]
         request.returnsDistinctResults = false
-        request.fetchBatchSize = 100  // Process duplicates in batches
-        
+
         guard let results = try? context.fetch(request) as? [[String: Any]] else { return }
-        
-        var seenIds = Set<String>()
-        var duplicateIds = [String]()
-        
+
+        // Build a map of id -> count to find duplicates
+        var idCounts = [String: Int]()
         for result in results {
             if let id = result["id"] as? String {
-                if seenIds.contains(id) {
-                    duplicateIds.append(id)
-                } else {
-                    seenIds.insert(id)
-                }
+                idCounts[id, default: 0] += 1
             }
         }
-        
+
+        // Get IDs that appear more than once
+        let duplicateIds = idCounts.filter { $0.value > 1 }.map { $0.key }
+
+        guard !duplicateIds.isEmpty else {
+            print("No duplicate messages found")
+            return
+        }
+
+        // Step 2: For each duplicate ID, keep one and delete the rest using NSBatchDeleteRequest
+        var totalDeleted = 0
+
         for duplicateId in duplicateIds {
-            let deleteRequest = Message.fetchRequest()
-            deleteRequest.predicate = NSPredicate(format: "id == %@", duplicateId)
-            deleteRequest.fetchLimit = 1
-            deleteRequest.fetchBatchSize = 1  // Single object fetch
-            
-            if let duplicates = try? context.fetch(deleteRequest), let duplicate = duplicates.first {
-                context.delete(duplicate)
+            // Find all messages with this ID, ordered by internalDate (keep newest)
+            let findRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
+            findRequest.predicate = NSPredicate(format: "id == %@", duplicateId)
+            findRequest.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: false)]
+            findRequest.resultType = .managedObjectIDResultType
+
+            guard let objectIDs = try? context.fetch(findRequest) as? [NSManagedObjectID],
+                  objectIDs.count > 1 else { continue }
+
+            // Keep the first (newest), delete the rest
+            let idsToDelete = Array(objectIDs.dropFirst())
+
+            // Use NSBatchDeleteRequest for efficient deletion
+            let batchDeleteRequest = NSBatchDeleteRequest(objectIDs: idsToDelete)
+            batchDeleteRequest.resultType = .resultTypeObjectIDs
+
+            do {
+                let deleteResult = try context.execute(batchDeleteRequest) as? NSBatchDeleteResult
+                if let deletedIDs = deleteResult?.result as? [NSManagedObjectID] {
+                    // Merge changes to view context
+                    let changes = [NSDeletedObjectsKey: deletedIDs]
+                    NSManagedObjectContext.mergeChanges(
+                        fromRemoteContextSave: changes,
+                        into: [coreDataStack.viewContext]
+                    )
+                    totalDeleted += deletedIDs.count
+                }
+            } catch {
+                print("Batch delete failed for duplicate \(duplicateId): \(error)")
             }
         }
-        
-        if !duplicateIds.isEmpty {
-            do {
-                try coreDataStack.save(context: context)
-                print("Removed \(duplicateIds.count) duplicate messages")
-            } catch {
-                print("Failed to save after removing duplicates: \(error)")
-                // This IS critical - duplicates will persist and cause UI issues
-                // Attempt rollback and log for investigation
-                context.rollback()
-                print("Rolled back duplicate removal transaction. Duplicates remain in database.")
-                // Consider notifying user or triggering a database maintenance task
-            }
+
+        let duration = CFAbsoluteTimeGetCurrent() - startTime
+        if totalDeleted > 0 {
+            print("📊 Removed \(totalDeleted) duplicate messages in \(String(format: "%.2f", duration))s")
         }
     }
 }

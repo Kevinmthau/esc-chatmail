@@ -378,29 +378,37 @@ struct MessageBubble: View {
                         .frame(maxWidth: UIScreen.main.bounds.width * 0.65)
                 }
 
-                // For newsletters/promotional emails, only show View More button
+                // For newsletters/promotional emails, show HTML preview
                 if message.isNewsletter {
-                    Button(action: {
-                        showingHTMLView = true
-                    }) {
-                        HStack(spacing: 4) {
-                            Text("View More")
-                                .font(.caption)
-                                .fontWeight(.medium)
-                            Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                .font(.caption2)
+                    VStack(alignment: .leading, spacing: 8) {
+                        HTMLPreviewView(message: message, maxHeight: 200)
+                            .frame(maxWidth: 260)
+                            .onTapGesture {
+                                showingHTMLView = true
+                            }
+
+                        Button(action: {
+                            showingHTMLView = true
+                        }) {
+                            HStack(spacing: 4) {
+                                Text("View Full Email")
+                                    .font(.caption)
+                                    .fontWeight(.medium)
+                                Image(systemName: "arrow.up.forward")
+                                    .font(.caption2)
+                            }
+                            .foregroundColor(.blue)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.blue.opacity(0.1))
+                            .cornerRadius(8)
                         }
-                        .foregroundColor(.blue)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Color.blue.opacity(0.1))
-                        .cornerRadius(8)
                     }
                 } else {
                     // For regular emails, show the full text content
                     // Text content - use fullTextContent if loaded, otherwise bodyText, fallback to snippet
                     if let rawText = fullTextContent ?? (message.value(forKey: "bodyText") as? String) ?? message.cleanedSnippet ?? message.snippet, !rawText.isEmpty {
-                        let text = message.isFromMe ? stripQuotedText(from: rawText) : rawText
+                        let text = stripQuotedText(from: rawText)
                         VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 8) {
                             Text(text)
                                 .padding(10)
@@ -408,23 +416,31 @@ struct MessageBubble: View {
                                 .foregroundColor(message.isFromMe ? .white : .primary)
                                 .cornerRadius(12)
 
-                            // View More button for rich HTML content
+                            // HTML preview for rich content
                             if hasRichContent {
-                                Button(action: {
-                                    showingHTMLView = true
-                                }) {
-                                    HStack(spacing: 4) {
-                                        Text("View More")
-                                            .font(.caption)
-                                            .fontWeight(.medium)
-                                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                            .font(.caption2)
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HTMLPreviewView(message: message, maxHeight: 150)
+                                        .frame(maxWidth: 260)
+                                        .onTapGesture {
+                                            showingHTMLView = true
+                                        }
+
+                                    Button(action: {
+                                        showingHTMLView = true
+                                    }) {
+                                        HStack(spacing: 4) {
+                                            Text("View Full Email")
+                                                .font(.caption)
+                                                .fontWeight(.medium)
+                                            Image(systemName: "arrow.up.forward")
+                                                .font(.caption2)
+                                        }
+                                        .foregroundColor(.blue)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        .background(Color.blue.opacity(0.1))
+                                        .cornerRadius(8)
                                     }
-                                    .foregroundColor(.blue)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
-                                    .background(Color.blue.opacity(0.1))
-                                    .cornerRadius(8)
                                 }
                             }
                         }

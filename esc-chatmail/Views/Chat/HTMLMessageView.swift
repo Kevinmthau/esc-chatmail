@@ -1,6 +1,160 @@
 import SwiftUI
 import WebKit
 
+// MARK: - Inline HTML Preview for Chat Bubbles
+struct HTMLPreviewView: View {
+    let message: Message
+    let maxHeight: CGFloat
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var htmlContent: String?
+    @State private var isLoading = true
+
+    private let htmlContentHandler = HTMLContentHandler()
+
+    var body: some View {
+        Group {
+            if isLoading {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.gray.opacity(0.1))
+                    .frame(height: maxHeight)
+                    .overlay(
+                        ProgressView()
+                            .scaleEffect(0.8)
+                    )
+            } else if let html = htmlContent {
+                HTMLPreviewWebView(
+                    htmlContent: html,
+                    isDarkMode: colorScheme == .dark,
+                    maxHeight: maxHeight
+                )
+                .frame(height: maxHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(Color.gray.opacity(0.2), lineWidth: 1)
+                )
+            } else {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.gray.opacity(0.1))
+                    .frame(height: 60)
+                    .overlay(
+                        Text("Preview unavailable")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    )
+            }
+        }
+        .task {
+            await loadHTMLContent()
+        }
+    }
+
+    private func loadHTMLContent() async {
+        let messageId = message.id
+
+        // Try loading from message ID
+        if htmlContentHandler.htmlFileExists(for: messageId),
+           let html = htmlContentHandler.loadHTML(for: messageId) {
+            let wrappedHTML = HTMLSanitizerService.shared.wrapHTMLForDisplay(
+                html,
+                isDarkMode: colorScheme == .dark
+            )
+            await MainActor.run {
+                self.htmlContent = wrappedHTML
+                self.isLoading = false
+            }
+            return
+        }
+
+        // Try loading from stored URI
+        if let urlString = message.bodyStorageURI {
+            let url: URL?
+            if urlString.starts(with: "/") {
+                url = URL(fileURLWithPath: urlString)
+            } else if urlString.starts(with: "file://") {
+                url = URL(string: urlString)
+            } else {
+                url = URL(string: urlString)
+            }
+
+            if let validUrl = url, FileManager.default.fileExists(atPath: validUrl.path),
+               let html = htmlContentHandler.loadHTML(from: validUrl) {
+                let wrappedHTML = HTMLSanitizerService.shared.wrapHTMLForDisplay(
+                    html,
+                    isDarkMode: colorScheme == .dark
+                )
+                await MainActor.run {
+                    self.htmlContent = wrappedHTML
+                    self.isLoading = false
+                }
+                return
+            }
+        }
+
+        await MainActor.run {
+            self.isLoading = false
+        }
+    }
+}
+
+struct HTMLPreviewWebView: UIViewRepresentable {
+    let htmlContent: String
+    let isDarkMode: Bool
+    let maxHeight: CGFloat
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = context.coordinator
+        webView.scrollView.isScrollEnabled = false
+        webView.scrollView.bounces = false
+        webView.isUserInteractionEnabled = false
+        webView.isOpaque = false
+        webView.backgroundColor = .clear
+        webView.scrollView.backgroundColor = .clear
+
+        context.coordinator.loadContent(in: webView)
+
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        if context.coordinator.lastLoadedContent != htmlContent {
+            context.coordinator.loadContent(in: webView)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    class Coordinator: NSObject, WKNavigationDelegate {
+        var parent: HTMLPreviewWebView
+        var lastLoadedContent: String = ""
+
+        init(_ parent: HTMLPreviewWebView) {
+            self.parent = parent
+        }
+
+        func loadContent(in webView: WKWebView) {
+            lastLoadedContent = parent.htmlContent
+            let baseURL = URL(string: "https://localhost/")
+            webView.loadHTMLString(parent.htmlContent, baseURL: baseURL)
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            if navigationAction.navigationType == .other || navigationAction.navigationType == .reload {
+                decisionHandler(.allow)
+            } else {
+                decisionHandler(.cancel)
+            }
+        }
+    }
+}
+
+// MARK: - Full HTML Message View
 struct HTMLMessageView: View {
     let message: Message
     @Environment(\.dismiss) private var dismiss

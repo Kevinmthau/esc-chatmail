@@ -172,36 +172,70 @@ final class ConversationManager: @unchecked Sendable {
     }
     
     func removeDuplicateConversations(in context: NSManagedObjectContext) async {
+        let startTime = CFAbsoluteTimeGetCurrent()
+
         await context.perform { [weak self] in
             guard let self = self else { return }
-            let request = Conversation.fetchRequest()
-            request.fetchBatchSize = 50  // Process conversations in batches
-            guard let conversations = try? context.fetch(request) else { return }
 
-            // Group conversations by keyHash
-            var groupedByKey = [String: [Conversation]]()
-            for conversation in conversations {
-                let keyHash = conversation.value(forKey: "keyHash") as? String ?? ""
-                groupedByKey[keyHash, default: []].append(conversation)
+            // Step 1: Find duplicate keyHashes using a lightweight dictionary fetch
+            // This avoids loading full Conversation objects initially
+            let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Conversation")
+            countRequest.resultType = .dictionaryResultType
+            countRequest.propertiesToFetch = ["keyHash"]
+
+            guard let results = try? context.fetch(countRequest) as? [[String: Any]] else { return }
+
+            // Build a map of keyHash -> count
+            var keyHashCounts = [String: Int]()
+            for result in results {
+                if let keyHash = result["keyHash"] as? String, !keyHash.isEmpty {
+                    keyHashCounts[keyHash, default: 0] += 1
+                }
+            }
+
+            // Get keyHashes that appear more than once
+            let duplicateKeyHashes = keyHashCounts.filter { $0.value > 1 }.map { $0.key }
+
+            guard !duplicateKeyHashes.isEmpty else {
+                return
             }
 
             var mergedCount = 0
+            var deletedObjectIDs = [NSManagedObjectID]()
 
-            // Process each group with duplicates
-            for (_, group) in groupedByKey where group.count > 1 {
+            // Step 2: Process each duplicate group - fetch only the duplicates
+            for keyHash in duplicateKeyHashes {
+                let request = Conversation.fetchRequest()
+                request.predicate = NSPredicate(format: "keyHash == %@", keyHash)
+                request.returnsObjectsAsFaults = false  // We need to access properties
+
+                guard let group = try? context.fetch(request), group.count > 1 else { continue }
+
                 let winner = self.selectWinnerConversation(from: group)
                 let losers = group.filter { $0 != winner }
 
                 for loser in losers {
                     self.mergeConversation(from: loser, into: winner)
+                    deletedObjectIDs.append(loser.objectID)
                     context.delete(loser)
                     mergedCount += 1
                 }
             }
-            
+
             if mergedCount > 0 {
                 self.coreDataStack.saveIfNeeded(context: context)
-                print("Merged \(mergedCount) duplicate conversations")
+
+                // Merge deletions to view context
+                if !deletedObjectIDs.isEmpty {
+                    let changes = [NSDeletedObjectsKey: deletedObjectIDs]
+                    NSManagedObjectContext.mergeChanges(
+                        fromRemoteContextSave: changes,
+                        into: [self.coreDataStack.viewContext]
+                    )
+                }
+
+                let duration = CFAbsoluteTimeGetCurrent() - startTime
+                print("📊 Merged \(mergedCount) duplicate conversations in \(String(format: "%.3f", duration))s")
             }
         }
     }

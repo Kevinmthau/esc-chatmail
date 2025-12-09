@@ -42,44 +42,72 @@ struct ConversationListView: View {
     @State private var currentFilter: ConversationFilter = .all
     @State private var showingFilterMenu = false
     @State private var contactEmailsCache: Set<String> = []
+    @State private var isSelecting = false
+    @State private var selectedConversationIDs: Set<NSManagedObjectID> = []
     
     var body: some View {
         ZStack {
             List {
                     ForEach(filteredConversations) { conversation in
-                        ZStack {
-                            NavigationLink(destination: ChatView(conversation: conversation)) {
-                                EmptyView()
+                        HStack(spacing: 0) {
+                            if isSelecting {
+                                Button {
+                                    toggleSelection(for: conversation)
+                                } label: {
+                                    Image(systemName: selectedConversationIDs.contains(conversation.objectID) ? "checkmark.circle.fill" : "circle")
+                                        .font(.system(size: 22))
+                                        .foregroundColor(selectedConversationIDs.contains(conversation.objectID) ? .blue : .gray)
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.leading, 16)
+                                .padding(.trailing, 8)
                             }
-                            .opacity(0)
 
-                            ConversationRowView(conversation: conversation)
+                            if isSelecting {
+                                ConversationRowView(conversation: conversation)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        toggleSelection(for: conversation)
+                                    }
+                            } else {
+                                ZStack {
+                                    NavigationLink(destination: ChatView(conversation: conversation)) {
+                                        EmptyView()
+                                    }
+                                    .opacity(0)
+
+                                    ConversationRowView(conversation: conversation)
+                                }
+                            }
                         }
                         .listRowInsets(EdgeInsets())
                         .listRowSeparator(.visible)
                     }
-                    .onDelete(perform: deleteConversations)
+                    .onDelete(perform: isSelecting ? nil : deleteConversations)
                 }
                 .listStyle(.plain)
                 .scrollDismissesKeyboard(.interactively)
-                .navigationTitle("Chats")
+                .navigationTitle(isSelecting ? "\(selectedConversationIDs.count) Selected" : "Chats")
                 .toolbar {
                     ToolbarItem(placement: .navigationBarLeading) {
-                        Button(action: { showingSettings = true }) {
-                            Image(systemName: "gear")
+                        if isSelecting {
+                            Button(selectedConversationIDs.count == filteredConversations.count ? "Deselect All" : "Select All") {
+                                selectAll()
+                            }
+                        } else {
+                            Button(action: { showingSettings = true }) {
+                                Image(systemName: "gear")
+                            }
                         }
                     }
                     ToolbarItem(placement: .navigationBarTrailing) {
-                        Button(action: { showingFilterMenu = true }) {
-                            Image(systemName: currentFilter.icon)
-                                .foregroundColor(currentFilter == .all ? .primary : .blue)
-                        }
-                    }
-                }
-                .confirmationDialog("Filter Conversations", isPresented: $showingFilterMenu) {
-                    ForEach(ConversationFilter.allCases, id: \.self) { filter in
-                        Button(filter.rawValue) {
-                            currentFilter = filter
+                        Button(isSelecting ? "Cancel" : "Select") {
+                            withAnimation {
+                                isSelecting.toggle()
+                                if !isSelecting {
+                                    selectedConversationIDs.removeAll()
+                                }
+                            }
                         }
                     }
                 }
@@ -105,68 +133,217 @@ struct ConversationListView: View {
                     stopPeriodicSync()
                 }
                 .safeAreaInset(edge: .bottom) {
-                    Color.clear.frame(height: 68)
+                    Color.clear.frame(height: 80)
                 }
 
-            // Floating search bar with compose button
+            // Floating bottom navigation bar
             VStack {
                 Spacer()
-                HStack(spacing: 8) {
-                    // Search bar
-                    HStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass")
-                            .foregroundColor(.secondary)
-                            .font(.system(size: 16))
+                if isSelecting && !selectedConversationIDs.isEmpty {
+                    // Selection action buttons
+                    HStack(spacing: 20) {
+                        // Archive button
+                        Button(action: { archiveSelectedConversations() }) {
+                            HStack(spacing: 10) {
+                                Image(systemName: "archivebox")
+                                    .font(.system(size: 20, weight: .medium))
+                                Text("Archive")
+                                    .font(.system(size: 17, weight: .medium))
+                            }
+                            .foregroundColor(.primary)
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 16)
+                            .background(Color.white.opacity(0.25))
+                            .background(
+                                Capsule()
+                                    .fill(.ultraThinMaterial)
+                                    .opacity(0.5)
+                            )
+                            .clipShape(Capsule())
+                            .overlay(
+                                Capsule()
+                                    .strokeBorder(
+                                        LinearGradient(
+                                            gradient: Gradient(colors: [
+                                                Color.white.opacity(0.6),
+                                                Color.white.opacity(0.15)
+                                            ]),
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        ),
+                                        lineWidth: 1
+                                    )
+                            )
+                            .shadow(color: .black.opacity(0.08), radius: 12, x: 0, y: 4)
+                        }
 
-                        TextField("Search", text: $searchText)
-                            .textFieldStyle(.plain)
+                        // Delete button
+                        Button(action: { deleteSelectedConversations() }) {
+                            HStack(spacing: 10) {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 20, weight: .medium))
+                                Text("Delete")
+                                    .font(.system(size: 17, weight: .medium))
+                            }
+                            .foregroundColor(.red)
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 16)
+                            .background(Color.white.opacity(0.25))
+                            .background(
+                                Capsule()
+                                    .fill(.ultraThinMaterial)
+                                    .opacity(0.5)
+                            )
+                            .clipShape(Capsule())
+                            .overlay(
+                                Capsule()
+                                    .strokeBorder(
+                                        LinearGradient(
+                                            gradient: Gradient(colors: [
+                                                Color.white.opacity(0.6),
+                                                Color.white.opacity(0.15)
+                                            ]),
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        ),
+                                        lineWidth: 1
+                                    )
+                            )
+                            .shadow(color: .black.opacity(0.08), radius: 12, x: 0, y: 4)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 14)
+                } else {
+                    // Normal navigation bar
+                    HStack(spacing: 14) {
+                        // Filter button
+                        Menu {
+                            ForEach(ConversationFilter.allCases, id: \.self) { filter in
+                                Button {
+                                    currentFilter = filter
+                                } label: {
+                                    SwiftUI.Label(filter.rawValue, systemImage: filter.icon)
+                                }
+                            }
+                        } label: {
+                            ZStack {
+                                Circle()
+                                    .fill(Color.white.opacity(0.25))
+                                    .background(
+                                        Circle()
+                                            .fill(.ultraThinMaterial)
+                                            .opacity(0.5)
+                                    )
+                                    .overlay(
+                                        Circle()
+                                            .strokeBorder(
+                                                LinearGradient(
+                                                    gradient: Gradient(colors: [
+                                                        Color.white.opacity(0.7),
+                                                        Color.white.opacity(0.2)
+                                                    ]),
+                                                    startPoint: .topLeading,
+                                                    endPoint: .bottomTrailing
+                                                ),
+                                                lineWidth: 1.5
+                                            )
+                                    )
+                                    .shadow(color: .black.opacity(0.08), radius: 12, x: 0, y: 4)
 
-                        if !searchText.isEmpty {
-                            Button(action: { searchText = "" }) {
-                                Image(systemName: "xmark.circle.fill")
+                                Image(systemName: currentFilter.icon)
+                                    .font(.system(size: 22, weight: .medium))
+                                    .foregroundColor(.primary)
+                            }
+                            .frame(width: 56, height: 56)
+                        }
+
+                        // Search bar with microphone
+                        HStack(spacing: 10) {
+                            Image(systemName: "magnifyingglass")
+                                .foregroundColor(.secondary)
+                                .font(.system(size: 18))
+
+                            TextField("Search", text: $searchText)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 17))
+
+                            if !searchText.isEmpty {
+                                Button(action: { searchText = "" }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(.secondary)
+                                        .font(.system(size: 18))
+                                }
+                            }
+
+                            // Microphone button
+                            Button(action: { }) {
+                                Image(systemName: "mic")
+                                    .font(.system(size: 20))
                                     .foregroundColor(.secondary)
-                                    .font(.system(size: 16))
                             }
                         }
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-                    .background(.ultraThinMaterial)
-                    .cornerRadius(10)
-                    .shadow(color: .black.opacity(0.1), radius: 10, x: 0, y: 4)
-
-                    // Compose button with clear liquid glass design
-                    Button(action: { showingComposer = true }) {
-                        ZStack {
-                            // Clear liquid glass background
-                            Circle()
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 16)
+                        .background(Color.white.opacity(0.25))
+                        .background(
+                            Capsule()
                                 .fill(.ultraThinMaterial)
-                                .overlay(
-                                    Circle()
-                                        .strokeBorder(
-                                            LinearGradient(
-                                                gradient: Gradient(colors: [
-                                                    Color.white.opacity(0.6),
-                                                    Color.white.opacity(0.2)
-                                                ]),
-                                                startPoint: .topLeading,
-                                                endPoint: .bottomTrailing
-                                            ),
-                                            lineWidth: 1.5
-                                        )
+                                .opacity(0.5)
+                        )
+                        .clipShape(Capsule())
+                        .overlay(
+                            Capsule()
+                                .strokeBorder(
+                                    LinearGradient(
+                                        gradient: Gradient(colors: [
+                                            Color.white.opacity(0.6),
+                                            Color.white.opacity(0.15)
+                                        ]),
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                    lineWidth: 1
                                 )
-                                .shadow(color: .black.opacity(0.1), radius: 10, x: 0, y: 4)
+                        )
+                        .shadow(color: .black.opacity(0.08), radius: 12, x: 0, y: 4)
 
-                            // Pencil icon
-                            Image(systemName: "square.and.pencil")
-                                .font(.system(size: 20, weight: .semibold))
-                                .foregroundColor(.primary)
+                        // Compose button
+                        Button(action: { showingComposer = true }) {
+                            ZStack {
+                                Circle()
+                                    .fill(Color.white.opacity(0.25))
+                                    .background(
+                                        Circle()
+                                            .fill(.ultraThinMaterial)
+                                            .opacity(0.5)
+                                    )
+                                    .overlay(
+                                        Circle()
+                                            .strokeBorder(
+                                                LinearGradient(
+                                                    gradient: Gradient(colors: [
+                                                        Color.white.opacity(0.7),
+                                                        Color.white.opacity(0.2)
+                                                    ]),
+                                                    startPoint: .topLeading,
+                                                    endPoint: .bottomTrailing
+                                                ),
+                                                lineWidth: 1.5
+                                            )
+                                    )
+                                    .shadow(color: .black.opacity(0.08), radius: 12, x: 0, y: 4)
+
+                                Image(systemName: "square.and.pencil")
+                                    .font(.system(size: 24, weight: .semibold))
+                                    .foregroundColor(.primary)
+                            }
+                            .frame(width: 56, height: 56)
                         }
-                        .frame(width: 44, height: 44)
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 14)
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 12)
             }
         }
     }
@@ -191,7 +368,47 @@ struct ConversationListView: View {
             }
         }
     }
-    
+
+    private func toggleSelection(for conversation: Conversation) {
+        if selectedConversationIDs.contains(conversation.objectID) {
+            selectedConversationIDs.remove(conversation.objectID)
+        } else {
+            selectedConversationIDs.insert(conversation.objectID)
+        }
+    }
+
+    private func selectAll() {
+        if selectedConversationIDs.count == filteredConversations.count {
+            selectedConversationIDs.removeAll()
+        } else {
+            selectedConversationIDs = Set(filteredConversations.map { $0.objectID })
+        }
+    }
+
+    private func archiveSelectedConversations() {
+        let context = CoreDataStack.shared.viewContext
+        for objectID in selectedConversationIDs {
+            if let conversation = try? context.existingObject(with: objectID) as? Conversation {
+                conversation.hidden = true
+            }
+        }
+        CoreDataStack.shared.saveIfNeeded(context: context)
+        selectedConversationIDs.removeAll()
+        isSelecting = false
+    }
+
+    private func deleteSelectedConversations() {
+        let context = CoreDataStack.shared.viewContext
+        for objectID in selectedConversationIDs {
+            if let conversation = try? context.existingObject(with: objectID) as? Conversation {
+                context.delete(conversation)
+            }
+        }
+        CoreDataStack.shared.saveIfNeeded(context: context)
+        selectedConversationIDs.removeAll()
+        isSelecting = false
+    }
+
     private var filteredConversations: [Conversation] {
         var result = Array(conversations)
 
