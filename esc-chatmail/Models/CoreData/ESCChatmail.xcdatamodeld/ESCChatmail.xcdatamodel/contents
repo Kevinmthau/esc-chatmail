@@ -64,6 +64,23 @@
         <attribute name="name" attributeType="String"/>
         <relationship name="messages" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="Message" inverseName="labels" inverseEntity="Message"/>
     </entity>
+    <entity name="PendingAction" representedClassName="PendingAction" syncable="YES">
+        <attribute name="actionType" attributeType="String"/>
+        <attribute name="createdAt" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="messageId" optional="YES" attributeType="String"/>
+        <attribute name="conversationId" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="payload" optional="YES" attributeType="String"/>
+        <attribute name="retryCount" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="lastAttempt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="status" attributeType="String" defaultValueString="pending"/>
+        <fetchIndex name="byStatusIndex">
+            <fetchIndexElement property="status" type="Binary" order="ascending"/>
+        </fetchIndex>
+        <fetchIndex name="byCreatedAtIndex">
+            <fetchIndexElement property="createdAt" type="Binary" order="ascending"/>
+        </fetchIndex>
+    </entity>
     <entity name="Message" representedClassName="Message" syncable="YES">
         <attribute name="bodyStorageURI" optional="YES" attributeType="String"/>
         <attribute name="bodyText" optional="YES" attributeType="String"/>
@@ -75,6 +92,7 @@
         <attribute name="isFromMe" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="isNewsletter" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="isUnread" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="localModifiedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="messageId" optional="YES" attributeType="String"/>
         <attribute name="references" optional="YES" attributeType="String"/>
         <attribute name="senderEmail" optional="YES" attributeType="String"/>

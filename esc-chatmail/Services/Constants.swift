@@ -68,8 +68,30 @@ struct GoogleConfig {
         "openid",
         "email",
         "profile",
-        "https://www.googleapis.com/auth/gmail.modify"
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/contacts.other.readonly"
     ]
+}
+
+// MARK: - People API Endpoints
+struct PeopleAPIEndpoints {
+    static let baseURL = "https://people.googleapis.com/v1"
+
+    /// Search for contacts by query (email)
+    static func searchContacts(query: String) -> String {
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        return "\(baseURL)/otherContacts:search?query=\(encoded)&readMask=photos,names,emailAddresses&pageSize=1"
+    }
+
+    /// Get a specific person by resource name
+    static func person(resourceName: String) -> String {
+        "\(baseURL)/\(resourceName)?personFields=photos,names,emailAddresses"
+    }
+
+    /// Search "other contacts" (people you've interacted with)
+    static func listOtherContacts() -> String {
+        "\(baseURL)/otherContacts?readMask=photos,names,emailAddresses&pageSize=100"
+    }
 }
 
 // MARK: - Sync Configuration

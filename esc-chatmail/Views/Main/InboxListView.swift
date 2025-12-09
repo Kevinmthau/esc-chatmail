@@ -76,16 +76,16 @@ struct InboxListView: View {
     
     private func archiveMessage(_ message: Message) {
         Task {
-            try? await messageActions.archive(message: message)
+            await messageActions.archive(message: message)
         }
     }
-    
+
     private func toggleRead(_ message: Message) {
         Task {
             if message.isUnread {
-                try? await messageActions.markAsRead(message: message)
+                await messageActions.markAsRead(message: message)
             } else {
-                try? await messageActions.markAsUnread(message: message)
+                await messageActions.markAsUnread(message: message)
             }
         }
     }

@@ -8,6 +8,8 @@ enum APIError: LocalizedError {
     case rateLimited
     case serverError(Int)
     case timeout
+    case historyIdExpired
+    case notFound(String)
 
     var errorDescription: String? {
         switch self {
@@ -25,6 +27,10 @@ enum APIError: LocalizedError {
             return "Server error: \(code)"
         case .timeout:
             return "Request timed out"
+        case .historyIdExpired:
+            return "History ID has expired. A full sync is required."
+        case .notFound(let resource):
+            return "Resource not found: \(resource)"
         }
     }
 }
@@ -269,7 +275,51 @@ class GmailAPIClient {
             throw APIError.invalidURL(endpoint)
         }
         let request = try await authenticatedRequest(url: url)
-        return try await performRequestWithRetry(request)
+
+        // Use specialized error handling for history API
+        // Gmail returns 404 when the historyId is too old/expired
+        return try await performHistoryRequest(request)
+    }
+
+    /// Specialized request handler for history API that detects expired history IDs
+    private nonisolated func performHistoryRequest(_ request: URLRequest) async throws -> HistoryResponse {
+        let (data, response) = try await session.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIError.networkError(URLError(.badServerResponse))
+        }
+
+        switch httpResponse.statusCode {
+        case 200:
+            return try JSONDecoder().decode(HistoryResponse.self, from: data)
+
+        case 404:
+            // Gmail returns 404 when historyId is expired or invalid
+            // Try to parse the error response for more details
+            if let errorResponse = try? JSONDecoder().decode(GmailErrorResponse.self, from: data) {
+                let errorMessage = errorResponse.error.message.lowercased()
+                if errorMessage.contains("not found") ||
+                   errorMessage.contains("invalid") ||
+                   errorMessage.contains("too old") {
+                    print("History ID expired: \(errorResponse.error.message)")
+                    throw APIError.historyIdExpired
+                }
+            }
+            // Default to historyIdExpired for any 404 on history endpoint
+            throw APIError.historyIdExpired
+
+        case 401:
+            throw APIError.authenticationError
+
+        case 429:
+            throw APIError.rateLimited
+
+        case 500...599:
+            throw APIError.serverError(httpResponse.statusCode)
+
+        default:
+            throw APIError.serverError(httpResponse.statusCode)
+        }
     }
 
     nonisolated func listSendAs() async throws -> [SendAs] {
@@ -296,12 +346,62 @@ class GmailAPIClient {
 
         return attachmentData
     }
+
+    // MARK: - People API
+
+    /// Search for a person by email address using the Google People API
+    nonisolated func searchPeopleByEmail(email: String) async throws -> PeopleSearchResult {
+        let endpoint = PeopleAPIEndpoints.searchContacts(query: email)
+        guard let url = URL(string: endpoint) else {
+            throw APIError.invalidURL(endpoint)
+        }
+
+        let request = try await authenticatedRequest(url: url)
+        let response: PeopleSearchResponse = try await performRequestWithRetry(request)
+
+        // Find the best match from results
+        if let results = response.results {
+            for result in results {
+                if let person = result.person {
+                    // Check if email matches
+                    let personEmails = person.emailAddresses?.map { $0.value.lowercased() } ?? []
+                    if personEmails.contains(email.lowercased()) {
+                        // Get the best photo URL
+                        let photoURL = person.photos?.first(where: { $0.metadata?.primary == true })?.url
+                            ?? person.photos?.first?.url
+
+                        let displayName = person.names?.first?.displayName
+
+                        return PeopleSearchResult(
+                            email: email,
+                            displayName: displayName,
+                            photoURL: photoURL
+                        )
+                    }
+                }
+            }
+        }
+
+        // No match found
+        return PeopleSearchResult(email: email, displayName: nil, photoURL: nil)
+    }
 }
 
 // MARK: - Helper Response Types
 
 /// Empty response for endpoints that don't return data
 private struct EmptyResponse: Codable {}
+
+/// Gmail API error response structure
+private struct GmailErrorResponse: Codable {
+    let error: GmailErrorDetail
+
+    struct GmailErrorDetail: Codable {
+        let code: Int
+        let message: String
+        let status: String?
+    }
+}
 
 /// Response type for attachment data
 private struct AttachmentResponse: Codable {
@@ -448,4 +548,56 @@ struct SendAs: Codable {
     let isDefault: Bool?
     let treatAsAlias: Bool?
     let verificationStatus: String?
+}
+
+// MARK: - People API Response Types
+
+struct PeopleSearchResult {
+    let email: String
+    let displayName: String?
+    let photoURL: String?
+}
+
+struct PeopleSearchResponse: Codable {
+    let results: [PersonSearchResult]?
+}
+
+struct PersonSearchResult: Codable {
+    let person: GooglePerson?
+}
+
+struct GooglePerson: Codable {
+    let resourceName: String?
+    let etag: String?
+    let names: [GooglePersonName]?
+    let photos: [GooglePersonPhoto]?
+    let emailAddresses: [GooglePersonEmail]?
+}
+
+struct GooglePersonName: Codable {
+    let displayName: String?
+    let familyName: String?
+    let givenName: String?
+    let metadata: GooglePersonMetadata?
+}
+
+struct GooglePersonPhoto: Codable {
+    let url: String?
+    let metadata: GooglePersonMetadata?
+}
+
+struct GooglePersonEmail: Codable {
+    let value: String
+    let type: String?
+    let metadata: GooglePersonMetadata?
+}
+
+struct GooglePersonMetadata: Codable {
+    let primary: Bool?
+    let source: GooglePersonSource?
+}
+
+struct GooglePersonSource: Codable {
+    let type: String?
+    let id: String?
 }

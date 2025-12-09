@@ -398,6 +398,9 @@ final class SyncEngine: ObservableObject {
     }
 
     private func performIncrementalSyncLogic() async throws {
+        // Record sync start time for conflict resolution
+        let syncStartTime = Date()
+
         // Fetch account data in a thread-safe way
         let accountData = try await fetchAccountData()
 
@@ -462,7 +465,8 @@ final class SyncEngine: ObservableObject {
                         }
 
                         // Process label changes and deletions immediately (they're lightweight)
-                        await processHistoryRecordLightweight(record, in: context)
+                        // Pass syncStartTime for conflict resolution
+                        await processHistoryRecordLightweight(record, in: context, syncStartTime: syncStartTime)
                     }
                 } else {
                     print("No history records in response")
@@ -529,14 +533,32 @@ final class SyncEngine: ObservableObject {
             if error is CancellationError {
                 // Let cancellation propagate up
                 throw error
-            } else if error.localizedDescription.contains("too old") {
-                print("History too old, need to perform full sync")
-                // Perform initial sync logic inline to avoid re-entrancy
+            } else if let apiError = error as? APIError, case .historyIdExpired = apiError {
+                // History ID has expired - perform full initial sync
+                print("History ID expired (detected via HTTP 404), performing full sync")
                 try await performInitialSyncLogic()
             } else {
                 // Better error handling for different error types
                 let errorMessage: String
-                if let urlError = error as? URLError {
+                if let apiError = error as? APIError {
+                    switch apiError {
+                    case .historyIdExpired:
+                        // Should be handled above, but just in case
+                        errorMessage = "History expired, re-syncing..."
+                    case .authenticationError:
+                        errorMessage = "Authentication failed"
+                    case .rateLimited:
+                        errorMessage = "Rate limited, please try again later"
+                    case .timeout:
+                        errorMessage = "Request timed out"
+                    case .networkError(let underlying):
+                        errorMessage = "Network error: \(underlying.localizedDescription)"
+                    case .serverError(let code):
+                        errorMessage = "Server error: \(code)"
+                    default:
+                        errorMessage = apiError.localizedDescription
+                    }
+                } else if let urlError = error as? URLError {
                     switch urlError.code {
                     case .unsupportedURL:
                         errorMessage = "Invalid URL configuration"
@@ -555,8 +577,8 @@ final class SyncEngine: ObservableObject {
 
                 uiState.update(isSyncing: false, status: "Sync failed: \(errorMessage)")
 
-                // Rethrow non-URLError errors
-                if !(error is URLError) {
+                // Rethrow errors that aren't handled
+                if !(error is URLError) && !(error is APIError) {
                     throw error
                 }
             }
@@ -950,8 +972,9 @@ final class SyncEngine: ObservableObject {
     }
     
     /// Lightweight history processing - handles label changes and deletions only (no message fetching)
-    private func processHistoryRecordLightweight(_ record: HistoryRecord, in context: NSManagedObjectContext) async {
-        // Handle message deletions
+    /// Includes conflict resolution: skips server updates for messages with pending local changes
+    private func processHistoryRecordLightweight(_ record: HistoryRecord, in context: NSManagedObjectContext, syncStartTime: Date? = nil) async {
+        // Handle message deletions - always apply, deletions are authoritative
         if let messagesDeleted = record.messagesDeleted {
             let messageIds = messagesDeleted.map { $0.message.id }
             await context.perform {
@@ -965,7 +988,7 @@ final class SyncEngine: ObservableObject {
             }
         }
 
-        // Handle label additions
+        // Handle label additions with conflict resolution
         if let labelsAdded = record.labelsAdded {
             for added in labelsAdded {
                 let messageId = added.message.id
@@ -976,6 +999,12 @@ final class SyncEngine: ObservableObject {
                     let request = Message.fetchRequest()
                     request.predicate = NSPredicate(format: "id == %@", messageId)
                     if let message = try? context.fetch(request).first {
+                        // Conflict resolution: skip if message has pending local changes
+                        if self.hasConflict(message: message, syncStartTime: syncStartTime) {
+                            print("Skipping server label addition for message \(messageId) - local changes pending")
+                            return
+                        }
+
                         // Fetch labels by ID inside context.perform
                         let labelRequest = Label.fetchRequest()
                         labelRequest.predicate = NSPredicate(format: "id IN %@", labelIds)
@@ -984,13 +1013,15 @@ final class SyncEngine: ObservableObject {
                                 message.addToLabels(label)
                             }
                         }
-                        message.isUnread = hasUnread
+                        if hasUnread {
+                            message.isUnread = true
+                        }
                     }
                 }
             }
         }
 
-        // Handle label removals
+        // Handle label removals with conflict resolution
         if let labelsRemoved = record.labelsRemoved {
             for removed in labelsRemoved {
                 let messageId = removed.message.id
@@ -1001,6 +1032,12 @@ final class SyncEngine: ObservableObject {
                     let request = Message.fetchRequest()
                     request.predicate = NSPredicate(format: "id == %@", messageId)
                     if let message = try? context.fetch(request).first {
+                        // Conflict resolution: skip if message has pending local changes
+                        if self.hasConflict(message: message, syncStartTime: syncStartTime) {
+                            print("Skipping server label removal for message \(messageId) - local changes pending")
+                            return
+                        }
+
                         // Fetch labels by ID inside context.perform
                         let labelRequest = Label.fetchRequest()
                         labelRequest.predicate = NSPredicate(format: "id IN %@", labelIds)
@@ -1015,6 +1052,33 @@ final class SyncEngine: ObservableObject {
                     }
                 }
             }
+        }
+    }
+
+    /// Check if a message has local modifications that haven't been synced yet
+    /// Returns true if the message was modified locally after the sync started
+    private nonisolated func hasConflict(message: Message, syncStartTime: Date?) -> Bool {
+        guard let syncStartTime = syncStartTime else { return false }
+        guard let localModifiedAt = message.value(forKey: "localModifiedAt") as? Date else { return false }
+
+        // If the message was modified locally after the sync started,
+        // it means there's a pending local change that should take precedence
+        return localModifiedAt > syncStartTime
+    }
+
+    /// Clear localModifiedAt for messages whose pending actions have been processed
+    /// Called after pending actions are synced successfully
+    func clearLocalModifications(for messageIds: [String]) async {
+        let context = coreDataStack.newBackgroundContext()
+        await context.perform {
+            for messageId in messageIds {
+                let request = Message.fetchRequest()
+                request.predicate = NSPredicate(format: "id == %@", messageId)
+                if let message = try? context.fetch(request).first {
+                    message.setValue(nil, forKey: "localModifiedAt")
+                }
+            }
+            try? context.save()
         }
     }
 

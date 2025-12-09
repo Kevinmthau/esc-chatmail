@@ -202,7 +202,7 @@ struct ChatView: View {
         Task {
             let unreadMessages = messages.filter { $0.isUnread }
             for message in unreadMessages {
-                try? await messageActions.markAsRead(message: message)
+                await messageActions.markAsRead(message: message)
             }
             // Update the conversation's unread count again after marking messages
             await MainActor.run {
@@ -211,32 +211,32 @@ struct ChatView: View {
             }
         }
     }
-    
+
     private func toggleMessageRead(_ message: Message) {
         Task {
             if message.isUnread {
-                try? await messageActions.markAsRead(message: message)
+                await messageActions.markAsRead(message: message)
             } else {
-                try? await messageActions.markAsUnread(message: message)
+                await messageActions.markAsUnread(message: message)
             }
         }
     }
-    
+
     private func archiveMessage(_ message: Message) {
         Task {
-            try? await messageActions.archive(message: message)
+            await messageActions.archive(message: message)
         }
     }
-    
+
     private func archiveConversation() {
         Task {
-            try? await messageActions.archiveConversation(conversation: conversation)
+            await messageActions.archiveConversation(conversation: conversation)
         }
     }
-    
+
     private func starMessage(_ message: Message) {
         Task {
-            try? await messageActions.star(message: message)
+            await messageActions.star(message: message)
         }
     }
     
@@ -264,7 +264,7 @@ struct ChatView: View {
     
     private func deleteConversation() {
         Task {
-            try? await messageActions.deleteConversation(conversation: conversation)
+            await messageActions.deleteConversation(conversation: conversation)
         }
     }
     

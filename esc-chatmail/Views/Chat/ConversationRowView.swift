@@ -3,12 +3,11 @@ import CoreData
 
 struct ConversationRowView: View {
     @ObservedObject var conversation: Conversation
-    @StateObject private var contactsResolver = ContactsResolver.shared
     @StateObject private var authSession = AuthSession.shared
     @StateObject private var personCache = PersonCache.shared
 
     @State private var displayName: String = ""
-    @State private var avatarData: [Data] = []
+    @State private var avatarPhotos: [ProfilePhoto] = []
     @State private var participantNames: [String] = []
     
     var body: some View {
@@ -24,7 +23,7 @@ struct ConversationRowView: View {
             .frame(width: 10, height: 10)
 
             // Avatar stack
-            AvatarStackView(avatarData: avatarData, participants: participantNames)
+            AvatarStackView(avatarPhotos: avatarPhotos, participants: participantNames)
                 .frame(width: 50, height: 50)
 
             VStack(alignment: .leading, spacing: 3) {
@@ -45,15 +44,9 @@ struct ConversationRowView: View {
                     Spacer()
 
                     if let date = conversation.lastMessageDate {
-                        HStack(spacing: 4) {
-                            Text(formatDate(date))
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-
-                            Image(systemName: "chevron.right")
-                                .font(.footnote.weight(.medium))
-                                .foregroundColor(Color(.tertiaryLabel))
-                        }
+                        Text(formatDate(date))
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
                     }
                 }
 
@@ -66,61 +59,62 @@ struct ConversationRowView: View {
         }
         .frame(height: 96)
         .padding(.horizontal, 12)
-        .task {
+        .task(priority: .medium) {
             await loadContactInfo()
         }
     }
-    
+
     private func loadContactInfo() async {
+        // Small yield to avoid blocking UI interactions
+        await Task.yield()
+
         guard let participants = conversation.participants else {
             displayName = "Unknown"
             return
         }
-        
+
         let myEmail = authSession.userEmail ?? ""
         let normalizedMyEmail = EmailNormalizer.normalize(myEmail)
-        
+
         // Get non-me participants
         let nonMeParticipants = participants.compactMap { participant -> String? in
             guard let email = participant.person?.email else { return nil }
             let normalized = EmailNormalizer.normalize(email)
             return normalized != normalizedMyEmail ? email : nil
         }
-        
+
         // Limit to top 4 participants for display (for group avatar)
         let topParticipants = Array(nonMeParticipants.prefix(4))
-        
-        // Resolve names and avatars
-        var resolvedNames: [String] = []
-        var resolvedAvatars: [Data] = []
-        
-        for email in topParticipants {
-            // Try contacts first
-            if let match = await contactsResolver.lookup(email: email) {
-                if let name = match.displayName {
-                    resolvedNames.append(name)
-                } else {
-                    // Fallback to Person displayName or email
-                    resolvedNames.append(await getPersonDisplayName(for: email))
-                }
 
-                if let imageData = match.imageData {
-                    resolvedAvatars.append(imageData)
-                }
-            } else {
-                // Fallback to Person displayName or email
-                resolvedNames.append(await getPersonDisplayName(for: email))
+        // Load names first (fast, from cache/database)
+        var resolvedNames: [String] = []
+        for email in topParticipants {
+            let name = await getPersonDisplayName(for: email)
+            resolvedNames.append(name)
+        }
+
+        // Update display name immediately (before photos load)
+        updateDisplayName(resolvedNames: resolvedNames, totalParticipants: nonMeParticipants.count)
+        participantNames = resolvedNames
+
+        // Load photos separately (slower, may involve network)
+        let photoResults = await ProfilePhotoResolver.shared.resolvePhotos(for: topParticipants)
+        var resolvedPhotos: [ProfilePhoto] = []
+        for email in topParticipants {
+            let normalizedEmail = EmailNormalizer.normalize(email)
+            if let photo = photoResults[normalizedEmail] {
+                resolvedPhotos.append(photo)
             }
         }
-        
-        // Build display name
+        avatarPhotos = resolvedPhotos
+    }
+
+    private func updateDisplayName(resolvedNames: [String], totalParticipants: Int) {
         if resolvedNames.isEmpty {
             displayName = conversation.displayName ?? "No participants"
         } else if resolvedNames.count == 1 {
-            // Single participant - use full name
             displayName = resolvedNames[0]
         } else {
-            // Group conversation - extract first names only
             let firstNames = resolvedNames.map { name in
                 let components = name.components(separatedBy: " ")
                 return components.first ?? name
@@ -129,7 +123,7 @@ struct ConversationRowView: View {
             if firstNames.count == 2 {
                 displayName = "\(firstNames[0]), \(firstNames[1])"
             } else {
-                let remaining = nonMeParticipants.count - 2
+                let remaining = totalParticipants - 2
                 if remaining > 0 {
                     displayName = "\(firstNames[0]), \(firstNames[1]) +\(remaining)"
                 } else {
@@ -137,11 +131,8 @@ struct ConversationRowView: View {
                 }
             }
         }
-        
-        participantNames = resolvedNames
-        avatarData = resolvedAvatars
     }
-    
+
     private func getPersonDisplayName(for email: String) async -> String {
         // Use PersonCache which fetches from database if not cached
         return await personCache.getDisplayName(for: email)
@@ -155,16 +146,16 @@ struct ConversationRowView: View {
 // MARK: - Avatar Stack View
 
 struct AvatarStackView: View {
-    let avatarData: [Data]
+    let avatarPhotos: [ProfilePhoto]
     let participants: [String]
 
     var body: some View {
         if participants.count > 1 {
             // Group conversation - show multiple small avatars in a circle
-            GroupAvatarView(avatarData: avatarData, participants: participants)
+            GroupAvatarView(avatarPhotos: avatarPhotos, participants: participants)
         } else {
             // Single conversation - show single large avatar
-            SingleAvatarView(avatarData: avatarData.first, participant: participants.first)
+            SingleAvatarView(avatarPhoto: avatarPhotos.first, participant: participants.first)
         }
     }
 }
@@ -172,17 +163,24 @@ struct AvatarStackView: View {
 // MARK: - Single Avatar View
 
 struct SingleAvatarView: View {
-    let avatarData: Data?
+    let avatarPhoto: ProfilePhoto?
     let participant: String?
 
     var body: some View {
-        if let avatarData = avatarData,
-           let uiImage = UIImage(data: avatarData) {
-            Image(uiImage: uiImage)
-                .resizable()
-                .scaledToFill()
-                .frame(width: 50, height: 50)
-                .clipShape(Circle())
+        if let photo = avatarPhoto {
+            CachedAsyncImage(
+                imageData: photo.imageData,
+                imageURL: photo.url,
+                size: 50
+            ) {
+                if let participant = participant {
+                    InitialsView(name: participant)
+                } else {
+                    Image(systemName: "person.circle.fill")
+                        .resizable()
+                        .foregroundColor(.gray)
+                }
+            }
         } else if let participant = participant {
             InitialsView(name: participant)
                 .frame(width: 50, height: 50)
@@ -198,7 +196,7 @@ struct SingleAvatarView: View {
 // MARK: - Group Avatar View (iMessage style)
 
 struct GroupAvatarView: View {
-    let avatarData: [Data]
+    let avatarPhotos: [ProfilePhoto]
     let participants: [String]
 
     private let mainSize: CGFloat = 50
@@ -222,18 +220,13 @@ struct GroupAvatarView: View {
 
             ForEach(0..<maxAvatars, id: \.self) { index in
                 ZStack {
-                    if index < avatarData.count,
-                       let uiImage = UIImage(data: avatarData[index]) {
+                    if index < avatarPhotos.count {
                         // Show actual avatar image
-                        Image(uiImage: uiImage)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: smallSize, height: smallSize)
-                            .clipShape(Circle())
-                            .overlay(
-                                Circle()
-                                    .stroke(Color(UIColor.systemBackground), lineWidth: 1.5)
-                            )
+                        SmallCachedAvatarView(
+                            photo: avatarPhotos[index],
+                            name: index < participants.count ? participants[index] : nil,
+                            size: smallSize
+                        )
                     } else if index < participants.count {
                         // Show initials
                         SmallInitialsView(name: participants[index])
@@ -302,6 +295,103 @@ struct GroupAvatarView: View {
         default:
             return 0
         }
+    }
+}
+
+// MARK: - Small Cached Avatar View for Group Avatars
+
+struct SmallCachedAvatarView: View {
+    let photo: ProfilePhoto
+    let name: String?
+    let size: CGFloat
+
+    @State private var loadedImage: UIImage?
+
+    var body: some View {
+        Group {
+            if let image = loadedImage {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: size, height: size)
+                    .clipShape(Circle())
+                    .overlay(
+                        Circle()
+                            .stroke(Color(UIColor.systemBackground), lineWidth: 1.5)
+                    )
+            } else if let name = name {
+                SmallInitialsView(name: name)
+                    .frame(width: size, height: size)
+            } else {
+                Circle()
+                    .fill(Color(UIColor.systemGray4))
+                    .frame(width: size, height: size)
+                    .overlay(
+                        Image(systemName: "person.fill")
+                            .font(.system(size: size * 0.5))
+                            .foregroundColor(.white)
+                    )
+                    .overlay(
+                        Circle()
+                            .stroke(Color(UIColor.systemBackground), lineWidth: 1.5)
+                    )
+            }
+        }
+        .task {
+            await loadImage()
+        }
+    }
+
+    private func loadImage() async {
+        // Try imageData first
+        if let data = photo.imageData, let image = UIImage(data: data) {
+            await MainActor.run {
+                loadedImage = image
+            }
+            return
+        }
+
+        // Try URL
+        guard let urlString = photo.url, !urlString.isEmpty else { return }
+
+        // Handle data URLs
+        if urlString.hasPrefix("data:image") {
+            if let data = dataFromBase64URL(urlString), let image = UIImage(data: data) {
+                await MainActor.run {
+                    loadedImage = image
+                }
+            }
+            return
+        }
+
+        // Handle HTTP URLs - check cache first
+        if let cachedImage = ImageCache.shared.get(for: urlString) {
+            await MainActor.run {
+                loadedImage = cachedImage
+            }
+            return
+        }
+
+        // Load from URL
+        guard let url = URL(string: urlString) else { return }
+
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            if let image = UIImage(data: data) {
+                ImageCache.shared.set(image, for: urlString)
+                await MainActor.run {
+                    loadedImage = image
+                }
+            }
+        } catch {
+            print("Failed to load small avatar from URL: \(error)")
+        }
+    }
+
+    private func dataFromBase64URL(_ dataURL: String) -> Data? {
+        guard let commaIndex = dataURL.firstIndex(of: ",") else { return nil }
+        let base64String = String(dataURL[dataURL.index(after: commaIndex)...])
+        return Data(base64Encoded: base64String)
     }
 }
 

@@ -223,6 +223,9 @@ struct esc_chatmailApp: App {
         case .active:
             if AuthSession.shared.isAuthenticated {
                 Task {
+                    // Process any pending actions first (queued during offline)
+                    await PendingActionsManager.shared.processAllPendingActions()
+                    // Then sync to get latest from server
                     try? await SyncEngine.shared.performInitialSync()
                 }
             }

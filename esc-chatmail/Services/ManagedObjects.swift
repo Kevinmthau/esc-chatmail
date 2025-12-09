@@ -33,6 +33,10 @@ public class MessageParticipant: NSManagedObject, Identifiable {
 public class Label: NSManagedObject, Identifiable {
 }
 
+@objc(PendingAction)
+public class PendingAction: NSManagedObject, Identifiable {
+}
+
 extension Attachment {
     enum State: String {
         case queued = "queued"
@@ -60,6 +64,45 @@ extension Attachment {
     var isPDF: Bool {
         let mimeTypeValue = value(forKey: "mimeType") as? String
         return mimeTypeValue == "application/pdf"
+    }
+}
+
+extension PendingAction {
+    enum ActionType: String {
+        case markRead = "markRead"
+        case markUnread = "markUnread"
+        case archive = "archive"
+        case archiveConversation = "archiveConversation"
+        case star = "star"
+        case unstar = "unstar"
+        case deleteConversation = "deleteConversation"
+    }
+
+    enum Status: String {
+        case pending = "pending"
+        case processing = "processing"
+        case failed = "failed"
+        case completed = "completed"
+    }
+
+    var actionTypeEnum: ActionType? {
+        get {
+            guard let rawValue = value(forKey: "actionType") as? String else { return nil }
+            return ActionType(rawValue: rawValue)
+        }
+        set {
+            setValue(newValue?.rawValue, forKey: "actionType")
+        }
+    }
+
+    var statusEnum: Status {
+        get {
+            let rawValue = value(forKey: "status") as? String ?? "pending"
+            return Status(rawValue: rawValue) ?? .pending
+        }
+        set {
+            setValue(newValue.rawValue, forKey: "status")
+        }
     }
 }
 

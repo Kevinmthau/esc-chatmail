@@ -323,9 +323,9 @@ struct HTMLWebView: UIViewRepresentable {
         configuration.allowsInlineMediaPlayback = true
         configuration.dataDetectorTypes = [.phoneNumber, .link, .address]
 
-        // SECURITY: Disable JavaScript to prevent XSS attacks from malicious emails
-        // HTML emails should render fine with just CSS. Any dynamic content is a security risk.
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+        // Enable JavaScript for our error-handling wrapper script
+        // Security: Email scripts are stripped during sanitization, only our wrapper script runs
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
 
         // Allow content to load properly
         configuration.allowsAirPlayForMediaPlayback = true

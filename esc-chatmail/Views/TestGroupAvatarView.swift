@@ -6,7 +6,7 @@ struct TestGroupAvatarView: View {
             List {
                 Section("Single Conversation") {
                     HStack {
-                        SingleAvatarView(avatarData: nil, participant: "John Doe")
+                        SingleAvatarView(avatarPhoto: nil, participant: "John Doe")
                             .frame(width: 60, height: 60)
                         VStack(alignment: .leading) {
                             Text("John Doe")
@@ -23,7 +23,7 @@ struct TestGroupAvatarView: View {
                 Section("Two Person Group") {
                     HStack {
                         GroupAvatarView(
-                            avatarData: [],
+                            avatarPhotos: [],
                             participants: ["Alice Smith", "Bob Johnson"]
                         )
                         .frame(width: 60, height: 60)
@@ -42,7 +42,7 @@ struct TestGroupAvatarView: View {
                 Section("Three Person Group") {
                     HStack {
                         GroupAvatarView(
-                            avatarData: [],
+                            avatarPhotos: [],
                             participants: ["Charlie Brown", "Diana Prince", "Edward Norton"]
                         )
                         .frame(width: 60, height: 60)
@@ -61,7 +61,7 @@ struct TestGroupAvatarView: View {
                 Section("Four Person Group") {
                     HStack {
                         GroupAvatarView(
-                            avatarData: [],
+                            avatarPhotos: [],
                             participants: ["Frank Miller", "Grace Kelly", "Henry Ford", "Isabel Martinez"]
                         )
                         .frame(width: 60, height: 60)
