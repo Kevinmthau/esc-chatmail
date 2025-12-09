@@ -42,8 +42,6 @@ final class CoreDataStack: @unchecked Sendable {
     // Synchronize access to mutable state using serial queue
     private let isolationQueue = DispatchQueue(label: "com.esc.coreDataStack.isolation")
     private var _loadAttempts = 0
-    private let maxLoadAttempts = 3
-    private let retryDelay: TimeInterval = 2.0
 
     private var _isStoreLoaded = false
     private var _storeLoadError: Error?
@@ -104,11 +102,12 @@ final class CoreDataStack: @unchecked Sendable {
         loadAttempts += 1
 
         // Check if error is recoverable
-        if isRecoverableError(error) && loadAttempts < maxLoadAttempts {
+        if isRecoverableError(error) {
             print("Core Data load attempt \(loadAttempts) failed with recoverable error: \(error)")
 
-            // Retry after delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + retryDelay) { [weak self] in
+            // Retry after delay using Task for cleaner async handling
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(CoreDataConfig.retryDelay * 1_000_000_000))
                 self?.retryLoadingStore(for: container)
             }
         } else if isMigrationError(error) {
@@ -129,7 +128,7 @@ final class CoreDataStack: @unchecked Sendable {
             NSPersistentStoreIncompatibleVersionHashError,
             NSPersistentStoreSaveConflictsError
         ]
-        return recoverableCodes.contains(error.code)
+        return recoverableCodes.contains(error.code) && loadAttempts < CoreDataConfig.maxLoadAttempts
     }
 
     private func isMigrationError(_ error: NSError) -> Bool {
@@ -251,7 +250,7 @@ final class CoreDataStack: @unchecked Sendable {
         return context
     }
     
-    func save(context: NSManagedObjectContext, retryCount: Int = 3) throws {
+    func save(context: NSManagedObjectContext, retryCount: Int = CoreDataConfig.maxSaveRetries) throws {
         try context.performAndWait {
             guard context.hasChanges else { return }
 

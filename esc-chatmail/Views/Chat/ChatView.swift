@@ -17,6 +17,7 @@ struct ChatView: View {
     @FocusState private var isTextFieldFocused: Bool
     @Namespace private var bottomID
     @State private var contactToAdd: ContactWrapper?
+    @State private var showingParticipantsList = false
     
     init(conversation: Conversation) {
         self.conversation = conversation
@@ -25,7 +26,7 @@ struct ChatView: View {
         request.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: true)]
         // Exclude draft messages from the conversation view
         request.predicate = NSPredicate(format: "conversation == %@ AND NOT (ANY labels.id == %@)", conversation, "DRAFTS")
-        request.fetchBatchSize = 30  // Load messages in batches for better performance
+        request.fetchBatchSize = CoreDataConfig.fetchBatchSize
         self._messages = FetchRequest(fetchRequest: request)
 
         self._sendService = StateObject(wrappedValue: GmailSendService(
@@ -62,45 +63,24 @@ struct ChatView: View {
             .onAppear {
                 markConversationAsRead()
                 // Delay initial scroll to ensure messages are loaded
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    withAnimation(.easeOut(duration: 0.25)) {
-                        // Try to scroll to last message or bottom anchor
-                        if let lastMessage = messages.last {
-                            proxy.scrollTo(lastMessage.id, anchor: .bottom)
-                        } else {
-                            proxy.scrollTo(bottomID, anchor: .bottom)
-                        }
-                    }
-                }
+                scrollToBottom(proxy: proxy, delay: UIConfig.initialScrollDelay)
             }
             .onChange(of: messages.count) { oldCount, newCount in
                 // Scroll to bottom when new messages appear
                 if newCount > oldCount {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        withAnimation(.easeOut(duration: 0.25)) {
-                            proxy.scrollTo(bottomID, anchor: .bottom)
-                        }
-                    }
+                    scrollToBottom(proxy: proxy, delay: UIConfig.contentChangeScrollDelay)
                 }
             }
             .onChange(of: keyboard.currentHeight) { oldHeight, newHeight in
                 // Scroll to bottom when keyboard appears or disappears
                 if newHeight > 0 || (oldHeight > 0 && newHeight == 0) {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        withAnimation(.easeOut(duration: 0.25)) {
-                            proxy.scrollTo(bottomID, anchor: .bottom)
-                        }
-                    }
+                    scrollToBottom(proxy: proxy, delay: UIConfig.contentChangeScrollDelay)
                 }
             }
             .onChange(of: isTextFieldFocused) { _, isFocused in
                 // Also scroll when focus changes (handles tap dismissal)
                 if !isFocused {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                        withAnimation(.easeOut(duration: 0.25)) {
-                            proxy.scrollTo(bottomID, anchor: .bottom)
-                        }
-                    }
+                    scrollToBottom(proxy: proxy, delay: UIConfig.initialScrollDelay)
                 }
             }
             .safeAreaInset(edge: .bottom) {
@@ -131,7 +111,7 @@ struct ChatView: View {
                         .contentShape(Rectangle())
                         .onTapGesture {
                             isTextFieldFocused = false
-                            prepareContactToAdd()
+                            showingParticipantsList = true
                         }
                 }
                 
@@ -165,6 +145,11 @@ struct ChatView: View {
             .sheet(item: $contactToAdd) { wrapper in
                 AddContactView(contact: wrapper.contact)
             }
+            .sheet(isPresented: $showingParticipantsList) {
+                ParticipantsListView(conversation: conversation) { person in
+                    prepareContactToAdd(for: person)
+                }
+            }
     }
     
     @State private var messageToForward: Message?
@@ -184,6 +169,24 @@ struct ChatView: View {
         }
     }
     
+    // MARK: - Scroll Helpers
+
+    /// Scrolls to the bottom of the chat with a configurable delay using async/await
+    private func scrollToBottom(proxy: ScrollViewProxy, delay: TimeInterval) {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            withAnimation(.easeOut(duration: UIConfig.scrollAnimationDuration)) {
+                if let lastMessage = messages.last {
+                    proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                } else {
+                    proxy.scrollTo(bottomID, anchor: .bottom)
+                }
+            }
+        }
+    }
+
+    // MARK: - Message Actions
+
     private func markConversationAsRead() {
         // Immediately clear the unread count to remove the indicator
         let context = conversation.managedObjectContext ?? CoreDataStack.shared.viewContext
@@ -343,36 +346,104 @@ struct ChatView: View {
         }
     }
 
-    private func prepareContactToAdd() {
-        // Get the primary participant (not the current user)
-        guard let participants = conversation.participants else { return }
+    private func prepareContactToAdd(for person: Person) {
+        let contact = CNMutableContact()
 
+        // Set name from display name
+        if let displayName = person.displayName, !displayName.isEmpty {
+            let components = displayName.components(separatedBy: " ")
+            if components.count >= 2 {
+                contact.givenName = components[0]
+                contact.familyName = components.dropFirst().joined(separator: " ")
+            } else {
+                contact.givenName = displayName
+            }
+        }
+
+        // Set email
+        let email = person.email
+        contact.emailAddresses = [CNLabeledValue(label: CNLabelWork, value: email as NSString)]
+
+        showingParticipantsList = false
+        contactToAdd = ContactWrapper(contact: contact)
+    }
+}
+
+// MARK: - Participants List View
+struct ParticipantsListView: View {
+    let conversation: Conversation
+    let onAddContact: (Person) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var contactsResolver = ContactsResolver.shared
+
+    private var otherParticipants: [Person] {
         let currentUserEmail = AuthSession.shared.userEmail?.lowercased() ?? ""
+        guard let participants = conversation.participants else { return [] }
 
-        // Find the first participant that's not the current user
-        for participant in participants {
-            guard let person = participant.person else { continue }
-            let email = person.email
-            guard email.lowercased() != currentUserEmail else { continue }
+        return participants.compactMap { participant -> Person? in
+            guard let person = participant.person else { return nil }
+            guard person.email.lowercased() != currentUserEmail else { return nil }
+            return person
+        }
+    }
 
-            let contact = CNMutableContact()
+    var body: some View {
+        NavigationView {
+            List {
+                ForEach(otherParticipants, id: \.email) { person in
+                    ParticipantRow(person: person, contactsResolver: contactsResolver) {
+                        onAddContact(person)
+                    }
+                }
+            }
+            .navigationTitle("Participants")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
 
-            // Set name from display name
-            if let displayName = person.displayName, !displayName.isEmpty {
-                let components = displayName.components(separatedBy: " ")
-                if components.count >= 2 {
-                    contact.givenName = components[0]
-                    contact.familyName = components.dropFirst().joined(separator: " ")
-                } else {
-                    contact.givenName = displayName
+struct ParticipantRow: View {
+    let person: Person
+    @ObservedObject var contactsResolver: ContactsResolver
+    let onAddContact: () -> Void
+    @State private var isExistingContact = false
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(person.displayName ?? person.email)
+                    .font(.body)
+                if person.displayName != nil {
+                    Text(person.email)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
             }
 
-            // Set email
-            contact.emailAddresses = [CNLabeledValue(label: CNLabelWork, value: email as NSString)]
+            Spacer()
 
-            contactToAdd = ContactWrapper(contact: contact)
-            return
+            if isExistingContact {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(.green)
+            } else {
+                Button(action: onAddContact) {
+                    Image(systemName: "person.badge.plus")
+                        .foregroundColor(.blue)
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+        .task {
+            if let match = await contactsResolver.lookup(email: person.email) {
+                isExistingContact = match.displayName != nil
+            }
         }
     }
 }
@@ -427,7 +498,8 @@ struct MessageBubble: View {
     @State private var hasRichContent = false
     @State private var fullTextContent: String?
 
-    private let htmlContentHandler = HTMLContentHandler()
+    /// Use shared instance to avoid creating new handler per message bubble
+    private var htmlContentHandler: HTMLContentHandler { HTMLContentHandler.shared }
     
     var body: some View {
         HStack {
@@ -486,42 +558,33 @@ struct MessageBubble: View {
                         }
                     }
                 } else {
-                    // For regular emails, show the full text content
-                    // Text content - use fullTextContent if loaded, otherwise bodyText, fallback to snippet
+                    // Regular email - show text content with optional "View Full Email" for complex HTML
                     if let rawText = fullTextContent ?? (message.value(forKey: "bodyText") as? String) ?? message.cleanedSnippet ?? message.snippet, !rawText.isEmpty {
                         let text = stripQuotedText(from: rawText)
-                        VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 8) {
+                        VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 6) {
                             Text(text)
                                 .padding(10)
                                 .background(message.isFromMe ? Color.blue : Color.gray.opacity(0.2))
                                 .foregroundColor(message.isFromMe ? .white : .primary)
                                 .cornerRadius(12)
 
-                            // HTML preview for rich content
+                            // Only show "View Full Email" for truly complex content (images, tables, etc.)
                             if hasRichContent {
-                                VStack(alignment: .leading, spacing: 6) {
-                                    HTMLPreviewView(message: message, maxHeight: 150)
-                                        .frame(maxWidth: 260)
-                                        .onTapGesture {
-                                            showingHTMLView = true
-                                        }
-
-                                    Button(action: {
-                                        showingHTMLView = true
-                                    }) {
-                                        HStack(spacing: 4) {
-                                            Text("View Full Email")
-                                                .font(.caption)
-                                                .fontWeight(.medium)
-                                            Image(systemName: "arrow.up.forward")
-                                                .font(.caption2)
-                                        }
-                                        .foregroundColor(.blue)
-                                        .padding(.horizontal, 12)
-                                        .padding(.vertical, 6)
-                                        .background(Color.blue.opacity(0.1))
-                                        .cornerRadius(8)
+                                Button(action: {
+                                    showingHTMLView = true
+                                }) {
+                                    HStack(spacing: 4) {
+                                        Text("View Full Email")
+                                            .font(.caption)
+                                            .fontWeight(.medium)
+                                        Image(systemName: "arrow.up.forward")
+                                            .font(.caption2)
                                     }
+                                    .foregroundColor(.blue)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .background(Color.blue.opacity(0.1))
+                                    .cornerRadius(8)
                                 }
                             }
                         }
@@ -589,12 +652,14 @@ struct MessageBubble: View {
         text = text.replacingOccurrences(of: "<script[^>]*>[\\s\\S]*?</script>", with: "", options: .regularExpression, range: nil)
         text = text.replacingOccurrences(of: "<style[^>]*>[\\s\\S]*?</style>", with: "", options: .regularExpression, range: nil)
 
-        // Convert common block elements to newlines
+        // Convert explicit line breaks to newlines
         text = text.replacingOccurrences(of: "<br[^>]*>", with: "\n", options: .regularExpression, range: nil)
+
+        // Paragraphs and headings get double newlines (actual content breaks)
         text = text.replacingOccurrences(of: "</p>", with: "\n\n", options: .regularExpression, range: nil)
-        text = text.replacingOccurrences(of: "</div>", with: "\n", options: .regularExpression, range: nil)
         text = text.replacingOccurrences(of: "</h[1-6]>", with: "\n\n", options: .regularExpression, range: nil)
 
+        // Don't convert </div> to newlines - divs are usually for layout, not content breaks
         // Remove all HTML tags
         text = text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression, range: nil)
 
@@ -605,9 +670,29 @@ struct MessageBubble: View {
         text = text.replacingOccurrences(of: "&gt;", with: ">")
         text = text.replacingOccurrences(of: "&quot;", with: "\"")
         text = text.replacingOccurrences(of: "&#39;", with: "'")
+        text = text.replacingOccurrences(of: "&#34;", with: "\"")
+        text = text.replacingOccurrences(of: "&apos;", with: "'")
 
-        // Clean up excessive whitespace
-        text = text.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression, range: nil)
+        // Smart quotes and other typographic entities
+        text = text.replacingOccurrences(of: "&ldquo;", with: "\"")
+        text = text.replacingOccurrences(of: "&rdquo;", with: "\"")
+        text = text.replacingOccurrences(of: "&lsquo;", with: "'")
+        text = text.replacingOccurrences(of: "&rsquo;", with: "'")
+        text = text.replacingOccurrences(of: "&#8220;", with: "\"")
+        text = text.replacingOccurrences(of: "&#8221;", with: "\"")
+        text = text.replacingOccurrences(of: "&#8216;", with: "'")
+        text = text.replacingOccurrences(of: "&#8217;", with: "'")
+        text = text.replacingOccurrences(of: "&ndash;", with: "–")
+        text = text.replacingOccurrences(of: "&mdash;", with: "—")
+        text = text.replacingOccurrences(of: "&#8211;", with: "–")
+        text = text.replacingOccurrences(of: "&#8212;", with: "—")
+        text = text.replacingOccurrences(of: "&hellip;", with: "…")
+        text = text.replacingOccurrences(of: "&#8230;", with: "…")
+
+        // Clean up whitespace: collapse multiple spaces and normalize newlines
+        text = text.replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression, range: nil)
+        text = text.replacingOccurrences(of: " ?\\n ?", with: "\n", options: .regularExpression, range: nil)
+        text = text.replacingOccurrences(of: "\\n{3,}", with: "\n\n", options: .regularExpression, range: nil)
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         return text
@@ -664,22 +749,38 @@ struct MessageBubble: View {
         // Check if we have HTML content stored
         if let urlString = message.bodyStorageURI,
            let _ = URL(string: urlString) {
-            let htmlHandler = HTMLContentHandler()
             let messageId = message.id
 
-            // Only show View More if HTML exists AND can be loaded AND is not simple
-            if htmlHandler.htmlFileExists(for: messageId),
-               let html = htmlHandler.loadHTML(for: messageId) {
-                let complexity = HTMLSanitizerService.shared.analyzeComplexity(html)
-                // Only show View More for moderate to complex HTML (not simple)
-                hasRichContent = complexity != .simple
+            // Only show View More if HTML exists AND can be loaded AND has complex layout
+            if htmlContentHandler.htmlFileExists(for: messageId),
+               let html = htmlContentHandler.loadHTML(for: messageId) {
+                // Check for complex layout elements (not just images - those are shown as attachments)
+                let lowercased = html.lowercased()
+                let hasTable = lowercased.contains("<table")
+                let hasVideo = lowercased.contains("<video")
+                let hasIframe = lowercased.contains("<iframe")
+
+                // Only show "View Full Email" for tables, videos, iframes - NOT images
+                // Images are already extracted and shown as attachments
+                hasRichContent = hasTable || hasVideo || hasIframe
             }
         }
     }
 
     private func stripQuotedText(from text: String) -> String {
-        let lines = text.components(separatedBy: .newlines)
+        // First normalize the text - collapse excessive whitespace
+        var normalizedText = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+
+        // Collapse 3+ newlines into 2
+        while normalizedText.contains("\n\n\n") {
+            normalizedText = normalizedText.replacingOccurrences(of: "\n\n\n", with: "\n\n")
+        }
+
+        let lines = normalizedText.components(separatedBy: "\n")
         var newMessageLines: [String] = []
+        var lastLineWasEmpty = false
 
         for (index, line) in lines.enumerated() {
             let trimmedLine = line.trimmingCharacters(in: .whitespaces)
@@ -694,7 +795,14 @@ struct MessageBubble: View {
                 break
             }
 
-            newMessageLines.append(line)
+            // Skip consecutive empty lines
+            let isEmptyLine = trimmedLine.isEmpty
+            if isEmptyLine && lastLineWasEmpty {
+                continue
+            }
+            lastLineWasEmpty = isEmptyLine
+
+            newMessageLines.append(trimmedLine.isEmpty ? "" : line)
         }
 
         return newMessageLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)

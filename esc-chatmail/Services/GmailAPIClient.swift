@@ -7,6 +7,7 @@ enum APIError: LocalizedError {
     case authenticationError
     case rateLimited
     case serverError(Int)
+    case timeout
 
     var errorDescription: String? {
         switch self {
@@ -22,7 +23,30 @@ enum APIError: LocalizedError {
             return "Rate limited by server"
         case .serverError(let code):
             return "Server error: \(code)"
+        case .timeout:
+            return "Request timed out"
         }
+    }
+}
+
+/// Wraps an async operation with a timeout
+func withTimeout<T: Sendable>(seconds: TimeInterval, operation: @Sendable @escaping () async throws -> T) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask {
+            try await operation()
+        }
+
+        group.addTask {
+            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            throw APIError.timeout
+        }
+
+        // Return the first result (either success or timeout)
+        guard let result = try await group.next() else {
+            throw APIError.timeout
+        }
+        group.cancelAll()
+        return result
     }
 }
 
@@ -35,8 +59,8 @@ class GmailAPIClient {
     private init() {
         // Configure URLSession with timeout and retry settings
         let configuration = URLSessionConfiguration.default
-        configuration.timeoutIntervalForRequest = 30.0  // 30 second timeout
-        configuration.timeoutIntervalForResource = 60.0 // 60 second resource timeout
+        configuration.timeoutIntervalForRequest = NetworkConfig.requestTimeout
+        configuration.timeoutIntervalForResource = NetworkConfig.resourceTimeout
         configuration.waitsForConnectivity = true // Wait for network connectivity
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
 
@@ -78,9 +102,9 @@ class GmailAPIClient {
         return true
     }
     
-    private nonisolated func performRequestWithRetry<T: Decodable>(_ request: URLRequest, maxRetries: Int = 3) async throws -> T {
+    private nonisolated func performRequestWithRetry<T: Decodable>(_ request: URLRequest, maxRetries: Int = NetworkConfig.maxRetries) async throws -> T {
         var lastError: Error?
-        var retryDelay: TimeInterval = 1.0
+        var retryDelay: TimeInterval = NetworkConfig.initialRetryDelay
 
         // Validate request URL
         guard let url = request.url, isValidURL(url) else {
@@ -98,14 +122,14 @@ class GmailAPIClient {
                         let delay = retryDelay * 2
                         print("Rate limited, waiting \(delay) seconds before retry")
                         try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                        retryDelay = min(delay * 2, 30.0) // Cap at 30 seconds
+                        retryDelay = min(delay * 2, NetworkConfig.maxRetryDelay)
                         continue
                     } else if httpResponse.statusCode >= 500 {
                         // Server error - retry with backoff
                         print("Server error \(httpResponse.statusCode), attempt \(attempt + 1) of \(maxRetries)")
                         if attempt < maxRetries - 1 {
                             try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
-                            retryDelay = min(retryDelay * 2, 10.0) // Exponential backoff
+                            retryDelay = min(retryDelay * 2, NetworkConfig.maxRetryDelay)
                             continue
                         }
                     }
@@ -123,7 +147,7 @@ class GmailAPIClient {
                         if attempt < maxRetries - 1 {
                             print("Network error, retrying in \(retryDelay) seconds...")
                             try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
-                            retryDelay = min(retryDelay * 2, 10.0)
+                            retryDelay = min(retryDelay * 2, NetworkConfig.maxRetryDelay)
                             continue
                         }
                     case .unsupportedURL:
@@ -145,20 +169,26 @@ class GmailAPIClient {
     }
     
     nonisolated func getProfile() async throws -> GmailProfile {
-        let url = URL(string: APIEndpoints.profile())!
+        guard let url = URL(string: APIEndpoints.profile()) else {
+            throw APIError.invalidURL(APIEndpoints.profile())
+        }
         let request = try await authenticatedRequest(url: url)
         return try await performRequestWithRetry(request)
     }
-    
+
     nonisolated func listLabels() async throws -> [GmailLabel] {
-        let url = URL(string: APIEndpoints.labels())!
+        guard let url = URL(string: APIEndpoints.labels()) else {
+            throw APIError.invalidURL(APIEndpoints.labels())
+        }
         let request = try await authenticatedRequest(url: url)
         let response: LabelsResponse = try await performRequestWithRetry(request)
         return response.labels ?? []
     }
-    
+
     nonisolated func listMessages(pageToken: String? = nil, maxResults: Int = 100, query: String? = nil) async throws -> MessagesListResponse {
-        var components = URLComponents(string: APIEndpoints.messages())!
+        guard var components = URLComponents(string: APIEndpoints.messages()) else {
+            throw APIError.invalidURL(APIEndpoints.messages())
+        }
         components.queryItems = [
             URLQueryItem(name: "maxResults", value: String(maxResults))
         ]
@@ -169,78 +199,96 @@ class GmailAPIClient {
             components.queryItems?.append(URLQueryItem(name: "q", value: query))
         }
 
-        let request = try await authenticatedRequest(url: components.url!)
+        guard let url = components.url else {
+            throw APIError.invalidURL(APIEndpoints.messages())
+        }
+        let request = try await authenticatedRequest(url: url)
         return try await performRequestWithRetry(request)
     }
-    
+
     nonisolated func getMessage(id: String, format: String = "full") async throws -> GmailMessage {
-        var components = URLComponents(string: APIEndpoints.message(id: id))!
+        let endpoint = APIEndpoints.message(id: id)
+        guard var components = URLComponents(string: endpoint) else {
+            throw APIError.invalidURL(endpoint)
+        }
         components.queryItems = [URLQueryItem(name: "format", value: format)]
-        
-        let request = try await authenticatedRequest(url: components.url!)
+
+        guard let url = components.url else {
+            throw APIError.invalidURL(endpoint)
+        }
+        let request = try await authenticatedRequest(url: url)
         return try await performRequestWithRetry(request)
     }
-    
+
     nonisolated func modifyMessage(id: String, addLabelIds: [String]? = nil, removeLabelIds: [String]? = nil) async throws -> GmailMessage {
-        let url = URL(string: APIEndpoints.modifyMessage(id: id))!
+        let endpoint = APIEndpoints.modifyMessage(id: id)
+        guard let url = URL(string: endpoint) else {
+            throw APIError.invalidURL(endpoint)
+        }
         var request = try await authenticatedRequest(url: url)
         request.httpMethod = "POST"
-        
+
         let body = ModifyMessageRequest(addLabelIds: addLabelIds, removeLabelIds: removeLabelIds)
         request.httpBody = try JSONEncoder().encode(body)
-        
-        let (data, _) = try await session.data(for: request)
-        return try JSONDecoder().decode(GmailMessage.self, from: data)
+
+        return try await performRequestWithRetry(request)
     }
-    
+
     nonisolated func batchModify(ids: [String], addLabelIds: [String]? = nil, removeLabelIds: [String]? = nil) async throws {
-        let url = URL(string: APIEndpoints.batchModify())!
+        let endpoint = APIEndpoints.batchModify()
+        guard let url = URL(string: endpoint) else {
+            throw APIError.invalidURL(endpoint)
+        }
         var request = try await authenticatedRequest(url: url)
         request.httpMethod = "POST"
 
         let body = BatchModifyRequest(ids: ids, addLabelIds: addLabelIds, removeLabelIds: removeLabelIds)
         request.httpBody = try JSONEncoder().encode(body)
 
-        let (_, _) = try await session.data(for: request)
+        let _: EmptyResponse = try await performRequestWithRetry(request)
     }
 
     nonisolated func archiveMessages(ids: [String]) async throws {
         // Archive by removing INBOX label
         try await batchModify(ids: ids, removeLabelIds: ["INBOX"])
     }
-    
+
     nonisolated func listHistory(startHistoryId: String, pageToken: String? = nil) async throws -> HistoryResponse {
-        var components = URLComponents(string: APIEndpoints.history())!
+        let endpoint = APIEndpoints.history()
+        guard var components = URLComponents(string: endpoint) else {
+            throw APIError.invalidURL(endpoint)
+        }
         components.queryItems = [
             URLQueryItem(name: "startHistoryId", value: startHistoryId)
         ]
         if let pageToken = pageToken {
             components.queryItems?.append(URLQueryItem(name: "pageToken", value: pageToken))
         }
-        
-        let request = try await authenticatedRequest(url: components.url!)
+
+        guard let url = components.url else {
+            throw APIError.invalidURL(endpoint)
+        }
+        let request = try await authenticatedRequest(url: url)
         return try await performRequestWithRetry(request)
     }
-    
+
     nonisolated func listSendAs() async throws -> [SendAs] {
-        let url = URL(string: APIEndpoints.sendAs())!
+        let endpoint = APIEndpoints.sendAs()
+        guard let url = URL(string: endpoint) else {
+            throw APIError.invalidURL(endpoint)
+        }
         let request = try await authenticatedRequest(url: url)
-        let (data, _) = try await session.data(for: request)
-        let response = try JSONDecoder().decode(SendAsListResponse.self, from: data)
+        let response: SendAsListResponse = try await performRequestWithRetry(request)
         return response.sendAs ?? []
     }
-    
-    nonisolated func getAttachment(messageId: String, attachmentId: String) async throws -> Data {
-        let url = URL(string: APIEndpoints.attachment(messageId: messageId, attachmentId: attachmentId))!
-        let request = try await authenticatedRequest(url: url)
-        let (data, _) = try await session.data(for: request)
-        
-        struct AttachmentResponse: Codable {
-            let size: Int?
-            let data: String
-        }
 
-        let response = try JSONDecoder().decode(AttachmentResponse.self, from: data)
+    nonisolated func getAttachment(messageId: String, attachmentId: String) async throws -> Data {
+        let endpoint = APIEndpoints.attachment(messageId: messageId, attachmentId: attachmentId)
+        guard let url = URL(string: endpoint) else {
+            throw APIError.invalidURL(endpoint)
+        }
+        let request = try await authenticatedRequest(url: url)
+        let response: AttachmentResponse = try await performRequestWithRetry(request)
 
         guard let attachmentData = Data(base64UrlEncoded: response.data) else {
             throw NSError(domain: "GmailAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to decode attachment data"])
@@ -248,6 +296,17 @@ class GmailAPIClient {
 
         return attachmentData
     }
+}
+
+// MARK: - Helper Response Types
+
+/// Empty response for endpoints that don't return data
+private struct EmptyResponse: Codable {}
+
+/// Response type for attachment data
+private struct AttachmentResponse: Codable {
+    let size: Int?
+    let data: String
 }
 
 extension Data {

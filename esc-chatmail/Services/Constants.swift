@@ -72,6 +72,69 @@ struct GoogleConfig {
     ]
 }
 
+// MARK: - Sync Configuration
+struct SyncConfig {
+    /// Number of messages to process in each batch during sync
+    static let messageBatchSize = 50
+
+    /// Maximum messages to fetch per API call
+    static let maxMessagesPerRequest = 500
+
+    /// Delay before retrying failed message fetches (in seconds)
+    static let retryDelaySeconds: UInt64 = 1_000_000_000
+
+    /// Timeout for individual message fetch operations (in seconds)
+    static let messageFetchTimeout: TimeInterval = 15.0
+
+    /// Timeout for batch operations (in seconds)
+    static let batchOperationTimeout: TimeInterval = 60.0
+}
+
+// MARK: - Core Data Configuration
+struct CoreDataConfig {
+    /// Number of items to fetch per batch for UI lists
+    static let fetchBatchSize = 30
+
+    /// Maximum retry attempts for store loading
+    static let maxLoadAttempts = 3
+
+    /// Delay between store load retries (in seconds)
+    static let retryDelay: TimeInterval = 2.0
+
+    /// Maximum retry attempts for save operations
+    static let maxSaveRetries = 3
+}
+
+// MARK: - Network Configuration
+struct NetworkConfig {
+    /// Request timeout interval (in seconds)
+    static let requestTimeout: TimeInterval = 30.0
+
+    /// Resource timeout interval (in seconds)
+    static let resourceTimeout: TimeInterval = 60.0
+
+    /// Maximum retry attempts for API requests
+    static let maxRetries = 3
+
+    /// Initial retry delay (in seconds)
+    static let initialRetryDelay: TimeInterval = 1.0
+
+    /// Maximum retry delay cap (in seconds)
+    static let maxRetryDelay: TimeInterval = 30.0
+}
+
+// MARK: - UI Configuration
+struct UIConfig {
+    /// Delay for initial scroll after view appears (in seconds)
+    static let initialScrollDelay: TimeInterval = 0.3
+
+    /// Delay for scroll after content changes (in seconds)
+    static let contentChangeScrollDelay: TimeInterval = 0.1
+
+    /// Duration of scroll animations (in seconds)
+    static let scrollAnimationDuration: TimeInterval = 0.25
+}
+
 struct APIEndpoints {
     static let baseURL = "https://gmail.googleapis.com/gmail/v1"
     

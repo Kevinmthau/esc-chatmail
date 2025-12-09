@@ -98,14 +98,53 @@ class EmailTextProcessor {
             return attributed.string
         } catch {
             // Fallback: basic HTML tag removal
-            return html
+            var text = html
                 .replacingOccurrences(of: "<br>", with: "\n")
                 .replacingOccurrences(of: "<br/>", with: "\n")
                 .replacingOccurrences(of: "<br />", with: "\n")
                 .replacingOccurrences(of: "</p>", with: "\n")
                 .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Decode HTML entities
+            text = decodeHTMLEntities(text)
+
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
         }
+    }
+
+    /// Decodes common HTML entities to their character equivalents
+    private static func decodeHTMLEntities(_ text: String) -> String {
+        var result = text
+
+        // Basic entities
+        result = result.replacingOccurrences(of: "&nbsp;", with: " ")
+        result = result.replacingOccurrences(of: "&amp;", with: "&")
+        result = result.replacingOccurrences(of: "&lt;", with: "<")
+        result = result.replacingOccurrences(of: "&gt;", with: ">")
+        result = result.replacingOccurrences(of: "&quot;", with: "\"")
+        result = result.replacingOccurrences(of: "&#39;", with: "'")
+        result = result.replacingOccurrences(of: "&#34;", with: "\"")
+        result = result.replacingOccurrences(of: "&apos;", with: "'")
+
+        // Smart quotes and typographic entities
+        result = result.replacingOccurrences(of: "&ldquo;", with: "\"")
+        result = result.replacingOccurrences(of: "&rdquo;", with: "\"")
+        result = result.replacingOccurrences(of: "&lsquo;", with: "'")
+        result = result.replacingOccurrences(of: "&rsquo;", with: "'")
+        result = result.replacingOccurrences(of: "&#8220;", with: "\"")
+        result = result.replacingOccurrences(of: "&#8221;", with: "\"")
+        result = result.replacingOccurrences(of: "&#8216;", with: "'")
+        result = result.replacingOccurrences(of: "&#8217;", with: "'")
+
+        // Dashes and ellipsis
+        result = result.replacingOccurrences(of: "&ndash;", with: "–")
+        result = result.replacingOccurrences(of: "&mdash;", with: "—")
+        result = result.replacingOccurrences(of: "&#8211;", with: "–")
+        result = result.replacingOccurrences(of: "&#8212;", with: "—")
+        result = result.replacingOccurrences(of: "&hellip;", with: "…")
+        result = result.replacingOccurrences(of: "&#8230;", with: "…")
+
+        return result
     }
     
     // MARK: - Plain Text Processing

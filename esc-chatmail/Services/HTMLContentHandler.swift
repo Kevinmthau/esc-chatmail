@@ -1,8 +1,11 @@
 import Foundation
 
-class HTMLContentHandler {
+final class HTMLContentHandler {
+    /// Shared singleton instance for efficient reuse across views
+    static let shared = HTMLContentHandler()
+
     private let messagesDirectory: URL
-    
+
     init() {
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         self.messagesDirectory = documentsPath.appendingPathComponent("Messages")
