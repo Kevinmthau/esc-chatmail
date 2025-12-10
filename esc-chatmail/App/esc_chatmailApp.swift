@@ -79,10 +79,9 @@ struct esc_chatmailApp: App {
             userDefaults.set(true, forKey: "isFreshInstall")
             userDefaults.synchronize()
 
-            // Verify the write succeeded
+            // Verify the write succeeded - retry without blocking
             if userDefaults.string(forKey: installationKey) == nil {
                 print("⚠️  UserDefaults write failed, retrying...")
-                Thread.sleep(forTimeInterval: 0.1)
                 userDefaults.set(newID, forKey: installationKey)
                 userDefaults.set(true, forKey: "isFreshInstall")
                 userDefaults.synchronize()
@@ -146,8 +145,6 @@ struct esc_chatmailApp: App {
             UserDefaults.standard.removePersistentDomain(forName: bundleIdentifier)
             // Force synchronization to ensure persistent domain removal completes
             UserDefaults.standard.synchronize()
-            // Small delay to ensure filesystem operations complete
-            Thread.sleep(forTimeInterval: 0.05)
             print("  ✓ UserDefaults cleared")
         }
 
@@ -217,12 +214,11 @@ struct esc_chatmailApp: App {
                 BackgroundSyncManager.shared.scheduleProcessingTask()
             }
         case .active:
+            // Note: Sync is handled by ConversationListView.onAppear to avoid duplicate syncs
+            // Only process pending actions here (lightweight operation)
             if AuthSession.shared.isAuthenticated {
                 Task {
-                    // Process any pending actions first (queued during offline)
                     await PendingActionsManager.shared.processAllPendingActions()
-                    // Then sync to get latest from server
-                    try? await SyncEngine.shared.performInitialSync()
                 }
             }
         case .inactive:

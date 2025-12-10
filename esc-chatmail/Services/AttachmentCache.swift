@@ -14,7 +14,11 @@ class AttachmentCache {
         setupCacheLimits()
         observeMemoryWarnings()
     }
-    
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
     private func setupCacheLimits() {
         // Thumbnail cache: ~50MB (assuming ~100KB per thumbnail)
         thumbnailCache.countLimit = 500

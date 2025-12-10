@@ -69,67 +69,68 @@ final class ConversationManager: @unchecked Sendable {
         return person
     }
     
+    /// Updates rollup data for a conversation. Must be called from within the conversation's context queue.
     func updateConversationRollups(for conversation: Conversation) {
-        guard let context = conversation.managedObjectContext else { return }
-        
-        context.performAndWait {
-            guard let messages = conversation.value(forKey: "messages") as? Set<Message> else { return }
+        guard conversation.managedObjectContext != nil else { return }
 
-            // Filter out draft messages
-            let nonDraftMessages = messages.filter { message in
-                if let labelsSet = message.value(forKey: "labels") as? NSSet,
-                   let labels = labelsSet.allObjects as? [NSManagedObject] {
-                    let isDraft = labels.contains { label in
-                        (label.value(forKey: "id") as? String) == "DRAFTS"
-                    }
-                    return !isDraft
-                }
-                return true
-            }
+        // Note: This method assumes it's called from within context.perform or performAndWait
+        // Do not add performAndWait here as it causes nested blocking when called from updateAllConversationRollups
+        guard let messages = conversation.value(forKey: "messages") as? Set<Message> else { return }
 
-            // Update last message date and snippet (excluding drafts)
-            let sortedMessages = nonDraftMessages.sorted { $0.internalDate < $1.internalDate }
-            if let latestMessage = sortedMessages.last {
-                conversation.lastMessageDate = latestMessage.internalDate
-                // For newsletters, show subject. For personal emails or sent messages, show snippet.
-                if latestMessage.isNewsletter, let subject = latestMessage.subject, !subject.isEmpty {
-                    conversation.snippet = subject
-                } else {
-                    conversation.snippet = latestMessage.cleanedSnippet ?? latestMessage.snippet
+        // Filter out draft messages
+        let nonDraftMessages = messages.filter { message in
+            if let labelsSet = message.value(forKey: "labels") as? NSSet,
+               let labels = labelsSet.allObjects as? [NSManagedObject] {
+                let isDraft = labels.contains { label in
+                    (label.value(forKey: "id") as? String) == "DRAFTS"
+                }
+                return !isDraft
+            }
+            return true
+        }
+
+        // Update last message date and snippet (excluding drafts)
+        let sortedMessages = nonDraftMessages.sorted { $0.internalDate < $1.internalDate }
+        if let latestMessage = sortedMessages.last {
+            conversation.lastMessageDate = latestMessage.internalDate
+            // For newsletters, show subject. For personal emails or sent messages, show snippet.
+            if latestMessage.isNewsletter, let subject = latestMessage.subject, !subject.isEmpty {
+                conversation.snippet = subject
+            } else {
+                conversation.snippet = latestMessage.cleanedSnippet ?? latestMessage.snippet
+            }
+        }
+
+        // Update inbox status
+        var inboxMessages: [Message] = []
+        for message in messages {
+            if let labelsSet = message.value(forKey: "labels") as? NSSet,
+               let labels = labelsSet.allObjects as? [NSManagedObject] {
+                let hasInbox = labels.contains { label in
+                    (label.value(forKey: "id") as? String) == "INBOX"
+                }
+                if hasInbox {
+                    inboxMessages.append(message)
                 }
             }
-            
-            // Update inbox status
-            var inboxMessages: [Message] = []
-            for message in messages {
-                if let labelsSet = message.value(forKey: "labels") as? NSSet,
-                   let labels = labelsSet.allObjects as? [NSManagedObject] {
-                    let hasInbox = labels.contains { label in
-                        (label.value(forKey: "id") as? String) == "INBOX"
-                    }
-                    if hasInbox {
-                        inboxMessages.append(message)
-                    }
+        }
+
+        conversation.hasInbox = !inboxMessages.isEmpty
+        conversation.inboxUnreadCount = Int32(inboxMessages.filter { $0.isUnread }.count)
+
+        if let latestInboxMessage = inboxMessages.max(by: { $0.internalDate < $1.internalDate }) {
+            conversation.latestInboxDate = latestInboxMessage.internalDate
+        }
+
+        // Update display name from participants
+        if let participants = conversation.value(forKey: "participants") as? Set<ConversationParticipant> {
+            let names = participants.compactMap { participant in
+                if let person = participant.value(forKey: "person") as? Person {
+                    return (person.value(forKey: "displayName") as? String) ?? (person.value(forKey: "email") as? String)
                 }
+                return nil
             }
-            
-            conversation.hasInbox = !inboxMessages.isEmpty
-            conversation.inboxUnreadCount = Int32(inboxMessages.filter { $0.isUnread }.count)
-            
-            if let latestInboxMessage = inboxMessages.max(by: { $0.internalDate < $1.internalDate }) {
-                conversation.latestInboxDate = latestInboxMessage.internalDate
-            }
-            
-            // Update display name from participants
-            if let participants = conversation.value(forKey: "participants") as? Set<ConversationParticipant> {
-                let names = participants.compactMap { participant in
-                    if let person = participant.value(forKey: "person") as? Person {
-                        return (person.value(forKey: "displayName") as? String) ?? (person.value(forKey: "email") as? String)
-                    }
-                    return nil
-                }
-                conversation.displayName = self.formatGroupNames(names)
-            }
+            conversation.displayName = self.formatGroupNames(names)
         }
     }
 

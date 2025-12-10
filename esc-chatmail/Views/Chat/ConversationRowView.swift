@@ -3,8 +3,8 @@ import CoreData
 
 struct ConversationRowView: View {
     @ObservedObject var conversation: Conversation
-    @StateObject private var authSession = AuthSession.shared
-    @StateObject private var personCache = PersonCache.shared
+    private let authSession = AuthSession.shared
+    private let personCache = PersonCache.shared
 
     @State private var displayName: String = ""
     @State private var avatarPhotos: [ProfilePhoto] = []
@@ -86,10 +86,13 @@ struct ConversationRowView: View {
         // Limit to top 4 participants for display (for group avatar)
         let topParticipants = Array(nonMeParticipants.prefix(4))
 
-        // Load names first (fast, from cache/database)
+        // Batch prefetch all names in a single query (avoids N+1)
+        await personCache.prefetch(emails: topParticipants)
+
+        // Now get names from cache (all should be cached after prefetch)
         var resolvedNames: [String] = []
         for email in topParticipants {
-            let name = await getPersonDisplayName(for: email)
+            let name = personCache.getCachedDisplayName(for: email) ?? fallbackDisplayName(for: email)
             resolvedNames.append(name)
         }
 
@@ -133,11 +136,14 @@ struct ConversationRowView: View {
         }
     }
 
-    private func getPersonDisplayName(for email: String) async -> String {
-        // Use PersonCache which fetches from database if not cached
-        return await personCache.getDisplayName(for: email)
+    private func fallbackDisplayName(for email: String) -> String {
+        let normalized = EmailNormalizer.normalize(email)
+        if let atIndex = normalized.firstIndex(of: "@") {
+            return String(normalized[..<atIndex])
+        }
+        return email
     }
-    
+
     private func formatDate(_ date: Date) -> String {
         return TimestampFormatter.format(date)
     }
@@ -364,27 +370,11 @@ struct SmallCachedAvatarView: View {
             return
         }
 
-        // Handle HTTP URLs - check cache first
-        if let cachedImage = ImageCache.shared.get(for: urlString) {
+        // Handle HTTP URLs - use deduplicated loader
+        if let image = await ImageCache.shared.loadImage(from: urlString) {
             await MainActor.run {
-                loadedImage = cachedImage
+                loadedImage = image
             }
-            return
-        }
-
-        // Load from URL
-        guard let url = URL(string: urlString) else { return }
-
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            if let image = UIImage(data: data) {
-                ImageCache.shared.set(image, for: urlString)
-                await MainActor.run {
-                    loadedImage = image
-                }
-            }
-        } catch {
-            print("Failed to load small avatar from URL: \(error)")
         }
     }
 

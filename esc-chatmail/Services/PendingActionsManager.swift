@@ -36,6 +36,13 @@ actor PendingActionsManager {
         networkMonitor = monitor
     }
 
+    /// Stops network monitoring and cleans up resources
+    func stopMonitoring() {
+        networkMonitor?.cancel()
+        networkMonitor = nil
+        isInitialized = false
+    }
+
     private func handleNetworkChange(isAvailable: Bool) async {
         let wasUnavailable = !isNetworkAvailable
         isNetworkAvailable = isAvailable

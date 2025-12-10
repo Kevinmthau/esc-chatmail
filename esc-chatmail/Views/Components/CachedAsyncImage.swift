@@ -64,35 +64,17 @@ struct CachedAsyncImage: View {
             return
         }
 
-        // Handle HTTP URLs
-        guard let url = URL(string: urlString) else { return }
-
+        // Handle HTTP URLs - use deduplicated loader
         await MainActor.run {
             isLoading = true
         }
 
-        do {
-            // Check image cache first
-            if let cachedImage = ImageCache.shared.get(for: urlString) {
-                await MainActor.run {
-                    loadedImage = cachedImage
-                    isLoading = false
-                }
-                return
+        if let image = await ImageCache.shared.loadImage(from: urlString) {
+            await MainActor.run {
+                loadedImage = image
+                isLoading = false
             }
-
-            let (data, _) = try await URLSession.shared.data(from: url)
-            if let image = UIImage(data: data) {
-                // Cache the image
-                ImageCache.shared.set(image, for: urlString)
-
-                await MainActor.run {
-                    loadedImage = image
-                    isLoading = false
-                }
-            }
-        } catch {
-            print("Failed to load image from URL: \(error)")
+        } else {
             await MainActor.run {
                 isLoading = false
             }
@@ -108,10 +90,11 @@ struct CachedAsyncImage: View {
 
 // MARK: - Image Cache
 
-final class ImageCache {
+final class ImageCache: @unchecked Sendable {
     static let shared = ImageCache()
 
     private let cache = NSCache<NSString, UIImage>()
+    private let requestManager = ImageRequestManager()
 
     private init() {
         cache.countLimit = 100
@@ -132,5 +115,61 @@ final class ImageCache {
 
     func clear() {
         cache.removeAllObjects()
+    }
+
+    /// Loads an image from URL with deduplication - multiple requests for the same URL
+    /// will share a single network request
+    func loadImage(from urlString: String) async -> UIImage? {
+        // Check cache first
+        if let cached = get(for: urlString) {
+            return cached
+        }
+
+        // Use actor for thread-safe in-flight request management
+        return await requestManager.loadImage(from: urlString) { [weak self] image in
+            if let image = image {
+                self?.set(image, for: urlString)
+            }
+        }
+    }
+}
+
+// MARK: - Actor for In-Flight Request Deduplication
+
+private actor ImageRequestManager {
+    private var inFlightRequests: [String: Task<UIImage?, Never>] = [:]
+
+    func loadImage(from urlString: String, onComplete: @escaping (UIImage?) -> Void) async -> UIImage? {
+        // Check for existing in-flight request
+        if let existingTask = inFlightRequests[urlString] {
+            return await existingTask.value
+        }
+
+        // Create new task
+        let task = Task<UIImage?, Never> {
+            guard let url = URL(string: urlString) else { return nil }
+
+            do {
+                let (data, _) = try await URLSession.shared.data(from: url)
+                if let image = UIImage(data: data) {
+                    return image
+                }
+            } catch {
+                print("Failed to load image: \(error.localizedDescription)")
+            }
+            return nil
+        }
+
+        inFlightRequests[urlString] = task
+
+        let result = await task.value
+
+        // Cache the result
+        onComplete(result)
+
+        // Clean up
+        inFlightRequests.removeValue(forKey: urlString)
+
+        return result
     }
 }

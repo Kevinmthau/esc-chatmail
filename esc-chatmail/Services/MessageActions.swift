@@ -23,6 +23,25 @@ class MessageActions: ObservableObject {
         await pendingActionsManager.queueAction(type: .markRead, messageId: message.id)
     }
 
+    /// Mark message as read using ObjectID - safe to call from background threads
+    func markAsRead(messageID: NSManagedObjectID) async {
+        let context = coreDataStack.newBackgroundContext()
+        var messageIdString: String?
+
+        context.performAndWait {
+            guard let message = try? context.existingObject(with: messageID) as? Message else { return }
+            message.isUnread = false
+            message.setValue(Date(), forKey: "localModifiedAt")
+            messageIdString = message.id
+            try? context.save()
+        }
+
+        // Queue the action for sync
+        if let id = messageIdString {
+            await pendingActionsManager.queueAction(type: .markRead, messageId: id)
+        }
+    }
+
     @MainActor
     func markAsUnread(message: Message) async {
         // Update local state immediately (optimistic update)
