@@ -200,10 +200,6 @@ struct esc_chatmailApp: App {
     }
     
     private func configureGoogleSignIn() {
-        #if DEBUG
-        GoogleConfig.printConfigurationStatus()
-        #endif
-
         GIDSignIn.sharedInstance.configuration = GIDConfiguration(
             clientID: GoogleConfig.clientId
         )

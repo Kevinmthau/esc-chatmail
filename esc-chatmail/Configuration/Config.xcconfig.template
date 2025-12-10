@@ -1,15 +1,17 @@
 // Configuration Template
-// Copy this file to Debug.xcconfig and Release.xcconfig
-// Fill in your actual values
-// DO NOT commit the actual config files to version control
+//
+// SETUP INSTRUCTIONS:
+// 1. Copy this file to Debug.xcconfig and Release.xcconfig in this same folder
+// 2. Fill in your Google Cloud Console values below
+// 3. In Xcode: Click project (blue icon) > Project (not target) > Info tab
+// 4. Under "Configurations", set Debug.xcconfig for Debug and Release.xcconfig for Release
+// 5. Clean build folder (Cmd+Shift+K) and rebuild
+//
+// DO NOT commit Debug.xcconfig or Release.xcconfig to version control!
 
-// Google OAuth Configuration
-GOOGLE_CLIENT_ID = your-client-id-here
-GOOGLE_API_KEY = your-api-key-here
-GOOGLE_PROJECT_NUMBER = your-project-number-here
-GOOGLE_PROJECT_ID = your-project-id-here
-GOOGLE_REDIRECT_URI = your-redirect-uri-here
-
-// App Configuration
-APP_BUNDLE_ID = com.your.bundle.id
-APP_NAME = Your App Name
+// Google OAuth Configuration (from Google Cloud Console)
+GOOGLE_CLIENT_ID = your-client-id.apps.googleusercontent.com
+GOOGLE_API_KEY = your-api-key
+GOOGLE_PROJECT_NUMBER = your-project-number
+GOOGLE_PROJECT_ID = your-project-id
+GOOGLE_REDIRECT_URI = com.googleusercontent.apps.your-client-id
