@@ -141,66 +141,63 @@ final class GmailSendService: ObservableObject {
     }
     
     private nonisolated func sendMessage(mimeData: Data, threadId: String?) async throws -> SendResult {
-        // Debug: Print MIME message
-        if let mimeString = String(data: mimeData, encoding: .utf8) {
-            print("DEBUG: Sending MIME message:")
-            print("---START MIME---")
-            print(mimeString)
-            print("---END MIME---")
-        }
-        
+        #if DEBUG
+        print("[GmailSendService] Sending MIME message (\(mimeData.count) bytes)")
+        #endif
+
         let rawMessage = MimeBuilder.base64UrlEncode(mimeData)
-        print("DEBUG: Base64 encoded message length: \(rawMessage.count)")
-        
+
         var requestBody: [String: Any] = ["raw": rawMessage]
         if let threadId = threadId {
             requestBody["threadId"] = threadId
         }
-        
+
         let accessToken = try await authSession.withFreshToken()
-        
-        guard let url = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages/send") else {
+
+        guard let url = URL(string: APIEndpoints.sendMessage()) else {
             throw SendError.apiError("Invalid API URL")
         }
-            
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            
-            do {
-                request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
-            } catch {
-                throw SendError.invalidMimeData
-            }
-            
-            let (data, response) = try await URLSession.shared.data(for: request)
-            
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw SendError.apiError("Invalid response")
-            }
-            
-            if httpResponse.statusCode == 401 {
-                throw SendError.authenticationFailed
-            }
-            
-            print("DEBUG: Gmail API Response Status: \(httpResponse.statusCode)")
-            if let responseString = String(data: data, encoding: .utf8) {
-                print("DEBUG: Gmail API Response: \(responseString)")
-            }
-            
-            guard httpResponse.statusCode == 200 else {
-                let errorMessage = String(data: data, encoding: .utf8) ?? "Unknown error"
-                throw SendError.apiError("Failed to send message: \(errorMessage)")
-            }
-            
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let messageId = json["id"] as? String,
-                  let returnedThreadId = json["threadId"] as? String else {
-                throw SendError.apiError("Invalid response format")
-            }
-        
-        print("DEBUG: Message sent successfully - ID: \(messageId), ThreadID: \(returnedThreadId)")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+        } catch {
+            throw SendError.invalidMimeData
+        }
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw SendError.apiError("Invalid response")
+        }
+
+        if httpResponse.statusCode == 401 {
+            throw SendError.authenticationFailed
+        }
+
+        #if DEBUG
+        print("[GmailSendService] Response status: \(httpResponse.statusCode)")
+        #endif
+
+        guard httpResponse.statusCode == 200 else {
+            let errorMessage = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw SendError.apiError("Failed to send message: \(errorMessage)")
+        }
+
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let messageId = json["id"] as? String,
+              let returnedThreadId = json["threadId"] as? String else {
+            throw SendError.apiError("Invalid response format")
+        }
+
+        #if DEBUG
+        print("[GmailSendService] Message sent - ID: \(messageId)")
+        #endif
+
         return SendResult(messageId: messageId, threadId: returnedThreadId)
     }
     

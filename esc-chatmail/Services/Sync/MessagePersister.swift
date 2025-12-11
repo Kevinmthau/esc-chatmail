@@ -6,7 +6,11 @@ final class MessagePersister: @unchecked Sendable {
     private let coreDataStack: CoreDataStack
     private let messageProcessor: MessageProcessor
     private let htmlContentHandler: HTMLContentHandler
-    private let conversationManager: ConversationManager
+    let conversationManager: ConversationManager
+
+    /// Tracks conversation IDs modified during current sync batch
+    /// Access should be synchronized via the sync context
+    private var modifiedConversationIDs: Set<NSManagedObjectID> = []
 
     init(
         coreDataStack: CoreDataStack = .shared,
@@ -18,6 +22,23 @@ final class MessagePersister: @unchecked Sendable {
         self.messageProcessor = messageProcessor
         self.htmlContentHandler = htmlContentHandler
         self.conversationManager = conversationManager
+    }
+
+    /// Resets the modified conversations tracker - call at start of sync
+    func resetModifiedConversations() {
+        modifiedConversationIDs.removeAll()
+    }
+
+    /// Returns and clears the set of modified conversation IDs
+    func getAndClearModifiedConversations() -> Set<NSManagedObjectID> {
+        let result = modifiedConversationIDs
+        modifiedConversationIDs.removeAll()
+        return result
+    }
+
+    /// Tracks a conversation as modified
+    private func trackModifiedConversation(_ conversation: Conversation) {
+        modifiedConversationIDs.insert(conversation.objectID)
     }
 
     /// Saves a Gmail message to Core Data
@@ -102,6 +123,11 @@ final class MessagePersister: @unchecked Sendable {
             for attachmentInfo in processedMessage.attachmentInfo {
                 createAttachment(attachmentInfo, for: existingMessage, in: context)
             }
+        }
+
+        // Track the conversation as modified for rollup updates
+        if let conversation = existingMessage.conversation {
+            trackModifiedConversation(conversation)
         }
 
         print("Updated existing message: \(processedMessage.id)")
@@ -190,6 +216,9 @@ final class MessagePersister: @unchecked Sendable {
                 conversation.snippet = message.cleanedSnippet ?? message.snippet
             }
         }
+
+        // Track the conversation as modified for rollup updates
+        trackModifiedConversation(conversation)
     }
 
     /// Saves all participants for a message

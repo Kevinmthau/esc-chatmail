@@ -1,12 +1,14 @@
 import SwiftUI
 import CoreData
 
+/// @deprecated Use ComposeView instead
+/// This view is kept for backwards compatibility during migration
 struct NewMessageComposerView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.managedObjectContext) private var viewContext
     
     @StateObject private var contactsService = ContactsService()
-    @State private var recipients: [RecipientField.Recipient] = []
+    @State private var recipients: [Recipient] = []
     @State private var recipientInput = ""
     @State private var subject = ""
     @State private var messageBody = ""
@@ -168,7 +170,7 @@ struct NewMessageComposerView: View {
     }
     
     private func addRecipient(email: String, displayName: String?) {
-        let recipient = RecipientField.Recipient(email: email, displayName: displayName)
+        let recipient = Recipient(email: email, displayName: displayName)
         if !recipients.contains(where: { $0.email == recipient.email }) {
             recipients.append(recipient)
         }

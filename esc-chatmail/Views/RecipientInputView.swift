@@ -1,23 +1,22 @@
 import SwiftUI
 import Contacts
 
+/// Legacy recipient input view with horizontal scrolling layout
+/// Note: Consider using ComposeRecipientField from ComposeView.swift for new code
 struct RecipientInputView: View {
-    @Binding var recipients: [RecipientToken]
+    @Binding var recipients: [Recipient]
     @Binding var query: String
     @Binding var isSearching: Bool
-    @FocusState var focusedField: NewMessageView.Field?
-    
+    var isFocused: FocusState<Bool>.Binding
+
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
-            // "To:" label
             Text("To:")
                 .foregroundColor(Color(.secondaryLabel))
                 .padding(.leading, 16)
-            
-            // Scrollable area for chips and input
+
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
-                    // Recipient chips
                     ForEach(recipients) { recipient in
                         MessageRecipientChip(
                             recipient: recipient,
@@ -28,18 +27,15 @@ struct RecipientInputView: View {
                             }
                         )
                     }
-                    
-                    // Input field
+
                     TextField("Add recipient", text: $query)
-                        .focused($focusedField, equals: .recipients)
+                        .focused(isFocused)
                         .frame(minWidth: 150)
                         .font(.system(size: 17))
                         .onChange(of: query) { _, newValue in
                             isSearching = !newValue.isEmpty
                         }
-                        .onSubmit {
-                            // Handle return key if needed
-                        }
+                        .onSubmit { }
                         .submitLabel(.done)
                 }
                 .padding(.vertical, 8)
@@ -51,19 +47,20 @@ struct RecipientInputView: View {
     }
 }
 
+/// Chip view for MessageRecipientChip (blue style)
 struct MessageRecipientChip: View {
-    let recipient: RecipientToken
+    let recipient: Recipient
     let onDelete: () -> Void
-    
+
     @State private var isPressed = false
-    
+
     var body: some View {
         HStack(spacing: 4) {
-            Text(recipient.name.isEmpty ? recipient.email : recipient.name)
+            Text(recipient.display)
                 .font(.system(size: 15))
                 .foregroundColor(.white)
                 .lineLimit(1)
-            
+
             Button(action: onDelete) {
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 14))

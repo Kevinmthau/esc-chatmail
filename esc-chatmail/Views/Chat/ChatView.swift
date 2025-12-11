@@ -4,101 +4,6 @@ import CoreData
 import Contacts
 import ContactsUI
 
-// MARK: - Text Processing Helpers (nonisolated for background thread usage)
-private enum TextProcessing {
-    static func extractPlainText(from html: String) -> String {
-        var text = html
-
-        // Remove script and style tags and their content
-        text = text.replacingOccurrences(of: "<script[^>]*>[\\s\\S]*?</script>", with: "", options: .regularExpression, range: nil)
-        text = text.replacingOccurrences(of: "<style[^>]*>[\\s\\S]*?</style>", with: "", options: .regularExpression, range: nil)
-
-        // Convert explicit line breaks to newlines
-        text = text.replacingOccurrences(of: "<br[^>]*>", with: "\n", options: .regularExpression, range: nil)
-
-        // Paragraphs and headings get double newlines (actual content breaks)
-        text = text.replacingOccurrences(of: "</p>", with: "\n\n", options: .regularExpression, range: nil)
-        text = text.replacingOccurrences(of: "</h[1-6]>", with: "\n\n", options: .regularExpression, range: nil)
-
-        // Remove all HTML tags
-        text = text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression, range: nil)
-
-        // Decode HTML entities
-        text = text.replacingOccurrences(of: "&nbsp;", with: " ")
-        text = text.replacingOccurrences(of: "&amp;", with: "&")
-        text = text.replacingOccurrences(of: "&lt;", with: "<")
-        text = text.replacingOccurrences(of: "&gt;", with: ">")
-        text = text.replacingOccurrences(of: "&quot;", with: "\"")
-        text = text.replacingOccurrences(of: "&#39;", with: "'")
-        text = text.replacingOccurrences(of: "&#34;", with: "\"")
-        text = text.replacingOccurrences(of: "&apos;", with: "'")
-
-        // Smart quotes and other typographic entities
-        text = text.replacingOccurrences(of: "&ldquo;", with: "\"")
-        text = text.replacingOccurrences(of: "&rdquo;", with: "\"")
-        text = text.replacingOccurrences(of: "&lsquo;", with: "'")
-        text = text.replacingOccurrences(of: "&rsquo;", with: "'")
-        text = text.replacingOccurrences(of: "&#8220;", with: "\"")
-        text = text.replacingOccurrences(of: "&#8221;", with: "\"")
-        text = text.replacingOccurrences(of: "&#8216;", with: "'")
-        text = text.replacingOccurrences(of: "&#8217;", with: "'")
-        text = text.replacingOccurrences(of: "&ndash;", with: "–")
-        text = text.replacingOccurrences(of: "&mdash;", with: "—")
-        text = text.replacingOccurrences(of: "&#8211;", with: "–")
-        text = text.replacingOccurrences(of: "&#8212;", with: "—")
-        text = text.replacingOccurrences(of: "&hellip;", with: "…")
-        text = text.replacingOccurrences(of: "&#8230;", with: "…")
-
-        // Clean up whitespace
-        text = text.replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression, range: nil)
-        text = text.replacingOccurrences(of: " ?\\n ?", with: "\n", options: .regularExpression, range: nil)
-        text = text.replacingOccurrences(of: "\\n{3,}", with: "\n\n", options: .regularExpression, range: nil)
-        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        return text
-    }
-
-    static func stripQuotedText(from text: String) -> String {
-        var normalizedText = text
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-
-        // Collapse 3+ newlines into 2
-        while normalizedText.contains("\n\n\n") {
-            normalizedText = normalizedText.replacingOccurrences(of: "\n\n\n", with: "\n\n")
-        }
-
-        let lines = normalizedText.components(separatedBy: "\n")
-        var newMessageLines: [String] = []
-        var lastLineWasEmpty = false
-
-        for (index, line) in lines.enumerated() {
-            let trimmedLine = line.trimmingCharacters(in: .whitespaces)
-
-            // Stop at common quoted text markers
-            if trimmedLine.starts(with: ">") ||
-               (trimmedLine.starts(with: "On ") && trimmedLine.contains("wrote:")) ||
-               (trimmedLine.starts(with: "From:") && index > 0) ||
-               trimmedLine == "..." ||
-               trimmedLine.contains("---------- Forwarded message ---------") ||
-               trimmedLine.contains("________________________________") {
-                break
-            }
-
-            // Skip consecutive empty lines
-            let isEmptyLine = trimmedLine.isEmpty
-            if isEmptyLine && lastLineWasEmpty {
-                continue
-            }
-            lastLineWasEmpty = isEmptyLine
-
-            newMessageLines.append(trimmedLine.isEmpty ? "" : line)
-        }
-
-        return newMessageLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-}
-
 struct ChatView: View {
     @ObservedObject var conversation: Conversation
     @StateObject private var viewModel: ChatViewModel
@@ -148,6 +53,12 @@ struct ChatView: View {
                 let unreadMessageIDs = messages.filter { $0.isUnread }.map { $0.objectID }
                 viewModel.markConversationAsRead(messageObjectIDs: unreadMessageIDs)
                 scrollToBottom(proxy: proxy, delay: UIConfig.initialScrollDelay)
+
+                // Batch prefetch text content for visible messages (eliminates N+1 queries)
+                Task.detached(priority: .userInitiated) {
+                    let messageIds = await messages.map { $0.id }
+                    await ProcessedTextCache.shared.prefetch(messageIds: messageIds)
+                }
             }
             .onChange(of: messages.count) { oldCount, newCount in
                 if newCount > oldCount {
@@ -219,7 +130,7 @@ struct ChatView: View {
             }
         }
         .sheet(item: $viewModel.messageToForward) { message in
-            NewMessageView(forwardedMessage: message)
+            ComposeView(mode: .forward(message))
         }
         .sheet(item: $viewModel.contactToAdd) { wrapper in
             AddContactView(contact: wrapper.contact)
@@ -378,6 +289,9 @@ struct AddContactView: UIViewControllerRepresentable {
 struct MessageBubble: View {
     let message: Message
     let conversation: Conversation
+    /// Pre-loaded sender names from batch fetch (avoids N+1 queries)
+    var prefetchedSenderName: String?
+
     private let contactsResolver = ContactsResolver.shared
     @State private var senderName: String?
     @State private var showingHTMLView = false
@@ -447,14 +361,16 @@ struct MessageBubble: View {
                     }
                 } else {
                     if let text = fullTextContent ?? message.cleanedSnippet ?? message.snippet, !text.isEmpty {
+                        let isTruncated = text.components(separatedBy: .newlines).count > 25
                         VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 6) {
                             Text(text)
+                                .lineLimit(25)
                                 .padding(10)
                                 .background(message.isFromMe ? Color.blue : Color.gray.opacity(0.2))
                                 .foregroundColor(message.isFromMe ? .white : .primary)
                                 .cornerRadius(12)
 
-                            if hasRichContent {
+                            if hasRichContent || isTruncated {
                                 Button(action: {
                                     showingHTMLView = true
                                 }) {
@@ -498,11 +414,23 @@ struct MessageBubble: View {
             guard !hasLoadedContent else { return }
             hasLoadedContent = true
 
+            // Use prefetched sender name if available, otherwise load
             if !message.isFromMe && isGroupConversation {
-                await loadSenderName()
+                if let prefetched = prefetchedSenderName {
+                    senderName = prefetched
+                } else {
+                    await loadSenderName()
+                }
             }
-            await loadFullTextContent()
-            checkForRichContent()
+
+            // Try cache first (populated by batch prefetch in ChatView.onAppear)
+            if let cached = await ProcessedTextCache.shared.get(messageId: message.id) {
+                fullTextContent = cached.plainText
+                hasRichContent = message.isForwardedEmail || (!message.isFromMe && cached.hasRichContent)
+            } else {
+                // Fallback: process on background thread and cache result
+                await loadFullTextContentWithCache()
+            }
         }
         .sheet(isPresented: $showingHTMLView) {
             HTMLMessageView(message: message)
@@ -513,28 +441,34 @@ struct MessageBubble: View {
         conversation.conversationType == .group || conversation.conversationType == .list
     }
 
-    private func loadFullTextContent() async {
+    /// Loads and caches text content on background thread
+    private func loadFullTextContentWithCache() async {
         let messageId = message.id
         let bodyText = message.value(forKey: "bodyText") as? String
+        let isFromMe = message.isFromMe
+        let isForwarded = message.isForwardedEmail
 
-        let processedText: String? = await Task.detached(priority: .userInitiated) {
+        let result: (plainText: String?, hasRichContent: Bool) = await Task.detached(priority: .userInitiated) {
             let handler = HTMLContentHandler.shared
+            var processedResult = ProcessedTextCache.processMessage(messageId: messageId, handler: handler)
 
-            if handler.htmlFileExists(for: messageId),
-               let html = handler.loadHTML(for: messageId) {
-                let plainText = TextProcessing.extractPlainText(from: html)
-                if !plainText.isEmpty {
-                    return TextProcessing.stripQuotedText(from: plainText)
-                }
+            // If no HTML content, try bodyText
+            if processedResult.plainText == nil, let text = bodyText {
+                processedResult = (TextProcessing.stripQuotedText(from: text), false)
             }
 
-            if let text = bodyText {
-                return TextProcessing.stripQuotedText(from: text)
-            }
-            return nil
+            // Cache the result for future use
+            await ProcessedTextCache.shared.set(
+                messageId: messageId,
+                plainText: processedResult.plainText,
+                hasRichContent: processedResult.hasRichContent
+            )
+
+            return processedResult
         }.value
 
-        fullTextContent = processedText
+        fullTextContent = result.plainText
+        hasRichContent = isForwarded || (!isFromMe && result.hasRichContent)
     }
 
     private func loadSenderName() async {
@@ -568,41 +502,5 @@ struct MessageBubble: View {
 
     private func formatTime(_ date: Date) -> String {
         return TimestampFormatter.format(date)
-    }
-
-    private func checkForRichContent() {
-        let messageId = message.id
-        let isFromMe = message.isFromMe
-        let isForwarded = message.isForwardedEmail
-        let hasStorageURI = message.bodyStorageURI != nil
-
-        Task.detached(priority: .userInitiated) {
-            guard !isFromMe else {
-                await MainActor.run { hasRichContent = false }
-                return
-            }
-
-            let richContentResult: Bool
-            if isForwarded {
-                richContentResult = true
-            } else if hasStorageURI {
-                let handler = HTMLContentHandler.shared
-                if handler.htmlFileExists(for: messageId),
-                   let html = handler.loadHTML(for: messageId) {
-                    let lowercased = html.lowercased()
-                    let hasTable = lowercased.contains("<table")
-                    let hasVideo = lowercased.contains("<video")
-                    let hasIframe = lowercased.contains("<iframe")
-
-                    richContentResult = hasTable || hasVideo || hasIframe
-                } else {
-                    richContentResult = false
-                }
-            } else {
-                richContentResult = false
-            }
-
-            await MainActor.run { hasRichContent = richContentResult }
-        }
     }
 }

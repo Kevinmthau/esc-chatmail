@@ -67,35 +67,54 @@ final class ContactsService: ObservableObject {
     func searchContacts(query: String, limit: Int = 6) async -> [ContactMatch] {
         guard authorizationStatus == .authorized else { return [] }
         guard !query.isEmpty else { return [] }
-        
+
         await MainActor.run {
             self.isLoadingContacts = true
         }
-        
-        defer {
-            Task { @MainActor in
-                self.isLoadingContacts = false
-            }
+
+        // Move blocking CNContactStore operations to background thread
+        // enumerateContacts is synchronous and will block the calling thread
+        let results = await Task.detached(priority: .userInitiated) { [keysToFetch, contactStore] in
+            Self.performContactSearch(
+                query: query,
+                limit: limit,
+                keysToFetch: keysToFetch,
+                contactStore: contactStore
+            )
+        }.value
+
+        await MainActor.run {
+            self.isLoadingContacts = false
         }
-        
+
+        return results
+    }
+
+    /// Synchronous contact search - must be called from background thread
+    private static func performContactSearch(
+        query: String,
+        limit: Int,
+        keysToFetch: [CNKeyDescriptor],
+        contactStore: CNContactStore
+    ) -> [ContactMatch] {
         let lowercasedQuery = query.lowercased()
         var matches: [ContactMatch] = []
-        
-        let request = CNContactFetchRequest(keysToFetch: keysToFetch)
-        
-        request.predicate = CNContact.predicateForContacts(matchingName: query)
-        
+
+        // First search by name predicate
+        let nameRequest = CNContactFetchRequest(keysToFetch: keysToFetch)
+        nameRequest.predicate = CNContact.predicateForContacts(matchingName: query)
+
         do {
-            try contactStore.enumerateContacts(with: request) { contact, stop in
+            try contactStore.enumerateContacts(with: nameRequest) { contact, stop in
                 let match = ContactMatch(from: contact)
-                
+
                 let nameMatches = match.displayName.lowercased().contains(lowercasedQuery)
                 let emailMatches = match.emails.contains { $0.lowercased().contains(lowercasedQuery) }
-                
+
                 if nameMatches || emailMatches {
                     matches.append(match)
                 }
-                
+
                 if matches.count >= limit {
                     stop.pointee = true
                 }
@@ -103,25 +122,26 @@ final class ContactsService: ObservableObject {
         } catch {
             print("Failed to fetch contacts: \(error)")
         }
-        
+
+        // If we need more results, search by email
         if matches.count < limit {
             let emailRequest = CNContactFetchRequest(keysToFetch: keysToFetch)
-            
+
             do {
                 try contactStore.enumerateContacts(with: emailRequest) { contact, stop in
                     let match = ContactMatch(from: contact)
-                    
+
                     let alreadyAdded = matches.contains { existing in
                         existing.primaryEmail == match.primaryEmail
                     }
-                    
+
                     if !alreadyAdded {
                         let emailMatches = match.emails.contains { $0.lowercased().contains(lowercasedQuery) }
                         if emailMatches {
                             matches.append(match)
                         }
                     }
-                    
+
                     if matches.count >= limit {
                         stop.pointee = true
                     }
@@ -130,31 +150,34 @@ final class ContactsService: ObservableObject {
                 print("Failed to search contacts by email: \(error)")
             }
         }
-        
+
         return Array(matches.prefix(limit))
     }
     
     func getContactByEmail(_ email: String) async -> ContactMatch? {
         guard authorizationStatus == .authorized else { return nil }
-        
-        let predicate = CNContact.predicateForContacts(matchingEmailAddress: email)
-        let request = CNContactFetchRequest(keysToFetch: keysToFetch)
-        request.predicate = predicate
-        
-        do {
-            var foundContact: CNContact?
-            try contactStore.enumerateContacts(with: request) { contact, stop in
-                foundContact = contact
-                stop.pointee = true
+
+        // Move blocking CNContactStore operation to background thread
+        return await Task.detached(priority: .userInitiated) { [keysToFetch, contactStore] in
+            let predicate = CNContact.predicateForContacts(matchingEmailAddress: email)
+            let request = CNContactFetchRequest(keysToFetch: keysToFetch)
+            request.predicate = predicate
+
+            do {
+                var foundContact: CNContact?
+                try contactStore.enumerateContacts(with: request) { contact, stop in
+                    foundContact = contact
+                    stop.pointee = true
+                }
+
+                if let contact = foundContact {
+                    return ContactMatch(from: contact)
+                }
+            } catch {
+                print("Failed to fetch contact by email: \(error)")
             }
-            
-            if let contact = foundContact {
-                return ContactMatch(from: contact)
-            }
-        } catch {
-            print("Failed to fetch contact by email: \(error)")
-        }
-        
-        return nil
+
+            return nil
+        }.value
     }
 }

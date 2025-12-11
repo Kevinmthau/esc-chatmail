@@ -411,8 +411,14 @@ final class SyncEngine: ObservableObject {
 
             try Task.checkCancellation()
 
-            // Cleanup and rollups
-            await conversationManager.updateAllConversationRollups(in: context)
+            // Update rollups only for modified conversations (much more efficient than updateAll)
+            let modifiedConversationIDs = messagePersister.getAndClearModifiedConversations()
+            if !modifiedConversationIDs.isEmpty {
+                await conversationManager.updateRollupsForModifiedConversations(
+                    conversationIDs: modifiedConversationIDs,
+                    in: context
+                )
+            }
             await dataCleanupService.runIncrementalCleanup(in: context)
 
             uiState.update(progress: 0.95, status: "Saving changes...")

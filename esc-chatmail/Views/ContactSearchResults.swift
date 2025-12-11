@@ -3,7 +3,7 @@ import Contacts
 
 struct ContactSearchResults: View {
     let query: String
-    let existingRecipients: [RecipientToken]
+    let existingRecipients: [Recipient]
     let onSelect: (CNContact) -> Void
     
     @State private var searchResults: [CNContact] = []

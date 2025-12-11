@@ -23,7 +23,17 @@ enum ConversationFilter: String, CaseIterable {
 final class ConversationListViewModel: ObservableObject {
     // MARK: - Published State
 
-    @Published var searchText = ""
+    @Published var searchText = "" {
+        didSet {
+            // Debounce search input to avoid re-filtering on every keystroke
+            searchDebounceTask?.cancel()
+            searchDebounceTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 150_000_000) // 150ms debounce
+                self?.debouncedSearchText = self?.searchText ?? ""
+            }
+        }
+    }
+    @Published private(set) var debouncedSearchText = ""
     @Published var currentFilter: ConversationFilter = .all
     @Published var isSelecting = false
     @Published var selectedConversationIDs: Set<NSManagedObjectID> = []
@@ -40,6 +50,10 @@ final class ConversationListViewModel: ObservableObject {
     private let coreDataStack: CoreDataStack
     private var syncTimer: Timer?
     private var hasPerformedInitialSync = false
+    private var searchDebounceTask: Task<Void, Never>?
+
+    /// Cache for filtered results - invalidated when filter/search changes
+    private var filteredCache: FilteredConversationsCache?
 
     // MARK: - Initialization
 
@@ -180,12 +194,22 @@ final class ConversationListViewModel: ObservableObject {
     // MARK: - Filtering
 
     func filteredConversations(from conversations: [Conversation]) -> [Conversation] {
+        // Use debounced search text for filtering
+        let searchQuery = debouncedSearchText
+
+        // Check cache validity
+        if let cache = filteredCache,
+           cache.isValid(for: conversations, searchText: searchQuery, filter: currentFilter) {
+            return cache.results
+        }
+
         var result = conversations
 
-        if !searchText.isEmpty {
+        if !searchQuery.isEmpty {
+            let lowercasedQuery = searchQuery.lowercased()
             result = result.filter { conversation in
-                conversation.displayName?.localizedCaseInsensitiveContains(searchText) ?? false ||
-                conversation.snippet?.localizedCaseInsensitiveContains(searchText) ?? false
+                conversation.displayName?.lowercased().contains(lowercasedQuery) ?? false ||
+                conversation.snippet?.lowercased().contains(lowercasedQuery) ?? false
             }
         }
 
@@ -198,7 +222,20 @@ final class ConversationListViewModel: ObservableObject {
             result = result.filter { !isConversationWithContact($0) }
         }
 
+        // Update cache
+        filteredCache = FilteredConversationsCache(
+            sourceCount: conversations.count,
+            searchText: searchQuery,
+            filter: currentFilter,
+            results: result
+        )
+
         return result
+    }
+
+    /// Invalidates the filtered cache - call when underlying data changes
+    func invalidateFilterCache() {
+        filteredCache = nil
     }
 
     func isConversationWithContact(_ conversation: Conversation) -> Bool {
@@ -287,5 +324,23 @@ final class ConversationListViewModel: ObservableObject {
     /// Called when view disappears
     func onDisappear() {
         stopPeriodicSync()
+        searchDebounceTask?.cancel()
+    }
+}
+
+// MARK: - Filtered Conversations Cache
+
+/// Caches filtered conversation results to avoid re-filtering on every render
+private struct FilteredConversationsCache {
+    let sourceCount: Int
+    let searchText: String
+    let filter: ConversationFilter
+    let results: [Conversation]
+
+    /// Checks if cache is still valid for the given parameters
+    func isValid(for conversations: [Conversation], searchText: String, filter: ConversationFilter) -> Bool {
+        return self.sourceCount == conversations.count &&
+               self.searchText == searchText &&
+               self.filter == filter
     }
 }

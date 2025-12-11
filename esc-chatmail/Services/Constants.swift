@@ -154,4 +154,8 @@ struct APIEndpoints {
     static func attachment(messageId: String, attachmentId: String) -> String {
         "\(baseURL)/users/me/messages/\(messageId)/attachments/\(attachmentId)"
     }
+
+    static func sendMessage() -> String {
+        "\(baseURL)/users/me/messages/send"
+    }
 }

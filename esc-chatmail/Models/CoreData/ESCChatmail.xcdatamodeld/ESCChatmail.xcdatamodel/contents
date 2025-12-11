@@ -115,6 +115,10 @@
         <fetchIndex name="byIsUnreadIndex">
             <fetchIndexElement property="isUnread" type="Binary" order="ascending"/>
         </fetchIndex>
+        <fetchIndex name="byConversationAndDateIndex">
+            <fetchIndexElement property="conversation" type="Binary" order="ascending"/>
+            <fetchIndexElement property="internalDate" type="Binary" order="ascending"/>
+        </fetchIndex>
         <uniquenessConstraints>
             <uniquenessConstraint>
                 <constraint value="id"/>
@@ -134,5 +138,8 @@
         <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
         <relationship name="conversationParticipations" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="ConversationParticipant" inverseName="person" inverseEntity="ConversationParticipant"/>
         <relationship name="messageParticipations" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="MessageParticipant" inverseName="person" inverseEntity="MessageParticipant"/>
+        <fetchIndex name="byEmailIndex">
+            <fetchIndexElement property="email" type="Binary" order="ascending"/>
+        </fetchIndex>
     </entity>
 </model>

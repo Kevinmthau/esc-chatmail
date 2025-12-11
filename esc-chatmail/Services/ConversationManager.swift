@@ -159,11 +159,55 @@ final class ConversationManager: @unchecked Sendable {
         }
     }
 
+    /// Updates rollups for ALL conversations - expensive O(n*m) operation.
+    /// Prefer updateRollupsForModifiedConversations when possible.
     func updateAllConversationRollups(in context: NSManagedObjectContext) async {
         await context.perform { [weak self] in
             guard let self = self else { return }
             let request = Conversation.fetchRequest()
             request.fetchBatchSize = 50  // Process conversations in batches
+            guard let conversations = try? context.fetch(request) else { return }
+
+            for conversation in conversations {
+                self.updateConversationRollups(for: conversation)
+            }
+        }
+    }
+
+    /// Updates rollups only for conversations that were modified.
+    /// Much more efficient than updateAllConversationRollups - O(k*m) where k << n.
+    func updateRollupsForModifiedConversations(
+        conversationIDs: Set<NSManagedObjectID>,
+        in context: NSManagedObjectContext
+    ) async {
+        guard !conversationIDs.isEmpty else { return }
+
+        await context.perform { [weak self] in
+            guard let self = self else { return }
+
+            for objectID in conversationIDs {
+                if let conversation = try? context.existingObject(with: objectID) as? Conversation {
+                    self.updateConversationRollups(for: conversation)
+                }
+            }
+        }
+    }
+
+    /// Updates rollups for conversations by keyHash - useful when you have keyHashes but not objectIDs.
+    func updateRollupsForConversations(
+        keyHashes: Set<String>,
+        in context: NSManagedObjectContext
+    ) async {
+        guard !keyHashes.isEmpty else { return }
+
+        await context.perform { [weak self] in
+            guard let self = self else { return }
+
+            // Batch fetch conversations by keyHash
+            let request = Conversation.fetchRequest()
+            request.predicate = NSPredicate(format: "keyHash IN %@", keyHashes)
+            request.fetchBatchSize = 50
+
             guard let conversations = try? context.fetch(request) else { return }
 
             for conversation in conversations {

@@ -14,8 +14,11 @@ actor ProfilePhotoResolver {
     private let cache = NSCache<NSString, CachedPhoto>()
     private var inFlightRequests: [String: Task<ProfilePhoto?, Never>] = [:]
 
-    /// Semaphore to limit concurrent People API requests
-    private let apiSemaphore = AsyncSemaphore(limit: 2)
+    /// Queue for People API requests with priority and limit
+    private var apiQueue: [String] = []
+    private var activeAPIRequests = 0
+    private let maxConcurrentAPIRequests = 2
+    private let maxQueuedAPIRequests = 10  // Drop requests beyond this to avoid memory bloat
 
     /// Track emails that failed API lookup to avoid retrying
     private var failedLookups: Set<String> = []
@@ -116,9 +119,21 @@ actor ProfilePhotoResolver {
     private func fetchPhoto(for email: String) async -> ProfilePhoto? {
         // 1. Check CoreData Person cache first
         if let cachedURL = await getCachedPhotoURL(for: email) {
-            // If it's a data URL, convert to Data
-            if cachedURL.hasPrefix("data:image") {
+            // Handle file:// URLs (new format)
+            if cachedURL.hasPrefix("file://") {
+                if let data = AvatarStorage.shared.loadAvatar(from: cachedURL) {
+                    return ProfilePhoto(source: .cached, imageData: data, url: nil)
+                }
+            }
+            // Handle legacy data:// URLs (base64)
+            else if cachedURL.hasPrefix("data:image") {
                 if let data = dataFromBase64URL(cachedURL) {
+                    // Migrate to file storage in background
+                    Task.detached(priority: .utility) {
+                        if let fileURL = AvatarStorage.shared.migrateFromBase64(email: email, base64URL: cachedURL) {
+                            await self.savePhotoURLToCache(email: email, url: fileURL)
+                        }
+                    }
                     return ProfilePhoto(source: .cached, imageData: data, url: nil)
                 }
             } else if !cachedURL.isEmpty {
@@ -158,9 +173,36 @@ actor ProfilePhotoResolver {
             return nil
         }
 
-        // Throttle API requests with semaphore
-        await apiSemaphore.wait()
-        defer { Task { await apiSemaphore.signal() } }
+        // Check if queue is full - drop request to avoid memory bloat
+        if apiQueue.count >= maxQueuedAPIRequests {
+            return nil
+        }
+
+        // Check if already queued
+        if apiQueue.contains(email) {
+            return nil
+        }
+
+        // Add to queue
+        apiQueue.append(email)
+
+        // Wait for our turn (bounded queue prevents memory bloat)
+        while apiQueue.first != email || activeAPIRequests >= maxConcurrentAPIRequests {
+            // Yield to avoid busy waiting
+            try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+
+            // Check if we got removed from queue (cleanup)
+            if !apiQueue.contains(email) {
+                return nil
+            }
+        }
+
+        // Our turn - execute the request
+        activeAPIRequests += 1
+        defer {
+            activeAPIRequests -= 1
+            apiQueue.removeAll { $0 == email }
+        }
 
         do {
             // Get API client reference on main actor (quick operation)
@@ -197,9 +239,10 @@ actor ProfilePhotoResolver {
     }
 
     private func savePhotoToCache(email: String, imageData: Data) async {
-        let base64String = imageData.base64EncodedString()
-        let dataURL = "data:image/jpeg;base64,\(base64String)"
-        await savePhotoURLToCache(email: email, url: dataURL)
+        // Save to file storage instead of base64 to avoid database bloat
+        if let fileURL = AvatarStorage.shared.saveAvatar(for: email, imageData: imageData) {
+            await savePhotoURLToCache(email: email, url: fileURL)
+        }
     }
 
     private func savePhotoURLToCache(email: String, url: String) async {
@@ -277,35 +320,3 @@ private class CachedPhoto {
     }
 }
 
-// MARK: - Async Semaphore
-
-/// A simple async semaphore to limit concurrent operations
-actor AsyncSemaphore {
-    private let limit: Int
-    private var count: Int = 0
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    init(limit: Int) {
-        self.limit = limit
-    }
-
-    func wait() async {
-        if count < limit {
-            count += 1
-            return
-        }
-
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
-        }
-    }
-
-    func signal() {
-        if let waiter = waiters.first {
-            waiters.removeFirst()
-            waiter.resume()
-        } else {
-            count -= 1
-        }
-    }
-}

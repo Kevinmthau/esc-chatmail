@@ -1,20 +1,50 @@
 import SwiftUI
 import CoreData
 
+/// Snapshot of conversation data to prevent excessive re-renders.
+/// Instead of observing the full Conversation object (which triggers re-renders on ANY property change),
+/// we capture only the display-relevant properties once and update via explicit refresh.
+struct ConversationSnapshot: Equatable {
+    let objectID: NSManagedObjectID
+    let inboxUnreadCount: Int32
+    let pinned: Bool
+    let snippet: String?
+    let lastMessageDate: Date?
+    let displayNameHint: String?
+
+    init(from conversation: Conversation) {
+        self.objectID = conversation.objectID
+        self.inboxUnreadCount = conversation.inboxUnreadCount
+        self.pinned = conversation.pinned
+        self.snippet = conversation.snippet
+        self.lastMessageDate = conversation.lastMessageDate
+        self.displayNameHint = conversation.displayName
+    }
+}
+
 struct ConversationRowView: View {
-    @ObservedObject var conversation: Conversation
+    /// Use snapshot to avoid re-renders from unrelated Conversation property changes
+    let snapshot: ConversationSnapshot
+    /// Keep reference for participant loading (but don't observe it)
+    let conversation: Conversation
+
     private let authSession = AuthSession.shared
     private let personCache = PersonCache.shared
 
     @State private var displayName: String = ""
     @State private var avatarPhotos: [ProfilePhoto] = []
     @State private var participantNames: [String] = []
-    
+
+    init(conversation: Conversation) {
+        self.conversation = conversation
+        self.snapshot = ConversationSnapshot(from: conversation)
+    }
+
     var body: some View {
         HStack(spacing: 8) {
             // Unread indicator with fixed width container
             ZStack {
-                if conversation.inboxUnreadCount > 0 {
+                if snapshot.inboxUnreadCount > 0 {
                     Circle()
                         .fill(Color.blue)
                         .frame(width: 10, height: 10)
@@ -30,7 +60,7 @@ struct ConversationRowView: View {
                 // Top row: Name, date, and chevron
                 HStack {
                     HStack(spacing: 4) {
-                        if conversation.pinned {
+                        if snapshot.pinned {
                             Image(systemName: "pin.fill")
                                 .font(.footnote)
                                 .foregroundColor(.orange)
@@ -43,15 +73,21 @@ struct ConversationRowView: View {
 
                     Spacer()
 
-                    if let date = conversation.lastMessageDate {
-                        Text(formatDate(date))
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
+                    HStack(spacing: 4) {
+                        if let date = snapshot.lastMessageDate {
+                            Text(formatDate(date))
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(Color(.tertiaryLabel))
                     }
                 }
 
                 // Bottom row: snippet only
-                Text(conversation.snippet ?? "No messages")
+                Text(snapshot.snippet ?? "No messages")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .lineLimit(2)
@@ -86,8 +122,15 @@ struct ConversationRowView: View {
         // Limit to top 4 participants for display (for group avatar)
         let topParticipants = Array(nonMeParticipants.prefix(4))
 
-        // Batch prefetch all names in a single query (avoids N+1)
-        await personCache.prefetch(emails: topParticipants)
+        // Check if all emails are already cached (ViewModel likely prefetched them)
+        let allCached = topParticipants.allSatisfy { email in
+            personCache.getCachedDisplayName(for: email) != nil
+        }
+
+        // Only call prefetch if we have uncached emails (avoids redundant calls)
+        if !allCached {
+            await personCache.prefetch(emails: topParticipants)
+        }
 
         // Now get names from cache (all should be cached after prefetch)
         var resolvedNames: [String] = []
@@ -137,11 +180,12 @@ struct ConversationRowView: View {
     }
 
     private func fallbackDisplayName(for email: String) -> String {
-        let normalized = EmailNormalizer.normalize(email)
-        if let atIndex = normalized.firstIndex(of: "@") {
-            return String(normalized[..<atIndex])
+        // Preserve original case for display, just extract username part
+        let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let atIndex = trimmed.firstIndex(of: "@") {
+            return String(trimmed[..<atIndex])
         }
-        return email
+        return trimmed
     }
 
     private func formatDate(_ date: Date) -> String {
@@ -349,39 +393,24 @@ struct SmallCachedAvatarView: View {
     }
 
     private func loadImage() async {
-        // Try imageData first
-        if let data = photo.imageData, let image = UIImage(data: data) {
-            await MainActor.run {
-                loadedImage = image
-            }
-            return
-        }
-
-        // Try URL
-        guard let urlString = photo.url, !urlString.isEmpty else { return }
-
-        // Handle data URLs
-        if urlString.hasPrefix("data:image") {
-            if let data = dataFromBase64URL(urlString), let image = UIImage(data: data) {
+        // Try imageData first (decode on background thread)
+        if let data = photo.imageData {
+            if let image = await ImageDecoder.decodeAsync(data) {
                 await MainActor.run {
                     loadedImage = image
                 }
+                return
             }
-            return
         }
 
-        // Handle HTTP URLs - use deduplicated loader
-        if let image = await ImageCache.shared.loadImage(from: urlString) {
+        // Try URL - use enhanced cache (handles all URL types with disk caching)
+        guard let urlString = photo.url, !urlString.isEmpty else { return }
+
+        if let image = await EnhancedImageCache.shared.loadImage(from: urlString) {
             await MainActor.run {
                 loadedImage = image
             }
         }
-    }
-
-    private func dataFromBase64URL(_ dataURL: String) -> Data? {
-        guard let commaIndex = dataURL.firstIndex(of: ",") else { return nil }
-        let base64String = String(dataURL[dataURL.index(after: commaIndex)...])
-        return Data(base64Encoded: base64String)
     }
 }
 

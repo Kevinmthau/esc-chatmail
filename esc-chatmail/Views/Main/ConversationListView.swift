@@ -30,9 +30,11 @@ struct ConversationListView: View {
 
     // MARK: - Conversation List
 
+    @State private var selectedConversation: Conversation?
+
     private var conversationList: some View {
         List {
-            ForEach(filteredConversations) { conversation in
+            ForEach(Array(filteredConversations.enumerated()), id: \.element.objectID) { index, conversation in
                 if viewModel.isSelecting {
                     HStack(spacing: 0) {
                         selectionButton(for: conversation)
@@ -41,30 +43,35 @@ struct ConversationListView: View {
                             .onTapGesture { viewModel.toggleSelection(for: conversation) }
                     }
                     .listRowInsets(EdgeInsets())
-                    .listRowSeparator(.visible)
+                    .listRowSeparator(index == 0 ? .hidden : .visible, edges: .top)
                 } else {
-                    NavigationLink(destination: ChatView(conversation: conversation)) {
-                        ConversationRowView(conversation: conversation)
-                    }
-                    .listRowInsets(EdgeInsets())
-                    .listRowSeparator(.visible)
-                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                        Button(role: .destructive) {
-                            viewModel.archiveConversation(conversation)
-                        } label: {
-                            SwiftUI.Label("Archive", systemImage: "archivebox")
+                    ConversationRowView(conversation: conversation)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            selectedConversation = conversation
                         }
-                        .tint(.blue)
-                    }
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(index == 0 ? .hidden : .visible, edges: .top)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) {
+                                viewModel.archiveConversation(conversation)
+                            } label: {
+                                SwiftUI.Label("Archive", systemImage: "archivebox")
+                            }
+                            .tint(.blue)
+                        }
                 }
             }
         }
         .listStyle(.plain)
         .scrollDismissesKeyboard(.interactively)
         .navigationTitle(viewModel.isSelecting ? "\(viewModel.selectedConversationIDs.count) Selected" : "Chats")
+        .navigationDestination(item: $selectedConversation) { conversation in
+            ChatView(conversation: conversation)
+        }
         .toolbar { toolbarContent }
         .refreshable { await viewModel.performSync() }
-        .sheet(isPresented: $viewModel.showingComposer) { NewMessageView() }
+        .sheet(isPresented: $viewModel.showingComposer) { ComposeView(mode: .newMessage) }
         .sheet(isPresented: $viewModel.showingSettings) {
             NavigationStack { SettingsView() }
         }

@@ -252,19 +252,18 @@ final class ContactsResolver: ObservableObject, ContactsResolving, @unchecked Se
                     if let person = try self.viewContext.fetch(request).first {
                         var hasChanges = false
 
-                        // Only update if we have new data and existing is empty
-                        if person.displayName == nil || person.displayName?.isEmpty == true,
-                           let displayName = displayName {
+                        // Address book name always takes precedence over email header name
+                        if let displayName = displayName, !displayName.isEmpty,
+                           person.displayName != displayName {
                             person.displayName = displayName
                             hasChanges = true
                         }
 
                         if person.avatarURL == nil && imageData != nil {
-                            // Store image data as base64 URL for now
-                            // In production, save to file and store URL
-                            if let imageData = imageData {
-                                let base64String = imageData.base64EncodedString()
-                                person.avatarURL = "data:image/png;base64,\(base64String)"
+                            // Store image as file and save URL to avoid base64 bloat
+                            if let imageData = imageData,
+                               let fileURL = AvatarStorage.shared.saveAvatar(for: email, imageData: imageData) {
+                                person.avatarURL = fileURL
                                 hasChanges = true
                             }
                         }

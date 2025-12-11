@@ -135,12 +135,13 @@ final class PersonCache: ObservableObject {
         cache.removeAll()
     }
 
-    /// Get fallback display name from email
+    /// Get fallback display name from email (preserves original case)
     private func fallbackDisplayName(for email: String) -> String {
-        let normalized = EmailNormalizer.normalize(email)
-        if let atIndex = normalized.firstIndex(of: "@") {
-            return String(normalized[..<atIndex])
+        // Use original email to preserve capitalization, just extract username part
+        let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let atIndex = trimmed.firstIndex(of: "@") {
+            return String(trimmed[..<atIndex])
         }
-        return email
+        return trimmed
     }
 }
