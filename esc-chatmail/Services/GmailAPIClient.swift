@@ -139,8 +139,15 @@ class GmailAPIClient {
                             continue
                         }
                     }
+
+                    // Handle empty response for void-like operations (e.g., batchModify returns 204 No Content)
+                    if (200...299).contains(httpResponse.statusCode) && data.isEmpty {
+                        if let empty = EmptyResponse() as? T {
+                            return empty
+                        }
+                    }
                 }
-                
+
                 return try JSONDecoder().decode(T.self, from: data)
             } catch {
                 lastError = error

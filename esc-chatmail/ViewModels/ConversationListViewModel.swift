@@ -166,16 +166,24 @@ final class ConversationListViewModel: ObservableObject {
         }
 
         let count = conversationsToArchive.count
+        print("[ARCHIVE] Starting batch archive of \(count) conversations from \(selectedConversationIDs.count) selected IDs")
+        for (index, conv) in conversationsToArchive.enumerated() {
+            let messageCount = conv.messages?.count ?? 0
+            print("[ARCHIVE] [\(index + 1)/\(count)] '\(conv.displayName ?? "unknown")' (id: \(conv.id), messages: \(messageCount))")
+        }
+
         selectedConversationIDs.removeAll()
         isSelecting = false
 
         Task {
-            for conversation in conversationsToArchive {
+            for (index, conversation) in conversationsToArchive.enumerated() {
+                print("[ARCHIVE] [\(index + 1)/\(count)] Processing '\(conversation.displayName ?? "unknown")'...")
                 await messageActions.archiveConversation(conversation: conversation)
                 conversation.hidden = true
+                print("[ARCHIVE] [\(index + 1)/\(count)] Set hidden=true for '\(conversation.displayName ?? "unknown")'")
             }
             coreDataStack.saveIfNeeded(context: context)
-            print("Archived \(count) conversations")
+            print("[ARCHIVE] Batch archive complete - saved \(count) conversations")
         }
     }
 
