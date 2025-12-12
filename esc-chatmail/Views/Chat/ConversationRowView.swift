@@ -41,6 +41,7 @@ struct ConversationRowView: View {
     }
 
     var body: some View {
+        let _ = print("[ROW] displayName: '\(displayName)' | snippet: '\(snapshot.snippet ?? "nil")' | storedDisplayName: '\(snapshot.displayNameHint ?? "nil")'")
         HStack(spacing: 8) {
             // Unread indicator with fixed width container
             ZStack {
@@ -106,18 +107,29 @@ struct ConversationRowView: View {
 
         guard let participants = conversation.participants else {
             displayName = "Unknown"
+            print("[ConversationRowView] No participants for conversation \(conversation.id)")
             return
         }
 
         let myEmail = authSession.userEmail ?? ""
         let normalizedMyEmail = EmailNormalizer.normalize(myEmail)
 
-        // Get non-me participants
-        let nonMeParticipants = participants.compactMap { participant -> String? in
-            guard let email = participant.person?.email else { return nil }
+        // Log all participants for debugging
+        let allEmails = participants.compactMap { $0.person?.email }
+        print("[ConversationRowView] Conversation \(conversation.id): All participant emails: \(allEmails)")
+        print("[ConversationRowView] My email: \(myEmail), Stored displayName: \(conversation.displayName ?? "nil"), snippet: \(snapshot.snippet ?? "nil")")
+
+        // Get non-me participants (deduplicated by normalized email)
+        var seenEmails = Set<String>()
+        var nonMeParticipants: [String] = []
+        for participant in participants {
+            guard let email = participant.person?.email else { continue }
             let normalized = EmailNormalizer.normalize(email)
-            return normalized != normalizedMyEmail ? email : nil
+            guard normalized != normalizedMyEmail, !seenEmails.contains(normalized) else { continue }
+            seenEmails.insert(normalized)
+            nonMeParticipants.append(email)
         }
+        print("[ConversationRowView] Non-me participants: \(nonMeParticipants)")
 
         // Limit to top 4 participants for display (for group avatar)
         let topParticipants = Array(nonMeParticipants.prefix(4))
@@ -156,10 +168,14 @@ struct ConversationRowView: View {
     }
 
     private func updateDisplayName(resolvedNames: [String], totalParticipants: Int) {
+        print("[ConversationRowView] updateDisplayName called with resolvedNames: \(resolvedNames), totalParticipants: \(totalParticipants)")
+
         if resolvedNames.isEmpty {
             displayName = conversation.displayName ?? "No participants"
+            print("[ConversationRowView] Using fallback displayName: \(displayName)")
         } else if resolvedNames.count == 1 {
             displayName = resolvedNames[0]
+            print("[ConversationRowView] Single participant displayName: \(displayName)")
         } else {
             let firstNames = resolvedNames.map { name in
                 let components = name.components(separatedBy: " ")
@@ -176,6 +192,7 @@ struct ConversationRowView: View {
                     displayName = "\(firstNames[0]), \(firstNames[1])"
                 }
             }
+            print("[ConversationRowView] Multi-participant displayName: \(displayName)")
         }
     }
 

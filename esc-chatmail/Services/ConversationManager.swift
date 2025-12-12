@@ -70,7 +70,10 @@ final class ConversationManager: @unchecked Sendable {
     }
     
     /// Updates rollup data for a conversation. Must be called from within the conversation's context queue.
-    func updateConversationRollups(for conversation: Conversation) {
+    /// - Parameters:
+    ///   - conversation: The conversation to update
+    ///   - myEmail: The current user's email (must be captured before entering context.perform block due to @MainActor isolation)
+    func updateConversationRollups(for conversation: Conversation, myEmail: String) {
         guard conversation.managedObjectContext != nil else { return }
 
         // Note: This method assumes it's called from within context.perform or performAndWait
@@ -122,15 +125,44 @@ final class ConversationManager: @unchecked Sendable {
             conversation.latestInboxDate = latestInboxMessage.internalDate
         }
 
-        // Update display name from participants
+        // Update display name from participants (excluding the current user)
         if let participants = conversation.value(forKey: "participants") as? Set<ConversationParticipant> {
-            let names = participants.compactMap { participant in
-                if let person = participant.value(forKey: "person") as? Person {
-                    return (person.value(forKey: "displayName") as? String) ?? (person.value(forKey: "email") as? String)
-                }
-                return nil
+            let normalizedMyEmail = EmailNormalizer.normalize(myEmail)
+
+            // Log all participants for debugging
+            let allParticipantEmails = participants.compactMap { participant -> String? in
+                guard let person = participant.value(forKey: "person") as? Person else { return nil }
+                return person.value(forKey: "email") as? String
             }
-            conversation.displayName = self.formatGroupNames(names)
+            print("[ConversationManager] Conversation \(conversation.id): All participants: \(allParticipantEmails)")
+            print("[ConversationManager] My email: \(myEmail) (normalized: \(normalizedMyEmail))")
+
+            // Deduplicate participants by normalized email
+            var seenEmails = Set<String>()
+            var names: [String] = []
+            for participant in participants {
+                guard let person = participant.value(forKey: "person") as? Person else { continue }
+                guard let email = person.value(forKey: "email") as? String else { continue }
+
+                let normalizedEmail = EmailNormalizer.normalize(email)
+
+                // Exclude current user from display name
+                if normalizedEmail == normalizedMyEmail {
+                    print("[ConversationManager] Excluding self: \(email)")
+                    continue
+                }
+
+                // Skip duplicates
+                guard !seenEmails.contains(normalizedEmail) else { continue }
+                seenEmails.insert(normalizedEmail)
+
+                let name = (person.value(forKey: "displayName") as? String) ?? email
+                print("[ConversationManager] Including participant: \(name)")
+                names.append(name)
+            }
+            let finalDisplayName = self.formatGroupNames(names)
+            print("[ConversationManager] Final displayName: \(finalDisplayName), snippet: \(conversation.snippet ?? "nil")")
+            conversation.displayName = finalDisplayName
         }
     }
 
@@ -161,7 +193,11 @@ final class ConversationManager: @unchecked Sendable {
 
     /// Updates rollups for ALL conversations - expensive O(n*m) operation.
     /// Prefer updateRollupsForModifiedConversations when possible.
+    @MainActor
     func updateAllConversationRollups(in context: NSManagedObjectContext) async {
+        // Capture user email on main actor before entering context.perform
+        let myEmail = AuthSession.shared.userEmail ?? ""
+
         await context.perform { [weak self] in
             guard let self = self else { return }
             let request = Conversation.fetchRequest()
@@ -169,36 +205,44 @@ final class ConversationManager: @unchecked Sendable {
             guard let conversations = try? context.fetch(request) else { return }
 
             for conversation in conversations {
-                self.updateConversationRollups(for: conversation)
+                self.updateConversationRollups(for: conversation, myEmail: myEmail)
             }
         }
     }
 
     /// Updates rollups only for conversations that were modified.
     /// Much more efficient than updateAllConversationRollups - O(k*m) where k << n.
+    @MainActor
     func updateRollupsForModifiedConversations(
         conversationIDs: Set<NSManagedObjectID>,
         in context: NSManagedObjectContext
     ) async {
         guard !conversationIDs.isEmpty else { return }
 
+        // Capture user email on main actor before entering context.perform
+        let myEmail = AuthSession.shared.userEmail ?? ""
+
         await context.perform { [weak self] in
             guard let self = self else { return }
 
             for objectID in conversationIDs {
                 if let conversation = try? context.existingObject(with: objectID) as? Conversation {
-                    self.updateConversationRollups(for: conversation)
+                    self.updateConversationRollups(for: conversation, myEmail: myEmail)
                 }
             }
         }
     }
 
     /// Updates rollups for conversations by keyHash - useful when you have keyHashes but not objectIDs.
+    @MainActor
     func updateRollupsForConversations(
         keyHashes: Set<String>,
         in context: NSManagedObjectContext
     ) async {
         guard !keyHashes.isEmpty else { return }
+
+        // Capture user email on main actor before entering context.perform
+        let myEmail = AuthSession.shared.userEmail ?? ""
 
         await context.perform { [weak self] in
             guard let self = self else { return }
@@ -211,7 +255,7 @@ final class ConversationManager: @unchecked Sendable {
             guard let conversations = try? context.fetch(request) else { return }
 
             for conversation in conversations {
-                self.updateConversationRollups(for: conversation)
+                self.updateConversationRollups(for: conversation, myEmail: myEmail)
             }
         }
     }
