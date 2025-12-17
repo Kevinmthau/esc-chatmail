@@ -149,31 +149,6 @@ class MessageActions: ObservableObject {
         await pendingActionsManager.queueAction(type: .unstar, messageId: message.id)
     }
 
-    // MARK: - Delete
-
-    @MainActor
-    func deleteConversation(conversation: Conversation) async {
-        guard let messages = conversation.messages else { return }
-
-        let messageIds = messages.map { $0.id }
-        guard !messageIds.isEmpty else { return }
-
-        // Update local state immediately (optimistic update)
-        conversation.hidden = true
-        let now = Date()
-        for message in messages {
-            message.setValue(now, forKey: "localModifiedAt")
-        }
-        coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
-
-        // Queue the action for sync
-        await pendingActionsManager.queueConversationAction(
-            type: .deleteConversation,
-            conversationId: conversation.id,
-            messageIds: messageIds
-        )
-    }
-
     // MARK: - Helpers
 
     private func updateConversationInboxStatus(_ conversation: Conversation) {

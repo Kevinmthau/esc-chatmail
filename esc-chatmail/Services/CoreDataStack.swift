@@ -273,7 +273,7 @@ final class CoreDataStack: @unchecked Sendable {
                     } else if isTransientError(error) && attempt < retryCount - 1 {
                         // Wait before retry for transient errors
                         Thread.sleep(forTimeInterval: 0.1 * Double(attempt + 1))
-                        context.refreshAllObjects()
+                        context.rollback()
                     } else {
                         // Non-recoverable error
                         throw CoreDataError.saveFailed(error)
@@ -322,16 +322,16 @@ final class CoreDataStack: @unchecked Sendable {
 
     func saveAsync(context: NSManagedObjectContext) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            context.perform { [weak self] in
-                guard let self = self else {
-                    continuation.resume(throwing: CoreDataError.stackDestroyed)
+            context.perform {
+                guard context.hasChanges else {
+                    continuation.resume(returning: ())
                     return
                 }
                 do {
-                    try self.save(context: context)
+                    try context.save()
                     continuation.resume(returning: ())
                 } catch {
-                    continuation.resume(throwing: error)
+                    continuation.resume(throwing: CoreDataError.saveFailed(error))
                 }
             }
         }
@@ -387,14 +387,18 @@ final class CoreDataStack: @unchecked Sendable {
     }
 
     // Convenience method for non-critical saves that logs errors but doesn't throw
+    // Uses async perform to avoid blocking the main thread
     func saveIfNeeded(context: NSManagedObjectContext) {
         guard context.hasChanges else { return }
 
-        do {
-            try save(context: context)
-        } catch {
-            print("Core Data save error (non-critical): \(error)")
-            // Log error but don't crash - suitable for UI updates and non-critical operations
+        context.perform {
+            guard context.hasChanges else { return }
+            do {
+                try context.save()
+            } catch {
+                print("Core Data save error (non-critical): \(error)")
+                // Log error but don't crash - suitable for UI updates and non-critical operations
+            }
         }
     }
 

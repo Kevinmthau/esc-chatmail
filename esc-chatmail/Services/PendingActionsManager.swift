@@ -310,12 +310,6 @@ actor PendingActionsManager {
                 throw PendingActionError.missingMessageId
             }
             _ = try await apiClient.modifyMessage(id: messageId, removeLabelIds: ["STARRED"])
-
-        case .deleteConversation:
-            guard let messageIds = payload?["messageIds"] as? [String], !messageIds.isEmpty else {
-                throw PendingActionError.missingMessageIds
-            }
-            try await apiClient.batchModify(ids: messageIds, addLabelIds: ["TRASH"], removeLabelIds: ["INBOX"])
         }
     }
 

@@ -87,12 +87,6 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    func deleteConversation() {
-        Task {
-            await messageActions.deleteConversation(conversation: conversation)
-        }
-    }
-
     // MARK: - Conversation Settings
 
     func togglePin() {

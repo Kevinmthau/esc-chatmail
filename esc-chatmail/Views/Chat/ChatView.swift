@@ -120,10 +120,6 @@ struct ChatView: View {
                         SwiftUI.Label(conversation.muted ? "Unmute" : "Mute",
                               systemImage: conversation.muted ? "bell" : "bell.slash")
                     }
-
-                    Button(role: .destructive, action: { viewModel.deleteConversation() }) {
-                        SwiftUI.Label("Delete", systemImage: "trash")
-                    }
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }

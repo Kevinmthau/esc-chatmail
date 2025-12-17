@@ -139,7 +139,6 @@ struct ConversationListView: View {
     private var selectionActionBar: some View {
         HStack(spacing: 20) {
             archiveButton
-            deleteButton
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 14)
@@ -160,44 +159,18 @@ struct ConversationListView: View {
         }
     }
 
-    private var deleteButton: some View {
-        Button(action: { viewModel.deleteSelectedConversations() }) {
-            HStack(spacing: 10) {
-                Image(systemName: "trash")
-                    .font(.system(size: 20, weight: .medium))
-                Text("Delete")
-                    .font(.system(size: 17, weight: .medium))
-            }
-            .foregroundColor(.red)
-            .padding(.horizontal, 24)
-            .padding(.vertical, 16)
-            .background(glassBackground)
-        }
-    }
-
     private var glassBackground: some View {
         ZStack {
-            Color.white.opacity(0.25)
+            Color(UIColor.systemBackground).opacity(0.95)
             Capsule()
-                .fill(.ultraThinMaterial)
-                .opacity(0.5)
+                .fill(.thinMaterial)
         }
         .clipShape(Capsule())
         .overlay(
             Capsule()
-                .strokeBorder(
-                    LinearGradient(
-                        gradient: Gradient(colors: [
-                            Color.white.opacity(0.6),
-                            Color.white.opacity(0.15)
-                        ]),
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
+                .strokeBorder(Color.gray.opacity(0.3), lineWidth: 0.5)
         )
-        .shadow(color: .black.opacity(0.08), radius: 12, x: 0, y: 4)
+        .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 2)
     }
 
     private var navigationBar: some View {
@@ -252,7 +225,7 @@ struct ConversationListView: View {
         .padding(.vertical, 14)
         .background(
             Capsule()
-                .fill(Color(UIColor.systemBackground).opacity(0.85))
+                .fill(Color(UIColor.systemBackground).opacity(0.95))
                 .overlay(
                     Capsule()
                         .strokeBorder(Color.gray.opacity(0.3), lineWidth: 0.5)
@@ -270,7 +243,7 @@ struct ConversationListView: View {
     private func circleButton(icon: String) -> some View {
         ZStack {
             Circle()
-                .fill(Color(UIColor.systemBackground).opacity(0.85))
+                .fill(Color(UIColor.systemBackground).opacity(0.95))
                 .overlay(
                     Circle()
                         .strokeBorder(Color.gray.opacity(0.3), lineWidth: 0.5)

@@ -187,17 +187,6 @@ final class ConversationListViewModel: ObservableObject {
         }
     }
 
-    func deleteSelectedConversations() {
-        let context = coreDataStack.viewContext
-        for objectID in selectedConversationIDs {
-            if let conversation = try? context.existingObject(with: objectID) as? Conversation {
-                context.delete(conversation)
-            }
-        }
-        coreDataStack.saveIfNeeded(context: context)
-        selectedConversationIDs.removeAll()
-        isSelecting = false
-    }
 
     // MARK: - Filtering
 

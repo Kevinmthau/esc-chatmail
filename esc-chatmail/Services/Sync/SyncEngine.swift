@@ -432,7 +432,6 @@ final class SyncEngine: ObservableObject {
                 throw error
             }
 
-            coreDataStack.viewContext.refreshAllObjects()
             uiState.update(isSyncing: false, progress: 1.0, status: "Sync complete")
 
             NotificationCenter.default.post(name: .syncCompleted, object: nil)
