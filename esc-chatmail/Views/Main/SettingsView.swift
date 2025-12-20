@@ -44,7 +44,7 @@ struct SettingsView: View {
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
-                        
+
                         ProgressView(value: syncEngine.syncProgress)
                     } else {
                         Button(action: performFullSync) {
@@ -53,13 +53,21 @@ struct SettingsView: View {
                                 Text("Perform Full Sync")
                             }
                         }
-                        
+
                         Button(action: performIncrementalSync) {
                             HStack {
                                 Image(systemName: "arrow.clockwise")
                                 Text("Check for Updates")
                             }
                         }
+
+                        Button(action: resetAndSync) {
+                            HStack {
+                                Image(systemName: "envelope.badge")
+                                Text("Recover Missing Emails")
+                            }
+                        }
+                        .foregroundColor(.blue)
                     }
                 }
                 
@@ -116,6 +124,20 @@ struct SettingsView: View {
                 try await syncEngine.performIncrementalSync()
             } catch {
                 print("Incremental sync error: \(error)")
+            }
+        }
+    }
+
+    private func resetAndSync() {
+        // Reset installation timestamp to 5 minutes ago to catch emails that arrived just before install
+        KeychainService.shared.resetInstallationTimestamp(minutesBack: 5)
+
+        // Then perform a full sync
+        Task {
+            do {
+                try await syncEngine.performInitialSync()
+            } catch {
+                print("Reset and sync error: \(error)")
             }
         }
     }

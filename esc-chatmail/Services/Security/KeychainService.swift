@@ -314,10 +314,13 @@ extension KeychainService {
             return timestamp
         }
 
-        // Create new timestamp if it doesn't exist
-        let now = Date()
-        setInstallationTimestamp(now)
-        return now
+        // Create new timestamp with a 10-minute buffer in the past
+        // This accounts for emails that arrived just before the app was installed
+        let bufferMinutes: TimeInterval = 10 * 60
+        let timestamp = Date().addingTimeInterval(-bufferMinutes)
+        setInstallationTimestamp(timestamp)
+        print("Created installation timestamp with 10-minute buffer: \(timestamp)")
+        return timestamp
     }
 
     func getInstallationTimestamp() -> Date? {
@@ -331,5 +334,19 @@ extension KeychainService {
     func setInstallationTimestamp(_ date: Date = Date()) {
         let timestamp = date.timeIntervalSince1970
         try? saveString(String(timestamp), for: .installationTimestamp, withAccess: .afterFirstUnlockThisDeviceOnly)
+    }
+
+    /// Resets the installation timestamp to include older messages
+    /// - Parameter minutesBack: How many minutes in the past to set the timestamp (default 30)
+    func resetInstallationTimestamp(minutesBack: Int = 30) {
+        let newTimestamp = Date().addingTimeInterval(-TimeInterval(minutesBack * 60))
+        setInstallationTimestamp(newTimestamp)
+        print("Reset installation timestamp to: \(newTimestamp) (\(minutesBack) minutes ago)")
+    }
+
+    /// Clears the installation timestamp so it will be recreated on next sync
+    func clearInstallationTimestamp() {
+        try? delete(for: .installationTimestamp)
+        print("Cleared installation timestamp")
     }
 }

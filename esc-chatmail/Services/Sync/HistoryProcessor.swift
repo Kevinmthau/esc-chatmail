@@ -37,16 +37,20 @@ final class HistoryProcessor: @unchecked Sendable {
 
         for record in records {
             if let messagesAdded = record.messagesAdded {
+                print("📬 History record \(record.id): \(messagesAdded.count) new messages")
                 for added in messagesAdded {
                     // Skip spam messages
                     if let labelIds = added.message.labelIds, labelIds.contains("SPAM") {
+                        print("   ⏭️ Skipping spam: \(added.message.id)")
                         continue
                     }
+                    print("   ✅ Will fetch: \(added.message.id)")
                     messageIds.append(added.message.id)
                 }
             }
         }
 
+        print("📊 Total new messages to fetch: \(messageIds.count)")
         return messageIds
     }
 
@@ -63,8 +67,12 @@ final class HistoryProcessor: @unchecked Sendable {
             for messageId in messageIds {
                 let request = Message.fetchRequest()
                 request.predicate = NSPredicate(format: "id == %@", messageId)
-                if let message = try? context.fetch(request).first {
-                    context.delete(message)
+                do {
+                    if let message = try context.fetch(request).first {
+                        context.delete(message)
+                    }
+                } catch {
+                    print("Failed to fetch message for deletion \(messageId): \(error.localizedDescription)")
                 }
             }
         }
@@ -85,7 +93,12 @@ final class HistoryProcessor: @unchecked Sendable {
             await context.perform {
                 let request = Message.fetchRequest()
                 request.predicate = NSPredicate(format: "id == %@", messageId)
-                if let message = try? context.fetch(request).first {
+                do {
+                    guard let message = try context.fetch(request).first else {
+                        // Message not found locally - this is normal for messages we haven't synced
+                        return
+                    }
+
                     // Conflict resolution: skip if message has pending local changes
                     if self.hasConflict(message: message, syncStartTime: syncStartTime) {
                         print("Skipping server label addition for message \(messageId) - local changes pending")
@@ -95,14 +108,23 @@ final class HistoryProcessor: @unchecked Sendable {
                     // Fetch labels by ID
                     let labelRequest = Label.fetchRequest()
                     labelRequest.predicate = NSPredicate(format: "id IN %@", labelIds)
-                    if let labels = try? context.fetch(labelRequest) {
+                    do {
+                        let labels = try context.fetch(labelRequest)
                         for label in labels {
                             message.addToLabels(label)
                         }
+                        if labels.count != labelIds.count {
+                            print("Warning: Only found \(labels.count) of \(labelIds.count) labels for message \(messageId)")
+                        }
+                    } catch {
+                        print("Failed to fetch labels for message \(messageId): \(error.localizedDescription)")
                     }
+
                     if hasUnread {
                         message.isUnread = true
                     }
+                } catch {
+                    print("Failed to fetch message for label addition \(messageId): \(error.localizedDescription)")
                 }
             }
         }
@@ -123,7 +145,12 @@ final class HistoryProcessor: @unchecked Sendable {
             await context.perform {
                 let request = Message.fetchRequest()
                 request.predicate = NSPredicate(format: "id == %@", messageId)
-                if let message = try? context.fetch(request).first {
+                do {
+                    guard let message = try context.fetch(request).first else {
+                        // Message not found locally - this is normal for messages we haven't synced
+                        return
+                    }
+
                     // Conflict resolution: skip if message has pending local changes
                     if self.hasConflict(message: message, syncStartTime: syncStartTime) {
                         print("Skipping server label removal for message \(messageId) - local changes pending")
@@ -133,14 +160,20 @@ final class HistoryProcessor: @unchecked Sendable {
                     // Fetch labels by ID
                     let labelRequest = Label.fetchRequest()
                     labelRequest.predicate = NSPredicate(format: "id IN %@", labelIds)
-                    if let labels = try? context.fetch(labelRequest) {
+                    do {
+                        let labels = try context.fetch(labelRequest)
                         for label in labels {
                             message.removeFromLabels(label)
                         }
+                    } catch {
+                        print("Failed to fetch labels for removal on message \(messageId): \(error.localizedDescription)")
                     }
+
                     if removesUnread {
                         message.isUnread = false
                     }
+                } catch {
+                    print("Failed to fetch message for label removal \(messageId): \(error.localizedDescription)")
                 }
             }
         }
@@ -160,14 +193,28 @@ final class HistoryProcessor: @unchecked Sendable {
     func clearLocalModifications(for messageIds: [String]) async {
         let context = coreDataStack.newBackgroundContext()
         await context.perform {
+            var successCount = 0
             for messageId in messageIds {
                 let request = Message.fetchRequest()
                 request.predicate = NSPredicate(format: "id == %@", messageId)
-                if let message = try? context.fetch(request).first {
-                    message.setValue(nil, forKey: "localModifiedAt")
+                do {
+                    if let message = try context.fetch(request).first {
+                        message.setValue(nil, forKey: "localModifiedAt")
+                        successCount += 1
+                    }
+                } catch {
+                    print("Failed to fetch message \(messageId) for clearing local modifications: \(error.localizedDescription)")
                 }
             }
-            try? context.save()
+
+            do {
+                if context.hasChanges {
+                    try context.save()
+                    print("Cleared local modifications for \(successCount) messages")
+                }
+            } catch {
+                print("Failed to save after clearing local modifications: \(error.localizedDescription)")
+            }
         }
     }
 }

@@ -120,38 +120,180 @@ class BackgroundSyncManager {
             var pageToken: String? = nil
             let maxPages = isProcessingTask ? 10 : 3
             var pageCount = 0
-            
+            var latestHistoryId: String? = nil
+
             repeat {
                 let historyResponse = try await apiClient.listHistory(startHistoryId: startHistoryId, pageToken: pageToken)
-                
+
                 if let histories = historyResponse.history {
                     allHistories.append(contentsOf: histories)
+                } else if historyResponse.history == nil && pageCount == 0 {
+                    // No history changes - this is normal, just update the history ID
+                    print("No history changes since last sync")
                 }
-                
+
                 pageToken = historyResponse.nextPageToken
                 pageCount += 1
-                
+
                 if let newHistoryId = historyResponse.historyId {
-                    storeHistoryId(newHistoryId)
+                    latestHistoryId = newHistoryId
                 }
             } while pageToken != nil && pageCount < maxPages
-            
+
             if !allHistories.isEmpty {
                 await processHistoryChanges(histories: allHistories)
             }
-            
+
+            // Only update history ID after successful processing
+            if let latestHistoryId = latestHistoryId {
+                storeHistoryId(latestHistoryId)
+            }
+
             resetRetryCount()
             return true
-            
+
         } catch {
-            if let nsError = error as NSError? {
-                if nsError.code == 404 || (nsError.domain.contains("Gmail") && nsError.code == 404) {
-                    print("History too old, falling back to partial sync")
-                    return await performPartialSync(isProcessingTask: isProcessingTask)
+            return await handleHistorySyncError(error, isProcessingTask: isProcessingTask)
+        }
+    }
+
+    /// Handles errors from history sync with appropriate recovery strategies
+    private func handleHistorySyncError(_ error: Error, isProcessingTask: Bool) async -> Bool {
+        // Check for API errors first
+        if let apiError = error as? APIError {
+            switch apiError {
+            case .historyIdExpired:
+                print("History ID expired (APIError), falling back to partial sync")
+                return await performPartialSync(isProcessingTask: isProcessingTask)
+
+            case .authenticationError:
+                print("Authentication error during background sync, attempting token refresh")
+                // Try to refresh token and retry once
+                do {
+                    _ = try await AuthSession.shared.withFreshToken()
+                    // Token refreshed, retry the sync
+                    if let historyId = getStoredHistoryId() {
+                        return await performHistorySyncRetry(startHistoryId: historyId, isProcessingTask: isProcessingTask)
+                    }
+                } catch {
+                    print("Token refresh failed: \(error)")
                 }
+                handleSyncError()
+                return false
+
+            case .rateLimited:
+                print("Rate limited during background sync, will retry with backoff")
+                handleSyncError() // Uses exponential backoff
+                return false
+
+            case .timeout, .networkError:
+                print("Network issue during background sync: \(apiError)")
+                handleSyncError()
+                return false
+
+            case .serverError(let code):
+                print("Server error \(code) during background sync")
+                if code >= 500 {
+                    // Server errors are retriable
+                    handleSyncError()
+                }
+                return false
+
+            default:
+                print("API error during background sync: \(apiError)")
+                handleSyncError()
+                return false
             }
-            
-            print("History sync error: \(error)")
+        }
+
+        // Check for NSError (including 404 history expired)
+        if let nsError = error as NSError? {
+            if nsError.code == 404 || (nsError.domain.contains("Gmail") && nsError.code == 404) {
+                print("History too old (404), falling back to partial sync")
+                return await performPartialSync(isProcessingTask: isProcessingTask)
+            }
+
+            if nsError.code == 401 {
+                print("401 Unauthorized, attempting token refresh")
+                do {
+                    _ = try await AuthSession.shared.withFreshToken()
+                    if let historyId = getStoredHistoryId() {
+                        return await performHistorySyncRetry(startHistoryId: historyId, isProcessingTask: isProcessingTask)
+                    }
+                } catch {
+                    print("Token refresh failed: \(error)")
+                }
+                handleSyncError()
+                return false
+            }
+
+            if nsError.code == 429 {
+                print("Rate limited (429), will retry with backoff")
+                handleSyncError()
+                return false
+            }
+        }
+
+        // Check for URLError
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .notConnectedToInternet, .networkConnectionLost:
+                print("Network unavailable during background sync")
+                // Don't increment retry count for network unavailable
+                return false
+            case .timedOut:
+                print("Request timed out during background sync")
+                handleSyncError()
+                return false
+            default:
+                print("URL error during background sync: \(urlError)")
+                handleSyncError()
+                return false
+            }
+        }
+
+        print("Unknown error during history sync: \(error)")
+        handleSyncError()
+        return false
+    }
+
+    /// Single retry attempt after token refresh
+    private func performHistorySyncRetry(startHistoryId: String, isProcessingTask: Bool) async -> Bool {
+        do {
+            var allHistories: [HistoryRecord] = []
+            var pageToken: String? = nil
+            let maxPages = isProcessingTask ? 10 : 3
+            var pageCount = 0
+            var latestHistoryId: String? = nil
+
+            repeat {
+                let historyResponse = try await apiClient.listHistory(startHistoryId: startHistoryId, pageToken: pageToken)
+
+                if let histories = historyResponse.history {
+                    allHistories.append(contentsOf: histories)
+                }
+
+                pageToken = historyResponse.nextPageToken
+                pageCount += 1
+
+                if let newHistoryId = historyResponse.historyId {
+                    latestHistoryId = newHistoryId
+                }
+            } while pageToken != nil && pageCount < maxPages
+
+            if !allHistories.isEmpty {
+                await processHistoryChanges(histories: allHistories)
+            }
+
+            if let latestHistoryId = latestHistoryId {
+                storeHistoryId(latestHistoryId)
+            }
+
+            resetRetryCount()
+            return true
+
+        } catch {
+            print("History sync retry failed: \(error)")
             handleSyncError()
             return false
         }
@@ -236,25 +378,51 @@ class BackgroundSyncManager {
         let labelCache = await syncEngine.prefetchLabelsForBackground(in: context)
 
         let batchSize = 10
+        var successCount = 0
+        var failedCount = 0
 
         for batch in messageIds.chunked(into: batchSize) {
-            await withTaskGroup(of: GmailMessage?.self) { group in
+            await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
                 for messageId in batch {
                     group.addTask { [weak self] in
-                        try? await self?.apiClient.getMessage(id: messageId)
+                        guard let self = self else {
+                            return (messageId, .failure(NSError(domain: "BackgroundSync", code: -1, userInfo: [NSLocalizedDescriptionKey: "Self deallocated"])))
+                        }
+                        do {
+                            let message = try await self.apiClient.getMessage(id: messageId)
+                            return (messageId, .success(message))
+                        } catch {
+                            return (messageId, .failure(error))
+                        }
                     }
                 }
 
-                for await message in group {
-                    if let message = message {
+                for await (messageId, result) in group {
+                    switch result {
+                    case .success(let message):
                         await syncEngine.saveMessage(message, labelCache: labelCache, in: context)
+                        successCount += 1
+                    case .failure(let error):
+                        failedCount += 1
+                        print("Failed to fetch message \(messageId) in background: \(error.localizedDescription)")
                     }
                 }
             }
         }
 
+        if failedCount > 0 {
+            print("Background sync: fetched \(successCount) messages, \(failedCount) failed")
+        }
+
         await syncEngine.updateConversationRollups(in: context)
-        coreDataStack.saveIfNeeded(context: context)
+
+        do {
+            if context.hasChanges {
+                try context.save()
+            }
+        } catch {
+            print("Failed to save background sync context: \(error.localizedDescription)")
+        }
     }
     
     private func deleteMessages(messageIds: [String], in context: NSManagedObjectContext) async {

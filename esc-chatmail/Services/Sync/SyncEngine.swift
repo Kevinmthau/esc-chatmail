@@ -206,7 +206,11 @@ final class SyncEngine: ObservableObject {
             let epochSeconds = Int(installationTimestamp.timeIntervalSince1970)
             let gmailQuery = "after:\(epochSeconds) -label:spam -label:drafts"
 
-            print("Syncing messages after installation: \(installationTimestamp)")
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateStyle = .medium
+            dateFormatter.timeStyle = .medium
+            print("🔄 FULL SYNC - Fetching messages after: \(dateFormatter.string(from: installationTimestamp))")
+            print("🔍 Gmail query: \(gmailQuery)")
 
             // Stream process messages in batches
             var pageToken: String? = nil
@@ -221,6 +225,8 @@ final class SyncEngine: ObservableObject {
                     query: gmailQuery,
                     pageToken: pageToken
                 )
+
+                print("📋 Full sync page: \(messageIds.count) message IDs returned")
 
                 // Process this page in batches
                 // Note: labelCache contains NSManagedObjects which aren't Sendable, but we ensure
@@ -346,8 +352,8 @@ final class SyncEngine: ObservableObject {
                     pageToken: pageToken
                 )
 
-                if let history = history {
-                    print("Received \(history.count) history records")
+                if let history = history, !history.isEmpty {
+                    print("📬 Received \(history.count) history records")
 
                     // Extract new message IDs
                     let newIds = historyProcessor.extractNewMessageIds(from: history)
@@ -361,9 +367,12 @@ final class SyncEngine: ObservableObject {
                             syncStartTime: syncStartTime
                         )
                     }
+                } else {
+                    print("📭 No history changes from Gmail API (historyId: \(historyId))")
                 }
 
                 if let newHistoryId = newHistoryId {
+                    print("📝 New history ID from API: \(newHistoryId)")
                     latestHistoryId = newHistoryId
                 }
 
@@ -373,6 +382,7 @@ final class SyncEngine: ObservableObject {
             try Task.checkCancellation()
 
             // Fetch new messages
+            var fetchFailed = false
             if !allNewMessageIds.isEmpty {
                 uiState.update(progress: 0.3, status: "Fetching \(allNewMessageIds.count) new messages...")
 
@@ -381,11 +391,12 @@ final class SyncEngine: ObservableObject {
                 nonisolated(unsafe) let unsafeLabelCache = labelCache
 
                 var processedCount = 0
+                var totalFailedIds: [String] = []
 
                 for batch in allNewMessageIds.chunked(into: SyncConfig.messageBatchSize) {
                     try Task.checkCancellation()
 
-                    _ = await messageFetcher.fetchBatch(batch) { [weak self] message in
+                    let failedIds = await messageFetcher.fetchBatch(batch) { [weak self] message in
                         guard let self = self else { return }
                         await self.messagePersister.saveMessage(
                             message,
@@ -395,6 +406,7 @@ final class SyncEngine: ObservableObject {
                         )
                     }
 
+                    totalFailedIds.append(contentsOf: failedIds)
                     processedCount += batch.count
                     let progress = 0.3 + (Double(processedCount) / Double(allNewMessageIds.count)) * 0.5
 
@@ -404,6 +416,36 @@ final class SyncEngine: ObservableObject {
                             status: "Processing messages... \(processedCount)/\(allNewMessageIds.count)"
                         )
                     }
+                }
+
+                // If any messages failed to fetch, don't update history ID to avoid losing them
+                if !totalFailedIds.isEmpty {
+                    print("Warning: \(totalFailedIds.count) messages failed to fetch, will retry on next sync")
+                    fetchFailed = true
+                }
+            }
+
+            // Reconciliation: Check for any missed messages from the last hour
+            uiState.update(progress: 0.8, status: "Checking for missed messages...")
+            try Task.checkCancellation()
+
+            let missedIds = await checkForMissedMessages(in: context)
+            if !missedIds.isEmpty {
+                print("🔍 Found \(missedIds.count) potentially missed messages, fetching...")
+                nonisolated(unsafe) let unsafeLabelCache = labelCache
+
+                let failedMissedIds = await messageFetcher.fetchBatch(missedIds) { [weak self] message in
+                    guard let self = self else { return }
+                    await self.messagePersister.saveMessage(
+                        message,
+                        labelCache: unsafeLabelCache,
+                        myAliases: self.myAliases,
+                        in: context
+                    )
+                }
+
+                if !failedMissedIds.isEmpty {
+                    print("⚠️ Failed to fetch \(failedMissedIds.count) missed messages")
                 }
             }
 
@@ -423,7 +465,12 @@ final class SyncEngine: ObservableObject {
 
             uiState.update(progress: 0.95, status: "Saving changes...")
 
-            await messagePersister.updateAccountHistoryId(latestHistoryId)
+            // Only update history ID after successful message fetching to avoid losing messages
+            if !fetchFailed {
+                await messagePersister.updateAccountHistoryId(latestHistoryId)
+            } else {
+                print("Skipping history ID update due to fetch failures - will retry failed messages on next sync")
+            }
 
             do {
                 try await coreDataStack.saveAsync(context: context)
@@ -432,7 +479,7 @@ final class SyncEngine: ObservableObject {
                 throw error
             }
 
-            uiState.update(isSyncing: false, progress: 1.0, status: "Sync complete")
+            uiState.update(isSyncing: false, progress: 1.0, status: fetchFailed ? "Sync completed with warnings" : "Sync complete")
 
             NotificationCenter.default.post(name: .syncCompleted, object: nil)
 
@@ -445,11 +492,62 @@ final class SyncEngine: ObservableObject {
             } else {
                 let errorMessage = formatSyncError(error)
                 uiState.update(isSyncing: false, status: "Sync failed: \(errorMessage)")
-
-                if !(error is URLError) && !(error is APIError) {
-                    throw error
-                }
+                // Re-throw all errors so callers can handle them appropriately
+                throw error
             }
+        }
+    }
+
+    // MARK: - Reconciliation
+
+    /// Checks for messages that might have been missed by the history sync
+    /// Returns message IDs that exist in Gmail but not locally
+    private func checkForMissedMessages(in context: NSManagedObjectContext) async -> [String] {
+        do {
+            // Query Gmail for recent messages (last hour, or since installation with buffer)
+            let installationTimestamp = KeychainService.shared.getOrCreateInstallationTimestamp()
+            let gracePeriod: TimeInterval = 5 * 60  // 5 minutes buffer
+            let effectiveTimestamp = installationTimestamp.addingTimeInterval(-gracePeriod)
+
+            // Use the later of: 1 hour ago, or installation timestamp
+            let oneHourAgo = Date().addingTimeInterval(-3600)
+            let queryTimestamp = max(oneHourAgo, effectiveTimestamp)
+            let epochSeconds = Int(queryTimestamp.timeIntervalSince1970)
+
+            let query = "after:\(epochSeconds) -label:spam -label:drafts"
+
+            let (recentMessageIds, _) = try await messageFetcher.listMessages(
+                query: query,
+                maxResults: 50  // Limit to avoid excessive API calls
+            )
+
+            guard !recentMessageIds.isEmpty else {
+                return []
+            }
+
+            // Check which of these we don't have locally
+            let missingIds = await context.perform {
+                var missing: [String] = []
+                for messageId in recentMessageIds {
+                    let request = Message.fetchRequest()
+                    request.predicate = NSPredicate(format: "id == %@", messageId)
+                    request.fetchLimit = 1
+
+                    if let count = try? context.count(for: request), count == 0 {
+                        missing.append(messageId)
+                    }
+                }
+                return missing
+            }
+
+            if !missingIds.isEmpty {
+                print("📭 Reconciliation found \(missingIds.count) messages in Gmail but not locally")
+            }
+
+            return missingIds
+        } catch {
+            print("⚠️ Reconciliation check failed: \(error.localizedDescription)")
+            return []
         }
     }
 

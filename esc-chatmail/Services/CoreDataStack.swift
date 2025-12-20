@@ -386,18 +386,78 @@ final class CoreDataStack: @unchecked Sendable {
         }
     }
 
-    // Convenience method for non-critical saves that logs errors but doesn't throw
-    // Uses async perform to avoid blocking the main thread
-    func saveIfNeeded(context: NSManagedObjectContext) {
-        guard context.hasChanges else { return }
+    /// Convenience method for saves that logs errors but doesn't throw
+    /// Uses async perform to avoid blocking the main thread
+    /// - Parameters:
+    ///   - context: The managed object context to save
+    ///   - caller: Optional identifier for debugging which code path called this
+    /// - Returns: true if save succeeded or no changes were needed, false if save failed
+    @discardableResult
+    func saveIfNeeded(context: NSManagedObjectContext, caller: String = #function) -> Bool {
+        guard context.hasChanges else { return true }
 
-        context.perform {
-            guard context.hasChanges else { return }
+        var saveSucceeded = false
+
+        context.performAndWait {
+            guard context.hasChanges else {
+                saveSucceeded = true
+                return
+            }
             do {
                 try context.save()
-            } catch {
-                print("Core Data save error (non-critical): \(error)")
-                // Log error but don't crash - suitable for UI updates and non-critical operations
+                saveSucceeded = true
+            } catch let error as NSError {
+                print("Core Data save error in \(caller): \(error.localizedDescription)")
+
+                // Log additional details for debugging
+                if let detailedErrors = error.userInfo[NSDetailedErrorsKey] as? [NSError] {
+                    for detailedError in detailedErrors {
+                        print("  - Detail: \(detailedError.localizedDescription)")
+                        if let validationObject = detailedError.userInfo[NSValidationObjectErrorKey] as? NSManagedObject {
+                            print("    Object: \(validationObject.entity.name ?? "unknown")")
+                        }
+                    }
+                }
+
+                // Attempt recovery for merge conflicts
+                if error.code == NSManagedObjectMergeError || error.code == NSPersistentStoreSaveConflictsError {
+                    context.rollback()
+                    print("Rolled back context due to merge conflict")
+                }
+
+                saveSucceeded = false
+            }
+        }
+
+        return saveSucceeded
+    }
+
+    /// Async version of saveIfNeeded that returns success status via completion
+    func saveIfNeededAsync(context: NSManagedObjectContext, caller: String = #function, completion: ((Bool) -> Void)? = nil) {
+        guard context.hasChanges else {
+            completion?(true)
+            return
+        }
+
+        context.perform {
+            guard context.hasChanges else {
+                completion?(true)
+                return
+            }
+            do {
+                try context.save()
+                completion?(true)
+            } catch let error as NSError {
+                print("Core Data save error in \(caller): \(error.localizedDescription)")
+
+                // Log additional details for debugging
+                if let detailedErrors = error.userInfo[NSDetailedErrorsKey] as? [NSError] {
+                    for detailedError in detailedErrors {
+                        print("  - Detail: \(detailedError.localizedDescription)")
+                    }
+                }
+
+                completion?(false)
             }
         }
     }

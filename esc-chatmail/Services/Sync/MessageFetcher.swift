@@ -7,8 +7,49 @@ import Foundation
 final class MessageFetcher {
     private let apiClient: GmailAPIClient
 
+    /// Maximum number of retry attempts for failed messages
+    private let maxRetryAttempts = 3
+
+    /// Base delay in nanoseconds for exponential backoff (500ms)
+    private let baseRetryDelay: UInt64 = 500_000_000
+
     init() {
         self.apiClient = GmailAPIClient.shared
+    }
+
+    /// Checks if an error is retriable (transient network/server issues)
+    private func isRetriableError(_ error: Error) -> Bool {
+        // URLError codes that are retriable
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut, .networkConnectionLost, .notConnectedToInternet,
+                 .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
+                return true
+            default:
+                return false
+            }
+        }
+
+        // API errors that are retriable
+        if let apiError = error as? APIError {
+            switch apiError {
+            case .rateLimited, .timeout, .serverError:
+                return true
+            case .authenticationError, .historyIdExpired, .notFound:
+                return false
+            default:
+                return true // Default to retriable for unknown API errors
+            }
+        }
+
+        // NSError timeout codes
+        if let nsError = error as NSError? {
+            if nsError.domain == NSURLErrorDomain {
+                return [-1001, -1009, -1004, -1005].contains(nsError.code) // timeout, not connected, can't connect, connection lost
+            }
+        }
+
+        return true // Default to retriable for unknown errors
     }
 
     /// Fetches a batch of messages by ID with automatic retry on failure
@@ -25,7 +66,8 @@ final class MessageFetcher {
             return ids
         }
 
-        var failedIds: [String] = []
+        var currentFailedIds: [String] = []
+        var permanentlyFailed: [String] = []
 
         // First attempt with timeout per message
         await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
@@ -37,47 +79,6 @@ final class MessageFetcher {
                         }
                         return (id, .success(message))
                     } catch {
-                        print("Failed to fetch message \(id): \(error.localizedDescription)")
-                        return (id, .failure(error))
-                    }
-                }
-            }
-
-            for await (id, result) in group {
-                if Task.isCancelled { break }
-
-                switch result {
-                case .success(let message):
-                    await onSuccess(message)
-                case .failure:
-                    failedIds.append(id)
-                }
-            }
-        }
-
-        // Check for cancellation before retry
-        guard !Task.isCancelled, !failedIds.isEmpty else {
-            return failedIds
-        }
-
-        // Retry failed messages once with backoff
-        print("Retrying \(failedIds.count) failed messages...")
-        try? await Task.sleep(nanoseconds: SyncConfig.retryDelaySeconds)
-
-        guard !Task.isCancelled else { return failedIds }
-
-        var permanentlyFailed: [String] = []
-
-        await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
-            for id in failedIds {
-                group.addTask { [apiClient] in
-                    do {
-                        let message = try await withTimeout(seconds: SyncConfig.messageFetchTimeout) {
-                            try await apiClient.getMessage(id: id)
-                        }
-                        return (id, .success(message))
-                    } catch {
-                        print("Retry failed for message \(id): \(error.localizedDescription)")
                         return (id, .failure(error))
                     }
                 }
@@ -90,10 +91,78 @@ final class MessageFetcher {
                 case .success(let message):
                     await onSuccess(message)
                 case .failure(let error):
-                    print("Permanently failed to fetch message \(id): \(error.localizedDescription)")
-                    permanentlyFailed.append(id)
+                    if self.isRetriableError(error) {
+                        currentFailedIds.append(id)
+                    } else {
+                        print("Non-retriable error for message \(id): \(error.localizedDescription)")
+                        permanentlyFailed.append(id)
+                    }
                 }
             }
+        }
+
+        // Retry loop with exponential backoff
+        for attempt in 1...maxRetryAttempts {
+            guard !Task.isCancelled, !currentFailedIds.isEmpty else {
+                break
+            }
+
+            // Exponential backoff: 500ms, 1s, 2s
+            let delay = baseRetryDelay * UInt64(1 << (attempt - 1))
+            print("Retry attempt \(attempt)/\(maxRetryAttempts) for \(currentFailedIds.count) failed messages after \(delay / 1_000_000)ms...")
+
+            do {
+                try await Task.sleep(nanoseconds: delay)
+            } catch {
+                // Task was cancelled during sleep
+                break
+            }
+
+            guard !Task.isCancelled else { break }
+
+            var stillFailed: [String] = []
+
+            await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
+                for id in currentFailedIds {
+                    group.addTask { [apiClient] in
+                        do {
+                            let message = try await withTimeout(seconds: SyncConfig.messageFetchTimeout) {
+                                try await apiClient.getMessage(id: id)
+                            }
+                            return (id, .success(message))
+                        } catch {
+                            return (id, .failure(error))
+                        }
+                    }
+                }
+
+                for await (id, result) in group {
+                    if Task.isCancelled { break }
+
+                    switch result {
+                    case .success(let message):
+                        await onSuccess(message)
+                        print("Successfully fetched message \(id) on retry attempt \(attempt)")
+                    case .failure(let error):
+                        if attempt == maxRetryAttempts || !self.isRetriableError(error) {
+                            // Final attempt or non-retriable error
+                            print("Permanently failed to fetch message \(id) after \(attempt) attempts: \(error.localizedDescription)")
+                            permanentlyFailed.append(id)
+                        } else {
+                            stillFailed.append(id)
+                        }
+                    }
+                }
+            }
+
+            currentFailedIds = stillFailed
+        }
+
+        // Any remaining failed IDs should be added to permanently failed
+        permanentlyFailed.append(contentsOf: currentFailedIds)
+
+        if !permanentlyFailed.isEmpty {
+            print("Total permanently failed messages: \(permanentlyFailed.count)")
         }
 
         return permanentlyFailed

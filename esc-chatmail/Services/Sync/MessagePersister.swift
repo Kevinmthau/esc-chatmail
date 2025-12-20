@@ -59,19 +59,30 @@ final class MessagePersister: @unchecked Sendable {
             return
         }
 
+        // Debug: Log incoming message details
+        let fromHeader = gmailMessage.payload?.headers?.first(where: { $0.name.lowercased() == "from" })?.value ?? "unknown"
+        let subjectHeader = gmailMessage.payload?.headers?.first(where: { $0.name.lowercased() == "subject" })?.value ?? "no subject"
+        print("📧 Processing: from=\(fromHeader.prefix(40)) subj=\(subjectHeader.prefix(40))")
+
         // Process the Gmail message
         guard let processedMessage = messageProcessor.processGmailMessage(
             gmailMessage,
             myAliases: myAliases,
             in: context
         ) else {
+            print("⚠️ Failed to process message: \(gmailMessage.id)")
             return
         }
 
-        // Check if message is from before installation
+        // Check if message is from before installation (with 5-minute grace period)
         let installationTimestamp = KeychainService.shared.getOrCreateInstallationTimestamp()
-        if processedMessage.internalDate < installationTimestamp {
-            print("Skipping message from before installation: \(processedMessage.id)")
+        let gracePeriod: TimeInterval = 5 * 60  // 5 minutes buffer for emails arriving just before install
+        let effectiveTimestamp = installationTimestamp.addingTimeInterval(-gracePeriod)
+        if processedMessage.internalDate < effectiveTimestamp {
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateStyle = .short
+            dateFormatter.timeStyle = .short
+            print("⏭️ Skipping pre-install message: \(subjectHeader.prefix(30)) (msg: \(dateFormatter.string(from: processedMessage.internalDate)), cutoff: \(dateFormatter.string(from: effectiveTimestamp)))")
             return
         }
 
@@ -293,7 +304,17 @@ final class MessagePersister: @unchecked Sendable {
     private func findLabel(id: String, in context: NSManagedObjectContext) async -> Label? {
         let request = Label.fetchRequest()
         request.predicate = NSPredicate(format: "id == %@", id)
-        return try? context.fetch(request).first
+        do {
+            let label = try context.fetch(request).first
+            if label == nil {
+                // Log missing labels for debugging - this can happen if labels haven't been synced yet
+                print("Warning: Label '\(id)' not found in local cache")
+            }
+            return label
+        } catch {
+            print("Error fetching label '\(id)': \(error.localizedDescription)")
+            return nil
+        }
     }
 
     // MARK: - Label Operations
@@ -375,7 +396,13 @@ final class MessagePersister: @unchecked Sendable {
     }
 
     /// Updates account's history ID
-    func updateAccountHistoryId(_ historyId: String) async {
+    /// - Parameter historyId: The new history ID to save
+    /// - Returns: true if the save succeeded, false if it failed after retries
+    @discardableResult
+    func updateAccountHistoryId(_ historyId: String) async -> Bool {
+        var lastError: Error?
+
+        // First attempt
         do {
             try await coreDataStack.performBackgroundTask { [weak self] context in
                 guard let self = self else { return }
@@ -384,13 +411,24 @@ final class MessagePersister: @unchecked Sendable {
                 if let account = try context.fetch(request).first {
                     account.historyId = historyId
                     try self.coreDataStack.save(context: context)
+                    print("Successfully updated history ID to: \(historyId)")
+                } else {
+                    print("Warning: No account found to update history ID")
                 }
             }
+            return true
         } catch {
-            print("Failed to save history ID: \(error)")
-            // Attempt retry once
+            lastError = error
+            print("Failed to save history ID (attempt 1): \(error.localizedDescription)")
+        }
+
+        // Retry with backoff
+        for attempt in 2...3 {
             do {
-                try await Task.sleep(nanoseconds: 500_000_000)
+                // Exponential backoff: 500ms, 1s
+                let delay = UInt64(250_000_000 * (1 << (attempt - 1)))
+                try await Task.sleep(nanoseconds: delay)
+
                 try await coreDataStack.performBackgroundTask { [weak self] context in
                     guard let self = self else { return }
                     let request = Account.fetchRequest()
@@ -398,13 +436,18 @@ final class MessagePersister: @unchecked Sendable {
                     if let account = try context.fetch(request).first {
                         account.historyId = historyId
                         try self.coreDataStack.save(context: context)
-                        print("Successfully saved history ID on retry")
+                        print("Successfully saved history ID on retry attempt \(attempt)")
                     }
                 }
+                return true
             } catch {
-                print("Failed to save history ID after retry: \(error)")
+                lastError = error
+                print("Failed to save history ID (attempt \(attempt)): \(error.localizedDescription)")
             }
         }
+
+        print("Failed to save history ID after all retries. Last error: \(lastError?.localizedDescription ?? "unknown")")
+        return false
     }
 }
 

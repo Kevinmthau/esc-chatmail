@@ -195,24 +195,45 @@ actor ParallelMessageFetcher {
         var lastError: Error?
 
         for attempt in 0..<retryAttempts {
+            // Add timeout using TaskGroup for proper cleanup
             do {
-                // Add timeout
-                let task = Task { @MainActor in
-                    try await GmailAPIClient.shared.getMessage(id: messageId)
-                }
+                let message = try await withThrowingTaskGroup(of: GmailMessage.self) { group in
+                    // Main fetch task
+                    group.addTask { @MainActor in
+                        try await GmailAPIClient.shared.getMessage(id: messageId)
+                    }
 
-                let timeoutTask = Task {
-                    try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                    task.cancel()
-                    throw NSError(domain: "ParallelFetcher", code: -1, userInfo: [NSLocalizedDescriptionKey: "Timeout"])
-                }
+                    // Timeout task
+                    group.addTask {
+                        try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                        throw NSError(domain: "ParallelFetcher", code: -1, userInfo: [NSLocalizedDescriptionKey: "Timeout fetching message \(messageId)"])
+                    }
 
-                let message = try await task.value
-                timeoutTask.cancel()
+                    // Wait for first result - either success or timeout
+                    guard let result = try await group.next() else {
+                        throw NSError(domain: "ParallelFetcher", code: -3, userInfo: [NSLocalizedDescriptionKey: "No result from task group"])
+                    }
+
+                    // Cancel remaining tasks (the timeout if fetch succeeded, or fetch if timeout occurred)
+                    group.cancelAll()
+
+                    return result
+                }
                 return message
 
             } catch {
                 lastError = error
+
+                // Check if this is a non-retriable error
+                if let apiError = error as? APIError {
+                    switch apiError {
+                    case .notFound, .authenticationError:
+                        throw error // Don't retry these
+                    default:
+                        break
+                    }
+                }
+
                 if attempt < retryAttempts - 1 {
                     // Exponential backoff
                     let delay = Double(attempt + 1) * 0.5
@@ -221,7 +242,7 @@ actor ParallelMessageFetcher {
             }
         }
 
-        throw lastError ?? NSError(domain: "ParallelFetcher", code: -2)
+        throw lastError ?? NSError(domain: "ParallelFetcher", code: -2, userInfo: [NSLocalizedDescriptionKey: "Failed after \(retryAttempts) attempts"])
     }
 
     // MARK: - Metrics

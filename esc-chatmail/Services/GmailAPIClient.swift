@@ -65,12 +65,50 @@ class GmailAPIClient {
     private init() {
         // Configure URLSession with timeout and retry settings
         let configuration = URLSessionConfiguration.default
-        configuration.timeoutIntervalForRequest = NetworkConfig.requestTimeout
+        configuration.timeoutIntervalForRequest = max(NetworkConfig.requestTimeout, 30.0)
         configuration.timeoutIntervalForResource = NetworkConfig.resourceTimeout
         configuration.waitsForConnectivity = true // Wait for network connectivity
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
 
         self.session = URLSession(configuration: configuration)
+    }
+
+    /// Checks if an error is a connection-level error that should be retried
+    private nonisolated func isConnectionError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+
+        // POSIX errors (connection reset, broken pipe, etc.)
+        if nsError.domain == NSPOSIXErrorDomain {
+            // ECONNRESET (54), EPIPE (32), ENOTCONN (57), ENETDOWN (50), ENETRESET (52)
+            return [32, 50, 52, 54, 57].contains(nsError.code)
+        }
+
+        // NSURLError connection-related codes
+        if nsError.domain == NSURLErrorDomain {
+            switch nsError.code {
+            case NSURLErrorNetworkConnectionLost,      // -1005
+                 NSURLErrorNotConnectedToInternet,     // -1009
+                 NSURLErrorCannotConnectToHost,        // -1004
+                 NSURLErrorTimedOut,                   // -1001
+                 NSURLErrorSecureConnectionFailed,     // -1200
+                 NSURLErrorCannotFindHost,             // -1003
+                 NSURLErrorDNSLookupFailed,            // -1006
+                 -1022,  // NSURLErrorAppTransportSecurityRequiresSecureConnection
+                 -1017,  // NSURLErrorCannotParseResponse
+                 -1011,  // NSURLErrorBadServerResponse
+                 -997:   // Lost connection before completion
+                return true
+            default:
+                return false
+            }
+        }
+
+        // Check for QUIC-specific errors in the underlying error
+        if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            return isConnectionError(underlyingError)
+        }
+
+        return false
     }
 
     private nonisolated func authenticatedRequest(url: URL) async throws -> URLRequest {
@@ -80,6 +118,13 @@ class GmailAPIClient {
         }
 
         var request = URLRequest(url: url)
+
+        // Disable HTTP/3 (QUIC) to avoid sec_framer_open_aesgcm and quic_conn errors
+        // HTTP/2 is more stable and still provides multiplexing benefits
+        if #available(iOS 14.5, *) {
+            request.assumesHTTP3Capable = false
+        }
+
         // Use TokenManager with automatic retry on auth failure
         let token = try await tokenManager.getCurrentToken()
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -120,7 +165,7 @@ class GmailAPIClient {
         for attempt in 0..<maxRetries {
             do {
                 let (data, response) = try await session.data(for: request)
-                
+
                 // Check for HTTP errors
                 if let httpResponse = response as? HTTPURLResponse {
                     if httpResponse.statusCode == 429 {
@@ -138,6 +183,8 @@ class GmailAPIClient {
                             retryDelay = min(retryDelay * 2, NetworkConfig.maxRetryDelay)
                             continue
                         }
+                    } else if httpResponse.statusCode == 401 {
+                        throw APIError.authenticationError
                     }
 
                     // Handle empty response for void-like operations (e.g., batchModify returns 204 No Content)
@@ -151,14 +198,32 @@ class GmailAPIClient {
                 return try JSONDecoder().decode(T.self, from: data)
             } catch {
                 lastError = error
-                print("Request failed (attempt \(attempt + 1)): \(error.localizedDescription)")
-                
-                // Check if it's a network error
+                let errorDesc = error.localizedDescription
+                print("Request failed (attempt \(attempt + 1)/\(maxRetries)): \(errorDesc)")
+
+                // Don't retry auth errors
+                if let apiError = error as? APIError, case .authenticationError = apiError {
+                    throw error
+                }
+
+                // Check for connection-level errors (includes QUIC/HTTP3 issues)
+                if isConnectionError(error) {
+                    if attempt < maxRetries - 1 {
+                        print("Connection error detected, retrying in \(retryDelay) seconds...")
+                        try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
+                        retryDelay = min(retryDelay * 2, NetworkConfig.maxRetryDelay)
+                        continue
+                    }
+                }
+
+                // Check if it's a URL error
                 if let urlError = error as? URLError {
                     switch urlError.code {
-                    case .notConnectedToInternet, .networkConnectionLost, .timedOut, .cannotFindHost, .dnsLookupFailed:
+                    case .notConnectedToInternet, .networkConnectionLost, .timedOut,
+                         .cannotFindHost, .dnsLookupFailed, .cannotConnectToHost,
+                         .secureConnectionFailed:
                         if attempt < maxRetries - 1 {
-                            print("Network error, retrying in \(retryDelay) seconds...")
+                            print("Network error (\(urlError.code.rawValue)), retrying in \(retryDelay) seconds...")
                             try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
                             retryDelay = min(retryDelay * 2, NetworkConfig.maxRetryDelay)
                             continue
@@ -168,16 +233,27 @@ class GmailAPIClient {
                         print("Unsupported URL error - not retrying")
                         throw APIError.invalidURL(request.url?.absoluteString ?? "unknown")
                     default:
-                        throw error
+                        // For other URL errors, check if it's connection-related
+                        if attempt < maxRetries - 1 {
+                            print("URL error (\(urlError.code.rawValue)), retrying...")
+                            try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
+                            retryDelay = min(retryDelay * 2, NetworkConfig.maxRetryDelay)
+                            continue
+                        }
                     }
                 }
-                
+
+                // For decoding errors, don't retry
+                if error is DecodingError {
+                    throw APIError.decodingError(error)
+                }
+
                 if attempt == maxRetries - 1 {
                     throw lastError ?? error
                 }
             }
         }
-        
+
         throw lastError ?? URLError(.unknown)
     }
     
