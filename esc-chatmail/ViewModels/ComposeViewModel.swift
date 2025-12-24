@@ -242,64 +242,72 @@ final class ComposeViewModel: ObservableObject {
         )
         let optimisticMessageID = optimisticMessage.id
 
-        // Prepare attachment infos
+        // Mark attachments as uploaded immediately so they display non-dimmed
+        sendService.markAttachmentsAsUploaded(attachments)
+
+        // Prepare attachment infos for background send
         let attachmentInfos = attachments.map { sendService.attachmentToInfo($0) }
 
-        do {
-            let result: GmailSendService.SendResult
+        // Capture mode data before dismissing
+        let capturedMode = mode
 
-            switch mode {
-            case .reply(let conversation, let replyingTo):
-                let replyData = buildReplyData(
-                    conversation: conversation,
-                    replyingTo: replyingTo,
-                    body: messageBody
-                )
-                result = try await sendService.sendReply(
-                    to: replyData.recipients,
-                    body: replyData.body,
-                    subject: replyData.subject ?? "",
-                    threadId: replyData.threadId ?? "",
-                    inReplyTo: replyData.inReplyTo,
-                    references: replyData.references,
-                    originalMessage: replyData.originalMessage,
-                    attachmentInfos: attachmentInfos
-                )
-            default:
-                result = try await sendService.sendNew(
-                    to: recipientEmails,
-                    body: messageBody,
-                    subject: messageSubject,
-                    attachmentInfos: attachmentInfos
-                )
-            }
+        // Send in background - don't wait for completion
+        Task.detached { [sendService] in
+            do {
+                let result: GmailSendService.SendResult
 
-            // Update optimistic message with real IDs
-            if let message = sendService.fetchMessage(byID: optimisticMessageID) {
-                sendService.updateOptimisticMessage(message, with: result)
-            }
+                switch capturedMode {
+                case .reply(let conversation, let replyingTo):
+                    let replyData = await MainActor.run {
+                        self.buildReplyData(
+                            conversation: conversation,
+                            replyingTo: replyingTo,
+                            body: messageBody
+                        )
+                    }
+                    result = try await sendService.sendReply(
+                        to: replyData.recipients,
+                        body: replyData.body,
+                        subject: replyData.subject ?? "",
+                        threadId: replyData.threadId ?? "",
+                        inReplyTo: replyData.inReplyTo,
+                        references: replyData.references,
+                        originalMessage: replyData.originalMessage,
+                        attachmentInfos: attachmentInfos
+                    )
+                default:
+                    result = try await sendService.sendNew(
+                        to: recipientEmails,
+                        body: messageBody,
+                        subject: messageSubject,
+                        attachmentInfos: attachmentInfos
+                    )
+                }
 
-            // Mark attachments as uploaded
-            sendService.markAttachmentsAsUploaded(attachments)
+                // Update optimistic message with real IDs
+                await MainActor.run {
+                    if let message = sendService.fetchMessage(byID: optimisticMessageID) {
+                        sendService.updateOptimisticMessage(message, with: result)
+                    }
+                }
 
-            // Trigger sync to fetch the sent message from Gmail
-            Task {
+                // Trigger sync to fetch the sent message from Gmail
                 try? await SyncEngine.shared.performIncrementalSync()
-            }
 
-            isSending = false
-            return true
-
-        } catch {
-            // Delete optimistic message on failure
-            if let message = sendService.fetchMessage(byID: optimisticMessageID) {
-                sendService.deleteOptimisticMessage(message)
+            } catch {
+                // Mark attachments as failed so they show error indicator
+                await MainActor.run {
+                    if let message = sendService.fetchMessage(byID: optimisticMessageID),
+                       let attachmentsSet = message.value(forKey: "attachments") as? Set<Attachment> {
+                        sendService.markAttachmentsAsFailed(Array(attachmentsSet))
+                    }
+                }
+                print("Background send failed: \(error.localizedDescription)")
             }
-            self.error = error
-            self.showError = true
-            isSending = false
-            return false
         }
+
+        isSending = false
+        return true
     }
 
     // MARK: - Reply Data Builder

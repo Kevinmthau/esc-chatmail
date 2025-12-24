@@ -224,7 +224,8 @@ final class ConversationListViewModel: ObservableObject {
             sourceCount: conversations.count,
             searchText: searchQuery,
             filter: currentFilter,
-            results: result
+            results: result,
+            firstObjectID: conversations.first?.objectID
         )
 
         return result
@@ -333,11 +334,13 @@ private struct FilteredConversationsCache {
     let searchText: String
     let filter: ConversationFilter
     let results: [Conversation]
+    let firstObjectID: NSManagedObjectID?
 
     /// Checks if cache is still valid for the given parameters
     func isValid(for conversations: [Conversation], searchText: String, filter: ConversationFilter) -> Bool {
         return self.sourceCount == conversations.count &&
                self.searchText == searchText &&
-               self.filter == filter
+               self.filter == filter &&
+               self.firstObjectID == conversations.first?.objectID
     }
 }

@@ -139,6 +139,18 @@ final class GmailSendService: ObservableObject {
             print("Failed to save attachment state: \(error)")
         }
     }
+
+    // Helper function to mark attachments as failed
+    func markAttachmentsAsFailed(_ attachments: [Attachment]) {
+        for attachment in attachments {
+            attachment.state = .failed
+        }
+        do {
+            try CoreDataStack.shared.save(context: viewContext)
+        } catch {
+            print("Failed to save attachment state: \(error)")
+        }
+    }
     
     private nonisolated func sendMessage(mimeData: Data, threadId: String?) async throws -> SendResult {
         #if DEBUG

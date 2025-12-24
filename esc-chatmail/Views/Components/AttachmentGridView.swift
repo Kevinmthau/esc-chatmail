@@ -56,8 +56,8 @@ struct SingleAttachmentView: View {
                     attachment: attachment,
                     downloader: downloader,
                     onTap: {
-                        // Only allow tap if downloaded
-                        if (attachment.value(forKey: "stateRaw") as? String) == "downloaded" {
+                        // Only allow tap if downloaded or uploaded
+                        if ["downloaded", "uploaded"].contains(attachment.value(forKey: "stateRaw") as? String) {
                             onTap()
                         }
                     }
@@ -67,8 +67,8 @@ struct SingleAttachmentView: View {
                     attachment: attachment,
                     downloader: downloader,
                     onTap: {
-                        // Only allow tap if downloaded
-                        if (attachment.value(forKey: "stateRaw") as? String) == "downloaded" {
+                        // Only allow tap if downloaded or uploaded
+                        if ["downloaded", "uploaded"].contains(attachment.value(forKey: "stateRaw") as? String) {
                             onTap()
                         }
                     }
@@ -140,8 +140,8 @@ struct ImageAttachmentBubble: View {
             }
         }
         .buttonStyle(PlainButtonStyle())
-        .opacity((attachment.value(forKey: "stateRaw") as? String) == "downloaded" ? 1.0 : 0.7)
-        .disabled((attachment.value(forKey: "stateRaw") as? String) != "downloaded")
+        .opacity(["downloaded", "uploaded", "failed"].contains(attachment.value(forKey: "stateRaw") as? String) ? 1.0 : 0.7)
+        .disabled(!["downloaded", "uploaded"].contains(attachment.value(forKey: "stateRaw") as? String))
         .onAppear {
             loadThumbnail()
             if (attachment.value(forKey: "stateRaw") as? String) == "queued" {
@@ -332,8 +332,8 @@ struct AttachmentGridItem: View {
     
     var body: some View {
         Button(action: {
-            // Only allow tap if downloaded
-            if (attachment.value(forKey: "stateRaw") as? String) == "downloaded" {
+            // Only allow tap if downloaded or uploaded
+            if ["downloaded", "uploaded"].contains(attachment.value(forKey: "stateRaw") as? String) {
                 onTap()
             }
         }) {
@@ -455,24 +455,36 @@ struct AttachmentStatusOverlay: View {
 struct AttachmentStatusIcon: View {
     let attachment: Attachment
     @ObservedObject var downloader: AttachmentDownloader
-    
+
+    private var isLocalAttachment: Bool {
+        (attachment.value(forKey: "id") as? String)?.starts(with: "local_") == true
+    }
+
     var body: some View {
         Group {
             if (attachment.value(forKey: "stateRaw") as? String) == "uploading" ||
-               ((attachment.value(forKey: "stateRaw") as? String) == "queued" && (attachment.value(forKey: "id") as? String)?.starts(with: "local_") == true) {
+               ((attachment.value(forKey: "stateRaw") as? String) == "queued" && isLocalAttachment) {
                 ProgressView()
                     .progressViewStyle(CircularProgressViewStyle())
                     .scaleEffect(0.8)
                     .frame(width: 20, height: 20)
             } else if (attachment.value(forKey: "stateRaw") as? String) == "failed" {
-                Button(action: {
-                    Task {
-                        await downloader.retryFailedDownload(for: attachment)
-                    }
-                }) {
+                if isLocalAttachment {
+                    // Upload failure - show error icon with "Send failed" tooltip
                     Image(systemName: "exclamationmark.circle.fill")
                         .foregroundColor(.red)
                         .font(.system(size: 20))
+                } else {
+                    // Download failure - allow retry
+                    Button(action: {
+                        Task {
+                            await downloader.retryFailedDownload(for: attachment)
+                        }
+                    }) {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .foregroundColor(.red)
+                            .font(.system(size: 20))
+                    }
                 }
             } else if let attachmentId = attachment.value(forKey: "id") as? String,
                       downloader.activeDownloads.contains(attachmentId) {
