@@ -373,44 +373,48 @@ final class ConversationManager: @unchecked Sendable {
         winner.setValue(winnerPinned || loserPinned, forKey: "pinned")
     }
     
-    func createConversationIdentity(from headers: ProcessedHeaders, myAliases: Set<String>) -> ConversationIdentity {
-        var participants = Set<String>()
-        
-        // Add sender
-        if let fromEmail = EmailNormalizer.extractEmail(from: headers.from ?? "") {
-            participants.insert(normalizedEmail(fromEmail))
-        }
-        
-        // Add recipients
-        for recipient in headers.to {
-            participants.insert(recipient.email)
-        }
-        for recipient in headers.cc {
-            participants.insert(recipient.email)
-        }
-        
-        // Create identity using the existing global function
+    /// Creates a conversation identity using Gmail threadId as the primary key.
+    /// This ensures stable conversation grouping that matches Gmail's threading.
+    /// - Parameters:
+    ///   - headers: Processed message headers
+    ///   - gmThreadId: Gmail's thread ID for stable grouping
+    ///   - myAliases: Set of user's email aliases to exclude from participants
+    func createConversationIdentity(from headers: ProcessedHeaders, gmThreadId: String, myAliases: Set<String>) -> ConversationIdentity {
+        // Create identity using the global function with threadId
         let messageHeaders = createMessageHeaders(from: headers)
-        return makeConversationIdentity(from: messageHeaders, myAliases: myAliases)
+        return makeConversationIdentity(from: messageHeaders, gmThreadId: gmThreadId, myAliases: myAliases)
     }
-    
+
+    /// Legacy function for backward compatibility - calls new function with empty threadId
+    /// @deprecated Use createConversationIdentity(from:gmThreadId:myAliases:) instead
+    func createConversationIdentity(from headers: ProcessedHeaders, myAliases: Set<String>) -> ConversationIdentity {
+        return createConversationIdentity(from: headers, gmThreadId: "", myAliases: myAliases)
+    }
+
     private func createMessageHeaders(from headers: ProcessedHeaders) -> [MessageHeader] {
         var messageHeaders: [MessageHeader] = []
-        
+
         if let from = headers.from {
             messageHeaders.append(MessageHeader(name: "From", value: from))
         }
-        
+
         for recipient in headers.to {
             let value = recipient.displayName != nil ? "\(recipient.displayName!) <\(recipient.email)>" : recipient.email
             messageHeaders.append(MessageHeader(name: "To", value: value))
         }
-        
+
         for recipient in headers.cc {
             let value = recipient.displayName != nil ? "\(recipient.displayName!) <\(recipient.email)>" : recipient.email
             messageHeaders.append(MessageHeader(name: "Cc", value: value))
         }
-        
+
+        // Note: BCC is intentionally excluded from headers for identity creation
+        // to ensure consistent behavior (BCC is not included in identity or display)
+
+        if let listId = headers.listId {
+            messageHeaders.append(MessageHeader(name: "List-Id", value: listId))
+        }
+
         return messageHeaders
     }
 }

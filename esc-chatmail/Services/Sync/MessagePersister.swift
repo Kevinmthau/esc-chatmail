@@ -8,8 +8,12 @@ final class MessagePersister: @unchecked Sendable {
     private let htmlContentHandler: HTMLContentHandler
     let conversationManager: ConversationManager
 
+    /// Serial queue to protect access to modifiedConversationIDs
+    /// This ensures thread-safe access to the shared mutable set
+    private let modifiedConversationsQueue = DispatchQueue(label: "com.esc.chatmail.modifiedConversations")
+
     /// Tracks conversation IDs modified during current sync batch
-    /// Access should be synchronized via the sync context
+    /// Access is protected by modifiedConversationsQueue for thread safety
     private var modifiedConversationIDs: Set<NSManagedObjectID> = []
 
     init(
@@ -26,19 +30,27 @@ final class MessagePersister: @unchecked Sendable {
 
     /// Resets the modified conversations tracker - call at start of sync
     func resetModifiedConversations() {
-        modifiedConversationIDs.removeAll()
+        modifiedConversationsQueue.sync {
+            modifiedConversationIDs.removeAll()
+        }
     }
 
     /// Returns and clears the set of modified conversation IDs
+    /// Thread-safe: Uses serial queue to protect access
     func getAndClearModifiedConversations() -> Set<NSManagedObjectID> {
-        let result = modifiedConversationIDs
-        modifiedConversationIDs.removeAll()
-        return result
+        return modifiedConversationsQueue.sync {
+            let result = modifiedConversationIDs
+            modifiedConversationIDs.removeAll()
+            return result
+        }
     }
 
     /// Tracks a conversation as modified
+    /// Thread-safe: Uses serial queue to protect access
     private func trackModifiedConversation(_ conversation: Conversation) {
-        modifiedConversationIDs.insert(conversation.objectID)
+        _ = modifiedConversationsQueue.sync {
+            modifiedConversationIDs.insert(conversation.objectID)
+        }
     }
 
     /// Saves a Gmail message to Core Data
@@ -71,18 +83,6 @@ final class MessagePersister: @unchecked Sendable {
             in: context
         ) else {
             print("⚠️ Failed to process message: \(gmailMessage.id)")
-            return
-        }
-
-        // Check if message is from before installation (with 5-minute grace period)
-        let installationTimestamp = KeychainService.shared.getOrCreateInstallationTimestamp()
-        let gracePeriod: TimeInterval = 5 * 60  // 5 minutes buffer for emails arriving just before install
-        let effectiveTimestamp = installationTimestamp.addingTimeInterval(-gracePeriod)
-        if processedMessage.internalDate < effectiveTimestamp {
-            let dateFormatter = DateFormatter()
-            dateFormatter.dateStyle = .short
-            dateFormatter.timeStyle = .short
-            print("⏭️ Skipping pre-install message: \(subjectHeader.prefix(30)) (msg: \(dateFormatter.string(from: processedMessage.internalDate)), cutoff: \(dateFormatter.string(from: effectiveTimestamp)))")
             return
         }
 
@@ -152,9 +152,11 @@ final class MessagePersister: @unchecked Sendable {
         myAliases: Set<String>,
         in context: NSManagedObjectContext
     ) async {
-        // Create conversation identity and find/create conversation
+        // Create conversation identity using Gmail threadId as primary key
+        // This ensures stable conversation grouping that matches Gmail's threading
         let identity = conversationManager.createConversationIdentity(
             from: processedMessage.headers,
+            gmThreadId: processedMessage.gmThreadId,
             myAliases: myAliases
         )
         let conversation = await conversationManager.findOrCreateConversation(for: identity, in: context)
@@ -336,15 +338,39 @@ final class MessagePersister: @unchecked Sendable {
         }
     }
 
-    /// Saves labels from Gmail API to Core Data
+    /// Saves labels from Gmail API to Core Data with upsert logic
+    /// Labels are upserted by ID to prevent duplicate Label rows
     func saveLabels(_ gmailLabels: [GmailLabel], in context: NSManagedObjectContext) async {
-        for gmailLabel in gmailLabels {
-            let label = NSEntityDescription.insertNewObject(
-                forEntityName: "Label",
-                into: context
-            ) as! Label
-            label.id = gmailLabel.id
-            label.name = gmailLabel.name
+        await context.perform {
+            // Fetch all existing labels into a dictionary for efficient lookup
+            let request = Label.fetchRequest()
+            let existingLabels = (try? context.fetch(request)) ?? []
+            var labelDict = Dictionary(uniqueKeysWithValues: existingLabels.map { ($0.id, $0) })
+
+            var insertedCount = 0
+            var updatedCount = 0
+
+            for gmailLabel in gmailLabels {
+                if let existingLabel = labelDict[gmailLabel.id] {
+                    // Update existing label if name changed
+                    if existingLabel.name != gmailLabel.name {
+                        existingLabel.name = gmailLabel.name
+                        updatedCount += 1
+                    }
+                } else {
+                    // Insert new label
+                    let label = NSEntityDescription.insertNewObject(
+                        forEntityName: "Label",
+                        into: context
+                    ) as! Label
+                    label.id = gmailLabel.id
+                    label.name = gmailLabel.name
+                    labelDict[gmailLabel.id] = label
+                    insertedCount += 1
+                }
+            }
+
+            print("📋 [SyncCorrectness] Labels: inserted=\(insertedCount), updated=\(updatedCount), total=\(labelDict.count)")
         }
     }
 
@@ -395,9 +421,30 @@ final class MessagePersister: @unchecked Sendable {
         }
     }
 
-    /// Updates account's history ID
+    /// Updates account's history ID in the provided context WITHOUT saving
+    /// Use this for transactional updates where historyId should be saved with other changes
+    /// - Parameters:
+    ///   - historyId: The new history ID to set
+    ///   - context: The Core Data context to update in (will not be saved)
+    func setAccountHistoryId(_ historyId: String, in context: NSManagedObjectContext) async {
+        await context.perform {
+            let request = Account.fetchRequest()
+            request.fetchLimit = 1
+            if let account = try? context.fetch(request).first {
+                account.historyId = historyId
+                print("📝 [SyncCorrectness] Set historyId to \(historyId) in context (pending save)")
+            } else {
+                print("⚠️ [SyncCorrectness] No account found to set history ID")
+            }
+        }
+    }
+
+    /// Updates account's history ID in a SEPARATE transaction
+    /// WARNING: Use setAccountHistoryId(_:in:) for transactional sync updates
+    /// This method is only for standalone historyId updates outside of sync
     /// - Parameter historyId: The new history ID to save
     /// - Returns: true if the save succeeded, false if it failed after retries
+    @available(*, deprecated, message: "Use setAccountHistoryId(_:in:) for transactional sync updates")
     @discardableResult
     func updateAccountHistoryId(_ historyId: String) async -> Bool {
         var lastError: Error?

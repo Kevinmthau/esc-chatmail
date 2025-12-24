@@ -201,20 +201,37 @@ final class SyncEngine: ObservableObject {
 
             uiState.update(progress: 0.2, status: "Fetching messages...")
 
-            // Build query for messages after installation
-            let installationTimestamp = KeychainService.shared.getOrCreateInstallationTimestamp()
-            let epochSeconds = Int(installationTimestamp.timeIntervalSince1970)
-            let gmailQuery = "after:\(epochSeconds) -label:spam -label:drafts"
+            // Build query for messages from install time forward (excluding spam and drafts)
+            // This ensures we only sync messages that arrived after the user installed the app
+            let installTimestamp = UserDefaults.standard.double(forKey: "installTimestamp")
+            let gmailQuery: String
 
-            let dateFormatter = DateFormatter()
-            dateFormatter.dateStyle = .medium
-            dateFormatter.timeStyle = .medium
-            print("🔄 FULL SYNC - Fetching messages after: \(dateFormatter.string(from: installationTimestamp))")
+            if installTimestamp > 0 {
+                // Use install timestamp as cutoff - only sync messages after install
+                // Subtract 5 minutes buffer to catch any messages in-flight during install
+                let cutoffTimestamp = Int(installTimestamp) - 300
+                gmailQuery = "after:\(cutoffTimestamp) -label:spam -label:drafts"
+                let now = Date().timeIntervalSince1970
+                let ageMinutes = (now - installTimestamp) / 60
+                print("🔄 INITIAL SYNC - Fetching messages after install time")
+                print("📅 Install timestamp: \(installTimestamp) (\(Date(timeIntervalSince1970: installTimestamp)))")
+                print("📅 Cutoff timestamp: \(cutoffTimestamp) (install - 5min buffer)")
+                print("📅 Install was \(String(format: "%.1f", ageMinutes)) minutes ago")
+            } else {
+                // Fallback: no install timestamp found, use current time minus 30 days
+                // This shouldn't happen in normal operation but provides a safeguard
+                let thirtyDaysAgo = Int(Date().timeIntervalSince1970) - (30 * 24 * 60 * 60)
+                gmailQuery = "after:\(thirtyDaysAgo) -label:spam -label:drafts"
+                print("⚠️ [SyncCorrectness] No install timestamp found, using 30-day fallback")
+            }
+
             print("🔍 Gmail query: \(gmailQuery)")
 
             // Stream process messages in batches
             var pageToken: String? = nil
             var totalProcessed = 0
+            var totalSuccessfullyFetched = 0
+            var allFailedIds: [String] = []
 
             uiState.update(progress: 0.3, status: "Fetching messages...")
 
@@ -236,7 +253,7 @@ final class SyncEngine: ObservableObject {
                 for batch in messageIds.chunked(into: SyncConfig.messageBatchSize) {
                     try Task.checkCancellation()
 
-                    _ = await messageFetcher.fetchBatch(batch) { [weak self] message in
+                    let failedIds = await messageFetcher.fetchBatch(batch) { [weak self] message in
                         guard let self = self else { return }
                         await self.messagePersister.saveMessage(
                             message,
@@ -246,7 +263,13 @@ final class SyncEngine: ObservableObject {
                         )
                     }
 
+                    // Track successful vs failed fetches
+                    let successCount = batch.count - failedIds.count
+                    totalSuccessfullyFetched += successCount
+                    allFailedIds.append(contentsOf: failedIds)
                     totalProcessed += batch.count
+
+                    print("📊 [SyncCorrectness] Batch: requested=\(batch.count), success=\(successCount), failed=\(failedIds.count)")
 
                     await MainActor.run {
                         self.uiState.update(
@@ -259,7 +282,8 @@ final class SyncEngine: ObservableObject {
                 pageToken = nextPageToken
             } while pageToken != nil
 
-            uiState.update(progress: 0.9, status: "Processed \(totalProcessed) messages")
+            print("📊 [SyncCorrectness] Initial sync totals: processed=\(totalProcessed), successful=\(totalSuccessfullyFetched), failed=\(allFailedIds.count)")
+            uiState.update(progress: 0.9, status: "Processed \(totalSuccessfullyFetched) messages")
 
             // Update conversation rollups
             let rollupStartTime = CFAbsoluteTimeGetCurrent()
@@ -268,19 +292,54 @@ final class SyncEngine: ObservableObject {
 
             let conversationCount = await countConversations(in: context)
 
+            // Determine if we should advance historyId
+            let hasFailures = !allFailedIds.isEmpty
+            var syncCompletedWithWarnings = false
+
+            // Only set historyId in the context if ALL messages were fetched successfully
+            // This ensures historyId is saved transactionally with messages
+            if hasFailures {
+                print("⚠️ [SyncCorrectness] Initial sync has \(allFailedIds.count) failed messages - NOT advancing historyId")
+                print("⚠️ [SyncCorrectness] Failed message IDs: \(allFailedIds.prefix(10))...")
+                syncCompletedWithWarnings = true
+
+                // Run reconciliation for failed IDs specifically
+                nonisolated(unsafe) let unsafeLabelCache = labelCache
+                print("🔄 [SyncCorrectness] Retrying \(allFailedIds.count) failed messages via reconciliation...")
+                let stillFailedIds = await messageFetcher.fetchBatch(allFailedIds) { [weak self] message in
+                    guard let self = self else { return }
+                    await self.messagePersister.saveMessage(
+                        message,
+                        labelCache: unsafeLabelCache,
+                        myAliases: self.myAliases,
+                        in: context
+                    )
+                }
+
+                if stillFailedIds.isEmpty {
+                    print("✅ [SyncCorrectness] All failed messages recovered on retry - advancing historyId")
+                    await messagePersister.setAccountHistoryId(profile.historyId, in: context)
+                    syncCompletedWithWarnings = false
+                } else {
+                    print("⚠️ [SyncCorrectness] \(stillFailedIds.count) messages permanently failed - NOT advancing historyId")
+                }
+            } else {
+                print("✅ [SyncCorrectness] All messages fetched successfully - advancing historyId to \(profile.historyId)")
+                await messagePersister.setAccountHistoryId(profile.historyId, in: context)
+            }
+
             // Save changes (use async to avoid blocking main thread)
+            // historyId is now part of this save transaction
             let saveStartTime = CFAbsoluteTimeGetCurrent()
             do {
                 try await coreDataStack.saveAsync(context: context)
                 let saveDuration = CFAbsoluteTimeGetCurrent() - saveStartTime
-                performanceLogger.logSave(insertions: totalProcessed, updates: 0, deletions: 0, duration: saveDuration)
+                performanceLogger.logSave(insertions: totalSuccessfullyFetched, updates: 0, deletions: 0, duration: saveDuration)
+                print("✅ [SyncCorrectness] Initial sync save successful - historyId persisted in same transaction")
             } catch {
-                print("Failed to save sync data: \(error)")
+                print("❌ [SyncCorrectness] Failed to save sync data - historyId NOT advanced: \(error)")
                 throw error
             }
-
-            // Update history ID
-            await messagePersister.updateAccountHistoryId(profile.historyId)
 
             // Start downloading attachments
             Task {
@@ -291,7 +350,7 @@ final class SyncEngine: ObservableObject {
             let totalDuration = CFAbsoluteTimeGetCurrent() - syncStartTime
             performanceLogger.endOperation("InitialSync", signpostID: signpostID)
             performanceLogger.logSyncSummary(
-                messagesProcessed: totalProcessed,
+                messagesProcessed: totalSuccessfullyFetched,
                 conversationsUpdated: conversationCount,
                 totalDuration: totalDuration
             )
@@ -300,7 +359,8 @@ final class SyncEngine: ObservableObject {
             print("📊 Conversation rollup took \(String(format: "%.2f", rollupDuration))s")
             #endif
 
-            uiState.update(isSyncing: false, progress: 1.0, status: "Sync complete")
+            let finalStatus = syncCompletedWithWarnings ? "Sync completed with warnings" : "Sync complete"
+            uiState.update(isSyncing: false, progress: 1.0, status: finalStatus)
 
         } catch {
             performanceLogger.endOperation("InitialSync", signpostID: signpostID)
@@ -383,7 +443,9 @@ final class SyncEngine: ObservableObject {
 
             // Fetch new messages
             var fetchFailed = false
+            var totalSuccessfullyFetched = 0
             if !allNewMessageIds.isEmpty {
+                print("📊 [SyncCorrectness] Incremental sync: \(allNewMessageIds.count) new message IDs to fetch")
                 uiState.update(progress: 0.3, status: "Fetching \(allNewMessageIds.count) new messages...")
 
                 // Note: labelCache contains NSManagedObjects which aren't Sendable, but we ensure
@@ -406,8 +468,13 @@ final class SyncEngine: ObservableObject {
                         )
                     }
 
+                    let successCount = batch.count - failedIds.count
+                    totalSuccessfullyFetched += successCount
                     totalFailedIds.append(contentsOf: failedIds)
                     processedCount += batch.count
+
+                    print("📊 [SyncCorrectness] Incremental batch: requested=\(batch.count), success=\(successCount), failed=\(failedIds.count)")
+
                     let progress = 0.3 + (Double(processedCount) / Double(allNewMessageIds.count)) * 0.5
 
                     await MainActor.run {
@@ -418,20 +485,27 @@ final class SyncEngine: ObservableObject {
                     }
                 }
 
+                print("📊 [SyncCorrectness] Incremental sync totals: requested=\(allNewMessageIds.count), success=\(totalSuccessfullyFetched), failed=\(totalFailedIds.count)")
+
                 // If any messages failed to fetch, don't update history ID to avoid losing them
                 if !totalFailedIds.isEmpty {
-                    print("Warning: \(totalFailedIds.count) messages failed to fetch, will retry on next sync")
+                    print("⚠️ [SyncCorrectness] \(totalFailedIds.count) messages failed to fetch, will retry on next sync")
+                    print("⚠️ [SyncCorrectness] Failed IDs: \(totalFailedIds.prefix(10))...")
                     fetchFailed = true
                 }
+            } else {
+                print("📊 [SyncCorrectness] Incremental sync: no new messages to fetch")
             }
 
             // Reconciliation: Check for any missed messages from the last hour
             uiState.update(progress: 0.8, status: "Checking for missed messages...")
             try Task.checkCancellation()
 
+            print("🔄 [SyncCorrectness] Running reconciliation check for missed messages...")
             let missedIds = await checkForMissedMessages(in: context)
             if !missedIds.isEmpty {
-                print("🔍 Found \(missedIds.count) potentially missed messages, fetching...")
+                print("🔍 [SyncCorrectness] Reconciliation found \(missedIds.count) messages in Gmail but not locally")
+                print("🔍 [SyncCorrectness] Missed IDs: \(missedIds.prefix(10))...")
                 nonisolated(unsafe) let unsafeLabelCache = labelCache
 
                 let failedMissedIds = await messageFetcher.fetchBatch(missedIds) { [weak self] message in
@@ -444,9 +518,14 @@ final class SyncEngine: ObservableObject {
                     )
                 }
 
+                let successCount = missedIds.count - failedMissedIds.count
+                print("📊 [SyncCorrectness] Reconciliation fetch: requested=\(missedIds.count), success=\(successCount), failed=\(failedMissedIds.count)")
+
                 if !failedMissedIds.isEmpty {
-                    print("⚠️ Failed to fetch \(failedMissedIds.count) missed messages")
+                    print("⚠️ [SyncCorrectness] Failed to fetch \(failedMissedIds.count) missed messages")
                 }
+            } else {
+                print("✅ [SyncCorrectness] Reconciliation: no missed messages found")
             }
 
             uiState.update(progress: 0.85, status: "Updating conversations...")
@@ -465,17 +544,25 @@ final class SyncEngine: ObservableObject {
 
             uiState.update(progress: 0.95, status: "Saving changes...")
 
-            // Only update history ID after successful message fetching to avoid losing messages
+            // Only set historyId in the context if ALL messages were fetched successfully
+            // This ensures historyId is saved transactionally with messages
             if !fetchFailed {
-                await messagePersister.updateAccountHistoryId(latestHistoryId)
+                print("✅ [SyncCorrectness] Incremental sync - all messages fetched, setting historyId to \(latestHistoryId) in context")
+                await messagePersister.setAccountHistoryId(latestHistoryId, in: context)
             } else {
-                print("Skipping history ID update due to fetch failures - will retry failed messages on next sync")
+                print("⚠️ [SyncCorrectness] Incremental sync has fetch failures - NOT advancing historyId")
             }
 
+            // Save changes - historyId is now part of this save transaction
             do {
                 try await coreDataStack.saveAsync(context: context)
+                if !fetchFailed {
+                    print("✅ [SyncCorrectness] Incremental sync save successful - historyId \(latestHistoryId) persisted in same transaction")
+                } else {
+                    print("✅ [SyncCorrectness] Incremental sync save successful - historyId NOT advanced due to fetch failures")
+                }
             } catch {
-                print("Failed to save incremental sync: \(error)")
+                print("❌ [SyncCorrectness] Failed to save incremental sync - historyId NOT advanced: \(error)")
                 throw error
             }
 
@@ -504,15 +591,9 @@ final class SyncEngine: ObservableObject {
     /// Returns message IDs that exist in Gmail but not locally
     private func checkForMissedMessages(in context: NSManagedObjectContext) async -> [String] {
         do {
-            // Query Gmail for recent messages (last hour, or since installation with buffer)
-            let installationTimestamp = KeychainService.shared.getOrCreateInstallationTimestamp()
-            let gracePeriod: TimeInterval = 5 * 60  // 5 minutes buffer
-            let effectiveTimestamp = installationTimestamp.addingTimeInterval(-gracePeriod)
-
-            // Use the later of: 1 hour ago, or installation timestamp
+            // Query Gmail for recent messages (last hour)
             let oneHourAgo = Date().addingTimeInterval(-3600)
-            let queryTimestamp = max(oneHourAgo, effectiveTimestamp)
-            let epochSeconds = Int(queryTimestamp.timeIntervalSince1970)
+            let epochSeconds = Int(oneHourAgo.timeIntervalSince1970)
 
             let query = "after:\(epochSeconds) -label:spam -label:drafts"
 

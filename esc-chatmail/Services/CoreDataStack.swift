@@ -370,6 +370,44 @@ final class CoreDataStack: @unchecked Sendable {
         }
     }
 
+    /// Destroys all data and reloads the persistent stores synchronously.
+    /// Use this for fresh install cleanup where you need to ensure stores are ready before continuing.
+    func destroyAndReloadSync() throws {
+        try destroyAllData()
+
+        // Reset the viewContext to clear any stale managed objects
+        persistentContainer.viewContext.reset()
+
+        // Reload stores synchronously using a semaphore
+        let semaphore = DispatchSemaphore(value: 0)
+        var loadError: Error?
+
+        persistentContainer.loadPersistentStores { [weak self] storeDescription, error in
+            if let error = error {
+                loadError = error
+                print("Failed to reload Core Data store: \(error)")
+            } else {
+                self?.setStoreLoaded(true)
+                self?.loadAttempts = 0
+                print("Core Data store reloaded successfully: \(storeDescription)")
+            }
+            semaphore.signal()
+        }
+
+        // Wait for stores to load (with timeout)
+        let result = semaphore.wait(timeout: .now() + 10.0)
+        if result == .timedOut {
+            throw CoreDataError.storeLoadFailed(NSError(domain: "CoreDataStack", code: -1, userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for store to reload"]))
+        }
+
+        if let error = loadError {
+            throw CoreDataError.persistentFailure(error as NSError)
+        }
+
+        // Reset viewContext again after stores are loaded to ensure clean state
+        persistentContainer.viewContext.reset()
+    }
+
     func performBackgroundTask<T>(_ block: @escaping (NSManagedObjectContext) throws -> T) async throws -> T {
         try await waitForStoreToLoad()
 

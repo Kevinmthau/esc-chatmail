@@ -302,8 +302,20 @@ class BackgroundSyncManager {
     private func performPartialSync(isProcessingTask: Bool) async -> Bool {
         do {
             let maxResults = isProcessingTask ? 100 : 50
-            // Exclude spam and draft messages from the query
-            let response = try await apiClient.listMessages(maxResults: maxResults, query: "-label:spam -label:drafts")
+
+            // Use install timestamp to only fetch messages from install time forward
+            let installTimestamp = UserDefaults.standard.double(forKey: "installTimestamp")
+            let query: String
+            if installTimestamp > 0 {
+                let cutoffTimestamp = Int(installTimestamp) - 300 // 5 min buffer
+                query = "after:\(cutoffTimestamp) -label:spam -label:drafts"
+            } else {
+                // Fallback: only fetch messages from last 24 hours
+                let oneDayAgo = Int(Date().timeIntervalSince1970) - (24 * 60 * 60)
+                query = "after:\(oneDayAgo) -label:spam -label:drafts"
+            }
+
+            let response = try await apiClient.listMessages(maxResults: maxResults, query: query)
 
             if let messages = response.messages {
                 await fetchAndStoreMessages(messageIds: messages.map { $0.id })

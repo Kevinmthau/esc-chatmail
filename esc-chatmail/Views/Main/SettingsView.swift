@@ -2,9 +2,8 @@ import SwiftUI
 
 struct SettingsView: View {
     @StateObject private var authSession = AuthSession.shared
-    @StateObject private var syncEngine = SyncEngine.shared
     @State private var showingSignOutConfirmation = false
-    
+
     var body: some View {
         NavigationStack {
             Form {
@@ -14,7 +13,7 @@ struct SettingsView: View {
                             Image(systemName: "person.circle.fill")
                                 .font(.largeTitle)
                                 .foregroundColor(.gray)
-                            
+
                             VStack(alignment: .leading) {
                                 Text(email)
                                     .font(.headline)
@@ -25,7 +24,7 @@ struct SettingsView: View {
                         }
                         .padding(.vertical, 8)
                     }
-                    
+
                     Button(action: { showingSignOutConfirmation = true }) {
                         HStack {
                             Image(systemName: "arrow.right.square")
@@ -34,43 +33,7 @@ struct SettingsView: View {
                         .foregroundColor(.red)
                     }
                 }
-                
-                Section("Sync") {
-                    if syncEngine.isSyncing {
-                        HStack {
-                            ProgressView()
-                                .scaleEffect(0.8)
-                            Text(syncEngine.syncStatus)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
 
-                        ProgressView(value: syncEngine.syncProgress)
-                    } else {
-                        Button(action: performFullSync) {
-                            HStack {
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                                Text("Perform Full Sync")
-                            }
-                        }
-
-                        Button(action: performIncrementalSync) {
-                            HStack {
-                                Image(systemName: "arrow.clockwise")
-                                Text("Check for Updates")
-                            }
-                        }
-
-                        Button(action: resetAndSync) {
-                            HStack {
-                                Image(systemName: "envelope.badge")
-                                Text("Recover Missing Emails")
-                            }
-                        }
-                        .foregroundColor(.blue)
-                    }
-                }
-                
                 Section("About") {
                     HStack {
                         Text("Version")
@@ -106,39 +69,5 @@ struct SettingsView: View {
     
     private func signOut() {
         authSession.signOut()
-    }
-    
-    private func performFullSync() {
-        Task {
-            do {
-                try await syncEngine.performInitialSync()
-            } catch {
-                print("Full sync error: \(error)")
-            }
-        }
-    }
-    
-    private func performIncrementalSync() {
-        Task {
-            do {
-                try await syncEngine.performIncrementalSync()
-            } catch {
-                print("Incremental sync error: \(error)")
-            }
-        }
-    }
-
-    private func resetAndSync() {
-        // Reset installation timestamp to 5 minutes ago to catch emails that arrived just before install
-        KeychainService.shared.resetInstallationTimestamp(minutesBack: 5)
-
-        // Then perform a full sync
-        Task {
-            do {
-                try await syncEngine.performInitialSync()
-            } catch {
-                print("Reset and sync error: \(error)")
-            }
-        }
     }
 }

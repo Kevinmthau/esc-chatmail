@@ -74,14 +74,21 @@ struct esc_chatmailApp: App {
             // Generate and store new installation ID
             let newID = keychainService.getOrCreateInstallationId()
 
+            // Record install timestamp for sync cutoff
+            let installTimestamp = Date().timeIntervalSince1970
+            userDefaults.set(installTimestamp, forKey: "installTimestamp")
+
             // Ensure we can write to UserDefaults after domain removal
             userDefaults.set(newID, forKey: installationKey)
             userDefaults.set(true, forKey: "isFreshInstall")
             userDefaults.synchronize()
 
+            print("📅 Install timestamp recorded: \(installTimestamp) (\(Date()))")
+
             // Verify the write succeeded - retry without blocking
             if userDefaults.string(forKey: installationKey) == nil {
                 print("⚠️  UserDefaults write failed, retrying...")
+                userDefaults.set(installTimestamp, forKey: "installTimestamp")
                 userDefaults.set(newID, forKey: installationKey)
                 userDefaults.set(true, forKey: "isFreshInstall")
                 userDefaults.synchronize()
@@ -94,9 +101,25 @@ struct esc_chatmailApp: App {
                 print("⚠️  Installation ID mismatch - performing cleanup")
                 performFreshInstallCleanup()
                 let newID = keychainService.getOrCreateInstallationId()
+
+                // Record install timestamp for sync cutoff (cleanup cleared it)
+                let installTimestamp = Date().timeIntervalSince1970
+                userDefaults.set(installTimestamp, forKey: "installTimestamp")
                 userDefaults.set(newID, forKey: installationKey)
+                userDefaults.set(true, forKey: "isFreshInstall")
                 userDefaults.synchronize()
+
+                print("📅 Install timestamp recorded: \(installTimestamp) (\(Date()))")
             }
+        }
+
+        // Defensive check: ensure install timestamp exists
+        // This catches any edge cases where it wasn't set properly
+        if userDefaults.double(forKey: "installTimestamp") == 0 {
+            let installTimestamp = Date().timeIntervalSince1970
+            userDefaults.set(installTimestamp, forKey: "installTimestamp")
+            userDefaults.synchronize()
+            print("📅 Install timestamp was missing, set to: \(installTimestamp)")
         }
     }
     
@@ -148,18 +171,22 @@ struct esc_chatmailApp: App {
             print("  ✓ UserDefaults cleared")
         }
 
-        // 6. Clear Core Data
+        // 6. Clear Core Data (synchronous to ensure it completes and reloads before sync starts)
         print("  → Clearing Core Data")
-        Task {
-            do {
-                try await CoreDataStack.shared.resetStore()
-                print("  ✓ Core Data cleared")
-            } catch {
-                print("  ⚠️  Failed to clear Core Data: \(error)")
-            }
+        do {
+            try CoreDataStack.shared.destroyAndReloadSync()
+            print("  ✓ Core Data cleared and reloaded")
+        } catch {
+            print("  ⚠️  Failed to clear Core Data: \(error)")
         }
 
-        // 7. Clear attachment caches
+        // 7. Clear in-memory caches (already on main thread from init)
+        print("  → Clearing in-memory caches")
+        ConversationCache.shared.clear()
+        PersonCache.shared.clearCache()
+        print("  ✓ In-memory caches cleared")
+
+        // 8. Clear attachment caches
         print("  → Clearing attachment caches")
         AttachmentCache.shared.clearCache(level: .aggressive)
         clearAttachmentFiles()
