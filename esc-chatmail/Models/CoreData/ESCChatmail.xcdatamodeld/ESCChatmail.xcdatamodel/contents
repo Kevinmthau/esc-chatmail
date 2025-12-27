@@ -20,6 +20,7 @@
         <relationship name="message" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="Message" inverseName="attachments" inverseEntity="Message"/>
     </entity>
     <entity name="Conversation" representedClassName="Conversation" syncable="YES">
+        <attribute name="archivedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="displayName" optional="YES" attributeType="String"/>
         <attribute name="hasInbox" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="hidden" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
@@ -29,6 +30,7 @@
         <attribute name="lastMessageDate" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="latestInboxDate" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="muted" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="participantHash" optional="YES" attributeType="String"/>
         <attribute name="pinned" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="snippet" optional="YES" attributeType="String"/>
         <attribute name="type" attributeType="String"/>
@@ -47,11 +49,13 @@
         <fetchIndex name="byHiddenIndex">
             <fetchIndexElement property="hidden" type="Binary" order="ascending"/>
         </fetchIndex>
-        <uniquenessConstraints>
-            <uniquenessConstraint>
-                <constraint value="keyHash"/>
-            </uniquenessConstraint>
-        </uniquenessConstraints>
+        <fetchIndex name="byArchivedAtIndex">
+            <fetchIndexElement property="archivedAt" type="Binary" order="ascending"/>
+        </fetchIndex>
+        <fetchIndex name="byParticipantHashAndArchivedIndex">
+            <fetchIndexElement property="participantHash" type="Binary" order="ascending"/>
+            <fetchIndexElement property="archivedAt" type="Binary" order="ascending"/>
+        </fetchIndex>
     </entity>
     <entity name="ConversationParticipant" representedClassName="ConversationParticipant" syncable="YES">
         <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>

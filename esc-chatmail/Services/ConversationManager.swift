@@ -3,70 +3,51 @@ import CoreData
 
 final class ConversationManager: @unchecked Sendable {
     private let coreDataStack = CoreDataStack.shared
-    
+
+    /// Finds an ACTIVE (non-archived) conversation for the given participants, or creates a new one.
+    ///
+    /// Archive-aware lookup:
+    /// 1. Look for conversations with matching participantHash WHERE archivedAt IS NULL
+    /// 2. If found, return the existing active conversation
+    /// 3. If not found (all archived or none exist), create a NEW conversation
+    ///
+    /// This ensures that when a user archives a conversation and later receives a new email
+    /// from the same person, it appears as a fresh conversation without the old history.
     func findOrCreateConversation(
         for identity: ConversationIdentity,
         in context: NSManagedObjectContext
     ) async -> Conversation {
         return await context.perform {
+            // Look for an ACTIVE conversation with these participants
             let request = Conversation.fetchRequest()
-            request.predicate = NSPredicate(format: "keyHash == %@", identity.keyHash)
+            request.predicate = NSPredicate(
+                format: "participantHash == %@ AND archivedAt == nil",
+                identity.participantHash
+            )
             request.fetchLimit = 1
-            request.fetchBatchSize = 1  // Single object fetch
+            request.fetchBatchSize = 1
 
             if let existing = try? context.fetch(request).first {
+                print("📬 [ConversationManager] Found active conversation for participants: \(identity.participants)")
                 return existing
             }
 
-            return self.createNewConversation(for: identity, in: context)
+            // No active conversation found - create a new one
+            // This happens when:
+            // 1. First message from these participants
+            // 2. All previous conversations with these participants are archived
+            print("📬 [ConversationManager] Creating new conversation for participants: \(identity.participants)")
+            return ConversationFactory.create(for: identity, in: context)
         }
     }
-    
-    private func createNewConversation(
-        for identity: ConversationIdentity,
-        in context: NSManagedObjectContext
-    ) -> Conversation {
-        let conversation = NSEntityDescription.insertNewObject(forEntityName: "Conversation", into: context) as! Conversation
-        conversation.id = UUID()
-        conversation.keyHash = identity.keyHash
-        conversation.conversationType = identity.type
-        
-        // Create participants
-        for email in identity.participants {
-            let person = findOrCreatePerson(email: email, displayName: nil, in: context)
-            let participant = NSEntityDescription.insertNewObject(forEntityName: "ConversationParticipant", into: context) as! ConversationParticipant
-            participant.id = UUID()
-            participant.participantRole = .normal
-            participant.person = person
-            participant.conversation = conversation
-        }
-        
-        return conversation
-    }
-    
+
+    /// Delegates to PersonFactory for consistent person creation
     func findOrCreatePerson(
         email: String,
         displayName: String?,
         in context: NSManagedObjectContext
     ) -> Person {
-        let request = Person.fetchRequest()
-        request.predicate = NSPredicate(format: "email == %@", email)
-        request.fetchLimit = 1
-        request.fetchBatchSize = 1  // Single object fetch
-        
-        if let existing = try? context.fetch(request).first {
-            // Update display name if we have a new one and the existing one is nil
-            if displayName != nil && existing.displayName == nil {
-                existing.displayName = displayName
-            }
-            return existing
-        }
-        
-        let person = NSEntityDescription.insertNewObject(forEntityName: "Person", into: context) as! Person
-        person.id = UUID()
-        person.email = email
-        person.displayName = displayName
-        return person
+        PersonFactory.findOrCreate(email: email, displayName: displayName, in: context)
     }
     
     /// Updates rollup data for a conversation. Must be called from within the conversation's context queue.
@@ -106,19 +87,54 @@ final class ConversationManager: @unchecked Sendable {
 
         // Update inbox status
         var inboxMessages: [Message] = []
+        let previousHasInbox = conversation.hasInbox
         for message in messages {
             if let labelsSet = message.value(forKey: "labels") as? NSSet,
                let labels = labelsSet.allObjects as? [NSManagedObject] {
-                let hasInbox = labels.contains { label in
-                    (label.value(forKey: "id") as? String) == "INBOX"
-                }
+                let labelIds = labels.compactMap { $0.value(forKey: "id") as? String }
+                let hasInbox = labelIds.contains("INBOX")
                 if hasInbox {
                     inboxMessages.append(message)
+                }
+                // Debug: Log message label info during rollup
+                if let msgId = message.value(forKey: "id") as? String {
+                    print("📬 [ConversationRollup] Message \(msgId): labels=\(labelIds), hasINBOX=\(hasInbox)")
+                }
+            } else {
+                // Debug: Log if labels aren't accessible
+                if let msgId = message.value(forKey: "id") as? String {
+                    print("⚠️ [ConversationRollup] Message \(msgId): could not read labels (labels nil or not NSSet)")
                 }
             }
         }
 
-        conversation.hasInbox = !inboxMessages.isEmpty
+        let newHasInbox = !inboxMessages.isEmpty
+        conversation.hasInbox = newHasInbox
+
+        // CRITICAL: Handle archive state changes
+        // When ALL messages lose INBOX label (from Gmail), set archivedAt
+        // When ANY message gets INBOX label back, clear archivedAt (un-archive)
+        if newHasInbox && conversation.archivedAt != nil {
+            // Un-archive: At least one message is back in inbox
+            conversation.archivedAt = nil
+            conversation.hidden = false
+            print("📬 [ConversationRollup] Conversation \(conversation.id.uuidString): UN-ARCHIVED (hasInbox=true, archivedAt->nil)")
+        } else if !newHasInbox && conversation.archivedAt == nil {
+            // Archive: All messages have lost INBOX label
+            conversation.archivedAt = Date()
+            conversation.hidden = true
+            print("📬 [ConversationRollup] Conversation \(conversation.id.uuidString): ARCHIVED (hasInbox=false, archivedAt set)")
+        }
+
+        // Keep hidden state in sync with archive state (for backward compatibility)
+        if newHasInbox && conversation.hidden {
+            conversation.hidden = false
+        } else if !newHasInbox && !conversation.hidden {
+            conversation.hidden = true
+        }
+
+        // Log rollup result
+        print("📬 [ConversationRollup] Conversation \(conversation.id.uuidString): hasInbox=\(newHasInbox) (was \(previousHasInbox)), inboxMsgCount=\(inboxMessages.count), totalMsgCount=\(messages.count), hidden=\(conversation.hidden)")
         conversation.inboxUnreadCount = Int32(inboxMessages.filter { $0.isUnread }.count)
 
         if let latestInboxMessage = inboxMessages.max(by: { $0.internalDate < $1.internalDate }) {

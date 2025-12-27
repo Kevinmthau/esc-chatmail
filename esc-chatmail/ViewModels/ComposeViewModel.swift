@@ -46,30 +46,9 @@ final class ComposeViewModel: ObservableObject {
     // MARK: - Dependencies
 
     let mode: Mode
-    private var _sendService: GmailSendService?
-    private var _contactsService: ContactsService?
-    private var _viewContext: NSManagedObjectContext?
-
-    private var viewContext: NSManagedObjectContext {
-        if _viewContext == nil {
-            _viewContext = CoreDataStack.shared.viewContext
-        }
-        return _viewContext!
-    }
-
-    private var sendService: GmailSendService {
-        if _sendService == nil {
-            _sendService = GmailSendService(viewContext: viewContext)
-        }
-        return _sendService!
-    }
-
-    private var contactsService: ContactsService {
-        if _contactsService == nil {
-            _contactsService = ContactsService()
-        }
-        return _contactsService!
-    }
+    private lazy var viewContext: NSManagedObjectContext = CoreDataStack.shared.viewContext
+    private lazy var sendService: GmailSendService = GmailSendService(viewContext: viewContext)
+    private lazy var contactsService: ContactsService = ContactsService()
 
     // MARK: - Debouncing
 
@@ -248,23 +227,25 @@ final class ComposeViewModel: ObservableObject {
         // Prepare attachment infos for background send
         let attachmentInfos = attachments.map { sendService.attachmentToInfo($0) }
 
-        // Capture mode data before dismissing
-        let capturedMode = mode
+        // Build reply data on main actor before background task (Core Data objects aren't Sendable)
+        let replyData: ReplyData?
+        switch mode {
+        case .reply(let conversation, let replyingTo):
+            replyData = buildReplyData(
+                conversation: conversation,
+                replyingTo: replyingTo,
+                body: messageBody
+            )
+        default:
+            replyData = nil
+        }
 
         // Send in background - don't wait for completion
         Task.detached { [sendService] in
             do {
                 let result: GmailSendService.SendResult
 
-                switch capturedMode {
-                case .reply(let conversation, let replyingTo):
-                    let replyData = await MainActor.run {
-                        self.buildReplyData(
-                            conversation: conversation,
-                            replyingTo: replyingTo,
-                            body: messageBody
-                        )
-                    }
+                if let replyData = replyData {
                     result = try await sendService.sendReply(
                         to: replyData.recipients,
                         body: replyData.body,
@@ -275,7 +256,7 @@ final class ComposeViewModel: ObservableObject {
                         originalMessage: replyData.originalMessage,
                         attachmentInfos: attachmentInfos
                     )
-                default:
+                } else {
                     result = try await sendService.sendNew(
                         to: recipientEmails,
                         body: messageBody,

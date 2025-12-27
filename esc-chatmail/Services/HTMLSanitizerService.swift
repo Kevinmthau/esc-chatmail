@@ -8,6 +8,37 @@ protocol HTMLSanitizerProtocol {
     func analyzeComplexity(_ html: String) -> HTMLSanitizerService.HTMLComplexity
 }
 
+// MARK: - Regex Sanitizer Utility
+
+/// Utility for applying regex-based sanitization rules to strings
+/// Eliminates boilerplate in HTML sanitization methods
+struct RegexSanitizer {
+    /// Applies a single regex pattern replacement
+    static func replace(
+        in text: String,
+        pattern: String,
+        with replacement: String = "",
+        options: String.CompareOptions = [.regularExpression, .caseInsensitive]
+    ) -> String {
+        text.replacingOccurrences(of: pattern, with: replacement, options: options)
+    }
+
+    /// Applies multiple regex pattern replacements in sequence
+    static func applyRules(to text: String, rules: [(pattern: String, replacement: String)]) -> String {
+        rules.reduce(text) { result, rule in
+            replace(in: result, pattern: rule.pattern, with: rule.replacement)
+        }
+    }
+
+    /// Removes HTML tags (with content) matching any of the given tag names
+    static func removeTags(from html: String, tags: [String]) -> String {
+        tags.reduce(html) { result, tag in
+            let pattern = "<\(tag)\\b[^>]*>.*?</\(tag)>|<\(tag)\\b[^>]*/?>"
+            return replace(in: result, pattern: pattern)
+        }
+    }
+}
+
 class HTMLSanitizerService: HTMLSanitizerProtocol {
     static let shared = HTMLSanitizerService()
 
@@ -99,54 +130,40 @@ class HTMLSanitizerService: HTMLSanitizerProtocol {
         return sanitized
     }
 
+    // MARK: - Dangerous Tags Configuration
+
+    private static let dangerousTags = [
+        "script", "noscript", "object", "embed", "applet",
+        "frame", "frameset", "iframe", "base", "basefont",
+        "form", "input", "button", "select", "textarea",
+        "option", "optgroup", "fieldset", "legend", "label",
+        "meta", "link"
+    ]
+
     // MARK: - Specific Sanitization Methods
 
     private func removeDangerousElements(_ html: String) -> String {
-        let dangerousTags = [
-            "script", "noscript", "object", "embed", "applet",
-            "frame", "frameset", "iframe", "base", "basefont",
-            "form", "input", "button", "select", "textarea",
-            "option", "optgroup", "fieldset", "legend", "label",
-            "meta", "link"
-        ]
-
-        var result = html
-        for tag in dangerousTags {
-            // Remove opening and closing tags and their content
-            let pattern = "<\(tag)\\b[^>]*>.*?</\(tag)>|<\(tag)\\b[^>]*/?>"
-            result = result.replacingOccurrences(
-                of: pattern,
-                with: "",
-                options: [.regularExpression, .caseInsensitive]
-            )
-        }
-        return result
+        RegexSanitizer.removeTags(from: html, tags: Self.dangerousTags)
     }
 
     private func removeScriptTags(_ html: String) -> String {
-        let scriptPattern = "<script\\b[^<]*(?:(?!<\\/script>)<[^<]*)*<\\/script>|<script\\b[^>]*\\/>"
-        return html.replacingOccurrences(
-            of: scriptPattern,
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
+        RegexSanitizer.replace(
+            in: html,
+            pattern: "<script\\b[^<]*(?:(?!<\\/script>)<[^<]*)*<\\/script>|<script\\b[^>]*\\/>"
         )
     }
 
     private func removeStyleTags(_ html: String) -> String {
-        let stylePattern = "<style\\b[^<]*(?:(?!<\\/style>)<[^<]*)*<\\/style>"
-        return html.replacingOccurrences(
-            of: stylePattern,
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
+        RegexSanitizer.replace(
+            in: html,
+            pattern: "<style\\b[^<]*(?:(?!<\\/style>)<[^<]*)*<\\/style>"
         )
     }
 
     private func removeEventHandlers(_ html: String) -> String {
-        let eventPattern = "\\s*on\\w+\\s*=\\s*[\"'][^\"']*[\"']|\\s*on\\w+\\s*=\\s*[^\\s>]+"
-        return html.replacingOccurrences(
-            of: eventPattern,
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
+        RegexSanitizer.replace(
+            in: html,
+            pattern: "\\s*on\\w+\\s*=\\s*[\"'][^\"']*[\"']|\\s*on\\w+\\s*=\\s*[^\\s>]+"
         )
     }
 
@@ -239,29 +256,23 @@ class HTMLSanitizerService: HTMLSanitizerProtocol {
     }
 
     private func removeMetaRefresh(_ html: String) -> String {
-        let metaPattern = "<meta\\s+[^>]*http-equiv\\s*=\\s*[\"']refresh[\"'][^>]*>"
-        return html.replacingOccurrences(
-            of: metaPattern,
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
+        RegexSanitizer.replace(
+            in: html,
+            pattern: "<meta\\s+[^>]*http-equiv\\s*=\\s*[\"']refresh[\"'][^>]*>"
         )
     }
 
     private func removeForms(_ html: String) -> String {
-        let formPattern = "<form\\b[^<]*(?:(?!<\\/form>)<[^<]*)*<\\/form>|<form\\b[^>]*\\/>"
-        return html.replacingOccurrences(
-            of: formPattern,
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
+        RegexSanitizer.replace(
+            in: html,
+            pattern: "<form\\b[^<]*(?:(?!<\\/form>)<[^<]*)*<\\/form>|<form\\b[^>]*\\/>"
         )
     }
 
     private func removeIframes(_ html: String) -> String {
-        let iframePattern = "<iframe\\b[^<]*(?:(?!<\\/iframe>)<[^<]*)*<\\/iframe>|<iframe\\b[^>]*\\/>"
-        return html.replacingOccurrences(
-            of: iframePattern,
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
+        RegexSanitizer.replace(
+            in: html,
+            pattern: "<iframe\\b[^<]*(?:(?!<\\/iframe>)<[^<]*)*<\\/iframe>|<iframe\\b[^>]*\\/>"
         )
     }
 
@@ -326,45 +337,16 @@ class HTMLSanitizerService: HTMLSanitizerProtocol {
         return result
     }
 
+    private static let cssSanitizationRules: [(pattern: String, replacement: String)] = [
+        ("javascript:", ""),                           // Remove javascript: in CSS
+        ("expression\\s*\\([^)]*\\)", ""),             // Remove expression() (IE specific)
+        ("@import[^;]*;", ""),                         // Remove @import
+        ("behavior\\s*:[^;]*;", ""),                   // Remove behavior property (IE specific)
+        ("-moz-binding\\s*:[^;]*;", "")                // Remove -moz-binding (Firefox specific)
+    ]
+
     private func sanitizeCSS(_ css: String) -> String {
-        var sanitized = css
-
-        // Remove javascript: in CSS
-        sanitized = sanitized.replacingOccurrences(
-            of: "javascript:",
-            with: "",
-            options: .caseInsensitive
-        )
-
-        // Remove expression() in CSS (IE specific)
-        sanitized = sanitized.replacingOccurrences(
-            of: "expression\\s*\\([^)]*\\)",
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
-        )
-
-        // Remove @import
-        sanitized = sanitized.replacingOccurrences(
-            of: "@import[^;]*;",
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
-        )
-
-        // Remove behavior property (IE specific)
-        sanitized = sanitized.replacingOccurrences(
-            of: "behavior\\s*:[^;]*;",
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
-        )
-
-        // Remove -moz-binding (Firefox specific)
-        sanitized = sanitized.replacingOccurrences(
-            of: "-moz-binding\\s*:[^;]*;",
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
-        )
-
-        return sanitized
+        RegexSanitizer.applyRules(to: css, rules: Self.cssSanitizationRules)
     }
 
     // MARK: - HTML to AttributedString Conversion

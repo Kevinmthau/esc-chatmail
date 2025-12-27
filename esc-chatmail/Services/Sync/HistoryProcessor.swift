@@ -169,10 +169,15 @@ final class HistoryProcessor: @unchecked Sendable {
     ) async {
         guard let labelsRemoved = labelsRemoved else { return }
 
+        print("🏷️ [HistoryProcessor] Processing \(labelsRemoved.count) label removals")
+
         for removed in labelsRemoved {
             let messageId = removed.message.id
             let labelIds = removed.labelIds
             let removesUnread = labelIds.contains("UNREAD")
+            let removesInbox = labelIds.contains("INBOX")
+
+            print("🏷️ [HistoryProcessor] Label removal: messageId=\(messageId), labels=\(labelIds), removesInbox=\(removesInbox)")
 
             await context.perform {
                 let request = Message.fetchRequest()
@@ -180,8 +185,11 @@ final class HistoryProcessor: @unchecked Sendable {
                 do {
                     guard let message = try context.fetch(request).first else {
                         // Message not found locally - this is normal for messages we haven't synced
+                        print("🏷️ [HistoryProcessor] Message \(messageId) not found locally - skipping")
                         return
                     }
+
+                    print("🏷️ [HistoryProcessor] Found local message \(messageId), applying label removal")
 
                     // Conflict resolution: skip if message has pending local changes
                     if self.hasConflict(message: message, syncStartTime: syncStartTime) {
@@ -196,6 +204,7 @@ final class HistoryProcessor: @unchecked Sendable {
                         let labels = try context.fetch(labelRequest)
                         for label in labels {
                             message.removeFromLabels(label)
+                            print("🏷️ [HistoryProcessor] Removed label '\(label.id)' from message \(messageId)")
                         }
                     } catch {
                         print("Failed to fetch labels for removal on message \(messageId): \(error.localizedDescription)")
@@ -208,6 +217,7 @@ final class HistoryProcessor: @unchecked Sendable {
                     // Track conversation for rollup update (handles hasInbox changes)
                     if let conversation = message.conversation {
                         self.trackModifiedConversation(conversation)
+                        print("🏷️ [HistoryProcessor] Tracked conversation \(conversation.id.uuidString) for rollup update")
                     }
                 } catch {
                     print("Failed to fetch message for label removal \(messageId): \(error.localizedDescription)")

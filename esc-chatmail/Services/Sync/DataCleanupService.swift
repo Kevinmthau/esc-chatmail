@@ -1,5 +1,6 @@
 import Foundation
 import CoreData
+import CryptoKit
 
 /// Handles data cleanup operations like duplicate removal and empty conversation cleanup
 final class DataCleanupService: @unchecked Sendable {
@@ -17,8 +18,66 @@ final class DataCleanupService: @unchecked Sendable {
     /// Runs full cleanup including duplicate removal
     /// - Parameter context: The Core Data context
     func runFullCleanup(in context: NSManagedObjectContext) async {
+        await migrateConversationsToArchiveModel(in: context)
         await removeDuplicateMessages(in: context)
         await removeDuplicateConversations(in: context)
+    }
+
+    // MARK: - Archive Model Migration
+
+    /// Migrates existing conversations to the new archive model
+    /// - Sets archivedAt for conversations that are hidden or have no inbox messages
+    /// - Sets participantHash for conversations that don't have one
+    func migrateConversationsToArchiveModel(in context: NSManagedObjectContext) async {
+        let hasDoneMigration = UserDefaults.standard.bool(forKey: "hasDoneArchiveModelMigrationV1")
+        guard !hasDoneMigration else { return }
+
+        print("🔄 [Migration] Starting archive model migration...")
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        await context.perform {
+            let request = Conversation.fetchRequest()
+            request.fetchBatchSize = 50
+
+            guard let conversations = try? context.fetch(request) else {
+                print("⚠️ [Migration] Failed to fetch conversations")
+                return
+            }
+
+            var archivedCount = 0
+            var participantHashCount = 0
+
+            for conversation in conversations {
+                // Set archivedAt for archived conversations
+                if conversation.archivedAt == nil && (conversation.hidden || !conversation.hasInbox) {
+                    conversation.archivedAt = conversation.lastMessageDate ?? Date()
+                    archivedCount += 1
+                }
+
+                // Set participantHash if missing
+                if conversation.participantHash == nil {
+                    // Build participant hash from participants
+                    let emails = conversation.participantsArray.map { normalizedEmail($0) }.sorted()
+                    if !emails.isEmpty {
+                        let participantKey = "p|\(emails.joined(separator: "|"))"
+                        let hash = SHA256.hash(data: Data(participantKey.utf8))
+                            .map { String(format: "%02x", $0) }
+                            .joined()
+                        conversation.participantHash = hash
+                        participantHashCount += 1
+                    }
+                }
+            }
+
+            self.coreDataStack.saveIfNeeded(context: context)
+
+            let duration = CFAbsoluteTimeGetCurrent() - startTime
+            print("✅ [Migration] Archive model migration complete in \(String(format: "%.2f", duration))s")
+            print("   - Set archivedAt for \(archivedCount) conversations")
+            print("   - Set participantHash for \(participantHashCount) conversations")
+        }
+
+        UserDefaults.standard.set(true, forKey: "hasDoneArchiveModelMigrationV1")
     }
 
     /// Runs incremental cleanup (no duplicate message check)

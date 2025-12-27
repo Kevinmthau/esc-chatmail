@@ -175,15 +175,19 @@ struct ParticipantsListView: View {
     let onAddContact: (Person) -> Void
     @Environment(\.dismiss) private var dismiss
     private let contactsResolver = ContactsResolver.shared
+    private let participantLoader = ParticipantLoader.shared
 
     private var otherParticipants: [Person] {
-        let currentUserEmail = AuthSession.shared.userEmail?.lowercased() ?? ""
-        guard let participants = conversation.participants else { return [] }
+        let currentUserEmail = AuthSession.shared.userEmail ?? ""
+        let otherEmails = Set(participantLoader.extractNonMeParticipants(
+            from: conversation,
+            currentUserEmail: currentUserEmail
+        ).map { EmailNormalizer.normalize($0) })
 
+        guard let participants = conversation.participants else { return [] }
         return participants.compactMap { participant -> Person? in
             guard let person = participant.person else { return nil }
-            guard person.email.lowercased() != currentUserEmail else { return nil }
-            return person
+            return otherEmails.contains(EmailNormalizer.normalize(person.email)) ? person : nil
         }
     }
 

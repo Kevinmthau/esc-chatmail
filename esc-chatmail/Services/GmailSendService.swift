@@ -313,11 +313,17 @@ final class GmailSendService: ObservableObject {
         // Build minimal headers for identity: From + To
         let identityHeaders = recipients.map { MessageHeader(name: "To", value: $0) }
         let identity = makeConversationIdentity(from: identityHeaders, myAliases: myAliases)
-        
+
+        // Look for an ACTIVE conversation with these participants
+        // When sending a new message, we want to add it to the active conversation
+        // or create a new one if all are archived
         let request: NSFetchRequest<Conversation> = Conversation.fetchRequest()
-        request.predicate = NSPredicate(format: "keyHash == %@", identity.keyHash)
+        request.predicate = NSPredicate(
+            format: "participantHash == %@ AND archivedAt == nil",
+            identity.participantHash
+        )
         request.fetchLimit = 1
-        request.fetchBatchSize = 1  // Single object fetch
+        request.fetchBatchSize = 1
 
         if let existing = try? context.fetch(request).first {
             return existing
@@ -326,11 +332,13 @@ final class GmailSendService: ObservableObject {
         let conversation = Conversation(context: context)
         conversation.id = UUID()
         conversation.keyHash = identity.keyHash
+        conversation.participantHash = identity.participantHash
         conversation.conversationType = identity.type
         conversation.lastMessageDate = Date()
         conversation.inboxUnreadCount = 0
         conversation.hasInbox = false  // IMPORTANT: do NOT set to true for outgoing messages
         conversation.hidden = false
+        conversation.archivedAt = nil  // New conversations are active
         conversation.displayName = formatGroupNames(recipients)
         
         // Create participants

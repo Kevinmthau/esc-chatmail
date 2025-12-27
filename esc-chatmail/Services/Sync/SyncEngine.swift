@@ -507,6 +507,8 @@ final class SyncEngine: ObservableObject {
             let historyModifiedIDs = historyProcessor.getAndClearModifiedConversations()
             modifiedConversationIDs.formUnion(historyModifiedIDs)
 
+            print("📬 [SyncEngine] Updating rollups for \(modifiedConversationIDs.count) modified conversations (persister: \(modifiedConversationIDs.count - historyModifiedIDs.count), history: \(historyModifiedIDs.count))")
+
             if !modifiedConversationIDs.isEmpty {
                 await conversationManager.updateRollupsForModifiedConversations(
                     conversationIDs: modifiedConversationIDs,
@@ -652,9 +654,11 @@ final class SyncEngine: ObservableObject {
             }
 
             print("🏷️ [SyncCorrectness] Reconciling labels for \(recentMessageIds.count) recent messages...")
+            print("🏷️ [SyncCorrectness] Message IDs to reconcile: \(recentMessageIds.prefix(5))...")
 
             var labelMismatches = 0
             var updatedMessages = 0
+            var messagesNotInLocalDB = 0
 
             // Note: labelCache contains NSManagedObjects which aren't Sendable, but we ensure
             // all Core Data operations happen on the same background context
@@ -665,6 +669,7 @@ final class SyncEngine: ObservableObject {
                 do {
                     // Fetch the message from Gmail
                     let gmailMessage = try await GmailAPIClient.shared.getMessage(id: messageId, format: "metadata")
+                    let gmailHasInbox = gmailMessage.labelIds?.contains("INBOX") ?? false
 
                     // Check local message
                     await context.perform {
@@ -673,6 +678,7 @@ final class SyncEngine: ObservableObject {
                         request.fetchLimit = 1
 
                         guard let localMessage = try? context.fetch(request).first else {
+                            messagesNotInLocalDB += 1
                             return // Message not in local DB
                         }
 
@@ -690,8 +696,10 @@ final class SyncEngine: ObservableObject {
                         let localLabelIds = Set(localLabels.compactMap { $0.id })
 
                         // Check for INBOX label discrepancy (most important for archive detection)
-                        let gmailHasInbox = gmailLabelIds.contains("INBOX")
                         let localHasInbox = localLabelIds.contains("INBOX")
+
+                        // Log comparison
+                        print("🏷️ [SyncCorrectness] Checking \(messageId): Gmail INBOX=\(gmailHasInbox), local INBOX=\(localHasInbox)")
 
                         if gmailHasInbox != localHasInbox {
                             labelMismatches += 1
@@ -736,7 +744,7 @@ final class SyncEngine: ObservableObject {
             if labelMismatches > 0 {
                 print("🔧 [SyncCorrectness] Label reconciliation: found \(labelMismatches) mismatches, updated \(updatedMessages) messages")
             } else {
-                print("✅ [SyncCorrectness] Label reconciliation: no mismatches found")
+                print("✅ [SyncCorrectness] Label reconciliation: no mismatches found (checked \(recentMessageIds.count - messagesNotInLocalDB) local messages, \(messagesNotInLocalDB) not in local DB)")
             }
         } catch {
             print("⚠️ [SyncCorrectness] Label reconciliation failed: \(error.localizedDescription)")

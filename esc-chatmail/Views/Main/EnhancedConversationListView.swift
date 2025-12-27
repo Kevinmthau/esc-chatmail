@@ -40,7 +40,7 @@ final class ConversationListState: ObservableObject {
             NSSortDescriptor(keyPath: \Conversation.pinned, ascending: false),
             NSSortDescriptor(keyPath: \Conversation.lastMessageDate, ascending: false)
         ]
-        request.predicate = NSPredicate(format: "hidden == NO")
+        request.predicate = NSPredicate(format: "archivedAt == nil")
         request.fetchBatchSize = 30
         request.relationshipKeyPathsForPrefetching = ["messages", "participants", "participants.person"]
 

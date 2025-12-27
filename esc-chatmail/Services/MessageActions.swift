@@ -8,36 +8,57 @@ class MessageActions: ObservableObject {
 
     @MainActor
     func markAsRead(message: Message) async {
-        // Update local state only (one-way sync: Gmail -> App only)
-        message.isUnread = false
+        await updateReadState(message: message, isUnread: false, actionType: .markRead)
+    }
+
+    @MainActor
+    func markAsUnread(message: Message) async {
+        await updateReadState(message: message, isUnread: true, actionType: .markUnread)
+    }
+
+    /// Core method for updating message read state - eliminates duplication between markAsRead/markAsUnread
+    @MainActor
+    private func updateReadState(message: Message, isUnread: Bool, actionType: PendingAction.ActionType) async {
+        // Skip if already in desired state
+        guard message.isUnread != isUnread else { return }
+
+        // Update local state
+        message.isUnread = isUnread
         coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
 
         // Update conversation unread count
         if let conversation = message.conversation {
             updateConversationInboxStatus(conversation)
+        }
+
+        // Queue sync to Gmail
+        let messageId = message.id
+        if !messageId.isEmpty {
+            await PendingActionsManager.shared.queueAction(
+                type: actionType,
+                messageId: messageId
+            )
         }
     }
 
     /// Mark message as read using ObjectID - safe to call from background threads
     func markAsRead(messageID: NSManagedObjectID) async {
-        let context = coreDataStack.newBackgroundContext()
+        var gmailMessageId: String?
 
+        let context = coreDataStack.newBackgroundContext()
         context.performAndWait {
             guard let message = try? context.existingObject(with: messageID) as? Message else { return }
+            guard message.isUnread else { return }
             message.isUnread = false
+            gmailMessageId = message.id
             try? context.save()
         }
-    }
 
-    @MainActor
-    func markAsUnread(message: Message) async {
-        // Update local state only (one-way sync: Gmail -> App only)
-        message.isUnread = true
-        coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
-
-        // Update conversation unread count
-        if let conversation = message.conversation {
-            updateConversationInboxStatus(conversation)
+        if let messageId = gmailMessageId, !messageId.isEmpty {
+            await PendingActionsManager.shared.queueAction(
+                type: .markRead,
+                messageId: messageId
+            )
         }
     }
 
@@ -49,12 +70,21 @@ class MessageActions: ObservableObject {
         let inboxLabel = labels.first { $0.id == "INBOX" }
         guard let inboxLabel = inboxLabel else { return }
 
-        // Update local state only (one-way sync: Gmail -> App only)
+        // Update local state
         message.removeFromLabels(inboxLabel)
         coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
 
         if let conversation = message.conversation {
             updateConversationInboxStatus(conversation)
+        }
+
+        // Queue sync to Gmail (remove INBOX label)
+        let messageId = message.id
+        if !messageId.isEmpty {
+            await PendingActionsManager.shared.queueAction(
+                type: .archive,
+                messageId: messageId
+            )
         }
     }
 
@@ -76,19 +106,38 @@ class MessageActions: ObservableObject {
         let inboxLabel = try? context.fetch(labelRequest).first
         print("[ARCHIVE-ACTION] INBOX label found: \(inboxLabel != nil)")
 
-        // Update local state only (one-way sync: Gmail -> App only)
+        // Collect message IDs for syncing
+        var messageIds: [String] = []
         var removedCount = 0
         for message in messages {
             if let inboxLabel = inboxLabel {
                 message.removeFromLabels(inboxLabel)
                 removedCount += 1
+                if !message.id.isEmpty {
+                    messageIds.append(message.id)
+                }
             }
         }
+
+        // CRITICAL: Set archivedAt to mark this conversation as archived
+        // This ensures that future emails from these participants create a NEW conversation
+        conversation.archivedAt = Date()
+        print("[ARCHIVE-ACTION] Set archivedAt to \(conversation.archivedAt!)")
+
         coreDataStack.saveIfNeeded(context: context)
         print("[ARCHIVE-ACTION] Removed INBOX label from \(removedCount) messages, saved context")
 
         updateConversationInboxStatus(conversation)
         print("[ARCHIVE-ACTION] Updated conversation inbox status - hasInbox: \(conversation.hasInbox)")
+
+        // Queue sync to Gmail
+        if !messageIds.isEmpty {
+            await PendingActionsManager.shared.queueConversationAction(
+                type: .archiveConversation,
+                conversationId: conversation.id,
+                messageIds: messageIds
+            )
+        }
     }
 
     // MARK: - Star/Unstar

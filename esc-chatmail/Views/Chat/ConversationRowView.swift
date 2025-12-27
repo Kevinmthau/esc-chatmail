@@ -29,7 +29,7 @@ struct ConversationRowView: View {
     let conversation: Conversation
 
     private let authSession = AuthSession.shared
-    private let personCache = PersonCache.shared
+    private let participantLoader = ParticipantLoader.shared
 
     @State private var displayName: String = ""
     @State private var avatarPhotos: [ProfilePhoto] = []
@@ -105,104 +105,18 @@ struct ConversationRowView: View {
         // Small yield to avoid blocking UI interactions
         await Task.yield()
 
-        guard let participants = conversation.participants else {
-            displayName = "Unknown"
-            print("[ConversationRowView] No participants for conversation \(conversation.id)")
-            return
-        }
-
         let myEmail = authSession.userEmail ?? ""
-        let normalizedMyEmail = EmailNormalizer.normalize(myEmail)
 
-        // Log all participants for debugging
-        let allEmails = participants.compactMap { $0.person?.email }
-        print("[ConversationRowView] Conversation \(conversation.id): All participant emails: \(allEmails)")
-        print("[ConversationRowView] My email: \(myEmail), Stored displayName: \(conversation.displayName ?? "nil"), snippet: \(snapshot.snippet ?? "nil")")
+        // Use ParticipantLoader for all participant resolution
+        let info = await participantLoader.loadParticipants(
+            from: conversation,
+            currentUserEmail: myEmail,
+            maxParticipants: 4
+        )
 
-        // Get non-me participants (deduplicated by normalized email)
-        var seenEmails = Set<String>()
-        var nonMeParticipants: [String] = []
-        for participant in participants {
-            guard let email = participant.person?.email else { continue }
-            let normalized = EmailNormalizer.normalize(email)
-            guard normalized != normalizedMyEmail, !seenEmails.contains(normalized) else { continue }
-            seenEmails.insert(normalized)
-            nonMeParticipants.append(email)
-        }
-        print("[ConversationRowView] Non-me participants: \(nonMeParticipants)")
-
-        // Limit to top 4 participants for display (for group avatar)
-        let topParticipants = Array(nonMeParticipants.prefix(4))
-
-        // Check if all emails are already cached (ViewModel likely prefetched them)
-        let allCached = topParticipants.allSatisfy { email in
-            personCache.getCachedDisplayName(for: email) != nil
-        }
-
-        // Only call prefetch if we have uncached emails (avoids redundant calls)
-        if !allCached {
-            await personCache.prefetch(emails: topParticipants)
-        }
-
-        // Now get names from cache (all should be cached after prefetch)
-        var resolvedNames: [String] = []
-        for email in topParticipants {
-            let name = personCache.getCachedDisplayName(for: email) ?? fallbackDisplayName(for: email)
-            resolvedNames.append(name)
-        }
-
-        // Update display name immediately (before photos load)
-        updateDisplayName(resolvedNames: resolvedNames, totalParticipants: nonMeParticipants.count)
-        participantNames = resolvedNames
-
-        // Load photos separately (slower, may involve network)
-        let photoResults = await ProfilePhotoResolver.shared.resolvePhotos(for: topParticipants)
-        var resolvedPhotos: [ProfilePhoto] = []
-        for email in topParticipants {
-            let normalizedEmail = EmailNormalizer.normalize(email)
-            if let photo = photoResults[normalizedEmail] {
-                resolvedPhotos.append(photo)
-            }
-        }
-        avatarPhotos = resolvedPhotos
-    }
-
-    private func updateDisplayName(resolvedNames: [String], totalParticipants: Int) {
-        print("[ConversationRowView] updateDisplayName called with resolvedNames: \(resolvedNames), totalParticipants: \(totalParticipants)")
-
-        if resolvedNames.isEmpty {
-            displayName = conversation.displayName ?? "No participants"
-            print("[ConversationRowView] Using fallback displayName: \(displayName)")
-        } else if resolvedNames.count == 1 {
-            displayName = resolvedNames[0]
-            print("[ConversationRowView] Single participant displayName: \(displayName)")
-        } else {
-            let firstNames = resolvedNames.map { name in
-                let components = name.components(separatedBy: " ")
-                return components.first ?? name
-            }
-
-            if firstNames.count == 2 {
-                displayName = "\(firstNames[0]), \(firstNames[1])"
-            } else {
-                let remaining = totalParticipants - 2
-                if remaining > 0 {
-                    displayName = "\(firstNames[0]), \(firstNames[1]) +\(remaining)"
-                } else {
-                    displayName = "\(firstNames[0]), \(firstNames[1])"
-                }
-            }
-            print("[ConversationRowView] Multi-participant displayName: \(displayName)")
-        }
-    }
-
-    private func fallbackDisplayName(for email: String) -> String {
-        // Preserve original case for display, just extract username part
-        let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let atIndex = trimmed.firstIndex(of: "@") {
-            return String(trimmed[..<atIndex])
-        }
-        return trimmed
+        displayName = info.formattedDisplayName
+        participantNames = info.displayNames
+        avatarPhotos = info.photos
     }
 
     private func formatDate(_ date: Date) -> String {

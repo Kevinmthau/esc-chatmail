@@ -11,7 +11,9 @@ struct ConversationListView: View {
             NSSortDescriptor(keyPath: \Conversation.pinned, ascending: false),
             NSSortDescriptor(keyPath: \Conversation.lastMessageDate, ascending: false)
         ]
-        request.predicate = NSPredicate(format: "hidden == NO")
+        // Show only active (non-archived) conversations
+        // archivedAt == nil means the conversation is active
+        request.predicate = NSPredicate(format: "archivedAt == nil")
         request.fetchBatchSize = 20
         request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
         _conversations = FetchRequest(fetchRequest: request)

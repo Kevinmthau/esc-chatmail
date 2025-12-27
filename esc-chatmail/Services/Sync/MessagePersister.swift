@@ -196,6 +196,8 @@ final class MessagePersister: @unchecked Sendable {
         await saveParticipants(for: processedMessage, message: message, in: context)
 
         // Save labels
+        var addedLabelIds: [String] = []
+        let hasInboxLabel = processedMessage.labelIds.contains("INBOX")
         for labelId in processedMessage.labelIds {
             let label: Label?
             if let cache = labelCache {
@@ -205,8 +207,10 @@ final class MessagePersister: @unchecked Sendable {
             }
             if let label = label {
                 message.addToLabels(label)
+                addedLabelIds.append(labelId)
             }
         }
+        print("📧 [MessagePersister] New message \(processedMessage.id): labels=\(addedLabelIds), hasINBOX=\(hasInboxLabel), conversationId=\(conversation.id.uuidString)")
 
         // Save HTML content if present
         if let htmlBody = processedMessage.htmlBody {
@@ -257,49 +261,28 @@ final class MessagePersister: @unchecked Sendable {
         }
     }
 
-    /// Saves a single participant
+    /// Saves a single participant using MessageParticipantFactory
     private func saveParticipant(
         from headerValue: String,
         kind: ParticipantKind,
         for message: Message,
         in context: NSManagedObjectContext
     ) async {
-        guard let email = EmailNormalizer.extractEmail(from: headerValue) else { return }
-        let normalizedEmail = EmailNormalizer.normalize(email)
-        let displayName = EmailNormalizer.extractDisplayName(from: headerValue)
-
-        let person = conversationManager.findOrCreatePerson(
-            email: normalizedEmail,
-            displayName: displayName,
+        _ = MessageParticipantFactory.create(
+            from: headerValue,
+            kind: kind,
+            for: message,
             in: context
         )
-
-        let participant = NSEntityDescription.insertNewObject(
-            forEntityName: "MessageParticipant",
-            into: context
-        ) as! MessageParticipant
-        participant.id = UUID()
-        participant.participantKind = kind
-        participant.person = person
-        participant.message = message
     }
 
-    /// Creates an attachment entity
+    /// Creates an attachment entity using AttachmentFactory
     private func createAttachment(
         _ info: AttachmentInfo,
         for message: Message,
         in context: NSManagedObjectContext
     ) {
-        let attachment = NSEntityDescription.insertNewObject(
-            forEntityName: "Attachment",
-            into: context
-        ) as! Attachment
-        attachment.setValue(info.id, forKey: "id")
-        attachment.setValue(info.filename, forKey: "filename")
-        attachment.setValue(info.mimeType, forKey: "mimeType")
-        attachment.setValue(Int64(info.size), forKey: "byteSize")
-        attachment.setValue("queued", forKey: "stateRaw")
-        attachment.setValue(message, forKey: "message")
+        _ = AttachmentFactory.create(from: info, for: message, in: context)
     }
 
     /// Finds a label by ID

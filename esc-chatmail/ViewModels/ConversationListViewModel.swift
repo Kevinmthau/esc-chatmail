@@ -153,9 +153,11 @@ final class ConversationListViewModel: ObservableObject {
 
     func archiveConversation(_ conversation: Conversation) {
         Task {
+            // MessageActions.archiveConversation handles:
+            // - Removing INBOX labels from messages
+            // - Setting archivedAt and hidden on conversation
+            // - Queuing sync to Gmail
             await messageActions.archiveConversation(conversation: conversation)
-            conversation.hidden = true
-            coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
         }
     }
 
@@ -178,12 +180,14 @@ final class ConversationListViewModel: ObservableObject {
         Task {
             for (index, conversation) in conversationsToArchive.enumerated() {
                 print("[ARCHIVE] [\(index + 1)/\(count)] Processing '\(conversation.displayName ?? "unknown")'...")
+                // MessageActions.archiveConversation handles:
+                // - Removing INBOX labels from messages
+                // - Setting archivedAt and hidden on conversation
+                // - Queuing sync to Gmail
                 await messageActions.archiveConversation(conversation: conversation)
-                conversation.hidden = true
-                print("[ARCHIVE] [\(index + 1)/\(count)] Set hidden=true for '\(conversation.displayName ?? "unknown")'")
+                print("[ARCHIVE] [\(index + 1)/\(count)] Archived '\(conversation.displayName ?? "unknown")'")
             }
-            coreDataStack.saveIfNeeded(context: context)
-            print("[ARCHIVE] Batch archive complete - saved \(count) conversations")
+            print("[ARCHIVE] Batch archive complete - \(count) conversations archived")
         }
     }
 
