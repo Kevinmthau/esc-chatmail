@@ -5,8 +5,35 @@ import CoreData
 final class HistoryProcessor: @unchecked Sendable {
     private let coreDataStack: CoreDataStack
 
+    /// Serial queue to protect access to modifiedConversationIDs
+    private let modifiedConversationsQueue = DispatchQueue(label: "com.esc.chatmail.historyProcessor.modifiedConversations")
+
+    /// Tracks conversation IDs modified during history processing
+    private var modifiedConversationIDs: Set<NSManagedObjectID> = []
+
     init(coreDataStack: CoreDataStack = .shared) {
         self.coreDataStack = coreDataStack
+    }
+
+    /// Returns and clears the set of modified conversation IDs
+    func getAndClearModifiedConversations() -> Set<NSManagedObjectID> {
+        return modifiedConversationsQueue.sync {
+            let result = modifiedConversationIDs
+            modifiedConversationIDs.removeAll()
+            return result
+        }
+    }
+
+    /// Tracks a conversation as modified
+    private func trackModifiedConversation(_ conversation: Conversation) {
+        _ = modifiedConversationsQueue.sync {
+            modifiedConversationIDs.insert(conversation.objectID)
+        }
+    }
+
+    /// Tracks a conversation as modified (public version for reconciliation)
+    func trackModifiedConversationForReconciliation(_ conversation: Conversation) {
+        trackModifiedConversation(conversation)
     }
 
     /// Processes a history record for lightweight operations (label changes and deletions)
@@ -123,6 +150,11 @@ final class HistoryProcessor: @unchecked Sendable {
                     if hasUnread {
                         message.isUnread = true
                     }
+
+                    // Track conversation for rollup update (handles hasInbox changes)
+                    if let conversation = message.conversation {
+                        self.trackModifiedConversation(conversation)
+                    }
                 } catch {
                     print("Failed to fetch message for label addition \(messageId): \(error.localizedDescription)")
                 }
@@ -172,12 +204,22 @@ final class HistoryProcessor: @unchecked Sendable {
                     if removesUnread {
                         message.isUnread = false
                     }
+
+                    // Track conversation for rollup update (handles hasInbox changes)
+                    if let conversation = message.conversation {
+                        self.trackModifiedConversation(conversation)
+                    }
                 } catch {
                     print("Failed to fetch message for label removal \(messageId): \(error.localizedDescription)")
                 }
             }
         }
     }
+
+    /// Maximum age for local modifications before they're considered stale
+    /// If a local modification is older than this, we allow server updates
+    /// This prevents local changes from blocking server updates indefinitely
+    private static let maxLocalModificationAge: TimeInterval = 300 // 5 minutes
 
     /// Check if a message has local modifications that haven't been synced yet
     private nonisolated func hasConflict(message: Message, syncStartTime: Date?) -> Bool {
@@ -186,7 +228,21 @@ final class HistoryProcessor: @unchecked Sendable {
 
         // If the message was modified locally after the sync started,
         // it means there's a pending local change that should take precedence
-        return localModifiedAt > syncStartTime
+        let hasPendingChange = localModifiedAt > syncStartTime
+
+        // However, if the local modification is too old, consider it stale
+        // This prevents local changes from blocking server updates indefinitely
+        // This can happen if the action failed to sync to the server
+        let now = Date()
+        let modificationAge = now.timeIntervalSince(localModifiedAt)
+        let isStaleModification = modificationAge > Self.maxLocalModificationAge
+
+        if hasPendingChange && isStaleModification {
+            print("⚠️ [SyncCorrectness] Local modification is stale (age: \(Int(modificationAge))s), allowing server update")
+            return false
+        }
+
+        return hasPendingChange
     }
 
     /// Clear localModifiedAt for messages whose pending actions have been processed

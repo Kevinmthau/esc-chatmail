@@ -69,6 +69,23 @@ struct SyncConfig {
 
     /// Timeout for batch operations (in seconds)
     static let batchOperationTimeout: TimeInterval = 60.0
+
+    /// Maximum number of consecutive sync failures before advancing historyId anyway
+    /// This prevents sync from getting permanently stuck on unfetchable messages
+    static let maxConsecutiveSyncFailures = 3
+
+    /// Maximum number of messages that can fail before we advance historyId anyway
+    /// If too many messages fail, we log them and move on to prevent sync deadlock
+    static let maxFailedMessagesBeforeAdvance = 10
+
+    /// UserDefaults key for tracking consecutive sync failures
+    static let consecutiveFailuresKey = "syncConsecutiveFailures"
+
+    /// UserDefaults key for tracking failed message IDs across syncs
+    static let persistentFailedIdsKey = "syncPersistentFailedIds"
+
+    /// UserDefaults key for tracking last successful sync time
+    static let lastSuccessfulSyncTimeKey = "lastSuccessfulSyncTime"
 }
 
 // MARK: - Core Data Configuration
