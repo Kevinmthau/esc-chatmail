@@ -134,13 +134,14 @@ final class ChatViewModel: ObservableObject {
         guard !replyData.recipients.isEmpty else { return }
 
         let currentReplyText = replyText
-        let optimisticMessageID = sendService.createOptimisticMessage(
+        let optimisticMessage = await sendService.createOptimisticMessage(
             to: replyData.recipients,
             body: currentReplyText,
             subject: replyData.subject,
             threadId: replyData.threadId,
             attachments: attachments
-        ).id
+        )
+        let optimisticMessageID = optimisticMessage.id
 
         do {
             let result: GmailSendService.SendResult

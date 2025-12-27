@@ -68,9 +68,10 @@ struct ConversationFactory {
         // New conversations start as active (not archived)
         conversation.archivedAt = nil
 
-        // Create participants
+        // Create participants with display names from email headers
         for email in identity.participants {
-            let person = PersonFactory.findOrCreate(email: email, displayName: nil, in: context)
+            let displayName = identity.participantDisplayNames[email]
+            let person = PersonFactory.findOrCreate(email: email, displayName: displayName, in: context)
             createParticipant(person: person, conversation: conversation, role: .normal, in: context)
         }
 

@@ -7,6 +7,7 @@ struct ConversationIdentity {
     let participantHash: String  // SHA256 hex of participant key (same for all convos with same participants)
     let type: ConversationType
     let participants: [String]   // normalized emails, excluding "me"
+    let participantDisplayNames: [String: String]  // normalized email -> display name
 }
 
 func normalizedEmail(_ raw: String) -> String {
@@ -46,7 +47,7 @@ func makeConversationIdentity(from headers: [MessageHeader],
                               myAliases: Set<String>) -> ConversationIdentity {
     // Extract all participants from From, To, Cc headers
     // BCC is explicitly excluded for both identity and display
-    func extractParticipants() -> [String] {
+    func extractParticipantsWithDisplayNames() -> ([String], [String: String]) {
         func values(_ h: String) -> [String] {
             headers.filter { $0.name.caseInsensitiveCompare(h) == .orderedSame }
                 .flatMap { $0.value.split(separator: ",").map(String.init) }
@@ -54,9 +55,24 @@ func makeConversationIdentity(from headers: [MessageHeader],
 
         let raw = values("From") + values("To") + values("Cc")
         // Note: BCC is intentionally excluded
-        let allEmails = Set(raw.compactMap { EmailNormalizer.extractEmail(from: $0) }
-                          .map(normalizedEmail)
-                          .filter { !$0.isEmpty })
+
+        var displayNames: [String: String] = [:]
+        var allEmails = Set<String>()
+
+        for headerValue in raw {
+            guard let email = EmailNormalizer.extractEmail(from: headerValue) else { continue }
+            let normalized = normalizedEmail(email)
+            guard !normalized.isEmpty else { continue }
+
+            allEmails.insert(normalized)
+
+            // Extract display name if we don't already have one for this email
+            if displayNames[normalized] == nil,
+               let displayName = EmailNormalizer.extractDisplayName(from: headerValue),
+               !displayName.isEmpty {
+                displayNames[normalized] = displayName
+            }
+        }
 
         // Remove current user's aliases from participants
         let parts = allEmails.filter { !myAliases.contains($0) }
@@ -64,18 +80,18 @@ func makeConversationIdentity(from headers: [MessageHeader],
         if parts.isEmpty {
             // Self-conversation: use deterministic alias selection (sorted order)
             if let firstAlias = myAliases.sorted().first {
-                return [firstAlias]
+                return ([firstAlias], displayNames)
             } else if let firstEmail = allEmails.sorted().first {
-                return [firstEmail]
+                return ([firstEmail], displayNames)
             } else {
-                return ["unknown@email.com"]
+                return (["unknown@email.com"], displayNames)
             }
         } else {
-            return parts.sorted()
+            return (parts.sorted(), displayNames)
         }
     }
 
-    let participants = extractParticipants()
+    let (participants, displayNames) = extractParticipantsWithDisplayNames()
     let type: ConversationType = participants.count <= 1 ? .oneToOne : .group
 
     // Create participant-based key (used for looking up conversations by participants)
@@ -97,7 +113,8 @@ func makeConversationIdentity(from headers: [MessageHeader],
         keyHash: keyHash,
         participantHash: participantHash,
         type: type,
-        participants: participants
+        participants: participants,
+        participantDisplayNames: displayNames
     )
 }
 

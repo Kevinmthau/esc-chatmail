@@ -165,14 +165,12 @@ struct NewMessageView: View {
                 isSending = true
             }
 
-            let optimisticMessageID = await MainActor.run {
-                let message = sendService.createOptimisticMessage(
-                    to: recipientEmails,
-                    body: trimmedMessage,
-                    subject: messageSubject
-                )
-                return message.id
-            }
+            let optimisticMessage = await sendService.createOptimisticMessage(
+                to: recipientEmails,
+                body: trimmedMessage,
+                subject: messageSubject
+            )
+            let optimisticMessageID = optimisticMessage.id
 
             do {
                 let result = try await sendService.sendNew(

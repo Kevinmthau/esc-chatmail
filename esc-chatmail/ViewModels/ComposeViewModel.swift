@@ -213,7 +213,7 @@ final class ComposeViewModel: ObservableObject {
         let messageSubject = subject.isEmpty ? nil : subject
 
         // Create optimistic message
-        let optimisticMessage = sendService.createOptimisticMessage(
+        let optimisticMessage = await sendService.createOptimisticMessage(
             to: recipientEmails,
             body: messageBody,
             subject: messageSubject,

@@ -219,7 +219,7 @@ final class GmailSendService: ObservableObject {
         subject: String? = nil,
         threadId: String? = nil,
         attachments: [Attachment] = []
-    ) -> Message {
+    ) async -> Message {
         let message = Message(context: viewContext)
         message.id = UUID().uuidString
         message.isFromMe = true
@@ -249,8 +249,8 @@ final class GmailSendService: ObservableObject {
             myAliases = []
         }
 
-        // Create the conversation - we're already on MainActor with viewContext
-        let conversation = findOrCreateConversation(recipients: recipients, myAliases: myAliases, in: viewContext)
+        // Create the conversation using the serializer to prevent race conditions
+        let conversation = await findOrCreateConversation(recipients: recipients, myAliases: myAliases, in: viewContext)
         message.conversation = conversation
 
         // Update conversation to bump it to the top
@@ -309,61 +309,17 @@ final class GmailSendService: ObservableObject {
         }
     }
     
-    private nonisolated func findOrCreateConversation(recipients: [String], myAliases: Set<String>, in context: NSManagedObjectContext) -> Conversation {
+    private func findOrCreateConversation(recipients: [String], myAliases: Set<String>, in context: NSManagedObjectContext) async -> Conversation {
         // Build minimal headers for identity: From + To
         let identityHeaders = recipients.map { MessageHeader(name: "To", value: $0) }
         let identity = makeConversationIdentity(from: identityHeaders, myAliases: myAliases)
 
-        // Look for an ACTIVE conversation with these participants
-        // When sending a new message, we want to add it to the active conversation
-        // or create a new one if all are archived
-        let request: NSFetchRequest<Conversation> = Conversation.fetchRequest()
-        request.predicate = NSPredicate(
-            format: "participantHash == %@ AND archivedAt == nil",
-            identity.participantHash
-        )
-        request.fetchLimit = 1
-        request.fetchBatchSize = 1
+        // Use the serializer to prevent race conditions when creating conversations
+        let conversation = await ConversationCreationSerializer.shared.findOrCreateConversation(for: identity, in: context)
 
-        if let existing = try? context.fetch(request).first {
-            return existing
-        }
-
-        let conversation = Conversation(context: context)
-        conversation.id = UUID()
-        conversation.keyHash = identity.keyHash
-        conversation.participantHash = identity.participantHash
-        conversation.conversationType = identity.type
-        conversation.lastMessageDate = Date()
-        conversation.inboxUnreadCount = 0
-        conversation.hasInbox = false  // IMPORTANT: do NOT set to true for outgoing messages
-        conversation.hidden = false
-        conversation.archivedAt = nil  // New conversations are active
+        // Update display name for sent messages
         conversation.displayName = formatGroupNames(recipients)
-        
-        // Create participants
-        for email in identity.participants {
-            let personRequest = Person.fetchRequest()
-            personRequest.predicate = NSPredicate(format: "email == %@", email)
-            personRequest.fetchLimit = 1
-            personRequest.fetchBatchSize = 1  // Single object fetch
-            
-            let person: Person
-            if let existingPerson = try? viewContext.fetch(personRequest).first {
-                person = existingPerson
-            } else {
-                person = Person(context: viewContext)
-                person.id = UUID()
-                person.email = email
-            }
-            
-            let participant = ConversationParticipant(context: viewContext)
-            participant.id = UUID()
-            participant.participantRole = .normal
-            participant.person = person
-            participant.conversation = conversation
-        }
-        
+
         return conversation
     }
 

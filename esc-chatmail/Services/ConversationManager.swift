@@ -13,32 +13,15 @@ final class ConversationManager: @unchecked Sendable {
     ///
     /// This ensures that when a user archives a conversation and later receives a new email
     /// from the same person, it appears as a fresh conversation without the old history.
+    ///
+    /// Note: This method is serialized per participantHash to prevent duplicate conversations
+    /// from being created when multiple messages for the same participants are processed concurrently.
     func findOrCreateConversation(
         for identity: ConversationIdentity,
         in context: NSManagedObjectContext
     ) async -> Conversation {
-        return await context.perform {
-            // Look for an ACTIVE conversation with these participants
-            let request = Conversation.fetchRequest()
-            request.predicate = NSPredicate(
-                format: "participantHash == %@ AND archivedAt == nil",
-                identity.participantHash
-            )
-            request.fetchLimit = 1
-            request.fetchBatchSize = 1
-
-            if let existing = try? context.fetch(request).first {
-                print("📬 [ConversationManager] Found active conversation for participants: \(identity.participants)")
-                return existing
-            }
-
-            // No active conversation found - create a new one
-            // This happens when:
-            // 1. First message from these participants
-            // 2. All previous conversations with these participants are archived
-            print("📬 [ConversationManager] Creating new conversation for participants: \(identity.participants)")
-            return ConversationFactory.create(for: identity, in: context)
-        }
+        // Delegate to the serializer actor to prevent race conditions
+        return await ConversationCreationSerializer.shared.findOrCreateConversation(for: identity, in: context)
     }
 
     /// Delegates to PersonFactory for consistent person creation
@@ -388,7 +371,66 @@ final class ConversationManager: @unchecked Sendable {
         let loserPinned = loser.value(forKey: "pinned") as? Bool ?? false
         winner.setValue(winnerPinned || loserPinned, forKey: "pinned")
     }
-    
+
+    /// Merges duplicate ACTIVE conversations that have the same participantHash.
+    /// This handles the race condition where multiple conversations were created
+    /// for the same set of participants before the serialization fix.
+    func mergeActiveConversationDuplicates(in context: NSManagedObjectContext) async {
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        await context.perform { [weak self] in
+            guard let self = self else { return }
+
+            // Find active conversations (archivedAt == nil) grouped by participantHash
+            let request = Conversation.fetchRequest()
+            request.predicate = NSPredicate(format: "archivedAt == nil")
+            request.returnsObjectsAsFaults = false
+
+            guard let conversations = try? context.fetch(request) else { return }
+
+            // Group by participantHash
+            var byHash: [String: [Conversation]] = [:]
+            for conv in conversations {
+                guard let hash = conv.participantHash, !hash.isEmpty else { continue }
+                byHash[hash, default: []].append(conv)
+            }
+
+            var mergedCount = 0
+            var deletedObjectIDs = [NSManagedObjectID]()
+
+            // Process groups with duplicates
+            for (hash, group) in byHash where group.count > 1 {
+                print("🔀 Found \(group.count) duplicate active conversations for participantHash: \(hash.prefix(16))...")
+
+                let winner = self.selectWinnerConversation(from: group)
+                let losers = group.filter { $0 != winner }
+
+                for loser in losers {
+                    self.mergeConversation(from: loser, into: winner)
+                    deletedObjectIDs.append(loser.objectID)
+                    context.delete(loser)
+                    mergedCount += 1
+                }
+            }
+
+            if mergedCount > 0 {
+                self.coreDataStack.saveIfNeeded(context: context)
+
+                // Merge deletions to view context
+                if !deletedObjectIDs.isEmpty {
+                    let changes = [NSDeletedObjectsKey: deletedObjectIDs]
+                    NSManagedObjectContext.mergeChanges(
+                        fromRemoteContextSave: changes,
+                        into: [self.coreDataStack.viewContext]
+                    )
+                }
+
+                let duration = CFAbsoluteTimeGetCurrent() - startTime
+                print("📊 Merged \(mergedCount) duplicate active conversations in \(String(format: "%.3f", duration))s")
+            }
+        }
+    }
+
     /// Creates a conversation identity using Gmail threadId as the primary key.
     /// This ensures stable conversation grouping that matches Gmail's threading.
     /// - Parameters:
