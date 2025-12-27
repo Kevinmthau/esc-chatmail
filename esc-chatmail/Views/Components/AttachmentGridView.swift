@@ -57,7 +57,7 @@ struct SingleAttachmentView: View {
                     downloader: downloader,
                     onTap: {
                         // Only allow tap if downloaded or uploaded
-                        if ["downloaded", "uploaded"].contains(attachment.value(forKey: "stateRaw") as? String) {
+                        if attachment.isReady {
                             onTap()
                         }
                     }
@@ -68,7 +68,7 @@ struct SingleAttachmentView: View {
                     downloader: downloader,
                     onTap: {
                         // Only allow tap if downloaded or uploaded
-                        if ["downloaded", "uploaded"].contains(attachment.value(forKey: "stateRaw") as? String) {
+                        if attachment.isReady {
                             onTap()
                         }
                     }
@@ -89,7 +89,7 @@ struct ImageAttachmentBubble: View {
     private let cache = AttachmentCache.shared
     
     var isDownloading: Bool {
-        if let attachmentId = attachment.value(forKey: "id") as? String {
+        if let attachmentId = attachment.id {
             return downloader.activeDownloads.contains(attachmentId)
         }
         return false
@@ -125,7 +125,7 @@ struct ImageAttachmentBubble: View {
                                 Image(systemName: "photo")
                                     .font(.system(size: 30))
                                     .foregroundColor(.gray)
-                                Text((attachment.value(forKey: "filename") as? String) ?? "Image")
+                                Text(attachment.filename)
                                     .font(.caption)
                                     .foregroundColor(.gray)
                             }
@@ -140,11 +140,11 @@ struct ImageAttachmentBubble: View {
             }
         }
         .buttonStyle(PlainButtonStyle())
-        .opacity(["downloaded", "uploaded", "failed"].contains(attachment.value(forKey: "stateRaw") as? String) ? 1.0 : 0.7)
-        .disabled(!["downloaded", "uploaded"].contains(attachment.value(forKey: "stateRaw") as? String))
+        .opacity([.downloaded, .uploaded, .failed].contains(attachment.state) ? 1.0 : 0.7)
+        .disabled(!attachment.isReady)
         .onAppear {
             loadThumbnail()
-            if (attachment.value(forKey: "stateRaw") as? String) == "queued" {
+            if attachment.state == .queued {
                 Task {
                     await downloader.downloadAttachmentIfNeeded(for: attachment)
                 }
@@ -159,11 +159,11 @@ struct ImageAttachmentBubble: View {
     private func loadThumbnail() {
         guard thumbnailImage == nil,
               !isLoadingImage,
-              let attachmentId = attachment.value(forKey: "id") as? String else { return }
+              let attachmentId = attachment.id else { return }
         
         isLoadingImage = true
         Task {
-            let previewPath = attachment.value(forKey: "previewURL") as? String
+            let previewPath = attachment.previewURL
             if let image = await cache.loadThumbnail(for: attachmentId, from: previewPath) {
                 await MainActor.run {
                     self.thumbnailImage = image
@@ -190,7 +190,7 @@ struct PDFAttachmentCard: View {
         Button(action: onTap) {
             HStack(spacing: 12) {
                 // Thumbnail
-                if let previewURL = attachment.value(forKey: "previewURL") as? String,
+                if let previewURL = attachment.previewURL,
                    let previewData = AttachmentPaths.loadData(from: previewURL),
                    let uiImage = UIImage(data: previewData) {
                     Image(uiImage: uiImage)
@@ -214,7 +214,7 @@ struct PDFAttachmentCard: View {
                 
                 // Info
                 VStack(alignment: .leading, spacing: 4) {
-                    Text((attachment.value(forKey: "filename") as? String) ?? "Document.pdf")
+                    Text(attachment.filename)
                         .font(.system(size: 14, weight: .medium))
                         .lineLimit(1)
                     
@@ -223,20 +223,20 @@ struct PDFAttachmentCard: View {
                             .font(.caption2)
                             .foregroundColor(.secondary)
                         
-                        if let pageCount = attachment.value(forKey: "pageCount") as? Int16, pageCount > 0 {
+                        if attachment.pageCount > 0 {
                             Text("•")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
-                            Text("\(pageCount) pages")
+                            Text("\(attachment.pageCount) pages")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
-                        
-                        if let byteSize = attachment.value(forKey: "byteSize") as? Int64, byteSize > 0 {
+
+                        if attachment.byteSize > 0 {
                             Text("•")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
-                            Text(formatFileSize(byteSize))
+                            Text(formatFileSize(attachment.byteSize))
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
@@ -258,7 +258,7 @@ struct PDFAttachmentCard: View {
         .buttonStyle(PlainButtonStyle())
         .onAppear {
             loadThumbnail()
-            if (attachment.value(forKey: "stateRaw") as? String) == "queued" {
+            if attachment.state == .queued {
                 Task {
                     await downloader.downloadAttachmentIfNeeded(for: attachment)
                 }
@@ -269,11 +269,11 @@ struct PDFAttachmentCard: View {
     private func loadThumbnail() {
         guard thumbnailImage == nil,
               !isLoadingImage,
-              let attachmentId = attachment.value(forKey: "id") as? String else { return }
+              let attachmentId = attachment.id else { return }
         
         isLoadingImage = true
         Task {
-            let previewPath = attachment.value(forKey: "previewURL") as? String
+            let previewPath = attachment.previewURL
             if let image = await cache.loadThumbnail(for: attachmentId, from: previewPath) {
                 await MainActor.run {
                     self.thumbnailImage = image
@@ -333,7 +333,7 @@ struct AttachmentGridItem: View {
     var body: some View {
         Button(action: {
             // Only allow tap if downloaded or uploaded
-            if ["downloaded", "uploaded"].contains(attachment.value(forKey: "stateRaw") as? String) {
+            if attachment.isReady {
                 onTap()
             }
         }) {
@@ -384,7 +384,7 @@ struct AttachmentGridItem: View {
         .buttonStyle(PlainButtonStyle())
         .onAppear {
             loadThumbnail()
-            if (attachment.value(forKey: "stateRaw") as? String) == "queued" {
+            if attachment.state == .queued {
                 Task {
                     await downloader.downloadAttachmentIfNeeded(for: attachment)
                 }
@@ -395,15 +395,15 @@ struct AttachmentGridItem: View {
     private func loadThumbnail() {
         guard thumbnailImage == nil,
               !isLoadingImage,
-              let attachmentId = attachment.value(forKey: "id") as? String else { return }
+              let attachmentId = attachment.id else { return }
         
         isLoadingImage = true
         Task {
-            let previewPath = attachment.value(forKey: "previewURL") as? String
+            let previewPath = attachment.previewURL
             let targetSize = CGSize(width: 200, height: 200) // Grid items are small
             
             // Try to load downsampled for grid view
-            if let localPath = attachment.value(forKey: "localURL") as? String,
+            if let localPath = attachment.localURL,
                attachment.isImage {
                 if let image = await cache.loadDownsampledImage(
                     for: attachmentId,
@@ -457,18 +457,18 @@ struct AttachmentStatusIcon: View {
     @ObservedObject var downloader: AttachmentDownloader
 
     private var isLocalAttachment: Bool {
-        (attachment.value(forKey: "id") as? String)?.starts(with: "local_") == true
+        (attachment.id)?.starts(with: "local_") == true
     }
 
     var body: some View {
         Group {
-            if (attachment.value(forKey: "stateRaw") as? String) == "uploading" ||
-               ((attachment.value(forKey: "stateRaw") as? String) == "queued" && isLocalAttachment) {
+            if attachment.state == .uploading ||
+               (attachment.state == .queued && isLocalAttachment) {
                 ProgressView()
                     .progressViewStyle(CircularProgressViewStyle())
                     .scaleEffect(0.8)
                     .frame(width: 20, height: 20)
-            } else if (attachment.value(forKey: "stateRaw") as? String) == "failed" {
+            } else if attachment.state == .failed {
                 if isLocalAttachment {
                     // Upload failure - show error icon with "Send failed" tooltip
                     Image(systemName: "exclamationmark.circle.fill")
@@ -486,7 +486,7 @@ struct AttachmentStatusIcon: View {
                             .font(.system(size: 20))
                     }
                 }
-            } else if let attachmentId = attachment.value(forKey: "id") as? String,
+            } else if let attachmentId = attachment.id,
                       downloader.activeDownloads.contains(attachmentId) {
                 ProgressView()
                     .progressViewStyle(CircularProgressViewStyle())

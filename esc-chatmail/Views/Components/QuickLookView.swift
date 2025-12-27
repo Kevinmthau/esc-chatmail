@@ -72,14 +72,14 @@ class AttachmentPreviewItem: NSObject, QLPreviewItem {
         super.init()
         
         // Get the file URL from the attachment's local storage
-        if let localURL = attachment.value(forKey: "localURL") as? String,
+        if let localURL = attachment.localURL,
            let url = AttachmentPaths.fullURL(for: localURL) {
             // Ensure the file exists
             if FileManager.default.fileExists(atPath: url.path) {
                 self._fileURL = url
             } else {
                 // Try to load from preview if original doesn't exist
-                if let previewURL = attachment.value(forKey: "previewURL") as? String,
+                if let previewURL = attachment.previewURL,
                    let url = AttachmentPaths.fullURL(for: previewURL),
                    FileManager.default.fileExists(atPath: url.path) {
                     self._fileURL = url
@@ -97,6 +97,6 @@ class AttachmentPreviewItem: NSObject, QLPreviewItem {
     }
     
     var previewItemTitle: String? {
-        return attachment.value(forKey: "filename") as? String ?? "Attachment"
+        return attachment.filename
     }
 }

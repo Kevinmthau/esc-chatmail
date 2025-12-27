@@ -39,7 +39,7 @@ struct AttachmentViewer: View {
                 
                 ToolbarItem(placement: .principal) {
                     if let attachment = attachments[safe: currentIndex] {
-                        Text((attachment.value(forKey: "filename") as? String) ?? "Attachment")
+                        Text(attachment.filename)
                             .foregroundColor(.white)
                             .lineLimit(1)
                     }
@@ -157,11 +157,11 @@ struct ImageDetailView: View {
     private func loadFullImage() {
         guard fullImage == nil,
               !isLoadingImage,
-              let attachmentId = attachment.value(forKey: "id") as? String else { return }
+              let attachmentId = attachment.id else { return }
         
         isLoadingImage = true
         Task {
-            let localPath = attachment.value(forKey: "localURL") as? String
+            let localPath = attachment.localURL
             
             if let image = await cache.loadFullImage(for: attachmentId, from: localPath) {
                 await MainActor.run {
@@ -170,7 +170,7 @@ struct ImageDetailView: View {
                 }
             } else {
                 // Fallback to preview if full image fails
-                let previewPath = attachment.value(forKey: "previewURL") as? String
+                let previewPath = attachment.previewURL
                 if let image = await cache.loadThumbnail(for: attachmentId, from: previewPath) {
                     await MainActor.run {
                         self.fullImage = image
@@ -190,7 +190,7 @@ struct PDFDetailView: View {
     let attachment: Attachment
     
     var body: some View {
-        if let localURL = attachment.value(forKey: "localURL") as? String,
+        if let localURL = attachment.localURL,
            let data = AttachmentPaths.loadData(from: localURL) {
             PDFKitView(data: data)
                 .edgesIgnoringSafeArea(.all)
@@ -232,16 +232,16 @@ struct UnsupportedAttachmentView: View {
                 .font(.system(size: 60))
                 .foregroundColor(.gray)
             
-            Text((attachment.value(forKey: "filename") as? String) ?? "Attachment")
+            Text(attachment.filename)
                 .font(.headline)
                 .foregroundColor(.white)
             
-            Text((attachment.value(forKey: "mimeType") as? String) ?? "Unknown type")
+            Text(attachment.mimeType)
                 .font(.caption)
                 .foregroundColor(.gray)
             
-            if let byteSize = attachment.value(forKey: "byteSize") as? Int64, byteSize > 0 {
-                Text(formatFileSize(byteSize))
+            if attachment.byteSize > 0 {
+                Text(formatFileSize(attachment.byteSize))
                     .font(.caption)
                     .foregroundColor(.gray)
             }

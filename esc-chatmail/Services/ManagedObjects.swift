@@ -45,25 +45,26 @@ extension Attachment {
         case failed = "failed"
         case downloaded = "downloaded"
     }
-    
+
     var state: State {
-        get {
-            let stateRawValue = value(forKey: "stateRaw") as? String ?? "queued"
-            return State(rawValue: stateRawValue) ?? .queued
-        }
-        set {
-            setValue(newValue.rawValue, forKey: "stateRaw")
-        }
+        get { State(rawValue: stateRaw) ?? .queued }
+        set { stateRaw = newValue.rawValue }
     }
-    
+
     var isImage: Bool {
-        let mimeTypeValue = value(forKey: "mimeType") as? String
-        return mimeTypeValue?.starts(with: "image/") ?? false
+        mimeType.starts(with: "image/")
     }
-    
+
     var isPDF: Bool {
-        let mimeTypeValue = value(forKey: "mimeType") as? String
-        return mimeTypeValue == "application/pdf"
+        mimeType == "application/pdf"
+    }
+
+    var isDownloaded: Bool {
+        state == .downloaded || state == .uploaded
+    }
+
+    var isReady: Bool {
+        state == .downloaded || state == .uploaded
     }
 }
 
@@ -85,23 +86,13 @@ extension PendingAction {
     }
 
     var actionTypeEnum: ActionType? {
-        get {
-            guard let rawValue = value(forKey: "actionType") as? String else { return nil }
-            return ActionType(rawValue: rawValue)
-        }
-        set {
-            setValue(newValue?.rawValue, forKey: "actionType")
-        }
+        get { ActionType(rawValue: actionType) }
+        set { actionType = newValue?.rawValue ?? "" }
     }
 
     var statusEnum: Status {
-        get {
-            let rawValue = value(forKey: "status") as? String ?? "pending"
-            return Status(rawValue: rawValue) ?? .pending
-        }
-        set {
-            setValue(newValue.rawValue, forKey: "status")
-        }
+        get { Status(rawValue: status) ?? .pending }
+        set { status = newValue.rawValue }
     }
 }
 

@@ -151,12 +151,11 @@ struct ChatReplyBar: View {
             let removed = attachments.remove(at: index)
             
             // Clean up files if it's a local attachment
-            if let attachmentId = removed.value(forKey: "id") as? String,
-               attachmentId.starts(with: "local_") {
-                if let localURL = removed.value(forKey: "localURL") as? String {
+            if removed.isLocalAttachment {
+                if let localURL = removed.localURL {
                     AttachmentPaths.deleteFile(at: localURL)
                 }
-                if let previewURL = removed.value(forKey: "previewURL") as? String {
+                if let previewURL = removed.previewURL {
                     AttachmentPaths.deleteFile(at: previewURL)
                 }
             }
@@ -207,21 +206,19 @@ struct AttachmentThumbnail: View {
     
     private func loadThumbnail() {
         guard thumbnailImage == nil,
-              let attachmentId = attachment.value(forKey: "id") as? String else { return }
-        
+              let attachmentId = attachment.id else { return }
+
         Task {
-            let previewPath = attachment.value(forKey: "previewURL") as? String
-            if let image = await cache.loadThumbnail(for: attachmentId, from: previewPath) {
+            if let image = await cache.loadThumbnail(for: attachmentId, from: attachment.previewURL) {
                 await MainActor.run {
                     self.thumbnailImage = image
                 }
             }
         }
     }
-    
+
     private func isPDF(_ attachment: Attachment) -> Bool {
-        let mimeType = attachment.value(forKey: "mimeType") as? String
-        return mimeType == "application/pdf"
+        attachment.isPDF
     }
 }
 
@@ -248,24 +245,24 @@ extension ChatReplyBar {
             if let replyingTo = replyingTo {
                 self.subject = replyingTo.subject.map { MimeBuilder.prefixSubjectForReply($0) }
                 self.threadId = replyingTo.gmThreadId
-                self.inReplyTo = replyingTo.value(forKey: "messageId") as? String
+                self.inReplyTo = replyingTo.messageId
 
                 // Build references chain from previous references + message ID
                 var refs: [String] = []
-                if let previousRefs = replyingTo.value(forKey: "references") as? String, !previousRefs.isEmpty {
+                if let previousRefs = replyingTo.references, !previousRefs.isEmpty {
                     refs = previousRefs.split(separator: " ").map(String.init)
                 }
-                if let messageId = replyingTo.value(forKey: "messageId") as? String {
+                if let messageId = replyingTo.messageId {
                     refs.append(messageId)
                 }
                 self.references = refs
 
                 // Store original message info for quoting
                 self.originalMessage = QuotedMessage(
-                    senderName: replyingTo.value(forKey: "senderName") as? String,
-                    senderEmail: (replyingTo.value(forKey: "senderEmail") as? String) ?? "",
+                    senderName: replyingTo.senderName,
+                    senderEmail: replyingTo.senderEmail ?? "",
                     date: replyingTo.internalDate,
-                    body: replyingTo.value(forKey: "bodyText") as? String
+                    body: replyingTo.bodyText
                 )
             } else {
                 let latestMessage = Array(conversation.messages ?? [])

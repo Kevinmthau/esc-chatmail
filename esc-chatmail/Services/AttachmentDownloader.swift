@@ -30,20 +30,19 @@ class AttachmentDownloader: ObservableObject {
         guard let attachments = try? context.fetch(request) else { return }
         
         for attachment in attachments {
-            if let messageId = attachment.value(forKey: "message") as? Message,
-               let messageIdStr = messageId.value(forKey: "id") as? String {
-                await downloadAttachment(attachment, messageId: messageIdStr, in: context)
+            if let message = attachment.message {
+                await downloadAttachment(attachment, messageId: message.id, in: context)
             }
         }
     }
     
     func downloadAttachment(_ attachment: Attachment, messageId: String, in context: NSManagedObjectContext) async {
-        guard let attachmentId = attachment.value(forKey: "id") as? String else { return }
+        guard let attachmentId = attachment.id else { return }
 
         // Skip downloading attachments with local IDs - these are from sent messages and don't exist on Gmail
-        if attachmentId.hasPrefix("local_") {
+        if attachment.isLocalAttachment {
             print("Skipping download for local attachment: \(attachmentId)")
-            attachment.setValue("downloaded", forKey: "stateRaw")
+            attachment.state = .downloaded
             coreDataStack.saveIfNeeded(context: context)
             return
         }
@@ -66,47 +65,47 @@ class AttachmentDownloader: ObservableObject {
             }
             
             // Generate file extension and paths
-            let mimeType = attachment.value(forKey: "mimeType") as? String ?? ""
+            let mimeType = attachment.mimeType
             let ext = AttachmentPaths.fileExtension(for: mimeType)
             let originalPath = AttachmentPaths.originalPath(idOrUUID: attachmentId, ext: ext)
             let previewPath = AttachmentPaths.previewPath(idOrUUID: attachmentId)
-            
+
             // Save original file
             if AttachmentPaths.saveData(data, to: originalPath) {
-                attachment.setValue(originalPath, forKey: "localURL")
+                attachment.localURL = originalPath
             } else {
                 print("Warning: Failed to save original attachment file for ID: \(attachmentId)")
                 // Continue anyway - we can still show preview if it saves
             }
-            
+
             // Process based on type
             if mimeType.starts(with: "image/") {
                 // Process image: get dimensions and create preview
                 if let dimensions = ImageProcessor.getImageDimensions(from: data) {
-                    attachment.setValue(Int16(dimensions.width), forKey: "width")
-                    attachment.setValue(Int16(dimensions.height), forKey: "height")
+                    attachment.width = Int16(dimensions.width)
+                    attachment.height = Int16(dimensions.height)
                 }
-                
+
                 if let thumbnailData = ImageProcessor.generateThumbnail(from: data, mimeType: mimeType) {
                     if AttachmentPaths.saveData(thumbnailData, to: previewPath) {
-                        attachment.setValue(previewPath, forKey: "previewURL")
+                        attachment.previewURL = previewPath
                     }
                 }
             } else if mimeType == "application/pdf" {
                 // Process PDF: get page count and create preview
                 if let pageCount = ImageProcessor.getPDFPageCount(from: data) {
-                    attachment.setValue(Int16(pageCount), forKey: "pageCount")
+                    attachment.pageCount = Int16(pageCount)
                 }
-                
+
                 if let thumbnailData = ImageProcessor.generatePDFThumbnail(from: data) {
                     if AttachmentPaths.saveData(thumbnailData, to: previewPath) {
-                        attachment.setValue(previewPath, forKey: "previewURL")
+                        attachment.previewURL = previewPath
                     }
                 }
             }
-            
+
             // Update state to downloaded
-            attachment.setValue("downloaded", forKey: "stateRaw")
+            attachment.state = .downloaded
             
             await MainActor.run {
                 downloadProgress[attachmentId] = 1.0
@@ -139,7 +138,7 @@ class AttachmentDownloader: ObservableObject {
             } else {
                 // Max retries reached, mark as permanently failed
                 print("Attachment \(attachmentId) permanently failed after \(maxRetryAttempts) attempts")
-                attachment.setValue("failed", forKey: "stateRaw")
+                attachment.state = .failed
                 coreDataStack.saveIfNeeded(context: context)
                 retryAttempts.removeValue(forKey: attachmentId)
             }
@@ -152,9 +151,8 @@ class AttachmentDownloader: ObservableObject {
     }
     
     func retryFailedDownload(for attachment: Attachment) async {
-        guard let message = attachment.value(forKey: "message") as? Message,
-              let messageId = message.value(forKey: "id") as? String,
-              let attachmentId = attachment.value(forKey: "id") as? String else { return }
+        guard let message = attachment.message,
+              let attachmentId = attachment.id else { return }
 
         // Reset retry counter for manual retry
         retryAttempts.removeValue(forKey: attachmentId)
@@ -162,22 +160,20 @@ class AttachmentDownloader: ObservableObject {
         let context = coreDataStack.newBackgroundContext()
         guard let attachmentInContext = try? context.existingObject(with: attachment.objectID) as? Attachment else { return }
 
-        attachmentInContext.setValue("queued", forKey: "stateRaw")
+        attachmentInContext.state = .queued
         coreDataStack.saveIfNeeded(context: context)
 
-        await downloadAttachment(attachmentInContext, messageId: messageId, in: context)
+        await downloadAttachment(attachmentInContext, messageId: message.id, in: context)
     }
     
     func downloadAttachmentIfNeeded(for attachment: Attachment) async {
-        let stateRaw = attachment.value(forKey: "stateRaw") as? String ?? ""
-        guard stateRaw == "queued" || stateRaw == "failed",
-              let message = attachment.value(forKey: "message") as? Message,
-              let messageId = message.value(forKey: "id") as? String else { return }
-        
+        guard attachment.state == .queued || attachment.state == .failed,
+              let message = attachment.message else { return }
+
         let context = coreDataStack.newBackgroundContext()
         guard let attachmentInContext = try? context.existingObject(with: attachment.objectID) as? Attachment else { return }
-        
-        await downloadAttachment(attachmentInContext, messageId: messageId, in: context)
+
+        await downloadAttachment(attachmentInContext, messageId: message.id, in: context)
     }
     
     private func downloadWithExponentialBackoff(messageId: String, attachmentId: String) async throws -> Data {
@@ -227,11 +223,12 @@ class AttachmentDownloader: ObservableObject {
         guard let attachments = try? context.fetch(request) else { return }
         
         let validFiles = Set(attachments.compactMap { attachment -> [String] in
+            guard let att = attachment as? Attachment else { return [] }
             var files: [String] = []
-            if let localURL = attachment.value(forKey: "localURL") as? String {
+            if let localURL = att.localURL {
                 files.append(localURL)
             }
-            if let previewURL = attachment.value(forKey: "previewURL") as? String {
+            if let previewURL = att.previewURL {
                 files.append(previewURL)
             }
             return files
