@@ -8,37 +8,40 @@ struct AutocompleteList: View {
     @State private var expandedContactId: UUID?
     
     var body: some View {
-        VStack(spacing: 0) {
-            ForEach(Array(contacts.enumerated()), id: \.element.id) { index, contact in
-                if contact.emails.count > 1 && expandedContactId == contact.id {
-                    MultiEmailContactRow(
-                        contact: contact,
-                        onSelectEmail: { email in
-                            onSelect(email, contact.displayName)
-                        }
-                    )
-                } else {
-                    ContactRow(
-                        contact: contact,
-                        isSelected: index == selectedIndex,
-                        onTap: {
-                            if contact.emails.count > 1 {
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    expandedContactId = expandedContactId == contact.id ? nil : contact.id
-                                }
-                            } else {
-                                onSelect(contact.primaryEmail, contact.displayName)
+        ScrollView {
+            VStack(spacing: 0) {
+                ForEach(Array(contacts.enumerated()), id: \.element.id) { index, contact in
+                    if contact.emails.count > 1 && expandedContactId == contact.id {
+                        MultiEmailContactRow(
+                            contact: contact,
+                            onSelectEmail: { email in
+                                onSelect(email, contact.displayName)
                             }
-                        }
-                    )
-                }
-                
-                if index < contacts.count - 1 {
-                    Divider()
-                        .background(Color.gray.opacity(0.2))
+                        )
+                    } else {
+                        ContactRow(
+                            contact: contact,
+                            isSelected: index == selectedIndex,
+                            onTap: {
+                                if contact.emails.count > 1 {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        expandedContactId = expandedContactId == contact.id ? nil : contact.id
+                                    }
+                                } else {
+                                    onSelect(contact.primaryEmail, contact.displayName)
+                                }
+                            }
+                        )
+                    }
+
+                    if index < contacts.count - 1 {
+                        Divider()
+                            .background(Color.gray.opacity(0.2))
+                    }
                 }
             }
         }
+        .frame(maxHeight: 300)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color(UIColor.secondarySystemBackground))
@@ -48,7 +51,7 @@ struct AutocompleteList: View {
             RoundedRectangle(cornerRadius: 12)
                 .strokeBorder(Color.gray.opacity(0.2), lineWidth: 0.5)
         )
-        .frame(maxHeight: 240)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
         .onAppear {
             selectedIndex = 0
         }

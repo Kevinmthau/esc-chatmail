@@ -64,7 +64,7 @@ final class ContactsService: ObservableObject {
         }
     }
     
-    func searchContacts(query: String, limit: Int = 6) async -> [ContactMatch] {
+    func searchContacts(query: String) async -> [ContactMatch] {
         guard authorizationStatus == .authorized else { return [] }
         guard !query.isEmpty else { return [] }
 
@@ -77,7 +77,6 @@ final class ContactsService: ObservableObject {
         let results = await Task.detached(priority: .userInitiated) { [keysToFetch, contactStore] in
             Self.performContactSearch(
                 query: query,
-                limit: limit,
                 keysToFetch: keysToFetch,
                 contactStore: contactStore
             )
@@ -93,65 +92,53 @@ final class ContactsService: ObservableObject {
     /// Synchronous contact search - must be called from background thread
     private static func performContactSearch(
         query: String,
-        limit: Int,
         keysToFetch: [CNKeyDescriptor],
         contactStore: CNContactStore
     ) -> [ContactMatch] {
         let lowercasedQuery = query.lowercased()
         var matches: [ContactMatch] = []
+        var addedEmails = Set<String>()
 
         // First search by name predicate
         let nameRequest = CNContactFetchRequest(keysToFetch: keysToFetch)
         nameRequest.predicate = CNContact.predicateForContacts(matchingName: query)
 
         do {
-            try contactStore.enumerateContacts(with: nameRequest) { contact, stop in
+            try contactStore.enumerateContacts(with: nameRequest) { contact, _ in
                 let match = ContactMatch(from: contact)
 
                 let nameMatches = match.displayName.lowercased().contains(lowercasedQuery)
                 let emailMatches = match.emails.contains { $0.lowercased().contains(lowercasedQuery) }
 
-                if nameMatches || emailMatches {
+                if (nameMatches || emailMatches) && !addedEmails.contains(match.primaryEmail) {
                     matches.append(match)
-                }
-
-                if matches.count >= limit {
-                    stop.pointee = true
+                    addedEmails.insert(match.primaryEmail)
                 }
             }
         } catch {
             print("Failed to fetch contacts: \(error)")
         }
 
-        // If we need more results, search by email
-        if matches.count < limit {
-            let emailRequest = CNContactFetchRequest(keysToFetch: keysToFetch)
+        // Also search by email to catch contacts not matched by name
+        let emailRequest = CNContactFetchRequest(keysToFetch: keysToFetch)
 
-            do {
-                try contactStore.enumerateContacts(with: emailRequest) { contact, stop in
-                    let match = ContactMatch(from: contact)
+        do {
+            try contactStore.enumerateContacts(with: emailRequest) { contact, _ in
+                let match = ContactMatch(from: contact)
 
-                    let alreadyAdded = matches.contains { existing in
-                        existing.primaryEmail == match.primaryEmail
-                    }
-
-                    if !alreadyAdded {
-                        let emailMatches = match.emails.contains { $0.lowercased().contains(lowercasedQuery) }
-                        if emailMatches {
-                            matches.append(match)
-                        }
-                    }
-
-                    if matches.count >= limit {
-                        stop.pointee = true
+                if !addedEmails.contains(match.primaryEmail) {
+                    let emailMatches = match.emails.contains { $0.lowercased().contains(lowercasedQuery) }
+                    if emailMatches {
+                        matches.append(match)
+                        addedEmails.insert(match.primaryEmail)
                     }
                 }
-            } catch {
-                print("Failed to search contacts by email: \(error)")
             }
+        } catch {
+            print("Failed to search contacts by email: \(error)")
         }
 
-        return Array(matches.prefix(limit))
+        return matches
     }
     
     func getContactByEmail(_ email: String) async -> ContactMatch? {
