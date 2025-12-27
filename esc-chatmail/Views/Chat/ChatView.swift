@@ -361,10 +361,12 @@ struct MessageBubble: View {
                     }
                 } else {
                     if let text = fullTextContent ?? message.cleanedSnippet ?? message.snippet, !text.isEmpty {
-                        let isTruncated = text.components(separatedBy: .newlines).count > 25
+                        // Show "View More" if text has many lines OR is very long (long paragraphs)
+                        let lineCount = text.components(separatedBy: .newlines).count
+                        let isTruncated = lineCount > 15 || text.count > 800
                         VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 6) {
                             Text(text)
-                                .lineLimit(25)
+                                .lineLimit(15)
                                 .padding(10)
                                 .background(message.isFromMe ? Color.blue : Color.gray.opacity(0.2))
                                 .foregroundColor(message.isFromMe ? .white : .primary)
@@ -375,7 +377,7 @@ struct MessageBubble: View {
                                     showingHTMLView = true
                                 }) {
                                     HStack(spacing: 4) {
-                                        Text("View Full Email")
+                                        Text("View More")
                                             .font(.caption)
                                             .fontWeight(.medium)
                                         Image(systemName: "arrow.up.forward")
