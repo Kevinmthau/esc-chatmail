@@ -74,6 +74,30 @@ final class Dependencies: ObservableObject {
         coreDataStack.newBackgroundContext()
     }
 
+    // MARK: - Service Factories
+
+    /// Creates a new MessageActions instance with injected dependencies
+    func makeMessageActions() -> MessageActions {
+        MessageActions(
+            coreDataStack: coreDataStack,
+            pendingActionsManager: pendingActionsManager
+        )
+    }
+
+    /// Creates a new GmailSendService instance with injected dependencies
+    func makeSendService() -> GmailSendService {
+        GmailSendService(
+            viewContext: viewContext,
+            apiClient: gmailAPIClient,
+            authSession: authSession
+        )
+    }
+
+    /// Creates a new ContactsService instance
+    func makeContactsService() -> ContactsService {
+        ContactsService()
+    }
+
     // MARK: - Initialization
 
     /// Production initializer - uses all shared singleton instances.

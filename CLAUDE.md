@@ -31,12 +31,34 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
             Gmail API (sync back)
 ```
 
-### Key Services
+### Sync Architecture
+
+The sync system is decomposed into focused components:
 
 **SyncEngine** (`/Services/Sync/SyncEngine.swift`)
-- Orchestrates all Gmail synchronization
-- Delegates to: MessageFetcher, MessagePersister, HistoryProcessor, BatchProcessor
-- Handles initial sync (full fetch) and incremental sync (Gmail History API)
+- Lightweight orchestrator managing sync state and public API
+- Delegates actual work to specialized orchestrators
+- Manages `SyncUIState` for UI progress reporting
+
+**InitialSyncOrchestrator** (`/Services/Sync/InitialSyncOrchestrator.swift`)
+- Handles full sync when no historyId exists
+- Phases: profile/aliases → labels → messages → conversation rollups
+
+**IncrementalSyncOrchestrator** (`/Services/Sync/IncrementalSyncOrchestrator.swift`)
+- Handles delta sync via Gmail History API
+- Includes history recovery when historyId expires (falls back to full sync)
+
+**SyncReconciliation** (`/Services/Sync/SyncReconciliation.swift`)
+- Detects missed messages during sync
+- Reconciles label states between Gmail and local data
+
+**SyncFailureTracker** (`/Services/Sync/SyncFailureTracker.swift`)
+- Tracks sync failures to determine when to advance historyId
+- Prevents infinite retry loops on permanently failing messages
+
+Supporting components: `MessageFetcher`, `MessagePersister`, `HistoryProcessor`, `BatchProcessor`
+
+### Key Services
 
 **ConversationManager** (`/Services/ConversationManager.swift`)
 - Groups messages by `participantHash` (normalized participant emails)
@@ -59,6 +81,24 @@ Key entities in `ESCChatmail.xcdatamodel`:
 - **Message**: Individual email with labels, participants, attachments
 - **PendingAction**: Queued user actions awaiting sync
 - **Person**: Contact info cached from emails
+- **Attachment**: Email attachments with download state tracking
+
+### Utilities
+
+**Logger** (`/Services/Logger.swift`)
+- Structured logging with OSLog integration
+- Categories: sync, api, coreData, auth, ui, attachment
+- Usage: `Log.sync.info("message")` or `Log.api(endpoint:status:duration:)`
+
+**NSManagedObjectContext+Fetch** (`/Services/NSManagedObjectContext+Fetch.swift`)
+- Type-safe Core Data fetch helpers
+- Generic methods: `fetchFirst`, `fetchAll`, `count`, `exists`
+- Entity-specific: `fetchMessage(byId:)`, `fetchConversation(byKeyHash:)`, etc.
+- Predicate builders: `MessagePredicates`, `ConversationPredicates`, `LabelPredicates`
+
+**Models+Extensions** (`/Services/Models+Extensions.swift`)
+- Typed accessors for Core Data entities (avoiding `value(forKey:)`)
+- Includes computed properties like `Attachment.isReady`, `Attachment.isDownloaded`
 
 ### Authentication
 
@@ -79,3 +119,5 @@ Key entities in `ESCChatmail.xcdatamodel`:
 - **Actor isolation** for thread-safe state (PendingActionsManager, TokenManager)
 - **Background contexts** for heavy Core Data operations
 - Conversations use `participantHash` for lookup, `keyHash` for uniqueness
+- **Typed accessors** preferred over `value(forKey:)` for Core Data properties
+- **Structured logging** via `Log` singleton for consistent log output
