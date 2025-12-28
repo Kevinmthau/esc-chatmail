@@ -319,7 +319,7 @@ extension KeychainService {
         let bufferMinutes: TimeInterval = 10 * 60
         let timestamp = Date().addingTimeInterval(-bufferMinutes)
         setInstallationTimestamp(timestamp)
-        print("Created installation timestamp with 10-minute buffer: \(timestamp)")
+        Log.debug("Created installation timestamp with 10-minute buffer: \(timestamp)", category: .auth)
         return timestamp
     }
 
@@ -341,12 +341,12 @@ extension KeychainService {
     func resetInstallationTimestamp(minutesBack: Int = 30) {
         let newTimestamp = Date().addingTimeInterval(-TimeInterval(minutesBack * 60))
         setInstallationTimestamp(newTimestamp)
-        print("Reset installation timestamp to: \(newTimestamp) (\(minutesBack) minutes ago)")
+        Log.debug("Reset installation timestamp to: \(newTimestamp) (\(minutesBack) minutes ago)", category: .auth)
     }
 
     /// Clears the installation timestamp so it will be recreated on next sync
     func clearInstallationTimestamp() {
         try? delete(for: .installationTimestamp)
-        print("Cleared installation timestamp")
+        Log.debug("Cleared installation timestamp", category: .auth)
     }
 }

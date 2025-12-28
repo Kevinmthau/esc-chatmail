@@ -32,7 +32,7 @@ final class DataCleanupService: @unchecked Sendable {
         let hasDoneMigration = UserDefaults.standard.bool(forKey: "hasDoneArchiveModelMigrationV1")
         guard !hasDoneMigration else { return }
 
-        print("🔄 [Migration] Starting archive model migration...")
+        Log.info("Starting archive model migration...", category: .coreData)
         let startTime = CFAbsoluteTimeGetCurrent()
 
         await context.perform {
@@ -40,7 +40,7 @@ final class DataCleanupService: @unchecked Sendable {
             request.fetchBatchSize = 50
 
             guard let conversations = try? context.fetch(request) else {
-                print("⚠️ [Migration] Failed to fetch conversations")
+                Log.warning("Failed to fetch conversations for migration", category: .coreData)
                 return
             }
 
@@ -72,9 +72,7 @@ final class DataCleanupService: @unchecked Sendable {
             self.coreDataStack.saveIfNeeded(context: context)
 
             let duration = CFAbsoluteTimeGetCurrent() - startTime
-            print("✅ [Migration] Archive model migration complete in \(String(format: "%.2f", duration))s")
-            print("   - Set archivedAt for \(archivedCount) conversations")
-            print("   - Set participantHash for \(participantHashCount) conversations")
+            Log.info("Archive model migration complete in \(String(format: "%.2f", duration))s - archivedAt: \(archivedCount), participantHash: \(participantHashCount)", category: .coreData)
         }
 
         UserDefaults.standard.set(true, forKey: "hasDoneArchiveModelMigrationV1")
@@ -113,7 +111,7 @@ final class DataCleanupService: @unchecked Sendable {
         let duplicateIds = idCounts.filter { $0.value > 1 }.map { $0.key }
 
         guard !duplicateIds.isEmpty else {
-            print("No duplicate messages found")
+            Log.debug("No duplicate messages found", category: .coreData)
             return
         }
 
@@ -146,13 +144,13 @@ final class DataCleanupService: @unchecked Sendable {
                     totalDeleted += deletedIDs.count
                 }
             } catch {
-                print("Batch delete failed for duplicate \(duplicateId): \(error)")
+                Log.error("Batch delete failed for duplicate \(duplicateId)", category: .coreData, error: error)
             }
         }
 
         let duration = CFAbsoluteTimeGetCurrent() - startTime
         if totalDeleted > 0 {
-            print("📊 Removed \(totalDeleted) duplicate messages in \(String(format: "%.2f", duration))s")
+            Log.info("Removed \(totalDeleted) duplicate messages in \(String(format: "%.2f", duration))s", category: .coreData)
         }
     }
 
@@ -190,10 +188,10 @@ final class DataCleanupService: @unchecked Sendable {
                     )
 
                     let duration = CFAbsoluteTimeGetCurrent() - startTime
-                    print("📊 Removed \(deletedIDs.count) empty conversations in \(String(format: "%.3f", duration))s")
+                    Log.info("Removed \(deletedIDs.count) empty conversations in \(String(format: "%.3f", duration))s", category: .coreData)
                 }
             } catch {
-                print("Failed to batch delete empty conversations: \(error)")
+                Log.error("Failed to batch delete empty conversations", category: .coreData, error: error)
                 self.removeEmptyConversationsFallback(in: context)
             }
         }
@@ -217,7 +215,7 @@ final class DataCleanupService: @unchecked Sendable {
         }
 
         if removedCount > 0 {
-            print("Removed \(removedCount) empty conversations (fallback)")
+            Log.info("Removed \(removedCount) empty conversations (fallback)", category: .coreData)
             coreDataStack.saveIfNeeded(context: context)
         }
     }
@@ -242,10 +240,10 @@ final class DataCleanupService: @unchecked Sendable {
                     context.reset()
 
                     let duration = CFAbsoluteTimeGetCurrent() - startTime
-                    print("📊 Removed \(deletedCount) draft messages in \(String(format: "%.3f", duration))s")
+                    Log.info("Removed \(deletedCount) draft messages in \(String(format: "%.3f", duration))s", category: .coreData)
                 }
             } catch {
-                print("Failed to batch delete draft messages: \(error)")
+                Log.error("Failed to batch delete draft messages", category: .coreData, error: error)
                 self.removeDraftMessagesFallback(in: context)
             }
         }
@@ -265,7 +263,7 @@ final class DataCleanupService: @unchecked Sendable {
         }
 
         if removedCount > 0 {
-            print("Removed \(removedCount) draft messages (fallback)")
+            Log.info("Removed \(removedCount) draft messages (fallback)", category: .coreData)
             coreDataStack.saveIfNeeded(context: context)
         }
     }

@@ -26,7 +26,7 @@ actor SyncStateActor {
 
     func beginSync() async -> Bool {
         guard !isCurrentlySyncing else {
-            print("Sync already in progress, skipping")
+            Log.debug("Sync already in progress, skipping", category: .sync)
             return false
         }
         isCurrentlySyncing = true
@@ -168,9 +168,9 @@ final class NetworkMonitorService: @unchecked Sendable {
                 await self?.reachabilityActor.setReachable(path.status == .satisfied)
             }
             if !path.isExpensive && path.status == .satisfied {
-                print("Network is reachable")
+                Log.debug("Network is reachable", category: .general)
             } else {
-                print("Network status: \(path.status), expensive: \(path.isExpensive)")
+                Log.debug("Network status: \(path.status), expensive: \(path.isExpensive)", category: .general)
             }
         }
         networkMonitor.start(queue: monitorQueue)

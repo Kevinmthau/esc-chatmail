@@ -41,7 +41,7 @@ class AttachmentDownloader: ObservableObject {
 
         // Skip downloading attachments with local IDs - these are from sent messages and don't exist on Gmail
         if attachment.isLocalAttachment {
-            print("Skipping download for local attachment: \(attachmentId)")
+            Log.debug("Skipping download for local attachment: \(attachmentId)", category: .attachment)
             attachment.state = .downloaded
             coreDataStack.saveIfNeeded(context: context)
             return
@@ -74,7 +74,7 @@ class AttachmentDownloader: ObservableObject {
             if AttachmentPaths.saveData(data, to: originalPath) {
                 attachment.localURL = originalPath
             } else {
-                print("Warning: Failed to save original attachment file for ID: \(attachmentId)")
+                Log.warning("Failed to save original attachment file for ID: \(attachmentId)", category: .attachment)
                 // Continue anyway - we can still show preview if it saves
             }
 
@@ -118,7 +118,7 @@ class AttachmentDownloader: ObservableObject {
             retryAttempts.removeValue(forKey: attachmentId)
 
         } catch {
-            print("Failed to download attachment \(attachmentId): \(error)")
+            Log.error("Failed to download attachment \(attachmentId)", category: .attachment, error: error)
 
             // Check if we should retry
             let attempts = (retryAttempts[attachmentId] ?? 0) + 1
@@ -127,7 +127,7 @@ class AttachmentDownloader: ObservableObject {
             if attempts < maxRetryAttempts {
                 // Calculate exponential backoff delay
                 let delay = baseRetryDelay * pow(2.0, Double(attempts - 1))
-                print("Retrying attachment \(attachmentId) in \(delay) seconds (attempt \(attempts)/\(maxRetryAttempts))")
+                Log.debug("Retrying attachment \(attachmentId) in \(delay) seconds (attempt \(attempts)/\(maxRetryAttempts))", category: .attachment)
 
                 // Schedule retry
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -137,7 +137,7 @@ class AttachmentDownloader: ObservableObject {
                 return
             } else {
                 // Max retries reached, mark as permanently failed
-                print("Attachment \(attachmentId) permanently failed after \(maxRetryAttempts) attempts")
+                Log.warning("Attachment \(attachmentId) permanently failed after \(maxRetryAttempts) attempts", category: .attachment)
                 attachment.state = .failed
                 coreDataStack.saveIfNeeded(context: context)
                 retryAttempts.removeValue(forKey: attachmentId)
@@ -192,7 +192,7 @@ class AttachmentDownloader: ObservableObject {
                     switch urlError.code {
                     case .notConnectedToInternet, .networkConnectionLost, .timedOut, .cannotFindHost, .dnsLookupFailed:
                         if attempt < maxAttempts - 1 {
-                            print("Network error downloading attachment, retrying in \(retryDelay) seconds...")
+                            Log.debug("Network error downloading attachment, retrying in \(retryDelay) seconds...", category: .attachment)
                             try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
                             retryDelay = min(retryDelay * 2, 10.0) // Exponential backoff capped at 10 seconds
                             continue

@@ -295,7 +295,7 @@ struct ProfilePhoto {
                 let (data, _) = try await URLSession.shared.data(from: url)
                 return UIImage(data: data)
             } catch {
-                print("Failed to load image from URL: \(error)")
+                Log.debug("Failed to load image from URL: \(error)", category: .general)
             }
         }
 

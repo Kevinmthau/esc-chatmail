@@ -530,12 +530,12 @@ struct HTMLWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             isLoading = false
-            print("WebView navigation failed: \(error)")
+            Log.debug("WebView navigation failed: \(error)", category: .ui)
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             isLoading = false
-            print("WebView provisional navigation failed: \(error)")
+            Log.debug("WebView provisional navigation failed: \(error)", category: .ui)
         }
     }
 }

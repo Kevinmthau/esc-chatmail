@@ -81,12 +81,12 @@ final class ConversationManager: @unchecked Sendable {
                 }
                 // Debug: Log message label info during rollup
                 if let msgId = message.value(forKey: "id") as? String {
-                    print("📬 [ConversationRollup] Message \(msgId): labels=\(labelIds), hasINBOX=\(hasInbox)")
+                    Log.debug("Message \(msgId): labels=\(labelIds), hasINBOX=\(hasInbox)", category: .conversation)
                 }
             } else {
                 // Debug: Log if labels aren't accessible
                 if let msgId = message.value(forKey: "id") as? String {
-                    print("⚠️ [ConversationRollup] Message \(msgId): could not read labels (labels nil or not NSSet)")
+                    Log.warning("Message \(msgId): could not read labels (labels nil or not NSSet)", category: .conversation)
                 }
             }
         }
@@ -101,12 +101,12 @@ final class ConversationManager: @unchecked Sendable {
             // Un-archive: At least one message is back in inbox
             conversation.archivedAt = nil
             conversation.hidden = false
-            print("📬 [ConversationRollup] Conversation \(conversation.id.uuidString): UN-ARCHIVED (hasInbox=true, archivedAt->nil)")
+            Log.debug("Conversation \(conversation.id.uuidString): UN-ARCHIVED (hasInbox=true, archivedAt->nil)", category: .conversation)
         } else if !newHasInbox && conversation.archivedAt == nil {
             // Archive: All messages have lost INBOX label
             conversation.archivedAt = Date()
             conversation.hidden = true
-            print("📬 [ConversationRollup] Conversation \(conversation.id.uuidString): ARCHIVED (hasInbox=false, archivedAt set)")
+            Log.debug("Conversation \(conversation.id.uuidString): ARCHIVED (hasInbox=false, archivedAt set)", category: .conversation)
         }
 
         // Keep hidden state in sync with archive state (for backward compatibility)
@@ -117,7 +117,7 @@ final class ConversationManager: @unchecked Sendable {
         }
 
         // Log rollup result
-        print("📬 [ConversationRollup] Conversation \(conversation.id.uuidString): hasInbox=\(newHasInbox) (was \(previousHasInbox)), inboxMsgCount=\(inboxMessages.count), totalMsgCount=\(messages.count), hidden=\(conversation.hidden)")
+        Log.debug("Conversation \(conversation.id.uuidString): hasInbox=\(newHasInbox) (was \(previousHasInbox)), inboxMsgCount=\(inboxMessages.count), totalMsgCount=\(messages.count), hidden=\(conversation.hidden)", category: .conversation)
         conversation.inboxUnreadCount = Int32(inboxMessages.filter { $0.isUnread }.count)
 
         if let latestInboxMessage = inboxMessages.max(by: { $0.internalDate < $1.internalDate }) {
@@ -133,8 +133,8 @@ final class ConversationManager: @unchecked Sendable {
                 guard let person = participant.value(forKey: "person") as? Person else { return nil }
                 return person.value(forKey: "email") as? String
             }
-            print("[ConversationManager] Conversation \(conversation.id): All participants: \(allParticipantEmails)")
-            print("[ConversationManager] My email: \(myEmail) (normalized: \(normalizedMyEmail))")
+            Log.debug("Conversation \(conversation.id): All participants: \(allParticipantEmails)", category: .conversation)
+            Log.debug("My email: \(myEmail) (normalized: \(normalizedMyEmail))", category: .conversation)
 
             // Deduplicate participants by normalized email
             var seenEmails = Set<String>()
@@ -147,7 +147,7 @@ final class ConversationManager: @unchecked Sendable {
 
                 // Exclude current user from display name
                 if normalizedEmail == normalizedMyEmail {
-                    print("[ConversationManager] Excluding self: \(email)")
+                    Log.debug("Excluding self: \(email)", category: .conversation)
                     continue
                 }
 
@@ -156,11 +156,11 @@ final class ConversationManager: @unchecked Sendable {
                 seenEmails.insert(normalizedEmail)
 
                 let name = (person.value(forKey: "displayName") as? String) ?? email
-                print("[ConversationManager] Including participant: \(name)")
+                Log.debug("Including participant: \(name)", category: .conversation)
                 names.append(name)
             }
             let finalDisplayName = self.formatGroupNames(names)
-            print("[ConversationManager] Final displayName: \(finalDisplayName), snippet: \(conversation.snippet ?? "nil")")
+            Log.debug("Final displayName: \(finalDisplayName), snippet: \(conversation.snippet ?? "nil")", category: .conversation)
             conversation.displayName = finalDisplayName
         }
     }
@@ -323,7 +323,7 @@ final class ConversationManager: @unchecked Sendable {
                 }
 
                 let duration = CFAbsoluteTimeGetCurrent() - startTime
-                print("📊 Merged \(mergedCount) duplicate conversations in \(String(format: "%.3f", duration))s")
+                Log.info("Merged \(mergedCount) duplicate conversations in \(String(format: "%.3f", duration))s", category: .conversation)
             }
         }
     }
@@ -400,7 +400,7 @@ final class ConversationManager: @unchecked Sendable {
 
             // Process groups with duplicates
             for (hash, group) in byHash where group.count > 1 {
-                print("🔀 Found \(group.count) duplicate active conversations for participantHash: \(hash.prefix(16))...")
+                Log.debug("Found \(group.count) duplicate active conversations for participantHash: \(hash.prefix(16))...", category: .conversation)
 
                 let winner = self.selectWinnerConversation(from: group)
                 let losers = group.filter { $0 != winner }
@@ -426,7 +426,7 @@ final class ConversationManager: @unchecked Sendable {
                 }
 
                 let duration = CFAbsoluteTimeGetCurrent() - startTime
-                print("📊 Merged \(mergedCount) duplicate active conversations in \(String(format: "%.3f", duration))s")
+                Log.info("Merged \(mergedCount) duplicate active conversations in \(String(format: "%.3f", duration))s", category: .conversation)
             }
         }
     }

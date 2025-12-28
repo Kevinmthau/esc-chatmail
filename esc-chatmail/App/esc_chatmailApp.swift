@@ -63,10 +63,10 @@ struct esc_chatmailApp: App {
         // Detect fresh install: No UserDefaults but has Keychain data
         // This happens when app is deleted and reinstalled
         if !hasUserDefaultsID {
-            print("🔍 Fresh install detected - UserDefaults cleared")
+            Log.info("Fresh install detected - UserDefaults cleared", category: .auth)
 
             if hasKeychainData {
-                print("⚠️  Keychain data from previous installation found - cleaning up")
+                Log.warning("Keychain data from previous installation found - cleaning up", category: .auth)
             }
 
             // Perform cleanup regardless of keychain state
@@ -84,22 +84,22 @@ struct esc_chatmailApp: App {
             userDefaults.set(true, forKey: "isFreshInstall")
             userDefaults.synchronize()
 
-            print("📅 Install timestamp recorded: \(installTimestamp) (\(Date()))")
+            Log.debug("Install timestamp recorded: \(installTimestamp) (\(Date()))", category: .auth)
 
             // Verify the write succeeded - retry without blocking
             if userDefaults.string(forKey: installationKey) == nil {
-                print("⚠️  UserDefaults write failed, retrying...")
+                Log.warning("UserDefaults write failed, retrying...", category: .auth)
                 userDefaults.set(installTimestamp, forKey: "installTimestamp")
                 userDefaults.set(newID, forKey: installationKey)
                 userDefaults.set(true, forKey: "isFreshInstall")
                 userDefaults.synchronize()
             }
 
-            print("✅ Fresh install setup complete with new ID: \(newID.prefix(8))...")
+            Log.info("Fresh install setup complete with new ID: \(newID.prefix(8))...", category: .auth)
         } else if let storedID = userDefaults.string(forKey: installationKey) {
             // Verify the stored ID matches keychain
             if !keychainService.verifyInstallationId(storedID) {
-                print("⚠️  Installation ID mismatch - performing cleanup")
+                Log.warning("Installation ID mismatch - performing cleanup", category: .auth)
                 performFreshInstallCleanup()
                 let newID = keychainService.getOrCreateInstallationId()
 
@@ -110,7 +110,7 @@ struct esc_chatmailApp: App {
                 userDefaults.set(true, forKey: "isFreshInstall")
                 userDefaults.synchronize()
 
-                print("📅 Install timestamp recorded: \(installTimestamp) (\(Date()))")
+                Log.debug("Install timestamp recorded: \(installTimestamp) (\(Date()))", category: .auth)
             }
         }
 
@@ -120,15 +120,15 @@ struct esc_chatmailApp: App {
             let installTimestamp = Date().timeIntervalSince1970
             userDefaults.set(installTimestamp, forKey: "installTimestamp")
             userDefaults.synchronize()
-            print("📅 Install timestamp was missing, set to: \(installTimestamp)")
+            Log.debug("Install timestamp was missing, set to: \(installTimestamp)", category: .auth)
         }
     }
     
     private func performFreshInstallCleanup() {
-        print("🧹 Performing fresh install cleanup...")
+        Log.info("Performing fresh install cleanup...", category: .auth)
 
         // 1. Sign out from Google (synchronous, safe to call during init)
-        print("  → Signing out from Google")
+        Log.debug("Signing out from Google", category: .auth)
         GIDSignIn.sharedInstance.signOut()
 
         // Note: We skip disconnect() during app init as it's async and blocks the UI
@@ -136,7 +136,7 @@ struct esc_chatmailApp: App {
         // Disconnect will happen automatically on next sign-in if needed
 
         // 2. Clear AuthSession state
-        print("  → Clearing AuthSession")
+        Log.debug("Clearing AuthSession", category: .auth)
         Task { @MainActor in
             AuthSession.shared.currentUser = nil
             AuthSession.shared.isAuthenticated = false
@@ -146,54 +146,54 @@ struct esc_chatmailApp: App {
         }
 
         // 3. Clear all keychain items
-        print("  → Clearing keychain")
+        Log.debug("Clearing keychain", category: .auth)
         do {
             try KeychainService.shared.clearAll()
-            print("  ✓ Keychain cleared")
+            Log.debug("Keychain cleared", category: .auth)
         } catch {
-            print("  ⚠️  Failed to clear keychain: \(error)")
+            Log.warning("Failed to clear keychain: \(error)", category: .auth)
         }
 
         // 4. Clear tokens using TokenManager
-        print("  → Clearing tokens")
+        Log.debug("Clearing tokens", category: .auth)
         do {
             try TokenManager.shared.clearTokens()
-            print("  ✓ Tokens cleared")
+            Log.debug("Tokens cleared", category: .auth)
         } catch {
-            print("  ⚠️  Failed to clear tokens: \(error)")
+            Log.warning("Failed to clear tokens: \(error)", category: .auth)
         }
 
         // 5. Clear UserDefaults completely
-        print("  → Clearing UserDefaults")
+        Log.debug("Clearing UserDefaults", category: .auth)
         if let bundleIdentifier = Bundle.main.bundleIdentifier {
             UserDefaults.standard.removePersistentDomain(forName: bundleIdentifier)
             // Force synchronization to ensure persistent domain removal completes
             UserDefaults.standard.synchronize()
-            print("  ✓ UserDefaults cleared")
+            Log.debug("UserDefaults cleared", category: .auth)
         }
 
         // 6. Clear Core Data (synchronous to ensure it completes and reloads before sync starts)
-        print("  → Clearing Core Data")
+        Log.debug("Clearing Core Data", category: .coreData)
         do {
             try CoreDataStack.shared.destroyAndReloadSync()
-            print("  ✓ Core Data cleared and reloaded")
+            Log.debug("Core Data cleared and reloaded", category: .coreData)
         } catch {
-            print("  ⚠️  Failed to clear Core Data: \(error)")
+            Log.warning("Failed to clear Core Data: \(error)", category: .coreData)
         }
 
         // 7. Clear in-memory caches (already on main thread from init)
-        print("  → Clearing in-memory caches")
+        Log.debug("Clearing in-memory caches", category: .general)
         ConversationCache.shared.clear()
         PersonCache.shared.clearCache()
-        print("  ✓ In-memory caches cleared")
+        Log.debug("In-memory caches cleared", category: .general)
 
         // 8. Clear attachment caches
-        print("  → Clearing attachment caches")
+        Log.debug("Clearing attachment caches", category: .attachment)
         AttachmentCache.shared.clearCache(level: .aggressive)
         clearAttachmentFiles()
-        print("  ✓ Attachment caches cleared")
+        Log.debug("Attachment caches cleared", category: .attachment)
 
-        print("✅ Fresh install cleanup complete")
+        Log.info("Fresh install cleanup complete", category: .auth)
     }
 
     private func clearAttachmentFiles() {

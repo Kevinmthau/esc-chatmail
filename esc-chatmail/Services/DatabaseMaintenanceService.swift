@@ -68,7 +68,7 @@ final class DatabaseMaintenanceService: ObservableObject {
         do {
             try BGTaskScheduler.shared.submit(request)
         } catch {
-            print("Failed to schedule vacuum task: \(error)")
+            Log.error("Failed to schedule vacuum task", category: .background, error: error)
         }
     }
 
@@ -81,7 +81,7 @@ final class DatabaseMaintenanceService: ObservableObject {
         do {
             try BGTaskScheduler.shared.submit(request)
         } catch {
-            print("Failed to schedule analyze task: \(error)")
+            Log.error("Failed to schedule analyze task", category: .background, error: error)
         }
     }
 
@@ -94,7 +94,7 @@ final class DatabaseMaintenanceService: ObservableObject {
         do {
             try BGTaskScheduler.shared.submit(request)
         } catch {
-            print("Failed to schedule cleanup task: \(error)")
+            Log.error("Failed to schedule cleanup task", category: .background, error: error)
         }
     }
 
@@ -180,10 +180,10 @@ final class DatabaseMaintenanceService: ObservableObject {
         do {
             let db = try SQLiteDatabase(path: storeURL.path)
             try db.execute("VACUUM")
-            print("Database vacuum completed successfully")
+            Log.info("Database vacuum completed successfully", category: .coreData)
             return true
         } catch {
-            print("Database vacuum failed: \(error)")
+            Log.error("Database vacuum failed", category: .coreData, error: error)
             return false
         }
     }
@@ -196,10 +196,10 @@ final class DatabaseMaintenanceService: ObservableObject {
         do {
             let db = try SQLiteDatabase(path: storeURL.path)
             try db.execute("ANALYZE")
-            print("Database analyze completed successfully")
+            Log.info("Database analyze completed successfully", category: .coreData)
             return true
         } catch {
-            print("Database analyze failed: \(error)")
+            Log.error("Database analyze failed", category: .coreData, error: error)
             return false
         }
     }
@@ -218,7 +218,7 @@ final class DatabaseMaintenanceService: ObservableObject {
                 deleteOldMessages.resultType = .resultTypeCount
 
                 let oldMessageResult = try context.execute(deleteOldMessages) as? NSBatchDeleteResult
-                print("Deleted \(oldMessageResult?.result ?? 0) old messages")
+                Log.debug("Deleted \(oldMessageResult?.result ?? 0) old messages", category: .coreData)
 
                 // Cleanup orphaned attachments
                 let orphanedAttachmentRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Attachment")
@@ -228,7 +228,7 @@ final class DatabaseMaintenanceService: ObservableObject {
                 deleteOrphaned.resultType = .resultTypeCount
 
                 let orphanedResult = try context.execute(deleteOrphaned) as? NSBatchDeleteResult
-                print("Deleted \(orphanedResult?.result ?? 0) orphaned attachments")
+                Log.debug("Deleted \(orphanedResult?.result ?? 0) orphaned attachments", category: .coreData)
 
                 // Cleanup empty conversations
                 let emptyConversationRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Conversation")
@@ -238,13 +238,13 @@ final class DatabaseMaintenanceService: ObservableObject {
                 deleteEmpty.resultType = .resultTypeCount
 
                 let emptyResult = try context.execute(deleteEmpty) as? NSBatchDeleteResult
-                print("Deleted \(emptyResult?.result ?? 0) empty conversations")
+                Log.debug("Deleted \(emptyResult?.result ?? 0) empty conversations", category: .coreData)
 
                 // Save changes
                 try self.coreDataStack.save(context: context)
                 return true
             } catch {
-                print("Database cleanup failed: \(error)")
+                Log.error("Database cleanup failed", category: .coreData, error: error)
                 return false
             }
         }
@@ -258,10 +258,10 @@ final class DatabaseMaintenanceService: ObservableObject {
         do {
             let db = try SQLiteDatabase(path: storeURL.path)
             try db.execute("REINDEX")
-            print("Database reindex completed successfully")
+            Log.info("Database reindex completed successfully", category: .coreData)
             return true
         } catch {
-            print("Database reindex failed: \(error)")
+            Log.error("Database reindex failed", category: .coreData, error: error)
             return false
         }
     }
@@ -290,7 +290,7 @@ final class DatabaseMaintenanceService: ObservableObject {
 
             // Save denormalized data
             self.coreDataStack.saveIfNeeded(context: context)
-            print("Denormalized fields updated successfully")
+            Log.info("Denormalized fields updated successfully", category: .coreData)
         }
     }
 

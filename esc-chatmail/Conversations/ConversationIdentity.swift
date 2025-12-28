@@ -105,7 +105,7 @@ func makeConversationIdentity(from headers: [MessageHeader],
 
     #if DEBUG
     let fromHeader = headers.first(where: { $0.name.caseInsensitiveCompare("From") == .orderedSame })?.value ?? "unknown"
-    print("💬 [ConversationIdentity] participants=\(participants) from=\(fromHeader.prefix(40))")
+    Log.debug("[ConversationIdentity] participants=\(participants) from=\(fromHeader.prefix(40))", category: .conversation)
     #endif
 
     return ConversationIdentity(

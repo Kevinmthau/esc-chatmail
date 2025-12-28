@@ -46,10 +46,10 @@ extension NSPersistentStoreCoordinator {
                 for index in indexes {
                     try db.execute(index)
                 }
-                print("Database indexes created successfully")
+                Log.info("Database indexes created successfully", category: .coreData)
             }
         } catch {
-            print("Failed to create database indexes: \(error)")
+            Log.error("Failed to create database indexes", category: .coreData, error: error)
         }
     }
 }

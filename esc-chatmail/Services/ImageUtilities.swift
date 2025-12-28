@@ -357,9 +357,7 @@ private actor ImageRequestManager {
                    nsError.code != NSURLErrorTimedOut &&
                    nsError.code != NSURLErrorNotConnectedToInternet {
                     // Log at debug level - image loading failures are non-critical
-                    #if DEBUG
-                    print("Image load failed for \(url.host ?? "unknown"): \(error.localizedDescription)")
-                    #endif
+                    Log.debug("Image load failed for \(url.host ?? "unknown"): \(error.localizedDescription)", category: .general)
                 }
                 return nil
             }

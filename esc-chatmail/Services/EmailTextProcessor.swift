@@ -371,7 +371,7 @@ class EmailTextProcessor {
             )
             return AttributedString(nsAttributed)
         } catch {
-            print("Failed to create attributed string from HTML: \(error)")
+            Log.debug("Failed to create attributed string from HTML: \(error)", category: .message)
             return nil
         }
     }

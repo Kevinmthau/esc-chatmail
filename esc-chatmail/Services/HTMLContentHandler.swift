@@ -25,16 +25,16 @@ final class HTMLContentHandler {
             try html.write(to: fileURL, atomically: true, encoding: .utf8)
             return fileURL
         } catch {
-            print("Failed to save HTML for message \(messageId): \(error)")
+            Log.error("Failed to save HTML for message \(messageId)", category: .general, error: error)
             return nil
         }
     }
-    
+
     func loadHTML(from url: URL) -> String? {
         do {
             return try String(contentsOf: url, encoding: .utf8)
         } catch {
-            print("Failed to load HTML from \(url): \(error)")
+            Log.error("Failed to load HTML from \(url)", category: .general, error: error)
             return nil
         }
     }

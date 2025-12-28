@@ -67,16 +67,16 @@ struct BatchProcessor {
     ) async -> [String] {
         guard !failedIds.isEmpty else { return [] }
 
-        print("🔄 [SyncCorrectness] Retrying \(failedIds.count) failed messages...")
+        Log.debug("Retrying \(failedIds.count) failed messages...", category: .sync)
 
         let stillFailedIds = await messageFetcher.fetchBatch(failedIds) { message in
             await messageHandler(message)
         }
 
         if stillFailedIds.isEmpty {
-            print("✅ [SyncCorrectness] All failed messages recovered on retry")
+            Log.debug("All failed messages recovered on retry", category: .sync)
         } else {
-            print("⚠️ [SyncCorrectness] \(stillFailedIds.count) messages permanently failed")
+            Log.warning("\(stillFailedIds.count) messages permanently failed", category: .sync)
         }
 
         return stillFailedIds

@@ -59,7 +59,7 @@ final class ContactsService: ObservableObject {
             }
             return granted
         } catch {
-            print("Failed to request contacts access: \(error)")
+            Log.error("Failed to request contacts access", category: .general, error: error)
             return false
         }
     }
@@ -116,7 +116,7 @@ final class ContactsService: ObservableObject {
                 }
             }
         } catch {
-            print("Failed to fetch contacts: \(error)")
+            Log.error("Failed to fetch contacts", category: .general, error: error)
         }
 
         // Also search by email to catch contacts not matched by name
@@ -135,7 +135,7 @@ final class ContactsService: ObservableObject {
                 }
             }
         } catch {
-            print("Failed to search contacts by email: \(error)")
+            Log.error("Failed to search contacts by email", category: .general, error: error)
         }
 
         return matches
@@ -161,7 +161,7 @@ final class ContactsService: ObservableObject {
                     return ContactMatch(from: contact)
                 }
             } catch {
-                print("Failed to fetch contact by email: \(error)")
+                Log.error("Failed to fetch contact by email", category: .general, error: error)
             }
 
             return nil

@@ -46,12 +46,13 @@ final class ComposeViewModel: ObservableObject {
     // MARK: - Dependencies
 
     let mode: Mode
-    private let coreDataStack: CoreDataStack
-    private let authSession: AuthSession
-    private let syncEngine: SyncEngine
+    private let dependencies: Dependencies
+    private var coreDataStack: CoreDataStack { dependencies.coreDataStack }
+    private var authSession: AuthSession { dependencies.authSession }
+    private var syncEngine: SyncEngine { dependencies.syncEngine }
     private lazy var viewContext: NSManagedObjectContext = coreDataStack.viewContext
-    private lazy var sendService: GmailSendService = GmailSendService(viewContext: viewContext)
-    private lazy var contactsService: ContactsService = ContactsService()
+    private lazy var sendService: GmailSendService = dependencies.makeSendService()
+    private lazy var contactsService: ContactsService = dependencies.makeContactsService()
 
     // MARK: - Debouncing
 
@@ -84,28 +85,11 @@ final class ComposeViewModel: ObservableObject {
 
     // MARK: - Initialization
 
-    /// Default initializer with backward-compatible singleton defaults
-    init(
-        mode: Mode = .newMessage,
-        coreDataStack: CoreDataStack? = nil,
-        authSession: AuthSession? = nil,
-        syncEngine: SyncEngine? = nil
-    ) {
+    /// Primary initializer using Dependencies container
+    init(mode: Mode = .newMessage, deps: Dependencies? = nil) {
         self.mode = mode
-        self.coreDataStack = coreDataStack ?? .shared
-        self.authSession = authSession ?? .shared
-        self.syncEngine = syncEngine ?? .shared
+        self.dependencies = deps ?? .shared
         // Other dependencies are lazy-initialized to avoid blocking sheet presentation
-    }
-
-    /// Dependencies-based initializer for cleaner dependency injection
-    convenience init(mode: Mode = .newMessage, deps: Dependencies) {
-        self.init(
-            mode: mode,
-            coreDataStack: deps.coreDataStack,
-            authSession: deps.authSession,
-            syncEngine: deps.syncEngine
-        )
     }
 
     func setupForMode() {
@@ -305,7 +289,7 @@ final class ComposeViewModel: ObservableObject {
                         sendService.markAttachmentsAsFailed(Array(attachmentsSet))
                     }
                 }
-                print("Background send failed: \(error.localizedDescription)")
+                Log.error("Background send failed", category: .message, error: error)
             }
         }
 

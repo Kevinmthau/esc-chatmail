@@ -67,14 +67,14 @@ final class MessagePersister: @unchecked Sendable {
     ) async {
         // Skip messages in SPAM folder
         if let labelIds = gmailMessage.labelIds, labelIds.contains("SPAM") {
-            print("Skipping spam message: \(gmailMessage.id)")
+            Log.debug("Skipping spam message: \(gmailMessage.id)", category: .sync)
             return
         }
 
         // Debug: Log incoming message details
         let fromHeader = gmailMessage.payload?.headers?.first(where: { $0.name.lowercased() == "from" })?.value ?? "unknown"
         let subjectHeader = gmailMessage.payload?.headers?.first(where: { $0.name.lowercased() == "subject" })?.value ?? "no subject"
-        print("📧 Processing: from=\(fromHeader.prefix(40)) subj=\(subjectHeader.prefix(40))")
+        Log.debug("Processing: from=\(fromHeader.prefix(40)) subj=\(subjectHeader.prefix(40))", category: .sync)
 
         // Process the Gmail message
         guard let processedMessage = messageProcessor.processGmailMessage(
@@ -82,7 +82,7 @@ final class MessagePersister: @unchecked Sendable {
             myAliases: myAliases,
             in: context
         ) else {
-            print("⚠️ Failed to process message: \(gmailMessage.id)")
+            Log.warning("Failed to process message: \(gmailMessage.id)", category: .sync)
             return
         }
 
@@ -141,7 +141,7 @@ final class MessagePersister: @unchecked Sendable {
             trackModifiedConversation(conversation)
         }
 
-        print("Updated existing message: \(processedMessage.id)")
+        Log.debug("Updated existing message: \(processedMessage.id)", category: .sync)
         return true
     }
 
@@ -210,7 +210,7 @@ final class MessagePersister: @unchecked Sendable {
                 addedLabelIds.append(labelId)
             }
         }
-        print("📧 [MessagePersister] New message \(processedMessage.id): labels=\(addedLabelIds), hasINBOX=\(hasInboxLabel), conversationId=\(conversation.id.uuidString)")
+        Log.debug("New message \(processedMessage.id): labels=\(addedLabelIds), hasINBOX=\(hasInboxLabel), conversationId=\(conversation.id.uuidString)", category: .sync)
 
         // Save HTML content if present
         if let htmlBody = processedMessage.htmlBody {
@@ -293,11 +293,11 @@ final class MessagePersister: @unchecked Sendable {
             let label = try context.fetch(request).first
             if label == nil {
                 // Log missing labels for debugging - this can happen if labels haven't been synced yet
-                print("Warning: Label '\(id)' not found in local cache")
+                Log.debug("Label '\(id)' not found in local cache", category: .sync)
             }
             return label
         } catch {
-            print("Error fetching label '\(id)': \(error.localizedDescription)")
+            Log.error("Error fetching label '\(id)'", category: .sync, error: error)
             return nil
         }
     }
@@ -316,7 +316,7 @@ final class MessagePersister: @unchecked Sendable {
             for label in labels {
                 labelCache[label.id] = label
             }
-            print("Prefetched \(labelCache.count) labels into cache")
+            Log.debug("Prefetched \(labelCache.count) labels into cache", category: .sync)
             return labelCache
         }
     }
@@ -353,7 +353,7 @@ final class MessagePersister: @unchecked Sendable {
                 }
             }
 
-            print("📋 [SyncCorrectness] Labels: inserted=\(insertedCount), updated=\(updatedCount), total=\(labelDict.count)")
+            Log.debug("Labels: inserted=\(insertedCount), updated=\(updatedCount), total=\(labelDict.count)", category: .sync)
         }
     }
 
@@ -371,7 +371,7 @@ final class MessagePersister: @unchecked Sendable {
         if let existing = try? context.fetch(request).first {
             existing.aliasesArray = aliases
             existing.historyId = profile.historyId
-            print("Updated existing account: \(profile.emailAddress)")
+            Log.debug("Updated existing account: \(profile.emailAddress)", category: .sync)
             return existing
         }
 
@@ -383,7 +383,7 @@ final class MessagePersister: @unchecked Sendable {
         account.email = profile.emailAddress
         account.historyId = profile.historyId
         account.aliasesArray = aliases
-        print("Created new account: \(profile.emailAddress) with historyId: \(profile.historyId)")
+        Log.info("Created new account: \(profile.emailAddress) with historyId: \(profile.historyId)", category: .sync)
         return account
     }
 
@@ -415,9 +415,9 @@ final class MessagePersister: @unchecked Sendable {
             request.fetchLimit = 1
             if let account = try? context.fetch(request).first {
                 account.historyId = historyId
-                print("📝 [SyncCorrectness] Set historyId to \(historyId) in context (pending save)")
+                Log.debug("Set historyId to \(historyId) in context (pending save)", category: .sync)
             } else {
-                print("⚠️ [SyncCorrectness] No account found to set history ID")
+                Log.warning("No account found to set history ID", category: .sync)
             }
         }
     }
@@ -441,15 +441,15 @@ final class MessagePersister: @unchecked Sendable {
                 if let account = try context.fetch(request).first {
                     account.historyId = historyId
                     try self.coreDataStack.save(context: context)
-                    print("Successfully updated history ID to: \(historyId)")
+                    Log.debug("Successfully updated history ID to: \(historyId)", category: .sync)
                 } else {
-                    print("Warning: No account found to update history ID")
+                    Log.warning("No account found to update history ID", category: .sync)
                 }
             }
             return true
         } catch {
             lastError = error
-            print("Failed to save history ID (attempt 1): \(error.localizedDescription)")
+            Log.warning("Failed to save history ID (attempt 1): \(error.localizedDescription)", category: .sync)
         }
 
         // Retry with backoff
@@ -466,17 +466,17 @@ final class MessagePersister: @unchecked Sendable {
                     if let account = try context.fetch(request).first {
                         account.historyId = historyId
                         try self.coreDataStack.save(context: context)
-                        print("Successfully saved history ID on retry attempt \(attempt)")
+                        Log.debug("Successfully saved history ID on retry attempt \(attempt)", category: .sync)
                     }
                 }
                 return true
             } catch {
                 lastError = error
-                print("Failed to save history ID (attempt \(attempt)): \(error.localizedDescription)")
+                Log.warning("Failed to save history ID (attempt \(attempt)): \(error.localizedDescription)", category: .sync)
             }
         }
 
-        print("Failed to save history ID after all retries. Last error: \(lastError?.localizedDescription ?? "unknown")")
+        Log.error("Failed to save history ID after all retries. Last error: \(lastError?.localizedDescription ?? "unknown")", category: .sync)
         return false
     }
 }

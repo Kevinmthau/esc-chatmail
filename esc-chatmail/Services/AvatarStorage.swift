@@ -40,7 +40,7 @@ final class AvatarStorage: @unchecked Sendable {
             try dataToSave.write(to: fileURL, options: .atomic)
             return fileURL.absoluteString
         } catch {
-            print("Failed to save avatar for \(email): \(error)")
+            Log.error("Failed to save avatar for \(email)", category: .general, error: error)
             return nil
         }
     }

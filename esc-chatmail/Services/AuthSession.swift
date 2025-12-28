@@ -74,7 +74,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                             try KeychainService.shared.saveString(email, for: .googleUserEmail, withAccess: .whenUnlockedThisDeviceOnly)
                         }
                     } catch {
-                        print("Failed to save tokens: \(error)")
+                        Log.error("Failed to save tokens", category: .auth, error: error)
                     }
 
                     // Mark that user has successfully signed in
@@ -100,7 +100,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             try TokenManager.shared.clearTokens()
             try KeychainService.shared.delete(for: .googleUserEmail)
         } catch {
-            print("Failed to clear tokens: \(error)")
+            Log.error("Failed to clear tokens", category: .auth, error: error)
         }
 
         // Clear the sign-in flag
@@ -111,7 +111,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             do {
                 try await CoreDataStack.shared.resetStore()
             } catch {
-                print("Failed to clear Core Data: \(error)")
+                Log.error("Failed to clear Core Data", category: .coreData, error: error)
             }
         }
 
@@ -187,7 +187,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             try TokenManager.shared.clearTokens()
             try KeychainService.shared.delete(for: .googleUserEmail)
         } catch {
-            print("Failed to clear tokens: \(error)")
+            Log.error("Failed to clear tokens", category: .auth, error: error)
         }
 
         // Clear the sign-in flag
@@ -198,7 +198,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             do {
                 try await CoreDataStack.shared.resetStore()
             } catch {
-                print("Failed to clear Core Data: \(error)")
+                Log.error("Failed to clear Core Data", category: .coreData, error: error)
             }
         }
 

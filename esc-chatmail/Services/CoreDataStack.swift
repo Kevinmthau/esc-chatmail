@@ -93,7 +93,7 @@ final class CoreDataStack: @unchecked Sendable {
             } else {
                 self.setStoreLoaded(true)
                 self.loadAttempts = 0
-                print("Core Data store loaded successfully: \(storeDescription)")
+                Log.info("Core Data store loaded successfully: \(storeDescription)", category: .coreData)
             }
         }
     }
@@ -103,7 +103,7 @@ final class CoreDataStack: @unchecked Sendable {
 
         // Check if error is recoverable
         if isRecoverableError(error) {
-            print("Core Data load attempt \(loadAttempts) failed with recoverable error: \(error)")
+            Log.warning("Core Data load attempt \(loadAttempts) failed with recoverable error: \(error)", category: .coreData)
 
             // Retry after delay using Task for cleaner async handling
             Task { @MainActor [weak self] in
@@ -112,11 +112,11 @@ final class CoreDataStack: @unchecked Sendable {
             }
         } else if isMigrationError(error) {
             // Attempt to recover from migration failure
-            print("Core Data migration failed: \(error)")
+            Log.error("Core Data migration failed", category: .coreData, error: error)
             attemptMigrationRecovery(for: container, error: error)
         } else {
             // Non-recoverable error - attempt to reset store as last resort
-            print("Core Data critical error: \(error)")
+            Log.error("Core Data critical error", category: .coreData, error: error)
             attemptStoreReset(for: container, error: error)
         }
     }
@@ -167,7 +167,7 @@ final class CoreDataStack: @unchecked Sendable {
         try? FileManager.default.copyItem(at: walURL, to: backupWalURL)
         try? FileManager.default.copyItem(at: shmURL, to: backupShmURL)
 
-        print("Created timestamped backup at: \(backupPath)")
+        Log.info("Created timestamped backup at: \(backupPath)", category: .coreData)
         return backupPath
     }
 
@@ -177,7 +177,7 @@ final class CoreDataStack: @unchecked Sendable {
             do {
                 // Create timestamped backup before attempting recovery
                 let backupURL = try createTimestampedBackup(at: storeURL)
-                print("Created backup before migration recovery: \(backupURL.path)")
+                Log.info("Created backup before migration recovery: \(backupURL.path)", category: .coreData)
 
                 // Remove problematic store
                 try FileManager.default.removeItem(at: storeURL)
@@ -188,7 +188,7 @@ final class CoreDataStack: @unchecked Sendable {
                 // Retry loading
                 loadPersistentStores(for: container)
             } catch {
-                print("Migration recovery failed: \(error)")
+                Log.error("Migration recovery failed", category: .coreData, error: error)
                 attemptStoreReset(for: container, error: error)
             }
         }
@@ -200,7 +200,7 @@ final class CoreDataStack: @unchecked Sendable {
             do {
                 // Create timestamped backup before destroying data
                 let backupURL = try createTimestampedBackup(at: storeURL)
-                print("Created backup before store reset: \(backupURL.path)")
+                Log.info("Created backup before store reset: \(backupURL.path)", category: .coreData)
 
                 // Remove problematic store
                 try FileManager.default.removeItem(at: storeURL)
@@ -211,7 +211,7 @@ final class CoreDataStack: @unchecked Sendable {
                 loadPersistentStores(for: container)
             } catch {
                 // Store is completely broken - notify user
-                print("Store reset failed even after backup: \(error)")
+                Log.error("Store reset failed even after backup", category: .coreData, error: error)
                 notifyUserOfCriticalError(error)
             }
         }
@@ -312,7 +312,7 @@ final class CoreDataStack: @unchecked Sendable {
         if let errors = error.userInfo[NSDetailedErrorsKey] as? [NSError] {
             for detailedError in errors {
                 if let object = detailedError.userInfo[NSValidationObjectErrorKey] as? NSManagedObject {
-                    print("Validation error for object: \(object)")
+                    Log.warning("Validation error for object: \(object.entity.name ?? "unknown")", category: .coreData)
                     // Optionally reset invalid objects
                     context.refresh(object, mergeChanges: false)
                 }
@@ -357,7 +357,7 @@ final class CoreDataStack: @unchecked Sendable {
                 }
             } catch {
                 errors.append(error)
-                print("Failed to destroy Core Data store: \(error)")
+                Log.error("Failed to destroy Core Data store", category: .coreData, error: error)
             }
         }
 
@@ -385,11 +385,11 @@ final class CoreDataStack: @unchecked Sendable {
         persistentContainer.loadPersistentStores { [weak self] storeDescription, error in
             if let error = error {
                 loadError = error
-                print("Failed to reload Core Data store: \(error)")
+                Log.error("Failed to reload Core Data store", category: .coreData, error: error)
             } else {
                 self?.setStoreLoaded(true)
                 self?.loadAttempts = 0
-                print("Core Data store reloaded successfully: \(storeDescription)")
+                Log.info("Core Data store reloaded successfully: \(storeDescription)", category: .coreData)
             }
             semaphore.signal()
         }
@@ -445,14 +445,14 @@ final class CoreDataStack: @unchecked Sendable {
                 try context.save()
                 saveSucceeded = true
             } catch let error as NSError {
-                print("Core Data save error in \(caller): \(error.localizedDescription)")
+                Log.error("Core Data save error in \(caller): \(error.localizedDescription)", category: .coreData)
 
                 // Log additional details for debugging
                 if let detailedErrors = error.userInfo[NSDetailedErrorsKey] as? [NSError] {
                     for detailedError in detailedErrors {
-                        print("  - Detail: \(detailedError.localizedDescription)")
+                        Log.debug("  - Detail: \(detailedError.localizedDescription)", category: .coreData)
                         if let validationObject = detailedError.userInfo[NSValidationObjectErrorKey] as? NSManagedObject {
-                            print("    Object: \(validationObject.entity.name ?? "unknown")")
+                            Log.debug("    Object: \(validationObject.entity.name ?? "unknown")", category: .coreData)
                         }
                     }
                 }
@@ -460,7 +460,7 @@ final class CoreDataStack: @unchecked Sendable {
                 // Attempt recovery for merge conflicts
                 if error.code == NSManagedObjectMergeError || error.code == NSPersistentStoreSaveConflictsError {
                     context.rollback()
-                    print("Rolled back context due to merge conflict")
+                    Log.warning("Rolled back context due to merge conflict", category: .coreData)
                 }
 
                 saveSucceeded = false
@@ -486,12 +486,12 @@ final class CoreDataStack: @unchecked Sendable {
                 try context.save()
                 completion?(true)
             } catch let error as NSError {
-                print("Core Data save error in \(caller): \(error.localizedDescription)")
+                Log.error("Core Data save error in \(caller): \(error.localizedDescription)", category: .coreData)
 
                 // Log additional details for debugging
                 if let detailedErrors = error.userInfo[NSDetailedErrorsKey] as? [NSError] {
                     for detailedError in detailedErrors {
-                        print("  - Detail: \(detailedError.localizedDescription)")
+                        Log.debug("  - Detail: \(detailedError.localizedDescription)", category: .coreData)
                     }
                 }
 

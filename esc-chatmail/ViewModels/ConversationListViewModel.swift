@@ -59,29 +59,15 @@ final class ConversationListViewModel: ObservableObject {
 
     // MARK: - Initialization
 
-    /// Default initializer with backward-compatible singleton defaults
-    init(
-        coreDataStack: CoreDataStack? = nil,
-        syncEngine: SyncEngine? = nil,
-        authSession: AuthSession? = nil,
-        personCache: PersonCache? = nil
-    ) {
-        self.coreDataStack = coreDataStack ?? .shared
-        self.syncEngine = syncEngine ?? .shared
-        self.authSession = authSession ?? .shared
-        self.personCache = personCache ?? .shared
-        self.messageActions = MessageActions()
-        self.contactsService = ContactsService()
-    }
-
-    /// Dependencies-based initializer for cleaner dependency injection
-    convenience init(deps: Dependencies) {
-        self.init(
-            coreDataStack: deps.coreDataStack,
-            syncEngine: deps.syncEngine,
-            authSession: deps.authSession,
-            personCache: deps.personCache
-        )
+    /// Primary initializer using Dependencies container
+    init(deps: Dependencies? = nil) {
+        let dependencies = deps ?? .shared
+        self.coreDataStack = dependencies.coreDataStack
+        self.syncEngine = dependencies.syncEngine
+        self.authSession = dependencies.authSession
+        self.personCache = dependencies.personCache
+        self.messageActions = dependencies.makeMessageActions()
+        self.contactsService = dependencies.makeContactsService()
     }
 
     deinit {
@@ -93,7 +79,7 @@ final class ConversationListViewModel: ObservableObject {
     func performInitialSync() {
         guard !hasPerformedInitialSync else { return }
         guard authSession.isAuthenticated else {
-            print("Skipping initial sync - not authenticated")
+            Log.info("Skipping initial sync - not authenticated", category: .sync)
             return
         }
 
@@ -103,7 +89,7 @@ final class ConversationListViewModel: ObservableObject {
             do {
                 try await syncEngine.performIncrementalSync()
             } catch {
-                print("Initial sync error: \(error)")
+                Log.error("Initial sync error", category: .sync, error: error)
             }
         }
     }
@@ -112,7 +98,7 @@ final class ConversationListViewModel: ObservableObject {
         do {
             try await syncEngine.performIncrementalSync()
         } catch {
-            print("Sync error: \(error)")
+            Log.error("Sync error", category: .sync, error: error)
         }
     }
 
@@ -123,11 +109,11 @@ final class ConversationListViewModel: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
                 if !self.syncEngine.isSyncing {
-                    print("Performing periodic sync at \(Date())")
+                    Log.debug("Performing periodic sync", category: .sync)
                     do {
                         try await self.syncEngine.performIncrementalSync()
                     } catch {
-                        print("Periodic sync error: \(error)")
+                        Log.error("Periodic sync error", category: .sync, error: error)
                     }
                 }
             }
@@ -188,10 +174,10 @@ final class ConversationListViewModel: ObservableObject {
         }
 
         let count = conversationsToArchive.count
-        print("[ARCHIVE] Starting batch archive of \(count) conversations from \(selectedConversationIDs.count) selected IDs")
+        Log.debug("Starting batch archive of \(count) conversations from \(selectedConversationIDs.count) selected IDs", category: .message)
         for (index, conv) in conversationsToArchive.enumerated() {
             let messageCount = conv.messages?.count ?? 0
-            print("[ARCHIVE] [\(index + 1)/\(count)] '\(conv.displayName ?? "unknown")' (id: \(conv.id), messages: \(messageCount))")
+            Log.debug("[\(index + 1)/\(count)] '\(conv.displayName ?? "unknown")' (id: \(conv.id), messages: \(messageCount))", category: .message)
         }
 
         selectedConversationIDs.removeAll()
@@ -199,15 +185,15 @@ final class ConversationListViewModel: ObservableObject {
 
         Task {
             for (index, conversation) in conversationsToArchive.enumerated() {
-                print("[ARCHIVE] [\(index + 1)/\(count)] Processing '\(conversation.displayName ?? "unknown")'...")
+                Log.debug("[\(index + 1)/\(count)] Processing '\(conversation.displayName ?? "unknown")'...", category: .message)
                 // MessageActions.archiveConversation handles:
                 // - Removing INBOX labels from messages
                 // - Setting archivedAt and hidden on conversation
                 // - Queuing sync to Gmail
                 await messageActions.archiveConversation(conversation: conversation)
-                print("[ARCHIVE] [\(index + 1)/\(count)] Archived '\(conversation.displayName ?? "unknown")'")
+                Log.debug("[\(index + 1)/\(count)] Archived '\(conversation.displayName ?? "unknown")'", category: .message)
             }
-            print("[ARCHIVE] Batch archive complete - \(count) conversations archived")
+            Log.info("Batch archive complete - \(count) conversations archived", category: .message)
         }
     }
 
@@ -310,7 +296,7 @@ final class ConversationListViewModel: ObservableObject {
                     self?.contactEmailsCache = finalEmails
                 }
             } catch {
-                print("Failed to load contacts: \(error)")
+                Log.error("Failed to load contacts", category: .general, error: error)
             }
         }
     }
@@ -323,7 +309,7 @@ final class ConversationListViewModel: ObservableObject {
             let conversationManager = ConversationManager()
             await conversationManager.updateAllConversationRollups(in: coreDataStack.viewContext)
             UserDefaults.standard.set(true, forKey: hasRefreshedKey)
-            print("Refreshed all conversation names to new format")
+            Log.info("Refreshed all conversation names to new format", category: .conversation)
         }
     }
 

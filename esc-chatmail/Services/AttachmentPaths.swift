@@ -74,7 +74,7 @@ struct AttachmentPaths {
             try data.write(to: url)
             return true
         } catch {
-            print("Failed to save attachment data: \(error)")
+            Log.error("Failed to save attachment data", category: .attachment, error: error)
             return false
         }
     }

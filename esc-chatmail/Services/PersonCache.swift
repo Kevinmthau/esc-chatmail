@@ -53,7 +53,7 @@ final class PersonCache: ObservableObject {
                         (person.email, person.displayName)
                     }
                 } catch {
-                    print("Failed to prefetch Person entities: \(error)")
+                    Log.error("Failed to prefetch Person entities", category: .coreData, error: error)
                     return []
                 }
             }
@@ -118,7 +118,7 @@ final class PersonCache: ObservableObject {
                 cachedAt: Date()
             )
         } catch {
-            print("Failed to fetch Person for \(email): \(error)")
+            Log.error("Failed to fetch Person for \(email)", category: .coreData, error: error)
             displayName = nil
         }
 

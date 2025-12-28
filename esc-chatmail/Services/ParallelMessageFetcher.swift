@@ -106,7 +106,7 @@ actor ParallelMessageFetcher {
                     do {
                         return try await self.fetchBatch(batch, priority: priority)
                     } catch {
-                        print("Batch \(index) failed: \(error)")
+                        Log.error("Batch \(index) failed", category: .sync, error: error)
                         return []
                     }
                 }
@@ -149,7 +149,7 @@ actor ParallelMessageFetcher {
                 incrementTotalFetched(by: messages.count)
             } catch {
                 incrementErrors()
-                print("Failed to fetch batch: \(error)")
+                Log.error("Failed to fetch batch", category: .sync, error: error)
             }
 
             fetchTask.completion(messages)
@@ -357,7 +357,7 @@ final class AdaptiveMessageFetcher: ObservableObject {
         do {
             return try await fetcher.fetchMessages(messageIds, priority: priority)
         } catch {
-            print("Failed to fetch messages: \(error)")
+            Log.error("Failed to fetch messages", category: .sync, error: error)
             return []
         }
     }

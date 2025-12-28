@@ -62,7 +62,7 @@ final class MessageFetcher {
         onSuccess: @escaping @Sendable (GmailMessage) async -> Void
     ) async -> [String] {
         guard !Task.isCancelled else {
-            print("Batch processing cancelled")
+            Log.debug("Batch processing cancelled", category: .sync)
             return ids
         }
 
@@ -94,7 +94,7 @@ final class MessageFetcher {
                     if self.isRetriableError(error) {
                         currentFailedIds.append(id)
                     } else {
-                        print("Non-retriable error for message \(id): \(error.localizedDescription)")
+                        Log.warning("Non-retriable error for message \(id): \(error.localizedDescription)", category: .sync)
                         permanentlyFailed.append(id)
                     }
                 }
@@ -109,7 +109,7 @@ final class MessageFetcher {
 
             // Exponential backoff: 500ms, 1s, 2s
             let delay = baseRetryDelay * UInt64(1 << (attempt - 1))
-            print("Retry attempt \(attempt)/\(maxRetryAttempts) for \(currentFailedIds.count) failed messages after \(delay / 1_000_000)ms...")
+            Log.debug("Retry attempt \(attempt)/\(maxRetryAttempts) for \(currentFailedIds.count) failed messages after \(delay / 1_000_000)ms...", category: .sync)
 
             do {
                 try await Task.sleep(nanoseconds: delay)
@@ -142,11 +142,11 @@ final class MessageFetcher {
                     switch result {
                     case .success(let message):
                         await onSuccess(message)
-                        print("Successfully fetched message \(id) on retry attempt \(attempt)")
+                        Log.debug("Successfully fetched message \(id) on retry attempt \(attempt)", category: .sync)
                     case .failure(let error):
                         if attempt == maxRetryAttempts || !self.isRetriableError(error) {
                             // Final attempt or non-retriable error
-                            print("Permanently failed to fetch message \(id) after \(attempt) attempts: \(error.localizedDescription)")
+                            Log.warning("Permanently failed to fetch message \(id) after \(attempt) attempts: \(error.localizedDescription)", category: .sync)
                             permanentlyFailed.append(id)
                         } else {
                             stillFailed.append(id)
@@ -162,7 +162,7 @@ final class MessageFetcher {
         permanentlyFailed.append(contentsOf: currentFailedIds)
 
         if !permanentlyFailed.isEmpty {
-            print("Total permanently failed messages: \(permanentlyFailed.count)")
+            Log.warning("Total permanently failed messages: \(permanentlyFailed.count)", category: .sync)
         }
 
         return permanentlyFailed

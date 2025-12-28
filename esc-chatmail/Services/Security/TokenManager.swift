@@ -225,7 +225,7 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
                 }
 
                 // Log retry attempt
-                print("Token refresh attempt \(attempt + 1) failed: \(error)")
+                Log.warning("Token refresh attempt \(attempt + 1) failed: \(error)", category: .auth)
             }
         }
 

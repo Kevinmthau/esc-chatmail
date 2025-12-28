@@ -116,7 +116,7 @@ final class CoreDataBatchOperations: @unchecked Sendable {
                               count: insertedCount,
                               duration: duration)
 
-        print("Batch inserted \(insertedCount) messages in \(String(format: "%.2f", duration))s")
+        Log.info("Batch inserted \(insertedCount) messages in \(String(format: "%.2f", duration))s", category: .coreData)
     }
 
     // MARK: - Batch Update for Messages
@@ -165,7 +165,7 @@ final class CoreDataBatchOperations: @unchecked Sendable {
             }
         }
 
-        print("Batch updated \(updatedCount) messages")
+        Log.info("Batch updated \(updatedCount) messages", category: .coreData)
     }
 
     // MARK: - Batch Delete for Messages
@@ -196,7 +196,7 @@ final class CoreDataBatchOperations: @unchecked Sendable {
             )
         }
 
-        print("Batch deleted \(messageIds.count) messages")
+        Log.info("Batch deleted \(messageIds.count) messages", category: .coreData)
     }
 
     // MARK: - Batch Insert for Conversations
@@ -244,7 +244,7 @@ final class CoreDataBatchOperations: @unchecked Sendable {
             }
         }
 
-        print("Batch inserted \(insertedCount) conversations")
+        Log.info("Batch inserted \(insertedCount) conversations", category: .coreData)
     }
 
     // MARK: - Helper Methods
@@ -270,7 +270,7 @@ final class CoreDataBatchOperations: @unchecked Sendable {
 
                     // Check for validation errors
                     if nsError.code == NSValidationMultipleErrorsError {
-                        print("Validation errors: \(nsError.userInfo)")
+                        Log.warning("Validation errors: \(nsError.userInfo)", category: .coreData)
                         throw BatchOperationError.contextSaveFailure(error)
                     }
                 }
@@ -334,7 +334,7 @@ final class CoreDataBatchOperations: @unchecked Sendable {
 private final class PerformanceMonitor: Sendable {
     func log(operation: String, count: Int, duration: TimeInterval) {
         let throughput = Double(count) / duration
-        print("📊 Performance: \(operation) - \(count) items in \(String(format: "%.2f", duration))s (\(String(format: "%.0f", throughput)) items/sec)")
+        Log.debug("Performance: \(operation) - \(count) items in \(String(format: "%.2f", duration))s (\(String(format: "%.0f", throughput)) items/sec)", category: .coreData)
     }
 }
 

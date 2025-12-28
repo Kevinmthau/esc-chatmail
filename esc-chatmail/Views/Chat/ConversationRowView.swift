@@ -41,7 +41,7 @@ struct ConversationRowView: View {
     }
 
     var body: some View {
-        let _ = print("[ROW] displayName: '\(displayName)' | snippet: '\(snapshot.snippet ?? "nil")' | storedDisplayName: '\(snapshot.displayNameHint ?? "nil")'")
+        let _ = Log.debug("[ROW] displayName: '\(displayName)' | snippet: '\(snapshot.snippet ?? "nil")' | storedDisplayName: '\(snapshot.displayNameHint ?? "nil")'", category: .ui)
         HStack(spacing: 8) {
             // Unread indicator with fixed width container
             ZStack {

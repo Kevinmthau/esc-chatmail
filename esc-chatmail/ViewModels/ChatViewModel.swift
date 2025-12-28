@@ -25,26 +25,14 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Initialization
 
-    /// Default initializer with backward-compatible singleton defaults
-    init(
-        conversation: Conversation,
-        coreDataStack: CoreDataStack? = nil,
-        syncEngine: SyncEngine? = nil
-    ) {
+    /// Primary initializer using Dependencies container
+    init(conversation: Conversation, deps: Dependencies? = nil) {
+        let dependencies = deps ?? .shared
         self.conversation = conversation
-        self.coreDataStack = coreDataStack ?? .shared
-        self.syncEngine = syncEngine ?? .shared
-        self.messageActions = MessageActions()
-        self.sendService = GmailSendService(viewContext: self.coreDataStack.viewContext)
-    }
-
-    /// Dependencies-based initializer for cleaner dependency injection
-    convenience init(conversation: Conversation, deps: Dependencies) {
-        self.init(
-            conversation: conversation,
-            coreDataStack: deps.coreDataStack,
-            syncEngine: deps.syncEngine
-        )
+        self.coreDataStack = dependencies.coreDataStack
+        self.syncEngine = dependencies.syncEngine
+        self.messageActions = dependencies.makeMessageActions()
+        self.sendService = dependencies.makeSendService()
     }
 
     // MARK: - Message Actions
@@ -107,7 +95,7 @@ final class ChatViewModel: ObservableObject {
         do {
             try coreDataStack.save(context: coreDataStack.viewContext)
         } catch {
-            print("Failed to toggle pin: \(error)")
+            Log.error("Failed to toggle pin", category: .ui, error: error)
             conversation.pinned.toggle()
         }
     }
@@ -117,7 +105,7 @@ final class ChatViewModel: ObservableObject {
         do {
             try coreDataStack.save(context: coreDataStack.viewContext)
         } catch {
-            print("Failed to toggle mute: \(error)")
+            Log.error("Failed to toggle mute", category: .ui, error: error)
             conversation.muted.toggle()
         }
     }
@@ -199,7 +187,7 @@ final class ChatViewModel: ObservableObject {
             if let optimisticMessage = sendService.fetchMessage(byID: optimisticMessageID) {
                 sendService.deleteOptimisticMessage(optimisticMessage)
             }
-            print("Failed to send reply: \(error)")
+            Log.error("Failed to send reply", category: .message, error: error)
         }
     }
 

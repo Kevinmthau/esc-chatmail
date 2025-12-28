@@ -4,10 +4,10 @@ import CoreData
 
 @MainActor
 final class GmailSendService: ObservableObject {
-    private let apiClient = GmailAPIClient.shared
-    private let authSession = AuthSession.shared
+    private let apiClient: GmailAPIClient
+    private let authSession: AuthSession
     private let viewContext: NSManagedObjectContext
-    
+
     struct SendResult {
         let messageId: String
         let threadId: String
@@ -18,12 +18,12 @@ final class GmailSendService: ObservableObject {
         let filename: String
         let mimeType: String
     }
-    
+
     enum SendError: LocalizedError {
         case invalidMimeData
         case apiError(String)
         case authenticationFailed
-        
+
         var errorDescription: String? {
             switch self {
             case .invalidMimeData:
@@ -35,9 +35,15 @@ final class GmailSendService: ObservableObject {
             }
         }
     }
-    
-    init(viewContext: NSManagedObjectContext) {
+
+    init(
+        viewContext: NSManagedObjectContext,
+        apiClient: GmailAPIClient? = nil,
+        authSession: AuthSession? = nil
+    ) {
         self.viewContext = viewContext
+        self.apiClient = apiClient ?? .shared
+        self.authSession = authSession ?? .shared
     }
     
     nonisolated func sendNew(to recipients: [String], body: String, subject: String? = nil, attachmentInfos: [AttachmentInfo] = []) async throws -> SendResult {
@@ -136,7 +142,7 @@ final class GmailSendService: ObservableObject {
         do {
             try CoreDataStack.shared.save(context: viewContext)
         } catch {
-            print("Failed to save attachment state: \(error)")
+            Log.error("Failed to save attachment state", category: .attachment, error: error)
         }
     }
 
@@ -148,14 +154,12 @@ final class GmailSendService: ObservableObject {
         do {
             try CoreDataStack.shared.save(context: viewContext)
         } catch {
-            print("Failed to save attachment state: \(error)")
+            Log.error("Failed to save attachment state", category: .attachment, error: error)
         }
     }
     
     private nonisolated func sendMessage(mimeData: Data, threadId: String?) async throws -> SendResult {
-        #if DEBUG
-        print("[GmailSendService] Sending MIME message (\(mimeData.count) bytes)")
-        #endif
+        Log.debug("Sending MIME message (\(mimeData.count) bytes)", category: .api)
 
         let rawMessage = MimeBuilder.base64UrlEncode(mimeData)
 
@@ -191,9 +195,7 @@ final class GmailSendService: ObservableObject {
             throw SendError.authenticationFailed
         }
 
-        #if DEBUG
-        print("[GmailSendService] Response status: \(httpResponse.statusCode)")
-        #endif
+        Log.debug("Response status: \(httpResponse.statusCode)", category: .api)
 
         guard httpResponse.statusCode == 200 else {
             let errorMessage = String(data: data, encoding: .utf8) ?? "Unknown error"
@@ -206,9 +208,7 @@ final class GmailSendService: ObservableObject {
             throw SendError.apiError("Invalid response format")
         }
 
-        #if DEBUG
-        print("[GmailSendService] Message sent - ID: \(messageId)")
-        #endif
+        Log.info("Message sent - ID: \(messageId)", category: .api)
 
         return SendResult(messageId: messageId, threadId: returnedThreadId)
     }
@@ -264,7 +264,7 @@ final class GmailSendService: ObservableObject {
                 try viewContext.save()
             }
         } catch {
-            print("Failed to save optimistic message: \(error)")
+            Log.error("Failed to save optimistic message", category: .message, error: error)
         }
 
         return message
@@ -279,7 +279,7 @@ final class GmailSendService: ObservableObject {
         do {
             return try viewContext.fetch(request).first
         } catch {
-            print("Failed to fetch message: \(error)")
+            Log.error("Failed to fetch message", category: .message, error: error)
             return nil
         }
     }
@@ -293,10 +293,10 @@ final class GmailSendService: ObservableObject {
                 try viewContext.save()
             }
         } catch {
-            print("Failed to update message with Gmail ID: \(error)")
+            Log.error("Failed to update message with Gmail ID", category: .message, error: error)
         }
     }
-    
+
     func deleteOptimisticMessage(_ message: Message) {
         viewContext.delete(message)
 
@@ -305,7 +305,7 @@ final class GmailSendService: ObservableObject {
                 try viewContext.save()
             }
         } catch {
-            print("Failed to delete optimistic message: \(error)")
+            Log.error("Failed to delete optimistic message", category: .message, error: error)
         }
     }
     

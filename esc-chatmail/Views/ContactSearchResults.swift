@@ -60,9 +60,9 @@ struct ContactSearchResults: View {
             await withCheckedContinuation { continuation in
                 contactStore.requestAccess(for: .contacts) { granted, error in
                     if let error = error {
-                        print("Failed to request contacts access: \(error)")
+                        Log.error("Failed to request contacts access", category: .general, error: error)
                     } else if !granted {
-                        print("Contacts access denied")
+                        Log.warning("Contacts access denied", category: .general)
                     }
                     continuation.resume()
                 }
@@ -121,7 +121,7 @@ struct ContactSearchResults: View {
                     isSearching = false
                 }
             } catch {
-                print("Failed to search contacts: \(error)")
+                Log.error("Failed to search contacts", category: .general, error: error)
                 await MainActor.run {
                     searchResults = []
                     isSearching = false

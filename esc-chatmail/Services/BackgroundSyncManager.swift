@@ -40,23 +40,23 @@ class BackgroundSyncManager {
         
         do {
             try BGTaskScheduler.shared.submit(request)
-            print("Background refresh scheduled")
+            Log.debug("Background refresh scheduled", category: .background)
         } catch {
-            print("Failed to schedule background refresh: \(error)")
+            Log.error("Failed to schedule background refresh", category: .background, error: error)
         }
     }
-    
+
     func scheduleProcessingTask() {
         let request = BGProcessingTaskRequest(identifier: processingTaskIdentifier)
         request.requiresNetworkConnectivity = true
         request.requiresExternalPower = false
         request.earliestBeginDate = Date(timeIntervalSinceNow: 60 * 60)
-        
+
         do {
             try BGTaskScheduler.shared.submit(request)
-            print("Background processing scheduled")
+            Log.debug("Background processing scheduled", category: .background)
         } catch {
-            print("Failed to schedule background processing: \(error)")
+            Log.error("Failed to schedule background processing", category: .background, error: error)
         }
     }
     
@@ -108,12 +108,12 @@ class BackgroundSyncManager {
                 return await performPartialSync(isProcessingTask: isProcessingTask)
             }
         } catch {
-            print("Background sync error: \(error)")
+            Log.error("Background sync error", category: .background, error: error)
             handleSyncError()
             return false
         }
     }
-    
+
     private func performHistorySync(startHistoryId: String, isProcessingTask: Bool) async -> Bool {
         do {
             var allHistories: [HistoryRecord] = []
@@ -129,7 +129,7 @@ class BackgroundSyncManager {
                     allHistories.append(contentsOf: histories)
                 } else if historyResponse.history == nil && pageCount == 0 {
                     // No history changes - this is normal, just update the history ID
-                    print("No history changes since last sync")
+                    Log.debug("No history changes since last sync", category: .background)
                 }
 
                 pageToken = historyResponse.nextPageToken
@@ -163,11 +163,11 @@ class BackgroundSyncManager {
         if let apiError = error as? APIError {
             switch apiError {
             case .historyIdExpired:
-                print("History ID expired (APIError), falling back to partial sync")
+                Log.info("History ID expired (APIError), falling back to partial sync", category: .background)
                 return await performPartialSync(isProcessingTask: isProcessingTask)
 
             case .authenticationError:
-                print("Authentication error during background sync, attempting token refresh")
+                Log.warning("Authentication error during background sync, attempting token refresh", category: .background)
                 // Try to refresh token and retry once
                 do {
                     _ = try await AuthSession.shared.withFreshToken()
@@ -176,23 +176,23 @@ class BackgroundSyncManager {
                         return await performHistorySyncRetry(startHistoryId: historyId, isProcessingTask: isProcessingTask)
                     }
                 } catch {
-                    print("Token refresh failed: \(error)")
+                    Log.error("Token refresh failed", category: .background, error: error)
                 }
                 handleSyncError()
                 return false
 
             case .rateLimited:
-                print("Rate limited during background sync, will retry with backoff")
+                Log.warning("Rate limited during background sync, will retry with backoff", category: .background)
                 handleSyncError() // Uses exponential backoff
                 return false
 
             case .timeout, .networkError:
-                print("Network issue during background sync: \(apiError)")
+                Log.warning("Network issue during background sync: \(apiError)", category: .background)
                 handleSyncError()
                 return false
 
             case .serverError(let code):
-                print("Server error \(code) during background sync")
+                Log.warning("Server error \(code) during background sync", category: .background)
                 if code >= 500 {
                     // Server errors are retriable
                     handleSyncError()
@@ -200,7 +200,7 @@ class BackgroundSyncManager {
                 return false
 
             default:
-                print("API error during background sync: \(apiError)")
+                Log.error("API error during background sync: \(apiError)", category: .background)
                 handleSyncError()
                 return false
             }
@@ -209,26 +209,26 @@ class BackgroundSyncManager {
         // Check for NSError (including 404 history expired)
         if let nsError = error as NSError? {
             if nsError.code == 404 || (nsError.domain.contains("Gmail") && nsError.code == 404) {
-                print("History too old (404), falling back to partial sync")
+                Log.info("History too old (404), falling back to partial sync", category: .background)
                 return await performPartialSync(isProcessingTask: isProcessingTask)
             }
 
             if nsError.code == 401 {
-                print("401 Unauthorized, attempting token refresh")
+                Log.warning("401 Unauthorized, attempting token refresh", category: .background)
                 do {
                     _ = try await AuthSession.shared.withFreshToken()
                     if let historyId = getStoredHistoryId() {
                         return await performHistorySyncRetry(startHistoryId: historyId, isProcessingTask: isProcessingTask)
                     }
                 } catch {
-                    print("Token refresh failed: \(error)")
+                    Log.error("Token refresh failed", category: .background, error: error)
                 }
                 handleSyncError()
                 return false
             }
 
             if nsError.code == 429 {
-                print("Rate limited (429), will retry with backoff")
+                Log.warning("Rate limited (429), will retry with backoff", category: .background)
                 handleSyncError()
                 return false
             }
@@ -238,21 +238,21 @@ class BackgroundSyncManager {
         if let urlError = error as? URLError {
             switch urlError.code {
             case .notConnectedToInternet, .networkConnectionLost:
-                print("Network unavailable during background sync")
+                Log.info("Network unavailable during background sync", category: .background)
                 // Don't increment retry count for network unavailable
                 return false
             case .timedOut:
-                print("Request timed out during background sync")
+                Log.warning("Request timed out during background sync", category: .background)
                 handleSyncError()
                 return false
             default:
-                print("URL error during background sync: \(urlError)")
+                Log.error("URL error during background sync: \(urlError)", category: .background)
                 handleSyncError()
                 return false
             }
         }
 
-        print("Unknown error during history sync: \(error)")
+        Log.error("Unknown error during history sync", category: .background, error: error)
         handleSyncError()
         return false
     }
@@ -293,12 +293,12 @@ class BackgroundSyncManager {
             return true
 
         } catch {
-            print("History sync retry failed: \(error)")
+            Log.error("History sync retry failed", category: .background, error: error)
             handleSyncError()
             return false
         }
     }
-    
+
     private func performPartialSync(isProcessingTask: Bool) async -> Bool {
         do {
             let maxResults = isProcessingTask ? 100 : 50
@@ -327,25 +327,25 @@ class BackgroundSyncManager {
             resetRetryCount()
             return true
         } catch {
-            print("Partial sync error: \(error)")
+            Log.error("Partial sync error", category: .background, error: error)
             handleSyncError()
             return false
         }
     }
-    
+
     private func processHistoryChanges(histories: [HistoryRecord]) async {
         let context = coreDataStack.newBackgroundContext()
-        
+
         var messagesToFetch: Set<String> = []
         var messagesToDelete: Set<String> = []
         var messageLabelsToUpdate: [String: [String]] = [:]
-        
+
         for history in histories {
             if let messagesAdded = history.messagesAdded {
                 for messageAdded in messagesAdded {
                     // Skip spam messages
                     if let labelIds = messageAdded.message.labelIds, labelIds.contains("SPAM") {
-                        print("Skipping spam message from history: \(messageAdded.message.id)")
+                        Log.debug("Skipping spam message from history: \(messageAdded.message.id)", category: .background)
                         continue
                     }
                     messagesToFetch.insert(messageAdded.message.id)
@@ -416,14 +416,14 @@ class BackgroundSyncManager {
                         successCount += 1
                     case .failure(let error):
                         failedCount += 1
-                        print("Failed to fetch message \(messageId) in background: \(error.localizedDescription)")
+                        Log.warning("Failed to fetch message \(messageId) in background: \(error.localizedDescription)", category: .background)
                     }
                 }
             }
         }
 
         if failedCount > 0 {
-            print("Background sync: fetched \(successCount) messages, \(failedCount) failed")
+            Log.info("Background sync: fetched \(successCount) messages, \(failedCount) failed", category: .background)
         }
 
         await syncEngine.updateConversationRollups(in: context)
@@ -433,10 +433,10 @@ class BackgroundSyncManager {
                 try context.save()
             }
         } catch {
-            print("Failed to save background sync context: \(error.localizedDescription)")
+            Log.error("Failed to save background sync context: \(error.localizedDescription)", category: .background)
         }
     }
-    
+
     private func deleteMessages(messageIds: [String], in context: NSManagedObjectContext) async {
         await context.perform {
             for messageId in messageIds {
@@ -449,12 +449,12 @@ class BackgroundSyncManager {
                         context.delete(message)
                     }
                 } catch {
-                    print("Failed to delete message \(messageId): \(error)")
+                    Log.error("Failed to delete message \(messageId)", category: .background, error: error)
                 }
             }
         }
     }
-    
+
     private func getStoredHistoryId() -> String? {
         var historyId: String? = nil
         let context = coreDataStack.newBackgroundContext()
@@ -466,12 +466,12 @@ class BackgroundSyncManager {
                 let accounts = try context.fetch(fetchRequest)
                 historyId = accounts.first?.historyId
             } catch {
-                print("Failed to fetch historyId: \(error)")
+                Log.error("Failed to fetch historyId", category: .background, error: error)
             }
         }
         return historyId
     }
-    
+
     private func storeHistoryId(_ historyId: String) {
         Task {
             do {
@@ -487,7 +487,7 @@ class BackgroundSyncManager {
                     }
                 }
             } catch {
-                print("Failed to store historyId: \(error)")
+                Log.error("Failed to store historyId", category: .background, error: error)
             }
         }
     }
@@ -507,12 +507,12 @@ class BackgroundSyncManager {
     private func scheduleRetryAfterBackoff() {
         let request = BGAppRefreshTaskRequest(identifier: refreshTaskIdentifier)
         request.earliestBeginDate = Date(timeIntervalSinceNow: currentBackoff)
-        
+
         do {
             try BGTaskScheduler.shared.submit(request)
-            print("Retry scheduled after \(currentBackoff) seconds")
+            Log.debug("Retry scheduled after \(currentBackoff) seconds", category: .background)
         } catch {
-            print("Failed to schedule retry: \(error)")
+            Log.error("Failed to schedule retry", category: .background, error: error)
         }
     }
     

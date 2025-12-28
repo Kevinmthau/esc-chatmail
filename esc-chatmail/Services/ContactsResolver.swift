@@ -107,7 +107,7 @@ final class ContactsResolver: ObservableObject, ContactsResolving, @unchecked Se
         do {
             try await ensureAuthorization()
         } catch {
-            print("Contacts authorization failed: \(error)")
+            Log.warning("Contacts authorization failed: \(error)", category: .general)
             return nil
         }
         
@@ -185,9 +185,9 @@ final class ContactsResolver: ObservableObject, ContactsResolving, @unchecked Se
                     }
                     
                 } catch {
-                    print("Error fetching contacts: \(error)")
+                    Log.error("Error fetching contacts", category: .general, error: error)
                 }
-                
+
                 continuation.resume(returning: nil)
             }
         }
@@ -274,9 +274,9 @@ final class ContactsResolver: ObservableObject, ContactsResolving, @unchecked Se
                         }
                     }
                 } catch {
-                    print("Failed to update Person: \(error)")
+                    Log.error("Failed to update Person", category: .general, error: error)
                 }
-                
+
                 continuation.resume()
             }
         } as Void

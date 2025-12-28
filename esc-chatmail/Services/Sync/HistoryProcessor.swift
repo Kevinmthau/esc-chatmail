@@ -64,20 +64,20 @@ final class HistoryProcessor: @unchecked Sendable {
 
         for record in records {
             if let messagesAdded = record.messagesAdded {
-                print("📬 History record \(record.id): \(messagesAdded.count) new messages")
+                Log.debug("History record \(record.id): \(messagesAdded.count) new messages", category: .sync)
                 for added in messagesAdded {
                     // Skip spam messages
                     if let labelIds = added.message.labelIds, labelIds.contains("SPAM") {
-                        print("   ⏭️ Skipping spam: \(added.message.id)")
+                        Log.debug("Skipping spam: \(added.message.id)", category: .sync)
                         continue
                     }
-                    print("   ✅ Will fetch: \(added.message.id)")
+                    Log.debug("Will fetch: \(added.message.id)", category: .sync)
                     messageIds.append(added.message.id)
                 }
             }
         }
 
-        print("📊 Total new messages to fetch: \(messageIds.count)")
+        Log.debug("Total new messages to fetch: \(messageIds.count)", category: .sync)
         return messageIds
     }
 
@@ -99,7 +99,7 @@ final class HistoryProcessor: @unchecked Sendable {
                         context.delete(message)
                     }
                 } catch {
-                    print("Failed to fetch message for deletion \(messageId): \(error.localizedDescription)")
+                    Log.error("Failed to fetch message for deletion \(messageId)", category: .sync, error: error)
                 }
             }
         }
@@ -128,7 +128,7 @@ final class HistoryProcessor: @unchecked Sendable {
 
                     // Conflict resolution: skip if message has pending local changes
                     if self.hasConflict(message: message, syncStartTime: syncStartTime) {
-                        print("Skipping server label addition for message \(messageId) - local changes pending")
+                        Log.debug("Skipping server label addition for message \(messageId) - local changes pending", category: .sync)
                         return
                     }
 
@@ -141,10 +141,10 @@ final class HistoryProcessor: @unchecked Sendable {
                             message.addToLabels(label)
                         }
                         if labels.count != labelIds.count {
-                            print("Warning: Only found \(labels.count) of \(labelIds.count) labels for message \(messageId)")
+                            Log.warning("Only found \(labels.count) of \(labelIds.count) labels for message \(messageId)", category: .sync)
                         }
                     } catch {
-                        print("Failed to fetch labels for message \(messageId): \(error.localizedDescription)")
+                        Log.error("Failed to fetch labels for message \(messageId)", category: .sync, error: error)
                     }
 
                     if hasUnread {
@@ -156,7 +156,7 @@ final class HistoryProcessor: @unchecked Sendable {
                         self.trackModifiedConversation(conversation)
                     }
                 } catch {
-                    print("Failed to fetch message for label addition \(messageId): \(error.localizedDescription)")
+                    Log.error("Failed to fetch message for label addition \(messageId)", category: .sync, error: error)
                 }
             }
         }
@@ -169,7 +169,7 @@ final class HistoryProcessor: @unchecked Sendable {
     ) async {
         guard let labelsRemoved = labelsRemoved else { return }
 
-        print("🏷️ [HistoryProcessor] Processing \(labelsRemoved.count) label removals")
+        Log.debug("Processing \(labelsRemoved.count) label removals", category: .sync)
 
         for removed in labelsRemoved {
             let messageId = removed.message.id
@@ -177,7 +177,7 @@ final class HistoryProcessor: @unchecked Sendable {
             let removesUnread = labelIds.contains("UNREAD")
             let removesInbox = labelIds.contains("INBOX")
 
-            print("🏷️ [HistoryProcessor] Label removal: messageId=\(messageId), labels=\(labelIds), removesInbox=\(removesInbox)")
+            Log.debug("Label removal: messageId=\(messageId), labels=\(labelIds), removesInbox=\(removesInbox)", category: .sync)
 
             await context.perform {
                 let request = Message.fetchRequest()
@@ -185,15 +185,15 @@ final class HistoryProcessor: @unchecked Sendable {
                 do {
                     guard let message = try context.fetch(request).first else {
                         // Message not found locally - this is normal for messages we haven't synced
-                        print("🏷️ [HistoryProcessor] Message \(messageId) not found locally - skipping")
+                        Log.debug("Message \(messageId) not found locally - skipping", category: .sync)
                         return
                     }
 
-                    print("🏷️ [HistoryProcessor] Found local message \(messageId), applying label removal")
+                    Log.debug("Found local message \(messageId), applying label removal", category: .sync)
 
                     // Conflict resolution: skip if message has pending local changes
                     if self.hasConflict(message: message, syncStartTime: syncStartTime) {
-                        print("Skipping server label removal for message \(messageId) - local changes pending")
+                        Log.debug("Skipping server label removal for message \(messageId) - local changes pending", category: .sync)
                         return
                     }
 
@@ -204,10 +204,10 @@ final class HistoryProcessor: @unchecked Sendable {
                         let labels = try context.fetch(labelRequest)
                         for label in labels {
                             message.removeFromLabels(label)
-                            print("🏷️ [HistoryProcessor] Removed label '\(label.id)' from message \(messageId)")
+                            Log.debug("Removed label '\(label.id)' from message \(messageId)", category: .sync)
                         }
                     } catch {
-                        print("Failed to fetch labels for removal on message \(messageId): \(error.localizedDescription)")
+                        Log.error("Failed to fetch labels for removal on message \(messageId)", category: .sync, error: error)
                     }
 
                     if removesUnread {
@@ -217,10 +217,10 @@ final class HistoryProcessor: @unchecked Sendable {
                     // Track conversation for rollup update (handles hasInbox changes)
                     if let conversation = message.conversation {
                         self.trackModifiedConversation(conversation)
-                        print("🏷️ [HistoryProcessor] Tracked conversation \(conversation.id.uuidString) for rollup update")
+                        Log.debug("Tracked conversation \(conversation.id.uuidString) for rollup update", category: .sync)
                     }
                 } catch {
-                    print("Failed to fetch message for label removal \(messageId): \(error.localizedDescription)")
+                    Log.error("Failed to fetch message for label removal \(messageId)", category: .sync, error: error)
                 }
             }
         }
@@ -248,7 +248,7 @@ final class HistoryProcessor: @unchecked Sendable {
         let isStaleModification = modificationAge > Self.maxLocalModificationAge
 
         if hasPendingChange && isStaleModification {
-            print("⚠️ [SyncCorrectness] Local modification is stale (age: \(Int(modificationAge))s), allowing server update")
+            Log.warning("Local modification is stale (age: \(Int(modificationAge))s), allowing server update", category: .sync)
             return false
         }
 
@@ -269,17 +269,17 @@ final class HistoryProcessor: @unchecked Sendable {
                         successCount += 1
                     }
                 } catch {
-                    print("Failed to fetch message \(messageId) for clearing local modifications: \(error.localizedDescription)")
+                    Log.error("Failed to fetch message \(messageId) for clearing local modifications", category: .sync, error: error)
                 }
             }
 
             do {
                 if context.hasChanges {
                     try context.save()
-                    print("Cleared local modifications for \(successCount) messages")
+                    Log.debug("Cleared local modifications for \(successCount) messages", category: .sync)
                 }
             } catch {
-                print("Failed to save after clearing local modifications: \(error.localizedDescription)")
+                Log.error("Failed to save after clearing local modifications", category: .sync, error: error)
             }
         }
     }

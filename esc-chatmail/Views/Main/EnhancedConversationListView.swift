@@ -62,7 +62,7 @@ final class ConversationListState: ObservableObject {
 
             isLoading = false
         } catch {
-            print("Failed to fetch conversations: \(error)")
+            Log.error("Failed to fetch conversations", category: .coreData, error: error)
             isLoading = false
         }
     }
@@ -247,7 +247,7 @@ struct EnhancedConversationListView: View {
             try await syncEngine.performIncrementalSync()
             await listState.refreshConversations()
         } catch {
-            print("Sync failed: \(error)")
+            Log.error("Sync failed", category: .sync, error: error)
         }
     }
 }

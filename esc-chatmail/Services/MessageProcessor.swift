@@ -166,7 +166,7 @@ class MessageProcessor {
         }
         
         guard let decodedData = Data(base64Encoded: paddedBase64) else {
-            print("Failed to decode Base64")
+            Log.debug("Failed to decode Base64", category: .sync)
             return nil
         }
         

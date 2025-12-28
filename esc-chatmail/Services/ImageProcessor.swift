@@ -10,20 +10,20 @@ struct ImageProcessor {
     static func processImage(data: Data, maxDimension: CGFloat = maxFullSizeDimension) -> (processed: Data?, size: CGSize?) {
         // Validate data is not empty
         guard !data.isEmpty else {
-            print("ImageProcessor: Empty data provided")
+            Log.debug("ImageProcessor: Empty data provided", category: .attachment)
             return (nil, nil)
         }
 
         // Try to create image from data
         guard let image = UIImage(data: data) else {
-            print("ImageProcessor: Failed to create UIImage from data of size \(data.count)")
+            Log.debug("ImageProcessor: Failed to create UIImage from data of size \(data.count)", category: .attachment)
             return (nil, nil)
         }
 
         // Validate image dimensions
         let size = image.size
         guard size.width > 0 && size.height > 0 else {
-            print("ImageProcessor: Invalid image dimensions \(size)")
+            Log.debug("ImageProcessor: Invalid image dimensions \(size)", category: .attachment)
             return (nil, nil)
         }
 

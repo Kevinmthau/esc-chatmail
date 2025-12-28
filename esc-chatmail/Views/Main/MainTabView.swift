@@ -30,7 +30,7 @@ struct MainTabView: View {
             do {
                 try await syncEngine.performInitialSync()
             } catch {
-                print("Initial sync error: \(error)")
+                Log.error("Initial sync error", category: .sync, error: error)
             }
         }
     }
