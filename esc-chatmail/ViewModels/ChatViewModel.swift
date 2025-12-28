@@ -21,17 +21,30 @@ final class ChatViewModel: ObservableObject {
     let sendService: GmailSendService
 
     private let coreDataStack: CoreDataStack
+    private let syncEngine: SyncEngine
 
     // MARK: - Initialization
 
+    /// Default initializer with backward-compatible singleton defaults
     init(
         conversation: Conversation,
-        coreDataStack: CoreDataStack = .shared
+        coreDataStack: CoreDataStack? = nil,
+        syncEngine: SyncEngine? = nil
     ) {
         self.conversation = conversation
-        self.coreDataStack = coreDataStack
+        self.coreDataStack = coreDataStack ?? .shared
+        self.syncEngine = syncEngine ?? .shared
         self.messageActions = MessageActions()
-        self.sendService = GmailSendService(viewContext: coreDataStack.viewContext)
+        self.sendService = GmailSendService(viewContext: self.coreDataStack.viewContext)
+    }
+
+    /// Dependencies-based initializer for cleaner dependency injection
+    convenience init(conversation: Conversation, deps: Dependencies) {
+        self.init(
+            conversation: conversation,
+            coreDataStack: deps.coreDataStack,
+            syncEngine: deps.syncEngine
+        )
     }
 
     // MARK: - Message Actions
@@ -178,8 +191,9 @@ final class ChatViewModel: ObservableObject {
             replyingTo = nil
 
             // Trigger sync to fetch the sent message from Gmail
+            let syncEngine = self.syncEngine
             Task.detached {
-                try? await SyncEngine.shared.performIncrementalSync()
+                try? await syncEngine.performIncrementalSync()
             }
         } catch {
             if let optimisticMessage = sendService.fetchMessage(byID: optimisticMessageID) {

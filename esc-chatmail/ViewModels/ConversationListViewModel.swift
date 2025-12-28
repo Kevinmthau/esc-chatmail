@@ -48,6 +48,8 @@ final class ConversationListViewModel: ObservableObject {
     let contactsService: ContactsService
 
     private let coreDataStack: CoreDataStack
+    private let authSession: AuthSession
+    private let personCache: PersonCache
     private var syncTimer: Timer?
     private var hasPerformedInitialSync = false
     private var searchDebounceTask: Task<Void, Never>?
@@ -57,11 +59,29 @@ final class ConversationListViewModel: ObservableObject {
 
     // MARK: - Initialization
 
-    init() {
-        self.coreDataStack = .shared
-        self.syncEngine = .shared
+    /// Default initializer with backward-compatible singleton defaults
+    init(
+        coreDataStack: CoreDataStack? = nil,
+        syncEngine: SyncEngine? = nil,
+        authSession: AuthSession? = nil,
+        personCache: PersonCache? = nil
+    ) {
+        self.coreDataStack = coreDataStack ?? .shared
+        self.syncEngine = syncEngine ?? .shared
+        self.authSession = authSession ?? .shared
+        self.personCache = personCache ?? .shared
         self.messageActions = MessageActions()
         self.contactsService = ContactsService()
+    }
+
+    /// Dependencies-based initializer for cleaner dependency injection
+    convenience init(deps: Dependencies) {
+        self.init(
+            coreDataStack: deps.coreDataStack,
+            syncEngine: deps.syncEngine,
+            authSession: deps.authSession,
+            personCache: deps.personCache
+        )
     }
 
     deinit {
@@ -72,7 +92,7 @@ final class ConversationListViewModel: ObservableObject {
 
     func performInitialSync() {
         guard !hasPerformedInitialSync else { return }
-        guard AuthSession.shared.isAuthenticated else {
+        guard authSession.isAuthenticated else {
             print("Skipping initial sync - not authenticated")
             return
         }
@@ -256,12 +276,13 @@ final class ConversationListViewModel: ObservableObject {
     // MARK: - Data Loading
 
     func prefetchPersonData(from conversations: [Conversation]) {
+        let personCache = self.personCache
         Task {
             let allEmails = conversations.prefix(30).flatMap { conversation -> [String] in
                 guard let participants = conversation.participants else { return [] }
                 return participants.compactMap { $0.person?.email }
             }
-            await PersonCache.shared.prefetch(emails: Array(Set(allEmails)))
+            await personCache.prefetch(emails: Array(Set(allEmails)))
         }
     }
 

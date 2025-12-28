@@ -12,7 +12,7 @@ import Security
 
 @main
 struct esc_chatmailApp: App {
-    @StateObject private var authSession = AuthSession.shared
+    @StateObject private var dependencies = Dependencies.shared
     @Environment(\.scenePhase) var scenePhase
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
@@ -37,8 +37,9 @@ struct esc_chatmailApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environment(\.managedObjectContext, CoreDataStack.shared.viewContext)
-                .environmentObject(authSession)
+                .environment(\.managedObjectContext, dependencies.viewContext)
+                .environmentObject(dependencies)
+                .environmentObject(dependencies.authSession) // backward compatibility
                 .onOpenURL { url in
                     GIDSignIn.sharedInstance.handle(url)
                 }
@@ -236,16 +237,16 @@ struct esc_chatmailApp: App {
     private func handleScenePhaseChange(_ newPhase: ScenePhase) {
         switch newPhase {
         case .background:
-            if AuthSession.shared.isAuthenticated {
-                BackgroundSyncManager.shared.scheduleAppRefresh()
-                BackgroundSyncManager.shared.scheduleProcessingTask()
+            if dependencies.authSession.isAuthenticated {
+                dependencies.backgroundSyncManager.scheduleAppRefresh()
+                dependencies.backgroundSyncManager.scheduleProcessingTask()
             }
         case .active:
             // Note: Sync is handled by ConversationListView.onAppear to avoid duplicate syncs
             // Only process pending actions here (lightweight operation)
-            if AuthSession.shared.isAuthenticated {
+            if dependencies.authSession.isAuthenticated {
                 Task {
-                    await PendingActionsManager.shared.processAllPendingActions()
+                    await dependencies.pendingActionsManager.processAllPendingActions()
                 }
             }
         case .inactive:

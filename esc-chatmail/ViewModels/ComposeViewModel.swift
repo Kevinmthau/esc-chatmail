@@ -46,7 +46,10 @@ final class ComposeViewModel: ObservableObject {
     // MARK: - Dependencies
 
     let mode: Mode
-    private lazy var viewContext: NSManagedObjectContext = CoreDataStack.shared.viewContext
+    private let coreDataStack: CoreDataStack
+    private let authSession: AuthSession
+    private let syncEngine: SyncEngine
+    private lazy var viewContext: NSManagedObjectContext = coreDataStack.viewContext
     private lazy var sendService: GmailSendService = GmailSendService(viewContext: viewContext)
     private lazy var contactsService: ContactsService = ContactsService()
 
@@ -81,9 +84,28 @@ final class ComposeViewModel: ObservableObject {
 
     // MARK: - Initialization
 
-    init(mode: Mode = .newMessage) {
+    /// Default initializer with backward-compatible singleton defaults
+    init(
+        mode: Mode = .newMessage,
+        coreDataStack: CoreDataStack? = nil,
+        authSession: AuthSession? = nil,
+        syncEngine: SyncEngine? = nil
+    ) {
         self.mode = mode
-        // All dependencies are lazy-initialized to avoid blocking sheet presentation
+        self.coreDataStack = coreDataStack ?? .shared
+        self.authSession = authSession ?? .shared
+        self.syncEngine = syncEngine ?? .shared
+        // Other dependencies are lazy-initialized to avoid blocking sheet presentation
+    }
+
+    /// Dependencies-based initializer for cleaner dependency injection
+    convenience init(mode: Mode = .newMessage, deps: Dependencies) {
+        self.init(
+            mode: mode,
+            coreDataStack: deps.coreDataStack,
+            authSession: deps.authSession,
+            syncEngine: deps.syncEngine
+        )
     }
 
     func setupForMode() {
@@ -241,7 +263,7 @@ final class ComposeViewModel: ObservableObject {
         }
 
         // Send in background - don't wait for completion
-        Task.detached { [sendService] in
+        Task.detached { [sendService, syncEngine] in
             do {
                 let result: GmailSendService.SendResult
 
@@ -273,7 +295,7 @@ final class ComposeViewModel: ObservableObject {
                 }
 
                 // Trigger sync to fetch the sent message from Gmail
-                try? await SyncEngine.shared.performIncrementalSync()
+                try? await syncEngine.performIncrementalSync()
 
             } catch {
                 // Mark attachments as failed so they show error indicator
@@ -308,7 +330,7 @@ final class ComposeViewModel: ObservableObject {
         replyingTo: Message?,
         body: String
     ) -> ReplyData {
-        let currentUserEmail = AuthSession.shared.userEmail ?? ""
+        let currentUserEmail = authSession.userEmail ?? ""
 
         // Extract participants from conversation
         let participantEmails = Array(conversation.participants ?? [])
@@ -375,11 +397,11 @@ final class ComposeViewModel: ObservableObject {
         let participants = Array(message.conversation?.participants ?? [])
 
         if message.isFromMe {
-            quotedText += "From: \(AuthSession.shared.userEmail ?? "Me")\n"
+            quotedText += "From: \(authSession.userEmail ?? "Me")\n"
         } else {
             if let otherParticipant = participants.first(where: { participant in
                 let email = participant.person?.email ?? ""
-                return EmailNormalizer.normalize(email) != EmailNormalizer.normalize(AuthSession.shared.userEmail ?? "")
+                return EmailNormalizer.normalize(email) != EmailNormalizer.normalize(authSession.userEmail ?? "")
             })?.person {
                 quotedText += "From: \(otherParticipant.name ?? otherParticipant.email)\n"
             }
@@ -399,7 +421,7 @@ final class ComposeViewModel: ObservableObject {
         }
 
         let recipientList = participants.compactMap { $0.person?.email }
-            .filter { EmailNormalizer.normalize($0) != EmailNormalizer.normalize(AuthSession.shared.userEmail ?? "") }
+            .filter { EmailNormalizer.normalize($0) != EmailNormalizer.normalize(authSession.userEmail ?? "") }
 
         if !recipientList.isEmpty {
             quotedText += "To: \(recipientList.joined(separator: ", "))\n"
@@ -417,7 +439,7 @@ final class ComposeViewModel: ObservableObject {
     // MARK: - Reply Setup
 
     private func setupReplyRecipients(_ conversation: Conversation) {
-        let currentUserEmail = AuthSession.shared.userEmail ?? ""
+        let currentUserEmail = authSession.userEmail ?? ""
         let participantEmails = Array(conversation.participants ?? [])
             .compactMap { $0.person?.email }
             .filter { EmailNormalizer.normalize($0) != EmailNormalizer.normalize(currentUserEmail) }

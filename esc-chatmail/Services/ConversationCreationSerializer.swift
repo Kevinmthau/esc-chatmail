@@ -3,13 +3,10 @@ import CoreData
 
 /// Serializes conversation creation to prevent duplicate conversations.
 ///
-/// Uses a global lock to ensure only one conversation can be created at a time,
+/// Uses an actor to ensure only one conversation can be created at a time,
 /// regardless of which Core Data context is being used.
-final class ConversationCreationSerializer: @unchecked Sendable {
+actor ConversationCreationSerializer {
     static let shared = ConversationCreationSerializer()
-
-    /// Global lock for conversation creation - ensures atomic find-or-create
-    private let lock = NSLock()
 
     /// Recently created conversation hashes - prevents duplicates across contexts
     /// before Core Data has a chance to propagate changes
@@ -19,17 +16,14 @@ final class ConversationCreationSerializer: @unchecked Sendable {
     func findOrCreateConversation(
         for identity: ConversationIdentity,
         in context: NSManagedObjectContext
-    ) async -> Conversation {
+    ) -> Conversation {
         let participantHash = identity.participantHash
-
-        // Use a global lock to serialize ALL conversation creation
-        // performAndWait is synchronous, so holding the lock is safe
-        lock.lock()
 
         // Check if we recently created this conversation (may not be visible in this context yet)
         let shouldRefresh = recentlyCreatedHashes.contains(participantHash)
 
-        var result: Conversation!
+        // Use NSManagedObjectID (which is Sendable) to avoid capturing non-Sendable Conversation
+        var resultObjectID: NSManagedObjectID!
 
         context.performAndWait {
             if shouldRefresh {
@@ -46,7 +40,7 @@ final class ConversationCreationSerializer: @unchecked Sendable {
             request.fetchLimit = 1
 
             if let existing = try? context.fetch(request).first {
-                result = existing
+                resultObjectID = existing.objectID
                 return
             }
 
@@ -57,27 +51,30 @@ final class ConversationCreationSerializer: @unchecked Sendable {
             if context.hasChanges {
                 do {
                     try context.save()
-                    // Track this hash so other contexts know to refresh
-                    self.recentlyCreatedHashes.insert(participantHash)
-                    // Clean up after 30 seconds
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
-                        self?.removeFromCache(participantHash)
-                    }
                 } catch {
-                    print("Failed to save new conversation: \(error)")
+                    Log.error("Failed to save new conversation: \(error)", category: .coreData)
                 }
             }
 
-            result = conversation
+            resultObjectID = conversation.objectID
         }
 
-        lock.unlock()
-        return result
+        // Track this hash so other contexts know to refresh
+        recentlyCreatedHashes.insert(participantHash)
+
+        // Schedule cleanup after 30 seconds (capture only the hash, not self directly)
+        let hashToRemove = participantHash
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(30))
+            await self?.removeFromCache(hashToRemove)
+        }
+
+        // Fetch the conversation object from the ID
+        // swiftlint:disable:next force_cast
+        return context.object(with: resultObjectID) as! Conversation
     }
 
     private func removeFromCache(_ hash: String) {
-        lock.lock()
         recentlyCreatedHashes.remove(hash)
-        lock.unlock()
     }
 }
