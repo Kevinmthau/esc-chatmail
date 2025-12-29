@@ -21,6 +21,7 @@ final class DataCleanupService: @unchecked Sendable {
         await migrateConversationsToArchiveModel(in: context)
         await removeDuplicateMessages(in: context)
         await removeDuplicateConversations(in: context)
+        await mergeActiveConversationDuplicates(in: context)
     }
 
     // MARK: - Archive Model Migration
@@ -82,8 +83,90 @@ final class DataCleanupService: @unchecked Sendable {
     /// - Parameter context: The Core Data context
     func runIncrementalCleanup(in context: NSManagedObjectContext) async {
         await removeDuplicateConversations(in: context)
+        await mergeActiveConversationDuplicates(in: context)
+        await fixAndMergeIncorrectParticipantHashes(in: context)
         await removeEmptyConversations(in: context)
         await removeDraftMessages(in: context)
+    }
+
+    /// Fixes conversations with incorrect participantHashes (e.g., ones that include the user's email)
+    /// and merges them with the correct conversation.
+    func fixAndMergeIncorrectParticipantHashes(in context: NSManagedObjectContext) async {
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        await context.perform { [self] in
+            // Get user's aliases from Account
+            let accountRequest = Account.fetchRequest()
+            accountRequest.fetchLimit = 1
+            guard let account = try? context.fetch(accountRequest).first else { return }
+
+            let myAliases = Set(([account.email] + account.aliasesArray).map(normalizedEmail))
+            guard !myAliases.isEmpty else { return }
+
+            // Fetch all active conversations
+            let request = Conversation.fetchRequest()
+            request.predicate = NSPredicate(format: "archivedAt == nil")
+            request.returnsObjectsAsFaults = false
+
+            guard let conversations = try? context.fetch(request) else { return }
+
+            var mergedCount = 0
+            var deletedObjectIDs = [NSManagedObjectID]()
+
+            // Group conversations by their CORRECT participantHash (excluding user's email)
+            var byCorrectHash: [String: [Conversation]] = [:]
+
+            for conv in conversations {
+                // Calculate the correct participantHash by excluding user's aliases
+                let currentParticipants = conv.participantsArray
+                let correctParticipants = currentParticipants.filter { !myAliases.contains(normalizedEmail($0)) }
+
+                if correctParticipants.isEmpty { continue }
+
+                let participantKey = "p|\(correctParticipants.sorted().joined(separator: "|"))"
+                let correctHash = SHA256.hash(data: Data(participantKey.utf8))
+                    .map { String(format: "%02x", $0) }
+                    .joined()
+
+                byCorrectHash[correctHash, default: []].append(conv)
+
+                // Update the participantHash if it was wrong
+                if conv.participantHash != correctHash {
+                    Log.debug("Fixing participantHash for conversation: \(conv.displayName ?? "unknown")", category: .coreData)
+                    conv.participantHash = correctHash
+                }
+            }
+
+            // Merge groups with multiple conversations
+            for (hash, group) in byCorrectHash where group.count > 1 {
+                Log.debug("Merging \(group.count) conversations with corrected participantHash: \(hash.prefix(16))...", category: .coreData)
+
+                let winner = conversationManager.selectWinnerConversation(from: group)
+                let losers = group.filter { $0 != winner }
+
+                for loser in losers {
+                    conversationManager.mergeConversation(from: loser, into: winner)
+                    deletedObjectIDs.append(loser.objectID)
+                    context.delete(loser)
+                    mergedCount += 1
+                }
+            }
+
+            if mergedCount > 0 || context.hasChanges {
+                coreDataStack.saveIfNeeded(context: context)
+
+                if !deletedObjectIDs.isEmpty {
+                    let changes = [NSDeletedObjectsKey: deletedObjectIDs]
+                    NSManagedObjectContext.mergeChanges(
+                        fromRemoteContextSave: changes,
+                        into: [coreDataStack.viewContext]
+                    )
+                }
+
+                let duration = CFAbsoluteTimeGetCurrent() - startTime
+                Log.info("Fixed and merged \(mergedCount) conversations with incorrect participantHashes in \(String(format: "%.3f", duration))s", category: .coreData)
+            }
+        }
     }
 
     // MARK: - Duplicate Message Removal
@@ -158,6 +241,10 @@ final class DataCleanupService: @unchecked Sendable {
 
     func removeDuplicateConversations(in context: NSManagedObjectContext) async {
         await conversationManager.removeDuplicateConversations(in: context)
+    }
+
+    func mergeActiveConversationDuplicates(in context: NSManagedObjectContext) async {
+        await conversationManager.mergeActiveConversationDuplicates(in: context)
     }
 
     // MARK: - Empty Conversation Removal

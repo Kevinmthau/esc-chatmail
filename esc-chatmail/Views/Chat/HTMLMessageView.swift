@@ -9,7 +9,7 @@ struct HTMLPreviewView: View {
     @State private var htmlContent: String?
     @State private var isLoading = true
 
-    private let htmlContentHandler = HTMLContentHandler()
+    private let htmlContentLoader = HTMLContentLoader.shared
 
     var body: some View {
         Group {
@@ -50,48 +50,14 @@ struct HTMLPreviewView: View {
     }
 
     private func loadHTMLContent() async {
-        let messageId = message.id
-
-        // Try loading from message ID
-        if htmlContentHandler.htmlFileExists(for: messageId),
-           let html = htmlContentHandler.loadHTML(for: messageId) {
-            let wrappedHTML = HTMLSanitizerService.shared.wrapHTMLForDisplay(
-                html,
-                isDarkMode: colorScheme == .dark
-            )
-            await MainActor.run {
-                self.htmlContent = wrappedHTML
-                self.isLoading = false
-            }
-            return
-        }
-
-        // Try loading from stored URI
-        if let urlString = message.bodyStorageURI {
-            let url: URL?
-            if urlString.starts(with: "/") {
-                url = URL(fileURLWithPath: urlString)
-            } else if urlString.starts(with: "file://") {
-                url = URL(string: urlString)
-            } else {
-                url = URL(string: urlString)
-            }
-
-            if let validUrl = url, FileManager.default.fileExists(atPath: validUrl.path),
-               let html = htmlContentHandler.loadHTML(from: validUrl) {
-                let wrappedHTML = HTMLSanitizerService.shared.wrapHTMLForDisplay(
-                    html,
-                    isDarkMode: colorScheme == .dark
-                )
-                await MainActor.run {
-                    self.htmlContent = wrappedHTML
-                    self.isLoading = false
-                }
-                return
-            }
-        }
+        let result = await htmlContentLoader.loadContent(
+            messageId: message.id,
+            bodyStorageURI: message.bodyStorageURI,
+            isDarkMode: colorScheme == .dark
+        )
 
         await MainActor.run {
+            self.htmlContent = result.html
             self.isLoading = false
         }
     }
@@ -162,7 +128,7 @@ struct HTMLMessageView: View {
     @State private var htmlContent: String?
     @State private var isLoading = true
 
-    private let htmlContentHandler = HTMLContentHandler()
+    private let htmlContentLoader = HTMLContentLoader.shared
 
     var body: some View {
         NavigationStack {
@@ -199,117 +165,32 @@ struct HTMLMessageView: View {
     }
 
     private func loadHTMLContent() async {
-        // Add timeout to prevent hangs
-        let timeoutTask = Task {
-            try? await Task.sleep(nanoseconds: 5_000_000_000) // 5 second timeout
-            await MainActor.run {
-                if self.isLoading {
-                    self.isLoading = false
-                }
-            }
-        }
+        let result = await htmlContentLoader.loadContentWithTimeout(
+            messageId: message.id,
+            bodyStorageURI: message.bodyStorageURI,
+            bodyText: message.bodyText,
+            isDarkMode: colorScheme == .dark,
+            timeout: 5.0
+        )
 
-        defer { timeoutTask.cancel() }
-
-        // Try multiple methods to load HTML content
-        var htmlLoaded = false
-
-        // Method 1: Try loading from the stored URI (may be from old container)
-        if let urlString = message.bodyStorageURI {
-            // Handle both file paths and URL strings
-            let url: URL?
-            if urlString.starts(with: "/") {
-                // It's a file path, convert to file URL
-                url = URL(fileURLWithPath: urlString)
-            } else if urlString.starts(with: "file://") {
-                // It's already a file URL
-                url = URL(string: urlString)
-            } else {
-                // Try as a regular URL
-                url = URL(string: urlString)
-            }
-
-            if let validUrl = url, FileManager.default.fileExists(atPath: validUrl.path) {
-                if let html = htmlContentHandler.loadHTML(from: validUrl) {
-                    let wrappedHTML = HTMLSanitizerService.shared.wrapHTMLForDisplay(
-                        html,
-                        isDarkMode: colorScheme == .dark
-                    )
-                    await MainActor.run {
-                        self.htmlContent = wrappedHTML
-                        self.isLoading = false
-                    }
-                    htmlLoaded = true
-                }
-            }
-        }
-
-        // Method 2: Try loading using just the message ID from current container
-        if !htmlLoaded {
+        // Handle URI migration if loaded from messageId but URI was stale
+        if result.source == .messageId,
+           let context = message.managedObjectContext {
             let messageId = message.id
-            if htmlContentHandler.htmlFileExists(for: messageId) {
-                if let html = htmlContentHandler.loadHTML(for: messageId) {
-                    let wrappedHTML = HTMLSanitizerService.shared.wrapHTMLForDisplay(
-                        html,
-                        isDarkMode: colorScheme == .dark
-                    )
-                    await MainActor.run {
-                        self.htmlContent = wrappedHTML
-                        self.isLoading = false
-                    }
-                    htmlLoaded = true
-
-                    // Update the stored URI to the current location
-                    if let context = message.managedObjectContext {
-                        Task {
-                            await context.perform {
-                                let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-                                let messagesDirectory = documentsPath.appendingPathComponent("Messages")
-                                let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
-                                message.setValue(fileURL.absoluteString, forKey: "bodyStorageURI")
-                                try? context.save()
-                            }
-                        }
-                    }
+            Task {
+                await context.perform {
+                    let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+                    let messagesDirectory = documentsPath.appendingPathComponent("Messages")
+                    let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
+                    message.bodyStorageURI = fileURL.absoluteString
+                    try? context.save()
                 }
             }
         }
 
-        // Method 3: Try to use plain text body as fallback
-        if !htmlLoaded, let bodyText = message.value(forKey: "bodyText") as? String, !bodyText.isEmpty {
-            // Convert plain text to basic HTML
-            let escapedText = bodyText
-                .replacingOccurrences(of: "&", with: "&amp;")
-                .replacingOccurrences(of: "<", with: "&lt;")
-                .replacingOccurrences(of: ">", with: "&gt;")
-                .replacingOccurrences(of: "\n", with: "<br>")
-
-            let basicHTML = """
-            <html>
-            <body>
-            <pre style="white-space: pre-wrap; word-wrap: break-word; font-family: -apple-system, system-ui;">
-            \(escapedText)
-            </pre>
-            </body>
-            </html>
-            """
-
-            let wrappedHTML = HTMLSanitizerService.shared.wrapHTMLForDisplay(
-                basicHTML,
-                isDarkMode: colorScheme == .dark
-            )
-            await MainActor.run {
-                self.htmlContent = wrappedHTML
-                self.isLoading = false
-            }
-            htmlLoaded = true
-        }
-
-        // No content available at all
-        if !htmlLoaded {
-            await MainActor.run {
-                self.isLoading = false
-            }
+        await MainActor.run {
+            self.htmlContent = result.html
+            self.isLoading = false
         }
     }
 }

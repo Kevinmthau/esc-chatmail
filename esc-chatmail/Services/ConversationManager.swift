@@ -42,18 +42,13 @@ final class ConversationManager: @unchecked Sendable {
 
         // Note: This method assumes it's called from within context.perform or performAndWait
         // Do not add performAndWait here as it causes nested blocking when called from updateAllConversationRollups
-        guard let messages = conversation.value(forKey: "messages") as? Set<Message> else { return }
+        guard let messages = conversation.messages else { return }
 
         // Filter out draft messages
         let nonDraftMessages = messages.filter { message in
-            if let labelsSet = message.value(forKey: "labels") as? NSSet,
-               let labels = labelsSet.allObjects as? [NSManagedObject] {
-                let isDraft = labels.contains { label in
-                    (label.value(forKey: "id") as? String) == "DRAFTS"
-                }
-                return !isDraft
-            }
-            return true
+            guard let labels = message.labels else { return true }
+            let isDraft = labels.contains { $0.id == "DRAFTS" }
+            return !isDraft
         }
 
         // Update last message date and snippet (excluding drafts)
@@ -72,22 +67,17 @@ final class ConversationManager: @unchecked Sendable {
         var inboxMessages: [Message] = []
         let previousHasInbox = conversation.hasInbox
         for message in messages {
-            if let labelsSet = message.value(forKey: "labels") as? NSSet,
-               let labels = labelsSet.allObjects as? [NSManagedObject] {
-                let labelIds = labels.compactMap { $0.value(forKey: "id") as? String }
+            if let labels = message.labels {
+                let labelIds = labels.map { $0.id }
                 let hasInbox = labelIds.contains("INBOX")
                 if hasInbox {
                     inboxMessages.append(message)
                 }
                 // Debug: Log message label info during rollup
-                if let msgId = message.value(forKey: "id") as? String {
-                    Log.debug("Message \(msgId): labels=\(labelIds), hasINBOX=\(hasInbox)", category: .conversation)
-                }
+                Log.debug("Message \(message.id): labels=\(labelIds), hasINBOX=\(hasInbox)", category: .conversation)
             } else {
                 // Debug: Log if labels aren't accessible
-                if let msgId = message.value(forKey: "id") as? String {
-                    Log.warning("Message \(msgId): could not read labels (labels nil or not NSSet)", category: .conversation)
-                }
+                Log.warning("Message \(message.id): could not read labels (labels nil)", category: .conversation)
             }
         }
 
@@ -125,14 +115,11 @@ final class ConversationManager: @unchecked Sendable {
         }
 
         // Update display name from participants (excluding the current user)
-        if let participants = conversation.value(forKey: "participants") as? Set<ConversationParticipant> {
+        if let participants = conversation.participants {
             let normalizedMyEmail = EmailNormalizer.normalize(myEmail)
 
             // Log all participants for debugging
-            let allParticipantEmails = participants.compactMap { participant -> String? in
-                guard let person = participant.value(forKey: "person") as? Person else { return nil }
-                return person.value(forKey: "email") as? String
-            }
+            let allParticipantEmails = participants.compactMap { $0.person?.email }
             Log.debug("Conversation \(conversation.id): All participants: \(allParticipantEmails)", category: .conversation)
             Log.debug("My email: \(myEmail) (normalized: \(normalizedMyEmail))", category: .conversation)
 
@@ -140,8 +127,8 @@ final class ConversationManager: @unchecked Sendable {
             var seenEmails = Set<String>()
             var names: [String] = []
             for participant in participants {
-                guard let person = participant.value(forKey: "person") as? Person else { continue }
-                guard let email = person.value(forKey: "email") as? String else { continue }
+                guard let person = participant.person else { continue }
+                let email = person.email
 
                 let normalizedEmail = EmailNormalizer.normalize(email)
 
@@ -155,7 +142,7 @@ final class ConversationManager: @unchecked Sendable {
                 guard !seenEmails.contains(normalizedEmail) else { continue }
                 seenEmails.insert(normalizedEmail)
 
-                let name = (person.value(forKey: "displayName") as? String) ?? email
+                let name = person.displayName ?? email
                 Log.debug("Including participant: \(name)", category: .conversation)
                 names.append(name)
             }
@@ -328,48 +315,44 @@ final class ConversationManager: @unchecked Sendable {
         }
     }
     
-    private func selectWinnerConversation(from group: [Conversation]) -> Conversation {
+    func selectWinnerConversation(from group: [Conversation]) -> Conversation {
         return group.max { (a, b) in
-            let aMessages = a.value(forKey: "messages") as? Set<Message>
-            let bMessages = b.value(forKey: "messages") as? Set<Message>
-            let aCount = aMessages?.count ?? 0
-            let bCount = bMessages?.count ?? 0
+            let aCount = a.messages?.count ?? 0
+            let bCount = b.messages?.count ?? 0
             if aCount != bCount { return aCount < bCount }
-            let aDate = a.value(forKey: "lastMessageDate") as? Date ?? .distantPast
-            let bDate = b.value(forKey: "lastMessageDate") as? Date ?? .distantPast
+            let aDate = a.lastMessageDate ?? .distantPast
+            let bDate = b.lastMessageDate ?? .distantPast
             return aDate < bDate
         }!
     }
     
-    private func mergeConversation(from loser: Conversation, into winner: Conversation) {
+    func mergeConversation(from loser: Conversation, into winner: Conversation) {
         // Reassign all messages from loser to winner
-        if let messages = loser.value(forKey: "messages") as? Set<Message> {
+        if let messages = loser.messages {
             for message in messages {
-                message.setValue(winner, forKey: "conversation")
+                message.conversation = winner
             }
         }
-        
+
         // Merge rollup data
         winner.lastMessageDate = max(winner.lastMessageDate ?? .distantPast,
                                     loser.lastMessageDate ?? .distantPast)
-        
-        if winner.snippet == nil || 
+
+        if winner.snippet == nil ||
            (loser.lastMessageDate ?? .distantPast) > (winner.lastMessageDate ?? .distantPast) {
             winner.snippet = loser.snippet
         }
-        
+
         winner.hasInbox = winner.hasInbox || loser.hasInbox
         winner.inboxUnreadCount += loser.inboxUnreadCount
-        
-        if let loserLatestInboxDate = loser.value(forKey: "latestInboxDate") as? Date {
-            let winnerLatestInboxDate = winner.value(forKey: "latestInboxDate") as? Date ?? .distantPast
-            winner.setValue(max(winnerLatestInboxDate, loserLatestInboxDate), forKey: "latestInboxDate")
+
+        if let loserLatestInboxDate = loser.latestInboxDate {
+            let winnerLatestInboxDate = winner.latestInboxDate ?? .distantPast
+            winner.latestInboxDate = max(winnerLatestInboxDate, loserLatestInboxDate)
         }
-        
+
         // Preserve pinned status
-        let winnerPinned = winner.value(forKey: "pinned") as? Bool ?? false
-        let loserPinned = loser.value(forKey: "pinned") as? Bool ?? false
-        winner.setValue(winnerPinned || loserPinned, forKey: "pinned")
+        winner.pinned = winner.pinned || loser.pinned
     }
 
     /// Merges duplicate ACTIVE conversations that have the same participantHash.

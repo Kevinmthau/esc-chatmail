@@ -175,13 +175,33 @@ final class SyncEngine: ObservableObject {
 
     /// Saves a message (used by BackgroundSyncManager)
     func saveMessage(_ gmailMessage: GmailMessage, labelCache: [String: Label]? = nil, in context: NSManagedObjectContext) async {
-        let myAliases = initialSyncOrchestrator.getMyAliases()
+        var myAliases = initialSyncOrchestrator.getMyAliases()
+
+        // If aliases aren't loaded in memory, fetch from Core Data
+        // This happens during background sync when the app hasn't done a foreground sync yet
+        if myAliases.isEmpty {
+            myAliases = await loadAliasesFromCoreData(in: context)
+        }
+
         await messagePersister.saveMessage(
             gmailMessage,
             labelCache: labelCache,
             myAliases: myAliases,
             in: context
         )
+    }
+
+    /// Loads user aliases from Core Data Account entity
+    private func loadAliasesFromCoreData(in context: NSManagedObjectContext) async -> Set<String> {
+        await context.perform {
+            let request = Account.fetchRequest()
+            request.fetchLimit = 1
+            guard let account = try? context.fetch(request).first else {
+                return Set<String>()
+            }
+            let aliases = ([account.email] + account.aliasesArray).map(normalizedEmail)
+            return Set(aliases)
+        }
     }
 
     // MARK: - Private Implementation

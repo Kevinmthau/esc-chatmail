@@ -234,6 +234,12 @@ struct esc_chatmailApp: App {
         BackgroundSyncManager.shared.registerBackgroundTasks()
     }
     
+    private func runDuplicateCleanup() async {
+        let context = CoreDataStack.shared.newBackgroundContext()
+        let conversationManager = ConversationManager()
+        await conversationManager.mergeActiveConversationDuplicates(in: context)
+    }
+
     private func handleScenePhaseChange(_ newPhase: ScenePhase) {
         switch newPhase {
         case .background:
@@ -247,6 +253,8 @@ struct esc_chatmailApp: App {
             if dependencies.authSession.isAuthenticated {
                 Task {
                     await dependencies.pendingActionsManager.processAllPendingActions()
+                    // Run lightweight duplicate cleanup on app activation
+                    await runDuplicateCleanup()
                 }
             }
         case .inactive:

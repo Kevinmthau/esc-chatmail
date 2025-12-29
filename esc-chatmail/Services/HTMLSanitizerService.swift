@@ -2,45 +2,18 @@ import Foundation
 import WebKit
 import UIKit
 
-protocol HTMLSanitizerProtocol {
-    func sanitize(_ html: String) -> String
-    func htmlToAttributedString(_ html: String, isFromMe: Bool) -> NSAttributedString?
-    func analyzeComplexity(_ html: String) -> HTMLSanitizerService.HTMLComplexity
-}
-
-// MARK: - Regex Sanitizer Utility
-
-/// Utility for applying regex-based sanitization rules to strings
-/// Eliminates boilerplate in HTML sanitization methods
-struct RegexSanitizer {
-    /// Applies a single regex pattern replacement
-    static func replace(
-        in text: String,
-        pattern: String,
-        with replacement: String = "",
-        options: String.CompareOptions = [.regularExpression, .caseInsensitive]
-    ) -> String {
-        text.replacingOccurrences(of: pattern, with: replacement, options: options)
-    }
-
-    /// Applies multiple regex pattern replacements in sequence
-    static func applyRules(to text: String, rules: [(pattern: String, replacement: String)]) -> String {
-        rules.reduce(text) { result, rule in
-            replace(in: result, pattern: rule.pattern, with: rule.replacement)
-        }
-    }
-
-    /// Removes HTML tags (with content) matching any of the given tag names
-    static func removeTags(from html: String, tags: [String]) -> String {
-        tags.reduce(html) { result, tag in
-            let pattern = "<\(tag)\\b[^>]*>.*?</\(tag)>|<\(tag)\\b[^>]*/?>"
-            return replace(in: result, pattern: pattern)
-        }
-    }
-}
-
-class HTMLSanitizerService: HTMLSanitizerProtocol {
+/// Main HTML sanitization service - facade delegating to specialized components
+final class HTMLSanitizerService: HTMLSanitizerProtocol {
     static let shared = HTMLSanitizerService()
+
+    // MARK: - Internal Components
+
+    private let urlSanitizer = HTMLURLSanitizer()
+    private let cssSanitizer = HTMLCSSSanitizer()
+    private let trackingRemover = HTMLTrackingRemover()
+    private let attributedConverter = HTMLAttributedStringConverter()
+    private let complexityAnalyzer = HTMLComplexityAnalyzer()
+    private let displayWrapper = HTMLDisplayWrapper()
 
     private init() {}
 
@@ -85,8 +58,14 @@ class HTMLSanitizerService: HTMLSanitizerProtocol {
         "*": ["class", "id", "style"] // Carefully sanitized
     ]
 
-    private let allowedProtocols: Set<String> = [
-        "http", "https", "mailto", "tel"
+    // MARK: - Dangerous Tags Configuration
+
+    private static let dangerousTags = [
+        "script", "noscript", "object", "embed", "applet",
+        "frame", "frameset", "iframe", "base", "basefont",
+        "form", "input", "button", "select", "textarea",
+        "option", "optgroup", "fieldset", "legend", "label",
+        "meta", "link"
     ]
 
     // MARK: - Main Sanitization Method
@@ -106,8 +85,8 @@ class HTMLSanitizerService: HTMLSanitizerProtocol {
         // Remove event handlers
         sanitized = removeEventHandlers(sanitized)
 
-        // Sanitize URLs
-        sanitized = sanitizeURLs(sanitized)
+        // Sanitize URLs (delegated)
+        sanitized = urlSanitizer.sanitizeURLs(sanitized)
 
         // Remove meta refresh
         sanitized = removeMetaRefresh(sanitized)
@@ -121,24 +100,14 @@ class HTMLSanitizerService: HTMLSanitizerProtocol {
         // Clean up Gmail-specific elements
         sanitized = removeGmailElements(sanitized)
 
-        // Remove tracking pixels
-        sanitized = removeTrackingPixels(sanitized)
+        // Remove tracking pixels (delegated)
+        sanitized = trackingRemover.removeTrackingPixels(sanitized)
 
-        // Sanitize CSS in style attributes
-        sanitized = sanitizeInlineStyles(sanitized)
+        // Sanitize CSS in style attributes (delegated)
+        sanitized = cssSanitizer.sanitizeInlineStyles(sanitized)
 
         return sanitized
     }
-
-    // MARK: - Dangerous Tags Configuration
-
-    private static let dangerousTags = [
-        "script", "noscript", "object", "embed", "applet",
-        "frame", "frameset", "iframe", "base", "basefont",
-        "form", "input", "button", "select", "textarea",
-        "option", "optgroup", "fieldset", "legend", "label",
-        "meta", "link"
-    ]
 
     // MARK: - Specific Sanitization Methods
 
@@ -167,94 +136,6 @@ class HTMLSanitizerService: HTMLSanitizerProtocol {
         )
     }
 
-    private func sanitizeURLs(_ html: String) -> String {
-        var result = html
-
-        // Sanitize href attributes
-        let hrefPattern = "href\\s*=\\s*[\"']([^\"']*)[\"']"
-        let hrefRegex = try? NSRegularExpression(pattern: hrefPattern, options: .caseInsensitive)
-        let matches = hrefRegex?.matches(in: result, range: NSRange(result.startIndex..., in: result)) ?? []
-
-        for match in matches.reversed() {
-            if let range = Range(match.range(at: 1), in: result) {
-                let url = String(result[range])
-                if !isURLSafe(url) {
-                    let fullRange = Range(match.range, in: result)!
-                    result.replaceSubrange(fullRange, with: "href=\"#\"")
-                }
-            }
-        }
-
-        // Sanitize src attributes - be more lenient with newsletter images
-        let srcPattern = "src\\s*=\\s*[\"']([^\"']*)[\"']"
-        let srcRegex = try? NSRegularExpression(pattern: srcPattern, options: .caseInsensitive)
-        let srcMatches = srcRegex?.matches(in: result, range: NSRange(result.startIndex..., in: result)) ?? []
-
-        for match in srcMatches.reversed() {
-            if let range = Range(match.range(at: 1), in: result) {
-                let url = String(result[range]).trimmingCharacters(in: .whitespacesAndNewlines)
-
-                // Skip empty URLs but don't replace valid newsletter tracking pixels
-                if url.isEmpty {
-                    let fullRange = Range(match.range, in: result)!
-                    // Use a transparent 1x1 pixel data URL to prevent errors
-                    result.replaceSubrange(fullRange, with: "src=\"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7\"")
-                } else if url.hasPrefix("javascript:") || url.hasPrefix("vbscript:") {
-                    // Only block explicitly dangerous URLs
-                    let fullRange = Range(match.range, in: result)!
-                    result.replaceSubrange(fullRange, with: "src=\"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7\"")
-                } else if url.hasPrefix("cid:") {
-                    // Replace cid: (Content-ID) URLs with transparent placeholder
-                    // These are inline email attachments that WKWebView can't load directly
-                    let fullRange = Range(match.range, in: result)!
-                    result.replaceSubrange(fullRange, with: "src=\"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7\"")
-                }
-                // Allow all other URLs including tracking pixels and newsletter images
-            }
-        }
-
-        return result
-    }
-
-    private func isURLSafe(_ url: String) -> Bool {
-        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-
-        // Block javascript: and data: URLs (except safe data: images)
-        if trimmed.hasPrefix("javascript:") || trimmed.hasPrefix("vbscript:") {
-            return false
-        }
-
-        // Allow data URLs for images only
-        if trimmed.hasPrefix("data:") {
-            return isDataURL(trimmed)
-        }
-
-        // Check if URL starts with allowed protocol
-        for proto in allowedProtocols {
-            if trimmed.hasPrefix("\(proto)://") || trimmed.hasPrefix("\(proto):") {
-                return true
-            }
-        }
-
-        // Allow relative URLs
-        if trimmed.hasPrefix("/") || trimmed.hasPrefix("#") || trimmed.hasPrefix("?") {
-            return true
-        }
-
-        // Allow URLs without protocol (will be treated as relative)
-        if !trimmed.contains(":") {
-            return true
-        }
-
-        return false
-    }
-
-    private func isDataURL(_ url: String) -> Bool {
-        // Support more image formats including WEBP and BMP
-        let safeDataURLPattern = "^data:image\\/(png|jpeg|jpg|gif|webp|bmp|svg\\+xml|x-icon|vnd\\.microsoft\\.icon)(;base64)?,"
-        return url.range(of: safeDataURLPattern, options: [.regularExpression, .caseInsensitive]) != nil
-    }
-
     private func removeMetaRefresh(_ html: String) -> String {
         RegexSanitizer.replace(
             in: html,
@@ -277,335 +158,27 @@ class HTMLSanitizerService: HTMLSanitizerProtocol {
     }
 
     private func removeGmailElements(_ html: String) -> String {
-        let result = html
-
         // Don't remove Gmail signatures and quotes - keep them for full display
         // Users want to see the complete email when viewing rich content
-
-        return result
-    }
-
-    private func removeTrackingPixels(_ html: String) -> String {
-        // Remove 1x1 images (tracking pixels) - but be careful not to remove legitimate small images
-        let trackingPattern = "<img[^>]*(?:width\\s*=\\s*[\"']1[\"']\\s+height\\s*=\\s*[\"']1[\"']|height\\s*=\\s*[\"']1[\"']\\s+width\\s*=\\s*[\"']1[\"'])[^>]*>"
-        var result = html.replacingOccurrences(
-            of: trackingPattern,
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
-        )
-
-        // Remove images from known tracking domains
-        let trackingDomains = [
-            "googleadservices.com",
-            "doubleclick.net",
-            "google-analytics.com",
-            "googlesyndication.com",
-            "facebook.com/tr",
-            "analytics.",
-            "tracking.",
-            "pixel.",
-            "beacon."
-        ]
-
-        for domain in trackingDomains {
-            let pattern = "<img[^>]*src\\s*=\\s*[\"'][^\"']*\(domain)[^\"']*[\"'][^>]*>"
-            result = result.replacingOccurrences(
-                of: pattern,
-                with: "",
-                options: [.regularExpression, .caseInsensitive]
-            )
-        }
-
-        return result
-    }
-
-    private func sanitizeInlineStyles(_ html: String) -> String {
-        let stylePattern = "style\\s*=\\s*[\"']([^\"']*)[\"']"
-        let regex = try? NSRegularExpression(pattern: stylePattern, options: .caseInsensitive)
-        let matches = regex?.matches(in: html, range: NSRange(html.startIndex..., in: html)) ?? []
-
-        var result = html
-        for match in matches.reversed() {
-            if let range = Range(match.range(at: 1), in: result) {
-                let styleContent = String(result[range])
-                let sanitizedStyle = sanitizeCSS(styleContent)
-                let fullRange = Range(match.range, in: result)!
-                result.replaceSubrange(fullRange, with: "style=\"\(sanitizedStyle)\"")
-            }
-        }
-
-        return result
-    }
-
-    private static let cssSanitizationRules: [(pattern: String, replacement: String)] = [
-        ("javascript:", ""),                           // Remove javascript: in CSS
-        ("expression\\s*\\([^)]*\\)", ""),             // Remove expression() (IE specific)
-        ("@import[^;]*;", ""),                         // Remove @import
-        ("behavior\\s*:[^;]*;", ""),                   // Remove behavior property (IE specific)
-        ("-moz-binding\\s*:[^;]*;", "")                // Remove -moz-binding (Firefox specific)
-    ]
-
-    private func sanitizeCSS(_ css: String) -> String {
-        RegexSanitizer.applyRules(to: css, rules: Self.cssSanitizationRules)
+        return html
     }
 
     // MARK: - HTML to AttributedString Conversion
 
     func htmlToAttributedString(_ html: String, isFromMe: Bool) -> NSAttributedString? {
-        // First sanitize the HTML
         let sanitized = sanitize(html)
-
-        // Check if HTML is simple enough for AttributedString
-        if isSimpleHTML(sanitized) {
-            return convertToAttributedString(sanitized, isFromMe: isFromMe)
-        }
-
-        return nil
+        return attributedConverter.convert(sanitized, isFromMe: isFromMe)
     }
 
-    private func isSimpleHTML(_ html: String) -> Bool {
-        // Check if HTML only contains simple formatting tags
-        let complexPatterns = [
-            "<table", "<img", "<video", "<audio", "<iframe",
-            "<form", "<input", "<canvas", "<svg"
-        ]
-
-        let lowercased = html.lowercased()
-        for pattern in complexPatterns {
-            if lowercased.contains(pattern) {
-                return false
-            }
-        }
-
-        return true
-    }
-
-    private func convertToAttributedString(_ html: String, isFromMe: Bool) -> NSAttributedString? {
-        guard let data = html.data(using: .utf8) else { return nil }
-
-        let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
-            .documentType: NSAttributedString.DocumentType.html,
-            .characterEncoding: String.Encoding.utf8.rawValue
-        ]
-
-        do {
-            let attributed = try NSMutableAttributedString(
-                data: data,
-                options: options,
-                documentAttributes: nil
-            )
-
-            // Apply theme colors
-            let textColor = isFromMe ? UIColor.white : UIColor.label
-            let linkColor = isFromMe ? UIColor(red: 0.68, green: 0.85, blue: 0.9, alpha: 1.0) : UIColor.systemBlue
-
-            attributed.addAttributes([
-                .foregroundColor: textColor,
-                .font: UIFont.systemFont(ofSize: 16)
-            ], range: NSRange(location: 0, length: attributed.length))
-
-            // Update link colors
-            attributed.enumerateAttribute(.link, in: NSRange(location: 0, length: attributed.length)) { value, range, _ in
-                if value != nil {
-                    attributed.addAttribute(.foregroundColor, value: linkColor, range: range)
-                }
-            }
-
-            return attributed
-        } catch {
-            return nil
-        }
-    }
-
-    // MARK: - HTML Complexity Analyzer
-
-    enum HTMLComplexity {
-        case simple    // Can use AttributedString
-        case moderate  // Need WebView but with optimizations
-        case complex   // Full WebView rendering
-    }
+    // MARK: - HTML Complexity Analysis
 
     func analyzeComplexity(_ html: String) -> HTMLComplexity {
-        let lowercased = html.lowercased()
-
-        // Only mark as complex if it has rich media elements that truly need a web view
-        // These are elements that can't be properly rendered in a text bubble
-        let hasTable = lowercased.contains("<table")
-        let hasImage = lowercased.contains("<img")
-        let hasVideo = lowercased.contains("<video")
-        let hasAudio = lowercased.contains("<audio")
-        let hasIframe = lowercased.contains("<iframe")
-        let hasCanvas = lowercased.contains("<canvas")
-        let hasSvg = lowercased.contains("<svg")
-
-        if hasTable || hasImage || hasVideo || hasAudio || hasIframe || hasCanvas || hasSvg {
-            return .complex
-        }
-
-        // Count total tags - newsletters typically have 100+ tags
-        let tagPattern = "<[^>]+>"
-        let regex = try? NSRegularExpression(pattern: tagPattern)
-        let matches = regex?.matches(in: html, range: NSRange(html.startIndex..., in: html)) ?? []
-
-        // Only mark as moderate/complex if there are MANY tags (newsletters, heavy HTML emails)
-        if matches.count > 100 {
-            return .complex
-        } else if matches.count > 75 {
-            return .moderate
-        }
-
-        // Everything else is simple
-        // This includes basic Gmail replies with quoted text (typically 15-40 tags)
-        return .simple
+        complexityAnalyzer.analyze(html)
     }
 
     // MARK: - HTML Wrapping for Display
 
     func wrapHTMLForDisplay(_ html: String, isDarkMode: Bool) -> String {
-        // Use lighter sanitization to preserve email formatting
-        let sanitized = lightSanitize(html)
-
-        let backgroundColor = isDarkMode ? "#1c1c1e" : "#ffffff"
-        let textColor = isDarkMode ? "#ffffff" : "#000000"
-        let linkColor = isDarkMode ? "#4da6ff" : "#007aff"
-
-        return """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=yes">
-            <!-- Relaxed CSP to allow all image sources -->
-            <meta http-equiv="Content-Security-Policy" content="default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; script-src 'none'; connect-src * data: blob:; img-src * data: blob: http: https:; frame-src 'none'; style-src * 'unsafe-inline';">
-            <style>
-                * {
-                    box-sizing: border-box;
-                }
-                html, body {
-                    height: 100%;
-                    overflow: auto;
-                    -webkit-overflow-scrolling: touch;
-                }
-                /* Default body styles - preserve email's own styling when possible */
-                body {
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-                    font-size: 16px;
-                    line-height: 1.5;
-                    color: \(textColor);
-                    background-color: \(backgroundColor);
-                    padding: 8px;
-                    margin: 0;
-                    word-wrap: break-word;
-                    -webkit-text-size-adjust: 100%;
-                }
-                /* Override link colors */
-                a {
-                    color: \(linkColor) !important;
-                    text-decoration: none;
-                }
-                a:hover {
-                    text-decoration: underline;
-                }
-                /* Ensure images are responsive but respect their intended size */
-                img {
-                    max-width: 100% !important;
-                    height: auto !important;
-                    border: 0;
-                    display: block;
-                }
-                /* Respect table layouts for newsletters */
-                table {
-                    max-width: 100% !important;
-                    border-collapse: collapse;
-                }
-                /* Fix for nested tables in newsletters */
-                table table {
-                    width: 100% !important;
-                }
-                /* Preserve newsletter cell styling */
-                td, th {
-                    vertical-align: top;
-                }
-                /* Ensure text contrast in dark mode only when needed */
-                \(isDarkMode ? """
-                /* Only override text color if not already specified */
-                p:not([style*="color"]),
-                span:not([style*="color"]),
-                div:not([style*="color"]),
-                td:not([style*="color"]),
-                th:not([style*="color"]),
-                li:not([style*="color"]) {
-                    color: \(textColor) !important;
-                }
-                """ : "")
-            </style>
-            <script>
-                // Wait for DOM and images
-                window.addEventListener('load', function() {
-                    // Handle modern image formats that may not be supported
-                    var images = document.getElementsByTagName('img');
-                    for (var i = 0; i < images.length; i++) {
-                        var img = images[i];
-
-                        // Add comprehensive error handling
-                        img.onerror = function() {
-                            // Check if it's a modern format that needs fallback
-                            var src = this.src || '';
-                            if (src.includes('.webp') || src.includes('.avif') || src.includes('.jxl')) {
-                                // Hide unsupported format images
-                                this.style.display = 'none';
-                                this.alt = this.alt || 'Image not available';
-                            } else if (this.naturalWidth === 0) {
-                                // Try one reload for other formats
-                                if (!this.dataset.retried) {
-                                    this.dataset.retried = 'true';
-                                    var originalSrc = this.src;
-                                    this.src = '';
-                                    this.src = originalSrc;
-                                } else {
-                                    // Hide if still failing
-                                    this.style.display = 'none';
-                                }
-                            }
-                            this.onerror = null; // Prevent infinite loop
-                        };
-
-                        // Check if image failed to load initially
-                        if (img.complete && img.naturalWidth === 0) {
-                            img.onerror();
-                        }
-                    }
-
-                    // Adjust viewport for better display
-                    var content = document.body;
-                    if (content.scrollWidth > window.innerWidth) {
-                        var scale = window.innerWidth / content.scrollWidth;
-                        document.body.style.zoom = scale;
-                    }
-                });
-            </script>
-        </head>
-        <body>
-            \(sanitized)
-        </body>
-        </html>
-        """
-    }
-
-    // Lighter sanitization that preserves more formatting
-    private func lightSanitize(_ html: String) -> String {
-        var sanitized = html
-
-        // Remove only the most dangerous elements
-        sanitized = removeScriptTags(sanitized)
-        sanitized = removeEventHandlers(sanitized)
-        sanitized = removeMetaRefresh(sanitized)
-        sanitized = removeForms(sanitized)
-        sanitized = removeIframes(sanitized)
-
-        // Keep style tags for email formatting
-        // Keep most HTML structure intact
-
-        return sanitized
+        displayWrapper.wrapHTMLForDisplay(html, isDarkMode: isDarkMode)
     }
 }

@@ -391,6 +391,35 @@ struct MessageBubble: View {
                                 }
                             }
                         }
+                    } else if message.bodyStorageURI != nil || htmlContentHandler.htmlFileExists(for: message.id) {
+                        // No text content but HTML exists - show button to view it
+                        Button(action: {
+                            showingHTMLView = true
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "doc.richtext")
+                                    .font(.caption)
+                                Text("View Email")
+                                    .font(.caption)
+                                    .fontWeight(.medium)
+                                Image(systemName: "arrow.up.forward")
+                                    .font(.caption2)
+                            }
+                            .foregroundColor(.blue)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.blue.opacity(0.1))
+                            .cornerRadius(8)
+                        }
+                    } else {
+                        // No content available at all - show minimal placeholder
+                        Text("No preview available")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .italic()
+                            .padding(10)
+                            .background(Color.gray.opacity(0.1))
+                            .cornerRadius(12)
                     }
                 }
 

@@ -19,25 +19,27 @@ actor ConversationCreationSerializer {
     ) -> Conversation {
         let participantHash = identity.participantHash
 
-        // Check if we recently created this conversation (may not be visible in this context yet)
-        let shouldRefresh = recentlyCreatedHashes.contains(participantHash)
+        // Pre-register this hash to prevent concurrent creation attempts
+        // This is the key fix: register BEFORE we start the Core Data transaction
+        // The actor ensures only one call executes at a time, so if we see the hash
+        // already registered, a previous call already created the conversation
+        let isNewRegistration = !recentlyCreatedHashes.contains(participantHash)
+        recentlyCreatedHashes.insert(participantHash)
 
         // Use NSManagedObjectID (which is Sendable) to avoid capturing non-Sendable Conversation
         var resultObjectID: NSManagedObjectID!
 
         context.performAndWait {
-            if shouldRefresh {
-                // Refresh to see recently saved changes from other contexts
-                context.refreshAllObjects()
-            }
-
             // Look for an ACTIVE conversation with these participants
+            // Use includesPendingChanges = false to query the persistent store directly,
+            // bypassing any in-memory changes that might not reflect other contexts' saves
             let request = Conversation.fetchRequest()
             request.predicate = NSPredicate(
                 format: "participantHash == %@ AND archivedAt == nil",
                 participantHash
             )
             request.fetchLimit = 1
+            request.includesPendingChanges = false  // Query persistent store, not just in-memory
 
             if let existing = try? context.fetch(request).first {
                 resultObjectID = existing.objectID
@@ -59,14 +61,13 @@ actor ConversationCreationSerializer {
             resultObjectID = conversation.objectID
         }
 
-        // Track this hash so other contexts know to refresh
-        recentlyCreatedHashes.insert(participantHash)
-
-        // Schedule cleanup after 30 seconds (capture only the hash, not self directly)
-        let hashToRemove = participantHash
-        Task { [weak self] in
-            try? await Task.sleep(for: .seconds(30))
-            await self?.removeFromCache(hashToRemove)
+        // Schedule cleanup after 30 seconds (only if we registered it)
+        if isNewRegistration {
+            let hashToRemove = participantHash
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(30))
+                await self?.removeFromCache(hashToRemove)
+            }
         }
 
         // Fetch the conversation object from the ID

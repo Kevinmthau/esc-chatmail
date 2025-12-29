@@ -31,13 +31,15 @@ struct ConversationRowView: View {
     private let authSession = AuthSession.shared
     private let participantLoader = ParticipantLoader.shared
 
-    @State private var displayName: String = ""
+    @State private var displayName: String
     @State private var avatarPhotos: [ProfilePhoto] = []
     @State private var participantNames: [String] = []
 
     init(conversation: Conversation) {
         self.conversation = conversation
         self.snapshot = ConversationSnapshot(from: conversation)
+        // Initialize displayName with stored value to prevent flickering
+        self._displayName = State(initialValue: conversation.displayName ?? "")
     }
 
     var body: some View {
@@ -155,7 +157,7 @@ struct SingleAvatarView: View {
                 size: 50
             ) {
                 if let participant = participant {
-                    InitialsView(name: participant)
+                    InitialsAvatarView(name: participant, style: .standard)
                 } else {
                     Image(systemName: "person.circle.fill")
                         .resizable()
@@ -163,8 +165,7 @@ struct SingleAvatarView: View {
                 }
             }
         } else if let participant = participant {
-            InitialsView(name: participant)
-                .frame(width: 50, height: 50)
+            InitialsAvatarView(name: participant, style: .standard)
         } else {
             Image(systemName: "person.circle.fill")
                 .resizable()
@@ -210,8 +211,7 @@ struct GroupAvatarView: View {
                         )
                     } else if index < participants.count {
                         // Show initials
-                        SmallInitialsView(name: participants[index])
-                            .frame(width: smallSize, height: smallSize)
+                        InitialsAvatarView(name: participants[index], style: .compact)
                     } else {
                         // Fallback to person icon
                         Circle()
@@ -301,8 +301,7 @@ struct SmallCachedAvatarView: View {
                             .stroke(Color(UIColor.systemBackground), lineWidth: 1.5)
                     )
             } else if let name = name {
-                SmallInitialsView(name: name)
-                    .frame(width: size, height: size)
+                InitialsAvatarView(name: name, style: .compact)
             } else {
                 Circle()
                     .fill(Color(UIColor.systemGray4))
@@ -345,79 +344,3 @@ struct SmallCachedAvatarView: View {
     }
 }
 
-// MARK: - Small Initials View for Group Avatars
-
-struct SmallInitialsView: View {
-    let name: String
-
-    private var initials: String {
-        let components = name.split(separator: " ")
-        if components.count >= 2 {
-            let first = String(components[0].prefix(1))
-            let last = String(components[1].prefix(1))
-            return (first + last).uppercased()
-        } else if let first = components.first {
-            return String(first.prefix(1)).uppercased()
-        }
-        return "?"
-    }
-
-    private var backgroundColor: Color {
-        // Generate consistent color based on name
-        let hash = name.hashValue
-        let hue = Double(abs(hash) % 360) / 360.0
-        return Color(hue: hue, saturation: 0.5, brightness: 0.8)
-    }
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(backgroundColor)
-
-            Text(initials)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundColor(.white)
-        }
-        .overlay(
-            Circle()
-                .stroke(Color(UIColor.systemBackground), lineWidth: 1.5)
-        )
-    }
-}
-
-// MARK: - Initials View
-
-struct InitialsView: View {
-    let name: String
-    
-    private var initials: String {
-        let components = name.split(separator: " ")
-        if components.count >= 2 {
-            let first = String(components[0].prefix(1))
-            let last = String(components[1].prefix(1))
-            return (first + last).uppercased()
-        } else if let first = components.first {
-            return String(first.prefix(2)).uppercased()
-        }
-        return "?"
-    }
-    
-    private var backgroundColor: Color {
-        // Generate consistent color based on name
-        let hash = name.hashValue
-        let hue = Double(abs(hash) % 360) / 360.0
-        return Color(hue: hue, saturation: 0.5, brightness: 0.8)
-    }
-    
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(backgroundColor)
-            
-            Text(initials)
-                .font(.footnote.weight(.semibold))
-                .foregroundColor(.white)
-        }
-        .overlay(Circle().stroke(Color.white, lineWidth: 2))
-    }
-}
