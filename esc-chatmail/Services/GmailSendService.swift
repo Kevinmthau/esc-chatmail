@@ -318,33 +318,8 @@ final class GmailSendService: ObservableObject {
         let conversation = await ConversationCreationSerializer.shared.findOrCreateConversation(for: identity, in: context)
 
         // Update display name for sent messages
-        conversation.displayName = formatGroupNames(recipients)
+        conversation.displayName = DisplayNameFormatter.formatGroupNames(recipients)
 
         return conversation
-    }
-
-    private nonisolated func formatGroupNames(_ names: [String]) -> String {
-        // Extract first names only
-        let firstNames = names.map { name in
-            // Split by space and take the first component
-            let components = name.components(separatedBy: " ")
-            return components.first ?? name
-        }
-
-        switch firstNames.count {
-        case 0:
-            return ""
-        case 1:
-            return firstNames[0]
-        case 2:
-            return "\(firstNames[0]) & \(firstNames[1])"
-        case 3:
-            return "\(firstNames[0]), \(firstNames[1]) & \(firstNames[2])"
-        default:
-            // 4 or more: "John, Jane, Bob & Alice"
-            let allButLast = firstNames.dropLast()
-            let last = firstNames.last!
-            return "\(allButLast.joined(separator: ", ")) & \(last)"
-        }
     }
 }

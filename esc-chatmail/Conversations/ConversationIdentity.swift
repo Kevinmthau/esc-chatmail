@@ -1,6 +1,17 @@
 import Foundation
 import CryptoKit
 
+/// Calculates participant hash from sorted participant emails.
+/// CANONICAL IMPLEMENTATION - use this everywhere, do not duplicate.
+/// - Parameter participants: Array of normalized email addresses (user's aliases should already be excluded)
+/// - Returns: SHA256 hex string of the participant key
+func calculateParticipantHash(from participants: [String]) -> String {
+    let participantKey = "p|\(participants.sorted().joined(separator: "|"))"
+    return SHA256.hash(data: Data(participantKey.utf8))
+        .map { String(format: "%02x", $0) }
+        .joined()
+}
+
 struct ConversationIdentity {
     let key: String              // "p|alice@example.com" (one-to-one) OR "p|alice@x|bob@y" (group)
     let keyHash: String          // SHA256 hex of key (unique per conversation instance)
@@ -95,8 +106,8 @@ func makeConversationIdentity(from headers: [MessageHeader],
     let type: ConversationType = participants.count <= 1 ? .oneToOne : .group
 
     // Create participant-based key (used for looking up conversations by participants)
-    let participantKey = "p|\(participants.joined(separator: "|"))"
-    let participantHash = SHA256.hash(data: Data(participantKey.utf8)).map { String(format:"%02x", $0) }.joined()
+    let participantKey = "p|\(participants.sorted().joined(separator: "|"))"
+    let participantHash = calculateParticipantHash(from: participants)
 
     // Create unique key for this conversation instance (includes UUID for uniqueness)
     // This allows multiple conversations with the same participants (archived vs active)

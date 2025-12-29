@@ -1,6 +1,5 @@
 import Foundation
 import CoreData
-import CryptoKit
 
 /// Handles data cleanup operations like duplicate removal and empty conversation cleanup
 final class DataCleanupService: @unchecked Sendable {
@@ -58,13 +57,9 @@ final class DataCleanupService: @unchecked Sendable {
                 // Set participantHash if missing
                 if conversation.participantHash == nil {
                     // Build participant hash from participants
-                    let emails = conversation.participantsArray.map { normalizedEmail($0) }.sorted()
+                    let emails = conversation.participantsArray.map { normalizedEmail($0) }
                     if !emails.isEmpty {
-                        let participantKey = "p|\(emails.joined(separator: "|"))"
-                        let hash = SHA256.hash(data: Data(participantKey.utf8))
-                            .map { String(format: "%02x", $0) }
-                            .joined()
-                        conversation.participantHash = hash
+                        conversation.participantHash = calculateParticipantHash(from: emails)
                         participantHashCount += 1
                     }
                 }
@@ -119,14 +114,13 @@ final class DataCleanupService: @unchecked Sendable {
             for conv in conversations {
                 // Calculate the correct participantHash by excluding user's aliases
                 let currentParticipants = conv.participantsArray
-                let correctParticipants = currentParticipants.filter { !myAliases.contains(normalizedEmail($0)) }
+                let correctParticipants = currentParticipants
+                    .map { normalizedEmail($0) }
+                    .filter { !myAliases.contains($0) }
 
                 if correctParticipants.isEmpty { continue }
 
-                let participantKey = "p|\(correctParticipants.sorted().joined(separator: "|"))"
-                let correctHash = SHA256.hash(data: Data(participantKey.utf8))
-                    .map { String(format: "%02x", $0) }
-                    .joined()
+                let correctHash = calculateParticipantHash(from: correctParticipants)
 
                 byCorrectHash[correctHash, default: []].append(conv)
 

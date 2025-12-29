@@ -48,7 +48,7 @@ final class ParticipantLoader {
         let displayNames = resolveDisplayNames(for: topParticipants)
 
         // Format the display name for UI
-        let formattedName = formatDisplayName(
+        let formattedName = DisplayNameFormatter.formatForRow(
             names: displayNames,
             totalCount: participants.count,
             fallback: conversation.displayName
@@ -123,28 +123,4 @@ final class ParticipantLoader {
         }
     }
 
-    /// Formats display names for conversation row display
-    func formatDisplayName(names: [String], totalCount: Int, fallback: String?) -> String {
-        guard !names.isEmpty else {
-            return fallback ?? "No participants"
-        }
-
-        let firstNames = names.map { name in
-            name.components(separatedBy: " ").first ?? name
-        }
-
-        switch firstNames.count {
-        case 1:
-            return firstNames[0]
-        case 2:
-            return "\(firstNames[0]), \(firstNames[1])"
-        default:
-            let remaining = totalCount - 2
-            if remaining > 0 {
-                return "\(firstNames[0]), \(firstNames[1]) +\(remaining)"
-            } else {
-                return "\(firstNames[0]), \(firstNames[1])"
-            }
-        }
-    }
 }
