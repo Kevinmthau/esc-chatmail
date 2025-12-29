@@ -39,35 +39,30 @@ enum DisplayNameFormatter {
     // MARK: - Row Display (uses "+" for overflow)
 
     /// Formats names for conversation row display with overflow indicator.
+    /// Single participants show full names; groups show first names only (Apple-style).
     /// - Parameters:
-    ///   - names: Visible participant names (first names will be extracted)
+    ///   - names: Visible participant names
     ///   - totalCount: Total number of participants
     ///   - fallback: Fallback display name if names is empty
-    /// - Returns: Formatted string like "John, Jane +3"
+    /// - Returns: Formatted string like "John Smith" (single) or "John, Jane +3" (group)
     ///
     /// Examples:
     /// - ([], 0, "Unknown") → "Unknown"
-    /// - (["John"], 1, nil) → "John"
-    /// - (["John", "Jane"], 2, nil) → "John, Jane"
-    /// - (["John", "Jane"], 5, nil) → "John, Jane +3"
+    /// - (["John Smith"], 1, nil) → "John Smith"
+    /// - (["John Smith", "Jane Doe"], 2, nil) → "John, Jane"
+    /// - (["John Smith", "Jane Doe"], 5, nil) → "John, Jane +3"
     static func formatForRow(names: [String], totalCount: Int, fallback: String?) -> String {
         guard !names.isEmpty else {
             return fallback ?? "No participants"
         }
 
-        let firstNames = names.map { extractFirstName($0) }
-
-        switch firstNames.count {
+        switch names.count {
         case 1:
-            return firstNames[0]
-        case 2:
-            let remaining = totalCount - 2
-            if remaining > 0 {
-                return "\(firstNames[0]), \(firstNames[1]) +\(remaining)"
-            } else {
-                return "\(firstNames[0]), \(firstNames[1])"
-            }
+            // Single participant: show full name
+            return names[0]
         default:
+            // Multiple participants: use first names only (Apple-style)
+            let firstNames = names.map { extractFirstName($0) }
             let remaining = totalCount - 2
             if remaining > 0 {
                 return "\(firstNames[0]), \(firstNames[1]) +\(remaining)"
