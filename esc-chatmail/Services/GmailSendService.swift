@@ -128,9 +128,9 @@ final class GmailSendService: ObservableObject {
         attachment.state = .uploading
 
         return AttachmentInfo(
-            localURL: attachment.value(forKey: "localURL") as? String,
-            filename: (attachment.value(forKey: "filename") as? String) ?? "attachment",
-            mimeType: (attachment.value(forKey: "mimeType") as? String) ?? "application/octet-stream"
+            localURL: attachment.localURLValue,
+            filename: attachment.filenameValue,
+            mimeType: attachment.mimeTypeValue
         )
     }
 

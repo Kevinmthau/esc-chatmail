@@ -234,7 +234,7 @@ final class HistoryProcessor: @unchecked Sendable {
     /// Check if a message has local modifications that haven't been synced yet
     private nonisolated func hasConflict(message: Message, syncStartTime: Date?) -> Bool {
         guard let syncStartTime = syncStartTime else { return false }
-        guard let localModifiedAt = message.value(forKey: "localModifiedAt") as? Date else { return false }
+        guard let localModifiedAt = message.localModifiedAtValue else { return false }
 
         // If the message was modified locally after the sync started,
         // it means there's a pending local change that should take precedence

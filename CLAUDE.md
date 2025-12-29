@@ -23,9 +23,26 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
         PendingActionsManager (offline queue) → Gmail API
 ```
 
+### Directory Structure
+
+```
+/Services/
+  /CoreData/          - CoreDataStack, error handling, save operations
+  /Sync/              - SyncEngine, orchestrators, persisters (MessagePersister, LabelPersister, AccountPersister)
+  /Background/        - BackgroundSyncManager (BGTaskScheduler)
+/Views/
+  /Chat/              - ChatView, MessageBubble, ParticipantRow, ParticipantsListView
+  /Compose/           - ComposeView, RecipientChip, ComposeAttachmentThumbnail
+  /Components/
+    /Attachments/     - AttachmentGridView, ImageAttachmentBubble, PDFAttachmentCard, etc.
+/ViewModels/          - @MainActor view models
+/Models/              - Core Data entity classes
+```
+
 ### Key Components
 
 - **`/Services/Sync/`** - SyncEngine orchestrates InitialSyncOrchestrator (full sync) and IncrementalSyncOrchestrator (delta sync via History API)
+- **`/Services/CoreData/`** - CoreDataStack with extracted error types and save operations
 - **`/Services/Background/`** - BackgroundSyncManager handles iOS background tasks (BGTaskScheduler)
 - **ConversationManager** - Groups messages by `participantHash` (normalized emails excluding user's aliases)
 - **ConversationCreationSerializer** - Actor preventing duplicate conversations during concurrent processing
@@ -50,5 +67,6 @@ Categories: sync, api, coreData, auth, ui, background, conversation
 - **@MainActor** on ViewModels and UI services
 - **Actor isolation** for thread-safe state (TokenManager, PendingActionsManager, ConversationCreationSerializer)
 - **Background contexts** for Core Data operations
-- **Typed accessors** in Models+Extensions.swift (avoid `value(forKey:)`)
+- **Typed accessors** in `/Services/Models+Extensions.swift` (avoid `value(forKey:)`)
+- **Extensions for code organization** - MessagePersister uses extensions in separate files (LabelPersister.swift, AccountPersister.swift)
 - User's aliases must be excluded from `participantHash` - load from Account entity if not in memory

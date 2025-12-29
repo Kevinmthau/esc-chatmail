@@ -206,7 +206,7 @@ final class SyncReconciliation: @unchecked Sendable {
                 }
 
                 // Skip if message has pending local changes (modified in last 5 minutes)
-                if let localModifiedAt = localMessage.value(forKey: "localModifiedAt") as? Date,
+                if let localModifiedAt = localMessage.localModifiedAtValue,
                    localModifiedAt > Date().addingTimeInterval(-300) {
                     return MessageReconcileResult()
                 }

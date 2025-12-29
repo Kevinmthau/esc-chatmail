@@ -185,10 +185,10 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
     private func processAction(_ action: PendingAction, context: NSManagedObjectContext) async {
         let objectID = action.objectID
         let actionType = action.actionTypeEnum
-        let messageId = action.value(forKey: "messageId") as? String
-        let conversationId = action.value(forKey: "conversationId") as? UUID
-        let payloadString = action.value(forKey: "payload") as? String
-        let retryCount = action.value(forKey: "retryCount") as? Int16 ?? 0
+        let messageId = action.messageIdValue
+        let conversationId = action.conversationIdValue
+        let payloadString = action.payloadValue
+        let retryCount = action.retryCountValue
 
         // Mark as processing
         await updateActionStatus(objectID: objectID, status: "processing", context: context)

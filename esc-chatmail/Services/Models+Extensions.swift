@@ -135,6 +135,46 @@ extension Message {
         set { cleanedSnippet = newValue }
     }
 
+    /// Type-safe accessor for attachments with empty set fallback
+    var typedAttachments: Set<Attachment> {
+        attachments ?? []
+    }
+
+    /// Array of attachments for convenient iteration
+    var attachmentsArray: [Attachment] {
+        Array(typedAttachments)
+    }
+
+    /// Type-safe accessor for bodyText (alias for consistency)
+    var bodyTextValue: String? {
+        bodyText
+    }
+
+    /// Type-safe accessor for senderName (alias for consistency)
+    var senderNameValue: String? {
+        senderName
+    }
+
+    /// Type-safe accessor for senderEmail (alias for consistency)
+    var senderEmailValue: String? {
+        senderEmail
+    }
+
+    /// Type-safe accessor for messageId (alias for consistency)
+    var messageIdValue: String? {
+        messageId
+    }
+
+    /// Type-safe accessor for references (alias for consistency)
+    var referencesValue: String? {
+        references
+    }
+
+    /// Type-safe accessor for localModifiedAt (alias for consistency)
+    var localModifiedAtValue: Date? {
+        localModifiedAt
+    }
+
     var timestamp: Date {
         get { internalDate }
         set { internalDate = newValue }
@@ -242,6 +282,31 @@ extension Attachment {
     var isLocalAttachment: Bool {
         id?.starts(with: "local_") == true
     }
+
+    /// Type-safe accessor for id (alias for consistency)
+    var attachmentId: String? {
+        id
+    }
+
+    /// Type-safe accessor for localURL (alias for consistency)
+    var localURLValue: String? {
+        localURL
+    }
+
+    /// Type-safe accessor for previewURL (alias for consistency)
+    var previewURLValue: String? {
+        previewURL
+    }
+
+    /// Type-safe accessor for filename with default
+    var filenameValue: String {
+        filename
+    }
+
+    /// Type-safe accessor for mimeType with default
+    var mimeTypeValue: String {
+        mimeType
+    }
 }
 
 // MARK: - PendingAction
@@ -260,4 +325,24 @@ extension PendingAction {
     @NSManaged public var retryCount: Int16
     @NSManaged public var createdAt: Date
     @NSManaged public var lastAttempt: Date?
+
+    /// Type-safe accessor for messageId (alias for consistency)
+    var messageIdValue: String? {
+        messageId
+    }
+
+    /// Type-safe accessor for conversationId (alias for consistency)
+    var conversationIdValue: UUID? {
+        conversationId
+    }
+
+    /// Type-safe accessor for payload (alias for consistency)
+    var payloadValue: String? {
+        payload
+    }
+
+    /// Type-safe accessor for retryCount (alias for consistency)
+    var retryCountValue: Int16 {
+        retryCount
+    }
 }

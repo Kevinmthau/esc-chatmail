@@ -32,7 +32,7 @@ final class CachedConversation {
         var size = 0
         for message in messages {
             size += (message.snippet?.count ?? 0) * 2 // Unicode chars
-            size += ((message.value(forKey: "bodyText") as? String)?.count ?? 0) * 2
+            size += (message.bodyTextValue?.count ?? 0) * 2
             size += 1024 // Overhead per message
         }
         return size

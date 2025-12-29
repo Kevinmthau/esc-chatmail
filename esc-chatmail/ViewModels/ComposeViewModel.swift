@@ -193,12 +193,12 @@ final class ComposeViewModel: ObservableObject {
         let removed = attachments.remove(at: index)
 
         // Clean up files if it's a local attachment
-        if let attachmentId = removed.value(forKey: "id") as? String,
+        if let attachmentId = removed.attachmentId,
            attachmentId.starts(with: "local_") {
-            if let localURL = removed.value(forKey: "localURL") as? String {
+            if let localURL = removed.localURLValue {
                 AttachmentPaths.deleteFile(at: localURL)
             }
-            if let previewURL = removed.value(forKey: "previewURL") as? String {
+            if let previewURL = removed.previewURLValue {
                 AttachmentPaths.deleteFile(at: previewURL)
             }
         }
@@ -284,9 +284,8 @@ final class ComposeViewModel: ObservableObject {
             } catch {
                 // Mark attachments as failed so they show error indicator
                 await MainActor.run {
-                    if let message = sendService.fetchMessage(byID: optimisticMessageID),
-                       let attachmentsSet = message.value(forKey: "attachments") as? Set<Attachment> {
-                        sendService.markAttachmentsAsFailed(Array(attachmentsSet))
+                    if let message = sendService.fetchMessage(byID: optimisticMessageID) {
+                        sendService.markAttachmentsAsFailed(message.attachmentsArray)
                     }
                 }
                 Log.error("Background send failed", category: .message, error: error)
@@ -332,22 +331,22 @@ final class ComposeViewModel: ObservableObject {
         if let replyingTo = replyingTo {
             subject = replyingTo.subject.map { MimeBuilder.prefixSubjectForReply($0) }
             threadId = replyingTo.gmThreadId
-            inReplyTo = replyingTo.value(forKey: "messageId") as? String
+            inReplyTo = replyingTo.messageIdValue
 
             // Build references chain
-            if let previousRefs = replyingTo.value(forKey: "references") as? String, !previousRefs.isEmpty {
+            if let previousRefs = replyingTo.referencesValue, !previousRefs.isEmpty {
                 references = previousRefs.split(separator: " ").map(String.init)
             }
-            if let messageId = replyingTo.value(forKey: "messageId") as? String {
+            if let messageId = replyingTo.messageIdValue {
                 references.append(messageId)
             }
 
             // Store original message info for quoting
             originalMessage = QuotedMessage(
-                senderName: replyingTo.value(forKey: "senderName") as? String,
-                senderEmail: (replyingTo.value(forKey: "senderEmail") as? String) ?? "",
+                senderName: replyingTo.senderNameValue,
+                senderEmail: replyingTo.senderEmailValue ?? "",
                 date: replyingTo.internalDate,
-                body: replyingTo.value(forKey: "bodyText") as? String
+                body: replyingTo.bodyTextValue
             )
         } else {
             // Find latest message in conversation

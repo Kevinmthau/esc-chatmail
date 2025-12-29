@@ -284,7 +284,7 @@ struct OptimizedMessageBubble: View {
         VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 4) {
             // Sender info
             if !message.isFromMe {
-                Text((message.value(forKey: "senderName") as? String) ?? "Unknown")
+                Text(message.senderNameValue ?? "Unknown")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -318,7 +318,7 @@ struct OptimizedMessageBubble: View {
         }
 
         if message.hasAttachments {
-            let attachmentCount = (message.value(forKey: "attachments") as? NSSet)?.count ?? 0
+            let attachmentCount = message.typedAttachments.count
             AttachmentIndicator(count: attachmentCount)
         }
     }
