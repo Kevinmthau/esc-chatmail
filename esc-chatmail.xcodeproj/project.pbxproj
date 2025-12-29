@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		17D95D46A8EE480F854F9C4B /* DisplayNameFormatterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82A5335D7D8E4BC5A7A758B7 /* DisplayNameFormatterTests.swift */; };
 		F939A03B2E674AB400A7578D /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = F939A03A2E674AB400A7578D /* GoogleSignIn */; };
 		F939A03D2E674AB400A7578D /* GoogleSignInSwift in Frameworks */ = {isa = PBXBuildFile; productRef = F939A03C2E674AB400A7578D /* GoogleSignInSwift */; };
 /* End PBXBuildFile section */
@@ -29,6 +30,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		82A5335D7D8E4BC5A7A758B7 /* DisplayNameFormatterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayNameFormatterTests.swift; sourceTree = "<group>"; };
 		F9399FE12E66521800A7578D /* esc-chatmail.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "esc-chatmail.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F9399FF22E66521800A7578D /* esc-chatmailTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "esc-chatmailTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F9399FFC2E66521800A7578D /* esc-chatmailUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "esc-chatmailUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -84,10 +86,19 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		4D239ACE8F544444A4B7EC5E /* esc-chatmailTests */ = {
+			isa = PBXGroup;
+			children = (
+				82A5335D7D8E4BC5A7A758B7 /* DisplayNameFormatterTests.swift */,
+			);
+			path = "esc-chatmailTests";
+			sourceTree = "<group>";
+		};
 		F9399FD82E66521800A7578D = {
 			isa = PBXGroup;
 			children = (
 				F9399FE32E66521800A7578D /* esc-chatmail */,
+				4D239ACE8F544444A4B7EC5E /* esc-chatmailTests */,
 				F9399FE22E66521800A7578D /* Products */,
 			);
 			sourceTree = "<group>";
@@ -252,6 +263,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				17D95D46A8EE480F854F9C4B /* DisplayNameFormatterTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
