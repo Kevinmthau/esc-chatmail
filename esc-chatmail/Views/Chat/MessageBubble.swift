@@ -42,37 +42,14 @@ struct MessageBubble: View {
                 }
 
                 if message.isNewsletter {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if let text = fullTextContent ?? message.cleanedSnippet ?? message.snippet, !text.isEmpty {
-                            Text(text)
-                                .lineLimit(4)
-                                .padding(10)
-                                .background(Color.gray.opacity(0.2))
-                                .foregroundColor(.primary)
-                                .cornerRadius(12)
-                                .frame(maxWidth: 260)
-                        }
-
-                        Button(action: {
-                            showingHTMLView = true
-                        }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "doc.richtext")
-                                    .font(.caption)
-                                Text("View Full Email")
-                                    .font(.caption)
-                                    .fontWeight(.medium)
-                                Image(systemName: "arrow.up.forward")
-                                    .font(.caption2)
-                            }
-                            .foregroundColor(.blue)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(Color.blue.opacity(0.1))
-                            .cornerRadius(8)
-                        }
-                    }
+                    // Newsletter/promotional emails: Show extracted content card
+                    EmailContentSection(
+                        message: message,
+                        showingHTMLView: $showingHTMLView
+                    )
+                    .frame(maxWidth: 280)
                 } else {
+                    // Personal emails: Show as chat bubbles with text
                     if let text = fullTextContent ?? message.cleanedSnippet ?? message.snippet, !text.isEmpty {
                         // Show "View More" if text has many lines OR is very long (long paragraphs)
                         let lineCount = text.components(separatedBy: .newlines).count
