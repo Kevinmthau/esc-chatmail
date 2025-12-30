@@ -110,4 +110,18 @@ Categories: sync, api, coreData, auth, ui, background, conversation
 - **Extensions for code organization** - MessagePersister uses extensions in separate files (LabelPersister.swift, AccountPersister.swift)
 - **SyncPhase protocol** - Composable sync phases with typed Input/Output and progress reporting via SyncPhaseContext
 - **Service composition** - ViewModels compose extracted services (e.g., ComposeViewModel uses RecipientManager, ContactAutocompleteService)
+- **Nested ObservableObject forwarding** - When ViewModels compose child ObservableObjects, forward `objectWillChange` via Combine subscriptions (see ComposeViewModel)
 - User's aliases must be excluded from `participantHash` - load from Account entity if not in memory
+
+### Conversation Visibility Logic
+
+Conversations appear in the chat list based on `archivedAt == nil`. Archive state is managed by `ConversationRollupUpdater`:
+- **INBOX messages** → Conversation visible (`archivedAt = nil`)
+- **Sent-only conversations** (no replies yet) → Stay visible until manually archived
+- **All INBOX labels removed** → Auto-archived (`archivedAt = Date()`)
+- **New message arrives for archived conversation** → Auto un-archived by `ConversationCreationSerializer`
+
+Gmail labels vs visibility:
+- `INBOX` label → Message counts toward inbox visibility
+- `SENT` label only → Sent-only conversation, kept visible
+- No `INBOX` + has received messages → Archived
