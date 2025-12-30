@@ -30,36 +30,38 @@ final class ComposeViewModel: ObservableObject {
 
     // MARK: - Published State
 
-    @Published var recipients: [Recipient] = []
-    @Published var recipientInput = ""
     @Published var subject = ""
     @Published var body = ""
-    @Published var attachments: [Attachment] = []
-
     @Published var isSending = false
     @Published var error: Error?
     @Published var showError = false
 
-    @Published var autocompleteContacts: [ContactsService.ContactMatch] = []
-    @Published var showAutocomplete = false
+    // MARK: - Composed Services
+
+    let recipientManager: RecipientManager
+    let autocompleteService: ContactAutocompleteService
+    let attachmentManager: ComposeAttachmentManager
+
+    private let replyMetadataBuilder: ReplyMetadataBuilder
+    private let messageFormatBuilder: MessageFormatBuilder
 
     // MARK: - Dependencies
 
     let mode: Mode
     private let dependencies: Dependencies
-    private var coreDataStack: CoreDataStack { dependencies.coreDataStack }
-    private var authSession: AuthSession { dependencies.authSession }
     private var syncEngine: SyncEngine { dependencies.syncEngine }
-    private lazy var viewContext: NSManagedObjectContext = coreDataStack.viewContext
     private lazy var sendService: GmailSendService = dependencies.makeSendService()
-    private lazy var contactsService: ContactsService = dependencies.makeContactsService()
-
-    // MARK: - Debouncing
-
-    private var searchTask: Task<Void, Never>?
-    private let searchDebounceInterval: UInt64 = 150_000_000 // 150ms in nanoseconds
 
     // MARK: - Computed Properties
+
+    var recipients: [Recipient] { recipientManager.recipients }
+    var recipientInput: String {
+        get { recipientManager.recipientInput }
+        set { recipientManager.recipientInput = newValue }
+    }
+    var attachments: [Attachment] { attachmentManager.attachments }
+    var autocompleteContacts: [ContactsService.ContactMatch] { autocompleteService.autocompleteContacts }
+    var showAutocomplete: Bool { autocompleteService.showAutocomplete }
 
     var canSend: Bool {
         !recipients.isEmpty &&
@@ -85,125 +87,76 @@ final class ComposeViewModel: ObservableObject {
 
     // MARK: - Initialization
 
-    /// Primary initializer using Dependencies container
     init(mode: Mode = .newMessage, deps: Dependencies? = nil) {
+        let resolvedDeps = deps ?? .shared
         self.mode = mode
-        self.dependencies = deps ?? .shared
-        // Other dependencies are lazy-initialized to avoid blocking sheet presentation
+        self.dependencies = resolvedDeps
+
+        // Initialize composed services
+        self.recipientManager = RecipientManager(authSession: resolvedDeps.authSession)
+        self.autocompleteService = ContactAutocompleteService()
+        self.attachmentManager = ComposeAttachmentManager(viewContext: resolvedDeps.coreDataStack.viewContext)
+        self.replyMetadataBuilder = ReplyMetadataBuilder(authSession: resolvedDeps.authSession)
+        self.messageFormatBuilder = MessageFormatBuilder(authSession: resolvedDeps.authSession)
     }
 
     func setupForMode() {
         switch mode {
         case .forward(let message):
-            setupForwardedMessage(message)
+            let result = messageFormatBuilder.formatForwardedMessage(message)
+            body = result.body
+            subject = result.subject ?? ""
         case .reply(let conversation, _):
-            setupReplyRecipients(conversation)
+            recipientManager.setupReplyRecipients(from: conversation)
         case .newMessage, .newEmail:
             break
         }
     }
 
-    // MARK: - Contact Access
+    // MARK: - Delegate Methods (passthrough to services)
 
     func requestContactsAccess() async {
-        if contactsService.authorizationStatus == .notDetermined {
-            _ = await contactsService.requestAccess()
-        }
+        await autocompleteService.requestAccess()
     }
 
-    // MARK: - Recipient Management
-
     func addRecipient(_ recipient: Recipient) {
-        guard !recipients.contains(where: { $0.email == recipient.email }) else { return }
-        recipients.append(recipient)
+        recipientManager.addRecipient(recipient)
     }
 
     func addRecipient(email: String, displayName: String? = nil) {
-        let recipient = Recipient(email: email, displayName: displayName)
-        addRecipient(recipient)
+        recipientManager.addRecipient(email: email, displayName: displayName)
     }
 
     func removeRecipient(_ recipient: Recipient) {
-        recipients.removeAll { $0.id == recipient.id }
+        recipientManager.removeRecipient(recipient)
     }
 
     func addRecipientFromInput() {
-        let trimmed = recipientInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, EmailValidator.isValid(trimmed) else { return }
-
-        let normalized = EmailNormalizer.normalize(trimmed)
-        guard !recipients.contains(where: { $0.email == normalized }) else { return }
-
-        recipients.append(Recipient(email: trimmed))
-        recipientInput = ""
-        clearAutocomplete()
+        if recipientManager.addRecipientFromInput() {
+            autocompleteService.clearAutocomplete()
+        }
     }
 
-    // MARK: - Contact Search (Debounced)
-
     func searchContacts(query: String) {
-        // Cancel any pending search
-        searchTask?.cancel()
-
-        guard !query.isEmpty else {
-            clearAutocomplete()
-            return
-        }
-
-        // Debounce: wait before searching
-        searchTask = Task {
-            do {
-                try await Task.sleep(nanoseconds: searchDebounceInterval)
-            } catch {
-                return // Task was cancelled
-            }
-
-            guard !Task.isCancelled else { return }
-
-            let matches = await contactsService.searchContacts(query: query)
-
-            guard !Task.isCancelled else { return }
-
-            autocompleteContacts = matches
-            showAutocomplete = !matches.isEmpty
-        }
+        autocompleteService.searchContacts(query: query)
     }
 
     func selectContact(_ contact: ContactsService.ContactMatch, email: String? = nil) {
-        let selectedEmail = email ?? contact.primaryEmail
-        addRecipient(email: selectedEmail, displayName: contact.displayName)
-        recipientInput = ""
-        clearAutocomplete()
+        let result = autocompleteService.selectContact(contact, email: email)
+        recipientManager.addRecipient(email: result.email, displayName: result.displayName)
+        recipientManager.recipientInput = ""
     }
 
     func clearAutocomplete() {
-        searchTask?.cancel()
-        autocompleteContacts = []
-        showAutocomplete = false
+        autocompleteService.clearAutocomplete()
     }
 
-    // MARK: - Attachment Management
-
     func addAttachment(_ attachment: Attachment) {
-        attachments.append(attachment)
+        attachmentManager.addAttachment(attachment)
     }
 
     func removeAttachment(_ attachment: Attachment) {
-        guard let index = attachments.firstIndex(of: attachment) else { return }
-        let removed = attachments.remove(at: index)
-
-        // Clean up files if it's a local attachment
-        if let attachmentId = removed.attachmentId,
-           attachmentId.starts(with: "local_") {
-            if let localURL = removed.localURLValue {
-                AttachmentPaths.deleteFile(at: localURL)
-            }
-            if let previewURL = removed.previewURLValue {
-                AttachmentPaths.deleteFile(at: previewURL)
-            }
-        }
-
-        viewContext.delete(removed)
+        attachmentManager.removeAttachment(attachment)
     }
 
     // MARK: - Send Message
@@ -228,16 +181,16 @@ final class ComposeViewModel: ObservableObject {
         let optimisticMessageID = optimisticMessage.id
 
         // Mark attachments as uploaded immediately so they display non-dimmed
-        sendService.markAttachmentsAsUploaded(attachments)
+        sendService.markAttachmentsAsUploaded(Array(attachments))
 
         // Prepare attachment infos for background send
         let attachmentInfos = attachments.map { sendService.attachmentToInfo($0) }
 
         // Build reply data on main actor before background task (Core Data objects aren't Sendable)
-        let replyData: ReplyData?
+        let replyData: ReplyMetadataBuilder.ReplyData?
         switch mode {
         case .reply(let conversation, let replyingTo):
-            replyData = buildReplyData(
+            replyData = replyMetadataBuilder.buildReplyData(
                 conversation: conversation,
                 replyingTo: replyingTo,
                 body: messageBody
@@ -294,147 +247,5 @@ final class ComposeViewModel: ObservableObject {
 
         isSending = false
         return true
-    }
-
-    // MARK: - Reply Data Builder
-
-    struct ReplyData {
-        let recipients: [String]
-        let body: String
-        let subject: String?
-        let threadId: String?
-        let inReplyTo: String?
-        let references: [String]
-        let originalMessage: QuotedMessage?
-    }
-
-    private func buildReplyData(
-        conversation: Conversation,
-        replyingTo: Message?,
-        body: String
-    ) -> ReplyData {
-        let currentUserEmail = authSession.userEmail ?? ""
-
-        // Extract participants from conversation
-        let participantEmails = Array(conversation.participants ?? [])
-            .compactMap { $0.person?.email }
-        let recipients = participantEmails.filter {
-            EmailNormalizer.normalize($0) != EmailNormalizer.normalize(currentUserEmail)
-        }
-
-        var subject: String?
-        var threadId: String?
-        var inReplyTo: String?
-        var references: [String] = []
-        var originalMessage: QuotedMessage?
-
-        if let replyingTo = replyingTo {
-            subject = replyingTo.subject.map { MimeBuilder.prefixSubjectForReply($0) }
-            threadId = replyingTo.gmThreadId
-            inReplyTo = replyingTo.messageIdValue
-
-            // Build references chain
-            if let previousRefs = replyingTo.referencesValue, !previousRefs.isEmpty {
-                references = previousRefs.split(separator: " ").map(String.init)
-            }
-            if let messageId = replyingTo.messageIdValue {
-                references.append(messageId)
-            }
-
-            // Store original message info for quoting
-            originalMessage = QuotedMessage(
-                senderName: replyingTo.senderNameValue,
-                senderEmail: replyingTo.senderEmailValue ?? "",
-                date: replyingTo.internalDate,
-                body: replyingTo.bodyTextValue
-            )
-        } else {
-            // Find latest message in conversation
-            let latestMessage = Array(conversation.messages ?? [])
-                .sorted { $0.internalDate > $1.internalDate }
-                .first
-            threadId = latestMessage?.gmThreadId
-        }
-
-        return ReplyData(
-            recipients: recipients,
-            body: body,
-            subject: subject,
-            threadId: threadId,
-            inReplyTo: inReplyTo,
-            references: references,
-            originalMessage: originalMessage
-        )
-    }
-
-    // MARK: - Forward Setup
-
-    private func setupForwardedMessage(_ message: Message) {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-
-        var quotedText = "\n\n---------- Forwarded message ---------\n"
-
-        // Get sender info
-        let participants = Array(message.conversation?.participants ?? [])
-
-        if message.isFromMe {
-            quotedText += "From: \(authSession.userEmail ?? "Me")\n"
-        } else {
-            if let otherParticipant = participants.first(where: { participant in
-                let email = participant.person?.email ?? ""
-                return EmailNormalizer.normalize(email) != EmailNormalizer.normalize(authSession.userEmail ?? "")
-            })?.person {
-                quotedText += "From: \(otherParticipant.name ?? otherParticipant.email)\n"
-            }
-        }
-
-        quotedText += "Date: \(formatter.string(from: message.internalDate))\n"
-
-        if let originalSubject = message.subject, !originalSubject.isEmpty {
-            quotedText += "Subject: \(originalSubject)\n"
-
-            // Set subject with Fwd: prefix
-            if originalSubject.lowercased().hasPrefix("fwd:") || originalSubject.lowercased().hasPrefix("fw:") {
-                subject = originalSubject
-            } else {
-                subject = "Fwd: \(originalSubject)"
-            }
-        }
-
-        let recipientList = participants.compactMap { $0.person?.email }
-            .filter { EmailNormalizer.normalize($0) != EmailNormalizer.normalize(authSession.userEmail ?? "") }
-
-        if !recipientList.isEmpty {
-            quotedText += "To: \(recipientList.joined(separator: ", "))\n"
-        }
-
-        quotedText += "\n"
-
-        if let snippet = message.snippet {
-            quotedText += snippet
-        }
-
-        body = quotedText
-    }
-
-    // MARK: - Reply Setup
-
-    private func setupReplyRecipients(_ conversation: Conversation) {
-        let currentUserEmail = authSession.userEmail ?? ""
-        let participantEmails = Array(conversation.participants ?? [])
-            .compactMap { $0.person?.email }
-            .filter { EmailNormalizer.normalize($0) != EmailNormalizer.normalize(currentUserEmail) }
-
-        for email in participantEmails {
-            // Try to get display name from person
-            if let participant = conversation.participants?.first(where: { $0.person?.email == email }),
-               let person = participant.person {
-                recipients.append(Recipient(from: person))
-            } else {
-                recipients.append(Recipient(email: email))
-            }
-        }
     }
 }

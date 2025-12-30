@@ -10,11 +10,12 @@ struct IncrementalSyncResult {
 
 /// Orchestrates incremental sync using Gmail History API
 ///
-/// Responsibilities:
-/// - Fetch history changes since last sync
-/// - Process new messages and label changes
-/// - Run reconciliation to catch missed changes
-/// - Handle history ID expiration with recovery sync
+/// Uses composable SyncPhase implementations for each stage:
+/// 1. HistoryCollectionPhase - Fetch history changes
+/// 2. MessageFetchPhase - Fetch and persist new messages
+/// 3. LabelProcessingPhase - Process label changes
+/// 4. ReconciliationPhase - Catch missed changes
+/// 5. ConversationUpdatePhase - Update conversation rollups
 @MainActor
 final class IncrementalSyncOrchestrator {
 
@@ -31,6 +32,35 @@ final class IncrementalSyncOrchestrator {
     private let log = LogCategory.sync.logger
 
     private var myAliases: Set<String> = []
+
+    // MARK: - Phases (lazily initialized)
+
+    private lazy var historyCollectionPhase = HistoryCollectionPhase(
+        messageFetcher: messageFetcher,
+        historyProcessor: historyProcessor
+    )
+
+    private lazy var messageFetchPhase = MessageFetchPhase(
+        messageFetcher: messageFetcher,
+        messagePersister: messagePersister
+    )
+
+    private lazy var labelProcessingPhase = LabelProcessingPhase(
+        historyProcessor: historyProcessor
+    )
+
+    private lazy var reconciliationPhase = ReconciliationPhase(
+        reconciliation: reconciliation,
+        messageFetcher: messageFetcher,
+        messagePersister: messagePersister
+    )
+
+    private lazy var conversationUpdatePhase = ConversationUpdatePhase(
+        conversationManager: conversationManager,
+        dataCleanupService: dataCleanupService,
+        messagePersister: messagePersister,
+        historyProcessor: historyProcessor
+    )
 
     // MARK: - Initialization
 
@@ -56,11 +86,7 @@ final class IncrementalSyncOrchestrator {
 
     // MARK: - Public API
 
-    /// Performs incremental sync
-    /// - Parameters:
-    ///   - progressHandler: Callback for progress updates
-    ///   - initialSyncFallback: Closure to call if initial sync is needed
-    /// - Returns: Result of the sync operation
+    /// Performs incremental sync using composable phases
     func performSync(
         progressHandler: @escaping (Double, String) -> Void,
         initialSyncFallback: @escaping () async throws -> Void
@@ -82,40 +108,47 @@ final class IncrementalSyncOrchestrator {
         let context = coreDataStack.newBackgroundContext()
         let labelCache = await messagePersister.prefetchLabels(in: context)
 
+        // Create shared context for all phases
+        nonisolated(unsafe) let unsafeLabelCache = labelCache
+        let phaseContext = SyncPhaseContext(
+            coreDataContext: context,
+            labelCache: unsafeLabelCache,
+            myAliases: myAliases,
+            syncStartTime: syncStartTime,
+            progressHandler: progressHandler,
+            failureTracker: failureTracker
+        )
+
         do {
             // Phase 1: Collect all history
-            progressHandler(0.1, "Fetching history...")
-            let historyResult = try await collectHistory(startHistoryId: historyId)
+            let historyResult = try await historyCollectionPhase.execute(
+                input: historyId,
+                context: phaseContext
+            )
 
             // Phase 2: Fetch new messages
-            progressHandler(0.3, "Fetching new messages...")
-            nonisolated(unsafe) let unsafeLabelCache = labelCache
-            let fetchResult = try await fetchNewMessages(
-                messageIds: historyResult.newMessageIds,
-                labelCache: unsafeLabelCache,
-                context: context,
-                progressHandler: { progress, status in
-                    progressHandler(0.3 + progress * 0.4, status)
-                }
+            let fetchResult = try await messageFetchPhase.execute(
+                input: historyResult.newMessageIds,
+                context: phaseContext
             )
 
             // Phase 3: Process label changes (AFTER messages are fetched)
-            progressHandler(0.7, "Processing label changes...")
-            await processHistoryRecords(
-                records: historyResult.records,
-                context: context,
-                syncStartTime: syncStartTime
+            try await labelProcessingPhase.execute(
+                input: historyResult.records,
+                context: phaseContext
             )
 
             // Phase 4: Reconciliation
-            progressHandler(0.8, "Checking for missed messages...")
-            try Task.checkCancellation()
-            await runReconciliation(context: context, labelCache: unsafeLabelCache)
+            try await reconciliationPhase.execute(
+                input: (),
+                context: phaseContext
+            )
 
             // Phase 5: Update rollups
-            progressHandler(0.85, "Updating conversations...")
-            await updateModifiedConversations(context: context)
-            await dataCleanupService.runIncrementalCleanup(in: context)
+            try await conversationUpdatePhase.execute(
+                input: (),
+                context: phaseContext
+            )
 
             // Phase 6: Save
             progressHandler(0.95, "Saving changes...")
@@ -151,169 +184,6 @@ final class IncrementalSyncOrchestrator {
     /// Sets the user's email aliases (called from SyncEngine)
     func setMyAliases(_ aliases: Set<String>) {
         myAliases = aliases
-    }
-
-    // MARK: - History Collection
-
-    private struct HistoryCollectionResult {
-        let newMessageIds: [String]
-        let records: [HistoryRecord]
-        let latestHistoryId: String
-    }
-
-    private func collectHistory(startHistoryId: String) async throws -> HistoryCollectionResult {
-        var pageToken: String? = nil
-        var latestHistoryId = startHistoryId
-        var allNewMessageIds: [String] = []
-        var allHistoryRecords: [HistoryRecord] = []
-
-        repeat {
-            try Task.checkCancellation()
-
-            let (history, newHistoryId, nextPageToken) = try await messageFetcher.listHistory(
-                startHistoryId: startHistoryId,
-                pageToken: pageToken
-            )
-
-            if let history = history, !history.isEmpty {
-                log.debug("Received \(history.count) history records")
-                let newIds = historyProcessor.extractNewMessageIds(from: history)
-                allNewMessageIds.append(contentsOf: newIds)
-                allHistoryRecords.append(contentsOf: history)
-            }
-
-            if let newHistoryId = newHistoryId {
-                latestHistoryId = newHistoryId
-            }
-
-            pageToken = nextPageToken
-        } while pageToken != nil
-
-        log.info("History collection: \(allNewMessageIds.count) new messages, \(allHistoryRecords.count) records")
-
-        return HistoryCollectionResult(
-            newMessageIds: allNewMessageIds,
-            records: allHistoryRecords,
-            latestHistoryId: latestHistoryId
-        )
-    }
-
-    // MARK: - Message Fetching
-
-    private func fetchNewMessages(
-        messageIds: [String],
-        labelCache: [String: Label],
-        context: NSManagedObjectContext,
-        progressHandler: @escaping (Double, String) -> Void
-    ) async throws -> BatchProcessingResult {
-        guard !messageIds.isEmpty else {
-            log.debug("No new messages to fetch")
-            return BatchProcessingResult(totalProcessed: 0, successfulCount: 0, failedIds: [])
-        }
-
-        log.info("Fetching \(messageIds.count) new messages")
-
-        let result = try await BatchProcessor.processMessages(
-            messageIds: messageIds,
-            batchSize: SyncConfig.messageBatchSize,
-            messageFetcher: messageFetcher
-        ) { processed, total in
-            let progress = Double(processed) / Double(total)
-            await MainActor.run {
-                progressHandler(progress, "Processing messages... \(processed)/\(total)")
-            }
-        } messageHandler: { [weak self] message in
-            guard let self = self else { return }
-            await self.messagePersister.saveMessage(
-                message,
-                labelCache: labelCache,
-                myAliases: self.myAliases,
-                in: context
-            )
-        }
-
-        if result.hasFailures {
-            log.warning("\(result.failedIds.count) messages failed to fetch")
-            failureTracker.recordFailure(failedIds: result.failedIds)
-        }
-
-        return result
-    }
-
-    // MARK: - History Processing
-
-    private func processHistoryRecords(
-        records: [HistoryRecord],
-        context: NSManagedObjectContext,
-        syncStartTime: Date
-    ) async {
-        guard !records.isEmpty else { return }
-
-        log.debug("Processing \(records.count) history records for label changes")
-
-        for record in records {
-            await historyProcessor.processLightweightOperations(
-                record,
-                in: context,
-                syncStartTime: syncStartTime
-            )
-        }
-    }
-
-    // MARK: - Reconciliation
-
-    private func runReconciliation(
-        context: NSManagedObjectContext,
-        labelCache: [String: Label]
-    ) async {
-        let installTimestamp = UserDefaults.standard.double(forKey: "installTimestamp")
-
-        // Check for missed messages
-        let missedIds = await reconciliation.checkForMissedMessages(
-            in: context,
-            installTimestamp: installTimestamp
-        )
-
-        if !missedIds.isEmpty {
-            log.info("Reconciliation found \(missedIds.count) missed messages")
-
-            let failedMissedIds = await BatchProcessor.retryFailedMessages(
-                failedIds: missedIds,
-                messageFetcher: messageFetcher
-            ) { [weak self] message in
-                guard let self = self else { return }
-                await self.messagePersister.saveMessage(
-                    message,
-                    labelCache: labelCache,
-                    myAliases: self.myAliases,
-                    in: context
-                )
-            }
-
-            if !failedMissedIds.isEmpty {
-                log.warning("Failed to fetch \(failedMissedIds.count) missed messages")
-            }
-        }
-
-        // Reconcile labels
-        await reconciliation.reconcileLabelStates(in: context, labelCache: labelCache)
-    }
-
-    // MARK: - Conversation Updates
-
-    private func updateModifiedConversations(context: NSManagedObjectContext) async {
-        var modifiedIDs = messagePersister.getAndClearModifiedConversations()
-        let historyModifiedIDs = historyProcessor.getAndClearModifiedConversations()
-        modifiedIDs.formUnion(historyModifiedIDs)
-
-        log.debug("Updating rollups for \(modifiedIDs.count) modified conversations")
-
-        if !modifiedIDs.isEmpty {
-            await conversationManager.updateRollupsForModifiedConversations(
-                conversationIDs: modifiedIDs,
-                in: context
-            )
-        }
     }
 
     // MARK: - History Recovery
