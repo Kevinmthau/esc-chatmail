@@ -30,18 +30,22 @@ actor ConversationCreationSerializer {
         var resultObjectID: NSManagedObjectID!
 
         context.performAndWait {
-            // Look for an ACTIVE conversation with these participants
+            // Look for ANY conversation with these participants (including archived)
+            // This ensures replies to sent messages join the existing conversation
             // Use includesPendingChanges = false to query the persistent store directly,
             // bypassing any in-memory changes that might not reflect other contexts' saves
             let request = Conversation.fetchRequest()
-            request.predicate = NSPredicate(
-                format: "participantHash == %@ AND archivedAt == nil",
-                participantHash
-            )
+            request.predicate = NSPredicate(format: "participantHash == %@", participantHash)
             request.fetchLimit = 1
             request.includesPendingChanges = false  // Query persistent store, not just in-memory
 
             if let existing = try? context.fetch(request).first {
+                // If the conversation was archived, un-archive it (new message reactivates it)
+                if existing.archivedAt != nil {
+                    existing.archivedAt = nil
+                    existing.hidden = false
+                    Log.debug("Un-archived conversation \(existing.id) due to new message", category: .conversation)
+                }
                 resultObjectID = existing.objectID
                 return
             }

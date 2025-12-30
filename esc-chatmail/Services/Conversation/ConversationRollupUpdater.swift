@@ -30,7 +30,7 @@ final class ConversationRollupUpdater: @unchecked Sendable {
         conversation.hasInbox = hasInbox
 
         // Phase 3: Update archive state
-        updateArchiveState(for: conversation, hasInbox: hasInbox)
+        updateArchiveState(for: conversation, hasInbox: hasInbox, messages: messages)
 
         // Phase 4: Update inbox metrics
         updateInboxMetrics(for: conversation, inboxMessages: inboxMessages, previousHasInbox: previousHasInbox, totalCount: messages.count)
@@ -152,23 +152,38 @@ final class ConversationRollupUpdater: @unchecked Sendable {
 
     /// Updates archive state based on inbox status.
     /// CRITICAL: Handles archive/un-archive transitions.
-    private func updateArchiveState(for conversation: Conversation, hasInbox: Bool) {
+    /// Sent-only conversations (user initiated, no replies yet) are NOT auto-archived.
+    private func updateArchiveState(for conversation: Conversation, hasInbox: Bool, messages: Set<Message>) {
+        // Check if this is a sent-only conversation (user initiated, no replies yet)
+        let hasSentMessages = messages.contains { message in
+            message.labels?.contains { $0.id == "SENT" } ?? false
+        }
+        let hasReceivedMessages = messages.contains { message in
+            !message.isFromMe
+        }
+        let isSentOnlyConversation = hasSentMessages && !hasReceivedMessages && !hasInbox
+
         if hasInbox && conversation.archivedAt != nil {
             // Un-archive: At least one message is back in inbox
             conversation.archivedAt = nil
             conversation.hidden = false
             Log.debug("Conversation \(conversation.id.uuidString): UN-ARCHIVED (hasInbox=true, archivedAt->nil)", category: .conversation)
-        } else if !hasInbox && conversation.archivedAt == nil {
-            // Archive: All messages have lost INBOX label
+        } else if !hasInbox && conversation.archivedAt == nil && !isSentOnlyConversation {
+            // Archive only if:
+            // - No INBOX messages AND
+            // - Not a sent-only conversation (awaiting reply)
             conversation.archivedAt = Date()
             conversation.hidden = true
             Log.debug("Conversation \(conversation.id.uuidString): ARCHIVED (hasInbox=false, archivedAt set)", category: .conversation)
+        } else if isSentOnlyConversation && conversation.archivedAt == nil {
+            Log.debug("Conversation \(conversation.id.uuidString): KEPT VISIBLE (sent-only, awaiting reply)", category: .conversation)
         }
 
         // Keep hidden state in sync with archive state (for backward compatibility)
+        // But don't hide sent-only conversations
         if hasInbox && conversation.hidden {
             conversation.hidden = false
-        } else if !hasInbox && !conversation.hidden {
+        } else if !hasInbox && !conversation.hidden && !isSentOnlyConversation {
             conversation.hidden = true
         }
     }

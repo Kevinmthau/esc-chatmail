@@ -36,6 +36,8 @@ final class ComposeViewModel: ObservableObject {
     @Published var error: Error?
     @Published var showError = false
 
+    private var cancellables = Set<AnyCancellable>()
+
     // MARK: - Composed Services
 
     let recipientManager: RecipientManager
@@ -98,6 +100,19 @@ final class ComposeViewModel: ObservableObject {
         self.attachmentManager = ComposeAttachmentManager(viewContext: resolvedDeps.coreDataStack.viewContext)
         self.replyMetadataBuilder = ReplyMetadataBuilder(authSession: resolvedDeps.authSession)
         self.messageFormatBuilder = MessageFormatBuilder(authSession: resolvedDeps.authSession)
+
+        // Forward child observable changes to trigger view updates
+        autocompleteService.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+
+        recipientManager.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
     }
 
     func setupForMode() {
