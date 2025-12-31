@@ -4,8 +4,7 @@ import UIKit
 
 /// Resolves profile photos for email addresses using multiple sources:
 /// 1. Local device Contacts
-/// 2. Google People API (for Gmail users you've interacted with)
-/// 3. Cached results in CoreData Person entities
+/// 2. Cached results in CoreData Person entities
 actor ProfilePhotoResolver {
     static let shared = ProfilePhotoResolver()
 
@@ -14,39 +13,8 @@ actor ProfilePhotoResolver {
     private let cache = NSCache<NSString, CachedPhoto>()
     private var inFlightRequests: [String: Task<ProfilePhoto?, Never>] = [:]
 
-    /// Queue for People API requests with priority and limit
-    private var apiQueue: [String] = []
-    private var activeAPIRequests = 0
-    private let maxConcurrentAPIRequests = 2
-    private let maxQueuedAPIRequests = 10  // Drop requests beyond this to avoid memory bloat
-
-    /// Track emails that failed API lookup to avoid retrying
-    private var failedLookups: Set<String> = []
-
-    /// Whether People API lookups are enabled (disabled during initial sync)
-    private var peopleAPIEnabled = false
-
-    /// Track when the app started to defer API calls
-    private let startTime = Date()
-
     private init() {
-        cache.countLimit = 200
-
-        // Enable People API after a delay to let initial sync complete
-        Task {
-            try? await Task.sleep(nanoseconds: 10_000_000_000) // 10 seconds
-            await enablePeopleAPI()
-        }
-    }
-
-    /// Enable People API lookups (call after initial sync completes)
-    func enablePeopleAPI() {
-        peopleAPIEnabled = true
-    }
-
-    /// Disable People API lookups (call during heavy sync operations)
-    func disablePeopleAPI() {
-        peopleAPIEnabled = false
+        cache.countLimit = 500  // Increased from 200 for better cache hit rate
     }
 
     // MARK: - Public API
@@ -114,6 +82,40 @@ actor ProfilePhotoResolver {
         cache.removeAllObjects()
     }
 
+    /// Prefetch photos for multiple emails without blocking
+    /// Uses batch contact lookup for efficiency, then caches results
+    func prefetchPhotos(for emails: [String]) async {
+        guard !emails.isEmpty else { return }
+
+        // First, batch lookup from Contacts for efficiency
+        let contactPhotos = await contactsResolver.resolveAvatarDataBatch(for: emails)
+
+        // Save found photos to cache and storage
+        for (normalizedEmail, imageData) in contactPhotos {
+            // Save to file storage
+            if let fileURL = AvatarStorage.shared.saveAvatar(for: normalizedEmail, imageData: imageData) {
+                await savePhotoURLToCache(email: normalizedEmail, url: fileURL)
+            }
+            // Add to memory cache
+            let photo = ProfilePhoto(source: .contacts, imageData: imageData, url: nil)
+            let cached = CachedPhoto(photo: photo, timestamp: Date())
+            cache.setObject(cached, forKey: normalizedEmail as NSString)
+        }
+
+        // For emails not found in contacts, check cache individually
+        let foundEmails = Set(contactPhotos.keys)
+        let remainingEmails = emails
+            .map { EmailNormalizer.normalize($0) }
+            .filter { !foundEmails.contains($0) }
+
+        // Fire off individual cache lookups for remaining emails (non-blocking)
+        for email in remainingEmails {
+            Task {
+                _ = await resolvePhoto(for: email)
+            }
+        }
+    }
+
     // MARK: - Private Methods
 
     private func fetchPhoto(for email: String) async -> ProfilePhoto? {
@@ -148,78 +150,11 @@ actor ProfilePhotoResolver {
             return ProfilePhoto(source: .contacts, imageData: contactPhoto, url: nil)
         }
 
-        // 3. Try Google People API
-        if let googlePhotoURL = await fetchFromGooglePeopleAPI(email: email) {
-            // Save URL to CoreData
-            await savePhotoURLToCache(email: email, url: googlePhotoURL)
-            return ProfilePhoto(source: .google, imageData: nil, url: googlePhotoURL)
-        }
-
         return nil
     }
 
     private func fetchFromContacts(email: String) async -> Data? {
         return await contactsResolver.resolveAvatarData(for: email)
-    }
-
-    private func fetchFromGooglePeopleAPI(email: String) async -> String? {
-        // Skip if People API is disabled (during initial sync)
-        guard peopleAPIEnabled else {
-            return nil
-        }
-
-        // Skip if we already know this email failed
-        if failedLookups.contains(email) {
-            return nil
-        }
-
-        // Check if queue is full - drop request to avoid memory bloat
-        if apiQueue.count >= maxQueuedAPIRequests {
-            return nil
-        }
-
-        // Check if already queued
-        if apiQueue.contains(email) {
-            return nil
-        }
-
-        // Add to queue
-        apiQueue.append(email)
-
-        // Wait for our turn (bounded queue prevents memory bloat)
-        while apiQueue.first != email || activeAPIRequests >= maxConcurrentAPIRequests {
-            // Yield to avoid busy waiting
-            try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
-
-            // Check if we got removed from queue (cleanup)
-            if !apiQueue.contains(email) {
-                return nil
-            }
-        }
-
-        // Our turn - execute the request
-        activeAPIRequests += 1
-        defer {
-            activeAPIRequests -= 1
-            apiQueue.removeAll { $0 == email }
-        }
-
-        do {
-            // Get API client reference on main actor (quick operation)
-            let apiClient = await MainActor.run { GmailAPIClient.shared }
-            // The actual network call is nonisolated and won't block main thread
-            let result = try await apiClient.searchPeopleByEmail(email: email)
-
-            // Find photo URL from result
-            if let photoURL = result.photoURL {
-                return photoURL
-            }
-        } catch {
-            // Track failure to avoid retrying this session
-            failedLookups.insert(email)
-        }
-
-        return nil
     }
 
     private func getCachedPhotoURL(for email: String) async -> String? {
@@ -276,7 +211,6 @@ actor ProfilePhotoResolver {
 struct ProfilePhoto {
     enum Source {
         case contacts
-        case google
         case cached
     }
 
@@ -307,8 +241,8 @@ private class CachedPhoto {
     let photo: ProfilePhoto?
     let timestamp: Date
 
-    // Cache entries expire after 1 hour
-    private let expirationInterval: TimeInterval = 3600
+    // Cache entries expire after 24 hours (photos rarely change)
+    private let expirationInterval: TimeInterval = 86400
 
     init(photo: ProfilePhoto?, timestamp: Date) {
         self.photo = photo

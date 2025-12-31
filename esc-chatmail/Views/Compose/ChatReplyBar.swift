@@ -69,54 +69,22 @@ struct ChatReplyBar: View {
     
     @ViewBuilder
     private var textField: some View {
-        ZStack(alignment: .leading) {
-            if replyText.isEmpty {
-                Text("iMessage")
-                    .foregroundColor(.gray.opacity(0.5))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-            }
-            
-            TextEditor(text: $replyText)
-                .focused(focusBinding)
-                .scrollContentBackground(.hidden)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .frame(minHeight: 36, maxHeight: 120)
-                .fixedSize(horizontal: false, vertical: true)
-                .onTapGesture {
-                    focusBinding.wrappedValue = true
-                }
-        }
-        .background(
-            RoundedRectangle(cornerRadius: 18)
-                .fill(Color.gray.opacity(0.15))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18)
-                .strokeBorder(Color.gray.opacity(0.3), lineWidth: 0.5)
-        )
+        PlaceholderTextField(text: $replyText, placeholder: "iMessage")
+            .focused(focusBinding)
     }
     
     @ViewBuilder
     private var attachmentStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(attachments) { attachment in
-                    AttachmentThumbnail(attachment: attachment) {
-                        removeAttachment(attachment)
-                    }
-                }
+        AttachmentPreviewStrip(attachments: attachments) { attachment in
+            AttachmentThumbnail(attachment: attachment) {
+                removeAttachment(attachment)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
         }
-        .background(Color.gray.opacity(0.05))
     }
     
     @ViewBuilder
     private var sendButton: some View {
-        Button(action: {
+        SendButton(isEnabled: canSend, isSending: isSending) {
             if canSend {
                 Task {
                     isSending = true
@@ -125,25 +93,7 @@ struct ChatReplyBar: View {
                     isSending = false
                 }
             }
-        }) {
-            ZStack {
-                Circle()
-                    .fill(canSend ? Color.accentColor : Color.gray.opacity(0.3))
-                    .frame(width: 32, height: 32)
-                
-                if isSending {
-                    ProgressView()
-                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                        .scaleEffect(0.6)
-                } else {
-                    Image(systemName: "arrow.up")
-                        .font(.callout.weight(.bold))
-                        .foregroundColor(.white)
-                }
-            }
         }
-        .disabled(!canSend)
-        .animation(.easeInOut(duration: 0.2), value: canSend)
     }
     
     private func removeAttachment(_ attachment: Attachment) {

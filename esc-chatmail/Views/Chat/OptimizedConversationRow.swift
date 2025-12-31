@@ -5,18 +5,12 @@ struct OptimizedConversationRow: View {
     @ObservedObject var conversation: Conversation
     let onAppear: () -> Void
 
-    private var participantNames: String {
-        guard let participantsSet = conversation.participants as? NSSet else {
-            return "Unknown"
-        }
+    private let authSession = AuthSession.shared
+    private let participantLoader = ParticipantLoader.shared
 
-        let names = participantsSet
-            .compactMap { ($0 as? ConversationParticipant)?.person?.displayName ?? ($0 as? ConversationParticipant)?.person?.email }
-            .prefix(3)
-            .joined(separator: ", ")
-
-        return names.isEmpty ? "No participants" : names
-    }
+    @State private var displayName: String = ""
+    @State private var avatarPhotos: [ProfilePhoto] = []
+    @State private var participantNames: [String] = []
 
     private var timeString: String {
         guard let date = conversation.lastMessageDate else { return "" }
@@ -28,14 +22,14 @@ struct OptimizedConversationRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            // Avatar
-            AvatarView(name: participantNames)
+            // Avatar stack with photo support
+            AvatarStackView(avatarPhotos: avatarPhotos, participants: participantNames)
                 .frame(width: 50, height: 50)
 
             VStack(alignment: .leading, spacing: 4) {
                 // Header
                 HStack {
-                    Text(conversation.displayName ?? participantNames)
+                    Text(displayName.isEmpty ? (conversation.displayName ?? "Unknown") : displayName)
                         .font(.headline)
                         .lineLimit(1)
 
@@ -78,5 +72,22 @@ struct OptimizedConversationRow: View {
         .onAppear {
             onAppear()
         }
+        .task {
+            await loadContactInfo()
+        }
+    }
+
+    private func loadContactInfo() async {
+        let myEmail = authSession.userEmail ?? ""
+
+        let info = await participantLoader.loadParticipants(
+            from: conversation,
+            currentUserEmail: myEmail,
+            maxParticipants: 4
+        )
+
+        displayName = info.formattedDisplayName
+        participantNames = info.displayNames
+        avatarPhotos = info.photos
     }
 }

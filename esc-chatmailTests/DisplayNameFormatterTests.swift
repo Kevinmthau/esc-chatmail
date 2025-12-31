@@ -10,9 +10,10 @@ final class DisplayNameFormatterTests: XCTestCase {
         XCTAssertEqual(result, "")
     }
 
-    func testFormatGroupNames_singleName_returnsFirstName() {
+    func testFormatGroupNames_singleName_returnsFullName() {
+        // Single participant shows full name (preserves company names like "Rally House")
         let result = DisplayNameFormatter.formatGroupNames(["John Smith"])
-        XCTAssertEqual(result, "John")
+        XCTAssertEqual(result, "John Smith")
     }
 
     func testFormatGroupNames_singleFirstNameOnly_returnsName() {
@@ -97,10 +98,15 @@ final class DisplayNameFormatterTests: XCTestCase {
     // MARK: - Edge Cases
 
     func testFormatGroupNames_whitespaceInName_extractsFirstPart() {
+        // Single participant: returns full trimmed name
         let result = DisplayNameFormatter.formatGroupNames(["  John   Smith  "])
-        // Note: The current implementation doesn't trim, so leading space becomes first component
-        // This documents current behavior
-        XCTAssertEqual(result, "")
+        XCTAssertEqual(result, "  John   Smith  ")  // Single name returns as-is
+    }
+
+    func testFormatGroupNames_whitespaceInNames_extractsFirstNames() {
+        // Multiple participants with whitespace: extracts trimmed first names
+        let result = DisplayNameFormatter.formatGroupNames(["  John   Smith  ", "  Jane   Doe  "])
+        XCTAssertEqual(result, "John & Jane")
     }
 
     func testFormatForRow_totalCountLessThanNames_noOverflow() {

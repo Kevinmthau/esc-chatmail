@@ -11,7 +11,7 @@ final class ContactAutocompleteService: ObservableObject {
     private var searchTask: Task<Void, Never>?
     private let searchDebounceInterval: UInt64 = 150_000_000 // 150ms in nanoseconds
 
-    init(contactsService: ContactsService = ContactsService()) {
+    init(contactsService: ContactsService = ContactsService( )) {
         self.contactsService = contactsService
     }
 

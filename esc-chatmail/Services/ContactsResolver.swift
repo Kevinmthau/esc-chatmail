@@ -305,4 +305,77 @@ extension ContactsResolver {
     func resolveAvatarData(for email: String) async -> Data? {
         return await lookup(email: email)?.imageData
     }
+
+    /// Batch resolve avatar data for multiple emails in a single CNContactStore query
+    /// Much more efficient than individual lookups when prefetching
+    func resolveAvatarDataBatch(for emails: [String]) async -> [String: Data] {
+        guard !emails.isEmpty else { return [:] }
+
+        // Ensure we have authorization
+        do {
+            try await ensureAuthorization()
+        } catch {
+            Log.warning("Contacts authorization failed for batch lookup: \(error)", category: .general)
+            return [:]
+        }
+
+        let normalizedEmails = Set(emails.map { EmailNormalizer.normalize($0) })
+
+        return await withCheckedContinuation { continuation in
+            contactQueue.async { [weak self] in
+                guard let self = self else {
+                    continuation.resume(returning: [:])
+                    return
+                }
+
+                var results: [String: Data] = [:]
+
+                let keysToFetch: [CNKeyDescriptor] = [
+                    CNContactEmailAddressesKey as CNKeyDescriptor,
+                    CNContactImageDataAvailableKey as CNKeyDescriptor,
+                    CNContactThumbnailImageDataKey as CNKeyDescriptor
+                ]
+
+                // For large batches, enumerate all contacts once (more efficient than N predicates)
+                // For small batches, use individual predicates
+                if normalizedEmails.count > 10 {
+                    // Enumerate all contacts with images
+                    let request = CNContactFetchRequest(keysToFetch: keysToFetch)
+                    do {
+                        try self.contactStore.enumerateContacts(with: request) { contact, _ in
+                            guard contact.imageDataAvailable,
+                                  let imageData = contact.thumbnailImageData else { return }
+
+                            for emailAddress in contact.emailAddresses {
+                                let contactEmail = EmailNormalizer.normalize(emailAddress.value as String)
+                                if normalizedEmails.contains(contactEmail) {
+                                    results[contactEmail] = imageData
+                                }
+                            }
+                        }
+                    } catch {
+                        Log.error("Batch contact enumeration failed", category: .general, error: error)
+                    }
+                } else {
+                    // For smaller batches, use individual predicates (avoids full scan)
+                    for email in normalizedEmails {
+                        do {
+                            let predicate = CNContact.predicateForContacts(matchingEmailAddress: email)
+                            let contacts = try self.contactStore.unifiedContacts(matching: predicate, keysToFetch: keysToFetch)
+                            if let contact = contacts.first,
+                               contact.imageDataAvailable,
+                               let imageData = contact.thumbnailImageData {
+                                results[email] = imageData
+                            }
+                        } catch {
+                            // Individual lookup failed, continue with others
+                            continue
+                        }
+                    }
+                }
+
+                continuation.resume(returning: results)
+            }
+        }
+    }
 }

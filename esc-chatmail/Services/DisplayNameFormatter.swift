@@ -8,31 +8,36 @@ enum DisplayNameFormatter {
 
     /// Formats names for conversation display using "&" as the final separator.
     /// - Parameter names: Full names or emails to format
-    /// - Returns: Formatted string like "John & Jane" or "John, Jane & Bob"
+    /// - Returns: Formatted string like "John Smith" (single) or "John & Jane" (group)
     ///
     /// Examples:
     /// - [] → ""
-    /// - ["John Smith"] → "John"
+    /// - ["John Smith"] → "John Smith" (full name for single participant)
+    /// - ["Rally House"] → "Rally House" (preserves company names)
     /// - ["John Smith", "Jane Doe"] → "John & Jane"
     /// - ["John", "Jane", "Bob"] → "John, Jane & Bob"
     /// - ["John", "Jane", "Bob", "Alice"] → "John, Jane, Bob & Alice"
     static func formatGroupNames(_ names: [String]) -> String {
-        let firstNames = names.map { extractFirstName($0) }
-
-        switch firstNames.count {
+        switch names.count {
         case 0:
             return ""
         case 1:
-            return firstNames[0]
-        case 2:
-            return "\(firstNames[0]) & \(firstNames[1])"
-        case 3:
-            return "\(firstNames[0]), \(firstNames[1]) & \(firstNames[2])"
+            // Single participant: use full name (preserves company names like "Rally House")
+            return names[0]
         default:
-            // 4 or more: "John, Jane, Bob & Alice"
-            let allButLast = firstNames.dropLast()
-            let last = firstNames.last!
-            return "\(allButLast.joined(separator: ", ")) & \(last)"
+            // Multiple participants: use first names only (Apple-style for groups)
+            let firstNames = names.map { extractFirstName($0) }
+            switch firstNames.count {
+            case 2:
+                return "\(firstNames[0]) & \(firstNames[1])"
+            case 3:
+                return "\(firstNames[0]), \(firstNames[1]) & \(firstNames[2])"
+            default:
+                // 4 or more: "John, Jane, Bob & Alice"
+                let allButLast = firstNames.dropLast()
+                let last = firstNames.last!
+                return "\(allButLast.joined(separator: ", ")) & \(last)"
+            }
         }
     }
 
@@ -76,8 +81,9 @@ enum DisplayNameFormatter {
 
     /// Extracts the first name from a full name string.
     /// - Parameter name: Full name like "John Smith" or email like "john@example.com"
-    /// - Returns: First component before space, or the original string if no space
+    /// - Returns: First non-empty component before space, or the trimmed string if no space
     private static func extractFirstName(_ name: String) -> String {
-        name.components(separatedBy: " ").first ?? name
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        return trimmed.components(separatedBy: " ").first { !$0.isEmpty } ?? trimmed
     }
 }

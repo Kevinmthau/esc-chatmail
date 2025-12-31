@@ -302,14 +302,15 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     func refreshConversationNames() {
-        let hasRefreshedKey = "hasRefreshedConversationNamesV1"
+        // V2: Fix single-participant names to use full name instead of first name only
+        let hasRefreshedKey = "hasRefreshedConversationNamesV2"
         guard !UserDefaults.standard.bool(forKey: hasRefreshedKey) else { return }
 
         Task {
             let conversationManager = ConversationManager()
             await conversationManager.updateAllConversationRollups(in: coreDataStack.viewContext)
             UserDefaults.standard.set(true, forKey: hasRefreshedKey)
-            Log.info("Refreshed all conversation names to new format", category: .conversation)
+            Log.info("Refreshed all conversation names (V2: full names for single participants)", category: .conversation)
         }
     }
 

@@ -155,13 +155,15 @@ final class ConversationRollupUpdater: @unchecked Sendable {
     /// Sent-only conversations (user initiated, no replies yet) are NOT auto-archived.
     private func updateArchiveState(for conversation: Conversation, hasInbox: Bool, messages: Set<Message>) {
         // Check if this is a sent-only conversation (user initiated, no replies yet)
-        let hasSentMessages = messages.contains { message in
-            message.labels?.contains { $0.id == "SENT" } ?? false
+        // Note: We check both SENT label AND isFromMe because optimistic messages
+        // may not have the SENT label yet (it gets added when Gmail returns the message)
+        let hasSentOrFromMeMessages = messages.contains { message in
+            message.isFromMe || (message.labels?.contains { $0.id == "SENT" } ?? false)
         }
         let hasReceivedMessages = messages.contains { message in
             !message.isFromMe
         }
-        let isSentOnlyConversation = hasSentMessages && !hasReceivedMessages && !hasInbox
+        let isSentOnlyConversation = hasSentOrFromMeMessages && !hasReceivedMessages && !hasInbox
 
         if hasInbox && conversation.archivedAt != nil {
             // Un-archive: At least one message is back in inbox
@@ -235,13 +237,15 @@ final class ConversationRollupUpdater: @unchecked Sendable {
             guard !seenEmails.contains(normalizedEmail) else { continue }
             seenEmails.insert(normalizedEmail)
 
-            let name = person.displayName ?? email
+            // Use displayName, fall back to email, fall back to "Unknown"
+            let name = person.displayName?.isEmpty == false ? person.displayName! : (email.isEmpty ? "Unknown" : email)
             Log.debug("Including participant: \(name)", category: .conversation)
             names.append(name)
         }
 
         let finalDisplayName = DisplayNameFormatter.formatGroupNames(names)
         Log.debug("Final displayName: \(finalDisplayName), snippet: \(conversation.snippet ?? "nil")", category: .conversation)
-        conversation.displayName = finalDisplayName
+        // Ensure we never set an empty display name
+        conversation.displayName = finalDisplayName.isEmpty ? "Unknown" : finalDisplayName
     }
 }

@@ -175,15 +175,6 @@ class GmailAPIClient {
         return attachmentData
     }
 
-    // MARK: - People API (Delegated)
-
-    /// Search for a person by email address using the Google People API
-    /// Delegates to PeopleAPIClient for separation of concerns
-    nonisolated func searchPeopleByEmail(email: String) async throws -> PeopleSearchResult {
-        let client = await MainActor.run { PeopleAPIClient.shared }
-        return try await client.searchPeopleByEmail(email: email)
-    }
-
     // MARK: - Private Helpers
 
     private nonisolated func authenticatedRequest(url: URL) async throws -> URLRequest {

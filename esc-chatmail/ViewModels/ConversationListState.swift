@@ -57,7 +57,17 @@ final class ConversationListState: ObservableObject {
                 }
                 return participants.compactMap { $0.person?.email }
             }
-            await PersonCache.shared.prefetch(emails: Array(Set(allEmails)))
+            let uniqueEmails = Array(Set(allEmails))
+            await PersonCache.shared.prefetch(emails: uniqueEmails)
+
+            // Prefetch avatars for first 20 conversations (don't block on this)
+            let avatarEmails = Array(Set(fetchedConversations.prefix(20).flatMap { conversation -> [String] in
+                guard let participants = conversation.participants else { return [] }
+                return participants.compactMap { $0.person?.email }
+            }))
+            Task.detached(priority: .userInitiated) {
+                await ProfilePhotoResolver.shared.prefetchPhotos(for: avatarEmails)
+            }
 
             isLoading = false
         } catch {
@@ -97,6 +107,20 @@ final class ConversationListState: ObservableObject {
 
         if !toPreload.isEmpty {
             cache.preload(toPreload)
+
+            // Also prefetch avatars for adjacent conversations
+            let adjacentConversations = toPreload.compactMap { id in
+                conversations.first { $0.id.uuidString == id }
+            }
+            let adjacentEmails = adjacentConversations.flatMap { conversation -> [String] in
+                guard let participants = conversation.participants else { return [] }
+                return participants.compactMap { $0.person?.email }
+            }
+            if !adjacentEmails.isEmpty {
+                Task.detached(priority: .utility) {
+                    await ProfilePhotoResolver.shared.prefetchPhotos(for: adjacentEmails)
+                }
+            }
         }
     }
 
