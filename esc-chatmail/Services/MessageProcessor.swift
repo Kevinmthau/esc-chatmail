@@ -9,7 +9,7 @@ class MessageProcessor {
         guard let payload = gmailMessage.payload,
               let headers = payload.headers else { return nil }
         
-        let processedMessage = ProcessedMessage()
+        var processedMessage = ProcessedMessage()
         processedMessage.id = gmailMessage.id
         processedMessage.gmThreadId = gmailMessage.threadId ?? ""
         processedMessage.snippet = gmailMessage.snippet
@@ -227,7 +227,7 @@ class MessageProcessor {
 
 // MARK: - Data Models
 
-final class ProcessedMessage: @unchecked Sendable {
+struct ProcessedMessage: Sendable {
     var id: String = ""
     var gmThreadId: String = ""
     var snippet: String?

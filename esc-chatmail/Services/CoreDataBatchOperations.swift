@@ -52,7 +52,7 @@ struct BatchConfiguration {
 }
 
 // MARK: - Core Data Batch Operations
-final class CoreDataBatchOperations: @unchecked Sendable {
+struct CoreDataBatchOperations: Sendable {
     private let coreDataStack: CoreDataStack
     private let performanceMonitor = PerformanceMonitor()
 

@@ -3,7 +3,7 @@ import CoreData
 
 /// Handles merging duplicate conversations and deduplication.
 /// Extracted from ConversationManager for focused responsibility.
-final class ConversationMerger: @unchecked Sendable {
+struct ConversationMerger: Sendable {
     private let coreDataStack: CoreDataStack
 
     init(coreDataStack: CoreDataStack = .shared) {
@@ -16,9 +16,7 @@ final class ConversationMerger: @unchecked Sendable {
     func removeDuplicateConversations(in context: NSManagedObjectContext) async {
         let startTime = CFAbsoluteTimeGetCurrent()
 
-        await context.perform { [weak self] in
-            guard let self = self else { return }
-
+        await context.perform {
             // Step 1: Find duplicate keyHashes using a lightweight dictionary fetch
             let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Conversation")
             countRequest.resultType = .dictionaryResultType
@@ -87,9 +85,7 @@ final class ConversationMerger: @unchecked Sendable {
     func mergeActiveConversationDuplicates(in context: NSManagedObjectContext) async {
         let startTime = CFAbsoluteTimeGetCurrent()
 
-        await context.perform { [weak self] in
-            guard let self = self else { return }
-
+        await context.perform {
             // Find active conversations (archivedAt == nil) grouped by participantHash
             let request = Conversation.fetchRequest()
             request.predicate = NSPredicate(format: "archivedAt == nil")

@@ -2,7 +2,7 @@ import Foundation
 import CoreData
 
 /// Handles data cleanup operations like duplicate removal and empty conversation cleanup
-final class DataCleanupService: @unchecked Sendable {
+struct DataCleanupService: Sendable {
     private let coreDataStack: CoreDataStack
     private let conversationManager: ConversationManager
 
