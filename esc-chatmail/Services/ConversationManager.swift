@@ -6,7 +6,7 @@ import CoreData
 /// - ConversationCreationSerializer: Thread-safe conversation creation
 /// - ConversationRollupUpdater: Rollup calculations (lastMessageDate, snippet, hasInbox)
 /// - ConversationMerger: Duplicate detection and merging
-final class ConversationManager: @unchecked Sendable {
+final class ConversationManager: Sendable {
     private let rollupUpdater: ConversationRollupUpdater
     private let merger: ConversationMerger
 

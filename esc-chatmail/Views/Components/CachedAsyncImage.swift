@@ -77,7 +77,7 @@ struct CachedAsyncImage: View {
 // MARK: - Legacy ImageCache (forwards to EnhancedImageCache)
 
 /// Backwards-compatible wrapper - use EnhancedImageCache directly for new code
-final class ImageCache: @unchecked Sendable {
+final class ImageCache: Sendable {
     static let shared = ImageCache()
 
     private init() {}

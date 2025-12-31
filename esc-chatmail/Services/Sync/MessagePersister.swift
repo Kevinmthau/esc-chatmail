@@ -2,18 +2,14 @@ import Foundation
 import CoreData
 
 /// Handles persisting messages to Core Data
-final class MessagePersister: @unchecked Sendable {
+actor MessagePersister {
     let coreDataStack: CoreDataStack
     private let messageProcessor: MessageProcessor
     private let htmlContentHandler: HTMLContentHandler
     let conversationManager: ConversationManager
 
-    /// Serial queue to protect access to modifiedConversationIDs
-    /// This ensures thread-safe access to the shared mutable set
-    private let modifiedConversationsQueue = DispatchQueue(label: "com.esc.chatmail.modifiedConversations")
-
     /// Tracks conversation IDs modified during current sync batch
-    /// Access is protected by modifiedConversationsQueue for thread safety
+    /// Actor isolation provides thread safety
     private var modifiedConversationIDs: Set<NSManagedObjectID> = []
 
     init(
@@ -30,27 +26,19 @@ final class MessagePersister: @unchecked Sendable {
 
     /// Resets the modified conversations tracker - call at start of sync
     func resetModifiedConversations() {
-        modifiedConversationsQueue.sync {
-            modifiedConversationIDs.removeAll()
-        }
+        modifiedConversationIDs.removeAll()
     }
 
     /// Returns and clears the set of modified conversation IDs
-    /// Thread-safe: Uses serial queue to protect access
     func getAndClearModifiedConversations() -> Set<NSManagedObjectID> {
-        return modifiedConversationsQueue.sync {
-            let result = modifiedConversationIDs
-            modifiedConversationIDs.removeAll()
-            return result
-        }
+        let result = modifiedConversationIDs
+        modifiedConversationIDs.removeAll()
+        return result
     }
 
     /// Tracks a conversation as modified
-    /// Thread-safe: Uses serial queue to protect access
     private func trackModifiedConversation(_ conversation: Conversation) {
-        _ = modifiedConversationsQueue.sync {
-            modifiedConversationIDs.insert(conversation.objectID)
-        }
+        modifiedConversationIDs.insert(conversation.objectID)
     }
 
     /// Saves a Gmail message to Core Data

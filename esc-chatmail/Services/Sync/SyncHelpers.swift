@@ -79,7 +79,7 @@ final class SyncUIState: ObservableObject {
 // MARK: - Core Data Performance Logger
 
 /// Logger for tracking Core Data performance metrics
-final class CoreDataPerformanceLogger: @unchecked Sendable {
+final class CoreDataPerformanceLogger: Sendable {
     static let shared = CoreDataPerformanceLogger()
 
     private let log = OSLog(subsystem: "com.esc.inboxchat", category: "CoreData")

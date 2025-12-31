@@ -7,7 +7,7 @@ import CoreData
 /// - Detect and fetch missed messages
 /// - Reconcile label states (especially INBOX for archive detection)
 /// - Verify local state matches Gmail truth
-final class SyncReconciliation: @unchecked Sendable {
+final class SyncReconciliation: Sendable {
 
     private let messageFetcher: MessageFetcher
     private let historyProcessor: HistoryProcessor
@@ -194,24 +194,23 @@ final class SyncReconciliation: @unchecked Sendable {
             let gmailHasInbox = gmailLabelIds.contains("INBOX")
             let gmailIsUnread = gmailLabelIds.contains("UNREAD")
 
-            return await context.perform { [weak self] in
-                guard let self = self else { return MessageReconcileResult() }
-
+            let (result, conversationToTrack): (MessageReconcileResult, Conversation?) = await context.perform {
                 let request = Message.fetchRequest()
                 request.predicate = NSPredicate(format: "id == %@", messageId)
                 request.fetchLimit = 1
 
                 guard let localMessage = try? context.fetch(request).first else {
-                    return MessageReconcileResult(notInLocalDB: true)
+                    return (MessageReconcileResult(notInLocalDB: true), nil)
                 }
 
                 // Skip if message has pending local changes (modified in last 5 minutes)
                 if let localModifiedAt = localMessage.localModifiedAtValue,
                    localModifiedAt > Date().addingTimeInterval(-300) {
-                    return MessageReconcileResult()
+                    return (MessageReconcileResult(), nil)
                 }
 
                 var result = MessageReconcileResult()
+                var conversationToTrack: Conversation? = nil
                 let localLabels = localMessage.labels ?? []
                 let localHasInbox = localLabels.contains { $0.id == "INBOX" }
 
@@ -229,22 +228,27 @@ final class SyncReconciliation: @unchecked Sendable {
                         }
                     }
 
-                    if let conversation = localMessage.conversation {
-                        self.historyProcessor.trackModifiedConversationForReconciliation(conversation)
-                    }
+                    conversationToTrack = localMessage.conversation
                     result.wasUpdated = true
                 }
 
                 // Check UNREAD status
                 if localMessage.isUnread != gmailIsUnread {
                     localMessage.isUnread = gmailIsUnread
-                    if let conversation = localMessage.conversation {
-                        self.historyProcessor.trackModifiedConversationForReconciliation(conversation)
+                    if conversationToTrack == nil {
+                        conversationToTrack = localMessage.conversation
                     }
                 }
 
-                return result
+                return (result, conversationToTrack)
             }
+
+            // Track modified conversation outside the closure (actor-isolated)
+            if let conversation = conversationToTrack {
+                await historyProcessor.trackModifiedConversationForReconciliation(conversation)
+            }
+
+            return result
         } catch {
             // Skip messages that fail to fetch (might be deleted)
             return MessageReconcileResult()

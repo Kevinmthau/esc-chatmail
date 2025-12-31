@@ -2,13 +2,11 @@ import Foundation
 import CoreData
 
 /// Handles processing Gmail history records for incremental sync
-final class HistoryProcessor: @unchecked Sendable {
+actor HistoryProcessor {
     private let coreDataStack: CoreDataStack
 
-    /// Serial queue to protect access to modifiedConversationIDs
-    private let modifiedConversationsQueue = DispatchQueue(label: "com.esc.chatmail.historyProcessor.modifiedConversations")
-
     /// Tracks conversation IDs modified during history processing
+    /// Actor isolation provides thread safety
     private var modifiedConversationIDs: Set<NSManagedObjectID> = []
 
     init(coreDataStack: CoreDataStack = .shared) {
@@ -17,23 +15,26 @@ final class HistoryProcessor: @unchecked Sendable {
 
     /// Returns and clears the set of modified conversation IDs
     func getAndClearModifiedConversations() -> Set<NSManagedObjectID> {
-        return modifiedConversationsQueue.sync {
-            let result = modifiedConversationIDs
-            modifiedConversationIDs.removeAll()
-            return result
-        }
+        let result = modifiedConversationIDs
+        modifiedConversationIDs.removeAll()
+        return result
     }
 
-    /// Tracks a conversation as modified
-    private func trackModifiedConversation(_ conversation: Conversation) {
-        _ = modifiedConversationsQueue.sync {
-            modifiedConversationIDs.insert(conversation.objectID)
+    /// Tracks a conversation as modified by its objectID
+    private func trackModifiedConversation(_ objectID: NSManagedObjectID) {
+        modifiedConversationIDs.insert(objectID)
+    }
+
+    /// Tracks multiple conversations as modified
+    private func trackModifiedConversations(_ objectIDs: [NSManagedObjectID]) {
+        for objectID in objectIDs {
+            modifiedConversationIDs.insert(objectID)
         }
     }
 
     /// Tracks a conversation as modified (public version for reconciliation)
     func trackModifiedConversationForReconciliation(_ conversation: Conversation) {
-        trackModifiedConversation(conversation)
+        modifiedConversationIDs.insert(conversation.objectID)
     }
 
     /// Processes a history record for lightweight operations (label changes and deletions)
@@ -59,7 +60,7 @@ final class HistoryProcessor: @unchecked Sendable {
     /// Extracts message IDs that need to be fetched from history records
     /// - Parameter records: Array of history records
     /// - Returns: Array of message IDs (excluding spam)
-    func extractNewMessageIds(from records: [HistoryRecord]) -> [String] {
+    nonisolated func extractNewMessageIds(from records: [HistoryRecord]) -> [String] {
         var messageIds: [String] = []
 
         for record in records {
@@ -112,24 +113,26 @@ final class HistoryProcessor: @unchecked Sendable {
     ) async {
         guard let labelsAdded = labelsAdded else { return }
 
+        var modifiedObjectIDs: [NSManagedObjectID] = []
+
         for added in labelsAdded {
             let messageId = added.message.id
             let labelIds = added.labelIds
             let hasUnread = labelIds.contains("UNREAD")
 
-            await context.perform {
+            let objectID: NSManagedObjectID? = await context.perform {
                 let request = Message.fetchRequest()
                 request.predicate = NSPredicate(format: "id == %@", messageId)
                 do {
                     guard let message = try context.fetch(request).first else {
                         // Message not found locally - this is normal for messages we haven't synced
-                        return
+                        return nil
                     }
 
                     // Conflict resolution: skip if message has pending local changes
                     if self.hasConflict(message: message, syncStartTime: syncStartTime) {
                         Log.debug("Skipping server label addition for message \(messageId) - local changes pending", category: .sync)
-                        return
+                        return nil
                     }
 
                     // Fetch labels by ID
@@ -151,15 +154,21 @@ final class HistoryProcessor: @unchecked Sendable {
                         message.isUnread = true
                     }
 
-                    // Track conversation for rollup update (handles hasInbox changes)
-                    if let conversation = message.conversation {
-                        self.trackModifiedConversation(conversation)
-                    }
+                    // Return conversation objectID for tracking outside the closure
+                    return message.conversation?.objectID
                 } catch {
                     Log.error("Failed to fetch message for label addition \(messageId)", category: .sync, error: error)
+                    return nil
                 }
             }
+
+            if let objectID = objectID {
+                modifiedObjectIDs.append(objectID)
+            }
         }
+
+        // Track all modified conversations (actor-isolated)
+        trackModifiedConversations(modifiedObjectIDs)
     }
 
     private func processLabelRemovals(
@@ -171,6 +180,8 @@ final class HistoryProcessor: @unchecked Sendable {
 
         Log.debug("Processing \(labelsRemoved.count) label removals", category: .sync)
 
+        var modifiedObjectIDs: [NSManagedObjectID] = []
+
         for removed in labelsRemoved {
             let messageId = removed.message.id
             let labelIds = removed.labelIds
@@ -179,14 +190,14 @@ final class HistoryProcessor: @unchecked Sendable {
 
             Log.debug("Label removal: messageId=\(messageId), labels=\(labelIds), removesInbox=\(removesInbox)", category: .sync)
 
-            await context.perform {
+            let objectID: NSManagedObjectID? = await context.perform {
                 let request = Message.fetchRequest()
                 request.predicate = NSPredicate(format: "id == %@", messageId)
                 do {
                     guard let message = try context.fetch(request).first else {
                         // Message not found locally - this is normal for messages we haven't synced
                         Log.debug("Message \(messageId) not found locally - skipping", category: .sync)
-                        return
+                        return nil
                     }
 
                     Log.debug("Found local message \(messageId), applying label removal", category: .sync)
@@ -194,7 +205,7 @@ final class HistoryProcessor: @unchecked Sendable {
                     // Conflict resolution: skip if message has pending local changes
                     if self.hasConflict(message: message, syncStartTime: syncStartTime) {
                         Log.debug("Skipping server label removal for message \(messageId) - local changes pending", category: .sync)
-                        return
+                        return nil
                     }
 
                     // Fetch labels by ID
@@ -214,16 +225,25 @@ final class HistoryProcessor: @unchecked Sendable {
                         message.isUnread = false
                     }
 
-                    // Track conversation for rollup update (handles hasInbox changes)
+                    // Return conversation objectID for tracking outside the closure
                     if let conversation = message.conversation {
-                        self.trackModifiedConversation(conversation)
                         Log.debug("Tracked conversation \(conversation.id.uuidString) for rollup update", category: .sync)
+                        return conversation.objectID
                     }
+                    return nil
                 } catch {
                     Log.error("Failed to fetch message for label removal \(messageId)", category: .sync, error: error)
+                    return nil
                 }
             }
+
+            if let objectID = objectID {
+                modifiedObjectIDs.append(objectID)
+            }
         }
+
+        // Track all modified conversations (actor-isolated)
+        trackModifiedConversations(modifiedObjectIDs)
     }
 
     /// Maximum age for local modifications before they're considered stale
