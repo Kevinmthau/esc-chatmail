@@ -3,7 +3,8 @@ import CoreData
 
 /// Handles updating conversation rollup data (lastMessageDate, snippet, hasInbox, etc.)
 /// Extracted from ConversationManager for focused responsibility.
-final class ConversationRollupUpdater: @unchecked Sendable {
+/// Struct is naturally Sendable since it only holds immutable references.
+struct ConversationRollupUpdater: Sendable {
     private let coreDataStack: CoreDataStack
 
     init(coreDataStack: CoreDataStack = .shared) {
@@ -47,8 +48,7 @@ final class ConversationRollupUpdater: @unchecked Sendable {
     func updateAllRollups(in context: NSManagedObjectContext) async {
         let myEmail = AuthSession.shared.userEmail ?? ""
 
-        await context.perform { [weak self] in
-            guard let self = self else { return }
+        await context.perform {
             let request = Conversation.fetchRequest()
             request.fetchBatchSize = 50
             guard let conversations = try? context.fetch(request) else { return }
@@ -69,9 +69,7 @@ final class ConversationRollupUpdater: @unchecked Sendable {
         guard !conversationIDs.isEmpty else { return }
         let myEmail = AuthSession.shared.userEmail ?? ""
 
-        await context.perform { [weak self] in
-            guard let self = self else { return }
-
+        await context.perform {
             for objectID in conversationIDs {
                 if let conversation = try? context.existingObject(with: objectID) as? Conversation {
                     self.updateRollups(for: conversation, myEmail: myEmail)
@@ -89,9 +87,7 @@ final class ConversationRollupUpdater: @unchecked Sendable {
         guard !keyHashes.isEmpty else { return }
         let myEmail = AuthSession.shared.userEmail ?? ""
 
-        await context.perform { [weak self] in
-            guard let self = self else { return }
-
+        await context.perform {
             let request = Conversation.fetchRequest()
             request.predicate = NSPredicate(format: "keyHash IN %@", keyHashes)
             request.fetchBatchSize = 50
