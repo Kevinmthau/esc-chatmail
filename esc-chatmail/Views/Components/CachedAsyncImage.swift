@@ -82,16 +82,16 @@ final class ImageCache: Sendable {
 
     private init() {}
 
-    func get(for key: String) -> UIImage? {
-        EnhancedImageCache.shared.get(for: key)
+    func get(for key: String) async -> UIImage? {
+        await EnhancedImageCache.shared.get(for: key)
     }
 
-    func set(_ image: UIImage, for key: String) {
-        EnhancedImageCache.shared.set(image, for: key)
+    func set(_ image: UIImage, for key: String) async {
+        await EnhancedImageCache.shared.set(image, for: key)
     }
 
-    func clear() {
-        EnhancedImageCache.shared.clearMemory()
+    func clear() async {
+        await EnhancedImageCache.shared.clearMemory()
     }
 
     func loadImage(from urlString: String) async -> UIImage? {

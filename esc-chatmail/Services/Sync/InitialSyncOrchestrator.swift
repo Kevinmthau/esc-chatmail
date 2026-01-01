@@ -266,12 +266,12 @@ final class InitialSyncOrchestrator {
                 syncCompletedWithWarnings = false
             } else {
                 log.warning("\(stillFailedIds.count) messages permanently failed - NOT advancing historyId")
-                failureTracker.recordFailure(failedIds: stillFailedIds)
+                await failureTracker.recordFailure(failedIds: stillFailedIds)
             }
         } else {
             log.info("All messages fetched successfully - advancing historyId to \(profile.historyId)")
             await messagePersister.setAccountHistoryId(profile.historyId, in: context)
-            failureTracker.recordSuccess()
+            await failureTracker.recordSuccess()
         }
 
         return syncCompletedWithWarnings

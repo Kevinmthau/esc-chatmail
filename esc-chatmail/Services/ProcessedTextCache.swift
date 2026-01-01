@@ -2,37 +2,44 @@ import Foundation
 
 /// Thread-safe cache for processed message text content
 /// Eliminates redundant HTML parsing and regex operations during scroll
+/// Uses LRUCacheActor for automatic eviction management
 actor ProcessedTextCache {
     static let shared = ProcessedTextCache()
 
-    private var cache: [String: CachedText] = [:]
-    private let maxCacheSize = 500
-
-    private struct CachedText {
+    /// Cached text content with rich content indicator
+    struct CachedText: Sendable {
         let plainText: String?
         let hasRichContent: Bool
-        let accessedAt: Date
     }
 
-    func get(messageId: String) -> (plainText: String?, hasRichContent: Bool)? {
-        guard var entry = cache[messageId] else { return nil }
-        // Update access time for LRU
-        entry = CachedText(plainText: entry.plainText, hasRichContent: entry.hasRichContent, accessedAt: Date())
-        cache[messageId] = entry
+    private let cache: LRUCacheActor<String, CachedText>
+
+    init() {
+        self.cache = LRUCacheActor(config: CacheConfiguration(
+            maxItems: 500,
+            maxMemoryBytes: nil,
+            ttlSeconds: nil,
+            evictionPolicy: .lru
+        ))
+    }
+
+    func get(messageId: String) async -> (plainText: String?, hasRichContent: Bool)? {
+        guard let entry = await cache.get(messageId) else { return nil }
         return (entry.plainText, entry.hasRichContent)
     }
 
-    func set(messageId: String, plainText: String?, hasRichContent: Bool) {
-        // Evict old entries if cache is full
-        if cache.count >= maxCacheSize {
-            evictOldEntries()
-        }
-        cache[messageId] = CachedText(plainText: plainText, hasRichContent: hasRichContent, accessedAt: Date())
+    func set(messageId: String, plainText: String?, hasRichContent: Bool) async {
+        await cache.set(messageId, value: CachedText(plainText: plainText, hasRichContent: hasRichContent))
     }
 
     func prefetch(messageIds: [String]) async {
-        // Process messages that aren't cached yet
-        let uncachedIds = messageIds.filter { cache[$0] == nil }
+        // Filter out already cached messages
+        var uncachedIds: [String] = []
+        for messageId in messageIds {
+            if await !cache.contains(messageId) {
+                uncachedIds.append(messageId)
+            }
+        }
         guard !uncachedIds.isEmpty else { return }
 
         // Process in batches on background thread
@@ -68,19 +75,13 @@ actor ProcessedTextCache {
         return (plainText, hasRichContent)
     }
 
-    private func evictOldEntries() {
-        // Remove oldest 20% of entries
-        let sortedKeys = cache.keys.sorted { key1, key2 in
-            (cache[key1]?.accessedAt ?? .distantPast) < (cache[key2]?.accessedAt ?? .distantPast)
-        }
-        let toRemove = sortedKeys.prefix(maxCacheSize / 5)
-        for key in toRemove {
-            cache.removeValue(forKey: key)
-        }
+    func clear() async {
+        await cache.clear()
     }
 
-    func clear() {
-        cache.removeAll()
+    /// Returns cache statistics for monitoring
+    func getStatistics() async -> LRUCacheStatistics {
+        await cache.getStatistics()
     }
 }
 

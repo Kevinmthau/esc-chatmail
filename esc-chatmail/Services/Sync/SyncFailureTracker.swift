@@ -4,7 +4,7 @@ import Foundation
 ///
 /// This prevents sync from getting permanently stuck on unfetchable messages
 /// by advancing historyId after a configurable number of consecutive failures.
-final class SyncFailureTracker: @unchecked Sendable {
+actor SyncFailureTracker {
     static let shared = SyncFailureTracker()
 
     private let defaults: UserDefaults

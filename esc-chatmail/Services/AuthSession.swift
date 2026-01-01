@@ -2,6 +2,10 @@ import Foundation
 import GoogleSignIn
 import UIKit
 
+/// AuthSession uses @unchecked Sendable because:
+/// - All state is @MainActor isolated
+/// - ObservableObject pattern requires class semantics with Sendable conformance
+/// - GIDSignIn callbacks are properly dispatched to MainActor via DispatchQueue.main.async
 @MainActor
 final class AuthSession: ObservableObject, @unchecked Sendable {
     static let shared = AuthSession()

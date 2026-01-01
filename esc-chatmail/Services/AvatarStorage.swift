@@ -3,21 +3,22 @@ import UIKit
 
 /// Stores avatar images as binary files on disk instead of base64 strings in Core Data.
 /// This reduces database bloat by ~33% and improves query performance.
-final class AvatarStorage: @unchecked Sendable {
+actor AvatarStorage {
     static let shared = AvatarStorage()
 
-    private let avatarsDirectory: URL
+    private nonisolated let avatarsDirectory: URL
     private let fileManager = FileManager.default
 
     private init() {
-        let documentsPath = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         self.avatarsDirectory = documentsPath.appendingPathComponent("Avatars")
-        createDirectoryIfNeeded()
+        Self.createDirectoryIfNeeded(at: avatarsDirectory)
     }
 
-    private func createDirectoryIfNeeded() {
-        if !fileManager.fileExists(atPath: avatarsDirectory.path) {
-            try? fileManager.createDirectory(at: avatarsDirectory, withIntermediateDirectories: true)
+    private static func createDirectoryIfNeeded(at directory: URL) {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: directory.path) {
+            try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
         }
     }
 
@@ -79,7 +80,7 @@ final class AvatarStorage: @unchecked Sendable {
     /// Deletes all cached avatars
     func deleteAllAvatars() {
         try? fileManager.removeItem(at: avatarsDirectory)
-        createDirectoryIfNeeded()
+        Self.createDirectoryIfNeeded(at: avatarsDirectory)
     }
 
     /// Calculates total storage used by avatars

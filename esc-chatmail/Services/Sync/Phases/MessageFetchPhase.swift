@@ -49,7 +49,7 @@ struct MessageFetchPhase: SyncPhase {
 
         if result.hasFailures {
             log.warning("\(result.failedIds.count) messages failed to fetch")
-            context.failureTracker.recordFailure(failedIds: result.failedIds)
+            await context.failureTracker.recordFailure(failedIds: result.failedIds)
         }
 
         return result

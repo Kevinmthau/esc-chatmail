@@ -19,27 +19,19 @@ enum ConversationFilter: String, CaseIterable {
 }
 
 /// ViewModel for ConversationListView - manages list state and operations
+/// Composes specialized services for search, selection, and filtering
 @MainActor
 final class ConversationListViewModel: ObservableObject {
-    // MARK: - Published State
+    // MARK: - Composed Services
 
-    @Published var searchText = "" {
-        didSet {
-            // Debounce search input to avoid re-filtering on every keystroke
-            searchDebounceTask?.cancel()
-            searchDebounceTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 150_000_000) // 150ms debounce
-                self?.debouncedSearchText = self?.searchText ?? ""
-            }
-        }
-    }
-    @Published private(set) var debouncedSearchText = ""
-    @Published var currentFilter: ConversationFilter = .all
-    @Published var isSelecting = false
-    @Published var selectedConversationIDs: Set<NSManagedObjectID> = []
+    let searchService: ConversationSearchService
+    let selectionService: ConversationSelectionService
+    let filterService: ConversationFilterService
+
+    // MARK: - Published State (Presentation)
+
     @Published var showingComposer = false
     @Published var showingSettings = false
-    @Published private(set) var contactEmailsCache: Set<String> = []
 
     // MARK: - Dependencies
 
@@ -52,10 +44,7 @@ final class ConversationListViewModel: ObservableObject {
     private let personCache: PersonCache
     private var syncTimer: Timer?
     private var hasPerformedInitialSync = false
-    private var searchDebounceTask: Task<Void, Never>?
-
-    /// Cache for filtered results - invalidated when filter/search changes
-    private var filteredCache: FilteredConversationsCache?
+    private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Initialization
 
@@ -68,10 +57,64 @@ final class ConversationListViewModel: ObservableObject {
         self.personCache = dependencies.personCache
         self.messageActions = dependencies.makeMessageActions()
         self.contactsService = dependencies.makeContactsService()
+
+        // Initialize composed services
+        self.searchService = ConversationSearchService()
+        self.selectionService = ConversationSelectionService(
+            messageActions: dependencies.makeMessageActions(),
+            coreDataStack: dependencies.coreDataStack
+        )
+        self.filterService = ConversationFilterService(
+            contactsService: dependencies.makeContactsService()
+        )
+
+        // Forward objectWillChange from child services
+        searchService.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
+        selectionService.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
+        filterService.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
     }
 
     deinit {
         syncTimer?.invalidate()
+    }
+
+    // MARK: - Convenience Accessors (View Compatibility)
+
+    /// Binding for search text input
+    var searchText: String {
+        get { searchService.searchText }
+        set { searchService.searchText = newValue }
+    }
+
+    /// Current filter selection
+    var currentFilter: ConversationFilter {
+        get { filterService.currentFilter }
+        set { filterService.currentFilter = newValue }
+    }
+
+    /// Whether selection mode is active
+    var isSelecting: Bool {
+        get { selectionService.isSelecting }
+        set { selectionService.isSelecting = newValue }
+    }
+
+    /// Set of selected conversation IDs
+    var selectedConversationIDs: Set<NSManagedObjectID> {
+        get { selectionService.selectedConversationIDs }
+        set { selectionService.selectedConversationIDs = newValue }
+    }
+
+    /// Cached contact emails for filtering
+    var contactEmailsCache: Set<String> {
+        filterService.contactEmailsCache
     }
 
     // MARK: - Sync Operations
@@ -125,138 +168,51 @@ final class ConversationListViewModel: ObservableObject {
         syncTimer = nil
     }
 
-    // MARK: - Selection Operations
+    // MARK: - Selection Operations (Delegate to Service)
 
     func toggleSelection(for conversation: Conversation) {
-        if selectedConversationIDs.contains(conversation.objectID) {
-            selectedConversationIDs.remove(conversation.objectID)
-        } else {
-            selectedConversationIDs.insert(conversation.objectID)
-        }
+        selectionService.toggleSelection(for: conversation)
     }
 
     func selectAll(from conversations: [Conversation]) {
-        if selectedConversationIDs.count == conversations.count {
-            selectedConversationIDs.removeAll()
-        } else {
-            selectedConversationIDs = Set(conversations.map { $0.objectID })
-        }
+        selectionService.selectAll(from: conversations)
     }
 
     func cancelSelection() {
-        isSelecting = false
-        selectedConversationIDs.removeAll()
+        selectionService.cancelSelection()
     }
 
     func toggleSelectionMode() {
-        isSelecting.toggle()
-        if !isSelecting {
-            selectedConversationIDs.removeAll()
-        }
+        selectionService.toggleSelectionMode()
     }
 
     // MARK: - Conversation Actions
 
     func archiveConversation(_ conversation: Conversation) {
         Task {
-            // MessageActions.archiveConversation handles:
-            // - Removing INBOX labels from messages
-            // - Setting archivedAt and hidden on conversation
-            // - Queuing sync to Gmail
             await messageActions.archiveConversation(conversation: conversation)
         }
     }
 
     func archiveSelectedConversations() {
-        let context = coreDataStack.viewContext
-        let conversationsToArchive = selectedConversationIDs.compactMap { objectID in
-            try? context.existingObject(with: objectID) as? Conversation
-        }
-
-        let count = conversationsToArchive.count
-        Log.debug("Starting batch archive of \(count) conversations from \(selectedConversationIDs.count) selected IDs", category: .message)
-        for (index, conv) in conversationsToArchive.enumerated() {
-            let messageCount = conv.messages?.count ?? 0
-            Log.debug("[\(index + 1)/\(count)] '\(conv.displayName ?? "unknown")' (id: \(conv.id), messages: \(messageCount))", category: .message)
-        }
-
-        selectedConversationIDs.removeAll()
-        isSelecting = false
-
-        Task {
-            for (index, conversation) in conversationsToArchive.enumerated() {
-                Log.debug("[\(index + 1)/\(count)] Processing '\(conversation.displayName ?? "unknown")'...", category: .message)
-                // MessageActions.archiveConversation handles:
-                // - Removing INBOX labels from messages
-                // - Setting archivedAt and hidden on conversation
-                // - Queuing sync to Gmail
-                await messageActions.archiveConversation(conversation: conversation)
-                Log.debug("[\(index + 1)/\(count)] Archived '\(conversation.displayName ?? "unknown")'", category: .message)
-            }
-            Log.info("Batch archive complete - \(count) conversations archived", category: .message)
-        }
+        selectionService.archiveSelectedConversations()
     }
 
-
-    // MARK: - Filtering
+    // MARK: - Filtering (Delegate to Service)
 
     func filteredConversations(from conversations: [Conversation]) -> [Conversation] {
-        // Use debounced search text for filtering
-        let searchQuery = debouncedSearchText
-
-        // Check cache validity
-        if let cache = filteredCache,
-           cache.isValid(for: conversations, searchText: searchQuery, filter: currentFilter) {
-            return cache.results
-        }
-
-        var result = conversations
-
-        if !searchQuery.isEmpty {
-            let lowercasedQuery = searchQuery.lowercased()
-            result = result.filter { conversation in
-                conversation.displayName?.lowercased().contains(lowercasedQuery) ?? false ||
-                conversation.snippet?.lowercased().contains(lowercasedQuery) ?? false
-            }
-        }
-
-        switch currentFilter {
-        case .all:
-            break
-        case .contacts:
-            result = result.filter { isConversationWithContact($0) }
-        case .other:
-            result = result.filter { !isConversationWithContact($0) }
-        }
-
-        // Update cache
-        filteredCache = FilteredConversationsCache(
-            sourceCount: conversations.count,
-            searchText: searchQuery,
-            filter: currentFilter,
-            results: result,
-            firstObjectID: conversations.first?.objectID
+        filterService.filteredConversations(
+            from: conversations,
+            searchText: searchService.debouncedSearchText
         )
-
-        return result
     }
 
-    /// Invalidates the filtered cache - call when underlying data changes
     func invalidateFilterCache() {
-        filteredCache = nil
+        filterService.invalidateFilterCache()
     }
 
     func isConversationWithContact(_ conversation: Conversation) -> Bool {
-        guard let participants = conversation.participants else { return false }
-
-        for participant in participants {
-            if let email = participant.person?.email {
-                if contactEmailsCache.contains(email.lowercased()) {
-                    return true
-                }
-            }
-        }
-        return false
+        filterService.isConversationWithContact(conversation)
     }
 
     // MARK: - Data Loading
@@ -273,32 +229,7 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     func loadContactsCache() {
-        Task.detached { [contactsService] in
-            let authStatus = await MainActor.run { contactsService.authorizationStatus }
-            if authStatus != .authorized {
-                let granted = await contactsService.requestAccess()
-                if !granted { return }
-            }
-
-            let contactStore = CNContactStore()
-            let keysToFetch = [CNContactEmailAddressesKey as CNKeyDescriptor]
-            let request = CNContactFetchRequest(keysToFetch: keysToFetch)
-
-            do {
-                var emails: Set<String> = []
-                try contactStore.enumerateContacts(with: request) { contact, _ in
-                    for emailAddress in contact.emailAddresses {
-                        emails.insert((emailAddress.value as String).lowercased())
-                    }
-                }
-                let finalEmails = emails
-                await MainActor.run { [weak self] in
-                    self?.contactEmailsCache = finalEmails
-                }
-            } catch {
-                Log.error("Failed to load contacts", category: .general, error: error)
-            }
-        }
+        filterService.loadContactsCache()
     }
 
     func refreshConversationNames() {
@@ -334,25 +265,6 @@ final class ConversationListViewModel: ObservableObject {
     /// Called when view disappears
     func onDisappear() {
         stopPeriodicSync()
-        searchDebounceTask?.cancel()
-    }
-}
-
-// MARK: - Filtered Conversations Cache
-
-/// Caches filtered conversation results to avoid re-filtering on every render
-private struct FilteredConversationsCache {
-    let sourceCount: Int
-    let searchText: String
-    let filter: ConversationFilter
-    let results: [Conversation]
-    let firstObjectID: NSManagedObjectID?
-
-    /// Checks if cache is still valid for the given parameters
-    func isValid(for conversations: [Conversation], searchText: String, filter: ConversationFilter) -> Bool {
-        return self.sourceCount == conversations.count &&
-               self.searchText == searchText &&
-               self.filter == filter &&
-               self.firstObjectID == conversations.first?.objectID
+        searchService.cleanup()
     }
 }

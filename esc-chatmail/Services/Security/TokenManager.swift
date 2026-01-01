@@ -68,7 +68,13 @@ protocol TokenManagerProtocol {
     func isAuthenticated() -> Bool
 }
 
-// MARK: - Token Manager Implementation
+/// MARK: - Token Manager Implementation
+
+/// TokenManager uses @unchecked Sendable because:
+/// - All @Published properties are explicitly @MainActor isolated
+/// - Internal coordination uses dedicated actors (TokenRefreshCoordinator, RefreshBackoffActor)
+/// - Nonisolated methods are carefully designed to not access mutable state directly
+/// - ObservableObject pattern requires class semantics with Sendable conformance
 final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sendable {
     @MainActor static let shared: TokenManager = TokenManager()
 

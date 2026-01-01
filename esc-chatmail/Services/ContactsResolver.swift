@@ -213,6 +213,13 @@ actor ContactsResolver: ContactsResolving {
     private func updatePerson(email: String, match: ContactMatch) async {
         let displayName = match.displayName
         let imageData = match.imageData
+
+        // Save avatar to file storage outside of context.perform (async operation)
+        var avatarFileURL: String?
+        if let imageData = imageData {
+            avatarFileURL = await AvatarStorage.shared.saveAvatar(for: email, imageData: imageData)
+        }
+
         let context = coreDataStack.newBackgroundContext()
 
         await context.perform {
@@ -230,13 +237,9 @@ actor ContactsResolver: ContactsResolving {
                         hasChanges = true
                     }
 
-                    if person.avatarURL == nil && imageData != nil {
-                        // Store image as file and save URL to avoid base64 bloat
-                        if let imageData = imageData,
-                           let fileURL = AvatarStorage.shared.saveAvatar(for: email, imageData: imageData) {
-                            person.avatarURL = fileURL
-                            hasChanges = true
-                        }
+                    if person.avatarURL == nil, let fileURL = avatarFileURL {
+                        person.avatarURL = fileURL
+                        hasChanges = true
                     }
 
                     // Only save if there are actual changes

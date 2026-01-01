@@ -35,28 +35,29 @@ enum ImageDecoder {
 
 /// Persistent disk cache for remote images (Google People API photos, etc.)
 /// Survives app restarts, reducing network requests significantly.
-final class DiskImageCache: @unchecked Sendable {
+actor DiskImageCache {
     static let shared = DiskImageCache()
 
-    private let cacheDirectory: URL
+    private nonisolated let cacheDirectory: URL
     private let fileManager = FileManager.default
     private let maxCacheAge: TimeInterval = 7 * 24 * 60 * 60 // 7 days
     private let maxCacheSize: Int64 = 100 * 1024 * 1024 // 100 MB
 
     private init() {
-        let cachesPath = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        let cachesPath = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
         self.cacheDirectory = cachesPath.appendingPathComponent("ImageCache")
-        createDirectoryIfNeeded()
+        Self.createDirectoryIfNeeded(at: cacheDirectory)
 
         // Clean old entries on init (in background)
-        Task.detached(priority: .utility) {
+        Task.detached(priority: .utility) { [self] in
             await self.cleanExpiredEntries()
         }
     }
 
-    private func createDirectoryIfNeeded() {
-        if !fileManager.fileExists(atPath: cacheDirectory.path) {
-            try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+    private static func createDirectoryIfNeeded(at directory: URL) {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: directory.path) {
+            try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
         }
     }
 
@@ -108,7 +109,7 @@ final class DiskImageCache: @unchecked Sendable {
     /// Clears all cached images
     func clearAll() {
         try? fileManager.removeItem(at: cacheDirectory)
-        createDirectoryIfNeeded()
+        Self.createDirectoryIfNeeded(at: cacheDirectory)
     }
 
     /// Returns total cache size in bytes
@@ -203,7 +204,7 @@ final class DiskImageCache: @unchecked Sendable {
 // MARK: - Enhanced Image Cache (Memory + Disk)
 
 /// Two-tier image cache: fast memory cache backed by persistent disk cache
-final class EnhancedImageCache: @unchecked Sendable {
+actor EnhancedImageCache {
     static let shared = EnhancedImageCache()
 
     private let memoryCache = NSCache<NSString, UIImage>()
@@ -216,14 +217,14 @@ final class EnhancedImageCache: @unchecked Sendable {
     }
 
     /// Gets image from cache (memory first, then disk)
-    func get(for key: String) -> UIImage? {
-        // Check memory cache
+    func get(for key: String) async -> UIImage? {
+        // Check memory cache (NSCache is thread-safe)
         if let cached = memoryCache.object(forKey: key as NSString) {
             return cached
         }
 
         // Check disk cache
-        if let diskImage = diskCache.getImage(for: key) {
+        if let diskImage = await diskCache.getImage(for: key) {
             // Promote to memory cache
             memoryCache.setObject(diskImage, forKey: key as NSString)
             return diskImage
@@ -233,13 +234,11 @@ final class EnhancedImageCache: @unchecked Sendable {
     }
 
     /// Sets image in both caches
-    func set(_ image: UIImage, for key: String) {
+    func set(_ image: UIImage, for key: String) async {
         memoryCache.setObject(image, forKey: key as NSString)
 
-        // Save to disk in background
-        Task.detached(priority: .utility) {
-            self.diskCache.save(image, for: key)
-        }
+        // Save to disk
+        await diskCache.save(image, for: key)
     }
 
     /// Clears memory cache only
@@ -248,21 +247,21 @@ final class EnhancedImageCache: @unchecked Sendable {
     }
 
     /// Clears both memory and disk cache
-    func clearAll() {
+    func clearAll() async {
         memoryCache.removeAllObjects()
-        diskCache.clearAll()
+        await diskCache.clearAll()
     }
 
     /// Loads an image from URL with deduplication and two-tier caching
     func loadImage(from urlString: String) async -> UIImage? {
         // Check caches first
-        if let cached = get(for: urlString) {
+        if let cached = await get(for: urlString) {
             return cached
         }
 
         // Handle file:// URLs (local avatars)
         if urlString.hasPrefix("file://") {
-            if let data = AvatarStorage.shared.loadAvatar(from: urlString),
+            if let data = await AvatarStorage.shared.loadAvatar(from: urlString),
                let image = UIImage(data: data) {
                 memoryCache.setObject(image, forKey: urlString as NSString)
                 return image
@@ -280,9 +279,11 @@ final class EnhancedImageCache: @unchecked Sendable {
         }
 
         // Handle HTTP URLs - use actor for thread-safe deduplication
-        return await requestManager.loadImage(from: urlString) { [weak self] image in
+        return await requestManager.loadImage(from: urlString) { [self] image in
             if let image = image {
-                self?.set(image, for: urlString)
+                Task {
+                    await self.set(image, for: urlString)
+                }
             }
         }
     }

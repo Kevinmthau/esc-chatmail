@@ -2,20 +2,6 @@ import Foundation
 import Network
 import os.signpost
 
-// MARK: - Network Reachability Actor
-
-/// Thread-safe actor for tracking network reachability status
-actor NetworkReachabilityActor {
-    private var _isReachable = true
-
-    func setReachable(_ reachable: Bool) {
-        _isReachable = reachable
-    }
-
-    func isReachable() -> Bool {
-        return _isReachable
-    }
-}
 
 // MARK: - Sync State Actor
 
@@ -148,36 +134,52 @@ final class CoreDataPerformanceLogger: Sendable {
 
 // MARK: - Network Monitor
 
-/// Manages network connectivity monitoring
-final class NetworkMonitorService: @unchecked Sendable {
+/// Actor for managing network connectivity monitoring
+/// Provides thread-safe access to network reachability state
+actor NetworkMonitorService {
     private let networkMonitor = NWPathMonitor()
-    private let monitorQueue = DispatchQueue(label: "NetworkMonitor")
-    private let reachabilityActor = NetworkReachabilityActor()
+    private nonisolated let monitorQueue = DispatchQueue(label: "NetworkMonitor")
+    private var _isReachable = true
 
     init() {
-        setupNetworkMonitoring()
+        Self.setupNetworkMonitoring(
+            monitor: networkMonitor,
+            queue: monitorQueue,
+            onStatusChange: { [weak self] isReachable, status, isExpensive in
+                Task { [weak self] in
+                    await self?.setReachable(isReachable)
+                }
+                if !isExpensive && isReachable {
+                    Log.debug("Network is reachable", category: .general)
+                } else {
+                    Log.debug("Network status: \(status), expensive: \(isExpensive)", category: .general)
+                }
+            }
+        )
     }
 
     deinit {
         networkMonitor.cancel()
     }
 
-    private func setupNetworkMonitoring() {
-        networkMonitor.pathUpdateHandler = { [weak self] path in
-            Task { [weak self] in
-                await self?.reachabilityActor.setReachable(path.status == .satisfied)
-            }
-            if !path.isExpensive && path.status == .satisfied {
-                Log.debug("Network is reachable", category: .general)
-            } else {
-                Log.debug("Network status: \(path.status), expensive: \(path.isExpensive)", category: .general)
-            }
+    /// Static helper to set up network monitoring without actor isolation issues
+    private static func setupNetworkMonitoring(
+        monitor: NWPathMonitor,
+        queue: DispatchQueue,
+        onStatusChange: @escaping @Sendable (Bool, NWPath.Status, Bool) -> Void
+    ) {
+        monitor.pathUpdateHandler = { path in
+            onStatusChange(path.status == .satisfied, path.status, path.isExpensive)
         }
-        networkMonitor.start(queue: monitorQueue)
+        monitor.start(queue: queue)
     }
 
-    func isNetworkAvailable() async -> Bool {
-        return await reachabilityActor.isReachable()
+    private func setReachable(_ reachable: Bool) {
+        _isReachable = reachable
+    }
+
+    func isNetworkAvailable() -> Bool {
+        return _isReachable
     }
 }
 

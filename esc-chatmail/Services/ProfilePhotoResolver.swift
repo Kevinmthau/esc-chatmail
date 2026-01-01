@@ -5,13 +5,15 @@ import UIKit
 /// Resolves profile photos for email addresses using multiple sources:
 /// 1. Local device Contacts
 /// 2. Cached results in CoreData Person entities
+///
+/// Uses InFlightRequestManager for request deduplication to prevent duplicate fetches
 actor ProfilePhotoResolver {
     static let shared = ProfilePhotoResolver()
 
     private let contactsResolver = ContactsResolver.shared
     private let coreDataStack = CoreDataStack.shared
     private let cache = NSCache<NSString, CachedPhoto>()
-    private var inFlightRequests: [String: Task<ProfilePhoto?, Never>] = [:]
+    private let requestManager = InFlightRequestManager<String, ProfilePhoto>()
 
     private init() {
         cache.countLimit = 500  // Increased from 200 for better cache hit rate
@@ -32,27 +34,16 @@ actor ProfilePhotoResolver {
             cache.removeObject(forKey: normalizedEmail as NSString)
         }
 
-        // Check if there's already a request in flight for this email
-        if let existingTask = inFlightRequests[normalizedEmail] {
-            return await existingTask.value
+        // Use request manager for deduplication
+        let photo = await requestManager.deduplicated(key: normalizedEmail) { [self] in
+            await fetchPhoto(for: normalizedEmail)
         }
 
-        // Create a new task for this request
-        let task = Task<ProfilePhoto?, Never> {
-            let photo = await fetchPhoto(for: normalizedEmail)
+        // Cache the result (even if nil, to avoid repeated lookups)
+        let cached = CachedPhoto(photo: photo, timestamp: Date())
+        cache.setObject(cached, forKey: normalizedEmail as NSString)
 
-            // Cache the result (even if nil, to avoid repeated lookups)
-            let cached = CachedPhoto(photo: photo, timestamp: Date())
-            cache.setObject(cached, forKey: normalizedEmail as NSString)
-
-            // Remove from in-flight
-            inFlightRequests.removeValue(forKey: normalizedEmail)
-
-            return photo
-        }
-
-        inFlightRequests[normalizedEmail] = task
-        return await task.value
+        return photo
     }
 
     /// Batch resolve photos for multiple emails
@@ -93,7 +84,7 @@ actor ProfilePhotoResolver {
         // Save found photos to cache and storage
         for (normalizedEmail, imageData) in contactPhotos {
             // Save to file storage
-            if let fileURL = AvatarStorage.shared.saveAvatar(for: normalizedEmail, imageData: imageData) {
+            if let fileURL = await AvatarStorage.shared.saveAvatar(for: normalizedEmail, imageData: imageData) {
                 await savePhotoURLToCache(email: normalizedEmail, url: fileURL)
             }
             // Add to memory cache
@@ -123,7 +114,7 @@ actor ProfilePhotoResolver {
         if let cachedURL = await getCachedPhotoURL(for: email) {
             // Handle file:// URLs (new format)
             if cachedURL.hasPrefix("file://") {
-                if let data = AvatarStorage.shared.loadAvatar(from: cachedURL) {
+                if let data = await AvatarStorage.shared.loadAvatar(from: cachedURL) {
                     return ProfilePhoto(source: .cached, imageData: data, url: nil)
                 }
             }
@@ -132,7 +123,7 @@ actor ProfilePhotoResolver {
                 if let data = dataFromBase64URL(cachedURL) {
                     // Migrate to file storage in background
                     Task.detached(priority: .utility) {
-                        if let fileURL = AvatarStorage.shared.migrateFromBase64(email: email, base64URL: cachedURL) {
+                        if let fileURL = await AvatarStorage.shared.migrateFromBase64(email: email, base64URL: cachedURL) {
                             await self.savePhotoURLToCache(email: email, url: fileURL)
                         }
                     }
@@ -175,7 +166,7 @@ actor ProfilePhotoResolver {
 
     private func savePhotoToCache(email: String, imageData: Data) async {
         // Save to file storage instead of base64 to avoid database bloat
-        if let fileURL = AvatarStorage.shared.saveAvatar(for: email, imageData: imageData) {
+        if let fileURL = await AvatarStorage.shared.saveAvatar(for: email, imageData: imageData) {
             await savePhotoURLToCache(email: email, url: fileURL)
         }
     }

@@ -1,6 +1,12 @@
 import Foundation
 import CoreData
 
+/// CoreDataStack uses @unchecked Sendable because:
+/// - destroyAndReloadSync() requires synchronous semaphore-based coordination for fresh installs
+/// - newBackgroundContext() and save() must remain synchronous for critical Core Data paths
+/// - DispatchQueue (isolationQueue) provides thread safety for mutable state (_loadAttempts, _isStoreLoaded, _storeLoadError)
+///
+/// Future consideration: Create a companion CoreDataStackActor for async-only operations
 final class CoreDataStack: @unchecked Sendable {
     static let shared = CoreDataStack()
 

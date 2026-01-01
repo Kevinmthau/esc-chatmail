@@ -152,7 +152,7 @@ final class IncrementalSyncOrchestrator {
 
             // Phase 6: Save
             progressHandler(0.95, "Saving changes...")
-            let shouldAdvance = failureTracker.shouldAdvanceHistoryId(
+            let shouldAdvance = await failureTracker.shouldAdvanceHistoryId(
                 hadFailures: fetchResult.hasFailures,
                 latestHistoryId: historyResult.latestHistoryId
             )
@@ -252,7 +252,7 @@ final class IncrementalSyncOrchestrator {
         try await coreDataStack.saveAsync(context: context)
 
         // Reset tracking
-        failureTracker.recordSuccess()
+        await failureTracker.recordSuccess()
 
         log.info("History recovery complete, new historyId: \(profile.historyId)")
     }
