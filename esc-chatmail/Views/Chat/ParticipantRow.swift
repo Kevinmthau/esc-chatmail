@@ -3,7 +3,10 @@ import SwiftUI
 struct ParticipantRow: View {
     let person: Person
     let onAddContact: () -> Void
+    let onEditContact: (String) -> Void
+
     @State private var isExistingContact = false
+    @State private var contactIdentifier: String?
     private let contactsResolver = ContactsResolver.shared
 
     var body: some View {
@@ -31,9 +34,16 @@ struct ParticipantRow: View {
                 .buttonStyle(.borderless)
             }
         }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isExistingContact, let identifier = contactIdentifier {
+                onEditContact(identifier)
+            }
+        }
         .task {
             if let match = await contactsResolver.lookup(email: person.email) {
-                isExistingContact = match.displayName != nil
+                isExistingContact = match.contactIdentifier != nil
+                contactIdentifier = match.contactIdentifier
             }
         }
     }

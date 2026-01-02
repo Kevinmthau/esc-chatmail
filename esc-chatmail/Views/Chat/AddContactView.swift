@@ -30,6 +30,14 @@ struct AddContactView: UIViewControllerRepresentable {
         }
 
         func contactViewController(_ viewController: CNContactViewController, didCompleteWith contact: CNContact?) {
+            // Invalidate cache for all emails on this contact
+            if let contact = contact {
+                Task {
+                    for email in contact.emailAddresses {
+                        await ContactsResolver.shared.invalidateCache(for: email.value as String)
+                    }
+                }
+            }
             dismiss()
         }
     }

@@ -137,9 +137,44 @@ struct ChatView: View {
         .sheet(item: $viewModel.contactToAdd) { wrapper in
             AddContactView(contact: wrapper.contact)
         }
+        .sheet(isPresented: $viewModel.showingContactPicker) {
+            ContactPickerView(
+                onContactSelected: { contact in
+                    viewModel.handleContactSelected(contact)
+                },
+                onCancel: {
+                    viewModel.handleContactPickerCancelled()
+                }
+            )
+        }
         .sheet(isPresented: $viewModel.showingParticipantsList) {
-            ParticipantsListView(conversation: conversation) { person in
-                viewModel.prepareContactToAdd(for: person)
+            ParticipantsListView(
+                conversation: conversation,
+                onAddContact: { person in
+                    viewModel.showContactActionSheet(for: person)
+                },
+                onEditContact: { identifier in
+                    viewModel.editExistingContact(identifier: identifier)
+                }
+            )
+        }
+        .confirmationDialog(
+            "Add Contact",
+            isPresented: $viewModel.showingContactActionSheet,
+            titleVisibility: .visible
+        ) {
+            Button("Create New Contact") {
+                viewModel.createNewContact()
+            }
+            Button("Add to Existing Contact") {
+                viewModel.addToExistingContact()
+            }
+            Button("Cancel", role: .cancel) {
+                viewModel.personForContactAction = nil
+            }
+        } message: {
+            if let person = viewModel.personForContactAction {
+                Text("Add \(person.email) to your contacts")
             }
         }
     }

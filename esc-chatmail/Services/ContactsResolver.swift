@@ -14,11 +14,13 @@ class ContactMatch: NSObject {
     let displayName: String?
     let email: String
     let imageData: Data?
+    let contactIdentifier: String?
 
-    init(displayName: String?, email: String, imageData: Data?) {
+    init(displayName: String?, email: String, imageData: Data?, contactIdentifier: String? = nil) {
         self.displayName = displayName
         self.email = email
         self.imageData = imageData
+        self.contactIdentifier = contactIdentifier
         super.init()
     }
 }
@@ -135,6 +137,7 @@ actor ContactsResolver: ContactsResolving {
             CNContactEmailAddressesKey as CNKeyDescriptor,
             CNContactImageDataAvailableKey as CNKeyDescriptor,
             CNContactThumbnailImageDataKey as CNKeyDescriptor,
+            CNContactIdentifierKey as CNKeyDescriptor,
             CNContactFormatter.descriptorForRequiredKeys(for: .fullName)
         ]
 
@@ -206,7 +209,8 @@ actor ContactsResolver: ContactsResolving {
         return ContactMatch(
             displayName: displayName,
             email: EmailNormalizer.normalize(email),
-            imageData: imageData
+            imageData: imageData,
+            contactIdentifier: contact.identifier
         )
     }
 
@@ -344,5 +348,18 @@ extension ContactsResolver {
         }
 
         return results
+    }
+
+    /// Invalidates cached contact data for a specific email.
+    /// Call this after adding or editing a contact.
+    func invalidateCache(for email: String) {
+        let normalizedEmail = EmailNormalizer.normalize(email)
+        cache.removeObject(forKey: normalizedEmail as NSString)
+    }
+
+    /// Invalidates all cached contact data.
+    /// Call this if a contact was modified and we don't know which emails changed.
+    func invalidateAllCache() {
+        cache.removeAllObjects()
     }
 }

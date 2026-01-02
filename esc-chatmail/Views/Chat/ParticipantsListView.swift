@@ -3,6 +3,7 @@ import SwiftUI
 struct ParticipantsListView: View {
     let conversation: Conversation
     let onAddContact: (Person) -> Void
+    let onEditContact: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     private let contactsResolver = ContactsResolver.shared
     private let participantLoader = ParticipantLoader.shared
@@ -25,9 +26,15 @@ struct ParticipantsListView: View {
         NavigationView {
             List {
                 ForEach(otherParticipants, id: \.email) { person in
-                    ParticipantRow(person: person) {
-                        onAddContact(person)
-                    }
+                    ParticipantRow(
+                        person: person,
+                        onAddContact: {
+                            onAddContact(person)
+                        },
+                        onEditContact: { identifier in
+                            onEditContact(identifier)
+                        }
+                    )
                 }
             }
             .navigationTitle("Participants")
