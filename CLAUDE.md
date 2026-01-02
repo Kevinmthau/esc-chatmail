@@ -35,14 +35,17 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
 /Services/
   /Caching/           - LRUCacheActor, DiskImageCache, EnhancedImageCache, ImageRequestManager, ConversationPreloader
   /Concurrency/       - TaskCoordinator (generic actor for deduplicating concurrent operations)
-  /CoreData/          - CoreDataStack, error handling (CoreDataErrorClassifier, CoreDataRecoveryHandler, CoreDataBackupManager)
-  /Retry/             - ExponentialBackoff (reusable retry utilities)
+  /CoreData/          - CoreDataStack, NSManagedObjectContext+Perform, error handling (CoreDataErrorClassifier, CoreDataRecoveryHandler, CoreDataBackupManager)
+  /ErrorHandling/     - FileSystemError, FileSystemErrorClassifier (error classification and recovery actions)
+  /Fetcher/           - ParallelMessageFetcher support: FetchConfiguration, FetchPriority, FetchTask, FetchMetrics, AdaptiveMessageFetcher
+  /Retry/             - ExponentialBackoff, RetryExecutor (reusable retry utilities)
   /Security/          - TokenManager, KeychainService, GoogleTokenRefresher
   /Sync/              - SyncEngine, orchestrators, persisters (MessagePersister, LabelPersister, AccountPersister)
     /Phases/          - SyncPhase protocol and composable phase implementations
+  /TextProcessing/    - EmailTextProcessor support: HTMLEntityDecoder, HTMLQuoteRemover, PlainTextQuoteRemover, TextSnippetCreator
   /Compose/           - RecipientManager, ContactAutocompleteService, ReplyMetadataBuilder, MessageFormatBuilder
   /VirtualScroll/     - VirtualScrollConfiguration, MessageWindow
-  /Background/        - BackgroundSyncManager (BGTaskScheduler)
+  /Background/        - BackgroundSyncManager, BackgroundTaskRegistry, BackgroundTaskConfiguration (BGTaskScheduler)
   /HTMLSanitization/  - Security pipeline for email HTML (URL/CSS sanitization, tracking removal)
 /Views/
   /Chat/              - ChatView, MessageBubble (with style config), MessageContentView, BubbleAvatarView, MessageBubbleStyle
@@ -60,13 +63,16 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
 
 - **`/Services/Caching/`** - Image caching (DiskImageCache, EnhancedImageCache), request deduplication (ImageRequestManager), conversation preloading (ConversationPreloader)
 - **`/Services/Concurrency/`** - TaskCoordinator actor for preventing duplicate concurrent operations (used by TokenManager)
-- **`/Services/Retry/`** - ExponentialBackoff and ExponentialBackoffActor for retry logic with jitter
-- **`/Services/CoreData/`** - CoreDataStack with extracted error classification (CoreDataErrorClassifier), backup management (CoreDataBackupManager), and recovery handling (CoreDataRecoveryHandler)
+- **`/Services/CoreData/`** - CoreDataStack, NSManagedObjectContext+Perform (async fetch helpers), error classification (CoreDataErrorClassifier), backup (CoreDataBackupManager), recovery (CoreDataRecoveryHandler)
+- **`/Services/ErrorHandling/`** - FileSystemError (typed errors), FileSystemErrorClassifier (maps NSError codes to RecoveryAction)
+- **`/Services/Fetcher/`** - Supporting types for ParallelMessageFetcher: FetchConfiguration, FetchPriority, FetchTask, FetchMetrics, AdaptiveMessageFetcher (UI wrapper with auto-optimization)
+- **`/Services/Retry/`** - ExponentialBackoff, ExponentialBackoffActor, RetryExecutor (reusable retry with configurable strategies)
 - **`/Services/Security/`** - TokenManager (uses TaskCoordinator + ExponentialBackoffActor), GoogleTokenRefresher (isolated OAuth logic)
 - **`/Services/Sync/`** - SyncEngine orchestrates InitialSyncOrchestrator (full sync) and IncrementalSyncOrchestrator (delta sync via History API)
 - **`/Services/Sync/Phases/`** - Composable SyncPhase protocol with phases: HistoryCollection, MessageFetch, LabelProcessing, Reconciliation, ConversationUpdate
+- **`/Services/TextProcessing/`** - Email text extraction: HTMLEntityDecoder (lookup table), HTMLQuoteRemover, PlainTextQuoteRemover, TextSnippetCreator
 - **`/Services/Compose/`** - Extracted compose services: RecipientManager, ContactAutocompleteService, ReplyMetadataBuilder, MessageFormatBuilder
-- **`/Services/Background/`** - BackgroundSyncManager handles iOS background tasks (BGTaskScheduler)
+- **`/Services/Background/`** - BackgroundSyncManager, BackgroundTaskRegistry (centralized task registration), BackgroundTaskConfiguration (task presets)
 - **ConversationManager** - Groups messages by `participantHash` (normalized emails excluding user's aliases)
 - **ConversationCreationSerializer** - Actor preventing duplicate conversations during concurrent processing
 - **PendingActionsManager** - Actor-based offline action queue with retry logic
@@ -121,7 +127,7 @@ Categories: sync, api, coreData, auth, ui, background, conversation
 - **SyncPhase protocol** - Composable sync phases with typed Input/Output and progress reporting via SyncPhaseContext
 - **Service composition** - ViewModels compose extracted services (e.g., ComposeViewModel uses RecipientManager, ContactAutocompleteService)
 - **Nested ObservableObject forwarding** - When ViewModels compose child ObservableObjects, forward `objectWillChange` via Combine subscriptions (see ComposeViewModel)
-- **Reusable utilities** - ExponentialBackoff for retry logic, TaskCoordinator for deduplication, CoreDataErrorClassifier for error handling
+- **Reusable utilities** - ExponentialBackoff/RetryExecutor for retry logic, TaskCoordinator for deduplication, CoreDataErrorClassifier/FileSystemErrorClassifier for error handling
 - **Style configuration** - MessageBubble uses MessageBubbleStyle enum (`.standard` vs `.compact`) for different display modes
 - User's aliases must be excluded from `participantHash` - load from Account entity if not in memory
 
