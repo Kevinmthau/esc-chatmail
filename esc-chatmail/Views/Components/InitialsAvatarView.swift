@@ -8,19 +8,19 @@ struct InitialsAvatarStyle {
     let borderWidth: CGFloat
     let singleNamePrefixLength: Int
 
-    /// Standard size for single conversation avatars (50x50)
+    /// Standard size for single conversation avatars (44x44)
     static let standard = InitialsAvatarStyle(
-        size: 50,
-        fontSize: 17,
+        size: 44,
+        fontSize: 15,
         borderColor: .white,
         borderWidth: 2,
         singleNamePrefixLength: 2
     )
 
-    /// Compact size for group avatar thumbnails (22x22)
+    /// Compact size for group avatar thumbnails (20x20)
     static let compact = InitialsAvatarStyle(
-        size: 22,
-        fontSize: 9,
+        size: 20,
+        fontSize: 8,
         borderColor: Color(UIColor.systemBackground),
         borderWidth: 1.5,
         singleNamePrefixLength: 1

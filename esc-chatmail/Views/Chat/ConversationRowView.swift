@@ -43,7 +43,7 @@ struct ConversationRowView: View {
     }
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 12) {
             // Unread indicator with fixed width container
             ZStack {
                 if snapshot.inboxUnreadCount > 0 {
@@ -56,7 +56,7 @@ struct ConversationRowView: View {
 
             // Avatar stack
             AvatarStackView(avatarPhotos: avatarPhotos, participants: participantNames)
-                .frame(width: 50, height: 50)
+                .frame(width: 44, height: 44)
 
             VStack(alignment: .leading, spacing: 3) {
                 // Top row: Name, date, and chevron

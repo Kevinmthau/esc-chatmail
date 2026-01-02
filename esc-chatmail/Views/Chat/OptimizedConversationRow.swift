@@ -21,10 +21,10 @@ struct OptimizedConversationRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 16) {
             // Avatar stack with photo support
             AvatarStackView(avatarPhotos: avatarPhotos, participants: participantNames)
-                .frame(width: 50, height: 50)
+                .frame(width: 44, height: 44)
 
             VStack(alignment: .leading, spacing: 4) {
                 // Header

@@ -28,7 +28,7 @@ struct SingleAvatarView: View {
             CachedAsyncImage(
                 imageData: photo.imageData,
                 imageURL: photo.url,
-                size: 50
+                size: 44
             ) {
                 if let participant = participant {
                     InitialsAvatarView(name: participant, style: .standard)
@@ -43,7 +43,7 @@ struct SingleAvatarView: View {
         } else {
             Image(systemName: "person.circle.fill")
                 .resizable()
-                .frame(width: 50, height: 50)
+                .frame(width: 44, height: 44)
                 .foregroundColor(.gray)
         }
     }
@@ -55,13 +55,13 @@ struct GroupAvatarView: View {
     let avatarPhotos: [ProfilePhoto]
     let participants: [String]
 
-    private let mainSize: CGFloat = 50
-    private let smallSize: CGFloat = 22
+    private let mainSize: CGFloat = 44
+    private let smallSize: CGFloat = 20
     private let positions: [(x: CGFloat, y: CGFloat)] = [
-        (x: -9, y: -9),   // Top left
-        (x: 9, y: -9),    // Top right
-        (x: 9, y: 9),     // Bottom right
-        (x: -9, y: 9)     // Bottom left
+        (x: -8, y: -8),   // Top left
+        (x: 8, y: -8),    // Top right
+        (x: 8, y: 8),     // Bottom right
+        (x: -8, y: 8)     // Bottom left
     ]
 
     var body: some View {
@@ -115,13 +115,13 @@ struct GroupAvatarView: View {
         switch total {
         case 2:
             // Two avatars: left and right
-            return index == 0 ? -9 : 9
+            return index == 0 ? -8 : 8
         case 3:
             // Three avatars: triangle arrangement
             switch index {
             case 0: return 0      // Top center
-            case 1: return -9     // Bottom left
-            case 2: return 9      // Bottom right
+            case 1: return -8     // Bottom left
+            case 2: return 8      // Bottom right
             default: return 0
             }
         case 4:
@@ -140,8 +140,8 @@ struct GroupAvatarView: View {
         case 3:
             // Three avatars: triangle arrangement
             switch index {
-            case 0: return -9     // Top
-            case 1, 2: return 9   // Bottom
+            case 0: return -8     // Top
+            case 1, 2: return 8   // Bottom
             default: return 0
             }
         case 4:
