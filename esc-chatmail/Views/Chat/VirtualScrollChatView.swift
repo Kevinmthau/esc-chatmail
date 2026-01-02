@@ -25,9 +25,10 @@ struct VirtualScrollChatView: View {
                             if scrollState.placeholderIndices.contains(index) {
                                 MessageSkeletonView()
                             } else {
-                                OptimizedMessageBubble(
+                                MessageBubble(
                                     message: message,
-                                    conversation: conversation
+                                    conversation: conversation,
+                                    style: .compact
                                 )
                             }
                         }

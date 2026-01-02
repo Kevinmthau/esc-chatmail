@@ -4,6 +4,7 @@ import Combine
 import UIKit
 
 // MARK: - Cached Conversation
+
 final class CachedConversation {
     let id: String
     let conversation: Conversation
@@ -39,17 +40,8 @@ final class CachedConversation {
     }
 }
 
-// MARK: - Cache Statistics
-struct CacheStatistics {
-    let totalItems: Int
-    let totalMemoryUsage: Int
-    let hitRate: Double
-    let missRate: Double
-    let averageAccessTime: TimeInterval
-    let evictionCount: Int
-}
-
 // MARK: - Conversation Cache
+
 @MainActor
 final class ConversationCache: ObservableObject {
     static let shared = ConversationCache()
@@ -63,25 +55,26 @@ final class ConversationCache: ObservableObject {
     private var cache: [String: CachedConversation] = [:]
     private var lruOrder: [String] = []
 
-    // Preloading
-    private var preloadQueue: Set<String> = []
-    private var preloadTask: Task<Void, Never>?
+    // Preloader (extracted)
+    private let preloader: ConversationPreloader
 
-    // Statistics
-    private var cacheHits = 0
-    private var cacheMisses = 0
-    private var evictions = 0
+    // Statistics (using shared type from CacheProtocol)
+    private var stats = LRUCacheStatistics()
     private var accessTimes: [TimeInterval] = []
 
     // Publishers
     @Published var currentMemoryUsage = 0
     @Published var cacheItemCount = 0
-    @Published var isPreloading = false
 
-    private let coreDataStack = CoreDataStack.shared
+    var isPreloading: Bool {
+        preloader.isPreloading
+    }
+
     private var cancellables = Set<AnyCancellable>()
 
     private init() {
+        self.preloader = ConversationPreloader()
+        preloader.setCache(self)
         setupMemoryWarningObserver()
         startPeriodicCleanup()
     }
@@ -92,17 +85,24 @@ final class ConversationCache: ObservableObject {
         let startTime = Date()
 
         if let cached = cache[conversationId] {
+            // Check TTL
+            if Date().timeIntervalSince(cached.lastAccessed) > ttl {
+                invalidate(conversationId)
+                stats.recordMiss()
+                return nil
+            }
+
             // Cache hit
             cached.access()
             moveToFront(conversationId)
-            cacheHits += 1
+            stats.recordHit()
 
             recordAccessTime(Date().timeIntervalSince(startTime))
             return cached
         }
 
         // Cache miss
-        cacheMisses += 1
+        stats.recordMiss()
         recordAccessTime(Date().timeIntervalSince(startTime))
         return nil
     }
@@ -121,17 +121,11 @@ final class ConversationCache: ObservableObject {
 
         updateMemoryUsage()
         cacheItemCount = cache.count
+        stats.currentItemCount = cache.count
     }
 
     func preload(_ conversationIds: [String]) {
-        let idsToPreload = conversationIds.filter { cache[$0] == nil }
-        guard !idsToPreload.isEmpty else { return }
-
-        preloadQueue.formUnion(idsToPreload)
-
-        if preloadTask == nil {
-            startPreloading()
-        }
+        preloader.preload(conversationIds)
     }
 
     func invalidate(_ conversationId: String) {
@@ -139,69 +133,27 @@ final class ConversationCache: ObservableObject {
         lruOrder.removeAll { $0 == conversationId }
         updateMemoryUsage()
         cacheItemCount = cache.count
+        stats.currentItemCount = cache.count
     }
 
     func clear() {
         cache.removeAll()
         lruOrder.removeAll()
-        preloadQueue.removeAll()
-        preloadTask?.cancel()
-        preloadTask = nil
+        preloader.cancel()
 
         currentMemoryUsage = 0
         cacheItemCount = 0
+        stats.currentItemCount = 0
     }
 
-    // MARK: - Preloading
+    // MARK: - Preloading (delegated)
 
-    private func startPreloading() {
-        guard preloadTask == nil else { return }
-
-        isPreloading = true
-
-        preloadTask = Task { [weak self] in
-            guard let self = self else { return }
-
-            while !self.preloadQueue.isEmpty {
-                let conversationId = self.preloadQueue.removeFirst()
-
-                // Load from Core Data
-                await self.loadConversation(conversationId)
-
-                // Small delay between loads to avoid blocking
-                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
-            }
-
-            await MainActor.run {
-                self.isPreloading = false
-                self.preloadTask = nil
-            }
-        }
+    func preloadAdjacentConversations(currentId: String, in conversationIds: [String]) {
+        preloader.preloadAdjacentConversations(currentId: currentId, in: conversationIds)
     }
 
-    private func loadConversation(_ conversationId: String) async {
-        let context = coreDataStack.newBackgroundContext()
-
-        await context.perform { [weak self] in
-            guard let self = self else { return }
-
-            let request = Conversation.fetchRequest()
-            request.predicate = NSPredicate(format: "id == %@", conversationId)
-            request.relationshipKeyPathsForPrefetching = ["messages", "participants"]
-
-            guard let conversation = try? context.fetch(request).first else { return }
-
-            let messageRequest = Message.fetchRequest()
-            messageRequest.predicate = NSPredicate(format: "conversation == %@", conversation)
-            messageRequest.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: true)]
-            messageRequest.fetchBatchSize = 50
-
-            guard let messages = try? context.fetch(messageRequest) else { return }
-
-            Task { @MainActor in
-                self.set(conversation, messages: messages)
-            }
-        }
+    func warmCache(with recentConversations: [Conversation]) {
+        preloader.warmCache(with: recentConversations)
     }
 
     // MARK: - LRU Management
@@ -220,7 +172,7 @@ final class ConversationCache: ObservableObject {
 
         cache.removeValue(forKey: lruId)
         lruOrder.removeLast()
-        evictions += 1
+        stats.recordEviction()
 
         updateMemoryUsage()
     }
@@ -248,6 +200,7 @@ final class ConversationCache: ObservableObject {
 
         for id in expiredIds {
             invalidate(id)
+            stats.recordEviction()
         }
     }
 
@@ -283,59 +236,19 @@ final class ConversationCache: ObservableObject {
         }
     }
 
-    func getStatistics() -> CacheStatistics {
-        let totalAccesses = cacheHits + cacheMisses
-        let hitRate = totalAccesses > 0 ? Double(cacheHits) / Double(totalAccesses) : 0
+    func getStatistics() -> LRUCacheStatistics {
+        return stats
+    }
+
+    /// Returns detailed statistics including access time info
+    func getDetailedStatistics() -> (stats: LRUCacheStatistics, avgAccessTime: TimeInterval, memoryUsage: Int) {
         let avgAccessTime = accessTimes.isEmpty ? 0 : accessTimes.reduce(0, +) / Double(accessTimes.count)
-
-        return CacheStatistics(
-            totalItems: cache.count,
-            totalMemoryUsage: currentMemoryUsage,
-            hitRate: hitRate,
-            missRate: 1 - hitRate,
-            averageAccessTime: avgAccessTime,
-            evictionCount: evictions
-        )
-    }
-
-    // MARK: - Intelligent Preloading
-
-    func preloadAdjacentConversations(currentId: String, in conversationIds: [String]) {
-        guard let currentIndex = conversationIds.firstIndex(of: currentId) else { return }
-
-        var toPreload: [String] = []
-
-        // Preload next 2 conversations
-        for i in 1...2 {
-            let nextIndex = currentIndex + i
-            if nextIndex < conversationIds.count {
-                toPreload.append(conversationIds[nextIndex])
-            }
-        }
-
-        // Preload previous conversation
-        if currentIndex > 0 {
-            toPreload.append(conversationIds[currentIndex - 1])
-        }
-
-        preload(toPreload)
-    }
-
-    func warmCache(with recentConversations: [Conversation]) {
-        Task {
-            for conversation in recentConversations.prefix(10) {
-                guard cache[conversation.id.uuidString] == nil else { continue }
-
-                await loadConversation(conversation.id.uuidString)
-
-                // Rate limit warming
-                try? await Task.sleep(nanoseconds: 200_000_000) // 0.2 seconds
-            }
-        }
+        return (stats, avgAccessTime, currentMemoryUsage)
     }
 }
 
 // MARK: - Cache-Aware Conversation Loader
+
 @MainActor
 final class CachedConversationLoader: ObservableObject {
     @Published var messages: [Message] = []

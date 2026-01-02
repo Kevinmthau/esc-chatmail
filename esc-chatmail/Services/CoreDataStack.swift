@@ -17,6 +17,9 @@ final class CoreDataStack: @unchecked Sendable {
     private var _isStoreLoaded = false
     private var _storeLoadError: Error?
 
+    // Extracted services
+    private let recoveryHandler = CoreDataRecoveryHandler()
+
     var isStoreLoaded: Bool {
         isolationQueue.sync { _isStoreLoaded }
     }
@@ -72,133 +75,49 @@ final class CoreDataStack: @unchecked Sendable {
     private func handleStoreLoadError(_ error: NSError, for container: NSPersistentContainer) {
         loadAttempts += 1
 
-        // Check if error is recoverable
-        if isRecoverableError(error) {
-            Log.warning("Core Data load attempt \(loadAttempts) failed with recoverable error: \(error)", category: .coreData)
+        let result = recoveryHandler.handleError(error, currentAttempts: loadAttempts)
 
-            // Retry after delay using Task for cleaner async handling
+        switch result {
+        case .retry(let delay):
             Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(CoreDataConfig.retryDelay * 1_000_000_000))
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 self?.retryLoadingStore(for: container)
             }
-        } else if isMigrationError(error) {
-            // Attempt to recover from migration failure
-            Log.error("Core Data migration failed", category: .coreData, error: error)
-            attemptMigrationRecovery(for: container, error: error)
-        } else {
-            // Non-recoverable error - attempt to reset store as last resort
-            Log.error("Core Data critical error", category: .coreData, error: error)
-            attemptStoreReset(for: container, error: error)
+
+        case .migrationRecovery:
+            attemptMigrationRecovery(for: container)
+
+        case .storeReset:
+            attemptStoreReset(for: container)
         }
-    }
-
-    private func isRecoverableError(_ error: NSError) -> Bool {
-        // Check for transient errors that might succeed on retry
-        let recoverableCodes = [
-            NSPersistentStoreTimeoutError,
-            NSPersistentStoreIncompatibleVersionHashError,
-            NSPersistentStoreSaveConflictsError
-        ]
-        return recoverableCodes.contains(error.code) && loadAttempts < CoreDataConfig.maxLoadAttempts
-    }
-
-    private func isMigrationError(_ error: NSError) -> Bool {
-        let migrationCodes = [
-            NSMigrationError,
-            NSMigrationConstraintViolationError,
-            NSMigrationCancelledError,
-            NSMigrationMissingSourceModelError
-        ]
-        return migrationCodes.contains(error.code)
     }
 
     private func retryLoadingStore(for container: NSPersistentContainer) {
         loadPersistentStores(for: container)
     }
 
-    private func createTimestampedBackup(at storeURL: URL) throws -> URL {
-        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let backupURL = storeURL.deletingPathExtension().appendingPathExtension("backup-\(timestamp).sqlite")
+    private func attemptMigrationRecovery(for container: NSPersistentContainer) {
+        guard let storeURL = container.persistentStoreDescriptions.first?.url else { return }
 
-        // Create backups directory if it doesn't exist
-        let backupsDir = storeURL.deletingLastPathComponent().appendingPathComponent("Backups")
-        try? FileManager.default.createDirectory(at: backupsDir, withIntermediateDirectories: true)
-
-        let backupPath = backupsDir.appendingPathComponent(backupURL.lastPathComponent)
-
-        // Copy main store file
-        try FileManager.default.copyItem(at: storeURL, to: backupPath)
-
-        // Copy associated SQLite files (-wal and -shm)
-        let walURL = storeURL.appendingPathExtension("wal")
-        let shmURL = storeURL.appendingPathExtension("shm")
-        let backupWalURL = backupPath.appendingPathExtension("wal")
-        let backupShmURL = backupPath.appendingPathExtension("shm")
-
-        try? FileManager.default.copyItem(at: walURL, to: backupWalURL)
-        try? FileManager.default.copyItem(at: shmURL, to: backupShmURL)
-
-        Log.info("Created timestamped backup at: \(backupPath)", category: .coreData)
-        return backupPath
-    }
-
-    private func attemptMigrationRecovery(for container: NSPersistentContainer, error: NSError) {
-        // Try loading with manual migration
-        if let storeURL = container.persistentStoreDescriptions.first?.url {
-            do {
-                // Create timestamped backup before attempting recovery
-                let backupURL = try createTimestampedBackup(at: storeURL)
-                Log.info("Created backup before migration recovery: \(backupURL.path)", category: .coreData)
-
-                // Remove problematic store
-                try FileManager.default.removeItem(at: storeURL)
-                // Also remove journal files
-                try? FileManager.default.removeItem(at: storeURL.appendingPathExtension("wal"))
-                try? FileManager.default.removeItem(at: storeURL.appendingPathExtension("shm"))
-
-                // Retry loading
-                loadPersistentStores(for: container)
-            } catch {
-                Log.error("Migration recovery failed", category: .coreData, error: error)
-                attemptStoreReset(for: container, error: error)
-            }
+        if recoveryHandler.prepareMigrationRecovery(for: storeURL) {
+            loadPersistentStores(for: container)
+        } else {
+            attemptStoreReset(for: container)
         }
     }
 
-    private func attemptStoreReset(for container: NSPersistentContainer, error: Error) {
-        // Last resort: delete and recreate store
-        if let storeURL = container.persistentStoreDescriptions.first?.url {
-            do {
-                // Create timestamped backup before destroying data
-                let backupURL = try createTimestampedBackup(at: storeURL)
-                Log.info("Created backup before store reset: \(backupURL.path)", category: .coreData)
+    private func attemptStoreReset(for container: NSPersistentContainer) {
+        guard let storeURL = container.persistentStoreDescriptions.first?.url else { return }
 
-                // Remove problematic store
-                try FileManager.default.removeItem(at: storeURL)
-                // Also remove journal files
-                try? FileManager.default.removeItem(at: storeURL.appendingPathExtension("wal"))
-                try? FileManager.default.removeItem(at: storeURL.appendingPathExtension("shm"))
-
-                loadPersistentStores(for: container)
-            } catch {
-                // Store is completely broken - notify user
-                Log.error("Store reset failed even after backup", category: .coreData, error: error)
-                notifyUserOfCriticalError(error)
-            }
-        }
-    }
-
-    private func notifyUserOfCriticalError(_ error: Error) {
-        // Post notification that views can observe to show alert
-        DispatchQueue.main.async {
-            NotificationCenter.default.post(
-                name: NSNotification.Name("CoreDataCriticalError"),
-                object: nil,
-                userInfo: ["error": CoreDataError.persistentFailure(error)]
+        if recoveryHandler.prepareStoreReset(for: storeURL) {
+            loadPersistentStores(for: container)
+        } else {
+            recoveryHandler.notifyUserOfCriticalError(
+                storeLoadError ?? NSError(domain: "CoreData", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unknown error"])
             )
         }
     }
-    
+
     var viewContext: NSManagedObjectContext {
         persistentContainer.viewContext
     }
@@ -214,13 +133,13 @@ final class CoreDataStack: @unchecked Sendable {
             try await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
         }
     }
-    
+
     func newBackgroundContext() -> NSManagedObjectContext {
         let context = persistentContainer.newBackgroundContext()
         context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
         return context
     }
-    
+
     func save(context: NSManagedObjectContext, retryCount: Int = CoreDataConfig.maxSaveRetries) throws {
         try context.performAndWait {
             guard context.hasChanges else { return }
@@ -241,7 +160,7 @@ final class CoreDataStack: @unchecked Sendable {
                     } else if error.code == NSValidationMultipleErrorsError {
                         // Handle validation errors
                         handleValidationErrors(in: context, error: error)
-                    } else if isTransientError(error) && attempt < retryCount - 1 {
+                    } else if CoreDataErrorClassifier.isTransientError(error) && attempt < retryCount - 1 {
                         // Wait before retry for transient errors
                         Thread.sleep(forTimeInterval: 0.1 * Double(attempt + 1))
                         context.rollback()
@@ -256,16 +175,6 @@ final class CoreDataStack: @unchecked Sendable {
                 throw CoreDataError.saveFailed(error)
             }
         }
-    }
-
-    private func isTransientError(_ error: NSError) -> Bool {
-        // Errors that might succeed on retry
-        let transientCodes = [
-            NSManagedObjectConstraintMergeError,
-            NSPersistentStoreSaveConflictsError,
-            NSSQLiteError // SQLite busy errors
-        ]
-        return transientCodes.contains(error.code) || error.domain == NSSQLiteErrorDomain
     }
 
     private func handleMergeConflicts(in context: NSManagedObjectContext, error: NSError) {
@@ -301,13 +210,7 @@ final class CoreDataStack: @unchecked Sendable {
                 try coordinator.remove(store)
 
                 if let storeURL = storeURL {
-                    try FileManager.default.removeItem(at: storeURL)
-
-                    // Also remove the journal files (-wal and -shm files for SQLite)
-                    let walURL = storeURL.appendingPathExtension("wal")
-                    let shmURL = storeURL.appendingPathExtension("shm")
-                    try? FileManager.default.removeItem(at: walURL)
-                    try? FileManager.default.removeItem(at: shmURL)
+                    try CoreDataBackupManager.removeStore(at: storeURL)
                 }
             } catch {
                 errors.append(error)

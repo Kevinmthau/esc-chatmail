@@ -3,6 +3,7 @@ import GoogleSignIn
 import Combine
 
 // MARK: - Token Manager Error
+
 enum TokenManagerError: LocalizedError {
     case noValidToken
     case refreshFailed(Error)
@@ -43,6 +44,7 @@ enum TokenManagerError: LocalizedError {
 }
 
 // MARK: - Token Info
+
 struct TokenInfo: Codable {
     let accessToken: String
     let refreshToken: String?
@@ -60,6 +62,7 @@ struct TokenInfo: Codable {
 }
 
 // MARK: - Token Manager Protocol
+
 protocol TokenManagerProtocol {
     func getCurrentToken() async throws -> String
     func refreshToken() async throws -> String
@@ -68,11 +71,11 @@ protocol TokenManagerProtocol {
     func isAuthenticated() -> Bool
 }
 
-/// MARK: - Token Manager Implementation
+// MARK: - Token Manager Implementation
 
 /// TokenManager uses @unchecked Sendable because:
 /// - All @Published properties are explicitly @MainActor isolated
-/// - Internal coordination uses dedicated actors (TokenRefreshCoordinator, RefreshBackoffActor)
+/// - Internal coordination uses dedicated actors (TaskCoordinator, ExponentialBackoffActor)
 /// - Nonisolated methods are carefully designed to not access mutable state directly
 /// - ObservableObject pattern requires class semantics with Sendable conformance
 final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sendable {
@@ -83,18 +86,21 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
 
     private let keychainService: KeychainServiceProtocol
     private let authSession: AuthSession
-    private let refreshCoordinator = TokenRefreshCoordinator()
-    private let refreshBackoffActor = RefreshBackoffActor()
+    private let refreshCoordinator = TaskCoordinator<String>()
+    private let refreshBackoff = ExponentialBackoffActor()
+    private let tokenRefresher: TokenRefresherProtocol
 
     // Token refresh configuration
     private let maxRetryAttempts = 3
-    private let baseRetryDelay: TimeInterval = 1.0
 
     // MARK: - Initialization
+
     init(keychainService: KeychainServiceProtocol,
-         authSession: AuthSession) {
+         authSession: AuthSession,
+         tokenRefresher: TokenRefresherProtocol? = nil) {
         self.keychainService = keychainService
         self.authSession = authSession
+        self.tokenRefresher = tokenRefresher ?? GoogleTokenRefresher(authSession: authSession)
     }
 
     @MainActor
@@ -178,7 +184,7 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
 
         // Reset backoff on successful save
         Task {
-            await refreshBackoffActor.reset()
+            await refreshBackoff.reset()
         }
     }
 
@@ -210,14 +216,22 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
             do {
                 // Use exponential backoff for retries
                 if attempt > 0 {
-                    let delay = await refreshBackoffActor.nextDelay()
+                    let delay = await refreshBackoff.nextDelay()
                     try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 }
 
-                // Attempt to refresh using Google Sign-In
-                let newToken = try await refreshUsingGoogleSignIn()
-                await refreshBackoffActor.reset()
-                return newToken
+                // Attempt to refresh using the token refresher
+                let tokens = try await tokenRefresher.refreshTokens()
+
+                // Save the new tokens
+                try saveTokens(
+                    access: tokens.accessToken,
+                    refresh: tokens.refreshToken,
+                    expirationDate: tokens.expirationDate
+                )
+
+                await refreshBackoff.reset()
+                return tokens.accessToken
 
             } catch let error {
                 lastError = error
@@ -241,36 +255,6 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
             self.lastRefreshError = finalError
         }
         throw finalError
-    }
-
-    private nonisolated func refreshUsingGoogleSignIn() async throws -> String {
-        let user = await MainActor.run { authSession.currentUser }
-        guard let user = user else {
-            throw TokenManagerError.noValidToken
-        }
-
-        return try await withCheckedThrowingContinuation { continuation in
-            user.refreshTokensIfNeeded { [weak self] tokens, error in
-                guard let self = self else { return }
-                if let error = error {
-                    continuation.resume(throwing: TokenManagerError.refreshFailed(error))
-                } else if let tokens = tokens {
-                    // Save the new tokens
-                    do {
-                        try self.saveTokens(
-                            access: tokens.accessToken.tokenString,
-                            refresh: tokens.refreshToken.tokenString,
-                            expirationDate: tokens.accessToken.expirationDate ?? Date().addingTimeInterval(3600)
-                        )
-                        continuation.resume(returning: tokens.accessToken.tokenString)
-                    } catch {
-                        continuation.resume(throwing: error)
-                    }
-                } else {
-                    continuation.resume(throwing: TokenManagerError.noValidToken)
-                }
-            }
-        }
     }
 
     private nonisolated func loadTokenInfo() throws -> TokenInfo {
@@ -303,61 +287,8 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
     }
 }
 
-// MARK: - Token Refresh Coordinator Actor
-// Ensures atomic check-and-set of refresh task to prevent race conditions
-private actor TokenRefreshCoordinator {
-    private var currentTask: Task<String, Error>?
-
-    func getOrCreateTask(_ factory: () -> Task<String, Error>) async -> Task<String, Error> {
-        if let existing = currentTask {
-            return existing
-        }
-        let new = factory()
-        currentTask = new
-        return new
-    }
-
-    func clearTask() {
-        currentTask = nil
-    }
-}
-
-// MARK: - Refresh Backoff Actor
-private actor RefreshBackoffActor {
-    private var backoff = ExponentialBackoff()
-
-    func nextDelay() -> TimeInterval {
-        return backoff.nextDelay()
-    }
-
-    func reset() {
-        backoff.reset()
-    }
-}
-
-// MARK: - Exponential Backoff
-private struct ExponentialBackoff {
-    private var attempt = 0
-    private let baseDelay: TimeInterval = 1.0
-    private let maxDelay: TimeInterval = 60.0
-    private let factor: Double = 2.0
-    private let jitter: Double = 0.1
-
-    mutating func nextDelay() -> TimeInterval {
-        defer { attempt += 1 }
-
-        let exponentialDelay = min(baseDelay * pow(factor, Double(attempt)), maxDelay)
-        let jitterAmount = exponentialDelay * jitter * Double.random(in: -1...1)
-
-        return exponentialDelay + jitterAmount
-    }
-
-    mutating func reset() {
-        attempt = 0
-    }
-}
-
 // MARK: - Token Manager + Async Extensions
+
 extension TokenManager {
     nonisolated func withValidToken<T>(_ operation: @escaping (String) async throws -> T) async throws -> T {
         let token = try await getCurrentToken()

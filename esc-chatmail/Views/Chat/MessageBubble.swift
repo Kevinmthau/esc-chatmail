@@ -7,6 +7,8 @@ struct MessageBubble: View {
     var prefetchedSenderName: String?
     /// Whether this is the last message from this sender before a different sender (for avatar grouping)
     var isLastFromSender: Bool = true
+    /// Display style configuration
+    var style: MessageBubbleStyle = .standard
 
     private let contactsResolver = ContactsResolver.shared
     @State private var senderName: String?
@@ -17,162 +19,125 @@ struct MessageBubble: View {
     @State private var fullTextContent: String?
     @State private var hasLoadedContent = false
 
-    private var htmlContentHandler: HTMLContentHandler { HTMLContentHandler.shared }
-
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
             if !message.isFromMe {
-                if isLastFromSender {
-                    BubbleAvatarView(name: senderName ?? "?", avatarURL: senderAvatarURL, imageData: senderImageData)
-                } else {
-                    Color.clear.frame(width: 24, height: 24)
-                }
+                leadingContent
             } else {
                 Spacer()
             }
 
             VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 4) {
-                if !message.isFromMe && isGroupConversation && senderName != nil {
-                    Text(senderName!)
-                        .font(.caption2)
-                        .fontWeight(.medium)
-                        .foregroundColor(.secondary)
-                }
+                senderNameView
 
-                if let subject = message.subject, !subject.isEmpty {
-                    Text(subject)
-                        .font(.footnote)
-                        .fontWeight(.semibold)
-                        .foregroundColor(message.isFromMe ? .secondary : .primary)
-                }
+                subjectView
 
-                if !message.typedAttachments.isEmpty {
-                    AttachmentGridView(attachments: message.attachmentsArray)
-                        .frame(maxWidth: UIScreen.main.bounds.width * 0.65)
-                }
+                attachmentsView
 
-                if message.isNewsletter || hasRichContent {
-                    // Rich HTML emails (newsletters, bank statements, etc.): Show HTML preview
-                    EmailContentSection(
-                        message: message,
-                        showingHTMLView: $showingHTMLView
-                    )
-                    .frame(maxWidth: 280)
-                } else {
-                    // Personal emails: Show as chat bubbles with text
-                    if let text = fullTextContent ?? message.cleanedSnippet ?? message.snippet, !text.isEmpty {
-                        // Show "View More" if text has many lines OR is very long (long paragraphs)
-                        let lineCount = text.components(separatedBy: .newlines).count
-                        let isTruncated = lineCount > 15 || text.count > 800
-                        VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 6) {
-                            Text(text)
-                                .lineLimit(15)
-                                .padding(10)
-                                .background(message.isFromMe ? Color.blue : Color.gray.opacity(0.2))
-                                .foregroundColor(message.isFromMe ? .white : .primary)
-                                .cornerRadius(12)
+                MessageContentView(
+                    message: message,
+                    style: style,
+                    hasRichContent: hasRichContent,
+                    fullTextContent: fullTextContent,
+                    showingHTMLView: $showingHTMLView
+                )
 
-                            if hasRichContent || isTruncated {
-                                Button(action: {
-                                    showingHTMLView = true
-                                }) {
-                                    HStack(spacing: 4) {
-                                        Text("View More")
-                                            .font(.caption)
-                                            .fontWeight(.medium)
-                                        Image(systemName: "arrow.up.forward")
-                                            .font(.caption2)
-                                    }
-                                    .foregroundColor(.blue)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
-                                    .background(Color.blue.opacity(0.1))
-                                    .cornerRadius(8)
-                                }
-                            }
-                        }
-                    } else if message.bodyStorageURI != nil || htmlContentHandler.htmlFileExists(for: message.id) {
-                        // No text content but HTML exists - show button to view it
-                        Button(action: {
-                            showingHTMLView = true
-                        }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "doc.richtext")
-                                    .font(.caption)
-                                Text("View Email")
-                                    .font(.caption)
-                                    .fontWeight(.medium)
-                                Image(systemName: "arrow.up.forward")
-                                    .font(.caption2)
-                            }
-                            .foregroundColor(.blue)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(Color.blue.opacity(0.1))
-                            .cornerRadius(8)
-                        }
-                    } else {
-                        // No content available at all - show minimal placeholder
-                        Text("No preview available")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .italic()
-                            .padding(10)
-                            .background(Color.gray.opacity(0.1))
-                            .cornerRadius(12)
-                    }
-                }
-
-                HStack(spacing: 8) {
-                    if message.isUnread {
-                        Circle()
-                            .fill(Color.blue)
-                            .frame(width: 6, height: 6)
-                    }
-
-                    Text(formatTime(message.internalDate))
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
+                MessageMetadata(
+                    date: message.internalDate,
+                    isUnread: message.isUnread,
+                    showUnreadIndicator: style.showUnreadIndicator
+                )
             }
-            .frame(maxWidth: 280, alignment: message.isFromMe ? .trailing : .leading)
+            .frame(maxWidth: style.maxBubbleWidth, alignment: message.isFromMe ? .trailing : .leading)
 
             if !message.isFromMe {
                 Spacer()
             }
         }
         .task {
-            guard !hasLoadedContent else { return }
-            hasLoadedContent = true
-
-            // Use prefetched sender name if available, otherwise load (needed for avatar)
-            if !message.isFromMe {
-                if let prefetched = prefetchedSenderName {
-                    senderName = prefetched
-                }
-                // Always load to get avatar URL (and sender name if not prefetched)
-                await loadSenderName()
-            }
-
-            // Try cache first (populated by batch prefetch in ChatView.onAppear)
-            if let cached = await ProcessedTextCache.shared.get(messageId: message.id) {
-                fullTextContent = cached.plainText
-                hasRichContent = message.isForwardedEmail || (!message.isFromMe && cached.hasRichContent)
-            } else {
-                // Fallback: process on background thread and cache result
-                await loadFullTextContentWithCache()
-            }
+            await loadContentIfNeeded()
         }
         .sheet(isPresented: $showingHTMLView) {
             HTMLMessageView(message: message)
         }
     }
 
+    // MARK: - Subviews
+
+    @ViewBuilder
+    private var leadingContent: some View {
+        if style.showAvatar {
+            if isLastFromSender {
+                BubbleAvatarView(name: senderName ?? "?", avatarURL: senderAvatarURL, imageData: senderImageData)
+            } else {
+                Color.clear.frame(width: 24, height: 24)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var senderNameView: some View {
+        if !message.isFromMe && style.showSenderName && isGroupConversation && senderName != nil {
+            Text(senderName!)
+                .font(.caption2)
+                .fontWeight(.medium)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var subjectView: some View {
+        if let subject = message.subject, !subject.isEmpty {
+            Text(subject)
+                .font(.footnote)
+                .fontWeight(.semibold)
+                .foregroundColor(message.isFromMe ? .secondary : .primary)
+        }
+    }
+
+    @ViewBuilder
+    private var attachmentsView: some View {
+        if !message.typedAttachments.isEmpty {
+            if style.showAttachmentGrid {
+                AttachmentGridView(attachments: message.attachmentsArray)
+                    .frame(maxWidth: UIScreen.main.bounds.width * 0.65)
+            } else {
+                AttachmentIndicator(count: message.typedAttachments.count)
+            }
+        }
+    }
+
+    // MARK: - Helpers
+
     private var isGroupConversation: Bool {
         conversation.conversationType == .group || conversation.conversationType == .list
     }
 
-    /// Loads and caches text content on background thread
+    // MARK: - Content Loading
+
+    private func loadContentIfNeeded() async {
+        guard !hasLoadedContent else { return }
+        hasLoadedContent = true
+
+        // Use prefetched sender name if available, otherwise load (needed for avatar)
+        if !message.isFromMe {
+            if let prefetched = prefetchedSenderName {
+                senderName = prefetched
+            }
+            // Always load to get avatar URL (and sender name if not prefetched)
+            await loadSenderName()
+        }
+
+        // Try cache first (populated by batch prefetch in ChatView.onAppear)
+        if let cached = await ProcessedTextCache.shared.get(messageId: message.id) {
+            fullTextContent = cached.plainText
+            hasRichContent = message.isForwardedEmail || (!message.isFromMe && cached.hasRichContent)
+        } else {
+            // Fallback: process on background thread and cache result
+            await loadFullTextContentWithCache()
+        }
+    }
+
     private func loadFullTextContentWithCache() async {
         let messageId = message.id
         let bodyText = message.bodyTextValue
@@ -237,50 +202,6 @@ struct MessageBubble: View {
                     }
                 }
                 return
-            }
-        }
-    }
-
-    private func formatTime(_ date: Date) -> String {
-        return TimestampFormatter.format(date)
-    }
-}
-
-// MARK: - Bubble Avatar View
-
-private struct BubbleAvatarView: View {
-    let name: String
-    let avatarURL: String?
-    let imageData: Data?
-
-    @State private var loadedImage: UIImage?
-
-    private var displayImage: UIImage? {
-        // Priority: contact image data > loaded URL image
-        if let data = imageData, let image = UIImage(data: data) {
-            return image
-        }
-        return loadedImage
-    }
-
-    var body: some View {
-        Group {
-            if let image = displayImage {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: 24, height: 24)
-                    .clipShape(Circle())
-            } else {
-                InitialsAvatarView(name: name, style: .bubble)
-            }
-        }
-        .task {
-            // Only load from URL if no contact image data
-            guard imageData == nil else { return }
-            guard let urlString = avatarURL, !urlString.isEmpty else { return }
-            if let image = await EnhancedImageCache.shared.loadImage(from: urlString) {
-                loadedImage = image
             }
         }
     }
