@@ -33,7 +33,11 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
 
 ```
 /Services/
-  /CoreData/          - CoreDataStack, error handling, save operations
+  /Caching/           - LRUCacheActor, DiskImageCache, EnhancedImageCache, ImageRequestManager, ConversationPreloader
+  /Concurrency/       - TaskCoordinator (generic actor for deduplicating concurrent operations)
+  /CoreData/          - CoreDataStack, error handling (CoreDataErrorClassifier, CoreDataRecoveryHandler, CoreDataBackupManager)
+  /Retry/             - ExponentialBackoff (reusable retry utilities)
+  /Security/          - TokenManager, KeychainService, GoogleTokenRefresher
   /Sync/              - SyncEngine, orchestrators, persisters (MessagePersister, LabelPersister, AccountPersister)
     /Phases/          - SyncPhase protocol and composable phase implementations
   /Compose/           - RecipientManager, ContactAutocompleteService, ReplyMetadataBuilder, MessageFormatBuilder
@@ -41,23 +45,27 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
   /Background/        - BackgroundSyncManager (BGTaskScheduler)
   /HTMLSanitization/  - Security pipeline for email HTML (URL/CSS sanitization, tracking removal)
 /Views/
-  /Chat/              - ChatView, MessageBubble, OptimizedMessageBubble, OptimizedConversationRow
+  /Chat/              - ChatView, MessageBubble (with style config), MessageContentView, BubbleAvatarView, MessageBubbleStyle
   /Compose/           - ComposeView, RecipientChip, ComposeAttachmentThumbnail
   /Components/
     /Attachments/     - AttachmentGridView, ImageAttachmentBubble, PDFAttachmentCard, etc.
     /EmailContent/    - MiniEmailWebView, HTMLPreviewWebView, HTMLFullWebView
     /Skeletons/       - MessageSkeletonView, ConversationSkeletonView
-    AvatarView, UnreadBadge, AttachmentIndicator
+    AvatarView, UnreadBadge, AttachmentIndicator, ViewContentButton, MessageMetadata
 /ViewModels/          - @MainActor view models (VirtualScrollState, ConversationListState, ComposeViewModel, etc.)
 /Models/              - Core Data entity classes
 ```
 
 ### Key Components
 
+- **`/Services/Caching/`** - Image caching (DiskImageCache, EnhancedImageCache), request deduplication (ImageRequestManager), conversation preloading (ConversationPreloader)
+- **`/Services/Concurrency/`** - TaskCoordinator actor for preventing duplicate concurrent operations (used by TokenManager)
+- **`/Services/Retry/`** - ExponentialBackoff and ExponentialBackoffActor for retry logic with jitter
+- **`/Services/CoreData/`** - CoreDataStack with extracted error classification (CoreDataErrorClassifier), backup management (CoreDataBackupManager), and recovery handling (CoreDataRecoveryHandler)
+- **`/Services/Security/`** - TokenManager (uses TaskCoordinator + ExponentialBackoffActor), GoogleTokenRefresher (isolated OAuth logic)
 - **`/Services/Sync/`** - SyncEngine orchestrates InitialSyncOrchestrator (full sync) and IncrementalSyncOrchestrator (delta sync via History API)
 - **`/Services/Sync/Phases/`** - Composable SyncPhase protocol with phases: HistoryCollection, MessageFetch, LabelProcessing, Reconciliation, ConversationUpdate
 - **`/Services/Compose/`** - Extracted compose services: RecipientManager, ContactAutocompleteService, ReplyMetadataBuilder, MessageFormatBuilder
-- **`/Services/CoreData/`** - CoreDataStack with extracted error types and save operations
 - **`/Services/Background/`** - BackgroundSyncManager handles iOS background tasks (BGTaskScheduler)
 - **ConversationManager** - Groups messages by `participantHash` (normalized emails excluding user's aliases)
 - **ConversationCreationSerializer** - Actor preventing duplicate conversations during concurrent processing
@@ -85,7 +93,9 @@ MiniEmailWebView (50% scaled, non-interactive preview) or HTMLMessageView (full)
 
 - **ProcessedTextCache** - Plain text extractions (500 items)
 - **AttachmentCache** - Thumbnails (500/50MB) and full images (20/100MB)
-- **ConversationCache** - Preloaded conversations (100 items, 5min TTL)
+- **ConversationCache** - Preloaded conversations (100 items, 5min TTL), uses ConversationPreloader for background loading
+- **EnhancedImageCache** - Two-tier cache (memory + disk) for remote images, uses ImageRequestManager for request deduplication
+- **DiskImageCache** - Persistent disk cache for images (7-day TTL, 100MB limit)
 
 ### Core Data Entities
 
@@ -104,13 +114,15 @@ Categories: sync, api, coreData, auth, ui, background, conversation
 ## Key Patterns
 
 - **@MainActor** on ViewModels and UI services
-- **Actor isolation** for thread-safe state (TokenManager, PendingActionsManager, ConversationCreationSerializer, ProcessedTextCache)
+- **Actor isolation** for thread-safe state (TokenManager, PendingActionsManager, ConversationCreationSerializer, ProcessedTextCache, DiskImageCache, EnhancedImageCache)
 - **Background contexts** for Core Data operations
 - **Typed accessors** in `/Services/Models+Extensions.swift` (avoid `value(forKey:)`)
 - **Extensions for code organization** - MessagePersister uses extensions in separate files (LabelPersister.swift, AccountPersister.swift)
 - **SyncPhase protocol** - Composable sync phases with typed Input/Output and progress reporting via SyncPhaseContext
 - **Service composition** - ViewModels compose extracted services (e.g., ComposeViewModel uses RecipientManager, ContactAutocompleteService)
 - **Nested ObservableObject forwarding** - When ViewModels compose child ObservableObjects, forward `objectWillChange` via Combine subscriptions (see ComposeViewModel)
+- **Reusable utilities** - ExponentialBackoff for retry logic, TaskCoordinator for deduplication, CoreDataErrorClassifier for error handling
+- **Style configuration** - MessageBubble uses MessageBubbleStyle enum (`.standard` vs `.compact`) for different display modes
 - User's aliases must be excluded from `participantHash` - load from Account entity if not in memory
 
 ### Conversation Visibility Logic
