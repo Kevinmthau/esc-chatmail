@@ -25,6 +25,15 @@ struct InitialsAvatarStyle {
         borderWidth: 1.5,
         singleNamePrefixLength: 1
     )
+
+    /// Bubble size for chat message avatars (24x24)
+    static let bubble = InitialsAvatarStyle(
+        size: 24,
+        fontSize: 10,
+        borderColor: .clear,
+        borderWidth: 0,
+        singleNamePrefixLength: 1
+    )
 }
 
 /// Unified initials avatar view with configurable styles

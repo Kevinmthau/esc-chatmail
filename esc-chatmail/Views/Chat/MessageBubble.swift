@@ -5,9 +5,13 @@ struct MessageBubble: View {
     let conversation: Conversation
     /// Pre-loaded sender names from batch fetch (avoids N+1 queries)
     var prefetchedSenderName: String?
+    /// Whether this is the last message from this sender before a different sender (for avatar grouping)
+    var isLastFromSender: Bool = true
 
     private let contactsResolver = ContactsResolver.shared
     @State private var senderName: String?
+    @State private var senderAvatarURL: String?
+    @State private var senderImageData: Data?
     @State private var showingHTMLView = false
     @State private var hasRichContent = false
     @State private var fullTextContent: String?
@@ -16,8 +20,14 @@ struct MessageBubble: View {
     private var htmlContentHandler: HTMLContentHandler { HTMLContentHandler.shared }
 
     var body: some View {
-        HStack {
-            if message.isFromMe {
+        HStack(alignment: .bottom, spacing: 8) {
+            if !message.isFromMe {
+                if isLastFromSender {
+                    BubbleAvatarView(name: senderName ?? "?", avatarURL: senderAvatarURL, imageData: senderImageData)
+                } else {
+                    Color.clear.frame(width: 24, height: 24)
+                }
+            } else {
                 Spacer()
             }
 
@@ -135,13 +145,13 @@ struct MessageBubble: View {
             guard !hasLoadedContent else { return }
             hasLoadedContent = true
 
-            // Use prefetched sender name if available, otherwise load
-            if !message.isFromMe && isGroupConversation {
+            // Use prefetched sender name if available, otherwise load (needed for avatar)
+            if !message.isFromMe {
                 if let prefetched = prefetchedSenderName {
                     senderName = prefetched
-                } else {
-                    await loadSenderName()
                 }
+                // Always load to get avatar URL (and sender name if not prefetched)
+                await loadSenderName()
             }
 
             // Try cache first (populated by batch prefetch in ChatView.onAppear)
@@ -200,13 +210,23 @@ struct MessageBubble: View {
                let person = participant.person {
                 let email = person.email
 
+                // Load avatar URL from Person entity
+                senderAvatarURL = person.avatarURL
+
+                // Look up contact in address book for name and photo
+                let match = await contactsResolver.lookup(email: email)
+
+                // Use contact image data if available
+                if let imageData = match?.imageData {
+                    senderImageData = imageData
+                }
+
                 if let personName = person.displayName, !personName.isEmpty {
                     senderName = personName
                     return
                 }
 
-                if let match = await contactsResolver.lookup(email: email),
-                   let displayName = match.displayName {
+                if let displayName = match?.displayName {
                     senderName = displayName
                 } else {
                     let normalized = EmailNormalizer.normalize(email)
@@ -223,5 +243,45 @@ struct MessageBubble: View {
 
     private func formatTime(_ date: Date) -> String {
         return TimestampFormatter.format(date)
+    }
+}
+
+// MARK: - Bubble Avatar View
+
+private struct BubbleAvatarView: View {
+    let name: String
+    let avatarURL: String?
+    let imageData: Data?
+
+    @State private var loadedImage: UIImage?
+
+    private var displayImage: UIImage? {
+        // Priority: contact image data > loaded URL image
+        if let data = imageData, let image = UIImage(data: data) {
+            return image
+        }
+        return loadedImage
+    }
+
+    var body: some View {
+        Group {
+            if let image = displayImage {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 24, height: 24)
+                    .clipShape(Circle())
+            } else {
+                InitialsAvatarView(name: name, style: .bubble)
+            }
+        }
+        .task {
+            // Only load from URL if no contact image data
+            guard imageData == nil else { return }
+            guard let urlString = avatarURL, !urlString.isEmpty else { return }
+            if let image = await EnhancedImageCache.shared.loadImage(from: urlString) {
+                loadedImage = image
+            }
+        }
     }
 }

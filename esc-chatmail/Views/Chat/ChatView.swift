@@ -26,12 +26,21 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 8) {
-                    ForEach(messages) { message in
-                        MessageBubble(message: message, conversation: conversation)
-                            .id(message.id)
-                            .contextMenu {
-                                messageContextMenu(for: message)
-                            }
+                    ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
+                        let nextMessage = index + 1 < messages.count ? messages[index + 1] : nil
+                        let isLastFromSender = nextMessage == nil ||
+                            nextMessage?.senderEmail != message.senderEmail ||
+                            nextMessage?.isFromMe != message.isFromMe
+
+                        MessageBubble(
+                            message: message,
+                            conversation: conversation,
+                            isLastFromSender: isLastFromSender
+                        )
+                        .id(message.id)
+                        .contextMenu {
+                            messageContextMenu(for: message)
+                        }
                     }
                     Color.clear
                         .frame(height: 1)
