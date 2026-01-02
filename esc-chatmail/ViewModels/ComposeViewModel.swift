@@ -121,6 +121,13 @@ final class ComposeViewModel: ObservableObject {
             let result = messageFormatBuilder.formatForwardedMessage(message)
             body = result.body
             subject = result.subject ?? ""
+
+            // Copy attachments from original message
+            for original in result.attachments {
+                if let copied = attachmentManager.copyAttachmentForForward(original) {
+                    attachmentManager.addAttachment(copied)
+                }
+            }
         case .reply(let conversation, _):
             recipientManager.setupReplyRecipients(from: conversation)
         case .newMessage, .newEmail:

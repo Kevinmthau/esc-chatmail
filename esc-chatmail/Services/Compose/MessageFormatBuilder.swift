@@ -13,6 +13,7 @@ struct MessageFormatBuilder {
     struct ForwardResult {
         let body: String
         let subject: String?
+        let attachments: [Attachment]
     }
 
     func formatForwardedMessage(_ message: Message) -> ForwardResult {
@@ -59,10 +60,10 @@ struct MessageFormatBuilder {
 
         quotedText += "\n"
 
-        if let snippet = message.snippet {
-            quotedText += snippet
-        }
+        // Use full body text if available, otherwise fall back to snippet
+        let messageContent = message.bodyTextValue ?? message.snippet ?? ""
+        quotedText += messageContent
 
-        return ForwardResult(body: quotedText, subject: subject)
+        return ForwardResult(body: quotedText, subject: subject, attachments: message.attachmentsArray)
     }
 }
