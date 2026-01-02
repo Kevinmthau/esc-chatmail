@@ -50,9 +50,7 @@ struct InitialsAvatarView: View {
     }
 
     private var backgroundColor: Color {
-        let hash = name.hashValue
-        let hue = Double(abs(hash) % 360) / 360.0
-        return Color(hue: hue, saturation: 0.5, brightness: 0.8)
+        Color(UIColor.systemGray)
     }
 
     var body: some View {
