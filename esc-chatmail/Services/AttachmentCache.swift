@@ -3,12 +3,12 @@ import Combine
 
 class AttachmentCache {
     static let shared = AttachmentCache()
-    
+
     private let thumbnailCache = NSCache<NSString, UIImage>()
     private let fullImageCache = NSCache<NSString, UIImage>()
     private let dataCache = NSCache<NSString, NSData>()
     private let loadingQueue = DispatchQueue(label: "com.esc.attachment.cache", attributes: .concurrent)
-    private let taskManager = LoadingTaskManager()
+    private let requestManager = InFlightRequestManager<String, UIImage>()
     
     private init() {
         setupCacheLimits()
@@ -64,39 +64,40 @@ class AttachmentCache {
             dataCache.removeAllObjects()
             thumbnailCache.removeAllObjects()
             Task {
-                await taskManager.cancelAllTasks()
+                await requestManager.clearFailedKeys()
             }
         }
     }
     
     // MARK: - Thumbnail Loading
-    
+
     func loadThumbnail(for attachmentId: String, from path: String?) async -> UIImage? {
-        let cacheKey = "thumb_\(attachmentId)" as NSString
-        
+        let cacheKey = "thumb_\(attachmentId)"
+
         // Check memory cache
-        if let cached = thumbnailCache.object(forKey: cacheKey) {
+        if let cached = thumbnailCache.object(forKey: cacheKey as NSString) {
             return cached
         }
-        
-        // Check if already loading or start new task
-        return await taskManager.getOrCreateTask(for: cacheKey as String) { [weak self] in
-            guard let self = self else { return nil }
-            
+
+        // Use request manager for deduplication
+        let result = await requestManager.deduplicated(key: cacheKey) {
             // Load from disk
             guard let path = path,
                   let data = AttachmentPaths.loadData(from: path) else {
                 return nil
             }
-            
+
             // Decode image
-            guard let image = UIImage(data: data) else { return nil }
-            
-            // Cache and return
-            self.thumbnailCache.setObject(image, forKey: cacheKey, cost: data.count)
-            
-            return image
+            return UIImage(data: data)
         }
+
+        // Cache the result outside the @Sendable closure
+        if let image = result {
+            let cost = image.jpegData(compressionQuality: 0.8)?.count ?? 0
+            thumbnailCache.setObject(image, forKey: cacheKey as NSString, cost: cost)
+        }
+
+        return result
     }
     
     // MARK: - Downsampled Image Loading
@@ -235,35 +236,3 @@ class AttachmentCache {
     }
 }
 
-// MARK: - LoadingTaskManager Actor
-
-actor LoadingTaskManager {
-    private var loadingTasks: [String: Task<UIImage?, Never>] = [:]
-    
-    func getOrCreateTask(for key: String, operation: @escaping () async -> UIImage?) async -> UIImage? {
-        // Check if already loading
-        if let existingTask = loadingTasks[key] {
-            return await existingTask.value
-        }
-        
-        // Create new task
-        let task = Task<UIImage?, Never> {
-            let result = await operation()
-            // Clean up task when done
-            self.removeTask(for: key)
-            return result
-        }
-        
-        loadingTasks[key] = task
-        return await task.value
-    }
-    
-    func removeTask(for key: String) {
-        loadingTasks.removeValue(forKey: key)
-    }
-    
-    func cancelAllTasks() {
-        loadingTasks.values.forEach { $0.cancel() }
-        loadingTasks.removeAll()
-    }
-}
