@@ -95,7 +95,7 @@ struct ConversationRowView: View {
                     .lineLimit(2)
             }
         }
-        .frame(height: 96)
+        .frame(height: 88)
         .padding(.horizontal, 12)
         .task {
             await loadContactInfo()

@@ -67,7 +67,7 @@ struct OptimizedConversationRow: View {
             }
         }
         .padding(.horizontal)
-        .padding(.vertical, 20)
+        .padding(.vertical, 16)
         .background(Color(.systemBackground))
         .onAppear {
             onAppear()
