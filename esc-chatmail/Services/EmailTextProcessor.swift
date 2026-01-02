@@ -126,6 +126,17 @@ class EmailTextProcessor {
         result = result.replacingOccurrences(of: "&#34;", with: "\"")
         result = result.replacingOccurrences(of: "&apos;", with: "'")
 
+        // Zero-width characters (strip entirely - they're invisible formatting)
+        result = result.replacingOccurrences(of: "&zwnj;", with: "")
+        result = result.replacingOccurrences(of: "&zwj;", with: "")
+        result = result.replacingOccurrences(of: "&#8204;", with: "")
+        result = result.replacingOccurrences(of: "&#8205;", with: "")
+        result = result.replacingOccurrences(of: "&#x200C;", with: "", options: .caseInsensitive)
+        result = result.replacingOccurrences(of: "&#x200D;", with: "", options: .caseInsensitive)
+        result = result.replacingOccurrences(of: "\u{200C}", with: "")
+        result = result.replacingOccurrences(of: "\u{200D}", with: "")
+        result = result.replacingOccurrences(of: "\u{200B}", with: "") // zero-width space
+
         // Smart quotes and typographic entities
         result = result.replacingOccurrences(of: "&ldquo;", with: "\"")
         result = result.replacingOccurrences(of: "&rdquo;", with: "\"")

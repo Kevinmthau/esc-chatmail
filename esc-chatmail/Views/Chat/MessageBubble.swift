@@ -41,8 +41,8 @@ struct MessageBubble: View {
                         .frame(maxWidth: UIScreen.main.bounds.width * 0.65)
                 }
 
-                if message.isNewsletter {
-                    // Newsletter/promotional emails: Show extracted content card
+                if message.isNewsletter || hasRichContent {
+                    // Rich HTML emails (newsletters, bank statements, etc.): Show HTML preview
                     EmailContentSection(
                         message: message,
                         showingHTMLView: $showingHTMLView

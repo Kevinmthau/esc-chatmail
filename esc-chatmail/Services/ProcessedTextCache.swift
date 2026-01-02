@@ -65,9 +65,10 @@ actor ProcessedTextCache {
                 plainText = TextProcessing.stripQuotedText(from: extracted)
             }
 
-            // Check for rich content
+            // Check for rich content (tables, images, video, iframes)
             let lowercased = html.lowercased()
             hasRichContent = lowercased.contains("<table") ||
+                            lowercased.contains("<img") ||
                             lowercased.contains("<video") ||
                             lowercased.contains("<iframe")
         }
@@ -113,6 +114,17 @@ enum TextProcessing {
         text = text.replacingOccurrences(of: "&#39;", with: "'")
         text = text.replacingOccurrences(of: "&#34;", with: "\"")
         text = text.replacingOccurrences(of: "&apos;", with: "'")
+
+        // Zero-width characters (strip entirely - they're invisible formatting)
+        text = text.replacingOccurrences(of: "&zwnj;", with: "")
+        text = text.replacingOccurrences(of: "&zwj;", with: "")
+        text = text.replacingOccurrences(of: "&#8204;", with: "")
+        text = text.replacingOccurrences(of: "&#8205;", with: "")
+        text = text.replacingOccurrences(of: "&#x200C;", with: "", options: .caseInsensitive)
+        text = text.replacingOccurrences(of: "&#x200D;", with: "", options: .caseInsensitive)
+        text = text.replacingOccurrences(of: "\u{200C}", with: "")
+        text = text.replacingOccurrences(of: "\u{200D}", with: "")
+        text = text.replacingOccurrences(of: "\u{200B}", with: "") // zero-width space
 
         // Smart quotes and other typographic entities
         text = text.replacingOccurrences(of: "&ldquo;", with: "\"")
