@@ -1,60 +1,17 @@
 import Foundation
 import CoreData
 
-// MARK: - Fetch Configuration
-struct FetchConfiguration {
-    let maxConcurrency: Int
-    let batchSize: Int
-    let timeout: TimeInterval
-    let retryAttempts: Int
-    let priorityBoost: Bool
-
-    static let `default` = FetchConfiguration(
-        maxConcurrency: 4,
-        batchSize: 50,
-        timeout: 30,
-        retryAttempts: 3,
-        priorityBoost: false
-    )
-
-    static let aggressive = FetchConfiguration(
-        maxConcurrency: 8,
-        batchSize: 100,
-        timeout: 45,
-        retryAttempts: 2,
-        priorityBoost: true
-    )
-
-    static let conservative = FetchConfiguration(
-        maxConcurrency: 2,
-        batchSize: 25,
-        timeout: 60,
-        retryAttempts: 5,
-        priorityBoost: false
-    )
-}
-
-// MARK: - Fetch Priority
-enum FetchPriority: Int, Comparable {
-    case low = 0
-    case normal = 1
-    case high = 2
-    case urgent = 3
-
-    static func < (lhs: FetchPriority, rhs: FetchPriority) -> Bool {
-        lhs.rawValue < rhs.rawValue
-    }
-}
-
-// MARK: - Fetch Task
-struct FetchTask: Identifiable {
-    let id = UUID()
-    let messageIds: [String]
-    let priority: FetchPriority
-    let completion: ([GmailMessage]) -> Void
-}
+// Supporting types extracted to /Services/Fetcher/:
+// - FetchConfiguration.swift
+// - FetchPriority.swift
+// - FetchTask.swift
+// - FetchMetrics.swift
+// - AdaptiveMessageFetcher.swift
 
 // MARK: - Parallel Message Fetcher
+
+/// Actor for parallel fetching of Gmail messages with priority queuing,
+/// retry logic, and adaptive configuration optimization.
 actor ParallelMessageFetcher {
     static let shared = ParallelMessageFetcher()
 
@@ -193,6 +150,7 @@ actor ParallelMessageFetcher {
 
     private func fetchSingleMessage(_ messageId: String, timeout: TimeInterval, retryAttempts: Int) async throws -> GmailMessage? {
         var lastError: Error?
+        var backoff = ExponentialBackoff(baseDelay: 0.5, maxDelay: 10.0)
 
         for attempt in 0..<retryAttempts {
             // Add timeout using TaskGroup for proper cleanup
@@ -235,8 +193,8 @@ actor ParallelMessageFetcher {
                 }
 
                 if attempt < retryAttempts - 1 {
-                    // Exponential backoff
-                    let delay = Double(attempt + 1) * 0.5
+                    // Exponential backoff with jitter
+                    let delay = backoff.nextDelay()
                     try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 }
             }
@@ -296,84 +254,5 @@ actor ParallelMessageFetcher {
                 priorityBoost: true
             )
         }
-    }
-}
-
-// MARK: - Fetch Metrics
-struct FetchMetrics {
-    let totalFetched: Int
-    let totalErrors: Int
-    let averageFetchTime: TimeInterval
-    let activeTaskCount: Int
-    let queuedTaskCount: Int
-
-    var errorRate: Double {
-        guard totalFetched > 0 else { return 0 }
-        return Double(totalErrors) / Double(totalFetched)
-    }
-
-    var throughput: Double {
-        guard averageFetchTime > 0 else { return 0 }
-        return 1.0 / averageFetchTime
-    }
-}
-
-// MARK: - Adaptive Fetcher
-final class AdaptiveMessageFetcher: ObservableObject {
-    @Published var isOptimizing = false
-    @Published var currentConfiguration: FetchConfiguration = .default
-
-    private let fetcher = ParallelMessageFetcher.shared
-    private var optimizationTimer: Timer?
-
-    init() {
-        startOptimization()
-    }
-
-    private func startOptimization() {
-        optimizationTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
-            Task { [weak self] in
-                await self?.optimize()
-            }
-        }
-    }
-
-    private func optimize() async {
-        await MainActor.run {
-            isOptimizing = true
-        }
-
-        await fetcher.optimizeConfiguration()
-
-        await MainActor.run {
-            isOptimizing = false
-        }
-    }
-
-    func fetchWithPriority(messageIds: [String], conversationId: String) async -> [GmailMessage] {
-        // Determine priority based on context
-        let priority: FetchPriority = determingPriority(for: conversationId)
-
-        do {
-            return try await fetcher.fetchMessages(messageIds, priority: priority)
-        } catch {
-            Log.error("Failed to fetch messages", category: .sync, error: error)
-            return []
-        }
-    }
-
-    private func determingPriority(for conversationId: String) -> FetchPriority {
-        // Logic to determine priority based on:
-        // - Is this the currently viewed conversation?
-        // - Is it marked as important?
-        // - Is it from a VIP contact?
-        // - Is it unread?
-
-        // For now, return normal priority
-        return .normal
-    }
-
-    deinit {
-        optimizationTimer?.invalidate()
     }
 }

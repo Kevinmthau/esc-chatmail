@@ -51,7 +51,14 @@ struct ConversationRollupUpdater: Sendable {
         await context.perform {
             let request = Conversation.fetchRequest()
             request.fetchBatchSize = 50
-            guard let conversations = try? context.fetch(request) else { return }
+
+            let conversations: [Conversation]
+            do {
+                conversations = try context.fetch(request)
+            } catch {
+                Log.error("Failed to fetch conversations for rollup update", category: .conversation, error: error)
+                return
+            }
 
             for conversation in conversations {
                 self.updateRollups(for: conversation, myEmail: myEmail)
@@ -71,8 +78,13 @@ struct ConversationRollupUpdater: Sendable {
 
         await context.perform {
             for objectID in conversationIDs {
-                if let conversation = try? context.existingObject(with: objectID) as? Conversation {
-                    self.updateRollups(for: conversation, myEmail: myEmail)
+                do {
+                    if let conversation = try context.existingObject(with: objectID) as? Conversation {
+                        self.updateRollups(for: conversation, myEmail: myEmail)
+                    }
+                } catch {
+                    // Object may have been deleted; skip and continue
+                    Log.debug("Conversation \(objectID) not found for rollup update", category: .conversation)
                 }
             }
         }
@@ -92,7 +104,13 @@ struct ConversationRollupUpdater: Sendable {
             request.predicate = NSPredicate(format: "keyHash IN %@", keyHashes)
             request.fetchBatchSize = 50
 
-            guard let conversations = try? context.fetch(request) else { return }
+            let conversations: [Conversation]
+            do {
+                conversations = try context.fetch(request)
+            } catch {
+                Log.error("Failed to fetch conversations by keyHash for rollup update", category: .conversation, error: error)
+                return
+            }
 
             for conversation in conversations {
                 self.updateRollups(for: conversation, myEmail: myEmail)

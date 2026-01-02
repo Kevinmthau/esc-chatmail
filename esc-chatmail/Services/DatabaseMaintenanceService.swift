@@ -4,6 +4,7 @@ import BackgroundTasks
 import SQLite3
 
 // MARK: - Database Maintenance Service
+
 @MainActor
 final class DatabaseMaintenanceService: ObservableObject {
     static let shared = DatabaseMaintenanceService()
@@ -18,122 +19,57 @@ final class DatabaseMaintenanceService: ObservableObject {
     @Published var maintenanceProgress: Double = 0.0
 
     private let coreDataStack = CoreDataStack.shared
-    private var maintenanceTimer: Timer?
+    private let taskRegistry = BackgroundTaskRegistry.shared
 
     private init() {
         registerBackgroundTasks()
         loadLastMaintenanceDate()
     }
 
-    // MARK: - Background Task Registration
+    // MARK: - Background Task Registration (Consolidated)
 
     func registerBackgroundTasks() {
-        // Register vacuum task (runs weekly)
-        BGTaskScheduler.shared.register(
-            forTaskWithIdentifier: Self.vacuumTaskIdentifier,
-            using: nil
-        ) { task in
-            self.handleVacuumTask(task: task as! BGProcessingTask)
-        }
+        // Register vacuum task (runs weekly, requires power)
+        taskRegistry.register(
+            config: .weeklyProcessing(
+                identifier: Self.vacuumTaskIdentifier,
+                requiresNetwork: false,
+                requiresPower: true
+            ),
+            handler: { [weak self] in
+                await self?.performVacuum() ?? false
+            }
+        )
 
         // Register analyze task (runs daily)
-        BGTaskScheduler.shared.register(
-            forTaskWithIdentifier: Self.analyzeTaskIdentifier,
-            using: nil
-        ) { task in
-            self.handleAnalyzeTask(task: task as! BGProcessingTask)
-        }
+        taskRegistry.register(
+            config: .dailyProcessing(
+                identifier: Self.analyzeTaskIdentifier,
+                requiresNetwork: false,
+                requiresPower: false
+            ),
+            handler: { [weak self] in
+                await self?.performAnalyze() ?? false
+            }
+        )
 
         // Register cleanup task (runs daily)
-        BGTaskScheduler.shared.register(
-            forTaskWithIdentifier: Self.cleanupTaskIdentifier,
-            using: nil
-        ) { task in
-            self.handleCleanupTask(task: task as! BGProcessingTask)
-        }
+        taskRegistry.register(
+            config: .dailyProcessing(
+                identifier: Self.cleanupTaskIdentifier,
+                requiresNetwork: false,
+                requiresPower: false
+            ),
+            handler: { [weak self] in
+                await self?.performCleanup() ?? false
+            }
+        )
     }
 
     func scheduleMaintenanceTasks() {
-        scheduleVacuumTask()
-        scheduleAnalyzeTask()
-        scheduleCleanupTask()
-    }
-
-    private func scheduleVacuumTask() {
-        let request = BGProcessingTaskRequest(identifier: Self.vacuumTaskIdentifier)
-        request.earliestBeginDate = Date(timeIntervalSinceNow: 7 * 24 * 60 * 60) // 1 week
-        request.requiresNetworkConnectivity = false
-        request.requiresExternalPower = true
-
-        do {
-            try BGTaskScheduler.shared.submit(request)
-        } catch {
-            Log.error("Failed to schedule vacuum task", category: .background, error: error)
-        }
-    }
-
-    private func scheduleAnalyzeTask() {
-        let request = BGProcessingTaskRequest(identifier: Self.analyzeTaskIdentifier)
-        request.earliestBeginDate = Date(timeIntervalSinceNow: 24 * 60 * 60) // 1 day
-        request.requiresNetworkConnectivity = false
-        request.requiresExternalPower = false
-
-        do {
-            try BGTaskScheduler.shared.submit(request)
-        } catch {
-            Log.error("Failed to schedule analyze task", category: .background, error: error)
-        }
-    }
-
-    private func scheduleCleanupTask() {
-        let request = BGProcessingTaskRequest(identifier: Self.cleanupTaskIdentifier)
-        request.earliestBeginDate = Date(timeIntervalSinceNow: 24 * 60 * 60) // 1 day
-        request.requiresNetworkConnectivity = false
-        request.requiresExternalPower = false
-
-        do {
-            try BGTaskScheduler.shared.submit(request)
-        } catch {
-            Log.error("Failed to schedule cleanup task", category: .background, error: error)
-        }
-    }
-
-    // MARK: - Background Task Handlers
-
-    private func handleVacuumTask(task: BGProcessingTask) {
-        task.expirationHandler = {
-            task.setTaskCompleted(success: false)
-        }
-
-        Task {
-            let success = await performVacuum()
-            task.setTaskCompleted(success: success)
-            scheduleVacuumTask() // Reschedule for next time
-        }
-    }
-
-    private func handleAnalyzeTask(task: BGProcessingTask) {
-        task.expirationHandler = {
-            task.setTaskCompleted(success: false)
-        }
-
-        Task {
-            let success = await performAnalyze()
-            task.setTaskCompleted(success: success)
-            scheduleAnalyzeTask() // Reschedule for next time
-        }
-    }
-
-    private func handleCleanupTask(task: BGProcessingTask) {
-        task.expirationHandler = {
-            task.setTaskCompleted(success: false)
-        }
-
-        Task {
-            let success = await performCleanup()
-            task.setTaskCompleted(success: success)
-            scheduleCleanupTask() // Reschedule for next time
-        }
+        taskRegistry.schedule(Self.vacuumTaskIdentifier)
+        taskRegistry.schedule(Self.analyzeTaskIdentifier)
+        taskRegistry.schedule(Self.cleanupTaskIdentifier)
     }
 
     // MARK: - Maintenance Operations
@@ -274,7 +210,14 @@ final class DatabaseMaintenanceService: ObservableObject {
         await context.perform {
             // Update conversation message counts
             let conversationRequest = Conversation.fetchRequest()
-            guard let conversations = try? context.fetch(conversationRequest) else { return }
+
+            let conversations: [Conversation]
+            do {
+                conversations = try context.fetch(conversationRequest)
+            } catch {
+                Log.error("Failed to fetch conversations for denormalization", category: .coreData, error: error)
+                return
+            }
 
             for conversation in conversations {
                 // Update unread count
@@ -283,9 +226,6 @@ final class DatabaseMaintenanceService: ObservableObject {
                     .filter { $0.isUnread }
                     .count ?? 0
                 conversation.inboxUnreadCount = Int32(unreadMessages)
-
-                // These fields would be added to Core Data model for production
-                // For now, we just update the fields that exist
             }
 
             // Save denormalized data
@@ -345,7 +285,8 @@ final class DatabaseMaintenanceService: ObservableObject {
 }
 
 // MARK: - Database Statistics
-struct DatabaseStatistics {
+
+struct DatabaseStatistics: Sendable {
     let messageCount: Int
     let conversationCount: Int
     let attachmentCount: Int

@@ -178,7 +178,13 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
             )
             request.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: true)]
             request.fetchLimit = 1
-            return try? context.fetch(request).first
+
+            do {
+                return try context.fetch(request).first
+            } catch {
+                Log.error("Failed to fetch pending actions", category: .sync, error: error)
+                return nil  // Will retry on next cycle
+            }
         }
     }
 
@@ -237,29 +243,45 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
 
     private func updateActionStatus(objectID: NSManagedObjectID, status: String, context: NSManagedObjectContext) async {
         await context.perform {
-            guard let action = try? context.existingObject(with: objectID) as? PendingAction else { return }
-            action.setValue(status, forKey: "status")
-            if status == "processing" {
-                action.setValue(Date(), forKey: "lastAttempt")
+            do {
+                guard let action = try context.existingObject(with: objectID) as? PendingAction else {
+                    Log.warning("PendingAction not found for status update to '\(status)'", category: .sync)
+                    return
+                }
+                action.setValue(status, forKey: "status")
+                if status == "processing" {
+                    action.setValue(Date(), forKey: "lastAttempt")
+                }
+                try context.save()
+            } catch {
+                Log.error("Failed to update action status to '\(status)'", category: .sync, error: error)
+                // Status update failure is non-critical; action will be retried on next cycle
             }
-            try? context.save()
         }
     }
 
     private func handleActionFailure(objectID: NSManagedObjectID, retryCount: Int16, context: NSManagedObjectContext) async {
         await context.perform {
-            guard let action = try? context.existingObject(with: objectID) as? PendingAction else { return }
-            let newRetryCount = retryCount + 1
-            action.setValue(newRetryCount, forKey: "retryCount")
-            action.setValue("failed", forKey: "status")
+            do {
+                guard let action = try context.existingObject(with: objectID) as? PendingAction else {
+                    Log.warning("PendingAction not found for failure handling", category: .sync)
+                    return
+                }
+                let newRetryCount = retryCount + 1
+                action.setValue(newRetryCount, forKey: "retryCount")
+                action.setValue("failed", forKey: "status")
 
-            if newRetryCount >= Int16(self.maxRetries) {
-                Log.warning("Action permanently failed after \(self.maxRetries) retries", category: .sync)
-            } else {
-                Log.info("Action will be retried (attempt \(newRetryCount + 1)/\(self.maxRetries))", category: .sync)
+                if newRetryCount >= Int16(self.maxRetries) {
+                    Log.warning("Action permanently failed after \(self.maxRetries) retries", category: .sync)
+                } else {
+                    Log.info("Action will be retried (attempt \(newRetryCount + 1)/\(self.maxRetries))", category: .sync)
+                }
+
+                try context.save()
+            } catch {
+                Log.error("Failed to record action failure", category: .sync, error: error)
+                // Failure recording failed; action may be processed again
             }
-
-            try? context.save()
         }
     }
 
@@ -277,8 +299,14 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         await context.perform {
             let request = NSFetchRequest<Message>(entityName: "Message")
             request.predicate = NSPredicate(format: "id == %@", messageId)
-            if let message = try? context.fetch(request).first {
-                message.setValue(nil, forKey: "localModifiedAt")
+
+            do {
+                if let message = try context.fetch(request).first {
+                    message.setValue(nil, forKey: "localModifiedAt")
+                }
+            } catch {
+                // Non-critical: local modification flag will be cleared on next sync
+                Log.debug("Failed to clear local modification for message \(messageId)", category: .sync)
             }
         }
     }
@@ -288,16 +316,19 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
             let request = NSFetchRequest<PendingAction>(entityName: "PendingAction")
             request.predicate = NSPredicate(format: "status == %@", "completed")
 
-            guard let completedActions = try? context.fetch(request), !completedActions.isEmpty else {
-                return
-            }
+            do {
+                let completedActions = try context.fetch(request)
+                guard !completedActions.isEmpty else { return }
 
-            for action in completedActions {
-                context.delete(action)
+                for action in completedActions {
+                    context.delete(action)
+                }
+                try context.save()
+                Log.debug("Cleaned up \(completedActions.count) completed actions", category: .sync)
+            } catch {
+                // Non-critical: cleanup will happen on next cycle
+                Log.debug("Failed to cleanup completed actions", category: .sync)
             }
-            try? context.save()
-
-            Log.debug("Cleaned up \(completedActions.count) completed actions", category: .sync)
         }
     }
 
@@ -309,7 +340,13 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
             let request = NSFetchRequest<NSNumber>(entityName: "PendingAction")
             request.predicate = NSPredicate(format: "status == %@ OR status == %@", "pending", "failed")
             request.resultType = .countResultType
-            return (try? context.fetch(request).first?.intValue) ?? 0
+
+            do {
+                return try context.fetch(request).first?.intValue ?? 0
+            } catch {
+                Log.error("Failed to count pending actions", category: .sync, error: error)
+                return 0
+            }
         }
     }
 
@@ -322,7 +359,13 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
                 messageId, type.rawValue, "pending", "processing"
             )
             request.fetchLimit = 1
-            return (try? context.fetch(request).first) != nil
+
+            do {
+                return try context.fetch(request).first != nil
+            } catch {
+                Log.error("Failed to check for pending action", category: .sync, error: error)
+                return false  // Assume no pending action on error
+            }
         }
     }
 
@@ -335,11 +378,14 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
                 messageId, type.rawValue, "pending"
             )
 
-            if let actions = try? context.fetch(request) {
+            do {
+                let actions = try context.fetch(request)
                 for action in actions {
                     context.delete(action)
                 }
                 coreDataStack.saveIfNeeded(context: context)
+            } catch {
+                Log.error("Failed to cancel pending action for message \(messageId)", category: .sync, error: error)
             }
         }
     }
