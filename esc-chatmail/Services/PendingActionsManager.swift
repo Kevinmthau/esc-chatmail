@@ -1,37 +1,36 @@
 import Foundation
 import CoreData
 
-// MARK: - Protocol for Dependency Injection
-
-/// Protocol for PendingActionsManager to enable testing with mock implementations
-protocol PendingActionsManagerProtocol: Actor {
-    func queueAction(type: PendingAction.ActionType, messageId: String, payload: [String: Any]?) async
-    func queueConversationAction(type: PendingAction.ActionType, conversationId: UUID, messageIds: [String]) async
-    func processAllPendingActions() async
-    func pendingActionCount() async -> Int
-    func hasPendingAction(forMessageId messageId: String, type: PendingAction.ActionType) async -> Bool
-    func cancelPendingAction(forMessageId messageId: String, type: PendingAction.ActionType) async
-    func stopMonitoring()
-}
-
 // MARK: - Pending Actions Manager
 
 /// Manages a persistent queue of pending actions that need to be synced to Gmail.
 /// Actions are stored in CoreData and processed when network is available.
 ///
-/// Responsibilities have been decomposed:
+/// The implementation is split across multiple files:
+/// - `PendingActionsManagerProtocol.swift`: Protocol definition
+/// - `PendingActionProcessor.swift`: Action execution and retry logic
+/// - `PendingActionQueries.swift`: Query methods (count, hasPending, cancel)
+///
+/// Dependencies:
 /// - NetworkMonitor: Handles connectivity detection
 /// - ActionExecutor: Handles action execution against Gmail API
 /// - PendingActionsManager: Coordinates queuing and processing
 actor PendingActionsManager: PendingActionsManagerProtocol {
     static let shared = PendingActionsManager()
 
-    private let coreDataStack: CoreDataStack
-    private let actionExecutor: ActionExecutorProtocol
-    private let networkMonitor: NetworkMonitorProtocol
+    // MARK: - Dependencies (internal for extensions)
 
-    private let maxRetries = 5
-    private let baseRetryDelay: TimeInterval = 2.0
+    let coreDataStack: CoreDataStack
+    let actionExecutor: ActionExecutorProtocol
+    let networkMonitor: NetworkMonitorProtocol
+
+    // MARK: - Configuration (internal for extensions)
+
+    let maxRetries = 5
+    let baseRetryDelay: TimeInterval = 2.0
+
+    // MARK: - State
+
     private var isProcessing = false
     private var isInitialized = false
 
@@ -69,14 +68,14 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         networkMonitor.start()
     }
 
-    func stopMonitoring() {
+    public func stopMonitoring() {
         networkMonitor.stop()
         isInitialized = false
     }
 
     // MARK: - Queue Actions
 
-    func queueAction(
+    public func queueAction(
         type: PendingAction.ActionType,
         messageId: String,
         payload: [String: Any]? = nil
@@ -99,7 +98,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         }
     }
 
-    func queueConversationAction(
+    public func queueConversationAction(
         type: PendingAction.ActionType,
         conversationId: UUID,
         messageIds: [String]
@@ -150,7 +149,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
 
     // MARK: - Process Actions
 
-    func processAllPendingActions() async {
+    public func processAllPendingActions() async {
         ensureInitialized()
 
         guard !isProcessing else { return }
@@ -161,232 +160,11 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
 
         let context = coreDataStack.newBackgroundContext()
 
-        // Process actions one by one
+        // Process actions one by one (uses extension methods)
         while let action = await fetchNextPendingAction(context: context) {
             await processAction(action, context: context)
         }
 
         await cleanupCompletedActions(context: context)
-    }
-
-    private func fetchNextPendingAction(context: NSManagedObjectContext) async -> PendingAction? {
-        await context.perform {
-            let request = NSFetchRequest<PendingAction>(entityName: "PendingAction")
-            request.predicate = NSPredicate(
-                format: "status == %@ OR (status == %@ AND retryCount < %d)",
-                "pending", "failed", self.maxRetries
-            )
-            request.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: true)]
-            request.fetchLimit = 1
-
-            do {
-                return try context.fetch(request).first
-            } catch {
-                Log.error("Failed to fetch pending actions", category: .sync, error: error)
-                return nil  // Will retry on next cycle
-            }
-        }
-    }
-
-    private func processAction(_ action: PendingAction, context: NSManagedObjectContext) async {
-        let objectID = action.objectID
-        let actionType = action.actionTypeEnum
-        let messageId = action.messageIdValue
-        let conversationId = action.conversationIdValue
-        let payloadString = action.payloadValue
-        let retryCount = action.retryCountValue
-
-        // Mark as processing
-        await updateActionStatus(objectID: objectID, status: "processing", context: context)
-
-        do {
-            let payload = parsePayload(payloadString)
-
-            guard let type = actionType else {
-                throw PendingActionError.invalidActionType
-            }
-
-            try await actionExecutor.execute(
-                type: type,
-                messageId: messageId,
-                conversationId: conversationId,
-                payload: payload
-            )
-
-            await updateActionStatus(objectID: objectID, status: "completed", context: context)
-            await clearLocalModifications(messageId: messageId, payload: payload, context: context)
-
-            Log.info("Processed action: \(type.rawValue) for message: \(messageId ?? "N/A")", category: .sync)
-
-        } catch {
-            Log.error("Failed to process action: \(error)", category: .sync)
-            await handleActionFailure(
-                objectID: objectID,
-                retryCount: retryCount,
-                context: context
-            )
-
-            // Wait before processing next action
-            let delay = baseRetryDelay * pow(2.0, Double(retryCount))
-            try? await Task.sleep(nanoseconds: UInt64(min(delay, 30.0) * 1_000_000_000))
-        }
-    }
-
-    private func parsePayload(_ payloadString: String?) -> [String: Any]? {
-        guard let payloadString = payloadString,
-              let data = payloadString.data(using: .utf8),
-              let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
-        }
-        return parsed
-    }
-
-    private func updateActionStatus(objectID: NSManagedObjectID, status: String, context: NSManagedObjectContext) async {
-        await context.perform {
-            do {
-                guard let action = try context.existingObject(with: objectID) as? PendingAction else {
-                    Log.warning("PendingAction not found for status update to '\(status)'", category: .sync)
-                    return
-                }
-                action.setValue(status, forKey: "status")
-                if status == "processing" {
-                    action.setValue(Date(), forKey: "lastAttempt")
-                }
-                try context.save()
-            } catch {
-                Log.error("Failed to update action status to '\(status)'", category: .sync, error: error)
-                // Status update failure is non-critical; action will be retried on next cycle
-            }
-        }
-    }
-
-    private func handleActionFailure(objectID: NSManagedObjectID, retryCount: Int16, context: NSManagedObjectContext) async {
-        await context.perform {
-            do {
-                guard let action = try context.existingObject(with: objectID) as? PendingAction else {
-                    Log.warning("PendingAction not found for failure handling", category: .sync)
-                    return
-                }
-                let newRetryCount = retryCount + 1
-                action.setValue(newRetryCount, forKey: "retryCount")
-                action.setValue("failed", forKey: "status")
-
-                if newRetryCount >= Int16(self.maxRetries) {
-                    Log.warning("Action permanently failed after \(self.maxRetries) retries", category: .sync)
-                } else {
-                    Log.info("Action will be retried (attempt \(newRetryCount + 1)/\(self.maxRetries))", category: .sync)
-                }
-
-                try context.save()
-            } catch {
-                Log.error("Failed to record action failure", category: .sync, error: error)
-                // Failure recording failed; action may be processed again
-            }
-        }
-    }
-
-    private func clearLocalModifications(messageId: String?, payload: [String: Any]?, context: NSManagedObjectContext) async {
-        if let messageId = messageId {
-            await clearLocalModification(forMessageId: messageId, context: context)
-        } else if let messageIds = payload?["messageIds"] as? [String] {
-            for msgId in messageIds {
-                await clearLocalModification(forMessageId: msgId, context: context)
-            }
-        }
-    }
-
-    private func clearLocalModification(forMessageId messageId: String, context: NSManagedObjectContext) async {
-        await context.perform {
-            let request = NSFetchRequest<Message>(entityName: "Message")
-            request.predicate = NSPredicate(format: "id == %@", messageId)
-
-            do {
-                if let message = try context.fetch(request).first {
-                    message.setValue(nil, forKey: "localModifiedAt")
-                }
-            } catch {
-                // Non-critical: local modification flag will be cleared on next sync
-                Log.debug("Failed to clear local modification for message \(messageId)", category: .sync)
-            }
-        }
-    }
-
-    private func cleanupCompletedActions(context: NSManagedObjectContext) async {
-        await context.perform {
-            let request = NSFetchRequest<PendingAction>(entityName: "PendingAction")
-            request.predicate = NSPredicate(format: "status == %@", "completed")
-
-            do {
-                let completedActions = try context.fetch(request)
-                guard !completedActions.isEmpty else { return }
-
-                for action in completedActions {
-                    context.delete(action)
-                }
-                try context.save()
-                Log.debug("Cleaned up \(completedActions.count) completed actions", category: .sync)
-            } catch {
-                // Non-critical: cleanup will happen on next cycle
-                Log.debug("Failed to cleanup completed actions", category: .sync)
-            }
-        }
-    }
-
-    // MARK: - Query Methods
-
-    func pendingActionCount() async -> Int {
-        let context = coreDataStack.newBackgroundContext()
-        return await context.perform {
-            let request = NSFetchRequest<NSNumber>(entityName: "PendingAction")
-            request.predicate = NSPredicate(format: "status == %@ OR status == %@", "pending", "failed")
-            request.resultType = .countResultType
-
-            do {
-                return try context.fetch(request).first?.intValue ?? 0
-            } catch {
-                Log.error("Failed to count pending actions", category: .sync, error: error)
-                return 0
-            }
-        }
-    }
-
-    func hasPendingAction(forMessageId messageId: String, type: PendingAction.ActionType) async -> Bool {
-        let context = coreDataStack.newBackgroundContext()
-        return await context.perform {
-            let request = NSFetchRequest<PendingAction>(entityName: "PendingAction")
-            request.predicate = NSPredicate(
-                format: "messageId == %@ AND actionType == %@ AND (status == %@ OR status == %@)",
-                messageId, type.rawValue, "pending", "processing"
-            )
-            request.fetchLimit = 1
-
-            do {
-                return try context.fetch(request).first != nil
-            } catch {
-                Log.error("Failed to check for pending action", category: .sync, error: error)
-                return false  // Assume no pending action on error
-            }
-        }
-    }
-
-    func cancelPendingAction(forMessageId messageId: String, type: PendingAction.ActionType) async {
-        await MainActor.run {
-            let context = coreDataStack.viewContext
-            let request = NSFetchRequest<PendingAction>(entityName: "PendingAction")
-            request.predicate = NSPredicate(
-                format: "messageId == %@ AND actionType == %@ AND status == %@",
-                messageId, type.rawValue, "pending"
-            )
-
-            do {
-                let actions = try context.fetch(request)
-                for action in actions {
-                    context.delete(action)
-                }
-                coreDataStack.saveIfNeeded(context: context)
-            } catch {
-                Log.error("Failed to cancel pending action for message \(messageId)", category: .sync, error: error)
-            }
-        }
     }
 }

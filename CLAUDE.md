@@ -34,10 +34,13 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
 ```
 /Services/
   /Caching/           - LRUCacheActor, DiskImageCache, EnhancedImageCache, ImageRequestManager, ConversationPreloader
-  /Concurrency/       - TaskCoordinator (generic actor for deduplicating concurrent operations)
-  /CoreData/          - CoreDataStack, NSManagedObjectContext+Perform, error handling (CoreDataErrorClassifier, CoreDataRecoveryHandler, CoreDataBackupManager)
+  /Concurrency/       - TaskCoordinator, BackgroundWork (Task.detached utilities)
+  /Contacts/          - ContactMatch, ContactSearchService, ContactPersistenceService (split from ContactsResolver)
+  /CoreData/          - CoreDataStack, NSManagedObjectContext+Perform, CoreDataStack+Background, error handling
+    /BatchOperations/ - BatchConfiguration, MessageBatchOperations, ConversationBatchOperations (split from CoreDataBatchOperations)
   /ErrorHandling/     - FileSystemError, FileSystemErrorClassifier (error classification and recovery actions)
   /Fetcher/           - ParallelMessageFetcher support: FetchConfiguration, FetchPriority, FetchTask, FetchMetrics, AdaptiveMessageFetcher
+  /PendingActions/    - PendingActionsManagerProtocol, PendingActionProcessor, PendingActionQueries (split from PendingActionsManager)
   /Retry/             - ExponentialBackoff, RetryExecutor (reusable retry utilities)
   /Security/          - TokenManager, KeychainService, GoogleTokenRefresher
   /Sync/              - SyncEngine, orchestrators, persisters (MessagePersister, LabelPersister, AccountPersister)
@@ -62,8 +65,11 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
 ### Key Components
 
 - **`/Services/Caching/`** - Image caching (DiskImageCache, EnhancedImageCache), request deduplication (ImageRequestManager), conversation preloading (ConversationPreloader)
-- **`/Services/Concurrency/`** - TaskCoordinator actor for preventing duplicate concurrent operations (used by TokenManager)
-- **`/Services/CoreData/`** - CoreDataStack, NSManagedObjectContext+Perform (async fetch helpers), error classification (CoreDataErrorClassifier), backup (CoreDataBackupManager), recovery (CoreDataRecoveryHandler)
+- **`/Services/Concurrency/`** - TaskCoordinator actor for preventing duplicate concurrent operations, BackgroundWork for Task.detached utilities
+- **`/Services/Contacts/`** - Contact lookup split into: ContactMatch (protocol/types), ContactSearchService (CNContact search), ContactPersistenceService (Core Data updates)
+- **`/Services/CoreData/`** - CoreDataStack, NSManagedObjectContext+Perform (async fetch helpers), CoreDataStack+Background (context helpers), error classification
+- **`/Services/CoreData/BatchOperations/`** - Batch operations split into: BatchConfiguration (types/config), MessageBatchOperations, ConversationBatchOperations
+- **`/Services/PendingActions/`** - Offline queue split into: PendingActionsManagerProtocol, PendingActionProcessor (execution/retry), PendingActionQueries (count/cancel)
 - **`/Services/ErrorHandling/`** - FileSystemError (typed errors), FileSystemErrorClassifier (maps NSError codes to RecoveryAction)
 - **`/Services/Fetcher/`** - Supporting types for ParallelMessageFetcher: FetchConfiguration, FetchPriority, FetchTask, FetchMetrics, AdaptiveMessageFetcher (UI wrapper with auto-optimization)
 - **`/Services/Retry/`** - ExponentialBackoff, ExponentialBackoffActor, RetryExecutor (reusable retry with configurable strategies)
@@ -75,7 +81,8 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
 - **`/Services/Background/`** - BackgroundSyncManager, BackgroundTaskRegistry (centralized task registration), BackgroundTaskConfiguration (task presets)
 - **ConversationManager** - Groups messages by `participantHash` (normalized emails excluding user's aliases)
 - **ConversationCreationSerializer** - Actor preventing duplicate conversations during concurrent processing
-- **PendingActionsManager** - Actor-based offline action queue with retry logic
+- **ContactsResolver** - Actor for contact lookup with caching (see `/Services/Contacts/`)
+- **PendingActionsManager** - Actor-based offline action queue with retry logic (see `/Services/PendingActions/`)
 
 ### Message Display Logic
 
@@ -123,7 +130,7 @@ Categories: sync, api, coreData, auth, ui, background, conversation
 - **Actor isolation** for thread-safe state (TokenManager, PendingActionsManager, ConversationCreationSerializer, ProcessedTextCache, DiskImageCache, EnhancedImageCache)
 - **Background contexts** for Core Data operations
 - **Typed accessors** in `/Services/Models+Extensions.swift` (avoid `value(forKey:)`)
-- **Extensions for code organization** - MessagePersister uses extensions in separate files (LabelPersister.swift, AccountPersister.swift)
+- **Extensions for code organization** - Large actors/structs split into extensions in separate files (ContactsResolver, PendingActionsManager, CoreDataBatchOperations). Main file keeps type definition + core logic, extensions in subdirectories handle specific concerns. Properties must be `internal` (not `private`) for extensions to access.
 - **SyncPhase protocol** - Composable sync phases with typed Input/Output and progress reporting via SyncPhaseContext
 - **Service composition** - ViewModels compose extracted services (e.g., ComposeViewModel uses RecipientManager, ContactAutocompleteService)
 - **Nested ObservableObject forwarding** - When ViewModels compose child ObservableObjects, forward `objectWillChange` via Combine subscriptions (see ComposeViewModel)
