@@ -201,9 +201,15 @@ class MessageProcessor {
     
     private func extractAttachments(from part: MessagePart) -> [AttachmentInfo] {
         var attachments: [AttachmentInfo] = []
-        
+        var seenIds: Set<String> = []
+
         func traverse(_ part: MessagePart) {
-            if let attachmentId = part.body?.attachmentId {
+            // Only process actual file parts, not multipart containers
+            // Also skip duplicate attachment IDs
+            if let attachmentId = part.body?.attachmentId,
+               !(part.mimeType?.hasPrefix("multipart/") ?? false),
+               !seenIds.contains(attachmentId) {
+                seenIds.insert(attachmentId)
                 let attachment = AttachmentInfo(
                     id: attachmentId,
                     filename: part.filename ?? "attachment",
@@ -212,14 +218,14 @@ class MessageProcessor {
                 )
                 attachments.append(attachment)
             }
-            
+
             if let parts = part.parts {
                 for subpart in parts {
                     traverse(subpart)
                 }
             }
         }
-        
+
         traverse(part)
         return attachments
     }

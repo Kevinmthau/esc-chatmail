@@ -34,10 +34,11 @@ struct MessageContentView: View {
             ViewContentButton.viewEmail {
                 showingHTMLView = true
             }
-        } else {
-            // No content available at all - show minimal placeholder
+        } else if message.typedAttachments.isEmpty {
+            // No content and no attachments - show placeholder
             noContentPlaceholder
         }
+        // If message has attachments but no text, show nothing (attachments are the content)
     }
 
     @ViewBuilder
