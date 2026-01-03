@@ -79,15 +79,25 @@ final class DisplayNameFormatterTests: XCTestCase {
         XCTAssertEqual(result, "John, Jane +3")
     }
 
-    func testFormatForRow_threeNamesWithOverflow_showsPlusCount() {
-        // Even with 3 names provided, only shows first 2 + overflow
-        let result = DisplayNameFormatter.formatForRow(names: ["John", "Jane", "Bob"], totalCount: 5, fallback: nil)
-        XCTAssertEqual(result, "John, Jane +3")
+    func testFormatForRow_threeNames_showsAllThree() {
+        let result = DisplayNameFormatter.formatForRow(names: ["John", "Jane", "Bob"], totalCount: 3, fallback: nil)
+        XCTAssertEqual(result, "John, Jane, Bob")
+    }
+
+    func testFormatForRow_fourNames_showsAllFour() {
+        let result = DisplayNameFormatter.formatForRow(names: ["John", "Jane", "Bob", "Alice"], totalCount: 4, fallback: nil)
+        XCTAssertEqual(result, "John, Jane, Bob, Alice")
+    }
+
+    func testFormatForRow_fiveNamesWithOverflow_showsFourPlusCount() {
+        // Shows first 4 names + overflow count
+        let result = DisplayNameFormatter.formatForRow(names: ["John", "Jane", "Bob", "Alice"], totalCount: 5, fallback: nil)
+        XCTAssertEqual(result, "John, Jane, Bob, Alice +1")
     }
 
     func testFormatForRow_manyParticipants_showsCorrectOverflow() {
-        let result = DisplayNameFormatter.formatForRow(names: ["John", "Jane"], totalCount: 10, fallback: nil)
-        XCTAssertEqual(result, "John, Jane +8")
+        let result = DisplayNameFormatter.formatForRow(names: ["John", "Jane", "Bob", "Alice"], totalCount: 10, fallback: nil)
+        XCTAssertEqual(result, "John, Jane, Bob, Alice +6")
     }
 
     func testFormatForRow_emailAddresses_returnsFullEmail() {
@@ -118,5 +128,44 @@ final class DisplayNameFormatterTests: XCTestCase {
     func testFormatForRow_totalCountZeroWithNames_noOverflow() {
         let result = DisplayNameFormatter.formatForRow(names: ["John", "Jane"], totalCount: 0, fallback: nil)
         XCTAssertEqual(result, "John, Jane")
+    }
+
+    // MARK: - Dr. Prefix Tests
+
+    func testFormatGroupNames_drPrefixWithPeriod_includesTitle() {
+        let result = DisplayNameFormatter.formatGroupNames(["Dr. John Smith", "Jane Doe"])
+        XCTAssertEqual(result, "Dr. John & Jane")
+    }
+
+    func testFormatGroupNames_drPrefixWithoutPeriod_includesTitle() {
+        let result = DisplayNameFormatter.formatGroupNames(["Dr John Smith", "Jane Doe"])
+        XCTAssertEqual(result, "Dr John & Jane")
+    }
+
+    func testFormatGroupNames_multipleDoctors_includesTitles() {
+        let result = DisplayNameFormatter.formatGroupNames(["Dr. John Smith", "Dr. Jane Doe", "Bob Wilson"])
+        XCTAssertEqual(result, "Dr. John, Dr. Jane & Bob")
+    }
+
+    func testFormatForRow_drPrefixWithPeriod_includesTitle() {
+        let result = DisplayNameFormatter.formatForRow(names: ["Dr. John Smith", "Jane Doe"], totalCount: 2, fallback: nil)
+        XCTAssertEqual(result, "Dr. John, Jane")
+    }
+
+    func testFormatForRow_drPrefixWithoutPeriod_includesTitle() {
+        let result = DisplayNameFormatter.formatForRow(names: ["Dr John Smith", "Jane Doe"], totalCount: 2, fallback: nil)
+        XCTAssertEqual(result, "Dr John, Jane")
+    }
+
+    func testFormatGroupNames_drOnly_returnsAsIs() {
+        // Edge case: name is just "Dr." with no first name
+        let result = DisplayNameFormatter.formatGroupNames(["Dr.", "Jane Doe"])
+        XCTAssertEqual(result, "Dr. & Jane")
+    }
+
+    func testFormatGroupNames_drInMiddleOfName_notTreatedAsTitle() {
+        // "Dr" in the middle of a name should not be treated as a title
+        let result = DisplayNameFormatter.formatGroupNames(["Andrew Smith", "Jane Doe"])
+        XCTAssertEqual(result, "Andrew & Jane")
     }
 }

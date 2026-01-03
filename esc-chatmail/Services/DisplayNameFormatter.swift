@@ -67,12 +67,15 @@ enum DisplayNameFormatter {
             return names[0]
         default:
             // Multiple participants: use first names only (Apple-style)
+            // Show up to 4 names to fill available space
             let firstNames = names.map { extractFirstName($0) }
-            let remaining = totalCount - 2
+            let maxVisible = min(firstNames.count, 4)
+            let visibleNames = firstNames.prefix(maxVisible).joined(separator: ", ")
+            let remaining = totalCount - maxVisible
             if remaining > 0 {
-                return "\(firstNames[0]), \(firstNames[1]) +\(remaining)"
+                return "\(visibleNames) +\(remaining)"
             } else {
-                return "\(firstNames[0]), \(firstNames[1])"
+                return visibleNames
             }
         }
     }
@@ -81,9 +84,20 @@ enum DisplayNameFormatter {
 
     /// Extracts the first name from a full name string.
     /// - Parameter name: Full name like "John Smith" or email like "john@example.com"
-    /// - Returns: First non-empty component before space, or the trimmed string if no space
+    /// - Returns: First non-empty component before space, or the trimmed string if no space.
+    ///           Includes "Dr." prefix when present (e.g., "Dr. John Smith" → "Dr. John")
     private static func extractFirstName(_ name: String) -> String {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
-        return trimmed.components(separatedBy: " ").first { !$0.isEmpty } ?? trimmed
+        let components = trimmed.components(separatedBy: " ").filter { !$0.isEmpty }
+
+        guard !components.isEmpty else { return trimmed }
+
+        // Check if first component is "Dr." or "Dr" - include it with the first name
+        let first = components[0]
+        if (first == "Dr." || first == "Dr") && components.count > 1 {
+            return "\(first) \(components[1])"
+        }
+
+        return first
     }
 }
