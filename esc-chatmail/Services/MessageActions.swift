@@ -25,6 +25,40 @@ class MessageActions: ObservableObject {
         await updateReadState(message: message, isUnread: true, actionType: .markUnread)
     }
 
+    @MainActor
+    func markConversationAsUnread(conversation: Conversation) async {
+        guard let messages = conversation.messages, !messages.isEmpty else { return }
+
+        // Find the latest INBOX message
+        let inboxMessages = messages.filter { message in
+            guard let labels = message.labels else { return false }
+            return labels.contains { $0.id == "INBOX" }
+        }
+
+        if let latestInboxMessage = inboxMessages.max(by: { $0.internalDate < $1.internalDate }) {
+            await markAsUnread(message: latestInboxMessage)
+        } else if let latestMessage = messages.max(by: { $0.internalDate < $1.internalDate }) {
+            // Fallback to latest message if no INBOX messages
+            await markAsUnread(message: latestMessage)
+        }
+    }
+
+    @MainActor
+    func markConversationAsRead(conversation: Conversation) async {
+        guard let messages = conversation.messages, !messages.isEmpty else { return }
+
+        // Mark all unread INBOX messages as read
+        let unreadInboxMessages = messages.filter { message in
+            guard message.isUnread else { return false }
+            guard let labels = message.labels else { return false }
+            return labels.contains { $0.id == "INBOX" }
+        }
+
+        for message in unreadInboxMessages {
+            await markAsRead(message: message)
+        }
+    }
+
     /// Core method for updating message read state - eliminates duplication between markAsRead/markAsUnread
     @MainActor
     private func updateReadState(message: Message, isUnread: Bool, actionType: PendingAction.ActionType) async {

@@ -194,6 +194,16 @@ final class ConversationListViewModel: ObservableObject {
         }
     }
 
+    func toggleConversationReadState(_ conversation: Conversation) {
+        Task {
+            if conversation.inboxUnreadCount > 0 {
+                await messageActions.markConversationAsRead(conversation: conversation)
+            } else {
+                await messageActions.markConversationAsUnread(conversation: conversation)
+            }
+        }
+    }
+
     func archiveSelectedConversations() {
         selectionService.archiveSelectedConversations()
     }

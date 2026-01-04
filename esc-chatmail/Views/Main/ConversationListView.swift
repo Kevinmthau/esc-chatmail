@@ -62,6 +62,18 @@ struct ConversationListView: View {
                             }
                             .tint(.blue)
                         }
+                        .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                            Button {
+                                viewModel.toggleConversationReadState(conversation)
+                            } label: {
+                                if conversation.inboxUnreadCount > 0 {
+                                    SwiftUI.Label("Read", systemImage: "envelope.open")
+                                } else {
+                                    SwiftUI.Label("Unread", systemImage: "envelope.badge")
+                                }
+                            }
+                            .tint(.blue)
+                        }
                 }
             }
         }
