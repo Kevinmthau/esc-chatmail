@@ -77,10 +77,9 @@ func makeConversationIdentity(from headers: [MessageHeader],
 
             allEmails.insert(normalized)
 
-            // Extract display name if we don't already have one for this email
-            if displayNames[normalized] == nil,
-               let displayName = EmailNormalizer.extractDisplayName(from: headerValue),
-               !displayName.isEmpty {
+            // Extract display name if it's better than what we have
+            if let displayName = EmailNormalizer.extractDisplayName(from: headerValue),
+               EmailNormalizer.isBetterDisplayName(displayName, than: displayNames[normalized]) {
                 displayNames[normalized] = displayName
             }
         }

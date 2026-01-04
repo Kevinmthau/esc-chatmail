@@ -70,4 +70,21 @@ class EmailNormalizer {
         }
         return nil
     }
+
+    /// Returns true if newName is "better" than existingName
+    /// Better means: more name parts, or same parts but longer
+    static func isBetterDisplayName(_ newName: String?, than existingName: String?) -> Bool {
+        guard let new = newName, !new.isEmpty else { return false }
+        guard let existing = existingName, !existing.isEmpty else { return true }
+
+        let newParts = new.components(separatedBy: " ").filter { !$0.isEmpty }
+        let existingParts = existing.components(separatedBy: " ").filter { !$0.isEmpty }
+
+        // More name parts is better (e.g., "John Smith" > "John")
+        if newParts.count > existingParts.count { return true }
+        if newParts.count < existingParts.count { return false }
+
+        // Same number of parts: longer is better (handles middle names, titles)
+        return new.count > existing.count
+    }
 }

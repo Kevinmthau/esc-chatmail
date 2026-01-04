@@ -19,8 +19,8 @@ struct PersonFactory {
         request.fetchBatchSize = 1
 
         if let existing = try? context.fetch(request).first {
-            // Update display name if we have a new one and the existing one is nil
-            if displayName != nil && existing.displayName == nil {
+            // Update display name if the new one is better (more name parts or longer)
+            if EmailNormalizer.isBetterDisplayName(displayName, than: existing.displayName) {
                 existing.displayName = displayName
             }
             return existing
