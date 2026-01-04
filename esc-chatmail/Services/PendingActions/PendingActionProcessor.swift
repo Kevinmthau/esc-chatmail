@@ -160,7 +160,7 @@ extension PendingActionsManager {
     func cleanupCompletedActions(context: NSManagedObjectContext) async {
         await context.perform {
             let request = NSFetchRequest<PendingAction>(entityName: "PendingAction")
-            request.predicate = NSPredicate(format: "status == %@", "completed")
+            request.predicate = PendingActionPredicates.completed
 
             do {
                 let completedActions = try context.fetch(request)

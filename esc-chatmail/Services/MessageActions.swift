@@ -111,7 +111,7 @@ class MessageActions: ObservableObject {
         // Update local state
         let context = coreDataStack.viewContext
         let labelRequest = Label.fetchRequest()
-        labelRequest.predicate = NSPredicate(format: "id == %@", "INBOX")
+        labelRequest.predicate = LabelPredicates.id("INBOX")
         let inboxLabel = try? context.fetch(labelRequest).first
         Log.debug("INBOX label found: \(inboxLabel != nil)", category: .message)
 

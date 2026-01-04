@@ -4,7 +4,7 @@ struct ComposeAttachmentThumbnail: View {
     let attachment: Attachment
     let onRemove: () -> Void
     @State private var thumbnailImage: UIImage?
-    private let cache = AttachmentCache.shared
+    private let cache = AttachmentCacheActor.shared
 
     var body: some View {
         ZStack(alignment: .topTrailing) {

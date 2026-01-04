@@ -92,7 +92,7 @@ struct ImageDetailView: View {
     @Binding var lastOffset: CGSize
     @State private var fullImage: UIImage?
     @State private var isLoadingImage = false
-    private let cache = AttachmentCache.shared
+    private let cache = AttachmentCacheActor.shared
     
     var body: some View {
         GeometryReader { geometry in

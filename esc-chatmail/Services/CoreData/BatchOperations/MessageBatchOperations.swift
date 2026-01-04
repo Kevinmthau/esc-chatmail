@@ -32,7 +32,7 @@ extension CoreDataBatchOperations {
                 // Check for existing messages to avoid duplicates
                 let messageIds = chunk.map { $0.id }
                 let existingRequest = NSFetchRequest<Message>(entityName: "Message")
-                existingRequest.predicate = NSPredicate(format: "id IN %@", messageIds)
+                existingRequest.predicate = MessagePredicates.ids(messageIds)
                 existingRequest.resultType = .dictionaryResultType
                 existingRequest.propertiesToFetch = ["id"]
 
@@ -91,7 +91,7 @@ extension CoreDataBatchOperations {
                 // Fetch messages to update
                 let messageIds = chunk.map { $0.id }
                 let request = NSFetchRequest<Message>(entityName: "Message")
-                request.predicate = NSPredicate(format: "id IN %@", messageIds)
+                request.predicate = MessagePredicates.ids(messageIds)
                 request.returnsObjectsAsFaults = false
 
                 let messages = try context.fetch(request)
@@ -138,7 +138,7 @@ extension CoreDataBatchOperations {
         try await context.perform {
             // Use NSBatchDeleteRequest for efficiency
             let fetchRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
-            fetchRequest.predicate = NSPredicate(format: "id IN %@", messageIds)
+            fetchRequest.predicate = MessagePredicates.ids(messageIds)
             let deleteRequest = NSBatchDeleteRequest(fetchRequest: fetchRequest)
 
             // Configure to merge changes

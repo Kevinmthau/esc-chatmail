@@ -120,7 +120,9 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         }
 
         // Clear all attachment caches
-        AttachmentCache.shared.clearCache(level: .aggressive)
+        Task {
+            await AttachmentCacheActor.shared.clearCache(level: .aggressive)
+        }
 
         // Clear attachment files from disk
         clearAttachmentFiles()
@@ -207,12 +209,14 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         }
 
         // Clear all attachment caches
-        AttachmentCache.shared.clearCache(level: .aggressive)
+        Task {
+            await AttachmentCacheActor.shared.clearCache(level: .aggressive)
+        }
 
         // Clear attachment files from disk
         clearAttachmentFiles()
     }
-    
+
     nonisolated func withFreshToken() async throws -> String {
         // Delegate to TokenManager for centralized token management
         return try await TokenManager.shared.getCurrentToken()

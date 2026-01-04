@@ -189,7 +189,9 @@ struct esc_chatmailApp: App {
 
         // 8. Clear attachment caches
         Log.debug("Clearing attachment caches", category: .attachment)
-        AttachmentCache.shared.clearCache(level: .aggressive)
+        Task {
+            await AttachmentCacheActor.shared.clearCache(level: .aggressive)
+        }
         clearAttachmentFiles()
         Log.debug("Attachment caches cleared", category: .attachment)
 
@@ -270,6 +272,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         // This is called when the app is about to terminate
         // Only clear memory cache, but preserve user session
         // Full cleanup only happens on fresh install detection
-        AttachmentCache.shared.clearCache(level: .moderate)
+        Task {
+            await AttachmentCacheActor.shared.clearCache(level: .moderate)
+        }
     }
 }

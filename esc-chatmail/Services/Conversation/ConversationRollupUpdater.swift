@@ -101,7 +101,7 @@ struct ConversationRollupUpdater: Sendable {
 
         await context.perform {
             let request = Conversation.fetchRequest()
-            request.predicate = NSPredicate(format: "keyHash IN %@", keyHashes)
+            request.predicate = ConversationPredicates.keyHashes(Array(keyHashes))
             request.fetchBatchSize = 50
 
             let conversations: [Conversation]

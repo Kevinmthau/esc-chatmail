@@ -27,7 +27,7 @@ extension CoreDataBatchOperations {
                 // Check existing conversations
                 let keyHashes = chunk.map { $0.keyHash }
                 let existingRequest = NSFetchRequest<Conversation>(entityName: "Conversation")
-                existingRequest.predicate = NSPredicate(format: "keyHash IN %@", keyHashes)
+                existingRequest.predicate = ConversationPredicates.keyHashes(keyHashes)
                 existingRequest.resultType = .dictionaryResultType
                 existingRequest.propertiesToFetch = ["keyHash"]
 

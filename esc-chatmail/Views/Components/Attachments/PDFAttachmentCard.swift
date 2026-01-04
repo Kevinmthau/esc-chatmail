@@ -6,7 +6,7 @@ struct PDFAttachmentCard: View {
     let onTap: () -> Void
     @State private var thumbnailImage: UIImage?
     @State private var isLoadingImage = false
-    private let cache = AttachmentCache.shared
+    private let cache = AttachmentCacheActor.shared
 
     var body: some View {
         Button(action: onTap) {

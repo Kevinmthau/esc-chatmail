@@ -114,7 +114,7 @@ extension NSManagedObjectContext {
     func fetchMessages(forConversation conversation: Conversation, sortedByDate ascending: Bool = true) throws -> [Message] {
         try fetchAll(
             Message.self,
-            where: NSPredicate(format: "conversation == %@", conversation),
+            where: MessagePredicates.inConversation(conversation),
             sortedBy: [NSSortDescriptor(key: "internalDate", ascending: ascending)]
         )
     }
@@ -215,9 +215,19 @@ enum MessagePredicates {
         NSPredicate(format: "ANY labels.id == %@", labelId)
     }
 
+    static func notHavingLabel(_ labelId: String) -> NSPredicate {
+        NSPredicate(format: "NONE labels.id == %@", labelId)
+    }
+
     static let unread = NSPredicate(format: "isUnread == YES")
     static let read = NSPredicate(format: "isUnread == NO")
     static let inbox = hasLabel("INBOX")
+    static let drafts = hasLabel("DRAFTS")
+    static let excludingDrafts = notHavingLabel("DRAFTS")
+
+    static func olderThan(_ date: Date) -> NSPredicate {
+        NSPredicate(format: "internalDate < %@", date as CVarArg)
+    }
 }
 
 /// Type-safe predicates for Conversation entity
@@ -243,6 +253,13 @@ enum ConversationPredicates {
     static let hasInbox = NSPredicate(format: "hasInbox == YES")
     static let hidden = NSPredicate(format: "hidden == YES")
     static let visible = NSPredicate(format: "hidden == NO")
+
+    static func keyHashes(_ hashes: [String]) -> NSPredicate {
+        NSPredicate(format: "keyHash IN %@", hashes)
+    }
+
+    static let empty = NSPredicate(format: "messages.@count == 0 AND participants.@count == 0")
+    static let emptyMessages = NSPredicate(format: "messages.@count == 0")
 }
 
 /// Type-safe predicates for Person entity
@@ -304,4 +321,6 @@ enum AttachmentPredicates {
     static func messageId(_ messageId: String) -> NSPredicate {
         NSPredicate(format: "messageId == %@", messageId)
     }
+
+    static let orphaned = NSPredicate(format: "message == nil")
 }

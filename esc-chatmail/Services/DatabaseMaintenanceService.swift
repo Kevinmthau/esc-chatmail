@@ -148,7 +148,7 @@ final class DatabaseMaintenanceService: ObservableObject {
                 // Cleanup old messages (older than 90 days)
                 let oldMessageDate = Date().addingTimeInterval(-90 * 24 * 60 * 60)
                 let oldMessageRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
-                oldMessageRequest.predicate = NSPredicate(format: "internalDate < %@", oldMessageDate as NSDate)
+                oldMessageRequest.predicate = MessagePredicates.olderThan(oldMessageDate)
 
                 let deleteOldMessages = NSBatchDeleteRequest(fetchRequest: oldMessageRequest)
                 deleteOldMessages.resultType = .resultTypeCount
@@ -158,7 +158,7 @@ final class DatabaseMaintenanceService: ObservableObject {
 
                 // Cleanup orphaned attachments
                 let orphanedAttachmentRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Attachment")
-                orphanedAttachmentRequest.predicate = NSPredicate(format: "message == nil")
+                orphanedAttachmentRequest.predicate = AttachmentPredicates.orphaned
 
                 let deleteOrphaned = NSBatchDeleteRequest(fetchRequest: orphanedAttachmentRequest)
                 deleteOrphaned.resultType = .resultTypeCount
@@ -168,7 +168,7 @@ final class DatabaseMaintenanceService: ObservableObject {
 
                 // Cleanup empty conversations
                 let emptyConversationRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Conversation")
-                emptyConversationRequest.predicate = NSPredicate(format: "messages.@count == 0")
+                emptyConversationRequest.predicate = ConversationPredicates.emptyMessages
 
                 let deleteEmpty = NSBatchDeleteRequest(fetchRequest: emptyConversationRequest)
                 deleteEmpty.resultType = .resultTypeCount

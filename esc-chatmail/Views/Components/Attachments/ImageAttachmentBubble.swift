@@ -8,7 +8,7 @@ struct ImageAttachmentBubble: View {
     @State private var isLoadingImage = false
 
     private let maxWidth = UIScreen.main.bounds.width * 0.65
-    private let cache = AttachmentCache.shared
+    private let cache = AttachmentCacheActor.shared
 
     var isDownloading: Bool {
         if let attachmentId = attachment.id {

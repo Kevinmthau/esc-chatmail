@@ -45,7 +45,12 @@ final class Dependencies: ObservableObject {
 
     let personCache: PersonCache
     let conversationCache: ConversationCache
-    let attachmentCache: AttachmentCache
+
+    /// Returns the shared AttachmentCacheActor instance.
+    /// Use `await` when calling methods on this actor.
+    nonisolated var attachmentCache: AttachmentCacheActor {
+        AttachmentCacheActor.shared
+    }
 
     // MARK: - Service Layer
 
@@ -110,7 +115,6 @@ final class Dependencies: ObservableObject {
         self.gmailAPIClient = GmailAPIClient.shared
         self.personCache = PersonCache.shared
         self.conversationCache = ConversationCache.shared
-        self.attachmentCache = AttachmentCache.shared
         self.syncEngine = SyncEngine.shared
         self.attachmentDownloader = AttachmentDownloader.shared
         self.backgroundSyncManager = BackgroundSyncManager.shared
@@ -136,7 +140,6 @@ final class Dependencies: ObservableObject {
         gmailAPIClient: GmailAPIClient,
         personCache: PersonCache,
         conversationCache: ConversationCache,
-        attachmentCache: AttachmentCache,
         syncEngine: SyncEngine,
         attachmentDownloader: AttachmentDownloader,
         backgroundSyncManager: BackgroundSyncManager
@@ -148,7 +151,6 @@ final class Dependencies: ObservableObject {
         self.gmailAPIClient = gmailAPIClient
         self.personCache = personCache
         self.conversationCache = conversationCache
-        self.attachmentCache = attachmentCache
         self.syncEngine = syncEngine
         self.attachmentDownloader = attachmentDownloader
         self.backgroundSyncManager = backgroundSyncManager
