@@ -10,7 +10,6 @@ struct ComposeView: View {
     @StateObject private var viewModel: ComposeViewModel
     @FocusState private var focusedField: FocusField?
 
-    @State private var showingAttachmentPicker = false
     @State private var recipientRowHeight: CGFloat = 44
 
     enum FocusField {
@@ -54,7 +53,6 @@ struct ComposeView: View {
                         ComposeInputBar(
                             viewModel: viewModel,
                             focusedField: $focusedField,
-                            showingAttachmentPicker: $showingAttachmentPicker,
                             onSendSuccess: { dismiss() }
                         )
                     }
@@ -95,9 +93,6 @@ struct ComposeView: View {
             Button("OK") { }
         } message: {
             Text(viewModel.error?.localizedDescription ?? "Failed to send message")
-        }
-        .sheet(isPresented: $showingAttachmentPicker) {
-            AttachmentPicker(attachments: .constant([]))
         }
         .task {
             await viewModel.requestContactsAccess()

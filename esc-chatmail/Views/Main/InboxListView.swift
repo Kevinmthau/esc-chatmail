@@ -58,7 +58,7 @@ struct InboxListView: View {
                 }
             }
             .sheet(isPresented: $showingComposer) {
-                ComposeView(mode: .newEmail)
+                ComposeView(mode: .newMessage)
             }
         }
     }
