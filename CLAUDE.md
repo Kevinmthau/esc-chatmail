@@ -33,17 +33,22 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
 
 ```
 /Services/
-  /Caching/           - LRUCacheActor, DiskImageCache, EnhancedImageCache, ImageRequestManager, ConversationPreloader
+  /API/               - GmailAPIClient extensions: Messages, Labels, History, Attachments
+  /Caching/           - LRUCacheActor, AttachmentCacheActor, DiskImageCache, EnhancedImageCache, ImageRequestManager, ConversationPreloader
   /Concurrency/       - TaskCoordinator, BackgroundWork (Task.detached utilities)
   /Contacts/          - ContactMatch, ContactSearchService, ContactPersistenceService (split from ContactsResolver)
-  /CoreData/          - CoreDataStack, NSManagedObjectContext+Perform, CoreDataStack+Background, error handling
-    /BatchOperations/ - BatchConfiguration, MessageBatchOperations, ConversationBatchOperations (split from CoreDataBatchOperations)
+  /CoreData/          - CoreDataStack, FetchRequestBuilder, NSManagedObjectContext+Perform, error handling
+    /BatchOperations/ - BatchConfiguration, MessageBatchOperations, ConversationBatchOperations
   /ErrorHandling/     - FileSystemError, FileSystemErrorClassifier (error classification and recovery actions)
   /Fetcher/           - ParallelMessageFetcher support: FetchConfiguration, FetchPriority, FetchTask, FetchMetrics, AdaptiveMessageFetcher
+  /Logging/           - Log, LogLevel, LogCategory, LoggerConfiguration, ScopedLogger
   /PendingActions/    - PendingActionsManagerProtocol, PendingActionProcessor, PendingActionQueries (split from PendingActionsManager)
   /Retry/             - ExponentialBackoff, RetryExecutor (reusable retry utilities)
   /Security/          - TokenManager, KeychainService, GoogleTokenRefresher
+  /Send/              - GmailSendService extensions: Models, Attachments, OptimisticUpdates
   /Sync/              - SyncEngine, orchestrators, persisters (MessagePersister, LabelPersister, AccountPersister)
+    /Cleanup/         - DataCleanupService extensions: Migration, DuplicateRemoval, EntityCleanup
+    /Persistence/     - MessagePersister extensions: Updates, Creation, Participants, Helpers
     /Phases/          - SyncPhase protocol and composable phase implementations
   /TextProcessing/    - EmailTextProcessor support: HTMLEntityDecoder, HTMLQuoteRemover, PlainTextQuoteRemover, TextSnippetCreator
   /Compose/           - RecipientManager, ContactAutocompleteService, ReplyMetadataBuilder, MessageFormatBuilder
@@ -67,8 +72,13 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
 - **`/Services/Caching/`** - Image caching (DiskImageCache, EnhancedImageCache), request deduplication (ImageRequestManager), conversation preloading (ConversationPreloader)
 - **`/Services/Concurrency/`** - TaskCoordinator actor for preventing duplicate concurrent operations, BackgroundWork for Task.detached utilities
 - **`/Services/Contacts/`** - Contact lookup split into: ContactMatch (protocol/types), ContactSearchService (CNContact search), ContactPersistenceService (Core Data updates)
-- **`/Services/CoreData/`** - CoreDataStack, NSManagedObjectContext+Perform (async fetch helpers), CoreDataStack+Background (context helpers), error classification
+- **`/Services/CoreData/`** - CoreDataStack, FetchRequestBuilder (chainable query builder), NSManagedObjectContext+Perform (async fetch helpers), error classification
 - **`/Services/CoreData/BatchOperations/`** - Batch operations split into: BatchConfiguration (types/config), MessageBatchOperations, ConversationBatchOperations
+- **`/Services/API/`** - GmailAPIClient split into extensions: Messages (list/get/modify), Labels (profile/aliases), History, Attachments
+- **`/Services/Send/`** - GmailSendService split into extensions: Models (SendResult/SendError), Attachments, OptimisticUpdates
+- **`/Services/Sync/Cleanup/`** - DataCleanupService split into extensions: Migration, DuplicateRemoval, EntityCleanup
+- **`/Services/Sync/Persistence/`** - MessagePersister split into extensions: Updates, Creation, Participants, Helpers
+- **`/Services/Logging/`** - Logger split into: Log (main interface), LogLevel, LogCategory, LoggerConfiguration, ScopedLogger
 - **`/Services/PendingActions/`** - Offline queue split into: PendingActionsManagerProtocol, PendingActionProcessor (execution/retry), PendingActionQueries (count/cancel)
 - **`/Services/ErrorHandling/`** - FileSystemError (typed errors), FileSystemErrorClassifier (maps NSError codes to RecoveryAction)
 - **`/Services/Fetcher/`** - Supporting types for ParallelMessageFetcher: FetchConfiguration, FetchPriority, FetchTask, FetchMetrics, AdaptiveMessageFetcher (UI wrapper with auto-optimization)
@@ -105,7 +115,7 @@ MiniEmailWebView (50% scaled, non-interactive preview) or HTMLMessageView (full)
 ### Caching (Actor-based, LRU)
 
 - **ProcessedTextCache** - Plain text extractions (500 items)
-- **AttachmentCache** - Thumbnails (500/50MB) and full images (20/100MB)
+- **AttachmentCacheActor** - Thumbnails (500/50MB) and full images (20/100MB)
 - **ConversationCache** - Preloaded conversations (100 items, 5min TTL), uses ConversationPreloader for background loading
 - **EnhancedImageCache** - Two-tier cache (memory + disk) for remote images, uses ImageRequestManager for request deduplication
 - **DiskImageCache** - Persistent disk cache for images (7-day TTL, 100MB limit)
