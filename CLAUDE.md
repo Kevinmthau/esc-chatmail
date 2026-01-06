@@ -35,28 +35,32 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
 /Services/
   /API/               - GmailAPIClient extensions: Messages, Labels, History, Attachments
   /Caching/           - LRUCacheActor, AttachmentCacheActor, DiskImageCache, EnhancedImageCache, ImageRequestManager, ConversationPreloader
+  /Chat/              - ChatContactManager (contact lookup/updates for chat view)
   /Concurrency/       - TaskCoordinator, BackgroundWork (Task.detached utilities)
   /Contacts/          - ContactMatch, ContactSearchService, ContactPersistenceService (split from ContactsResolver)
   /CoreData/          - CoreDataStack, FetchRequestBuilder, NSManagedObjectContext+Perform, error handling
     /BatchOperations/ - BatchConfiguration, MessageBatchOperations, ConversationBatchOperations
+  /Compose/           - RecipientManager, ContactAutocompleteService, ReplyMetadataBuilder, MessageFormatBuilder, ComposeSendOrchestrator
+  /DatabaseMaintenance/ - DatabaseMaintenanceService split: core, Cleanup, SQLite, Stats
   /ErrorHandling/     - FileSystemError, FileSystemErrorClassifier (error classification and recovery actions)
   /Fetcher/           - ParallelMessageFetcher support: FetchConfiguration, FetchPriority, FetchTask, FetchMetrics, AdaptiveMessageFetcher
+  /HTMLSanitization/  - Security pipeline for email HTML (URL/CSS sanitization, tracking removal)
   /Logging/           - Log, LogLevel, LogCategory, LoggerConfiguration, ScopedLogger
+  /Models/            - Per-entity Core Data extensions (Account, Message, Conversation, etc.)
   /PendingActions/    - PendingActionsManagerProtocol, PendingActionProcessor, PendingActionQueries (split from PendingActionsManager)
   /Retry/             - ExponentialBackoff, RetryExecutor (reusable retry utilities)
   /Security/          - TokenManager, KeychainService, GoogleTokenRefresher
   /Send/              - GmailSendService extensions: Models, Attachments, OptimisticUpdates
-  /Sync/              - SyncEngine, orchestrators, persisters (MessagePersister, LabelPersister, AccountPersister)
+  /Sync/              - SyncEngine, orchestrators, persisters; HistoryProcessor extensions (LabelOperations, MessageDeletions)
     /Cleanup/         - DataCleanupService extensions: Migration, DuplicateRemoval, EntityCleanup
     /Persistence/     - MessagePersister extensions: Updates, Creation, Participants, Helpers
     /Phases/          - SyncPhase protocol and composable phase implementations
   /TextProcessing/    - EmailTextProcessor support: HTMLEntityDecoder, HTMLQuoteRemover, PlainTextQuoteRemover, TextSnippetCreator
-  /Compose/           - RecipientManager, ContactAutocompleteService, ReplyMetadataBuilder, MessageFormatBuilder
   /VirtualScroll/     - VirtualScrollConfiguration, MessageWindow
   /Background/        - BackgroundSyncManager, BackgroundTaskRegistry, BackgroundTaskConfiguration (BGTaskScheduler)
-  /HTMLSanitization/  - Security pipeline for email HTML (URL/CSS sanitization, tracking removal)
+  WebKitPrewarmer.swift - Prewarms WKWebView for faster newsletter rendering
 /Views/
-  /Chat/              - ChatView, MessageBubble (with style config), MessageContentView, BubbleAvatarView, MessageBubbleStyle
+  /Chat/              - ChatView, MessageBubble (with style config), MessageContentView, BubbleAvatarView, MessageBubbleStyle, MessageContextMenuPreview
   /Compose/           - ComposeView, RecipientChip, ComposeAttachmentThumbnail
   /Components/
     /Attachments/     - AttachmentGridView, ImageAttachmentBubble, PDFAttachmentCard, etc.
@@ -87,7 +91,10 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
 - **`/Services/Sync/`** - SyncEngine orchestrates InitialSyncOrchestrator (full sync) and IncrementalSyncOrchestrator (delta sync via History API)
 - **`/Services/Sync/Phases/`** - Composable SyncPhase protocol with phases: HistoryCollection, MessageFetch, LabelProcessing, Reconciliation, ConversationUpdate
 - **`/Services/TextProcessing/`** - Email text extraction: HTMLEntityDecoder (lookup table), HTMLQuoteRemover, PlainTextQuoteRemover, TextSnippetCreator
-- **`/Services/Compose/`** - Extracted compose services: RecipientManager, ContactAutocompleteService, ReplyMetadataBuilder, MessageFormatBuilder
+- **`/Services/Compose/`** - Extracted compose services: RecipientManager, ContactAutocompleteService, ReplyMetadataBuilder, MessageFormatBuilder, ComposeSendOrchestrator
+- **`/Services/Chat/`** - ChatContactManager for contact lookup and updates in chat view
+- **`/Services/Models/`** - Per-entity Core Data typed accessors (Account, Message, Conversation, Attachment, etc.)
+- **`/Services/DatabaseMaintenance/`** - DatabaseMaintenanceService split into extensions: Cleanup, SQLite, Stats
 - **`/Services/Background/`** - BackgroundSyncManager, BackgroundTaskRegistry (centralized task registration), BackgroundTaskConfiguration (task presets)
 - **ConversationManager** - Groups messages by `participantHash` (normalized emails excluding user's aliases)
 - **ConversationCreationSerializer** - Actor preventing duplicate conversations during concurrent processing
@@ -139,7 +146,7 @@ Categories: sync, api, coreData, auth, ui, background, conversation
 - **@MainActor** on ViewModels and UI services
 - **Actor isolation** for thread-safe state (TokenManager, PendingActionsManager, ConversationCreationSerializer, ProcessedTextCache, DiskImageCache, EnhancedImageCache)
 - **Background contexts** for Core Data operations
-- **Typed accessors** in `/Services/Models+Extensions.swift` (avoid `value(forKey:)`)
+- **Typed accessors** in `/Services/Models/` (per-entity extension files, avoid `value(forKey:)`)
 - **Extensions for code organization** - Large actors/structs split into extensions in separate files (ContactsResolver, PendingActionsManager, CoreDataBatchOperations). Main file keeps type definition + core logic, extensions in subdirectories handle specific concerns. Properties must be `internal` (not `private`) for extensions to access.
 - **SyncPhase protocol** - Composable sync phases with typed Input/Output and progress reporting via SyncPhaseContext
 - **Service composition** - ViewModels compose extracted services (e.g., ComposeViewModel uses RecipientManager, ContactAutocompleteService)
