@@ -1,7 +1,8 @@
 import Foundation
 import CoreData
 
-class MessageActions: ObservableObject {
+@MainActor
+final class MessageActions: ObservableObject {
     private let coreDataStack: CoreDataStack
     private let pendingActionsManager: PendingActionsManager
 
@@ -15,17 +16,14 @@ class MessageActions: ObservableObject {
 
     // MARK: - Mark Read/Unread
 
-    @MainActor
     func markAsRead(message: Message) async {
         await updateReadState(message: message, isUnread: false, actionType: .markRead)
     }
 
-    @MainActor
     func markAsUnread(message: Message) async {
         await updateReadState(message: message, isUnread: true, actionType: .markUnread)
     }
 
-    @MainActor
     func markConversationAsUnread(conversation: Conversation) async {
         let context = coreDataStack.viewContext
         let inboxMessages = fetchInboxMessages(for: conversation, context: context)
@@ -39,7 +37,6 @@ class MessageActions: ObservableObject {
         }
     }
 
-    @MainActor
     func markConversationAsRead(conversation: Conversation) async {
         let context = coreDataStack.viewContext
         let unreadInboxMessages = fetchUnreadInboxMessages(for: conversation, context: context)
@@ -50,7 +47,6 @@ class MessageActions: ObservableObject {
     }
 
     /// Core method for updating message read state - eliminates duplication between markAsRead/markAsUnread
-    @MainActor
     private func updateReadState(message: Message, isUnread: Bool, actionType: PendingAction.ActionType) async {
         // Skip if already in desired state
         guard message.isUnread != isUnread else { return }
@@ -76,15 +72,15 @@ class MessageActions: ObservableObject {
 
     /// Mark message as read using ObjectID - safe to call from background threads
     func markAsRead(messageID: NSManagedObjectID) async {
-        var gmailMessageId: String?
-
         let context = coreDataStack.newBackgroundContext()
-        context.performAndWait {
-            guard let message = try? context.existingObject(with: messageID) as? Message else { return }
-            guard message.isUnread else { return }
+
+        let gmailMessageId: String? = await context.perform {
+            guard let message = try? context.existingObject(with: messageID) as? Message else { return nil }
+            guard message.isUnread else { return nil }
             message.isUnread = false
-            gmailMessageId = message.id
+            let messageId = message.id
             try? context.save()
+            return messageId
         }
 
         if let messageId = gmailMessageId, !messageId.isEmpty {
@@ -97,7 +93,6 @@ class MessageActions: ObservableObject {
 
     // MARK: - Archive
 
-    @MainActor
     func archive(message: Message) async {
         guard let labels = message.labels else { return }
         let inboxLabel = labels.first { $0.id == "INBOX" }
@@ -121,7 +116,6 @@ class MessageActions: ObservableObject {
         }
     }
 
-    @MainActor
     func archiveConversation(conversation: Conversation) async {
         Log.debug("archiveConversation called for '\(conversation.displayName ?? "unknown")' (id: \(conversation.id))", category: .message)
 
@@ -175,14 +169,12 @@ class MessageActions: ObservableObject {
 
     // MARK: - Star/Unstar
 
-    @MainActor
     func star(message: Message) async {
         // Note: Star status isn't currently tracked locally in the schema
         // Local-only action (one-way sync: Gmail -> App only)
         coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
     }
 
-    @MainActor
     func unstar(message: Message) async {
         // Local-only action (one-way sync: Gmail -> App only)
         coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)

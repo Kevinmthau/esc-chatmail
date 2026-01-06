@@ -6,9 +6,7 @@ struct AttachmentGridItem: View {
     let showOverlay: Bool
     let overlayCount: Int
     let onTap: () -> Void
-    @State private var thumbnailImage: UIImage?
-    @State private var isLoadingImage = false
-    private let cache = AttachmentCacheActor.shared
+    @StateObject private var thumbnailLoader = AttachmentThumbnailLoader()
 
     var body: some View {
         Button(action: {
@@ -19,7 +17,7 @@ struct AttachmentGridItem: View {
         }) {
             GeometryReader { geometry in
                 ZStack {
-                    if let image = thumbnailImage {
+                    if let image = thumbnailLoader.image {
                         Image(uiImage: image)
                             .resizable()
                             .aspectRatio(contentMode: .fill)
@@ -30,7 +28,7 @@ struct AttachmentGridItem: View {
                             .fill(Color.gray.opacity(0.1))
                             .overlay(
                                 Group {
-                                    if isLoadingImage {
+                                    if thumbnailLoader.isLoading {
                                         ProgressView()
                                             .progressViewStyle(CircularProgressViewStyle())
                                             .scaleEffect(0.6)
@@ -63,52 +61,21 @@ struct AttachmentGridItem: View {
         }
         .buttonStyle(PlainButtonStyle())
         .onAppear {
-            loadThumbnail()
+            thumbnailLoader.loadDownsampled(
+                attachmentId: attachment.id,
+                localPath: attachment.localURL,
+                previewPath: attachment.previewURL,
+                targetSize: CGSize(width: 200, height: 200),
+                isImage: attachment.isImage
+            )
             if attachment.state == .queued {
                 Task {
                     await downloader.downloadAttachmentIfNeeded(for: attachment)
                 }
             }
         }
-    }
-
-    private func loadThumbnail() {
-        guard thumbnailImage == nil,
-              !isLoadingImage,
-              let attachmentId = attachment.id else { return }
-
-        isLoadingImage = true
-        Task {
-            let previewPath = attachment.previewURL
-            let targetSize = CGSize(width: 200, height: 200) // Grid items are small
-
-            // Try to load downsampled for grid view
-            if let localPath = attachment.localURL,
-               attachment.isImage {
-                if let image = await cache.loadDownsampledImage(
-                    for: attachmentId,
-                    from: localPath,
-                    targetSize: targetSize
-                ) {
-                    await MainActor.run {
-                        self.thumbnailImage = image
-                        self.isLoadingImage = false
-                    }
-                    return
-                }
-            }
-
-            // Fall back to preview
-            if let image = await cache.loadThumbnail(for: attachmentId, from: previewPath) {
-                await MainActor.run {
-                    self.thumbnailImage = image
-                    self.isLoadingImage = false
-                }
-            } else {
-                await MainActor.run {
-                    self.isLoadingImage = false
-                }
-            }
+        .onDisappear {
+            thumbnailLoader.cancel()
         }
     }
 }

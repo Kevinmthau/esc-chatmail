@@ -2,6 +2,7 @@ import Foundation
 import Contacts
 import Combine
 
+@MainActor
 final class ContactsService: ObservableObject {
     @Published var authorizationStatus: CNAuthorizationStatus = .notDetermined
     @Published var isLoadingContacts = false
@@ -90,7 +91,7 @@ final class ContactsService: ObservableObject {
     }
 
     /// Synchronous contact search - must be called from background thread
-    private static func performContactSearch(
+    nonisolated private static func performContactSearch(
         query: String,
         keysToFetch: [CNKeyDescriptor],
         contactStore: CNContactStore

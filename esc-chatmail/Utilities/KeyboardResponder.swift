@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 
+@MainActor
 final class KeyboardResponder: ObservableObject {
     @Published var currentHeight: CGFloat = 0
     @Published var isKeyboardVisible: Bool = false

@@ -2,6 +2,7 @@ import Foundation
 
 /// UI-facing wrapper around ParallelMessageFetcher with adaptive optimization
 /// Automatically adjusts fetch configuration based on performance metrics
+@MainActor
 final class AdaptiveMessageFetcher: ObservableObject {
     @Published var isOptimizing = false
     @Published var currentConfiguration: FetchConfiguration = .default

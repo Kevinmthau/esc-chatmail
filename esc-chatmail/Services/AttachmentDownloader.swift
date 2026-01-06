@@ -2,7 +2,8 @@ import Foundation
 import CoreData
 import Combine
 
-class AttachmentDownloader: ObservableObject {
+@MainActor
+final class AttachmentDownloader: ObservableObject {
     static let shared = AttachmentDownloader()
     
     @Published var downloadProgress: [String: Double] = [:]

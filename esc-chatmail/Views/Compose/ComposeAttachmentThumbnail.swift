@@ -3,12 +3,11 @@ import SwiftUI
 struct ComposeAttachmentThumbnail: View {
     let attachment: Attachment
     let onRemove: () -> Void
-    @State private var thumbnailImage: UIImage?
-    private let cache = AttachmentCacheActor.shared
+    @StateObject private var thumbnailLoader = AttachmentThumbnailLoader()
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            if let image = thumbnailImage {
+            if let image = thumbnailLoader.image {
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -33,25 +32,14 @@ struct ComposeAttachmentThumbnail: View {
             .offset(x: 4, y: -4)
         }
         .onAppear {
-            loadThumbnail()
+            thumbnailLoader.load(attachmentId: attachment.attachmentId, previewPath: attachment.previewURLValue)
+        }
+        .onDisappear {
+            thumbnailLoader.cancel()
         }
     }
 
     private var isPDF: Bool {
         return attachment.mimeTypeValue == "application/pdf"
-    }
-
-    private func loadThumbnail() {
-        guard thumbnailImage == nil,
-              let attachmentId = attachment.attachmentId else { return }
-
-        Task {
-            let previewPath = attachment.previewURLValue
-            if let image = await cache.loadThumbnail(for: attachmentId, from: previewPath) {
-                await MainActor.run {
-                    self.thumbnailImage = image
-                }
-            }
-        }
     }
 }
