@@ -234,7 +234,11 @@ final class ConversationListViewModel: ObservableObject {
                 guard let participants = conversation.participants else { return [] }
                 return participants.compactMap { $0.person?.email }
             }
-            await personCache.prefetch(emails: Array(Set(allEmails)))
+            let uniqueEmails = Array(Set(allEmails))
+            await personCache.prefetch(emails: uniqueEmails)
+
+            // Also prefetch profile photos to avoid thundering herd on first load
+            await ProfilePhotoResolver.shared.prefetchPhotos(for: uniqueEmails)
         }
     }
 
@@ -260,12 +264,15 @@ final class ConversationListViewModel: ObservableObject {
         performInitialSync()
         startPeriodicSync()
 
+        // Prefetch photos immediately to avoid slow avatar loading in rows
+        // This needs to run before rows' .task blocks fire
+        prefetchPersonData(from: conversations)
+
         // Defer non-critical work to avoid blocking initial render
         Task.detached(priority: .utility) { [weak self] in
             try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
             await MainActor.run { [weak self] in
                 guard let self = self else { return }
-                self.prefetchPersonData(from: conversations)
                 self.loadContactsCache()
                 self.refreshConversationNames()
             }

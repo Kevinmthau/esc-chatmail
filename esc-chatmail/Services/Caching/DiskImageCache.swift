@@ -12,7 +12,8 @@ actor DiskImageCache {
     private let maxCacheSize: Int64 = 100 * 1024 * 1024 // 100 MB
 
     private init() {
-        let cachesPath = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        let cachesPath = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
         self.cacheDirectory = cachesPath.appendingPathComponent("ImageCache")
         Self.createDirectoryIfNeeded(at: cacheDirectory)
 

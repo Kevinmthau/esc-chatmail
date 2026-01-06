@@ -128,8 +128,11 @@ actor AttachmentCacheActor {
             return nil
         }
 
+        // Capture screen scale on main actor before detached task
+        let scale = await MainActor.run { UIScreen.main.scale }
+
         let image = await Task.detached(priority: .userInitiated) {
-            self.downsampleImage(at: url, to: targetSize, contentMode: contentMode)
+            self.downsampleImage(at: url, to: targetSize, contentMode: contentMode, scale: scale)
         }.value
 
         // Cache the downsampled image
@@ -144,14 +147,14 @@ actor AttachmentCacheActor {
     private nonisolated func downsampleImage(
         at url: URL,
         to targetSize: CGSize,
-        contentMode: UIView.ContentMode
+        contentMode: UIView.ContentMode,
+        scale: CGFloat
     ) -> UIImage? {
         let imageSourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, imageSourceOptions) else {
             return nil
         }
 
-        let scale = UIScreen.main.scale
         let maxDimensionInPixels = max(targetSize.width, targetSize.height) * scale
         let downsampleOptions = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -183,11 +186,14 @@ actor AttachmentCacheActor {
             return nil
         }
 
+        // Capture screen scale on main actor before detached task
+        let scale = await MainActor.run { UIScreen.main.scale }
+
         let image = await Task.detached(priority: .userInitiated) {
             // Use downsampling for very large images
             let maxDimension: CGFloat = 4096
             let targetSize = CGSize(width: maxDimension, height: maxDimension)
-            return self.loadImageWithSizeLimit(at: url, maxSize: targetSize)
+            return self.loadImageWithSizeLimit(at: url, maxSize: targetSize, scale: scale)
         }.value
 
         // Cache with estimated cost
@@ -199,7 +205,7 @@ actor AttachmentCacheActor {
         return image
     }
 
-    private nonisolated func loadImageWithSizeLimit(at url: URL, maxSize: CGSize) -> UIImage? {
+    private nonisolated func loadImageWithSizeLimit(at url: URL, maxSize: CGSize, scale: CGFloat) -> UIImage? {
         // First, get image dimensions without loading the full image
         let imageSourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, imageSourceOptions),
@@ -215,7 +221,7 @@ actor AttachmentCacheActor {
         }
 
         // Otherwise, downsample it
-        return downsampleImage(at: url, to: maxSize, contentMode: .scaleAspectFit)
+        return downsampleImage(at: url, to: maxSize, contentMode: .scaleAspectFit, scale: scale)
     }
 
     // MARK: - Data Cache

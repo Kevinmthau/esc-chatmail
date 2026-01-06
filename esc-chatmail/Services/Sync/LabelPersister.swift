@@ -2,7 +2,38 @@ import Foundation
 import CoreData
 
 extension MessagePersister {
+    /// Prefetches all label IDs for efficient lookups.
+    /// Returns only IDs (Sendable) to avoid passing NSManagedObjects across async boundaries.
+    func prefetchLabelIds(in context: NSManagedObjectContext) async -> Set<String> {
+        return await context.perform {
+            let request = Label.fetchRequest()
+            request.fetchBatchSize = 100
+            guard let labels = try? context.fetch(request) else {
+                return []
+            }
+            let ids = Set(labels.map { $0.id })
+            Log.debug("Prefetched \(ids.count) label IDs", category: .sync)
+            return ids
+        }
+    }
+
+    /// Fetches labels by IDs within the given context.
+    /// IMPORTANT: Call this inside a context.perform block to ensure thread safety.
+    /// This is nonisolated because it must be called synchronously within context.perform.
+    /// - Parameters:
+    ///   - ids: Set of label IDs to fetch
+    ///   - context: The Core Data context (must be on its queue)
+    /// - Returns: Dictionary mapping label ID to Label object
+    nonisolated func fetchLabelsByIds(_ ids: Set<String>, in context: NSManagedObjectContext) -> [String: Label] {
+        guard !ids.isEmpty else { return [:] }
+        let request = Label.fetchRequest()
+        request.predicate = NSPredicate(format: "id IN %@", ids)
+        guard let labels = try? context.fetch(request) else { return [:] }
+        return Dictionary(uniqueKeysWithValues: labels.map { ($0.id, $0) })
+    }
+
     /// Prefetches all labels into a dictionary for efficient lookups
+    /// @available(*, deprecated, message: "Use prefetchLabelIds instead to avoid passing NSManagedObjects across async boundaries")
     func prefetchLabels(in context: NSManagedObjectContext) async -> [String: Label] {
         return await context.perform {
             let request = Label.fetchRequest()

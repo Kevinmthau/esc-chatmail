@@ -51,7 +51,7 @@ struct ReconciliationPhase: SyncPhase {
             ) { [messagePersister] message in
                 await messagePersister.saveMessage(
                     message,
-                    labelCache: context.labelCache,
+                    labelIds: context.labelIds,
                     myAliases: context.myAliases,
                     in: context.coreDataContext
                 )
@@ -64,7 +64,7 @@ struct ReconciliationPhase: SyncPhase {
 
         // Reconcile labels
         context.reportProgress(0.8, status: "Reconciling labels...", phase: self)
-        await reconciliation.reconcileLabelStates(in: context.coreDataContext, labelCache: context.labelCache)
+        await reconciliation.reconcileLabelStates(in: context.coreDataContext, labelIds: context.labelIds)
 
         context.reportProgress(1.0, status: "Reconciliation complete", phase: self)
     }

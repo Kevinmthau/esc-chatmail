@@ -122,7 +122,9 @@ struct HTMLMessageView: View {
             let messageId = message.id
             Task {
                 await context.perform {
-                    let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+                    guard let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+                        return
+                    }
                     let messagesDirectory = documentsPath.appendingPathComponent("Messages")
                     let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
                     message.bodyStorageURI = fileURL.absoluteString

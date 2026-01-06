@@ -20,8 +20,17 @@ extension NSManagedObjectContext {
         where predicate: NSPredicate? = nil,
         sortedBy sortDescriptors: [NSSortDescriptor]? = nil
     ) async -> T? {
-        await perform {
-            try? self.fetchFirst(type, where: predicate, sortedBy: sortDescriptors)
+        // Copy to nonisolated(unsafe) to satisfy Sendable requirements
+        // Safe because NSPredicate/NSSortDescriptor are immutable after creation
+        nonisolated(unsafe) let safePredicate = predicate
+        nonisolated(unsafe) let safeSortDescriptors = sortDescriptors
+        return await perform {
+            do {
+                return try self.fetchFirst(type, where: safePredicate, sortedBy: safeSortDescriptors)
+            } catch {
+                Log.warning("fetchFirst failed for \(type): \(error.localizedDescription)", category: .coreData)
+                return nil
+            }
         }
     }
 
@@ -37,8 +46,10 @@ extension NSManagedObjectContext {
         where predicate: NSPredicate? = nil,
         sortedBy sortDescriptors: [NSSortDescriptor]? = nil
     ) async throws -> T? {
-        try await perform {
-            try self.fetchFirst(type, where: predicate, sortedBy: sortDescriptors)
+        nonisolated(unsafe) let safePredicate = predicate
+        nonisolated(unsafe) let safeSortDescriptors = sortDescriptors
+        return try await perform {
+            try self.fetchFirst(type, where: safePredicate, sortedBy: safeSortDescriptors)
         }
     }
 
@@ -55,8 +66,15 @@ extension NSManagedObjectContext {
         sortedBy sortDescriptors: [NSSortDescriptor]? = nil,
         limit: Int? = nil
     ) async -> [T] {
-        await perform {
-            (try? self.fetchAll(type, where: predicate, sortedBy: sortDescriptors, limit: limit)) ?? []
+        nonisolated(unsafe) let safePredicate = predicate
+        nonisolated(unsafe) let safeSortDescriptors = sortDescriptors
+        return await perform {
+            do {
+                return try self.fetchAll(type, where: safePredicate, sortedBy: safeSortDescriptors, limit: limit)
+            } catch {
+                Log.warning("fetchAll failed for \(type): \(error.localizedDescription)", category: .coreData)
+                return []
+            }
         }
     }
 
@@ -74,8 +92,10 @@ extension NSManagedObjectContext {
         sortedBy sortDescriptors: [NSSortDescriptor]? = nil,
         limit: Int? = nil
     ) async throws -> [T] {
-        try await perform {
-            try self.fetchAll(type, where: predicate, sortedBy: sortDescriptors, limit: limit)
+        nonisolated(unsafe) let safePredicate = predicate
+        nonisolated(unsafe) let safeSortDescriptors = sortDescriptors
+        return try await perform {
+            try self.fetchAll(type, where: safePredicate, sortedBy: safeSortDescriptors, limit: limit)
         }
     }
 
@@ -88,8 +108,14 @@ extension NSManagedObjectContext {
         _ type: T.Type,
         where predicate: NSPredicate? = nil
     ) async -> Int {
-        await perform {
-            (try? self.count(type, where: predicate)) ?? 0
+        nonisolated(unsafe) let safePredicate = predicate
+        return await perform {
+            do {
+                return try self.count(type, where: safePredicate)
+            } catch {
+                Log.warning("count failed for \(type): \(error.localizedDescription)", category: .coreData)
+                return 0
+            }
         }
     }
 
@@ -107,8 +133,9 @@ extension NSManagedObjectContext {
         where predicate: NSPredicate,
         update: @escaping (T) -> Void
     ) async -> Bool {
-        await perform {
-            guard let entity = try? self.fetchFirst(type, where: predicate) else {
+        nonisolated(unsafe) let safePredicate = predicate
+        return await perform {
+            guard let entity = try? self.fetchFirst(type, where: safePredicate) else {
                 return false
             }
             update(entity)
@@ -128,8 +155,9 @@ extension NSManagedObjectContext {
         where predicate: NSPredicate? = nil,
         update: @escaping (T) -> Void
     ) async -> Int {
-        await perform {
-            let entities = (try? self.fetchAll(type, where: predicate)) ?? []
+        nonisolated(unsafe) let safePredicate = predicate
+        return await perform {
+            let entities = (try? self.fetchAll(type, where: safePredicate)) ?? []
             for entity in entities {
                 update(entity)
             }
@@ -149,8 +177,9 @@ extension NSManagedObjectContext {
         _ type: T.Type,
         where predicate: NSPredicate
     ) async -> Int {
-        await perform {
-            let entities = (try? self.fetchAll(type, where: predicate)) ?? []
+        nonisolated(unsafe) let safePredicate = predicate
+        return await perform {
+            let entities = (try? self.fetchAll(type, where: safePredicate)) ?? []
             for entity in entities {
                 self.delete(entity)
             }
@@ -193,8 +222,9 @@ extension NSManagedObjectContext {
         update: @escaping (T) -> Void,
         caller: String = #function
     ) async -> Bool {
-        await perform {
-            guard let entity = try? self.fetchFirst(type, where: predicate) else {
+        nonisolated(unsafe) let safePredicate = predicate
+        return await perform {
+            guard let entity = try? self.fetchFirst(type, where: safePredicate) else {
                 return false
             }
             update(entity)

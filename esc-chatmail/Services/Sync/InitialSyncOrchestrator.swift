@@ -83,17 +83,16 @@ final class InitialSyncOrchestrator {
             progressHandler(0.1, "Fetching labels...")
             let labels = try await messageFetcher.listLabels()
             await messagePersister.saveLabels(labels, in: context)
-            let labelCache = await messagePersister.prefetchLabels(in: context)
+            let labelIds = await messagePersister.prefetchLabelIds(in: context)
 
             // Phase 3: Fetch and process messages
             progressHandler(0.2, "Fetching messages...")
             let query = buildInitialSyncQuery()
             log.info("Initial sync query: \(query)")
 
-            nonisolated(unsafe) let unsafeLabelCache = labelCache
             let result = try await fetchAndProcessMessages(
                 query: query,
-                labelCache: unsafeLabelCache,
+                labelIds: labelIds,
                 context: context,
                 progressHandler: { progress, status in
                     // Map 0-1 to 0.2-0.85
@@ -112,7 +111,7 @@ final class InitialSyncOrchestrator {
             let syncCompletedWithWarnings = await handleSyncCompletion(
                 result: result,
                 profile: profile,
-                labelCache: unsafeLabelCache,
+                labelIds: labelIds,
                 context: context
             )
 
@@ -193,7 +192,7 @@ final class InitialSyncOrchestrator {
 
     private func fetchAndProcessMessages(
         query: String,
-        labelCache: [String: Label],
+        labelIds: Set<String>,
         context: NSManagedObjectContext,
         progressHandler: @escaping (Double, String) -> Void
     ) async throws -> BatchProcessingResult {
@@ -227,7 +226,7 @@ final class InitialSyncOrchestrator {
             guard let self = self else { return }
             await self.messagePersister.saveMessage(
                 message,
-                labelCache: labelCache,
+                labelIds: labelIds,
                 myAliases: self.myAliases,
                 in: context
             )
@@ -237,7 +236,7 @@ final class InitialSyncOrchestrator {
     private func handleSyncCompletion(
         result: BatchProcessingResult,
         profile: GmailProfile,
-        labelCache: [String: Label],
+        labelIds: Set<String>,
         context: NSManagedObjectContext
     ) async -> Bool {
         var syncCompletedWithWarnings = false
@@ -254,7 +253,7 @@ final class InitialSyncOrchestrator {
                 guard let self = self else { return }
                 await self.messagePersister.saveMessage(
                     message,
-                    labelCache: labelCache,
+                    labelIds: labelIds,
                     myAliases: self.myAliases,
                     in: context
                 )

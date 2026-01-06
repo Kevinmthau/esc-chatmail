@@ -106,13 +106,12 @@ final class IncrementalSyncOrchestrator {
         myAliases = Set(([accountData.email] + accountData.aliases).map(normalizedEmail))
 
         let context = coreDataStack.newBackgroundContext()
-        let labelCache = await messagePersister.prefetchLabels(in: context)
+        let labelIds = await messagePersister.prefetchLabelIds(in: context)
 
         // Create shared context for all phases
-        nonisolated(unsafe) let unsafeLabelCache = labelCache
         let phaseContext = SyncPhaseContext(
             coreDataContext: context,
-            labelCache: unsafeLabelCache,
+            labelIds: labelIds,
             myAliases: myAliases,
             syncStartTime: syncStartTime,
             progressHandler: progressHandler,
@@ -195,7 +194,7 @@ final class IncrementalSyncOrchestrator {
         log.info("Starting history recovery sync")
 
         let context = coreDataStack.newBackgroundContext()
-        let labelCache = await messagePersister.prefetchLabels(in: context)
+        let labelIds = await messagePersister.prefetchLabelIds(in: context)
 
         let recoveryStartTime = calculateRecoveryStartTime()
         let query = "after:\(Int(recoveryStartTime)) -label:spam -label:drafts"
@@ -219,7 +218,6 @@ final class IncrementalSyncOrchestrator {
         } while pageToken != nil
 
         // Fetch messages
-        nonisolated(unsafe) let unsafeLabelCache = labelCache
         let result = try await BatchProcessor.processMessages(
             messageIds: allMessageIds,
             batchSize: SyncConfig.messageBatchSize,
@@ -233,7 +231,7 @@ final class IncrementalSyncOrchestrator {
             guard let self = self else { return }
             await self.messagePersister.saveMessage(
                 message,
-                labelCache: unsafeLabelCache,
+                labelIds: labelIds,
                 myAliases: self.myAliases,
                 in: context
             )

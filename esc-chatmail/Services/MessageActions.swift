@@ -27,17 +27,13 @@ class MessageActions: ObservableObject {
 
     @MainActor
     func markConversationAsUnread(conversation: Conversation) async {
-        guard let messages = conversation.messages, !messages.isEmpty else { return }
+        let context = coreDataStack.viewContext
+        let inboxMessages = fetchInboxMessages(for: conversation, context: context)
 
-        // Find the latest INBOX message
-        let inboxMessages = messages.filter { message in
-            guard let labels = message.labels else { return false }
-            return labels.contains { $0.id == "INBOX" }
-        }
-
-        if let latestInboxMessage = inboxMessages.max(by: { $0.internalDate < $1.internalDate }) {
+        if let latestInboxMessage = inboxMessages.first { // Already sorted by internalDate descending
             await markAsUnread(message: latestInboxMessage)
-        } else if let latestMessage = messages.max(by: { $0.internalDate < $1.internalDate }) {
+        } else if let messages = conversation.messages,
+                  let latestMessage = messages.max(by: { $0.internalDate < $1.internalDate }) {
             // Fallback to latest message if no INBOX messages
             await markAsUnread(message: latestMessage)
         }
@@ -45,14 +41,8 @@ class MessageActions: ObservableObject {
 
     @MainActor
     func markConversationAsRead(conversation: Conversation) async {
-        guard let messages = conversation.messages, !messages.isEmpty else { return }
-
-        // Mark all unread INBOX messages as read
-        let unreadInboxMessages = messages.filter { message in
-            guard message.isUnread else { return false }
-            guard let labels = message.labels else { return false }
-            return labels.contains { $0.id == "INBOX" }
-        }
+        let context = coreDataStack.viewContext
+        let unreadInboxMessages = fetchUnreadInboxMessages(for: conversation, context: context)
 
         for message in unreadInboxMessages {
             await markAsRead(message: message)
@@ -200,23 +190,36 @@ class MessageActions: ObservableObject {
 
     // MARK: - Helpers
 
-    private func updateConversationInboxStatus(_ conversation: Conversation) {
-        guard let messages = conversation.messages else { return }
+    /// Fetches INBOX messages for a conversation using Core Data predicates (avoids N+1)
+    private func fetchInboxMessages(for conversation: Conversation, context: NSManagedObjectContext) -> [Message] {
+        let request = Message.fetchRequest()
+        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            NSPredicate(format: "conversation == %@", conversation),
+            NSPredicate(format: "ANY labels.id == %@", "INBOX")
+        ])
+        request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: false)]
+        return (try? context.fetch(request)) ?? []
+    }
 
-        let inboxMessages = messages.filter { message in
-            guard let labels = message.labels else { return false }
-            return labels.contains { $0.id == "INBOX" }
-        }
+    /// Fetches unread INBOX messages for a conversation using Core Data predicates (avoids N+1)
+    private func fetchUnreadInboxMessages(for conversation: Conversation, context: NSManagedObjectContext) -> [Message] {
+        let request = Message.fetchRequest()
+        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            NSPredicate(format: "conversation == %@", conversation),
+            NSPredicate(format: "ANY labels.id == %@", "INBOX"),
+            NSPredicate(format: "isUnread == YES")
+        ])
+        return (try? context.fetch(request)) ?? []
+    }
+
+    private func updateConversationInboxStatus(_ conversation: Conversation) {
+        let context = coreDataStack.viewContext
+        let inboxMessages = fetchInboxMessages(for: conversation, context: context)
 
         conversation.hasInbox = !inboxMessages.isEmpty
         conversation.inboxUnreadCount = Int32(inboxMessages.filter { $0.isUnread }.count)
+        conversation.latestInboxDate = inboxMessages.first?.internalDate // Already sorted descending
 
-        if let latestInboxMessage = inboxMessages.max(by: { $0.internalDate < $1.internalDate }) {
-            conversation.latestInboxDate = latestInboxMessage.internalDate
-        } else {
-            conversation.latestInboxDate = nil
-        }
-
-        coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
+        coreDataStack.saveIfNeeded(context: context)
     }
 }

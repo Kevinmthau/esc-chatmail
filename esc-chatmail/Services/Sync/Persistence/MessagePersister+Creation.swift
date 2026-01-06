@@ -8,7 +8,7 @@ extension MessagePersister {
     /// Creates a new message in Core Data.
     func createNewMessage(
         _ processedMessage: ProcessedMessage,
-        labelCache: [String: Label]?,
+        labelIds: Set<String>?,
         myAliases: Set<String>,
         in context: NSManagedObjectContext
     ) async {
@@ -62,17 +62,14 @@ extension MessagePersister {
             }
         }
 
-        // Save labels
+        // Save labels - fetch all needed labels in a single batch query for efficiency
+        let messageLabelIds = Set(processedMessage.labelIds)
+        let hasInboxLabel = messageLabelIds.contains("INBOX")
         var addedLabelIds: [String] = []
-        let hasInboxLabel = processedMessage.labelIds.contains("INBOX")
+        // Batch fetch labels (nonisolated function, safe to call directly)
+        let labelCache = fetchLabelsByIds(messageLabelIds, in: context)
         for labelId in processedMessage.labelIds {
-            let label: Label?
-            if let cache = labelCache {
-                label = cache[labelId]
-            } else {
-                label = await findLabel(id: labelId, in: context)
-            }
-            if let label = label {
+            if let label = labelCache[labelId] {
                 message.addToLabels(label)
                 addedLabelIds.append(labelId)
             }

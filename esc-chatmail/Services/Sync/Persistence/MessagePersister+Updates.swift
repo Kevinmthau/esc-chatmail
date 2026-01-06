@@ -9,7 +9,7 @@ extension MessagePersister {
     /// - Returns: true if an existing message was found and updated
     func updateExistingMessage(
         _ processedMessage: ProcessedMessage,
-        labelCache: [String: Label]?,
+        labelIds: Set<String>?,
         in context: NSManagedObjectContext
     ) async -> Bool {
         let request = Message.fetchRequest()
@@ -24,16 +24,13 @@ extension MessagePersister {
         existingMessage.snippet = processedMessage.snippet
         existingMessage.cleanedSnippet = processedMessage.cleanedSnippet
 
-        // Update labels
+        // Update labels - fetch all needed labels in a single batch query
+        let messageLabelIds = Set(processedMessage.labelIds)
         existingMessage.labels = nil
+        // Batch fetch labels (nonisolated function, safe to call directly)
+        let labelCache = fetchLabelsByIds(messageLabelIds, in: context)
         for labelId in processedMessage.labelIds {
-            let label: Label?
-            if let cache = labelCache {
-                label = cache[labelId]
-            } else {
-                label = await findLabel(id: labelId, in: context)
-            }
-            if let label = label {
+            if let label = labelCache[labelId] {
                 existingMessage.addToLabels(label)
             }
         }

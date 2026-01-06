@@ -18,7 +18,7 @@ protocol SyncPhase {
 /// Shared context for sync phases
 struct SyncPhaseContext {
     let coreDataContext: NSManagedObjectContext
-    let labelCache: [String: Label]
+    let labelIds: Set<String>
     let myAliases: Set<String>
     let syncStartTime: Date
     let progressHandler: (Double, String) -> Void

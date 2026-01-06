@@ -168,13 +168,13 @@ final class SyncEngine: ObservableObject {
         await conversationManager.updateAllConversationRollups(in: context)
     }
 
-    /// Prefetches labels for background sync
-    nonisolated func prefetchLabelsForBackground(in context: NSManagedObjectContext) async -> [String: Label] {
-        return await messagePersister.prefetchLabels(in: context)
+    /// Prefetches label IDs for background sync
+    nonisolated func prefetchLabelIdsForBackground(in context: NSManagedObjectContext) async -> Set<String> {
+        return await messagePersister.prefetchLabelIds(in: context)
     }
 
     /// Saves a message (used by BackgroundSyncManager)
-    func saveMessage(_ gmailMessage: GmailMessage, labelCache: [String: Label]? = nil, in context: NSManagedObjectContext) async {
+    func saveMessage(_ gmailMessage: GmailMessage, labelIds: Set<String>? = nil, in context: NSManagedObjectContext) async {
         var myAliases = initialSyncOrchestrator.getMyAliases()
 
         // If aliases aren't loaded in memory, fetch from Core Data
@@ -185,7 +185,7 @@ final class SyncEngine: ObservableObject {
 
         await messagePersister.saveMessage(
             gmailMessage,
-            labelCache: labelCache,
+            labelIds: labelIds,
             myAliases: myAliases,
             in: context
         )

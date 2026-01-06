@@ -41,7 +41,7 @@ struct MessageFetchPhase: SyncPhase {
         } messageHandler: { [messagePersister] message in
             await messagePersister.saveMessage(
                 message,
-                labelCache: context.labelCache,
+                labelIds: context.labelIds,
                 myAliases: context.myAliases,
                 in: context.coreDataContext
             )

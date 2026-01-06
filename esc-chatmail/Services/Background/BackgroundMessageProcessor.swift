@@ -66,8 +66,8 @@ final class BackgroundMessageProcessor {
     func fetchAndStoreMessages(messageIds: [String]) async {
         let context = coreDataStack.newBackgroundContext()
 
-        // Prefetch labels for efficient lookups
-        let labelCache = await syncEngine.prefetchLabelsForBackground(in: context)
+        // Prefetch label IDs for efficient lookups (IDs are Sendable, safe to pass across async boundaries)
+        let labelIds = await syncEngine.prefetchLabelIdsForBackground(in: context)
 
         let batchSize = 10
         var successCount = 0
@@ -89,7 +89,7 @@ final class BackgroundMessageProcessor {
                 for await (messageId, result) in group {
                     switch result {
                     case .success(let message):
-                        await syncEngine.saveMessage(message, labelCache: labelCache, in: context)
+                        await syncEngine.saveMessage(message, labelIds: labelIds, in: context)
                         successCount += 1
                     case .failure(let error):
                         failedCount += 1

@@ -98,20 +98,20 @@ final class SyncReconciliation: Sendable {
         return max(reconciliationStartTime, maxReconciliationTime, installCutoff)
     }
 
-    /// Finds message IDs that don't exist in local database
+    /// Finds message IDs that don't exist in local database using efficient batch query
     private func findMissingMessages(ids: [String], in context: NSManagedObjectContext) async -> [String] {
         await context.perform {
-            var missing: [String] = []
-            for messageId in ids {
-                let request = Message.fetchRequest()
-                request.predicate = NSPredicate(format: "id == %@", messageId)
-                request.fetchLimit = 1
+            let request = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
+            request.predicate = MessagePredicates.ids(ids)
+            request.resultType = .dictionaryResultType
+            request.propertiesToFetch = ["id"]
 
-                if let count = try? context.count(for: request), count == 0 {
-                    missing.append(messageId)
-                }
+            guard let results = try? context.fetch(request) as? [[String: String]] else {
+                return ids  // If fetch fails, assume all missing
             }
-            return missing
+
+            let existingIds = Set(results.compactMap { $0["id"] })
+            return ids.filter { !existingIds.contains($0) }
         }
     }
 
@@ -124,10 +124,10 @@ final class SyncReconciliation: Sendable {
     ///
     /// - Parameters:
     ///   - context: Core Data context
-    ///   - labelCache: Pre-fetched label cache
+    ///   - labelIds: Pre-fetched label IDs (labels are fetched inside context.perform for thread safety)
     func reconcileLabelStates(
         in context: NSManagedObjectContext,
-        labelCache: [String: Label]
+        labelIds: Set<String>
     ) async {
         do {
             // Query recent messages (last 2 hours)
@@ -153,7 +153,7 @@ final class SyncReconciliation: Sendable {
                 let result = await reconcileMessageLabels(
                     messageId: messageId,
                     context: context,
-                    labelCache: labelCache
+                    labelIds: labelIds
                 )
                 if result.hadMismatch { stats.labelMismatches += 1 }
                 if result.wasUpdated { stats.updatedMessages += 1 }
@@ -181,12 +181,8 @@ final class SyncReconciliation: Sendable {
     private func reconcileMessageLabels(
         messageId: String,
         context: NSManagedObjectContext,
-        labelCache: [String: Label]
+        labelIds: Set<String>
     ) async -> MessageReconcileResult {
-        // Note: labelCache contains NSManagedObjects which aren't Sendable, but we ensure
-        // all Core Data operations happen on the same background context
-        nonisolated(unsafe) let unsafeLabelCache = labelCache
-
         do {
             // Fetch message from Gmail
             let gmailMessage = try await GmailAPIClient.shared.getMessage(id: messageId, format: "metadata")
@@ -219,7 +215,11 @@ final class SyncReconciliation: Sendable {
                     result.hadMismatch = true
 
                     if gmailHasInbox {
-                        if let inboxLabel = unsafeLabelCache["INBOX"] {
+                        // Fetch INBOX label inside context.perform for thread safety
+                        let labelRequest = Label.fetchRequest()
+                        labelRequest.predicate = NSPredicate(format: "id == %@", "INBOX")
+                        labelRequest.fetchLimit = 1
+                        if let inboxLabel = try? context.fetch(labelRequest).first {
                             localMessage.addToLabels(inboxLabel)
                         }
                     } else {

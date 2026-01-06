@@ -6,6 +6,28 @@ struct HTMLURLSanitizer {
         "http", "https", "mailto", "tel"
     ]
 
+    // Cached compiled regex patterns for performance
+    private static let hrefRegex: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: "href\\s*=\\s*[\"']([^\"']*)[\"']",
+            options: .caseInsensitive
+        )
+    }()
+
+    private static let srcRegex: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: "src\\s*=\\s*[\"']([^\"']*)[\"']",
+            options: .caseInsensitive
+        )
+    }()
+
+    private static let dataURLRegex: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: "^data:image\\/(png|jpeg|jpg|gif|webp|bmp|svg\\+xml|x-icon|vnd\\.microsoft\\.icon)(;base64)?,",
+            options: .caseInsensitive
+        )
+    }()
+
     /// Sanitizes href and src attributes in HTML
     func sanitizeURLs(_ html: String) -> String {
         var result = html
@@ -20,16 +42,15 @@ struct HTMLURLSanitizer {
     }
 
     private func sanitizeHrefAttributes(_ html: String) -> String {
+        guard let regex = Self.hrefRegex else { return html }
         var result = html
-        let hrefPattern = "href\\s*=\\s*[\"']([^\"']*)[\"']"
-        let hrefRegex = try? NSRegularExpression(pattern: hrefPattern, options: .caseInsensitive)
-        let matches = hrefRegex?.matches(in: result, range: NSRange(result.startIndex..., in: result)) ?? []
+        let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
 
         for match in matches.reversed() {
             if let range = Range(match.range(at: 1), in: result) {
                 let url = String(result[range])
                 if !isURLSafe(url) {
-                    let fullRange = Range(match.range, in: result)!
+                    guard let fullRange = Range(match.range, in: result) else { continue }
                     result.replaceSubrange(fullRange, with: "href=\"#\"")
                 }
             }
@@ -39,10 +60,9 @@ struct HTMLURLSanitizer {
     }
 
     private func sanitizeSrcAttributes(_ html: String) -> String {
+        guard let regex = Self.srcRegex else { return html }
         var result = html
-        let srcPattern = "src\\s*=\\s*[\"']([^\"']*)[\"']"
-        let srcRegex = try? NSRegularExpression(pattern: srcPattern, options: .caseInsensitive)
-        let srcMatches = srcRegex?.matches(in: result, range: NSRange(result.startIndex..., in: result)) ?? []
+        let srcMatches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
 
         let transparentPixel = "src=\"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7\""
 
@@ -52,16 +72,16 @@ struct HTMLURLSanitizer {
 
                 // Skip empty URLs but don't replace valid newsletter tracking pixels
                 if url.isEmpty {
-                    let fullRange = Range(match.range, in: result)!
+                    guard let fullRange = Range(match.range, in: result) else { continue }
                     result.replaceSubrange(fullRange, with: transparentPixel)
                 } else if url.hasPrefix("javascript:") || url.hasPrefix("vbscript:") {
                     // Only block explicitly dangerous URLs
-                    let fullRange = Range(match.range, in: result)!
+                    guard let fullRange = Range(match.range, in: result) else { continue }
                     result.replaceSubrange(fullRange, with: transparentPixel)
                 } else if url.hasPrefix("cid:") {
                     // Replace cid: (Content-ID) URLs with transparent placeholder
                     // These are inline email attachments that WKWebView can't load directly
-                    let fullRange = Range(match.range, in: result)!
+                    guard let fullRange = Range(match.range, in: result) else { continue }
                     result.replaceSubrange(fullRange, with: transparentPixel)
                 }
                 // Allow all other URLs including tracking pixels and newsletter images
@@ -107,7 +127,7 @@ struct HTMLURLSanitizer {
 
     /// Validates that a data URL is a safe image format
     func isDataURL(_ url: String) -> Bool {
-        let safeDataURLPattern = "^data:image\\/(png|jpeg|jpg|gif|webp|bmp|svg\\+xml|x-icon|vnd\\.microsoft\\.icon)(;base64)?,"
-        return url.range(of: safeDataURLPattern, options: [.regularExpression, .caseInsensitive]) != nil
+        guard let regex = Self.dataURLRegex else { return false }
+        return regex.firstMatch(in: url, range: NSRange(url.startIndex..., in: url)) != nil
     }
 }

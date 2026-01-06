@@ -55,12 +55,12 @@ actor MessagePersister {
     /// Saves a Gmail message to Core Data.
     /// - Parameters:
     ///   - gmailMessage: The Gmail message to save
-    ///   - labelCache: Pre-fetched label cache for efficient lookups
+    ///   - labelIds: Pre-fetched label IDs (Sendable). Labels are fetched inside context.perform for thread safety.
     ///   - myAliases: Set of user's email aliases
     ///   - context: The Core Data context to save in
     func saveMessage(
         _ gmailMessage: GmailMessage,
-        labelCache: [String: Label]? = nil,
+        labelIds: Set<String>? = nil,
         myAliases: Set<String>,
         in context: NSManagedObjectContext
     ) async {
@@ -86,11 +86,11 @@ actor MessagePersister {
         }
 
         // Check for existing message and update if needed
-        if await updateExistingMessage(processedMessage, labelCache: labelCache, in: context) {
+        if await updateExistingMessage(processedMessage, labelIds: labelIds, in: context) {
             return
         }
 
         // Create new message
-        await createNewMessage(processedMessage, labelCache: labelCache, myAliases: myAliases, in: context)
+        await createNewMessage(processedMessage, labelIds: labelIds, myAliases: myAliases, in: context)
     }
 }

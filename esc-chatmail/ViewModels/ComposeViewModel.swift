@@ -202,70 +202,45 @@ final class ComposeViewModel: ObservableObject {
         )
         let optimisticMessageID = optimisticMessage.id
 
-        // Mark attachments as uploaded immediately so they display non-dimmed
-        sendService.markAttachmentsAsUploaded(Array(attachments))
-
         // Prepare attachment infos for background send
         let attachmentInfos = attachments.map { sendService.attachmentToInfo($0) }
 
         // Build reply data on main actor before background task (Core Data objects aren't Sendable)
-        let replyData: ReplyMetadataBuilder.ReplyData?
+        let orchestratorReplyData: ComposeSendOrchestrator.SendInput.ReplyData?
         switch mode {
         case .reply(let conversation, let replyingTo):
-            replyData = replyMetadataBuilder.buildReplyData(
+            let replyData = replyMetadataBuilder.buildReplyData(
                 conversation: conversation,
                 replyingTo: replyingTo,
                 body: messageBody
             )
+            orchestratorReplyData = ComposeSendOrchestrator.SendInput.ReplyData(
+                recipients: replyData.recipients,
+                body: replyData.body,
+                subject: replyData.subject,
+                threadId: replyData.threadId,
+                inReplyTo: replyData.inReplyTo,
+                references: replyData.references,
+                originalMessage: replyData.originalMessage
+            )
         default:
-            replyData = nil
+            orchestratorReplyData = nil
         }
 
-        // Send in background - don't wait for completion
-        Task.detached { [sendService, syncEngine] in
-            do {
-                let result: GmailSendService.SendResult
+        let input = ComposeSendOrchestrator.SendInput(
+            recipientEmails: recipientEmails,
+            body: messageBody,
+            subject: messageSubject,
+            attachmentInfos: attachmentInfos,
+            replyData: orchestratorReplyData
+        )
 
-                if let replyData = replyData {
-                    result = try await sendService.sendReply(
-                        to: replyData.recipients,
-                        body: replyData.body,
-                        subject: replyData.subject ?? "",
-                        threadId: replyData.threadId ?? "",
-                        inReplyTo: replyData.inReplyTo,
-                        references: replyData.references,
-                        originalMessage: replyData.originalMessage,
-                        attachmentInfos: attachmentInfos
-                    )
-                } else {
-                    result = try await sendService.sendNew(
-                        to: recipientEmails,
-                        body: messageBody,
-                        subject: messageSubject,
-                        attachmentInfos: attachmentInfos
-                    )
-                }
-
-                // Update optimistic message with real IDs
-                await MainActor.run {
-                    if let message = sendService.fetchMessage(byID: optimisticMessageID) {
-                        sendService.updateOptimisticMessage(message, with: result)
-                    }
-                }
-
-                // Trigger sync to fetch the sent message from Gmail
-                try? await syncEngine.performIncrementalSync()
-
-            } catch {
-                // Mark attachments as failed so they show error indicator
-                await MainActor.run {
-                    if let message = sendService.fetchMessage(byID: optimisticMessageID) {
-                        sendService.markAttachmentsAsFailed(message.attachmentsArray)
-                    }
-                }
-                Log.error("Background send failed", category: .message, error: error)
-            }
-        }
+        let orchestrator = ComposeSendOrchestrator(sendService: sendService, syncEngine: syncEngine)
+        orchestrator.executeInBackground(
+            input: input,
+            attachments: Array(attachments),
+            optimisticMessageID: optimisticMessageID
+        )
 
         isSending = false
         return true

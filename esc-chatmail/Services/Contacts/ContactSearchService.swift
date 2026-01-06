@@ -24,7 +24,7 @@ extension ContactsResolver {
         ]
 
         do {
-            // Search by email predicate first (faster)
+            // Search by email predicate (handles normalized matching internally)
             let predicate = CNContact.predicateForContacts(matchingEmailAddress: email)
             let contacts = try contactStore.unifiedContacts(matching: predicate, keysToFetch: keysToFetch)
 
@@ -32,25 +32,6 @@ extension ContactsResolver {
             if let contact = findBestContact(from: contacts, for: email) {
                 return createMatch(from: contact, email: email)
             }
-
-            // If no exact match, try broader search
-            let request = CNContactFetchRequest(keysToFetch: keysToFetch)
-            var allContacts: [CNContact] = []
-
-            try contactStore.enumerateContacts(with: request) { contact, _ in
-                for emailAddress in contact.emailAddresses {
-                    let contactEmail = EmailNormalizer.normalize(emailAddress.value as String)
-                    if contactEmail == EmailNormalizer.normalize(email) {
-                        allContacts.append(contact)
-                        return
-                    }
-                }
-            }
-
-            if let contact = findBestContact(from: allContacts, for: email) {
-                return createMatch(from: contact, email: email)
-            }
-
         } catch {
             Log.error("Error fetching contacts", category: .general, error: error)
         }

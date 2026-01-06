@@ -40,6 +40,9 @@ struct ChatView: View {
                         .id(message.id)
                         .contextMenu {
                             messageContextMenu(for: message)
+                        } preview: {
+                            // Lightweight preview - just show the text content without triggering loads
+                            MessageContextMenuPreview(message: message)
                         }
                     }
                     Color.clear
@@ -64,6 +67,13 @@ struct ChatView: View {
                 Task.detached(priority: .userInitiated) {
                     let messageIds = await messages.map { $0.id }
                     await ProcessedTextCache.shared.prefetch(messageIds: messageIds)
+                }
+
+                // Batch prefetch contacts to avoid thundering herd on first load
+                Task.detached(priority: .userInitiated) {
+                    let senderEmails = await messages.compactMap { $0.senderEmail }
+                    let uniqueEmails = Array(Set(senderEmails))
+                    await ContactsResolver.shared.prewarm(emails: uniqueEmails)
                 }
             }
             .onChange(of: messages.count) { oldCount, newCount in
@@ -107,7 +117,7 @@ struct ChatView: View {
                     .contentShape(Rectangle())
                     .onTapGesture {
                         isTextFieldFocused = false
-                        viewModel.showingParticipantsList = true
+                        viewModel.contactManager.showingParticipantsList = true
                     }
             }
 
@@ -134,46 +144,46 @@ struct ChatView: View {
         .sheet(item: $viewModel.messageToForward) { message in
             ComposeView(mode: .forward(message))
         }
-        .sheet(item: $viewModel.contactToAdd) { wrapper in
+        .sheet(item: $viewModel.contactManager.contactToAdd) { wrapper in
             AddContactView(contact: wrapper.contact)
         }
-        .sheet(isPresented: $viewModel.showingContactPicker) {
+        .sheet(isPresented: $viewModel.contactManager.showingContactPicker) {
             ContactPickerView(
                 onContactSelected: { contact in
-                    viewModel.handleContactSelected(contact)
+                    viewModel.contactManager.handleContactSelected(contact)
                 },
                 onCancel: {
-                    viewModel.handleContactPickerCancelled()
+                    viewModel.contactManager.handleContactPickerCancelled()
                 }
             )
         }
-        .sheet(isPresented: $viewModel.showingParticipantsList) {
+        .sheet(isPresented: $viewModel.contactManager.showingParticipantsList) {
             ParticipantsListView(
                 conversation: conversation,
                 onAddContact: { person in
-                    viewModel.showContactActionSheet(for: person)
+                    viewModel.contactManager.showContactActionSheet(for: person)
                 },
                 onEditContact: { identifier in
-                    viewModel.editExistingContact(identifier: identifier)
+                    viewModel.contactManager.editExistingContact(identifier: identifier)
                 }
             )
         }
         .confirmationDialog(
             "Add Contact",
-            isPresented: $viewModel.showingContactActionSheet,
+            isPresented: $viewModel.contactManager.showingContactActionSheet,
             titleVisibility: .visible
         ) {
             Button("Create New Contact") {
-                viewModel.createNewContact()
+                viewModel.contactManager.createNewContact()
             }
             Button("Add to Existing Contact") {
-                viewModel.addToExistingContact()
+                viewModel.contactManager.addToExistingContact()
             }
             Button("Cancel", role: .cancel) {
-                viewModel.personForContactAction = nil
+                viewModel.contactManager.personForContactAction = nil
             }
         } message: {
-            if let person = viewModel.personForContactAction {
+            if let person = viewModel.contactManager.personForContactAction {
                 Text("Add \(person.email) to your contacts")
             }
         }

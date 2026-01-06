@@ -11,7 +11,9 @@ protocol TokenRefresherProtocol: Sendable {
 final class GoogleTokenRefresher: TokenRefresherProtocol, @unchecked Sendable {
     private let authSession: AuthSession
 
-    init(authSession: AuthSession = .shared) {
+    /// Initialize with an explicit AuthSession instance.
+    /// Note: No default parameter to avoid MainActor-isolated access issues in Swift 6.
+    init(authSession: AuthSession) {
         self.authSession = authSession
     }
 

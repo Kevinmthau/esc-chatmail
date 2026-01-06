@@ -90,9 +90,27 @@ actor ContactsResolver: ContactsResolving {
     }
 
     public func prewarm(emails: [String]) async {
-        // Batch fetch contacts for multiple emails
-        for email in emails {
-            _ = await lookup(email: email)
+        // Ensure authorization once before batch lookups
+        do {
+            try await ensureAuthorization()
+        } catch {
+            Log.warning("Contacts authorization failed for prewarm: \(error)", category: .general)
+            return
+        }
+
+        // Dedupe and normalize emails
+        let uniqueEmails = Set(emails.map { EmailNormalizer.normalize($0) })
+
+        // Populate cache for all unique emails
+        for email in uniqueEmails {
+            // Skip if already cached
+            if cache.object(forKey: email as NSString) != nil {
+                continue
+            }
+            // Search and cache
+            if let match = searchContact(for: email) {
+                cache.setObject(match, forKey: email as NSString)
+            }
         }
     }
 

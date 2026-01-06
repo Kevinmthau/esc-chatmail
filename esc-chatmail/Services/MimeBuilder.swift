@@ -69,14 +69,14 @@ struct MimeBuilder {
         mime += "Message-ID: \(generateMessageId())\r\n"
         
         if let inReplyTo = inReplyTo, !inReplyTo.isEmpty {
-            mime += "In-Reply-To: \(inReplyTo)\r\n"
+            mime += "In-Reply-To: \(sanitizeHeaderValue(inReplyTo))\r\n"
         }
-        
+
         if !references.isEmpty {
-            let referencesHeader = references.joined(separator: " ")
+            let referencesHeader = references.map { sanitizeHeaderValue($0) }.joined(separator: " ")
             mime += "References: \(referencesHeader)\r\n"
         }
-        
+
         mime += "MIME-Version: 1.0\r\n"
         mime += "Content-Type: text/plain; charset=UTF-8\r\n"
         mime += "Content-Transfer-Encoding: 8bit\r\n"
@@ -116,14 +116,14 @@ struct MimeBuilder {
         mime += "Message-ID: \(generateMessageId())\r\n"
         
         if let inReplyTo = inReplyTo, !inReplyTo.isEmpty {
-            mime += "In-Reply-To: \(inReplyTo)\r\n"
+            mime += "In-Reply-To: \(sanitizeHeaderValue(inReplyTo))\r\n"
         }
-        
+
         if !references.isEmpty {
-            let referencesHeader = references.joined(separator: " ")
+            let referencesHeader = references.map { sanitizeHeaderValue($0) }.joined(separator: " ")
             mime += "References: \(referencesHeader)\r\n"
         }
-        
+
         mime += "MIME-Version: 1.0\r\n"
         mime += "Content-Type: multipart/mixed; boundary=\"\(boundary)\"\r\n"
         mime += "\r\n"
@@ -138,10 +138,11 @@ struct MimeBuilder {
         
         // Attachments
         for attachment in attachments {
+            let safeFilename = sanitizeHeaderValue(attachment.filename)
             mime += "--\(boundary)\r\n"
-            mime += "Content-Type: \(attachment.mimeType); name=\"\(attachment.filename)\"\r\n"
+            mime += "Content-Type: \(sanitizeHeaderValue(attachment.mimeType)); name=\"\(safeFilename)\"\r\n"
             mime += "Content-Transfer-Encoding: base64\r\n"
-            mime += "Content-Disposition: attachment; filename=\"\(attachment.filename)\"\r\n"
+            mime += "Content-Disposition: attachment; filename=\"\(safeFilename)\"\r\n"
             mime += "\r\n"
             
             // Convert to standard base64 (not base64url)
@@ -175,13 +176,23 @@ struct MimeBuilder {
         return "<\(uuid)@\(domain)>"
     }
     
+    /// Sanitizes header values to prevent CRLF injection attacks
+    private static func sanitizeHeaderValue(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespaces)
+    }
+
     static func encodeHeaderIfNeeded(_ text: String) -> String {
-        let asciiOnly = text.unicodeScalars.allSatisfy { $0.isASCII }
+        let sanitized = sanitizeHeaderValue(text)
+        let asciiOnly = sanitized.unicodeScalars.allSatisfy { $0.isASCII }
         if asciiOnly {
-            return text
+            return sanitized
         }
 
-        guard let data = text.data(using: .utf8) else { return text }
+        guard let data = sanitized.data(using: .utf8) else { return sanitized }
         let base64 = data.base64EncodedString()
         return "=?UTF-8?B?\(base64)?="
     }

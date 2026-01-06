@@ -90,6 +90,7 @@ struct ConversationListView: View {
             NavigationStack { SettingsView() }
         }
         .onAppear {
+            AppPrewarmer.prewarmAll()
             viewModel.onAppear(conversations: Array(conversations))
         }
         .onDisappear {

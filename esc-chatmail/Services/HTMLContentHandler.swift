@@ -7,7 +7,8 @@ final class HTMLContentHandler {
     private let messagesDirectory: URL
 
     init() {
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
         self.messagesDirectory = documentsPath.appendingPathComponent("Messages")
         createMessagesDirectoryIfNeeded()
     }
