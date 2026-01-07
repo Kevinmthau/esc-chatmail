@@ -36,6 +36,14 @@ enum HTMLQuoteRemover {
         // Unsubscribe sections
         "<div[^>]*class=\"[^\"]*unsubscribe[^\"]*\"[^>]*>.*?</div>",
         "<p[^>]*class=\"[^\"]*unsubscribe[^\"]*\"[^>]*>.*?</p>",
+
+        // Signature blocks
+        "<div class=\"gmail_signature\">.*?</div>",
+        "<div class=\"gmail_signature_prefix\">.*?</div>",
+        "<div id=\"Signature\">.*?</div>",
+        "<div class=\"signature\">.*?</div>",
+        "<div[^>]*class=\"[^\"]*moz-signature[^\"]*\"[^>]*>.*?</div>",
+        "<div[^>]*class=\"[^\"]*ms-outlook-signature[^\"]*\"[^>]*>.*?</div>",
     ]
 
     /// Patterns that indicate the start of quoted content (truncate from here)
@@ -43,6 +51,18 @@ enum HTMLQuoteRemover {
         "On .+? wrote:",
         "From:</strong>.*?Subject:</strong>",
         "-----Original Message-----",
+        // Signature delimiters (plain text within HTML)
+        "<br>\\s*--\\s*<br>",
+        "<br>\\s*--\\s*</div>",
+        "<p>\\s*--\\s*</p>",
+        "<div>\\s*--\\s*</div>",
+        // Mobile signatures
+        "Sent from my iPhone",
+        "Sent from my iPad",
+        "Sent from my Android",
+        "Sent from Outlook",
+        "Get Outlook for",
+        "Sent from Mail for Windows",
     ]
 
     // MARK: - Public API

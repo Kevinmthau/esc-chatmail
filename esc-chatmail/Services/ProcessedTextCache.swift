@@ -152,40 +152,7 @@ enum TextProcessing {
     }
 
     static func stripQuotedText(from text: String) -> String {
-        var normalizedText = text
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-
-        // Use regex for efficient multiple newline collapse instead of while loop
-        normalizedText = normalizedText.replacingOccurrences(of: "\\n{3,}", with: "\n\n", options: .regularExpression)
-
-        let lines = normalizedText.components(separatedBy: "\n")
-        var newMessageLines: [String] = []
-        var lastLineWasEmpty = false
-
-        for (index, line) in lines.enumerated() {
-            let trimmedLine = line.trimmingCharacters(in: .whitespaces)
-
-            // Stop at common quoted text markers
-            if trimmedLine.starts(with: ">") ||
-               (trimmedLine.starts(with: "On ") && trimmedLine.contains("wrote:")) ||
-               (trimmedLine.starts(with: "From:") && index > 0) ||
-               trimmedLine == "..." ||
-               trimmedLine.contains("---------- Forwarded message ---------") ||
-               trimmedLine.contains("________________________________") {
-                break
-            }
-
-            // Skip consecutive empty lines
-            let isEmptyLine = trimmedLine.isEmpty
-            if isEmptyLine && lastLineWasEmpty {
-                continue
-            }
-            lastLineWasEmpty = isEmptyLine
-
-            newMessageLines.append(trimmedLine.isEmpty ? "" : line)
-        }
-
-        return newMessageLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        // Delegate to PlainTextQuoteRemover for unified quote and signature removal
+        PlainTextQuoteRemover.removeQuotes(from: text) ?? text
     }
 }
