@@ -71,38 +71,58 @@ final class AttachmentDownloader: ObservableObject {
             let originalPath = AttachmentPaths.originalPath(idOrUUID: attachmentId, ext: ext)
             let previewPath = AttachmentPaths.previewPath(idOrUUID: attachmentId)
 
-            // Save original file
-            if AttachmentPaths.saveData(data, to: originalPath) {
+            // Process heavy work in background to avoid blocking main thread
+            let processedResult: (savedOriginal: Bool, width: Int16?, height: Int16?, pageCount: Int16?, savedPreview: Bool) = await Task.detached {
+                // Save original file
+                let savedOriginal = AttachmentPaths.saveData(data, to: originalPath)
+
+                var width: Int16?
+                var height: Int16?
+                var pageCount: Int16?
+                var savedPreview = false
+
+                if mimeType.starts(with: "image/") {
+                    // Process image: get dimensions and create preview
+                    if let dimensions = ImageProcessor.getImageDimensions(from: data) {
+                        width = Int16(dimensions.width)
+                        height = Int16(dimensions.height)
+                    }
+
+                    if let thumbnailData = ImageProcessor.generateThumbnail(from: data, mimeType: mimeType) {
+                        savedPreview = AttachmentPaths.saveData(thumbnailData, to: previewPath)
+                    }
+                } else if mimeType == "application/pdf" {
+                    // Process PDF: get page count and create preview
+                    if let count = ImageProcessor.getPDFPageCount(from: data) {
+                        pageCount = Int16(count)
+                    }
+
+                    if let thumbnailData = ImageProcessor.generatePDFThumbnail(from: data) {
+                        savedPreview = AttachmentPaths.saveData(thumbnailData, to: previewPath)
+                    }
+                }
+
+                return (savedOriginal, width, height, pageCount, savedPreview)
+            }.value
+
+            // Update Core Data properties on MainActor
+            if processedResult.savedOriginal {
                 attachment.localURL = originalPath
             } else {
                 Log.warning("Failed to save original attachment file for ID: \(attachmentId)", category: .attachment)
-                // Continue anyway - we can still show preview if it saves
             }
 
-            // Process based on type
-            if mimeType.starts(with: "image/") {
-                // Process image: get dimensions and create preview
-                if let dimensions = ImageProcessor.getImageDimensions(from: data) {
-                    attachment.width = Int16(dimensions.width)
-                    attachment.height = Int16(dimensions.height)
-                }
-
-                if let thumbnailData = ImageProcessor.generateThumbnail(from: data, mimeType: mimeType) {
-                    if AttachmentPaths.saveData(thumbnailData, to: previewPath) {
-                        attachment.previewURL = previewPath
-                    }
-                }
-            } else if mimeType == "application/pdf" {
-                // Process PDF: get page count and create preview
-                if let pageCount = ImageProcessor.getPDFPageCount(from: data) {
-                    attachment.pageCount = Int16(pageCount)
-                }
-
-                if let thumbnailData = ImageProcessor.generatePDFThumbnail(from: data) {
-                    if AttachmentPaths.saveData(thumbnailData, to: previewPath) {
-                        attachment.previewURL = previewPath
-                    }
-                }
+            if let width = processedResult.width {
+                attachment.width = width
+            }
+            if let height = processedResult.height {
+                attachment.height = height
+            }
+            if let pageCount = processedResult.pageCount {
+                attachment.pageCount = pageCount
+            }
+            if processedResult.savedPreview {
+                attachment.previewURL = previewPath
             }
 
             // Update state to downloaded

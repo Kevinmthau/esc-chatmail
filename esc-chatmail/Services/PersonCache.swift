@@ -101,26 +101,23 @@ final class PersonCache: ObservableObject {
             return cached.displayName ?? fallbackDisplayName(for: email)
         }
 
-        // Fetch from Core Data
-        let request = Person.fetchRequest()
-        request.predicate = NSPredicate(format: "email == %@", normalized)
-        request.fetchLimit = 1
+        // Fetch from Core Data in background to avoid blocking main thread
+        let context = coreDataStack.newBackgroundContext()
+        let displayName: String? = await Task.detached {
+            await context.perform {
+                let request = Person.fetchRequest()
+                request.predicate = NSPredicate(format: "email == %@", normalized)
+                request.fetchLimit = 1
+                return try? context.fetch(request).first?.displayName
+            }
+        }.value
 
-        let displayName: String?
-        do {
-            let results = try coreDataStack.viewContext.fetch(request)
-            displayName = results.first?.displayName
-
-            // Cache the result
-            cache[normalized] = CachedPerson(
-                displayName: displayName,
-                email: normalized,
-                cachedAt: Date()
-            )
-        } catch {
-            Log.error("Failed to fetch Person for \(email)", category: .coreData, error: error)
-            displayName = nil
-        }
+        // Cache the result (on MainActor)
+        cache[normalized] = CachedPerson(
+            displayName: displayName,
+            email: normalized,
+            cachedAt: Date()
+        )
 
         return displayName ?? fallbackDisplayName(for: email)
     }

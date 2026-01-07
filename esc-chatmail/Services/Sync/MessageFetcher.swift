@@ -3,8 +3,7 @@ import Foundation
 // Note: SyncConfig is defined in Constants.swift
 
 /// Handles fetching messages from the Gmail API with retry logic and timeout handling
-@MainActor
-final class MessageFetcher {
+final class MessageFetcher: @unchecked Sendable {
     private let apiClient: GmailAPIClient
 
     /// Maximum number of retry attempts for failed messages
@@ -13,7 +12,7 @@ final class MessageFetcher {
     /// Base delay in nanoseconds for exponential backoff (500ms)
     private let baseRetryDelay: UInt64 = 500_000_000
 
-    init() {
+    @MainActor init() {
         self.apiClient = GmailAPIClient.shared
     }
 

@@ -9,7 +9,6 @@ import CoreData
 /// - `GmailSendModels.swift` - SendResult, AttachmentInfo, SendError types
 /// - `GmailSendService+Attachments.swift` - Attachment handling
 /// - `GmailSendService+OptimisticUpdates.swift` - Optimistic UI message management
-@MainActor
 final class GmailSendService: ObservableObject {
 
     // MARK: - Properties
@@ -20,7 +19,7 @@ final class GmailSendService: ObservableObject {
 
     // MARK: - Initialization
 
-    init(
+    @MainActor init(
         viewContext: NSManagedObjectContext,
         apiClient: GmailAPIClient? = nil,
         authSession: AuthSession? = nil

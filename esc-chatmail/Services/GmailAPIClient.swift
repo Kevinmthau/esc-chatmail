@@ -10,9 +10,8 @@ import Foundation
 /// - `GmailAPIClient+Labels.swift` - Profile, labels, and aliases
 /// - `GmailAPIClient+History.swift` - History API with specialized error handling
 /// - `GmailAPIClient+Attachments.swift` - Attachment downloading
-@MainActor
 class GmailAPIClient {
-    static let shared = GmailAPIClient()
+    @MainActor static let shared = GmailAPIClient()
 
     let session: URLSession
     let tokenManager: TokenManagerProtocol
@@ -21,7 +20,7 @@ class GmailAPIClient {
     // MARK: - Initialization
 
     /// Production initializer - uses shared TokenManager.
-    private init() {
+    @MainActor private init() {
         self.tokenManager = TokenManager.shared
         self.retryStrategy = NetworkRetryStrategy()
         self.session = Self.createSession()

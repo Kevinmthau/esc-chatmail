@@ -270,13 +270,14 @@ final class CachedConversationLoader: ObservableObject {
             return
         }
 
-        // Load from Core Data
-        let context = coreDataStack.newBackgroundContext()
-        let loadedMessages = await context.perform {
+        // Load from Core Data using viewContext with perform for proper threading
+        // Messages must be fetched on viewContext since they'll be used on MainActor
+        let viewContext = coreDataStack.viewContext
+        let loadedMessages: [Message] = await viewContext.perform {
             let request = Message.fetchRequest()
             request.predicate = NSPredicate(format: "conversation.id == %@", conversationId)
             request.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: true)]
-            return (try? context.fetch(request)) ?? []
+            return (try? viewContext.fetch(request)) ?? []
         }
 
         // Cache for future use
