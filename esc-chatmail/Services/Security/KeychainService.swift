@@ -189,35 +189,6 @@ final class KeychainService: KeychainServiceProtocol {
         }
     }
 
-    // MARK: - Convenience Methods
-
-    func saveString(_ string: String, for key: String, withAccess access: AccessLevel = .whenUnlockedThisDeviceOnly) throws {
-        guard let data = string.data(using: .utf8) else {
-            throw KeychainError.invalidParameters
-        }
-        try save(data, for: key, withAccess: access)
-    }
-
-    func loadString(for key: String) throws -> String {
-        let data = try load(for: key)
-        guard let string = String(data: data, encoding: .utf8) else {
-            throw KeychainError.unexpectedData
-        }
-        return string
-    }
-
-    func saveCodable<T: Codable>(_ object: T, for key: String, withAccess access: AccessLevel = .whenUnlockedThisDeviceOnly) throws {
-        let encoder = JSONEncoder()
-        let data = try encoder.encode(object)
-        try save(data, for: key, withAccess: access)
-    }
-
-    func loadCodable<T: Codable>(_ type: T.Type, for key: String) throws -> T {
-        let data = try load(for: key)
-        let decoder = JSONDecoder()
-        return try decoder.decode(type, from: data)
-    }
-
     // MARK: - Typed Convenience Methods
 
     func save(_ data: Data, for key: Key, withAccess access: AccessLevel = .whenUnlockedThisDeviceOnly) throws {
@@ -236,14 +207,6 @@ final class KeychainService: KeychainServiceProtocol {
         exists(for: key.rawValue)
     }
 
-    func saveString(_ string: String, for key: Key, withAccess access: AccessLevel = .whenUnlockedThisDeviceOnly) throws {
-        try saveString(string, for: key.rawValue, withAccess: access)
-    }
-
-    func loadString(for key: Key) throws -> String {
-        try loadString(for: key.rawValue)
-    }
-
     // MARK: - Private Helpers
 
     private func baseQuery(for key: String) -> [String: Any] {
@@ -258,95 +221,5 @@ final class KeychainService: KeychainServiceProtocol {
         }
 
         return query
-    }
-
-    // MARK: - Migration Support
-
-    func migrateFromOldKeychain() {
-        // Migrate old keychain items to new structure
-        // This is called during app initialization if needed
-
-        // Example: Migrate old Google tokens
-        let oldTokenQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitAll
-        ]
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(oldTokenQuery as CFDictionary, &result)
-
-        if status == errSecSuccess,
-           let items = result as? [[String: Any]] {
-            // Process and migrate old items
-            for _ in items {
-                // Migration logic here - to be implemented when needed
-            }
-        }
-    }
-}
-
-// MARK: - Keychain Service + Installation ID
-extension KeychainService {
-    func getOrCreateInstallationId() -> String {
-        if let existingId = try? loadString(for: .installationId) {
-            return existingId
-        }
-
-        let newId = UUID().uuidString
-        try? saveString(newId, for: .installationId, withAccess: .afterFirstUnlockThisDeviceOnly)
-
-        // Also create installation timestamp when creating new installation ID
-        setInstallationTimestamp()
-
-        return newId
-    }
-
-    func verifyInstallationId(_ id: String) -> Bool {
-        guard let storedId = try? loadString(for: .installationId) else {
-            return false
-        }
-        return storedId == id
-    }
-
-    func getOrCreateInstallationTimestamp() -> Date {
-        if let timestamp = getInstallationTimestamp() {
-            return timestamp
-        }
-
-        // Create new timestamp with a 10-minute buffer in the past
-        // This accounts for emails that arrived just before the app was installed
-        let bufferMinutes: TimeInterval = 10 * 60
-        let timestamp = Date().addingTimeInterval(-bufferMinutes)
-        setInstallationTimestamp(timestamp)
-        Log.debug("Created installation timestamp with 10-minute buffer: \(timestamp)", category: .auth)
-        return timestamp
-    }
-
-    func getInstallationTimestamp() -> Date? {
-        guard let timestampString = try? loadString(for: .installationTimestamp),
-              let timestamp = Double(timestampString) else {
-            return nil
-        }
-        return Date(timeIntervalSince1970: timestamp)
-    }
-
-    func setInstallationTimestamp(_ date: Date = Date()) {
-        let timestamp = date.timeIntervalSince1970
-        try? saveString(String(timestamp), for: .installationTimestamp, withAccess: .afterFirstUnlockThisDeviceOnly)
-    }
-
-    /// Resets the installation timestamp to include older messages
-    /// - Parameter minutesBack: How many minutes in the past to set the timestamp (default 30)
-    func resetInstallationTimestamp(minutesBack: Int = 30) {
-        let newTimestamp = Date().addingTimeInterval(-TimeInterval(minutesBack * 60))
-        setInstallationTimestamp(newTimestamp)
-        Log.debug("Reset installation timestamp to: \(newTimestamp) (\(minutesBack) minutes ago)", category: .auth)
-    }
-
-    /// Clears the installation timestamp so it will be recreated on next sync
-    func clearInstallationTimestamp() {
-        try? delete(for: .installationTimestamp)
-        Log.debug("Cleared installation timestamp", category: .auth)
     }
 }

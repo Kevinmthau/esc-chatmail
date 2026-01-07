@@ -81,17 +81,17 @@ protocol TokenManagerProtocol {
 final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sendable {
     @MainActor static let shared: TokenManager = TokenManager()
 
-    @MainActor @Published private(set) var isRefreshing = false
-    @MainActor @Published private(set) var lastRefreshError: Error?
+    @MainActor @Published var isRefreshing = false
+    @MainActor @Published var lastRefreshError: Error?
 
-    private let keychainService: KeychainServiceProtocol
+    let keychainService: KeychainServiceProtocol
     private let authSession: AuthSession
     private let refreshCoordinator = TaskCoordinator<String>()
-    private let refreshBackoff = ExponentialBackoffActor()
-    private let tokenRefresher: TokenRefresherProtocol
+    let refreshBackoff = ExponentialBackoffActor()
+    let tokenRefresher: TokenRefresherProtocol
 
     // Token refresh configuration
-    private let maxRetryAttempts = 3
+    let maxRetryAttempts = 3
 
     // MARK: - Initialization
 
@@ -207,117 +207,4 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
         return false
     }
 
-    // MARK: - Private Methods
-
-    private nonisolated func performTokenRefresh() async throws -> String {
-        var lastError: Error?
-
-        for attempt in 0..<maxRetryAttempts {
-            do {
-                // Use exponential backoff for retries
-                if attempt > 0 {
-                    let delay = await refreshBackoff.nextDelay()
-                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                }
-
-                // Attempt to refresh using the token refresher
-                let tokens = try await tokenRefresher.refreshTokens()
-
-                // Save the new tokens
-                try saveTokens(
-                    access: tokens.accessToken,
-                    refresh: tokens.refreshToken,
-                    expirationDate: tokens.expirationDate
-                )
-
-                await refreshBackoff.reset()
-                return tokens.accessToken
-
-            } catch let error {
-                lastError = error
-
-                // Check if error is retryable
-                if !isRetryableError(error) {
-                    await MainActor.run {
-                        self.lastRefreshError = error
-                    }
-                    throw error
-                }
-
-                // Log retry attempt
-                Log.warning("Token refresh attempt \(attempt + 1) failed: \(error)", category: .auth)
-            }
-        }
-
-        // All retries failed
-        let finalError = lastError ?? TokenManagerError.refreshFailed(NSError(domain: "TokenManager", code: -1))
-        await MainActor.run {
-            self.lastRefreshError = finalError
-        }
-        throw finalError
-    }
-
-    private nonisolated func loadTokenInfo() throws -> TokenInfo {
-        return try keychainService.loadCodable(TokenInfo.self, for: KeychainService.Key.googleAccessToken.rawValue)
-    }
-
-    private nonisolated func isRetryableError(_ error: Error) -> Bool {
-        // Determine if the error is retryable
-        if let tokenError = error as? TokenManagerError {
-            switch tokenError {
-            case .networkUnavailable, .rateLimitExceeded:
-                return true
-            case .noValidToken, .invalidCredentials, .tokenExpired:
-                return false
-            case .refreshFailed:
-                return true // Could be transient
-            }
-        }
-
-        // Check for network errors
-        let nsError = error as NSError
-        let networkErrorCodes = [
-            NSURLErrorNotConnectedToInternet,
-            NSURLErrorNetworkConnectionLost,
-            NSURLErrorTimedOut,
-            NSURLErrorCannotConnectToHost
-        ]
-
-        return networkErrorCodes.contains(nsError.code)
-    }
-}
-
-// MARK: - Token Manager + Async Extensions
-
-extension TokenManager {
-    nonisolated func withValidToken<T>(_ operation: @escaping (String) async throws -> T) async throws -> T {
-        let token = try await getCurrentToken()
-        return try await operation(token)
-    }
-
-    nonisolated func withTokenRetry<T>(_ operation: @escaping (String) async throws -> T) async throws -> T {
-        do {
-            let token = try await getCurrentToken()
-            return try await operation(token)
-        } catch {
-            // If operation failed, try refreshing token once and retry
-            if isAuthError(error) {
-                let newToken = try await refreshToken()
-                return try await operation(newToken)
-            }
-            throw error
-        }
-    }
-
-    private nonisolated func isAuthError(_ error: Error) -> Bool {
-        // Check if error is authentication related
-        let nsError = error as NSError
-        let authErrorCodes = [401, 403] // Unauthorized, Forbidden
-
-        if let urlError = error as? URLError {
-            return urlError.code == .userAuthenticationRequired
-        }
-
-        return authErrorCodes.contains(nsError.code)
-    }
 }

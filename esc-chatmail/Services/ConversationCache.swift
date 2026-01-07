@@ -47,20 +47,20 @@ final class ConversationCache: ObservableObject {
     static let shared = ConversationCache()
 
     // Configuration
-    private let maxCacheSize = 50 * 1024 * 1024 // 50MB
-    private let maxCacheItems = 100
-    private let ttl: TimeInterval = 300 // 5 minutes
+    let maxCacheSize = 50 * 1024 * 1024 // 50MB
+    let maxCacheItems = 100
+    let ttl: TimeInterval = 300 // 5 minutes
 
     // Cache storage
-    private var cache: [String: CachedConversation] = [:]
-    private var lruOrder: [String] = []
+    var cache: [String: CachedConversation] = [:]
+    var lruOrder: [String] = []
 
     // Preloader (extracted)
     private let preloader: ConversationPreloader
 
     // Statistics (using shared type from CacheProtocol)
-    private var stats = LRUCacheStatistics()
-    private var accessTimes: [TimeInterval] = []
+    var stats = LRUCacheStatistics()
+    var accessTimes: [TimeInterval] = []
 
     // Publishers
     @Published var currentMemoryUsage = 0
@@ -70,7 +70,7 @@ final class ConversationCache: ObservableObject {
         preloader.isPreloading
     }
 
-    private var cancellables = Set<AnyCancellable>()
+    var cancellables = Set<AnyCancellable>()
 
     private init() {
         self.preloader = ConversationPreloader()
@@ -154,96 +154,6 @@ final class ConversationCache: ObservableObject {
 
     func warmCache(with recentConversations: [Conversation]) {
         preloader.warmCache(with: recentConversations)
-    }
-
-    // MARK: - LRU Management
-
-    private func moveToFront(_ conversationId: String) {
-        lruOrder.removeAll { $0 == conversationId }
-        lruOrder.insert(conversationId, at: 0)
-    }
-
-    private func shouldEvict(newSize: Int) -> Bool {
-        return currentMemoryUsage + newSize > maxCacheSize || cache.count >= maxCacheItems
-    }
-
-    private func evictLeastRecentlyUsed() {
-        guard let lruId = lruOrder.last else { return }
-
-        cache.removeValue(forKey: lruId)
-        lruOrder.removeLast()
-        stats.recordEviction()
-
-        updateMemoryUsage()
-    }
-
-    // MARK: - TTL Management
-
-    private func startPeriodicCleanup() {
-        Timer.publish(every: 60, on: .main, in: .common)
-            .autoconnect()
-            .sink { [weak self] _ in
-                self?.cleanupExpiredItems()
-            }
-            .store(in: &cancellables)
-    }
-
-    private func cleanupExpiredItems() {
-        let now = Date()
-        var expiredIds: [String] = []
-
-        for (id, cached) in cache {
-            if now.timeIntervalSince(cached.lastAccessed) > ttl {
-                expiredIds.append(id)
-            }
-        }
-
-        for id in expiredIds {
-            invalidate(id)
-            stats.recordEviction()
-        }
-    }
-
-    // MARK: - Memory Management
-
-    private func setupMemoryWarningObserver() {
-        NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)
-            .sink { [weak self] _ in
-                self?.handleMemoryWarning()
-            }
-            .store(in: &cancellables)
-    }
-
-    private func handleMemoryWarning() {
-        // Aggressively clear cache on memory warning
-        let itemsToKeep = min(5, cache.count / 4)
-
-        while cache.count > itemsToKeep {
-            evictLeastRecentlyUsed()
-        }
-    }
-
-    private func updateMemoryUsage() {
-        currentMemoryUsage = cache.values.reduce(0) { $0 + $1.memorySize }
-    }
-
-    // MARK: - Statistics
-
-    private func recordAccessTime(_ time: TimeInterval) {
-        accessTimes.append(time)
-        if accessTimes.count > 100 {
-            accessTimes.removeFirst()
-        }
-    }
-
-    func getStatistics() -> LRUCacheStatistics {
-        return stats
-    }
-
-    /// Returns detailed statistics including access time info
-    func getDetailedStatistics() -> (stats: LRUCacheStatistics, avgAccessTime: TimeInterval, memoryUsage: Int) {
-        let avgAccessTime = accessTimes.isEmpty ? 0 : accessTimes.reduce(0, +) / Double(accessTimes.count)
-        return (stats, avgAccessTime, currentMemoryUsage)
     }
 }
 

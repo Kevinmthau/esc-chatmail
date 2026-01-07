@@ -5,19 +5,17 @@ import Combine
 @MainActor
 final class AttachmentDownloader: ObservableObject {
     static let shared = AttachmentDownloader()
-    
+
     @Published var downloadProgress: [String: Double] = [:]
     @Published var activeDownloads: Set<String> = []
-    
-    @MainActor private lazy var apiClient = GmailAPIClient.shared
+
+    private let apiClient = GmailAPIClient.shared
     private let coreDataStack = CoreDataStack.shared
-    private let downloadQueue = DispatchQueue(label: "com.esc.attachment.download", attributes: .concurrent)
-    private let semaphore = DispatchSemaphore(value: 2)  // Limit concurrent downloads
     private var cancellables = Set<AnyCancellable>()
     private var retryAttempts: [String: Int] = [:]
     private let maxRetryAttempts = 3
     private let baseRetryDelay: TimeInterval = 2.0
-    
+
     private init() {
         AttachmentPaths.setupDirectories()
     }
@@ -59,7 +57,7 @@ final class AttachmentDownloader: ObservableObject {
 
         do {
             // Download attachment data from Gmail with automatic retry
-            let data = try await downloadWithExponentialBackoff(messageId: messageId, attachmentId: attachmentId)
+            let data = try await downloadWithRetry(messageId: messageId, attachmentId: attachmentId)
             
             await MainActor.run {
                 downloadProgress[attachmentId] = 0.5
@@ -197,40 +195,11 @@ final class AttachmentDownloader: ObservableObject {
         await downloadAttachment(attachmentInContext, messageId: message.id, in: context)
     }
     
-    private func downloadWithExponentialBackoff(messageId: String, attachmentId: String) async throws -> Data {
-        var lastError: Error?
-        let maxAttempts = 3
-        var retryDelay: TimeInterval = 1.0
-
-        for attempt in 0..<maxAttempts {
-            do {
-                return try await apiClient.getAttachment(messageId: messageId, attachmentId: attachmentId)
-            } catch {
-                lastError = error
-
-                // Check if error is retryable
-                if let urlError = error as? URLError {
-                    switch urlError.code {
-                    case .notConnectedToInternet, .networkConnectionLost, .timedOut, .cannotFindHost, .dnsLookupFailed:
-                        if attempt < maxAttempts - 1 {
-                            Log.debug("Network error downloading attachment, retrying in \(retryDelay) seconds...", category: .attachment)
-                            try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
-                            retryDelay = min(retryDelay * 2, 10.0) // Exponential backoff capped at 10 seconds
-                            continue
-                        }
-                    default:
-                        throw error
-                    }
-                }
-
-                // For non-network errors, throw immediately
-                if attempt == maxAttempts - 1 {
-                    throw lastError ?? error
-                }
-            }
+    private func downloadWithRetry(messageId: String, attachmentId: String) async throws -> Data {
+        let executor = RetryExecutor<Data>.network(maxAttempts: 3, baseDelay: 1.0, maxDelay: 10.0)
+        return try await executor.execute { [apiClient] in
+            try await apiClient.getAttachment(messageId: messageId, attachmentId: attachmentId)
         }
-
-        throw lastError ?? URLError(.unknown)
     }
 
     func cleanupOrphanedFiles() {

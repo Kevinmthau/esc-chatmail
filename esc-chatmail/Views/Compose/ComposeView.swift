@@ -75,17 +75,15 @@ struct ComposeView: View {
                 }
 
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    if viewModel.showSubjectField {
-                        Button("Send") {
-                            Task {
-                                if await viewModel.send() {
-                                    dismiss()
-                                }
+                    Button("Send") {
+                        Task {
+                            if await viewModel.send() {
+                                dismiss()
                             }
                         }
-                        .fontWeight(.semibold)
-                        .disabled(!viewModel.canSend)
                     }
+                    .fontWeight(.semibold)
+                    .disabled(!viewModel.canSend)
                 }
             }
         }
