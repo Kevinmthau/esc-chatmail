@@ -34,13 +34,14 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
 ```
 /Services/
   /API/               - GmailAPIClient extensions: Messages, Labels, History, Attachments
-  /Caching/           - LRUCacheActor, AttachmentCacheActor, DiskImageCache, EnhancedImageCache, ImageRequestManager, ConversationPreloader
+  /Caching/           - LRUCacheActor, AttachmentCacheActor, DiskImageCache, EnhancedImageCache, ImageRequestManager, ConversationPreloader, ConversationCache extensions (+LRU, +TTL, +Memory, +Statistics)
   /Chat/              - ChatContactManager (contact lookup/updates for chat view)
   /Concurrency/       - TaskCoordinator, BackgroundWork (Task.detached utilities)
   /Contacts/          - ContactMatch, ContactSearchService, ContactPersistenceService (split from ContactsResolver)
   /CoreData/          - CoreDataStack, FetchRequestBuilder, NSManagedObjectContext+Perform, error handling
     /BatchOperations/ - BatchConfiguration, MessageBatchOperations, ConversationBatchOperations
   /Compose/           - RecipientManager, ContactAutocompleteService, ReplyMetadataBuilder, MessageFormatBuilder, ComposeSendOrchestrator
+    /MimeBuilder/     - MimeBuilder split into extensions: +Headers, +SimpleMessage, +MultipartMessage, +Reply
   /DatabaseMaintenance/ - DatabaseMaintenanceService split: core, Cleanup, SQLite, Stats
   /ErrorHandling/     - FileSystemError, FileSystemErrorClassifier (error classification and recovery actions)
   /Fetcher/           - ParallelMessageFetcher support: FetchConfiguration, FetchPriority, FetchTask, FetchMetrics, AdaptiveMessageFetcher
@@ -49,7 +50,7 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
   /Models/            - Per-entity Core Data extensions (Account, Message, Conversation, etc.)
   /PendingActions/    - PendingActionsManagerProtocol, PendingActionProcessor, PendingActionQueries (split from PendingActionsManager)
   /Retry/             - ExponentialBackoff, RetryExecutor (reusable retry utilities)
-  /Security/          - TokenManager, KeychainService, GoogleTokenRefresher
+  /Security/          - TokenManager (+Refresh, +AsyncUtilities), KeychainService (+Convenience, +Installation), GoogleTokenRefresher
   /Send/              - GmailSendService extensions: Models, Attachments, OptimisticUpdates
   /Sync/              - SyncEngine, orchestrators, persisters; HistoryProcessor extensions (LabelOperations, MessageDeletions)
     /Cleanup/         - DataCleanupService extensions: Migration, DuplicateRemoval, EntityCleanup
@@ -73,7 +74,7 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
 
 ### Key Components
 
-- **`/Services/Caching/`** - Image caching (DiskImageCache, EnhancedImageCache), request deduplication (ImageRequestManager), conversation preloading (ConversationPreloader)
+- **`/Services/Caching/`** - Image caching (DiskImageCache, EnhancedImageCache), request deduplication (ImageRequestManager), conversation preloading (ConversationPreloader), ConversationCache split (+LRU eviction, +TTL cleanup, +Memory warning handling, +Statistics)
 - **`/Services/Concurrency/`** - TaskCoordinator actor for preventing duplicate concurrent operations, BackgroundWork for Task.detached utilities
 - **`/Services/Contacts/`** - Contact lookup split into: ContactMatch (protocol/types), ContactSearchService (CNContact search), ContactPersistenceService (Core Data updates)
 - **`/Services/CoreData/`** - CoreDataStack, FetchRequestBuilder (chainable query builder), NSManagedObjectContext+Perform (async fetch helpers), error classification
@@ -87,11 +88,12 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
 - **`/Services/ErrorHandling/`** - FileSystemError (typed errors), FileSystemErrorClassifier (maps NSError codes to RecoveryAction)
 - **`/Services/Fetcher/`** - Supporting types for ParallelMessageFetcher: FetchConfiguration, FetchPriority, FetchTask, FetchMetrics, AdaptiveMessageFetcher (UI wrapper with auto-optimization)
 - **`/Services/Retry/`** - ExponentialBackoff, ExponentialBackoffActor, RetryExecutor (reusable retry with configurable strategies)
-- **`/Services/Security/`** - TokenManager (uses TaskCoordinator + ExponentialBackoffActor), GoogleTokenRefresher (isolated OAuth logic)
+- **`/Services/Security/`** - TokenManager split (+Refresh for retry logic, +AsyncUtilities for withValidToken/withTokenRetry), KeychainService split (+Convenience for String/Codable helpers, +Installation for installation ID management), GoogleTokenRefresher (isolated OAuth logic)
 - **`/Services/Sync/`** - SyncEngine orchestrates InitialSyncOrchestrator (full sync) and IncrementalSyncOrchestrator (delta sync via History API)
 - **`/Services/Sync/Phases/`** - Composable SyncPhase protocol with phases: HistoryCollection, MessageFetch, LabelProcessing, Reconciliation, ConversationUpdate
 - **`/Services/TextProcessing/`** - Email text extraction: HTMLEntityDecoder (lookup table), HTMLQuoteRemover, PlainTextQuoteRemover, TextSnippetCreator
 - **`/Services/Compose/`** - Extracted compose services: RecipientManager, ContactAutocompleteService, ReplyMetadataBuilder, MessageFormatBuilder, ComposeSendOrchestrator
+- **`/Services/Compose/MimeBuilder/`** - MIME message building split into: +Headers (formatting/encoding), +SimpleMessage, +MultipartMessage (attachments), +Reply (quote formatting)
 - **`/Services/Chat/`** - ChatContactManager for contact lookup and updates in chat view
 - **`/Services/Models/`** - Per-entity Core Data typed accessors (Account, Message, Conversation, Attachment, etc.)
 - **`/Services/DatabaseMaintenance/`** - DatabaseMaintenanceService split into extensions: Cleanup, SQLite, Stats
