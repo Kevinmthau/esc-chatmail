@@ -45,7 +45,7 @@ final class ParticipantLoader {
         await prefetchNamesIfNeeded(for: topParticipants)
 
         // Resolve display names
-        let displayNames = resolveDisplayNames(for: topParticipants)
+        let displayNames = await resolveDisplayNames(for: topParticipants)
 
         // Format the display name for UI
         let formattedName = DisplayNameFormatter.formatForRow(
@@ -93,19 +93,20 @@ final class ParticipantLoader {
     // MARK: - Private Helpers
 
     private func prefetchNamesIfNeeded(for emails: [String]) async {
-        let uncachedEmails = emails.filter { email in
-            personCache.getCachedDisplayName(for: email) == nil
-        }
-
-        if !uncachedEmails.isEmpty {
-            await personCache.prefetch(emails: uncachedEmails)
-        }
+        // Prefetch all emails - the cache will filter internally
+        await personCache.prefetch(emails: emails)
     }
 
-    private func resolveDisplayNames(for emails: [String]) -> [String] {
-        emails.map { email in
-            personCache.getCachedDisplayName(for: email) ?? fallbackDisplayName(for: email)
+    private func resolveDisplayNames(for emails: [String]) async -> [String] {
+        var names: [String] = []
+        for email in emails {
+            if let cached = await personCache.getCachedDisplayName(for: email) {
+                names.append(cached)
+            } else {
+                names.append(fallbackDisplayName(for: email))
+            }
         }
+        return names
     }
 
     private func fallbackDisplayName(for email: String) -> String {

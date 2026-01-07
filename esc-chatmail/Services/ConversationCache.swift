@@ -111,8 +111,8 @@ final class ConversationCache: ObservableObject {
         let cached = CachedConversation(conversation: conversation, messages: messages)
         let conversationId = conversation.id.uuidString
 
-        // Check if we need to evict
-        if shouldEvict(newSize: cached.memorySize) {
+        // Evict until we have space (loop to enforce size limit properly)
+        while shouldEvict(newSize: cached.memorySize) && !cache.isEmpty {
             evictLeastRecentlyUsed()
         }
 

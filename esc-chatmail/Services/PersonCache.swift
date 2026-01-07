@@ -2,8 +2,8 @@ import Foundation
 import CoreData
 
 /// Thread-safe cache for Person entities to avoid N+1 query problems in conversation lists
-@MainActor
-final class PersonCache: ObservableObject {
+/// Uses actor isolation for automatic thread-safety instead of @MainActor
+actor PersonCache {
     static let shared = PersonCache()
 
     // In-memory cache: email -> Person
@@ -11,7 +11,7 @@ final class PersonCache: ObservableObject {
     private let coreDataStack = CoreDataStack.shared
 
     // Cache entry with timestamp for expiration
-    private struct CachedPerson {
+    private struct CachedPerson: Sendable {
         let displayName: String?
         let email: String
         let cachedAt: Date
@@ -59,7 +59,7 @@ final class PersonCache: ObservableObject {
             }
         }.value
 
-        // Update cache on MainActor
+        // Update cache (actor-isolated)
         let now = Date()
         for (email, displayName) in personsData {
             cache[email] = CachedPerson(
@@ -112,7 +112,7 @@ final class PersonCache: ObservableObject {
             }
         }.value
 
-        // Cache the result (on MainActor)
+        // Cache the result (actor-isolated)
         cache[normalized] = CachedPerson(
             displayName: displayName,
             email: normalized,

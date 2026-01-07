@@ -99,10 +99,12 @@ actor ProfilePhotoResolver {
             .map { EmailNormalizer.normalize($0) }
             .filter { !foundEmails.contains($0) }
 
-        // Fire off individual cache lookups for remaining emails (non-blocking)
-        for email in remainingEmails {
-            Task {
-                _ = await resolvePhoto(for: email)
+        // Resolve remaining emails with structured concurrency
+        await withTaskGroup(of: Void.self) { group in
+            for email in remainingEmails {
+                group.addTask {
+                    _ = await self.resolvePhoto(for: email)
+                }
             }
         }
     }

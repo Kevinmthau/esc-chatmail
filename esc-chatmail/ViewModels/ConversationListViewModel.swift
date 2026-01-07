@@ -230,7 +230,11 @@ final class ConversationListViewModel: ObservableObject {
     func prefetchPersonData(from conversations: [Conversation]) {
         let personCache = self.personCache
         Task {
-            let allEmails = conversations.prefix(30).flatMap { conversation -> [String] in
+            // Use VirtualScrollConfiguration for consistent prefetch limits
+            let config = VirtualScrollConfiguration.default
+            let prefetchCount = config.visibleItemCount + config.bufferSize  // 30
+
+            let allEmails = conversations.prefix(prefetchCount).flatMap { conversation -> [String] in
                 guard let participants = conversation.participants else { return [] }
                 return participants.compactMap { $0.person?.email }
             }

@@ -181,10 +181,12 @@ struct esc_chatmailApp: App {
             Log.warning("Failed to clear Core Data: \(error)", category: .coreData)
         }
 
-        // 7. Clear in-memory caches (already on main thread from init)
+        // 7. Clear in-memory caches
         Log.debug("Clearing in-memory caches", category: .general)
         ConversationCache.shared.clear()
-        PersonCache.shared.clearCache()
+        Task {
+            await PersonCache.shared.clearCache()
+        }
         Log.debug("In-memory caches cleared", category: .general)
 
         // 8. Clear attachment caches
