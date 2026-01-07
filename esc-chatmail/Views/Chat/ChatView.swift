@@ -19,6 +19,9 @@ struct ChatView: View {
         request.predicate = NSPredicate(format: "conversation == %@ AND NOT (ANY labels.id == %@)", conversation, "DRAFTS")
         request.fetchBatchSize = CoreDataConfig.fetchBatchSize
         request.relationshipKeyPathsForPrefetching = ["participants", "participants.person", "attachments"]
+        // Limit initial fetch for large conversations - LazyVStack handles virtualization
+        let config = VirtualScrollConfiguration.default
+        request.fetchLimit = config.pageSize * 2  // 100 messages initially
         self._messages = FetchRequest(fetchRequest: request)
     }
 
@@ -63,15 +66,21 @@ struct ChatView: View {
                 viewModel.markConversationAsRead(messageObjectIDs: unreadMessageIDs)
                 scrollToBottom(proxy: proxy, delay: UIConfig.initialScrollDelay)
 
-                // Batch prefetch text content for visible messages (eliminates N+1 queries)
+                // Limit prefetch to visible + buffer messages (not all)
+                let config = VirtualScrollConfiguration.default
+                let prefetchLimit = config.visibleItemCount + config.bufferSize  // 30 messages
+
+                // Batch prefetch text content for recent messages (eliminates N+1 queries)
                 Task.detached(priority: .userInitiated) {
-                    let messageIds = await messages.map { $0.id }
+                    let recentMessages = await messages.suffix(prefetchLimit)
+                    let messageIds = recentMessages.map { $0.id }
                     await ProcessedTextCache.shared.prefetch(messageIds: messageIds)
                 }
 
                 // Batch prefetch contacts to avoid thundering herd on first load
                 Task.detached(priority: .userInitiated) {
-                    let senderEmails = await messages.compactMap { $0.senderEmail }
+                    let recentMessages = await messages.suffix(prefetchLimit)
+                    let senderEmails = recentMessages.compactMap { $0.senderEmail }
                     let uniqueEmails = Array(Set(senderEmails))
                     await ContactsResolver.shared.prewarm(emails: uniqueEmails)
                 }

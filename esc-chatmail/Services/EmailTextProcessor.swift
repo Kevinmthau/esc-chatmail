@@ -18,33 +18,9 @@ class EmailTextProcessor {
     /// - Parameter html: The HTML content to extract text from
     /// - Returns: Plain text extracted from the HTML
     static func extractPlainFromHTML(_ html: String) -> String {
-        // Convert HTML to AttributedString to extract plain text
-        guard let data = html.data(using: .utf8) else { return html }
-
-        do {
-            let attributed = try NSAttributedString(
-                data: data,
-                options: [
-                    .documentType: NSAttributedString.DocumentType.html,
-                    .characterEncoding: String.Encoding.utf8.rawValue
-                ],
-                documentAttributes: nil
-            )
-            return attributed.string
-        } catch {
-            // Fallback: basic HTML tag removal
-            var text = html
-                .replacingOccurrences(of: "<br>", with: "\n")
-                .replacingOccurrences(of: "<br/>", with: "\n")
-                .replacingOccurrences(of: "<br />", with: "\n")
-                .replacingOccurrences(of: "</p>", with: "\n")
-                .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
-
-            // Decode HTML entities
-            text = HTMLEntityDecoder.decode(text)
-
-            return text.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
+        // Use lightweight regex-based extraction instead of expensive NSAttributedString
+        // TextProcessing is defined in ProcessedTextCache.swift and is thread-safe
+        TextProcessing.extractPlainText(from: html)
     }
 
     // MARK: - Plain Text Processing

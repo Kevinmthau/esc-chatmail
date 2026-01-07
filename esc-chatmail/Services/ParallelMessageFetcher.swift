@@ -157,7 +157,7 @@ actor ParallelMessageFetcher {
             do {
                 let message = try await withThrowingTaskGroup(of: GmailMessage.self) { group in
                     // Main fetch task
-                    group.addTask { @MainActor in
+                    group.addTask {
                         try await GmailAPIClient.shared.getMessage(id: messageId)
                     }
 

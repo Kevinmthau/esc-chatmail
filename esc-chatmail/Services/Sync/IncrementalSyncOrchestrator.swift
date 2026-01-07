@@ -138,8 +138,10 @@ final class IncrementalSyncOrchestrator {
             )
 
             // Phase 4: Reconciliation
+            // Skip label reconciliation when history reported no changes (saves ~2.5s per sync)
+            let noHistoryChanges = historyResult.records.isEmpty && historyResult.newMessageIds.isEmpty
             try await reconciliationPhase.execute(
-                input: (),
+                input: ReconciliationInput(skipLabelReconciliation: noHistoryChanges),
                 context: phaseContext
             )
 

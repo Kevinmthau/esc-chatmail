@@ -1,9 +1,15 @@
 import Foundation
 import CoreData
 
+/// Input for reconciliation phase
+struct ReconciliationInput {
+    /// Skip label reconciliation when history reported no changes
+    let skipLabelReconciliation: Bool
+}
+
 /// Phase 4: Reconciliation to catch missed messages
 struct ReconciliationPhase: SyncPhase {
-    typealias Input = Void
+    typealias Input = ReconciliationInput
     typealias Output = Void
 
     let name = "Reconciliation"
@@ -25,7 +31,7 @@ struct ReconciliationPhase: SyncPhase {
     }
 
     func execute(
-        input: Void,
+        input: ReconciliationInput,
         context: SyncPhaseContext
     ) async throws {
         try Task.checkCancellation()
@@ -62,9 +68,13 @@ struct ReconciliationPhase: SyncPhase {
             }
         }
 
-        // Reconcile labels
-        context.reportProgress(0.8, status: "Reconciling labels...", phase: self)
-        await reconciliation.reconcileLabelStates(in: context.coreDataContext, labelIds: context.labelIds)
+        // Skip label reconciliation when history reported no changes
+        if input.skipLabelReconciliation {
+            log.debug("Skipping label reconciliation (no history changes)")
+        } else {
+            context.reportProgress(0.8, status: "Reconciling labels...", phase: self)
+            await reconciliation.reconcileLabelStates(in: context.coreDataContext, labelIds: context.labelIds)
+        }
 
         context.reportProgress(1.0, status: "Reconciliation complete", phase: self)
     }
