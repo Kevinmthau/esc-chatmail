@@ -143,9 +143,14 @@ Categories: sync, api, coreData, auth, ui, background, conversation
 
 ## Key Patterns
 
-- **@MainActor** on ViewModels and UI services
-- **Actor isolation** for thread-safe state (TokenManager, PendingActionsManager, ConversationCreationSerializer, ProcessedTextCache, DiskImageCache, EnhancedImageCache)
-- **Background contexts** for Core Data operations
+### Concurrency
+
+- **@MainActor** only on ViewModels with `@Published` properties and classes with mutable UI state. Pure services (GmailAPIClient, MessageFetcher) should NOT be @MainActor.
+- **@MainActor on init only** - When a class needs MainActor singletons (`TokenManager.shared`, `AuthSession.shared`) but methods can run anywhere, mark only `init` and `static let shared` as @MainActor
+- **Heavy work off MainActor** - Image processing, PDF operations, file I/O, and SQLite operations (VACUUM, ANALYZE) must use `Task.detached { }.value`
+- **Sendable conformance** - Pure service classes with only `let` properties use `@unchecked Sendable`
+- **Actor isolation** for thread-safe mutable state (TokenManager, PendingActionsManager, ConversationCreationSerializer, ProcessedTextCache, DiskImageCache, EnhancedImageCache)
+- **Core Data threading** - Use `viewContext.perform { }` or background context via `coreDataStack.newBackgroundContext()` - never synchronous fetches on MainActor
 - **Typed accessors** in `/Services/Models/` (per-entity extension files, avoid `value(forKey:)`)
 - **Extensions for code organization** - Large actors/structs split into extensions in separate files (ContactsResolver, PendingActionsManager, CoreDataBatchOperations). Main file keeps type definition + core logic, extensions in subdirectories handle specific concerns. Properties must be `internal` (not `private`) for extensions to access.
 - **SyncPhase protocol** - Composable sync phases with typed Input/Output and progress reporting via SyncPhaseContext
