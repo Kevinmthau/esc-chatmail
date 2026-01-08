@@ -58,14 +58,21 @@ struct InitialsAvatarView: View {
         return "?"
     }
 
-    private var backgroundColor: Color {
-        Color(UIColor.systemGray)
+    private var backgroundGradient: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color(red: 0.61, green: 0.64, blue: 0.78),  // #9BA3C7 - light purple
+                Color(red: 0.42, green: 0.45, blue: 0.65)   // #6B74A6 - darker purple
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
     }
 
     var body: some View {
         ZStack {
             Circle()
-                .fill(backgroundColor)
+                .fill(backgroundGradient)
 
             Text(initials)
                 .font(.system(size: style.fontSize, weight: .semibold))
