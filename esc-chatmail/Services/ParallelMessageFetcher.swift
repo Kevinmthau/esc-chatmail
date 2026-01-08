@@ -24,6 +24,7 @@ actor ParallelMessageFetcher {
     private var totalErrors = 0
     private var averageFetchTime: TimeInterval = 0
     private var fetchTimes: [TimeInterval] = []
+    private var fetchTimeSum: TimeInterval = 0
 
     private init(configuration: FetchConfiguration = .default) {
         self.configuration = configuration
@@ -207,10 +208,11 @@ actor ParallelMessageFetcher {
 
     private func recordFetchTime(_ time: TimeInterval) {
         fetchTimes.append(time)
+        fetchTimeSum += time
         if fetchTimes.count > 100 {
-            fetchTimes.removeFirst()
+            fetchTimeSum -= fetchTimes.removeFirst()
         }
-        averageFetchTime = fetchTimes.reduce(0, +) / Double(fetchTimes.count)
+        averageFetchTime = fetchTimeSum / Double(fetchTimes.count)
     }
 
     private func incrementTotalFetched(by count: Int) {

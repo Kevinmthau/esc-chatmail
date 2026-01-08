@@ -69,9 +69,9 @@ struct ComposeSendOrchestrator {
                     )
                 }
 
-                // Update optimistic message with real IDs
+                // Update optimistic message with real IDs (on MainActor to avoid Sendable issues)
                 await MainActor.run {
-                    if let message = sendService.fetchMessage(byID: optimisticMessageID) {
+                    if let message = sendService.fetchMessageSync(byID: optimisticMessageID) {
                         sendService.updateOptimisticMessage(message, with: result)
                     }
                 }
@@ -80,9 +80,9 @@ struct ComposeSendOrchestrator {
                 try? await syncEngine.performIncrementalSync()
 
             } catch {
-                // Mark attachments as failed so they show error indicator
+                // Mark attachments as failed so they show error indicator (on MainActor to avoid Sendable issues)
                 await MainActor.run {
-                    if let message = sendService.fetchMessage(byID: optimisticMessageID) {
+                    if let message = sendService.fetchMessageSync(byID: optimisticMessageID) {
                         sendService.markAttachmentsAsFailed(message.attachmentsArray)
                     }
                 }

@@ -12,6 +12,19 @@ actor EnhancedImageCache {
     private init() {
         memoryCache.countLimit = 100
         memoryCache.totalCostLimit = 50 * 1024 * 1024 // 50 MB
+
+        // Add memory warning observer to clear cache under memory pressure
+        Task { @MainActor in
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.didReceiveMemoryWarningNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task {
+                    await self?.clearMemory()
+                }
+            }
+        }
     }
 
     /// Gets image from cache (memory first, then disk)

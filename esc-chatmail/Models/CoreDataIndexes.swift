@@ -120,26 +120,39 @@ extension CoreDataStack {
     }
 
     private func configureSQLitePragmas() {
-        let context = persistentContainer.newBackgroundContext()
-        context.perform {
+        guard let store = persistentContainer.persistentStoreCoordinator.persistentStores.first,
+              let url = store.url else { return }
+
+        // Determine the actual SQLite file path
+        let sqlitePath: String
+        if url.path.hasSuffix(".sqlite") {
+            sqlitePath = url.path
+        } else {
+            sqlitePath = url.appendingPathComponent("StoreContent.sqlite").path
+        }
+
+        guard FileManager.default.fileExists(atPath: sqlitePath) else {
+            Log.warning("SQLite file not found at \(sqlitePath), skipping pragma configuration", category: .coreData)
+            return
+        }
+
+        do {
+            let db = try SQLiteDatabase(path: sqlitePath)
             let pragmas = [
                 "PRAGMA journal_mode = WAL",           // Write-Ahead Logging for better concurrency
                 "PRAGMA synchronous = NORMAL",         // Faster writes, still safe
-                "PRAGMA cache_size = -64000",         // 64MB cache
-                "PRAGMA temp_store = MEMORY",         // Use memory for temp tables
-                "PRAGMA mmap_size = 268435456",       // 256MB memory-mapped I/O
-                "PRAGMA page_size = 4096",            // Optimal page size
-                "PRAGMA auto_vacuum = INCREMENTAL"    // Automatic space reclamation
+                "PRAGMA cache_size = -64000",          // 64MB cache
+                "PRAGMA temp_store = MEMORY",          // Use memory for temp tables
+                "PRAGMA mmap_size = 268435456"         // 256MB memory-mapped I/O
+                // Note: page_size and auto_vacuum must be set before database is created
             ]
 
             for pragma in pragmas {
-                do {
-                    try context.execute(NSFetchRequest<NSFetchRequestResult>(entityName: pragma))
-                } catch {
-                    // This is expected to fail as we're using fetch request for pragmas
-                    // In production, use raw SQLite access
-                }
+                try db.execute(pragma)
             }
+            Log.info("SQLite pragmas configured successfully", category: .coreData)
+        } catch {
+            Log.error("Failed to configure SQLite pragmas", category: .coreData, error: error)
         }
     }
 }

@@ -17,6 +17,19 @@ actor ProfilePhotoResolver {
 
     private init() {
         cache.countLimit = 500  // Increased from 200 for better cache hit rate
+
+        // Add memory warning observer to clear cache under memory pressure
+        Task { @MainActor in
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.didReceiveMemoryWarningNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task {
+                    await self?.clearCache()
+                }
+            }
+        }
     }
 
     // MARK: - Public API

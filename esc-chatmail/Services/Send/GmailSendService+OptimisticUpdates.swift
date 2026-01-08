@@ -7,6 +7,7 @@ extension GmailSendService {
 
     /// Creates an optimistic local message before the actual send completes.
     /// This provides immediate feedback to the user.
+    @MainActor
     func createOptimisticMessage(
         to recipients: [String],
         body: String,
@@ -14,16 +15,42 @@ extension GmailSendService {
         threadId: String? = nil,
         attachments: [Attachment] = []
     ) async -> Message {
+        // Pre-compute values that don't need Core Data
+        let messageId = UUID().uuidString
+        let snippet = String(body.prefix(120))
+        let cleanedSnippet = EmailTextProcessor.createCleanSnippet(from: body, maxLength: Int.max, firstSentenceOnly: false)
+        let gmThreadId = threadId ?? ""
+        let hasAttachments = !attachments.isEmpty
+
+        // Get account info for myAliases (already on main thread via @MainActor)
+        let myAliases: Set<String> = {
+            let accountRequest = Account.fetchRequest()
+            accountRequest.fetchLimit = 1
+            accountRequest.fetchBatchSize = 1
+            if let account = try? viewContext.fetch(accountRequest).first {
+                return Set(([account.email] + account.aliasesArray).map(normalizedEmail))
+            }
+            return []
+        }()
+
+        // Create the conversation using the serializer to prevent race conditions
+        // Get the objectID since Conversation isn't safe to pass across threads
+        let conversationID = await findOrCreateConversation(recipients: recipients, myAliases: myAliases, in: viewContext).objectID
+
+        // Fetch conversation on main thread using the objectID
+        guard let conversation = try? viewContext.existingObject(with: conversationID) as? Conversation else {
+            fatalError("Failed to fetch conversation on main thread")
+        }
+
         let message = Message(context: viewContext)
-        message.id = UUID().uuidString
+        message.id = messageId
         message.isFromMe = true
         message.internalDate = Date()
-        message.snippet = String(body.prefix(120))
-        // Sent messages should show full content without any length limit
-        message.cleanedSnippet = EmailTextProcessor.createCleanSnippet(from: body, maxLength: Int.max, firstSentenceOnly: false)
-        message.gmThreadId = threadId ?? ""
+        message.snippet = snippet
+        message.cleanedSnippet = cleanedSnippet
+        message.gmThreadId = gmThreadId
         message.subject = subject
-        message.hasAttachments = !attachments.isEmpty
+        message.hasAttachments = hasAttachments
 
         // Add attachments to message
         for attachment in attachments {
@@ -31,20 +58,6 @@ extension GmailSendService {
             attachment.state = .queued
         }
 
-        // Get account info for myAliases
-        let accountRequest = Account.fetchRequest()
-        accountRequest.fetchLimit = 1
-        accountRequest.fetchBatchSize = 1
-
-        let myAliases: Set<String>
-        if let account = try? viewContext.fetch(accountRequest).first {
-            myAliases = Set(([account.email] + account.aliasesArray).map(normalizedEmail))
-        } else {
-            myAliases = []
-        }
-
-        // Create the conversation using the serializer to prevent race conditions
-        let conversation = await findOrCreateConversation(recipients: recipients, myAliases: myAliases, in: viewContext)
         message.conversation = conversation
 
         // Update conversation to bump it to the top
@@ -64,8 +77,26 @@ extension GmailSendService {
         return message
     }
 
-    /// Fetches a message by its ID.
-    func fetchMessage(byID messageID: String) -> Message? {
+    /// Fetches a message by its ID (async to avoid blocking main thread).
+    func fetchMessage(byID messageID: String) async -> Message? {
+        await viewContext.perform { [viewContext] in
+            let request = Message.fetchRequest()
+            request.predicate = MessagePredicates.id(messageID)
+            request.fetchLimit = 1
+            request.fetchBatchSize = 1
+
+            do {
+                return try viewContext.fetch(request).first
+            } catch {
+                Log.error("Failed to fetch message", category: .message, error: error)
+                return nil
+            }
+        }
+    }
+
+    /// Fetches a message by its ID synchronously (for use on MainActor where viewContext is safe).
+    @MainActor
+    func fetchMessageSync(byID messageID: String) -> Message? {
         let request = Message.fetchRequest()
         request.predicate = MessagePredicates.id(messageID)
         request.fetchLimit = 1

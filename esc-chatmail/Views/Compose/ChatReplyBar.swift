@@ -17,7 +17,9 @@ struct ChatReplyBar: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            if let replyingTo = replyingTo {
+            if let replyingTo = replyingTo,
+               let subject = replyingTo.subject,
+               !subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 replyingToIndicator(message: replyingTo)
             }
             

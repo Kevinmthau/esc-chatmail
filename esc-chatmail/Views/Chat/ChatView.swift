@@ -64,6 +64,7 @@ struct ChatView: View {
             .onAppear {
                 let unreadMessageIDs = messages.filter { $0.isUnread }.map { $0.objectID }
                 viewModel.markConversationAsRead(messageObjectIDs: unreadMessageIDs)
+                viewModel.initializeReplyingTo(lastMessage: messages.last)
                 scrollToBottom(proxy: proxy, delay: UIConfig.initialScrollDelay)
 
                 // Limit prefetch to visible + buffer messages (not all)
@@ -87,6 +88,7 @@ struct ChatView: View {
             }
             .onChange(of: messages.count) { oldCount, newCount in
                 if newCount > oldCount {
+                    viewModel.updateReplyingToIfNewSubject(lastMessage: messages.last)
                     scrollToBottom(proxy: proxy, delay: UIConfig.contentChangeScrollDelay)
                 }
             }

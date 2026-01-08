@@ -126,6 +126,28 @@ final class ChatViewModel: ObservableObject {
         replyingTo = message
     }
 
+    /// Sets the initial replyingTo message when the conversation loads
+    func initializeReplyingTo(lastMessage: Message?) {
+        guard replyingTo == nil, let lastMessage = lastMessage else { return }
+        replyingTo = lastMessage
+    }
+
+    /// Updates replyingTo when a new message arrives with a different subject
+    func updateReplyingToIfNewSubject(lastMessage: Message?) {
+        guard let lastMessage = lastMessage else { return }
+
+        // If user cleared replyingTo (tapped X), don't auto-update
+        guard let currentReplyingTo = replyingTo else { return }
+
+        // If the new message has a different subject, update to it
+        let currentSubject = currentReplyingTo.subject?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let newSubject = lastMessage.subject?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if currentSubject != newSubject {
+            replyingTo = lastMessage
+        }
+    }
+
     func setMessageToForward(_ message: Message) {
         messageToForward = message
     }
@@ -177,7 +199,7 @@ final class ChatViewModel: ObservableObject {
                 )
             }
 
-            if let optimisticMessage = sendService.fetchMessage(byID: optimisticMessageID) {
+            if let optimisticMessage = await sendService.fetchMessage(byID: optimisticMessageID) {
                 sendService.updateOptimisticMessage(optimisticMessage, with: result)
             }
 
@@ -194,7 +216,7 @@ final class ChatViewModel: ObservableObject {
                 try? await syncEngine.performIncrementalSync()
             }
         } catch {
-            if let optimisticMessage = sendService.fetchMessage(byID: optimisticMessageID) {
+            if let optimisticMessage = await sendService.fetchMessage(byID: optimisticMessageID) {
                 sendService.deleteOptimisticMessage(optimisticMessage)
             }
             Log.error("Failed to send reply", category: .message, error: error)
