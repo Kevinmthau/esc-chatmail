@@ -71,6 +71,36 @@ class EmailNormalizer {
         return nil
     }
 
+    /// Converts an email username to a formatted display name
+    /// e.g., "firstname.lastname" → "Firstname Lastname"
+    /// e.g., "john_doe" → "John Doe"
+    static func formatAsDisplayName(email: String) -> String {
+        let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Extract username part (before @)
+        let username: String
+        if let atIndex = trimmed.firstIndex(of: "@") {
+            username = String(trimmed[..<atIndex])
+        } else {
+            username = trimmed
+        }
+
+        // Split on common separators (dots, underscores, hyphens)
+        let parts = username
+            .replacingOccurrences(of: ".", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .components(separatedBy: " ")
+            .filter { !$0.isEmpty }
+
+        // Capitalize each part
+        let capitalized = parts.map { part in
+            part.prefix(1).uppercased() + part.dropFirst().lowercased()
+        }
+
+        return capitalized.joined(separator: " ")
+    }
+
     /// Returns true if newName is "better" than existingName
     /// Better means: more name parts, or same parts but longer
     static func isBetterDisplayName(_ newName: String?, than existingName: String?) -> Bool {

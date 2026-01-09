@@ -132,13 +132,8 @@ actor PersonCache {
         cache.removeAll()
     }
 
-    /// Get fallback display name from email (preserves original case)
+    /// Get fallback display name from email, formatted as a proper name
     private func fallbackDisplayName(for email: String) -> String {
-        // Use original email to preserve capitalization, just extract username part
-        let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let atIndex = trimmed.firstIndex(of: "@") {
-            return String(trimmed[..<atIndex])
-        }
-        return trimmed
+        EmailNormalizer.formatAsDisplayName(email: email)
     }
 }

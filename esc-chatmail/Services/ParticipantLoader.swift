@@ -110,11 +110,7 @@ final class ParticipantLoader {
     }
 
     private func fallbackDisplayName(for email: String) -> String {
-        let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let atIndex = trimmed.firstIndex(of: "@") {
-            return String(trimmed[..<atIndex])
-        }
-        return trimmed
+        EmailNormalizer.formatAsDisplayName(email: email)
     }
 
     private func loadPhotos(for emails: [String]) async -> [ProfilePhoto] {

@@ -18,6 +18,7 @@ enum HTMLQuoteRemover {
 
         // Apple Mail
         "<br><div><br><blockquote type=\"cite\">.*?</blockquote></div>",
+        "<div class=\"AppleMailSignature\">.*?</div>",
 
         // Generic quoted sections
         "<div style=\"[^\"]*border-left:[^\"]*\">.*?</div>",
@@ -44,6 +45,10 @@ enum HTMLQuoteRemover {
         "<div class=\"signature\">.*?</div>",
         "<div[^>]*class=\"[^\"]*moz-signature[^\"]*\"[^>]*>.*?</div>",
         "<div[^>]*class=\"[^\"]*ms-outlook-signature[^\"]*\"[^>]*>.*?</div>",
+
+        // Generic signature wrappers
+        "<div[^>]*class=\"[^\"]*sig[^\"]*\"[^>]*>.*?</div>",
+        "<table[^>]*class=\"[^\"]*signature[^\"]*\"[^>]*>.*?</table>",
     ]
 
     /// Patterns that indicate the start of quoted content (truncate from here)
@@ -56,6 +61,19 @@ enum HTMLQuoteRemover {
         "<br>\\s*--\\s*</div>",
         "<p>\\s*--\\s*</p>",
         "<div>\\s*--\\s*</div>",
+
+        // Common sign-offs in HTML
+        "<br[^>]*>\\s*Thanks,",
+        "<br[^>]*>\\s*Regards,",
+        "<br[^>]*>\\s*Best,",
+        "<br[^>]*>\\s*Cheers,",
+        "<br[^>]*>\\s*Sincerely,",
+        "<p[^>]*>\\s*Thanks,",
+        "<p[^>]*>\\s*Regards,",
+        "<p[^>]*>\\s*Best,",
+        "<div[^>]*>\\s*Thanks,",
+        "<div[^>]*>\\s*Regards,",
+
         // Mobile signatures
         "Sent from my iPhone",
         "Sent from my iPad",
@@ -63,6 +81,20 @@ enum HTMLQuoteRemover {
         "Sent from Outlook",
         "Get Outlook for",
         "Sent from Mail for Windows",
+        "Sent from Samsung",
+        "Sent from my Galaxy",
+        "Sent from my Pixel",
+        "Sent from Spark",
+        "Sent from ProtonMail",
+        "Sent from BlueMail",
+        "Sent from Gmail",
+        "Sent from Yahoo Mail",
+
+        // Confidentiality notices
+        "This email is confidential",
+        "This message is confidential",
+        "The information contained in this",
+        "If you are not the intended recipient",
     ]
 
     // MARK: - Public API

@@ -9,6 +9,7 @@ struct ChatView: View {
     @ObservedObject private var keyboard = KeyboardResponder.shared
     @FocusState private var isTextFieldFocused: Bool
     @Namespace private var bottomID
+    @State private var resolvedDisplayName: String?
 
     init(conversation: Conversation) {
         self.conversation = conversation
@@ -118,11 +119,14 @@ struct ChatView: View {
                 }
             }
         }
-        .navigationTitle(conversation.displayName ?? "Chat")
+        .navigationTitle(resolvedDisplayName ?? conversation.displayName ?? "Chat")
         .navigationBarTitleDisplayMode(.inline)
+        .task {
+            await loadResolvedDisplayName()
+        }
         .toolbar {
             ToolbarItem(placement: .principal) {
-                Text(conversation.displayName ?? "Chat")
+                Text(resolvedDisplayName ?? conversation.displayName ?? "Chat")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .contentShape(Rectangle())
@@ -228,5 +232,17 @@ struct ChatView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Display Name Resolution
+
+    private func loadResolvedDisplayName() async {
+        guard let myEmail = AuthSession.shared.userEmail else { return }
+        let info = await ParticipantLoader.shared.loadParticipants(
+            from: conversation,
+            currentUserEmail: myEmail,
+            maxParticipants: 4
+        )
+        resolvedDisplayName = info.formattedDisplayName
     }
 }

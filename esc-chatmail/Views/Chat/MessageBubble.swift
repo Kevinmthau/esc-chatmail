@@ -194,12 +194,7 @@ struct MessageBubble: View {
                 if let displayName = match?.displayName {
                     senderName = displayName
                 } else {
-                    let normalized = EmailNormalizer.normalize(email)
-                    if let atIndex = normalized.firstIndex(of: "@") {
-                        senderName = String(normalized[..<atIndex])
-                    } else {
-                        senderName = email
-                    }
+                    senderName = EmailNormalizer.formatAsDisplayName(email: email)
                 }
                 return
             }

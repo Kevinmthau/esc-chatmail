@@ -251,8 +251,15 @@ struct ConversationRollupUpdater: Sendable {
             guard !seenEmails.contains(normalizedEmail) else { continue }
             seenEmails.insert(normalizedEmail)
 
-            // Use displayName, fall back to email, fall back to "Unknown"
-            let name = person.displayName?.isEmpty == false ? person.displayName! : (email.isEmpty ? "Unknown" : email)
+            // Use displayName, fall back to formatted email, fall back to "Unknown"
+            let name: String
+            if let displayName = person.displayName, !displayName.isEmpty {
+                name = displayName
+            } else if !email.isEmpty {
+                name = EmailNormalizer.formatAsDisplayName(email: email)
+            } else {
+                name = "Unknown"
+            }
             Log.debug("Including participant: \(name)", category: .conversation)
             names.append(name)
         }

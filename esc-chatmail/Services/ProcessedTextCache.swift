@@ -144,8 +144,10 @@ enum TextProcessing {
 
         // Clean up whitespace
         text = text.replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression, range: nil)
-        text = text.replacingOccurrences(of: " ?\\n ?", with: "\n", options: .regularExpression, range: nil)
-        text = text.replacingOccurrences(of: "\\n{3,}", with: "\n\n", options: .regularExpression, range: nil)
+        // Collapse whitespace-only lines to single newline
+        text = text.replacingOccurrences(of: "\\n[ \\t]*\\n", with: "\n\n", options: .regularExpression, range: nil)
+        // Collapse any sequence of newlines (with optional whitespace) to max 2 newlines
+        text = text.replacingOccurrences(of: "(\\s*\\n\\s*){2,}", with: "\n\n", options: .regularExpression, range: nil)
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         return text

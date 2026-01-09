@@ -33,6 +33,30 @@ enum PlainTextQuoteRemover {
         "\n-- \n",
         "\n---\n",
         "\n___\n",
+        "\n- ",           // Single dash with space (common in casual emails)
+        "\n-\n",          // Single dash on its own line
+        "\n—",            // Em-dash signature delimiter
+        "\n– ",           // En-dash with space
+
+        // Common sign-offs (must be on their own line to avoid false positives)
+        "\nThanks,",
+        "\nThank you,",
+        "\nThanks!",
+        "\nRegards,",
+        "\nBest regards,",
+        "\nKind regards,",
+        "\nWarm regards,",
+        "\nBest,",
+        "\nCheers,",
+        "\nAll the best,",
+        "\nTake care,",
+        "\nSincerely,",
+        "\nYours truly,",
+        "\nRespectfully,",
+        "\nWith thanks,",
+        "\nMany thanks,",
+        "\nWith best wishes,",
+        "\nBest wishes,",
 
         // Mobile signatures
         "\nSent from my iPhone",
@@ -44,6 +68,18 @@ enum PlainTextQuoteRemover {
         "\nSent from Yahoo Mail",
         "\nSent via ",
         "\nSent using ",
+        "\nSent from Samsung",
+        "\nSent from my Galaxy",
+        "\nSent from my Pixel",
+        "\nSent from my mobile",
+        "\nSent from my phone",
+        "\nSent from BlueMail",
+        "\nSent from Spark",
+        "\nSent from ProtonMail",
+        "\nSent from Gmail",
+        "\nSent from TypeApp",
+        "\nGet BlueMail for",
+        "\nDownload Outlook",
 
         // Unsubscribe and preference links
         "\nUnsubscribe",
@@ -62,6 +98,11 @@ enum PlainTextQuoteRemover {
         "\nThis email and any attachments",
         "\nThis message is intended",
         "\nThis communication is confidential",
+        "\nThis message contains confidential",
+        "\nThis e-mail is confidential",
+        "\nThe information in this email",
+        "\nIf you are not the intended recipient",
+        "\nIf you have received this email in error",
         "\nConfidentiality Notice:",
         "\nDISCLAIMER:",
         "\nLegal Disclaimer:",
@@ -79,6 +120,11 @@ enum PlainTextQuoteRemover {
         "\nTerms of Service",
         "\nCopyright ©",
         "\n© 20",  // Catches "© 2024" etc
+
+        // Professional footer patterns (URLs often start signature blocks)
+        "\nwww.",
+        "\nhttp://",
+        "\nhttps://",
 
         // Marketing boilerplate
         "\nForward to a friend",
