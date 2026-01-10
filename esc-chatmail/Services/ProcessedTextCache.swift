@@ -65,7 +65,8 @@ actor ProcessedTextCache {
 
             let extracted = TextProcessing.extractPlainText(from: cleanedHTML)
             if !extracted.isEmpty {
-                plainText = TextProcessing.stripQuotedText(from: extracted)
+                let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: extracted)
+                plainText = TextProcessing.stripQuotedText(from: unwrapped)
             }
 
             // Check for rich content in cleaned HTML only (not quoted sections)
@@ -168,5 +169,109 @@ enum TextProcessing {
     static func stripQuotedText(from text: String) -> String {
         // Delegate to PlainTextQuoteRemover for unified quote and signature removal
         PlainTextQuoteRemover.removeQuotes(from: text) ?? text
+    }
+
+    /// Unwraps artificial email line breaks (72-80 char wrapping) while preserving paragraph breaks
+    /// Emails often contain hard line breaks at fixed widths for legacy compatibility.
+    /// This function joins lines that were artificially wrapped while keeping intentional paragraph breaks.
+    static func unwrapEmailLineBreaks(from text: String) -> String {
+        // Normalize line endings: CRLF → LF, CR → LF
+        var normalizedText = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+
+        // Normalize all special whitespace to regular space
+        // This handles NBSP (U+00A0), thin space, em space, etc. that would otherwise
+        // cause the lowercase check to fail when determining if lines should be joined
+        let specialWhitespace: [Character] = [
+            "\u{00A0}",  // Non-breaking space
+            "\u{2002}",  // En space
+            "\u{2003}",  // Em space
+            "\u{2009}",  // Thin space
+            "\u{200A}",  // Hair space
+            "\u{202F}",  // Narrow no-break space
+            "\u{205F}",  // Medium mathematical space
+            "\u{3000}",  // Ideographic space
+        ]
+        for char in specialWhitespace {
+            normalizedText = normalizedText.replacingOccurrences(of: String(char), with: " ")
+        }
+
+        let lines = normalizedText.components(separatedBy: "\n")
+        guard lines.count > 1 else { return normalizedText }
+
+        var result: [String] = []
+        var currentParagraph = ""
+        var i = 0
+
+        while i < lines.count {
+            let trimmedLine = lines[i].trimmingCharacters(in: .whitespaces)
+            i += 1
+
+            // Skip empty lines but check if we should join across them
+            if trimmedLine.isEmpty {
+                if currentParagraph.isEmpty {
+                    continue
+                }
+
+                // Look ahead to find the next non-empty line
+                var nextNonEmptyIndex = i
+                while nextNonEmptyIndex < lines.count &&
+                      lines[nextNonEmptyIndex].trimmingCharacters(in: .whitespaces).isEmpty {
+                    nextNonEmptyIndex += 1
+                }
+
+                // Check if we should join across the blank line(s)
+                if nextNonEmptyIndex < lines.count {
+                    let nextLine = lines[nextNonEmptyIndex].trimmingCharacters(in: .whitespaces)
+                    let lastChar = currentParagraph.last
+                    let firstChar = nextLine.first
+
+                    let endsWithPunctuation = lastChar.map { ".!?".contains($0) } ?? false
+                    // Join unless next line starts with uppercase (new sentence)
+                    let startsWithUppercase = firstChar?.isUppercase ?? false
+
+                    if !endsWithPunctuation && !startsWithUppercase {
+                        // This is a soft wrap across blank lines - skip the blanks and continue joining
+                        continue
+                    }
+                }
+
+                // Real paragraph break - flush current paragraph
+                result.append(currentParagraph)
+                result.append("") // Add paragraph separator
+                currentParagraph = ""
+                continue
+            }
+
+            if currentParagraph.isEmpty {
+                currentParagraph = trimmedLine
+            } else {
+                // Check if this looks like a continuation (soft wrap) or new paragraph
+                let lastChar = currentParagraph.last
+                let firstChar = trimmedLine.first
+
+                let endsWithPunctuation = lastChar.map { ".!?".contains($0) } ?? false
+                // Join unless next line starts with uppercase (new sentence)
+                let startsWithUppercase = firstChar?.isUppercase ?? false
+
+                if !endsWithPunctuation && !startsWithUppercase {
+                    // Join with space (unwrap soft line break)
+                    currentParagraph += " " + trimmedLine
+                } else {
+                    // New paragraph
+                    result.append(currentParagraph)
+                    currentParagraph = trimmedLine
+                }
+            }
+        }
+
+        if !currentParagraph.isEmpty {
+            result.append(currentParagraph)
+        }
+
+        // Filter out empty strings and join with double newlines for paragraph breaks
+        let paragraphs = result.filter { !$0.isEmpty }
+        return paragraphs.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

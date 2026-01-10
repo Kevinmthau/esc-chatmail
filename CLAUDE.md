@@ -71,6 +71,18 @@ Messages render differently based on `message.isNewsletter` (detected via Gmail 
 - **Newsletter emails** → `MiniEmailWebView` (scaled HTML preview)
 - **Personal emails** → Chat bubbles with extracted plain text
 
+### Text Processing Pipeline
+
+Plain text for chat bubbles goes through:
+```
+HTML/bodyText → extractPlainText() → unwrapEmailLineBreaks() → stripQuotedText()
+```
+
+**`unwrapEmailLineBreaks`** handles email line wrapping (RFC 2822 mandates 72-80 char line breaks):
+- Normalizes CRLF/CR to LF, special whitespace (NBSP, em space, etc.) to regular space
+- Joins lines unless: previous ends with `.!?` OR next starts with uppercase
+- Preserves intentional paragraph breaks (blank lines between sentences)
+
 ### HTML Content Pipeline
 
 ```

@@ -150,7 +150,8 @@ struct MessageBubble: View {
 
             // If no HTML content, try bodyText
             if processedResult.plainText == nil, let text = bodyText {
-                processedResult = (TextProcessing.stripQuotedText(from: text), false)
+                let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: text)
+                processedResult = (TextProcessing.stripQuotedText(from: unwrapped), false)
             }
 
             // Cache the result for future use
