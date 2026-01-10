@@ -10,6 +10,7 @@ struct ChatView: View {
     @FocusState private var isTextFieldFocused: Bool
     @Namespace private var bottomID
     @State private var resolvedDisplayName: String?
+    @State private var isReadyToShow = false
 
     init(conversation: Conversation) {
         self.conversation = conversation
@@ -62,11 +63,23 @@ struct ChatView: View {
                 }
             }
             .scrollDismissesKeyboard(.interactively)
+            .opacity(isReadyToShow ? 1 : 0)
             .onAppear {
                 let unreadMessageIDs = messages.filter { $0.isUnread }.map { $0.objectID }
                 viewModel.markConversationAsRead(messageObjectIDs: unreadMessageIDs)
                 viewModel.initializeReplyingTo(lastMessage: messages.last)
-                scrollToBottom(proxy: proxy, delay: UIConfig.initialScrollDelay)
+
+                // If messages already loaded (Core Data cache), scroll and reveal after layout
+                if !isReadyToShow && !messages.isEmpty {
+                    Task { @MainActor in
+                        // Wait for layout to complete before scrolling
+                        try? await Task.sleep(nanoseconds: UInt64(UIConfig.contentChangeScrollDelay * 1_000_000_000))
+                        if let lastMessage = messages.last {
+                            proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                        }
+                        isReadyToShow = true
+                    }
+                }
 
                 // Limit prefetch to visible + buffer messages (not all)
                 let config = VirtualScrollConfiguration.default
@@ -88,7 +101,17 @@ struct ChatView: View {
                 }
             }
             .onChange(of: messages.count) { oldCount, newCount in
-                if newCount > oldCount {
+                if !isReadyToShow && newCount > 0 {
+                    // Initial load: scroll to bottom after layout, then reveal
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: UInt64(UIConfig.contentChangeScrollDelay * 1_000_000_000))
+                        if let lastMessage = messages.last {
+                            proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                        }
+                        isReadyToShow = true
+                    }
+                } else if isReadyToShow && newCount > oldCount {
+                    // New message arrived: animate the scroll
                     viewModel.updateReplyingToIfNewSubject(lastMessage: messages.last)
                     scrollToBottom(proxy: proxy, delay: UIConfig.contentChangeScrollDelay)
                 }
