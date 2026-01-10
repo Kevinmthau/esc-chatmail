@@ -194,12 +194,20 @@ final class ComposeViewModel: ObservableObject {
         let messageSubject = subject.isEmpty ? nil : subject
 
         // Create optimistic message
-        let optimisticMessage = await sendService.createOptimisticMessage(
-            to: recipientEmails,
-            body: messageBody,
-            subject: messageSubject,
-            attachments: attachments
-        )
+        let optimisticMessage: Message
+        do {
+            optimisticMessage = try await sendService.createOptimisticMessage(
+                to: recipientEmails,
+                body: messageBody,
+                subject: messageSubject,
+                attachments: attachments
+            )
+        } catch {
+            Log.error("Failed to create optimistic message", category: .message, error: error)
+            self.error = GmailSendService.SendError.optimisticCreationFailed
+            isSending = false
+            return false
+        }
         let optimisticMessageID = optimisticMessage.id
 
         // Prepare attachment infos for background send

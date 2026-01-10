@@ -31,8 +31,8 @@ final class ConversationManager: Sendable {
     func findOrCreateConversation(
         for identity: ConversationIdentity,
         in context: NSManagedObjectContext
-    ) async -> Conversation {
-        await ConversationCreationSerializer.shared.findOrCreateConversation(for: identity, in: context)
+    ) async throws -> Conversation {
+        try await ConversationCreationSerializer.shared.findOrCreateConversation(for: identity, in: context)
     }
 
     /// Delegates to PersonFactory for consistent person creation.

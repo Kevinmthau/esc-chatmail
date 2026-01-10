@@ -22,8 +22,8 @@ extension CoreDataBatchOperations {
 
         var insertedCount = 0
 
-        try await context.perform {
-            for chunk in conversations.chunked(into: configuration.batchSize) {
+        for chunk in conversations.chunked(into: configuration.batchSize) {
+            try await context.perform {
                 // Check existing conversations
                 let keyHashes = chunk.map { $0.keyHash }
                 let existingRequest = NSFetchRequest<Conversation>(entityName: "Conversation")
@@ -40,18 +40,19 @@ extension CoreDataBatchOperations {
                     self.mapProcessedToManagedConversation(processedConv, to: conversation)
                     insertedCount += 1
                 }
-
-                // Save at intervals
-                if insertedCount % configuration.saveInterval == 0 {
-                    try self.saveContextWithRetry(context)
-                    context.reset()
-                }
             }
 
-            // Final save
-            if context.hasChanges {
-                try self.saveContextWithRetry(context)
+            // Save at intervals (outside perform block)
+            if insertedCount % configuration.saveInterval == 0 {
+                try await self.saveContextWithRetry(context)
+                await context.perform { context.reset() }
             }
+        }
+
+        // Final save
+        let hasChanges = await context.perform { context.hasChanges }
+        if hasChanges {
+            try await self.saveContextWithRetry(context)
         }
 
         Log.info("Batch inserted \(insertedCount) conversations", category: .coreData)

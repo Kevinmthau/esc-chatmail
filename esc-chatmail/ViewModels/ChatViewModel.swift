@@ -167,13 +167,19 @@ final class ChatViewModel: ObservableObject {
         guard !replyData.recipients.isEmpty else { return }
 
         let currentReplyText = replyText
-        let optimisticMessage = await sendService.createOptimisticMessage(
-            to: replyData.recipients,
-            body: currentReplyText,
-            subject: replyData.subject,
-            threadId: replyData.threadId,
-            attachments: attachments
-        )
+        let optimisticMessage: Message
+        do {
+            optimisticMessage = try await sendService.createOptimisticMessage(
+                to: replyData.recipients,
+                body: currentReplyText,
+                subject: replyData.subject,
+                threadId: replyData.threadId,
+                attachments: attachments
+            )
+        } catch {
+            Log.error("Failed to create optimistic message for reply", category: .message, error: error)
+            return
+        }
         let optimisticMessageID = optimisticMessage.id
 
         do {

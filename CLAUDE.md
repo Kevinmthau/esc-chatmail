@@ -60,10 +60,11 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
 
 - **SyncEngine** - Orchestrates InitialSyncOrchestrator (full sync) and IncrementalSyncOrchestrator (delta sync via History API)
 - **ConversationManager** - Groups messages by `participantHash` (normalized emails excluding user's aliases)
-- **ConversationCreationSerializer** - Actor preventing duplicate conversations during concurrent processing
+- **ConversationCreationSerializer** - Actor preventing duplicate conversations during concurrent processing (throws `ConversationCreationError` on failure)
 - **ContactsResolver** - Actor for contact lookup with caching
 - **PendingActionsManager** - Actor-based offline action queue with retry logic
 - **ProfilePhotoResolver** - Resolves profile photos from contacts and cache
+- **MessagePersister** - Tracks modified conversations during sync for differential rollup updates
 
 ### Message Display Logic
 
@@ -86,7 +87,7 @@ HTML/bodyText → extractPlainText() → unwrapEmailLineBreaks() → stripQuoted
 ### HTML Content Pipeline
 
 ```
-HTMLContentLoader (cache → storage URI → bodyText)
+HTMLContentLoader (memory cache → disk cache → storage URI → bodyText)
        ↓
 HTMLSanitizerService (removes scripts, tracking, dangerous URLs)
        ↓
@@ -94,6 +95,8 @@ HTMLContentHandler (file storage in Documents/Messages/)
        ↓
 MiniEmailWebView (50% scaled) or HTMLMessageView (full)
 ```
+
+**HTMLContentLoader** uses NSCache to avoid repeated disk I/O for recently viewed messages. Cache key includes message ID and dark mode flag.
 
 ### Caching (Actor-based, LRU)
 
@@ -125,7 +128,9 @@ Log.error("message", category: .api, error: error)
 - **Heavy work off MainActor** - Image processing, PDF operations, file I/O, SQLite operations must use `Task.detached { }.value`
 - **Sendable conformance** - Pure service classes with only `let` properties use `@unchecked Sendable`
 - **Actor isolation** for thread-safe mutable state (TokenManager, PendingActionsManager, caches)
+- **NotificationCenter in actors** - Store observer token, remove in `deinit`. Use `Task { @MainActor [weak self] in }` to register.
 - **Core Data threading** - Use `viewContext.perform { }` or `coreDataStack.newBackgroundContext()` - never synchronous fetches on MainActor
+- **Async batch operations** - `saveContextWithRetry` is async; perform Core Data work in `context.perform { }`, save/sleep outside
 - **Typed accessors** in `/Services/Models/` per-entity extensions (avoid `value(forKey:)`)
 - **Extensions for code organization** - Large actors/structs split into extensions in separate files. Properties must be `internal` (not `private`) for extensions to access.
 - **Nested ObservableObject forwarding** - Forward `objectWillChange` via Combine subscriptions when composing ObservableObjects
@@ -153,3 +158,12 @@ Conversations appear in the chat list based on `archivedAt == nil`. Archive stat
 - **Sent-only conversations** (no replies yet) → Stay visible until manually archived
 - **All INBOX labels removed** → Auto-archived (`archivedAt = Date()`)
 - **New message arrives for archived conversation** → Auto un-archived by `ConversationCreationSerializer`
+
+### Sync Optimization
+
+**Differential rollup updates** - Instead of updating all conversation rollups after sync (O(n×m) operation), only modified conversations are updated:
+1. `MessagePersister.trackModifiedConversation()` records conversation IDs during message save
+2. After sync, call `messagePersister.getAndClearModifiedConversations()` to get the set
+3. Pass to `conversationManager.updateRollupsForModifiedConversations(conversationIDs:in:)`
+
+This is used in `InitialSyncOrchestrator`, `IncrementalSyncOrchestrator`, and `SyncEngine.updateConversationRollups()`.

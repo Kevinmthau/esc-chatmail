@@ -11,7 +11,7 @@ extension MessagePersister {
         labelIds: Set<String>?,
         myAliases: Set<String>,
         in context: NSManagedObjectContext
-    ) async {
+    ) async throws {
         // Create conversation identity using Gmail threadId as primary key
         // This ensures stable conversation grouping that matches Gmail's threading
         let identity = conversationManager.createConversationIdentity(
@@ -19,7 +19,7 @@ extension MessagePersister {
             gmThreadId: processedMessage.gmThreadId,
             myAliases: myAliases
         )
-        let conversation = await conversationManager.findOrCreateConversation(for: identity, in: context)
+        let conversation = try await conversationManager.findOrCreateConversation(for: identity, in: context)
 
         // Create Core Data message entity
         let message = NSEntityDescription.insertNewObject(forEntityName: "Message", into: context) as! Message

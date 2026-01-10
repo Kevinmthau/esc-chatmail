@@ -11,6 +11,7 @@ actor AttachmentCacheActor {
     private let fullImageCache: LRUCacheActor<String, UIImage>
     private let dataCache: LRUCacheActor<String, Data>
     private let requestManager = InFlightRequestManager<String, UIImage>()
+    private var memoryWarningObserver: (any NSObjectProtocol)?
 
     // MARK: - Initialization
 
@@ -40,8 +41,8 @@ actor AttachmentCacheActor {
         ))
 
         // Observe memory warnings on the main actor
-        Task { @MainActor in
-            NotificationCenter.default.addObserver(
+        Task { @MainActor [weak self] in
+            let observer = NotificationCenter.default.addObserver(
                 forName: UIApplication.didReceiveMemoryWarningNotification,
                 object: nil,
                 queue: .main
@@ -50,6 +51,17 @@ actor AttachmentCacheActor {
                     await self?.clearCache(level: .aggressive)
                 }
             }
+            await self?.setMemoryWarningObserver(observer)
+        }
+    }
+
+    private func setMemoryWarningObserver(_ observer: any NSObjectProtocol) {
+        memoryWarningObserver = observer
+    }
+
+    deinit {
+        if let observer = memoryWarningObserver {
+            NotificationCenter.default.removeObserver(observer)
         }
     }
 

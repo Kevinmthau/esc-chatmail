@@ -22,6 +22,7 @@ extension GmailSendService {
         case invalidMimeData
         case apiError(String)
         case authenticationFailed
+        case optimisticCreationFailed
 
         var errorDescription: String? {
             switch self {
@@ -31,6 +32,8 @@ extension GmailSendService {
                 return message
             case .authenticationFailed:
                 return "Authentication failed"
+            case .optimisticCreationFailed:
+                return "Failed to prepare message for sending"
             }
         }
     }

@@ -163,9 +163,20 @@ final class SyncEngine: ObservableObject {
         await historyProcessor.clearLocalModifications(for: messageIds)
     }
 
-    /// Updates conversation rollups
+    /// Updates conversation rollups for modified conversations only (more efficient).
+    /// Falls back to updating all rollups if no modifications were tracked.
     nonisolated func updateConversationRollups(in context: NSManagedObjectContext) async {
-        await conversationManager.updateAllConversationRollups(in: context)
+        // Use differential updates when possible
+        let modifiedConversations = await messagePersister.getAndClearModifiedConversations()
+        if !modifiedConversations.isEmpty {
+            await conversationManager.updateRollupsForModifiedConversations(
+                conversationIDs: modifiedConversations,
+                in: context
+            )
+        } else {
+            // Fallback for cases where modifications weren't tracked
+            await conversationManager.updateAllConversationRollups(in: context)
+        }
     }
 
     /// Prefetches label IDs for background sync

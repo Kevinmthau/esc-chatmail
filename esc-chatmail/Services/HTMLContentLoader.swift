@@ -20,12 +20,18 @@ final class HTMLContentLoader {
     private let contentHandler: HTMLContentHandler
     private let sanitizer: HTMLSanitizerService
 
+    /// In-memory cache for wrapped HTML content to avoid repeated disk I/O
+    /// Key format: "\(messageId)_\(isDarkMode)" to cache both light and dark variants
+    private let htmlCache = NSCache<NSString, NSString>()
+
     init(
         contentHandler: HTMLContentHandler = HTMLContentHandler(),
         sanitizer: HTMLSanitizerService = .shared
     ) {
         self.contentHandler = contentHandler
         self.sanitizer = sanitizer
+        // Limit cache to ~50MB assuming average 50KB per HTML
+        htmlCache.countLimit = 1000
     }
 
     /// Resolves a storage URI string to a valid file URL
@@ -52,11 +58,17 @@ final class HTMLContentLoader {
         bodyText: String? = nil,
         isDarkMode: Bool
     ) async -> HTMLLoadResult {
+        // Check memory cache first
+        let cacheKey = "\(messageId)_\(isDarkMode)" as NSString
+        if let cachedHTML = htmlCache.object(forKey: cacheKey) {
+            return HTMLLoadResult(html: cachedHTML as String, source: .messageId)
+        }
 
         // Method 1: Try loading from message ID
         if contentHandler.htmlFileExists(for: messageId),
            let html = contentHandler.loadHTML(for: messageId) {
             let wrapped = sanitizer.wrapHTMLForDisplay(html, isDarkMode: isDarkMode)
+            htmlCache.setObject(wrapped as NSString, forKey: cacheKey)
             return HTMLLoadResult(html: wrapped, source: .messageId)
         }
 
@@ -66,10 +78,11 @@ final class HTMLContentLoader {
            FileManager.default.fileExists(atPath: url.path),
            let html = contentHandler.loadHTML(from: url) {
             let wrapped = sanitizer.wrapHTMLForDisplay(html, isDarkMode: isDarkMode)
+            htmlCache.setObject(wrapped as NSString, forKey: cacheKey)
             return HTMLLoadResult(html: wrapped, source: .storageURI)
         }
 
-        // Method 3: Plain text fallback
+        // Method 3: Plain text fallback (don't cache as it's trivial to generate)
         if let text = bodyText, !text.isEmpty {
             let html = convertPlainTextToHTML(text)
             let wrapped = sanitizer.wrapHTMLForDisplay(html, isDarkMode: isDarkMode)

@@ -14,13 +14,14 @@ actor ProfilePhotoResolver {
     private let coreDataStack = CoreDataStack.shared
     private let cache = NSCache<NSString, CachedPhoto>()
     private let requestManager = InFlightRequestManager<String, ProfilePhoto>()
+    private var memoryWarningObserver: (any NSObjectProtocol)?
 
     private init() {
         cache.countLimit = 500  // Increased from 200 for better cache hit rate
 
         // Add memory warning observer to clear cache under memory pressure
-        Task { @MainActor in
-            NotificationCenter.default.addObserver(
+        Task { @MainActor [weak self] in
+            let observer = NotificationCenter.default.addObserver(
                 forName: UIApplication.didReceiveMemoryWarningNotification,
                 object: nil,
                 queue: .main
@@ -29,6 +30,17 @@ actor ProfilePhotoResolver {
                     await self?.clearCache()
                 }
             }
+            await self?.setMemoryWarningObserver(observer)
+        }
+    }
+
+    private func setMemoryWarningObserver(_ observer: any NSObjectProtocol) {
+        memoryWarningObserver = observer
+    }
+
+    deinit {
+        if let observer = memoryWarningObserver {
+            NotificationCenter.default.removeObserver(observer)
         }
     }
 

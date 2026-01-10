@@ -91,6 +91,10 @@ actor MessagePersister {
         }
 
         // Create new message
-        await createNewMessage(processedMessage, labelIds: labelIds, myAliases: myAliases, in: context)
+        do {
+            try await createNewMessage(processedMessage, labelIds: labelIds, myAliases: myAliases, in: context)
+        } catch {
+            Log.error("Failed to create message \(gmailMessage.id): \(error)", category: .sync)
+        }
     }
 }

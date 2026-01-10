@@ -29,14 +29,25 @@ struct CoreDataBatchOperations: Sendable {
     /// - Parameters:
     ///   - context: The managed object context to save
     ///   - maxRetries: Maximum number of retry attempts
-    func saveContextWithRetry(_ context: NSManagedObjectContext, maxRetries: Int = 3) throws {
+    /// - Note: Uses exponential backoff with async sleep to avoid blocking.
+    func saveContextWithRetry(_ context: NSManagedObjectContext, maxRetries: Int = 3) async throws {
         var lastError: Error?
 
         for attempt in 1...maxRetries {
-            do {
-                try context.save()
+            // Perform save on context's queue
+            let saveResult: Result<Void, Error> = await context.perform {
+                do {
+                    try context.save()
+                    return .success(())
+                } catch {
+                    return .failure(error)
+                }
+            }
+
+            switch saveResult {
+            case .success:
                 return
-            } catch {
+            case .failure(let error):
                 lastError = error
 
                 // Handle specific Core Data errors
@@ -44,7 +55,7 @@ struct CoreDataBatchOperations: Sendable {
                     // Check for constraint violations
                     if nsError.code == NSManagedObjectConstraintMergeError {
                         // Resolve conflicts by keeping the store version
-                        context.rollback()
+                        await context.perform { context.rollback() }
                         return
                     }
 
@@ -55,10 +66,10 @@ struct CoreDataBatchOperations: Sendable {
                     }
                 }
 
-                // Retry with exponential backoff
+                // Retry with exponential backoff (non-blocking, outside perform block)
                 if attempt < maxRetries {
-                    let delay = pow(2.0, Double(attempt - 1)) * 0.1
-                    Thread.sleep(forTimeInterval: delay)
+                    let delayNanoseconds = UInt64(pow(2.0, Double(attempt - 1)) * 0.1 * 1_000_000_000)
+                    try? await Task.sleep(nanoseconds: delayNanoseconds)
                 }
             }
         }

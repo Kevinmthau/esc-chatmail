@@ -20,7 +20,7 @@ struct ChatView: View {
         request.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: true)]
         request.predicate = NSPredicate(format: "conversation == %@ AND NOT (ANY labels.id == %@)", conversation, "DRAFTS")
         request.fetchBatchSize = CoreDataConfig.fetchBatchSize
-        request.relationshipKeyPathsForPrefetching = ["participants", "participants.person", "attachments"]
+        request.relationshipKeyPathsForPrefetching = ["participants", "participants.person", "attachments", "labels"]
         // Limit initial fetch for large conversations - LazyVStack handles virtualization
         let config = VirtualScrollConfiguration.default
         request.fetchLimit = config.pageSize * 2  // 100 messages initially

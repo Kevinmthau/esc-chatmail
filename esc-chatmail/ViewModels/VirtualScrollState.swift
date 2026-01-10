@@ -178,11 +178,10 @@ final class VirtualScrollState: ObservableObject {
 
             let messages = (try? context.fetch(request)) ?? []
 
-            // Get total count
-            let countRequest = NSFetchRequest<NSNumber>(entityName: "Message")
+            // Get total count using efficient count() method instead of a full fetch
+            let countRequest = Message.fetchRequest()
             countRequest.predicate = request.predicate
-            countRequest.resultType = .countResultType
-            let total = (try? context.fetch(countRequest).first?.intValue) ?? 0
+            let total = (try? context.count(for: countRequest)) ?? 0
 
             return (messages, total)
         }

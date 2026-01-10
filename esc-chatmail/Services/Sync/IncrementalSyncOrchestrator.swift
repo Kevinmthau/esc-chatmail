@@ -241,8 +241,14 @@ final class IncrementalSyncOrchestrator {
 
         log.info("Recovery: processed=\(result.totalProcessed), success=\(result.successfulCount)")
 
-        // Update rollups
-        await conversationManager.updateAllConversationRollups(in: context)
+        // Update rollups only for modified conversations (more efficient than updating all)
+        let modifiedConversations = await messagePersister.getAndClearModifiedConversations()
+        if !modifiedConversations.isEmpty {
+            await conversationManager.updateRollupsForModifiedConversations(
+                conversationIDs: modifiedConversations,
+                in: context
+            )
+        }
 
         // Get new historyId
         let profile = try await messageFetcher.getProfile()

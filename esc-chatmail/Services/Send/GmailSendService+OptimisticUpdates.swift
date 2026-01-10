@@ -14,7 +14,7 @@ extension GmailSendService {
         subject: String? = nil,
         threadId: String? = nil,
         attachments: [Attachment] = []
-    ) async -> Message {
+    ) async throws -> Message {
         // Pre-compute values that don't need Core Data
         let messageId = UUID().uuidString
         let snippet = String(body.prefix(120))
@@ -35,7 +35,7 @@ extension GmailSendService {
 
         // Create the conversation using the serializer to prevent race conditions
         // Get the objectID since Conversation isn't safe to pass across threads
-        let conversationID = await findOrCreateConversation(recipients: recipients, myAliases: myAliases, in: viewContext).objectID
+        let conversationID = try await findOrCreateConversation(recipients: recipients, myAliases: myAliases, in: viewContext).objectID
 
         // Fetch conversation on main thread using the objectID
         guard let conversation = try? viewContext.existingObject(with: conversationID) as? Conversation else {
@@ -111,6 +111,7 @@ extension GmailSendService {
     }
 
     /// Updates an optimistic message with the actual Gmail IDs after successful send.
+    @MainActor
     func updateOptimisticMessage(_ message: Message, with result: SendResult) {
         message.id = result.messageId
         message.gmThreadId = result.threadId
@@ -125,6 +126,7 @@ extension GmailSendService {
     }
 
     /// Deletes an optimistic message (used when send fails).
+    @MainActor
     func deleteOptimisticMessage(_ message: Message) {
         viewContext.delete(message)
 
@@ -138,13 +140,13 @@ extension GmailSendService {
     }
 
     /// Finds or creates a conversation for the given recipients.
-    func findOrCreateConversation(recipients: [String], myAliases: Set<String>, in context: NSManagedObjectContext) async -> Conversation {
+    func findOrCreateConversation(recipients: [String], myAliases: Set<String>, in context: NSManagedObjectContext) async throws -> Conversation {
         // Build minimal headers for identity: From + To
         let identityHeaders = recipients.map { MessageHeader(name: "To", value: $0) }
         let identity = makeConversationIdentity(from: identityHeaders, myAliases: myAliases)
 
         // Use the serializer to prevent race conditions when creating conversations
-        let conversation = await ConversationCreationSerializer.shared.findOrCreateConversation(for: identity, in: context)
+        let conversation = try await ConversationCreationSerializer.shared.findOrCreateConversation(for: identity, in: context)
 
         // Update display name for sent messages
         conversation.displayName = DisplayNameFormatter.formatGroupNames(recipients)

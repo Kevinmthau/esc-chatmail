@@ -102,9 +102,15 @@ final class InitialSyncOrchestrator {
 
             log.info("Initial sync: processed=\(result.totalProcessed), success=\(result.successfulCount), failed=\(result.failedIds.count)")
 
-            // Phase 4: Update conversation rollups
+            // Phase 4: Update conversation rollups (only for modified conversations)
             progressHandler(0.85, "Updating conversations...")
-            await conversationManager.updateAllConversationRollups(in: context)
+            let modifiedConversations = await messagePersister.getAndClearModifiedConversations()
+            if !modifiedConversations.isEmpty {
+                await conversationManager.updateRollupsForModifiedConversations(
+                    conversationIDs: modifiedConversations,
+                    in: context
+                )
+            }
             let conversationCount = await countConversations(in: context)
 
             // Phase 5: Handle failures and determine historyId advancement

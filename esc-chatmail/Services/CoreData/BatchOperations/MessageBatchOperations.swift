@@ -26,9 +26,9 @@ extension CoreDataBatchOperations {
         let startTime = Date()
         var insertedCount = 0
 
-        try await context.perform {
-            // Process in chunks to avoid memory issues
-            for chunk in messages.chunked(into: configuration.batchSize) {
+        // Process in chunks to avoid memory issues
+        for chunk in messages.chunked(into: configuration.batchSize) {
+            try await context.perform {
                 // Check for existing messages to avoid duplicates
                 let messageIds = chunk.map { $0.id }
                 let existingRequest = NSFetchRequest<Message>(entityName: "Message")
@@ -45,18 +45,19 @@ extension CoreDataBatchOperations {
                     self.mapProcessedToManagedMessage(processedMessage, to: message)
                     insertedCount += 1
                 }
-
-                // Save at intervals to prevent memory buildup
-                if insertedCount % configuration.saveInterval == 0 {
-                    try self.saveContextWithRetry(context)
-                    context.reset() // Clear memory after save
-                }
             }
 
-            // Final save for remaining messages
-            if context.hasChanges {
-                try self.saveContextWithRetry(context)
+            // Save at intervals to prevent memory buildup (outside perform block)
+            if insertedCount % configuration.saveInterval == 0 {
+                try await self.saveContextWithRetry(context)
+                await context.perform { context.reset() } // Clear memory after save
             }
+        }
+
+        // Final save for remaining messages
+        let hasChanges = await context.perform { context.hasChanges }
+        if hasChanges {
+            try await self.saveContextWithRetry(context)
         }
 
         // Log performance metrics
@@ -86,8 +87,8 @@ extension CoreDataBatchOperations {
 
         var updatedCount = 0
 
-        try await context.perform {
-            for chunk in updates.chunked(into: configuration.batchSize) {
+        for chunk in updates.chunked(into: configuration.batchSize) {
+            try await context.perform {
                 // Fetch messages to update
                 let messageIds = chunk.map { $0.id }
                 let request = NSFetchRequest<Message>(entityName: "Message")
@@ -106,17 +107,18 @@ extension CoreDataBatchOperations {
                     }
                     updatedCount += 1
                 }
-
-                // Save at intervals
-                if updatedCount % configuration.saveInterval == 0 {
-                    try self.saveContextWithRetry(context)
-                }
             }
 
-            // Final save
-            if context.hasChanges {
-                try self.saveContextWithRetry(context)
+            // Save at intervals (outside perform block)
+            if updatedCount % configuration.saveInterval == 0 {
+                try await self.saveContextWithRetry(context)
             }
+        }
+
+        // Final save
+        let hasChanges = await context.perform { context.hasChanges }
+        if hasChanges {
+            try await self.saveContextWithRetry(context)
         }
 
         Log.info("Batch updated \(updatedCount) messages", category: .coreData)
