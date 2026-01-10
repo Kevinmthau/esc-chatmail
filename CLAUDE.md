@@ -131,6 +131,21 @@ Log.error("message", category: .api, error: error)
 - **Nested ObservableObject forwarding** - Forward `objectWillChange` via Combine subscriptions when composing ObservableObjects
 - User's aliases must be excluded from `participantHash` - load from Account entity if not in memory
 
+### Email Normalization (Gmail)
+
+Gmail treats dots in the local part as insignificant: `firstname.lastname@gmail.com` and `firstnamelastname@gmail.com` are the same account. Use `EmailNormalizer.normalize()` for all email comparisons:
+
+- Removes dots from Gmail local part
+- Strips `+` suffixes (plus addressing)
+- Normalizes `googlemail.com` → `gmail.com`
+- Lowercases everything
+
+**Critical usage points:**
+- `ConversationIdentity.normalizedEmail()` - participant hash computation
+- `ContactsResolver` - contact lookups and caching
+- `ConversationFilterService` - Contacts vs Other filtering
+- `PersonFactory` - Person entity lookups (callers must normalize)
+
 ### Conversation Visibility Logic
 
 Conversations appear in the chat list based on `archivedAt == nil`. Archive state is managed by `ConversationRollupUpdater`:

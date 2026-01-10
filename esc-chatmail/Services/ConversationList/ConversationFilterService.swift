@@ -82,7 +82,7 @@ final class ConversationFilterService: ObservableObject {
 
         for participant in participants {
             if let email = participant.person?.email {
-                if contactEmailsCache.contains(email.lowercased()) {
+                if contactEmailsCache.contains(EmailNormalizer.normalize(email)) {
                     return true
                 }
             }
@@ -109,7 +109,7 @@ final class ConversationFilterService: ObservableObject {
                 var emails: Set<String> = []
                 try contactStore.enumerateContacts(with: request) { contact, _ in
                     for emailAddress in contact.emailAddresses {
-                        emails.insert((emailAddress.value as String).lowercased())
+                        emails.insert(EmailNormalizer.normalize(emailAddress.value as String))
                     }
                 }
                 let finalEmails = emails

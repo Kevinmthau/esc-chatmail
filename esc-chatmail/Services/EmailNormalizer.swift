@@ -24,6 +24,12 @@ class EmailNormalizer {
         return trimmed
     }
     
+    /// Returns true if the email is a Gmail address (gmail.com or googlemail.com)
+    static func isGmailAddress(_ email: String) -> Bool {
+        let lowercased = email.lowercased()
+        return lowercased.hasSuffix("@gmail.com") || lowercased.hasSuffix("@googlemail.com")
+    }
+
     static func extractEmail(from string: String) -> String? {
         let pattern = #"<([^>]+@[^>]+)>"#
         if let regex = try? NSRegularExpression(pattern: pattern),

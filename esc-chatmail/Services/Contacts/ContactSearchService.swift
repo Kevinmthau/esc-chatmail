@@ -24,18 +24,54 @@ extension ContactsResolver {
         ]
 
         do {
-            // Search by email predicate (handles normalized matching internally)
+            // Try predicate search first (fast path)
             let predicate = CNContact.predicateForContacts(matchingEmailAddress: email)
             let contacts = try contactStore.unifiedContacts(matching: predicate, keysToFetch: keysToFetch)
 
-            // Find best match
             if let contact = findBestContact(from: contacts, for: email) {
                 return createMatch(from: contact, email: email)
+            }
+
+            // For Gmail addresses, fall back to enumeration with normalized comparison
+            // This handles cases where contact is stored with different dot placement
+            // (e.g., contact has firstname.lastname@gmail.com but we're searching for firstnamelastname@gmail.com)
+            if EmailNormalizer.isGmailAddress(email) {
+                return searchContactByEnumeration(for: email, keysToFetch: keysToFetch)
             }
         } catch {
             Log.error("Error fetching contacts", category: .general, error: error)
         }
 
+        return nil
+    }
+
+    /// Searches contacts by enumerating all and comparing normalized emails.
+    /// Used as fallback for Gmail addresses when predicate search fails due to dot-insensitivity.
+    private func searchContactByEnumeration(for email: String, keysToFetch: [CNKeyDescriptor]) -> ContactMatch? {
+        let normalizedTarget = EmailNormalizer.normalize(email)
+
+        let request = CNContactFetchRequest(keysToFetch: keysToFetch)
+        var matchedContact: CNContact?
+
+        do {
+            try contactStore.enumerateContacts(with: request) { contact, stop in
+                for emailAddress in contact.emailAddresses {
+                    let contactEmail = EmailNormalizer.normalize(emailAddress.value as String)
+                    if contactEmail == normalizedTarget {
+                        matchedContact = contact
+                        stop.pointee = true
+                        return
+                    }
+                }
+            }
+        } catch {
+            Log.error("Contact enumeration failed", category: .general, error: error)
+            return nil
+        }
+
+        if let contact = matchedContact {
+            return createMatch(from: contact, email: email)
+        }
         return nil
     }
 
