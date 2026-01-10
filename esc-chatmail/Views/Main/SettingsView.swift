@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @StateObject private var authSession = AuthSession.shared
+    @EnvironmentObject private var authSession: AuthSession
     @State private var showingSignOutConfirmation = false
 
     var body: some View {

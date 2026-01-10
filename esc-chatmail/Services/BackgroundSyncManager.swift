@@ -93,7 +93,7 @@ final class BackgroundSyncManager {
         do {
             _ = try await AuthSession.shared.withFreshToken()
 
-            let historyId = stateManager.getStoredHistoryId()
+            let historyId = await stateManager.getStoredHistoryId()
 
             if let historyId = historyId {
                 return await performHistorySync(startHistoryId: historyId, isProcessingTask: isProcessingTask)

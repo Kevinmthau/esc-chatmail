@@ -3,12 +3,19 @@ import Foundation
 // MARK: - Installation ID Management
 extension KeychainService {
     func getOrCreateInstallationId() -> String {
-        if let existingId = try? loadString(for: .installationId) {
+        do {
+            let existingId = try loadString(for: .installationId)
             return existingId
+        } catch {
+            Log.warning("Failed to load installation ID, will create new one", category: .auth)
         }
 
         let newId = UUID().uuidString
-        try? saveString(newId, for: .installationId, withAccess: .afterFirstUnlockThisDeviceOnly)
+        do {
+            try saveString(newId, for: .installationId, withAccess: .afterFirstUnlockThisDeviceOnly)
+        } catch {
+            Log.error("Failed to save installation ID", category: .auth, error: error)
+        }
 
         // Also create installation timestamp when creating new installation ID
         setInstallationTimestamp()
@@ -17,10 +24,13 @@ extension KeychainService {
     }
 
     func verifyInstallationId(_ id: String) -> Bool {
-        guard let storedId = try? loadString(for: .installationId) else {
+        do {
+            let storedId = try loadString(for: .installationId)
+            return storedId == id
+        } catch {
+            Log.warning("Failed to verify installation ID", category: .auth)
             return false
         }
-        return storedId == id
     }
 
     func getOrCreateInstallationTimestamp() -> Date {
@@ -38,16 +48,25 @@ extension KeychainService {
     }
 
     func getInstallationTimestamp() -> Date? {
-        guard let timestampString = try? loadString(for: .installationTimestamp),
-              let timestamp = Double(timestampString) else {
+        do {
+            let timestampString = try loadString(for: .installationTimestamp)
+            guard let timestamp = Double(timestampString) else {
+                return nil
+            }
+            return Date(timeIntervalSince1970: timestamp)
+        } catch {
+            Log.warning("Failed to load installation timestamp", category: .auth)
             return nil
         }
-        return Date(timeIntervalSince1970: timestamp)
     }
 
     func setInstallationTimestamp(_ date: Date = Date()) {
         let timestamp = date.timeIntervalSince1970
-        try? saveString(String(timestamp), for: .installationTimestamp, withAccess: .afterFirstUnlockThisDeviceOnly)
+        do {
+            try saveString(String(timestamp), for: .installationTimestamp, withAccess: .afterFirstUnlockThisDeviceOnly)
+        } catch {
+            Log.error("Failed to save installation timestamp", category: .auth, error: error)
+        }
     }
 
     /// Resets the installation timestamp to include older messages
@@ -60,7 +79,11 @@ extension KeychainService {
 
     /// Clears the installation timestamp so it will be recreated on next sync
     func clearInstallationTimestamp() {
-        try? delete(for: .installationTimestamp)
-        Log.debug("Cleared installation timestamp", category: .auth)
+        do {
+            try delete(for: .installationTimestamp)
+            Log.debug("Cleared installation timestamp", category: .auth)
+        } catch {
+            Log.warning("Failed to clear installation timestamp", category: .auth)
+        }
     }
 }

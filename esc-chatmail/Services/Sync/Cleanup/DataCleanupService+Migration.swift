@@ -18,6 +18,7 @@ extension DataCleanupService {
         await context.perform {
             let request = Conversation.fetchRequest()
             request.fetchBatchSize = 50
+            request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
 
             guard let conversations = try? context.fetch(request) else {
                 Log.warning("Failed to fetch conversations for migration", category: .coreData)
@@ -72,6 +73,7 @@ extension DataCleanupService {
             let request = Conversation.fetchRequest()
             request.predicate = ConversationPredicates.active
             request.returnsObjectsAsFaults = false
+            request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
 
             guard let conversations = try? context.fetch(request) else { return }
 

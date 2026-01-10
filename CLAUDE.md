@@ -167,3 +167,38 @@ Conversations appear in the chat list based on `archivedAt == nil`. Archive stat
 3. Pass to `conversationManager.updateRollupsForModifiedConversations(conversationIDs:in:)`
 
 This is used in `InitialSyncOrchestrator`, `IncrementalSyncOrchestrator`, and `SyncEngine.updateConversationRollups()`.
+
+### Core Data Performance
+
+**Prefetching relationships** - When accessing `Conversation.participantsArray` in loops, prefetch relationships to avoid N+1 queries:
+```swift
+request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
+```
+
+**Composite indexes** - `CoreDataIndexes.swift` creates SQLite indexes for common query patterns. The conversation list uses `idx_conversation_visible_sorted` for `hidden == NO AND archivedAt == nil ORDER BY lastMessageDate DESC`.
+
+### Error Handling
+
+Prefer explicit error logging over silent `try?`:
+```swift
+// Avoid:
+let value = try? loadString(for: .key)
+
+// Prefer:
+do {
+    let value = try loadString(for: .key)
+} catch {
+    Log.warning("Failed to load value", category: .auth)
+}
+```
+
+### SwiftUI Singletons
+
+Use `@EnvironmentObject` for shared singletons injected at app root, not `@StateObject`:
+```swift
+// Avoid:
+@StateObject private var authSession = AuthSession.shared
+
+// Prefer:
+@EnvironmentObject private var authSession: AuthSession
+```

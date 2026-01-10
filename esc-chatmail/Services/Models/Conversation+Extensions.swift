@@ -28,6 +28,10 @@ extension Conversation {
         set { type = newValue.rawValue }
     }
 
+    /// Returns participant emails from this conversation.
+    /// - Warning: Triggers Core Data faults for each participant's Person relationship.
+    ///   Ensure fetch requests include `relationshipKeyPathsForPrefetching = ["participants", "participants.person"]`
+    ///   before accessing this property in loops.
     var participantsArray: [String] {
         guard let participants = participants else { return [] }
         return participants.compactMap { $0.person?.email }

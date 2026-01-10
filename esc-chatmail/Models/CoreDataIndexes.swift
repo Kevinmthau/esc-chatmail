@@ -14,6 +14,8 @@ extension NSPersistentStoreCoordinator {
                 "CREATE INDEX IF NOT EXISTS idx_conversation_pinned_date ON ZCONVERSATION(ZPINNED DESC, ZLASTMESSAGEDATE DESC)",
                 "CREATE INDEX IF NOT EXISTS idx_conversation_hidden_date ON ZCONVERSATION(ZHIDDEN, ZLASTMESSAGEDATE DESC)",
                 "CREATE INDEX IF NOT EXISTS idx_conversation_unread_date ON ZCONVERSATION(ZINBOXUNREADCOUNT DESC, ZLASTMESSAGEDATE DESC)",
+                // Composite index for conversation list: visible + non-archived + sorted by date
+                "CREATE INDEX IF NOT EXISTS idx_conversation_visible_sorted ON ZCONVERSATION(ZHIDDEN, ZARCHIVEDAT, ZLASTMESSAGEDATE DESC)",
 
                 // Message indexes
                 "CREATE INDEX IF NOT EXISTS idx_message_conversation_date ON ZMESSAGE(ZCONVERSATION, ZINTERNALDATE DESC)",

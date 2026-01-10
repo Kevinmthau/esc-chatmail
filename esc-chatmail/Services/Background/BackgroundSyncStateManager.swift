@@ -25,21 +25,20 @@ final class BackgroundSyncStateManager {
     }
 
     /// Retrieves the stored history ID from Core Data
-    func getStoredHistoryId() -> String? {
-        var historyId: String? = nil
+    func getStoredHistoryId() async -> String? {
         let context = coreDataStack.newBackgroundContext()
-        context.performAndWait {
+        return await context.perform {
             let fetchRequest: NSFetchRequest<Account> = Account.fetchRequest()
             fetchRequest.fetchLimit = 1
 
             do {
                 let accounts = try context.fetch(fetchRequest)
-                historyId = accounts.first?.historyId
+                return accounts.first?.historyId
             } catch {
                 Log.error("Failed to fetch historyId", category: .background, error: error)
+                return nil
             }
         }
-        return historyId
     }
 
     /// Stores the history ID in Core Data
