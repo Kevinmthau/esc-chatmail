@@ -60,13 +60,16 @@ actor ProcessedTextCache {
 
         if handler.htmlFileExists(for: messageId),
            let html = handler.loadHTML(for: messageId) {
-            let extracted = TextProcessing.extractPlainText(from: html)
+            // Strip quoted content from HTML first
+            let cleanedHTML = HTMLQuoteRemover.removeQuotes(from: html) ?? html
+
+            let extracted = TextProcessing.extractPlainText(from: cleanedHTML)
             if !extracted.isEmpty {
                 plainText = TextProcessing.stripQuotedText(from: extracted)
             }
 
-            // Check for rich content (tables, images, video, iframes)
-            let lowercased = html.lowercased()
+            // Check for rich content in cleaned HTML only (not quoted sections)
+            let lowercased = cleanedHTML.lowercased()
             hasRichContent = lowercased.contains("<table") ||
                             lowercased.contains("<img") ||
                             lowercased.contains("<video") ||
@@ -95,8 +98,11 @@ enum TextProcessing {
         text = text.replacingOccurrences(of: "<script[^>]*>[\\s\\S]*?</script>", with: "", options: .regularExpression, range: nil)
         text = text.replacingOccurrences(of: "<style[^>]*>[\\s\\S]*?</style>", with: "", options: .regularExpression, range: nil)
 
-        // Convert explicit line breaks to newlines
-        text = text.replacingOccurrences(of: "<br[^>]*>", with: "\n", options: .regularExpression, range: nil)
+        // Convert consecutive <br> tags to paragraph breaks, single <br> to space (soft wrap)
+        // First: <br><br> or <br>\s*<br> → paragraph break
+        text = text.replacingOccurrences(of: "<br[^>]*>\\s*<br[^>]*>", with: "\n\n", options: .regularExpression, range: nil)
+        // Then: remaining single <br> → space (for soft line wrapping)
+        text = text.replacingOccurrences(of: "<br[^>]*>", with: " ", options: .regularExpression, range: nil)
 
         // Paragraphs and headings get double newlines (actual content breaks)
         text = text.replacingOccurrences(of: "</p>", with: "\n\n", options: .regularExpression, range: nil)
@@ -148,6 +154,12 @@ enum TextProcessing {
         text = text.replacingOccurrences(of: "\\n[ \\t]*\\n", with: "\n\n", options: .regularExpression, range: nil)
         // Collapse any sequence of newlines (with optional whitespace) to max 2 newlines
         text = text.replacingOccurrences(of: "(\\s*\\n\\s*){2,}", with: "\n\n", options: .regularExpression, range: nil)
+
+        // Trim whitespace from each line to clean up artifacts like " \n" from decoded &nbsp;
+        text = text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .joined(separator: "\n")
+
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         return text

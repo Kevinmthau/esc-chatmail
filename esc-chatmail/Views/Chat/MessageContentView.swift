@@ -1,15 +1,5 @@
 import SwiftUI
 
-/// Helper to compute text metrics once per text string
-private struct TextMetrics {
-    let isTruncated: Bool
-
-    init(text: String, lineLimit: Int?) {
-        let lineCount = text.components(separatedBy: .newlines).count
-        self.isTruncated = lineCount > (lineLimit ?? 15) || text.count > 800
-    }
-}
-
 /// Displays the content portion of a message bubble.
 /// Handles rich HTML, plain text, attachments, and empty states.
 struct MessageContentView: View {
@@ -53,22 +43,47 @@ struct MessageContentView: View {
 
     @ViewBuilder
     private func textBubble(text: String) -> some View {
-        let metrics = TextMetrics(text: text, lineLimit: style.textLineLimit)
+        let (displayText, wasTruncated) = truncatedText(text, lineLimit: style.textLineLimit)
+        let showViewMore = hasRichContent || wasTruncated
 
         VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 6) {
-            Text(text)
-                .lineLimit(style.textLineLimit)
+            Text(displayText)
                 .padding(style.bubblePadding)
                 .background(style.bubbleBackground(isFromMe: message.isFromMe))
                 .foregroundColor(style.textColor(isFromMe: message.isFromMe))
                 .cornerRadius(style.bubbleCornerRadius)
 
-            if hasRichContent || metrics.isTruncated {
+            if showViewMore {
                 ViewContentButton.viewMore {
                     showingHTMLView = true
                 }
             }
         }
+    }
+
+    /// Truncates text at the specified limits and adds ellipsis if truncated
+    private func truncatedText(_ text: String, lineLimit: Int?, charLimit: Int = 800) -> (text: String, wasTruncated: Bool) {
+        let maxLines = lineLimit ?? 15
+        let lines = text.components(separatedBy: .newlines)
+
+        // Check line limit first
+        if lines.count > maxLines {
+            let truncated = lines.prefix(maxLines).joined(separator: "\n")
+            return (truncated + "...", true)
+        }
+
+        // Check character limit
+        if text.count > charLimit {
+            let truncated = String(text.prefix(charLimit))
+            // Try to break at word boundary
+            if let lastSpace = truncated.lastIndex(of: " "),
+               truncated.distance(from: truncated.startIndex, to: lastSpace) > charLimit - 50 {
+                return (String(truncated[..<lastSpace]) + "...", true)
+            }
+            return (truncated + "...", true)
+        }
+
+        return (text, false)
     }
 
     private var noContentPlaceholder: some View {
