@@ -59,7 +59,7 @@ final class ChatViewModel: ObservableObject {
             await context.perform {
                 if let conv = try? context.existingObject(with: conversationID) as? Conversation {
                     conv.inboxUnreadCount = 0
-                    try? context.save()
+                    context.saveOrLog(operation: "reset conversation unread count")
                 }
             }
 

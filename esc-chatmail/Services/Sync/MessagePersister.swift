@@ -18,10 +18,6 @@ actor MessagePersister {
     let htmlContentHandler: HTMLContentHandler
     let conversationManager: ConversationManager
 
-    /// Tracks conversation IDs modified during current sync batch.
-    /// Actor isolation provides thread safety.
-    var modifiedConversationIDs: Set<NSManagedObjectID> = []
-
     // MARK: - Initialization
 
     init(
@@ -37,17 +33,18 @@ actor MessagePersister {
     }
 
     // MARK: - Modified Conversations Tracking
+    // Tracking is now delegated to ModificationTracker.shared for consolidated
+    // tracking across MessagePersister and HistoryProcessor.
 
     /// Resets the modified conversations tracker - call at start of sync.
-    func resetModifiedConversations() {
-        modifiedConversationIDs.removeAll()
+    func resetModifiedConversations() async {
+        await ModificationTracker.shared.reset()
     }
 
     /// Returns and clears the set of modified conversation IDs.
-    func getAndClearModifiedConversations() -> Set<NSManagedObjectID> {
-        let result = modifiedConversationIDs
-        modifiedConversationIDs.removeAll()
-        return result
+    /// NOTE: Prefer using ModificationTracker.shared.getAndClearModifiedConversations() directly.
+    func getAndClearModifiedConversations() async -> Set<NSManagedObjectID> {
+        await ModificationTracker.shared.getAndClearModifiedConversations()
     }
 
     // MARK: - Message Persistence

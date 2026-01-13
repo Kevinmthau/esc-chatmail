@@ -104,7 +104,7 @@ final class InitialSyncOrchestrator {
 
             // Phase 4: Update conversation rollups (only for modified conversations)
             progressHandler(0.85, "Updating conversations...")
-            let modifiedConversations = await messagePersister.getAndClearModifiedConversations()
+            let modifiedConversations = await ModificationTracker.shared.getAndClearModifiedConversations()
             if !modifiedConversations.isEmpty {
                 await conversationManager.updateRollupsForModifiedConversations(
                     conversationIDs: modifiedConversations,

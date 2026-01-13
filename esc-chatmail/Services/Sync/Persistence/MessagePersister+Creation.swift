@@ -99,6 +99,6 @@ extension MessagePersister {
         }
 
         // Track the conversation as modified for rollup updates
-        trackModifiedConversation(conversation)
+        await trackModifiedConversation(conversation)
     }
 }

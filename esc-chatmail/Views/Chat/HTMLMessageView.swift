@@ -128,7 +128,7 @@ struct HTMLMessageView: View {
                     let messagesDirectory = documentsPath.appendingPathComponent("Messages")
                     let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
                     message.bodyStorageURI = fileURL.absoluteString
-                    try? context.save()
+                    context.saveOrLog(operation: "update message body storage URI")
                 }
             }
         }

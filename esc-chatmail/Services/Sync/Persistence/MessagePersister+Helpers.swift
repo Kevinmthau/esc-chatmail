@@ -32,7 +32,8 @@ extension MessagePersister {
     }
 
     /// Tracks a conversation as modified for rollup updates.
-    func trackModifiedConversation(_ conversation: Conversation) {
-        modifiedConversationIDs.insert(conversation.objectID)
+    /// Delegates to the shared ModificationTracker for consolidated tracking.
+    func trackModifiedConversation(_ conversation: Conversation) async {
+        await ModificationTracker.shared.trackModifiedConversation(conversation.objectID)
     }
 }

@@ -206,6 +206,24 @@ extension NSManagedObjectContext {
         }
     }
 
+    /// Synchronous save with logging - use inside context.perform {} blocks
+    /// Replaces `try? context.save()` with proper error logging
+    /// - Parameters:
+    ///   - operation: Description of what operation triggered the save (e.g., "update profile photo")
+    ///   - category: Log category, defaults to .coreData
+    /// - Returns: true if save succeeded or no changes, false on error
+    @discardableResult
+    func saveOrLog(operation: String, category: LogCategory = .coreData) -> Bool {
+        guard hasChanges else { return true }
+        do {
+            try save()
+            return true
+        } catch {
+            Log.error("Failed to save: \(operation)", category: category, error: error)
+            return false
+        }
+    }
+
     // MARK: - Combined Operations
 
     /// Performs an update and saves in a single operation

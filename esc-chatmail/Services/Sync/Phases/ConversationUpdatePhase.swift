@@ -33,9 +33,9 @@ struct ConversationUpdatePhase: SyncPhase {
     ) async throws {
         context.reportProgress(0, status: "Updating conversations...", phase: self)
 
-        var modifiedIDs = await messagePersister.getAndClearModifiedConversations()
-        let historyModifiedIDs = await historyProcessor.getAndClearModifiedConversations()
-        modifiedIDs.formUnion(historyModifiedIDs)
+        // Use the shared ModificationTracker which consolidates tracking from both
+        // MessagePersister and HistoryProcessor
+        let modifiedIDs = await ModificationTracker.shared.getAndClearModifiedConversations()
 
         log.debug("Updating rollups for \(modifiedIDs.count) modified conversations")
 

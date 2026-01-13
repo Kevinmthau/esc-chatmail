@@ -64,7 +64,8 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
 - **ContactsResolver** - Actor for contact lookup with caching
 - **PendingActionsManager** - Actor-based offline action queue with retry logic
 - **ProfilePhotoResolver** - Resolves profile photos from contacts and cache
-- **MessagePersister** - Tracks modified conversations during sync for differential rollup updates
+- **ModificationTracker** - Shared actor tracking modified conversations during sync (single source of truth for both MessagePersister and HistoryProcessor)
+- **MessagePersister** - Persists Gmail messages to Core Data, delegates modification tracking to ModificationTracker
 
 ### Message Display Logic
 
@@ -132,6 +133,7 @@ Log.error("message", category: .api, error: error)
 - **Actor isolation** for thread-safe mutable state (TokenManager, PendingActionsManager, caches)
 - **NotificationCenter in actors** - Store observer token, remove in `deinit`. Use `Task { @MainActor [weak self] in }` to register.
 - **Core Data threading** - Use `viewContext.perform { }` or `coreDataStack.newBackgroundContext()` - never synchronous fetches on MainActor
+- **FetchedResults not thread-safe** - SwiftUI's `@FetchRequest` results are MainActor-bound. Collect needed data (IDs, values) on MainActor before passing to `Task.detached`
 - **Async batch operations** - `saveContextWithRetry` is async; perform Core Data work in `context.perform { }`, save/sleep outside
 - **Typed accessors** in `/Services/Models/` per-entity extensions (avoid `value(forKey:)`)
 - **Extensions for code organization** - Large actors/structs split into extensions in separate files. Properties must be `internal` (not `private`) for extensions to access.
@@ -164,11 +166,12 @@ Conversations appear in the chat list based on `archivedAt == nil`. Archive stat
 ### Sync Optimization
 
 **Differential rollup updates** - Instead of updating all conversation rollups after sync (O(n×m) operation), only modified conversations are updated:
-1. `MessagePersister.trackModifiedConversation()` records conversation IDs during message save
-2. After sync, call `messagePersister.getAndClearModifiedConversations()` to get the set
-3. Pass to `conversationManager.updateRollupsForModifiedConversations(conversationIDs:in:)`
+1. `ModificationTracker.shared` (actor) is the single source of truth for tracking modified conversations
+2. Both `MessagePersister` and `HistoryProcessor` delegate tracking to `ModificationTracker.shared`
+3. After sync, call `ModificationTracker.shared.getAndClearModifiedConversations()` to get the set
+4. Pass to `conversationManager.updateRollupsForModifiedConversations(conversationIDs:in:)`
 
-This is used in `InitialSyncOrchestrator`, `IncrementalSyncOrchestrator`, and `SyncEngine.updateConversationRollups()`.
+This is used in `InitialSyncOrchestrator`, `IncrementalSyncOrchestrator`, `ConversationUpdatePhase`, and `SyncEngine.updateConversationRollups()`.
 
 **Batch fetching in label operations** - `HistoryProcessor+LabelOperations.swift` uses batch Core Data queries:
 - Collect all message IDs and label IDs upfront before processing
@@ -218,6 +221,8 @@ This is used in `InitialSyncOrchestrator`, `IncrementalSyncOrchestrator`, and `S
 request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
 ```
 
+`ConversationRollupUpdater` prefetches `["messages", "messages.labels", "participants", "participants.person"]` in all batch methods to avoid N+1 queries when computing rollups.
+
 **Composite indexes** - `CoreDataIndexes.swift` creates SQLite indexes for common query patterns. The conversation list uses `idx_conversation_visible_sorted` for `hidden == NO AND archivedAt == nil ORDER BY lastMessageDate DESC`.
 
 ### Error Handling
@@ -233,6 +238,15 @@ do {
 } catch {
     Log.warning("Failed to load value", category: .auth)
 }
+```
+
+**Core Data saves** - Use `saveOrLog` instead of `try? context.save()` inside `context.perform {}` blocks:
+```swift
+// Avoid:
+try? context.save()
+
+// Prefer:
+context.saveOrLog(operation: "update message read status")
 ```
 
 ### SwiftUI Singletons

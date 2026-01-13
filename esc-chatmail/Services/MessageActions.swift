@@ -81,7 +81,7 @@ final class MessageActions: ObservableObject {
             message.isUnread = false
             message.localModifiedAt = Date()
             let messageId = message.id
-            try? context.save()
+            context.saveOrLog(operation: "mark message as read")
             return messageId
         }
 

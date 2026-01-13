@@ -85,18 +85,19 @@ struct ChatView: View {
                 let config = VirtualScrollConfiguration.default
                 let prefetchLimit = config.visibleItemCount + config.bufferSize  // 30 messages
 
+                // Collect data on MainActor (FetchedResults is not thread-safe)
+                let recentMessages = messages.suffix(prefetchLimit)
+                let messageIds = recentMessages.map { $0.id }
+                let senderEmails = recentMessages.compactMap { $0.senderEmail }
+                let uniqueEmails = Array(Set(senderEmails))
+
                 // Batch prefetch text content for recent messages (eliminates N+1 queries)
                 Task.detached(priority: .userInitiated) {
-                    let recentMessages = await messages.suffix(prefetchLimit)
-                    let messageIds = recentMessages.map { $0.id }
                     await ProcessedTextCache.shared.prefetch(messageIds: messageIds)
                 }
 
                 // Batch prefetch contacts to avoid thundering herd on first load
                 Task.detached(priority: .userInitiated) {
-                    let recentMessages = await messages.suffix(prefetchLimit)
-                    let senderEmails = recentMessages.compactMap { $0.senderEmail }
-                    let uniqueEmails = Array(Set(senderEmails))
                     await ContactsResolver.shared.prewarm(emails: uniqueEmails)
                 }
             }

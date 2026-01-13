@@ -45,7 +45,7 @@ extension MessagePersister {
 
         // Track the conversation as modified for rollup updates
         if let conversation = existingMessage.conversation {
-            trackModifiedConversation(conversation)
+            await trackModifiedConversation(conversation)
         }
 
         Log.debug("Updated existing message: \(processedMessage.id)", category: .sync)

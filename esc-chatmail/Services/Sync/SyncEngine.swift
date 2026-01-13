@@ -168,8 +168,8 @@ final class SyncEngine: ObservableObject {
     /// Updates conversation rollups for modified conversations only (more efficient).
     /// Falls back to updating all rollups if no modifications were tracked.
     nonisolated func updateConversationRollups(in context: NSManagedObjectContext) async {
-        // Use differential updates when possible
-        let modifiedConversations = await messagePersister.getAndClearModifiedConversations()
+        // Use differential updates when possible (from shared tracker)
+        let modifiedConversations = await ModificationTracker.shared.getAndClearModifiedConversations()
         if !modifiedConversations.isEmpty {
             await conversationManager.updateRollupsForModifiedConversations(
                 conversationIDs: modifiedConversations,

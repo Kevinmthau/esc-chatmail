@@ -210,7 +210,7 @@ actor ProfilePhotoResolver {
                 // Only update if not already set
                 if person.avatarURL == nil || person.avatarURL?.isEmpty == true {
                     person.avatarURL = url
-                    try? context.save()
+                    context.saveOrLog(operation: "update person avatar URL")
                 }
             }
         }

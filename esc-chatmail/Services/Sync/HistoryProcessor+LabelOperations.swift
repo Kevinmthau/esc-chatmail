@@ -89,7 +89,7 @@ extension HistoryProcessor {
         }
 
         // Track all modified conversations (actor-isolated)
-        trackModifiedConversations(modifiedObjectIDs)
+        await trackModifiedConversations(modifiedObjectIDs)
     }
 
     func processLabelRemovals(
@@ -174,7 +174,7 @@ extension HistoryProcessor {
         }
 
         // Track all modified conversations (actor-isolated)
-        trackModifiedConversations(modifiedObjectIDs)
+        await trackModifiedConversations(modifiedObjectIDs)
     }
 
     /// Check if a message has local modifications that haven't been synced yet

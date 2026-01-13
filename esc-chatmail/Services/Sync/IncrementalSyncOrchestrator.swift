@@ -247,7 +247,7 @@ final class IncrementalSyncOrchestrator {
         log.info("Recovery: processed=\(result.totalProcessed), success=\(result.successfulCount)")
 
         // Update rollups only for modified conversations (more efficient than updating all)
-        let modifiedConversations = await messagePersister.getAndClearModifiedConversations()
+        let modifiedConversations = await ModificationTracker.shared.getAndClearModifiedConversations()
         if !modifiedConversations.isEmpty {
             await conversationManager.updateRollupsForModifiedConversations(
                 conversationIDs: modifiedConversations,

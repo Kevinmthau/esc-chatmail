@@ -51,6 +51,13 @@ struct ConversationRollupUpdater: Sendable {
         await context.perform {
             let request = Conversation.fetchRequest()
             request.fetchBatchSize = 50
+            // Prefetch relationships to avoid N+1 queries when accessing messages/labels/participants
+            request.relationshipKeyPathsForPrefetching = [
+                "messages",
+                "messages.labels",
+                "participants",
+                "participants.person"
+            ]
 
             let conversations: [Conversation]
             do {
@@ -77,15 +84,27 @@ struct ConversationRollupUpdater: Sendable {
         let myEmail = AuthSession.shared.userEmail ?? ""
 
         await context.perform {
-            for objectID in conversationIDs {
-                do {
-                    if let conversation = try context.existingObject(with: objectID) as? Conversation {
-                        self.updateRollups(for: conversation, myEmail: myEmail)
-                    }
-                } catch {
-                    // Object may have been deleted; skip and continue
-                    Log.debug("Conversation \(objectID) not found for rollup update", category: .conversation)
-                }
+            // Use batch fetch with prefetching instead of individual existingObject calls
+            // This avoids N+1 queries when accessing messages/labels/participants
+            let request = Conversation.fetchRequest()
+            request.predicate = NSPredicate(format: "SELF IN %@", conversationIDs)
+            request.relationshipKeyPathsForPrefetching = [
+                "messages",
+                "messages.labels",
+                "participants",
+                "participants.person"
+            ]
+
+            let conversations: [Conversation]
+            do {
+                conversations = try context.fetch(request)
+            } catch {
+                Log.error("Failed to batch fetch conversations for rollup update", category: .conversation, error: error)
+                return
+            }
+
+            for conversation in conversations {
+                self.updateRollups(for: conversation, myEmail: myEmail)
             }
         }
     }
@@ -103,6 +122,13 @@ struct ConversationRollupUpdater: Sendable {
             let request = Conversation.fetchRequest()
             request.predicate = ConversationPredicates.keyHashes(Array(keyHashes))
             request.fetchBatchSize = 50
+            // Prefetch relationships to avoid N+1 queries when accessing messages/labels/participants
+            request.relationshipKeyPathsForPrefetching = [
+                "messages",
+                "messages.labels",
+                "participants",
+                "participants.person"
+            ]
 
             let conversations: [Conversation]
             do {
