@@ -8,10 +8,24 @@ enum PlainTextQuoteRemover {
 
     /// Regex patterns that indicate quoted content
     private static let quoteIndicatorPatterns = [
-        // Time-based quotes
+        // Time-based quotes (English)
         "On .+ wrote:",
         "On .+, .+ wrote:",
         "> On .+, at .+, .+ wrote:",
+
+        // Time-based quotes (Italian)
+        "Il giorno .+ ha scritto:",
+        "In data .+ ha scritto:",
+        "> Il giorno .+ ha scritto:",
+
+        // Time-based quotes (German)
+        "Am .+ schrieb .+:",
+
+        // Time-based quotes (French)
+        "Le .+ a écrit\\s?:",
+
+        // Time-based quotes (Spanish)
+        "El .+ escribió:",
 
         // Header-based quotes
         "From: .+\nSent: .+\nTo: .+\nSubject: .+",
@@ -58,7 +72,7 @@ enum PlainTextQuoteRemover {
         "\nWith best wishes,",
         "\nBest wishes,",
 
-        // Mobile signatures
+        // Mobile signatures (English)
         "\nSent from my iPhone",
         "\nSent from my iPad",
         "\nSent from my Android",
@@ -80,6 +94,47 @@ enum PlainTextQuoteRemover {
         "\nSent from TypeApp",
         "\nGet BlueMail for",
         "\nDownload Outlook",
+
+        // Mobile signatures (Italian) - newline prefix
+        "\nInviato da iPhone",
+        "\nInviato da iPad",
+        "\nInviato dal mio iPhone",
+        "\nInviato dal mio iPad",
+        "\nInviato da Mail",
+        // Mobile signatures (Italian) - space prefix for unwrapped lines
+        " Inviato da iPhone",
+        " Inviato da iPad",
+        " Inviato dal mio iPhone",
+        " Inviato dal mio iPad",
+
+        // Mobile signatures (German) - newline prefix
+        "\nGesendet von meinem iPhone",
+        "\nGesendet von meinem iPad",
+        "\nVon meinem iPhone gesendet",
+        "\nVon meinem iPad gesendet",
+        // Mobile signatures (German) - space prefix for unwrapped lines
+        " Gesendet von meinem iPhone",
+        " Gesendet von meinem iPad",
+        " Von meinem iPhone gesendet",
+        " Von meinem iPad gesendet",
+
+        // Mobile signatures (French) - newline prefix
+        "\nEnvoyé de mon iPhone",
+        "\nEnvoyé de mon iPad",
+        "\nEnvoyé depuis mon iPhone",
+        "\nEnvoyé depuis mon iPad",
+        // Mobile signatures (French) - space prefix for unwrapped lines
+        " Envoyé de mon iPhone",
+        " Envoyé de mon iPad",
+        " Envoyé depuis mon iPhone",
+        " Envoyé depuis mon iPad",
+
+        // Mobile signatures (Spanish) - newline prefix
+        "\nEnviado desde mi iPhone",
+        "\nEnviado desde mi iPad",
+        // Mobile signatures (Spanish) - space prefix for unwrapped lines
+        " Enviado desde mi iPhone",
+        " Enviado desde mi iPad",
 
         // Unsubscribe and preference links
         "\nUnsubscribe",
