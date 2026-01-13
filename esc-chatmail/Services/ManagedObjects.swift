@@ -37,6 +37,10 @@ public class Label: NSManagedObject, Identifiable {
 public class PendingAction: NSManagedObject, Identifiable {
 }
 
+@objc(AbandonedSyncMessage)
+public class AbandonedSyncMessage: NSManagedObject, Identifiable {
+}
+
 extension Attachment {
     enum State: String {
         case queued = "queued"
@@ -83,6 +87,7 @@ extension PendingAction {
         case processing = "processing"
         case failed = "failed"
         case completed = "completed"
+        case abandoned = "abandoned"
     }
 
     var actionTypeEnum: ActionType? {

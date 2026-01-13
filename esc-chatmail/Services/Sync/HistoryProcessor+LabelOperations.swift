@@ -5,7 +5,9 @@ extension HistoryProcessor {
     /// Maximum age for local modifications before they're considered stale
     /// If a local modification is older than this, we allow server updates
     /// This prevents local changes from blocking server updates indefinitely
-    static let maxLocalModificationAge: TimeInterval = 300 // 5 minutes
+    /// Note: 30 minutes allows for slow networks and app suspensions while still
+    /// eventually allowing server updates if the pending action truly failed
+    static let maxLocalModificationAge: TimeInterval = 1800 // 30 minutes
 
     func processLabelAdditions(
         _ labelsAdded: [HistoryLabelAdded]?,

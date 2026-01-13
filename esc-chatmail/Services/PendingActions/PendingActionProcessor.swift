@@ -104,26 +104,38 @@ extension PendingActionsManager {
 
     /// Handles a failed action by incrementing retry count.
     func handleActionFailure(objectID: NSManagedObjectID, retryCount: Int16, context: NSManagedObjectContext) async {
-        await context.perform {
+        let shouldNotify = await context.perform {
             do {
                 guard let action = try context.existingObject(with: objectID) as? PendingAction else {
                     Log.warning("PendingAction not found for failure handling", category: .sync)
-                    return
+                    return false
                 }
                 let newRetryCount = retryCount + 1
                 action.setValue(newRetryCount, forKey: "retryCount")
-                action.setValue("failed", forKey: "status")
 
                 if newRetryCount >= Int16(self.maxRetries) {
-                    Log.warning("Action permanently failed after \(self.maxRetries) retries", category: .sync)
+                    // Mark as abandoned instead of failed - this is permanent
+                    action.setValue("abandoned", forKey: "status")
+                    Log.warning("Action permanently failed after \(self.maxRetries) retries - marked as abandoned", category: .sync)
+                    try context.save()
+                    return true  // Notify UI
                 } else {
+                    action.setValue("failed", forKey: "status")
                     Log.info("Action will be retried (attempt \(newRetryCount + 1)/\(self.maxRetries))", category: .sync)
+                    try context.save()
+                    return false
                 }
-
-                try context.save()
             } catch {
                 Log.error("Failed to record action failure", category: .sync, error: error)
                 // Failure recording failed; action may be processed again
+                return false
+            }
+        }
+
+        // Post notification on main thread if action was permanently abandoned
+        if shouldNotify {
+            await MainActor.run {
+                NotificationCenter.default.post(name: .pendingActionFailed, object: nil)
             }
         }
     }

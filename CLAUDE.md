@@ -109,8 +109,10 @@ MiniEmailWebView (50% scaled) or HTMLMessageView (full)
 ### Core Data Entities
 
 - **Conversation**: `participantHash` (lookup), `keyHash` (uniqueness), `archivedAt`
-- **Message**: Email with labels, participants, attachments, `isNewsletter` flag
+- **Message**: Email with labels, participants, attachments, `isNewsletter` flag, `localModifiedAt` (conflict detection)
 - **Account**: User profile with email aliases (critical for participant filtering)
+- **PendingAction**: Offline action queue with `status` (pending/processing/failed/completed/abandoned)
+- **AbandonedSyncMessage**: Tracks message IDs that failed to sync for potential retry
 
 ### Logging
 
@@ -167,6 +169,34 @@ Conversations appear in the chat list based on `archivedAt == nil`. Archive stat
 3. Pass to `conversationManager.updateRollupsForModifiedConversations(conversationIDs:in:)`
 
 This is used in `InitialSyncOrchestrator`, `IncrementalSyncOrchestrator`, and `SyncEngine.updateConversationRollups()`.
+
+### Sync Conflict Resolution
+
+**Local modification tracking** - When users take actions locally (mark read/unread, archive), `message.localModifiedAt` is set to prevent server sync from overwriting:
+- `MessageActions` sets `localModifiedAt = Date()` on all local modifications
+- `HistoryProcessor.hasConflict()` checks this timestamp during sync
+- Local changes are protected for 30 minutes (`maxLocalModificationAge = 1800s`)
+- After 30 minutes, server updates are allowed (prevents indefinite blocking)
+
+**Reconciliation** - Catches label drift between Gmail and local state:
+- Runs automatically when history API returns changes
+- Also runs periodically (every hour) even if history is empty (`SyncConfig.reconciliationInterval`)
+- Covers 24-hour window (`SyncReconciliation.reconcileLabelStates`)
+
+### Abandoned Actions & Messages
+
+**Pending action failures** - When actions fail permanently (5 retries exceeded):
+- Status changed to `"abandoned"` (distinct from `"failed"`)
+- Notification posted: `.pendingActionFailed`
+- Query via `PendingActionsManager.abandonedActionCount()`, `fetchAbandonedActions()`
+- Retry via `retryAbandonedAction()`, `retryAllAbandonedActions()`
+- Dismiss via `dismissAbandonedAction()`, `dismissAllAbandonedActions()`
+
+**Abandoned sync messages** - When message fetches fail repeatedly and historyId must advance:
+- Message IDs persisted to `AbandonedSyncMessage` Core Data entity
+- Notification posted: `.syncMessagesAbandoned` with `userInfo["count"]`
+- Query via `SyncFailureTracker.abandonedSyncMessageCount()`, `fetchAbandonedSyncMessageIds()`
+- Clear via `removeAbandonedSyncMessage()`, `clearAllAbandonedSyncMessages()`
 
 ### Core Data Performance
 

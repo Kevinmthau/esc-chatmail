@@ -146,4 +146,22 @@
             <fetchIndexElement property="email" type="Binary" order="ascending"/>
         </fetchIndex>
     </entity>
+    <entity name="AbandonedSyncMessage" representedClassName="AbandonedSyncMessage" syncable="YES">
+        <attribute name="abandonedAt" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="gmailMessageId" attributeType="String"/>
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="reason" optional="YES" attributeType="String"/>
+        <attribute name="retryCount" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <fetchIndex name="byGmailMessageIdIndex">
+            <fetchIndexElement property="gmailMessageId" type="Binary" order="ascending"/>
+        </fetchIndex>
+        <fetchIndex name="byAbandonedAtIndex">
+            <fetchIndexElement property="abandonedAt" type="Binary" order="descending"/>
+        </fetchIndex>
+        <uniquenessConstraints>
+            <uniquenessConstraint>
+                <constraint value="gmailMessageId"/>
+            </uniquenessConstraint>
+        </uniquenessConstraints>
+    </entity>
 </model>

@@ -1,4 +1,5 @@
 import Foundation
+import CoreData
 
 /// Protocol for PendingActionsManager to enable testing with mock implementations.
 ///
@@ -42,4 +43,24 @@ protocol PendingActionsManagerProtocol: Actor {
 
     /// Stops network monitoring and cleans up resources.
     func stopMonitoring()
+
+    // MARK: - Abandoned Action Management
+
+    /// Returns the count of permanently failed (abandoned) actions.
+    func abandonedActionCount() async -> Int
+
+    /// Returns all permanently failed (abandoned) actions.
+    func fetchAbandonedActions() async -> [AbandonedActionInfo]
+
+    /// Retries an abandoned action by resetting its status and retry count.
+    func retryAbandonedAction(objectID: NSManagedObjectID) async
+
+    /// Retries all abandoned actions by resetting their status and retry count.
+    func retryAllAbandonedActions() async
+
+    /// Dismisses (deletes) an abandoned action permanently.
+    func dismissAbandonedAction(objectID: NSManagedObjectID) async
+
+    /// Dismisses (deletes) all abandoned actions permanently.
+    func dismissAllAbandonedActions() async
 }

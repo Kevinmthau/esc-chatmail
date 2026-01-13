@@ -4,6 +4,8 @@ import Combine
 
 extension Notification.Name {
     static let syncCompleted = Notification.Name("com.esc.inboxchat.syncCompleted")
+    static let pendingActionFailed = Notification.Name("com.esc.inboxchat.pendingActionFailed")
+    static let syncMessagesAbandoned = Notification.Name("com.esc.inboxchat.syncMessagesAbandoned")
 }
 
 // MARK: - Sync Engine

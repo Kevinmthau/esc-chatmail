@@ -130,14 +130,15 @@ final class SyncReconciliation: Sendable {
         labelIds: Set<String>
     ) async {
         do {
-            // Query recent messages (last 2 hours)
-            let twoHoursAgo = Date().addingTimeInterval(-7200)
-            let epochSeconds = Int(twoHoursAgo.timeIntervalSince1970)
+            // Query recent messages (last 24 hours)
+            // Extended from 2 hours to catch label drift from older messages
+            let oneDayAgo = Date().addingTimeInterval(-86400)
+            let epochSeconds = Int(oneDayAgo.timeIntervalSince1970)
             let query = "after:\(epochSeconds) -label:spam -label:drafts"
 
             let (recentMessageIds, _) = try await messageFetcher.listMessages(
                 query: query,
-                maxResults: 30
+                maxResults: 100
             )
 
             guard !recentMessageIds.isEmpty else {
@@ -199,9 +200,10 @@ final class SyncReconciliation: Sendable {
                     return (MessageReconcileResult(notInLocalDB: true), nil)
                 }
 
-                // Skip if message has pending local changes (modified in last 5 minutes)
+                // Skip if message has pending local changes (modified in last 30 minutes)
+                // This matches HistoryProcessor.maxLocalModificationAge
                 if let localModifiedAt = localMessage.localModifiedAtValue,
-                   localModifiedAt > Date().addingTimeInterval(-300) {
+                   localModifiedAt > Date().addingTimeInterval(-1800) {
                     return (MessageReconcileResult(), nil)
                 }
 

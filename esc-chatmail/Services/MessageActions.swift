@@ -51,8 +51,9 @@ final class MessageActions: ObservableObject {
         // Skip if already in desired state
         guard message.isUnread != isUnread else { return }
 
-        // Update local state
+        // Update local state and mark as locally modified for conflict detection
         message.isUnread = isUnread
+        message.localModifiedAt = Date()
         coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
 
         // Update conversation unread count
@@ -78,6 +79,7 @@ final class MessageActions: ObservableObject {
             guard let message = try? context.existingObject(with: messageID) as? Message else { return nil }
             guard message.isUnread else { return nil }
             message.isUnread = false
+            message.localModifiedAt = Date()
             let messageId = message.id
             try? context.save()
             return messageId
@@ -98,8 +100,9 @@ final class MessageActions: ObservableObject {
         let inboxLabel = labels.first { $0.id == "INBOX" }
         guard let inboxLabel = inboxLabel else { return }
 
-        // Update local state
+        // Update local state and mark as locally modified for conflict detection
         message.removeFromLabels(inboxLabel)
+        message.localModifiedAt = Date()
         coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
 
         if let conversation = message.conversation {
@@ -133,12 +136,14 @@ final class MessageActions: ObservableObject {
         let inboxLabel = try? context.fetch(labelRequest).first
         Log.debug("INBOX label found: \(inboxLabel != nil)", category: .message)
 
-        // Collect message IDs for syncing
+        // Collect message IDs for syncing and mark as locally modified
         var messageIds: [String] = []
         var removedCount = 0
+        let modificationDate = Date()
         for message in messages {
             if let inboxLabel = inboxLabel {
                 message.removeFromLabels(inboxLabel)
+                message.localModifiedAt = modificationDate
                 removedCount += 1
                 if !message.id.isEmpty {
                     messageIds.append(message.id)

@@ -139,11 +139,16 @@ final class IncrementalSyncOrchestrator {
 
             // Phase 4: Reconciliation
             // Skip label reconciliation when history reported no changes (saves ~2.5s per sync)
+            // BUT run reconciliation periodically (every hour) to catch label drift
             let noHistoryChanges = historyResult.records.isEmpty && historyResult.newMessageIds.isEmpty
+            let shouldSkipReconciliation = noHistoryChanges && !shouldForceReconciliation()
             try await reconciliationPhase.execute(
-                input: ReconciliationInput(skipLabelReconciliation: noHistoryChanges),
+                input: ReconciliationInput(skipLabelReconciliation: shouldSkipReconciliation),
                 context: phaseContext
             )
+            if !shouldSkipReconciliation {
+                recordReconciliationTime()
+            }
 
             // Phase 5: Update rollups
             try await conversationUpdatePhase.execute(
@@ -279,5 +284,22 @@ final class IncrementalSyncOrchestrator {
 
         // Ultimate fallback: 7 days ago
         return Date().timeIntervalSince1970 - (7 * 24 * 60 * 60)
+    }
+
+    /// Checks if forced label reconciliation is needed based on time since last reconciliation
+    private func shouldForceReconciliation() -> Bool {
+        let defaults = UserDefaults.standard
+        let lastReconciliation = defaults.double(forKey: SyncConfig.lastReconciliationTimeKey)
+
+        // Force reconciliation if we've never done one or it's been too long
+        guard lastReconciliation > 0 else { return true }
+
+        let timeSinceLastReconciliation = Date().timeIntervalSince1970 - lastReconciliation
+        return timeSinceLastReconciliation >= SyncConfig.reconciliationInterval
+    }
+
+    /// Records the current time as the last reconciliation time
+    private func recordReconciliationTime() {
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastReconciliationTimeKey)
     }
 }

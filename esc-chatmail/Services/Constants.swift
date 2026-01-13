@@ -64,6 +64,13 @@ struct SyncConfig {
 
     /// UserDefaults key for tracking last successful sync time
     static let lastSuccessfulSyncTimeKey = "lastSuccessfulSyncTime"
+
+    /// UserDefaults key for tracking last label reconciliation time
+    static let lastReconciliationTimeKey = "lastReconciliationTime"
+
+    /// Interval between forced label reconciliations even when history is empty (in seconds)
+    /// Running reconciliation hourly ensures label drift is caught even without history changes
+    static let reconciliationInterval: TimeInterval = 3600 // 1 hour
 }
 
 // MARK: - Core Data Configuration
