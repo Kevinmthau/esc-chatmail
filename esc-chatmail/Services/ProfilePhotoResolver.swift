@@ -17,7 +17,7 @@ actor ProfilePhotoResolver {
     private var memoryWarningObserver: (any NSObjectProtocol)?
 
     private init() {
-        cache.countLimit = 500  // Increased from 200 for better cache hit rate
+        cache.countLimit = CacheConfig.photoCacheSize
 
         // Add memory warning observer to clear cache under memory pressure
         Task { @MainActor [weak self] in
@@ -259,16 +259,13 @@ private class CachedPhoto {
     let photo: ProfilePhoto?
     let timestamp: Date
 
-    // Cache entries expire after 24 hours (photos rarely change)
-    private let expirationInterval: TimeInterval = 86400
-
     init(photo: ProfilePhoto?, timestamp: Date) {
         self.photo = photo
         self.timestamp = timestamp
     }
 
     var isExpired: Bool {
-        Date().timeIntervalSince(timestamp) > expirationInterval
+        Date().timeIntervalSince(timestamp) > CacheConfig.photoCacheTTL
     }
 }
 

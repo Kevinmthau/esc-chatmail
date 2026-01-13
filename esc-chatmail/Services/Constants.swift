@@ -118,6 +118,39 @@ struct UIConfig {
     static let scrollAnimationDuration: TimeInterval = 0.25
 }
 
+// MARK: - Cache Configuration
+struct CacheConfig {
+    /// Maximum items in processed text cache
+    static let textCacheSize = 500
+
+    /// Maximum items in profile photo cache
+    static let photoCacheSize = 500
+
+    /// Maximum items in HTML content cache
+    static let htmlCacheSize = 1000
+
+    /// Maximum items in conversation cache
+    static let conversationCacheSize = 100
+
+    /// Time-to-live for cached profile photos (24 hours)
+    static let photoCacheTTL: TimeInterval = 86400
+
+    /// Time-to-live for conversation cache entries (5 minutes)
+    static let conversationCacheTTL: TimeInterval = 300
+
+    /// Time-to-live for disk image cache (7 days)
+    static let diskImageCacheTTL: TimeInterval = 604800
+
+    /// Maximum disk cache size in bytes (100 MB)
+    static let maxDiskCacheSize: Int = 100 * 1024 * 1024
+
+    /// Maximum memory cache size for thumbnails in bytes (50 MB)
+    static let maxThumbnailCacheSize: Int = 50 * 1024 * 1024
+
+    /// Maximum memory cache size for full images in bytes (100 MB)
+    static let maxFullImageCacheSize: Int = 100 * 1024 * 1024
+}
+
 struct APIEndpoints {
     static let baseURL = "https://gmail.googleapis.com/gmail/v1"
     

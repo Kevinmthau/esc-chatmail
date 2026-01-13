@@ -46,10 +46,22 @@ final class Dependencies: ObservableObject {
     let personCache: PersonCache
     let conversationCache: ConversationCache
 
-    /// Returns the shared AttachmentCacheActor instance.
+    // MARK: - Actor-based Services
+    // Actors stored as let properties for injection, accessed via nonisolated getters
+
+    private let _attachmentCache: AttachmentCacheActor
+    private let _pendingActionsManager: PendingActionsManager
+
+    /// Returns the AttachmentCacheActor instance.
     /// Use `await` when calling methods on this actor.
     nonisolated var attachmentCache: AttachmentCacheActor {
-        AttachmentCacheActor.shared
+        _attachmentCache
+    }
+
+    /// Returns the PendingActionsManager actor instance.
+    /// Use `await` when calling methods on this actor.
+    nonisolated var pendingActionsManager: PendingActionsManager {
+        _pendingActionsManager
     }
 
     // MARK: - Service Layer
@@ -57,15 +69,6 @@ final class Dependencies: ObservableObject {
     let syncEngine: SyncEngine
     let attachmentDownloader: AttachmentDownloader
     let backgroundSyncManager: BackgroundSyncManager
-
-    // MARK: - Actor-based Services
-    // Actors are accessed via computed property to maintain actor isolation
-
-    /// Returns the shared PendingActionsManager actor instance.
-    /// Use `await` when calling methods on this actor.
-    nonisolated var pendingActionsManager: PendingActionsManager {
-        PendingActionsManager.shared
-    }
 
     // MARK: - Convenience Accessors
 
@@ -115,6 +118,8 @@ final class Dependencies: ObservableObject {
         self.gmailAPIClient = GmailAPIClient.shared
         self.personCache = PersonCache.shared
         self.conversationCache = ConversationCache.shared
+        self._attachmentCache = AttachmentCacheActor.shared
+        self._pendingActionsManager = PendingActionsManager.shared
         self.syncEngine = SyncEngine.shared
         self.attachmentDownloader = AttachmentDownloader.shared
         self.backgroundSyncManager = BackgroundSyncManager.shared
@@ -140,6 +145,8 @@ final class Dependencies: ObservableObject {
         gmailAPIClient: GmailAPIClient,
         personCache: PersonCache,
         conversationCache: ConversationCache,
+        attachmentCache: AttachmentCacheActor,
+        pendingActionsManager: PendingActionsManager,
         syncEngine: SyncEngine,
         attachmentDownloader: AttachmentDownloader,
         backgroundSyncManager: BackgroundSyncManager
@@ -151,6 +158,8 @@ final class Dependencies: ObservableObject {
         self.gmailAPIClient = gmailAPIClient
         self.personCache = personCache
         self.conversationCache = conversationCache
+        self._attachmentCache = attachmentCache
+        self._pendingActionsManager = pendingActionsManager
         self.syncEngine = syncEngine
         self.attachmentDownloader = attachmentDownloader
         self.backgroundSyncManager = backgroundSyncManager

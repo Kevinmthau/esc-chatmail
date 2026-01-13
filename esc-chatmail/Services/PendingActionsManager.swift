@@ -82,15 +82,15 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
     ) async {
         ensureInitialized()
 
-        await MainActor.run {
-            let context = coreDataStack.viewContext
-            createPendingAction(
+        let context = coreDataStack.viewContext
+        await context.perform {
+            self.createPendingAction(
                 in: context,
                 type: type,
                 messageId: messageId,
                 payload: payload
             )
-            coreDataStack.saveIfNeeded(context: context)
+            context.saveOrLog(operation: "queue pending action: \(type.rawValue)")
         }
 
         if networkMonitor.isConnected {
@@ -107,16 +107,16 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
 
         Log.info("Queueing \(type.rawValue) for \(messageIds.count) messages", category: .sync)
 
-        await MainActor.run {
-            let context = coreDataStack.viewContext
-            let payload: [String: Any] = ["messageIds": messageIds]
-            createPendingAction(
+        let context = coreDataStack.viewContext
+        let payload: [String: Any] = ["messageIds": messageIds]
+        await context.perform {
+            self.createPendingAction(
                 in: context,
                 type: type,
                 conversationId: conversationId,
                 payload: payload
             )
-            coreDataStack.saveIfNeeded(context: context)
+            context.saveOrLog(operation: "queue conversation action: \(type.rawValue)")
         }
 
         if networkMonitor.isConnected {

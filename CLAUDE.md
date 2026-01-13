@@ -35,6 +35,9 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
 ### Directory Structure
 
 ```
+/App/
+  esc_chatmailApp.swift   - App entry point, scene configuration
+  FreshInstallHandler.swift - Detects app reinstalls, clears stale keychain data
 /Services/
   /API/               - GmailAPIClient (Messages, Labels, History, Attachments)
   /Caching/           - Image caching, conversation preloading, request deduplication
@@ -48,6 +51,8 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
   /Security/          - TokenManager, KeychainService, OAuth
   /Sync/              - SyncEngine, orchestrators, persisters, composable phases
   /TextProcessing/    - Email text extraction, quote removal
+  Constants.swift     - GoogleConfig, SyncConfig, CacheConfig, NetworkConfig, UIConfig
+  Dependencies.swift  - Dependency injection container for testability
 /Views/
   /Chat/              - ChatView, MessageBubble, BubbleAvatarView
   /Compose/           - ComposeView, RecipientChip
@@ -259,3 +264,38 @@ Use `@EnvironmentObject` for shared singletons injected at app root, not `@State
 // Prefer:
 @EnvironmentObject private var authSession: AuthSession
 ```
+
+### Dependency Injection
+
+Use `Dependencies` container for testability. Actor instances are stored as private properties and exposed via nonisolated getters:
+```swift
+// In ViewModels/Services:
+init(deps: Dependencies = .shared) {
+    self.coreDataStack = deps.coreDataStack
+    self.messageActions = deps.makeMessageActions()
+}
+
+// In tests:
+let testDeps = Dependencies(
+    coreDataStack: testStack,
+    pendingActionsManager: testManager,
+    // ... other test doubles
+)
+let viewModel = ChatViewModel(deps: testDeps)
+```
+
+### Configuration Constants
+
+Use centralized config structs from `Constants.swift` instead of magic numbers:
+- **CacheConfig** - Cache sizes (`textCacheSize`, `photoCacheSize`) and TTLs (`photoCacheTTL`, `diskImageCacheTTL`)
+- **SyncConfig** - Batch sizes, timeouts, retry limits
+- **NetworkConfig** - Request timeouts, retry delays
+- **CoreDataConfig** - Fetch batch sizes, save retry limits
+
+### Fresh Install Detection
+
+`FreshInstallHandler` detects app reinstalls by comparing UserDefaults (cleared on uninstall) vs Keychain (persists). On fresh install:
+1. Clears stale keychain credentials
+2. Signs out from Google
+3. Clears Core Data and caches
+4. Generates new installation ID
