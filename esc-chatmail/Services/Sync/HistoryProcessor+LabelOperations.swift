@@ -14,60 +14,78 @@ extension HistoryProcessor {
         in context: NSManagedObjectContext,
         syncStartTime: Date?
     ) async {
-        guard let labelsAdded = labelsAdded else { return }
+        guard let labelsAdded = labelsAdded, !labelsAdded.isEmpty else { return }
 
-        var modifiedObjectIDs: [NSManagedObjectID] = []
+        // Collect all message IDs and label IDs upfront for batch fetching
+        let allMessageIds = Set(labelsAdded.map { $0.message.id })
+        let allLabelIds = Set(labelsAdded.flatMap { $0.labelIds })
 
-        for added in labelsAdded {
-            let messageId = added.message.id
-            let labelIds = added.labelIds
-            let hasUnread = labelIds.contains("UNREAD")
+        let modifiedObjectIDs: [NSManagedObjectID] = await context.perform {
+            // Batch fetch all messages
+            let messageRequest = Message.fetchRequest()
+            messageRequest.predicate = NSPredicate(format: "id IN %@", allMessageIds)
+            messageRequest.relationshipKeyPathsForPrefetching = ["labels", "conversation"]
 
-            let objectID: NSManagedObjectID? = await context.perform {
-                let request = Message.fetchRequest()
-                request.predicate = NSPredicate(format: "id == %@", messageId)
-                do {
-                    guard let message = try context.fetch(request).first else {
-                        // Message not found locally - this is normal for messages we haven't synced
-                        return nil
+            guard let messages = try? context.fetch(messageRequest) else {
+                Log.error("Failed to batch fetch messages for label additions", category: .sync)
+                return []
+            }
+
+            // Create dictionary for O(1) lookup
+            let messageDict = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0) })
+
+            // Batch fetch all labels
+            let labelRequest = Label.fetchRequest()
+            labelRequest.predicate = NSPredicate(format: "id IN %@", allLabelIds)
+
+            guard let labels = try? context.fetch(labelRequest) else {
+                Log.error("Failed to batch fetch labels for additions", category: .sync)
+                return []
+            }
+
+            let labelDict = Dictionary(uniqueKeysWithValues: labels.map { ($0.id, $0) })
+
+            // Process each addition using pre-fetched objects
+            var modifiedIDs: [NSManagedObjectID] = []
+
+            for added in labelsAdded {
+                let messageId = added.message.id
+                let labelIds = added.labelIds
+                let hasUnread = labelIds.contains("UNREAD")
+
+                guard let message = messageDict[messageId] else {
+                    // Message not found locally - this is normal for messages we haven't synced
+                    continue
+                }
+
+                // Conflict resolution: skip if message has pending local changes
+                if self.hasConflict(message: message, syncStartTime: syncStartTime) {
+                    Log.debug("Skipping server label addition for message \(messageId) - local changes pending", category: .sync)
+                    continue
+                }
+
+                // Add labels using pre-fetched label objects
+                var foundLabels = 0
+                for labelId in labelIds {
+                    if let label = labelDict[labelId] {
+                        message.addToLabels(label)
+                        foundLabels += 1
                     }
+                }
+                if foundLabels != labelIds.count {
+                    Log.warning("Only found \(foundLabels) of \(labelIds.count) labels for message \(messageId)", category: .sync)
+                }
 
-                    // Conflict resolution: skip if message has pending local changes
-                    if self.hasConflict(message: message, syncStartTime: syncStartTime) {
-                        Log.debug("Skipping server label addition for message \(messageId) - local changes pending", category: .sync)
-                        return nil
-                    }
+                if hasUnread {
+                    message.isUnread = true
+                }
 
-                    // Fetch labels by ID
-                    let labelRequest = Label.fetchRequest()
-                    labelRequest.predicate = NSPredicate(format: "id IN %@", labelIds)
-                    do {
-                        let labels = try context.fetch(labelRequest)
-                        for label in labels {
-                            message.addToLabels(label)
-                        }
-                        if labels.count != labelIds.count {
-                            Log.warning("Only found \(labels.count) of \(labelIds.count) labels for message \(messageId)", category: .sync)
-                        }
-                    } catch {
-                        Log.error("Failed to fetch labels for message \(messageId)", category: .sync, error: error)
-                    }
-
-                    if hasUnread {
-                        message.isUnread = true
-                    }
-
-                    // Return conversation objectID for tracking outside the closure
-                    return message.conversation?.objectID
-                } catch {
-                    Log.error("Failed to fetch message for label addition \(messageId)", category: .sync, error: error)
-                    return nil
+                if let conversationID = message.conversation?.objectID {
+                    modifiedIDs.append(conversationID)
                 }
             }
 
-            if let objectID = objectID {
-                modifiedObjectIDs.append(objectID)
-            }
+            return modifiedIDs
         }
 
         // Track all modified conversations (actor-isolated)
@@ -79,70 +97,80 @@ extension HistoryProcessor {
         in context: NSManagedObjectContext,
         syncStartTime: Date?
     ) async {
-        guard let labelsRemoved = labelsRemoved else { return }
+        guard let labelsRemoved = labelsRemoved, !labelsRemoved.isEmpty else { return }
 
         Log.debug("Processing \(labelsRemoved.count) label removals", category: .sync)
 
-        var modifiedObjectIDs: [NSManagedObjectID] = []
+        // Collect all message IDs and label IDs upfront for batch fetching
+        let allMessageIds = Set(labelsRemoved.map { $0.message.id })
+        let allLabelIds = Set(labelsRemoved.flatMap { $0.labelIds })
 
-        for removed in labelsRemoved {
-            let messageId = removed.message.id
-            let labelIds = removed.labelIds
-            let removesUnread = labelIds.contains("UNREAD")
-            let removesInbox = labelIds.contains("INBOX")
+        let modifiedObjectIDs: [NSManagedObjectID] = await context.perform {
+            // Batch fetch all messages
+            let messageRequest = Message.fetchRequest()
+            messageRequest.predicate = NSPredicate(format: "id IN %@", allMessageIds)
+            messageRequest.relationshipKeyPathsForPrefetching = ["labels", "conversation"]
 
-            Log.debug("Label removal: messageId=\(messageId), labels=\(labelIds), removesInbox=\(removesInbox)", category: .sync)
+            guard let messages = try? context.fetch(messageRequest) else {
+                Log.error("Failed to batch fetch messages for label removals", category: .sync)
+                return []
+            }
 
-            let objectID: NSManagedObjectID? = await context.perform {
-                let request = Message.fetchRequest()
-                request.predicate = NSPredicate(format: "id == %@", messageId)
-                do {
-                    guard let message = try context.fetch(request).first else {
-                        // Message not found locally - this is normal for messages we haven't synced
-                        Log.debug("Message \(messageId) not found locally - skipping", category: .sync)
-                        return nil
+            // Create dictionary for O(1) lookup
+            let messageDict = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0) })
+
+            // Batch fetch all labels
+            let labelRequest = Label.fetchRequest()
+            labelRequest.predicate = NSPredicate(format: "id IN %@", allLabelIds)
+
+            guard let labels = try? context.fetch(labelRequest) else {
+                Log.error("Failed to batch fetch labels for removals", category: .sync)
+                return []
+            }
+
+            let labelDict = Dictionary(uniqueKeysWithValues: labels.map { ($0.id, $0) })
+
+            // Process each removal using pre-fetched objects
+            var modifiedIDs: [NSManagedObjectID] = []
+
+            for removed in labelsRemoved {
+                let messageId = removed.message.id
+                let labelIds = removed.labelIds
+                let removesUnread = labelIds.contains("UNREAD")
+
+                guard let message = messageDict[messageId] else {
+                    // Message not found locally - this is normal for messages we haven't synced
+                    Log.debug("Message \(messageId) not found locally - skipping", category: .sync)
+                    continue
+                }
+
+                Log.debug("Found local message \(messageId), applying label removal", category: .sync)
+
+                // Conflict resolution: skip if message has pending local changes
+                if self.hasConflict(message: message, syncStartTime: syncStartTime) {
+                    Log.debug("Skipping server label removal for message \(messageId) - local changes pending", category: .sync)
+                    continue
+                }
+
+                // Remove labels using pre-fetched label objects
+                for labelId in labelIds {
+                    if let label = labelDict[labelId] {
+                        message.removeFromLabels(label)
+                        Log.debug("Removed label '\(label.id)' from message \(messageId)", category: .sync)
                     }
+                }
 
-                    Log.debug("Found local message \(messageId), applying label removal", category: .sync)
+                if removesUnread {
+                    message.isUnread = false
+                }
 
-                    // Conflict resolution: skip if message has pending local changes
-                    if self.hasConflict(message: message, syncStartTime: syncStartTime) {
-                        Log.debug("Skipping server label removal for message \(messageId) - local changes pending", category: .sync)
-                        return nil
-                    }
-
-                    // Fetch labels by ID
-                    let labelRequest = Label.fetchRequest()
-                    labelRequest.predicate = NSPredicate(format: "id IN %@", labelIds)
-                    do {
-                        let labels = try context.fetch(labelRequest)
-                        for label in labels {
-                            message.removeFromLabels(label)
-                            Log.debug("Removed label '\(label.id)' from message \(messageId)", category: .sync)
-                        }
-                    } catch {
-                        Log.error("Failed to fetch labels for removal on message \(messageId)", category: .sync, error: error)
-                    }
-
-                    if removesUnread {
-                        message.isUnread = false
-                    }
-
-                    // Return conversation objectID for tracking outside the closure
-                    if let conversation = message.conversation {
-                        Log.debug("Tracked conversation \(conversation.id.uuidString) for rollup update", category: .sync)
-                        return conversation.objectID
-                    }
-                    return nil
-                } catch {
-                    Log.error("Failed to fetch message for label removal \(messageId)", category: .sync, error: error)
-                    return nil
+                if let conversation = message.conversation {
+                    Log.debug("Tracked conversation \(conversation.id.uuidString) for rollup update", category: .sync)
+                    modifiedIDs.append(conversation.objectID)
                 }
             }
 
-            if let objectID = objectID {
-                modifiedObjectIDs.append(objectID)
-            }
+            return modifiedIDs
         }
 
         // Track all modified conversations (actor-isolated)

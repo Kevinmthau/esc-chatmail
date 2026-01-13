@@ -170,6 +170,19 @@ Conversations appear in the chat list based on `archivedAt == nil`. Archive stat
 
 This is used in `InitialSyncOrchestrator`, `IncrementalSyncOrchestrator`, and `SyncEngine.updateConversationRollups()`.
 
+**Batch fetching in label operations** - `HistoryProcessor+LabelOperations.swift` uses batch Core Data queries:
+- Collect all message IDs and label IDs upfront before processing
+- Single batch fetch with `NSPredicate(format: "id IN %@", allMessageIds)`
+- Prefetch relationships: `["labels", "conversation"]`
+- Create dictionary lookup for O(1) access during processing
+
+**Parallel Gmail API calls** - `SyncReconciliation.reconcileLabelStates()` uses bounded concurrency:
+- `withTaskGroup` for concurrent API requests
+- Chunked into batches of 10 concurrent requests (`maxConcurrentGmailRequests`)
+- Results collected into dictionary, then batch-processed against local state
+
+**Set-based message ID deduplication** - `HistoryCollectionPhase` and `HistoryProcessor.extractNewMessageIds()` use `Set<String>` to prevent duplicate message fetches across history pages.
+
 ### Sync Conflict Resolution
 
 **Local modification tracking** - When users take actions locally (mark read/unread, archive), `message.localModifiedAt` is set to prevent server sync from overwriting:

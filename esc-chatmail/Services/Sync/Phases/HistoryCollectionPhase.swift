@@ -25,7 +25,7 @@ struct HistoryCollectionPhase: SyncPhase {
 
         var pageToken: String? = nil
         var latestHistoryId = startHistoryId
-        var allNewMessageIds: [String] = []
+        var allNewMessageIds: Set<String> = []
         var allHistoryRecords: [HistoryRecord] = []
 
         repeat {
@@ -39,7 +39,7 @@ struct HistoryCollectionPhase: SyncPhase {
             if let history = history, !history.isEmpty {
                 log.debug("Received \(history.count) history records")
                 let newIds = historyProcessor.extractNewMessageIds(from: history)
-                allNewMessageIds.append(contentsOf: newIds)
+                allNewMessageIds.formUnion(newIds)
                 allHistoryRecords.append(contentsOf: history)
             }
 
@@ -50,12 +50,12 @@ struct HistoryCollectionPhase: SyncPhase {
             pageToken = nextPageToken
         } while pageToken != nil
 
-        log.info("History collection: \(allNewMessageIds.count) new messages, \(allHistoryRecords.count) records")
+        log.info("History collection: \(allNewMessageIds.count) unique messages, \(allHistoryRecords.count) records")
 
         context.reportProgress(1.0, status: "History collected", phase: self)
 
         return HistoryCollectionResult(
-            newMessageIds: allNewMessageIds,
+            newMessageIds: Array(allNewMessageIds),
             records: allHistoryRecords,
             latestHistoryId: latestHistoryId
         )

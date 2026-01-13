@@ -117,10 +117,18 @@ final class SyncReconciliation: Sendable {
 
     // MARK: - Label Reconciliation
 
+    /// Maximum concurrent Gmail API requests during reconciliation
+    private static let maxConcurrentGmailRequests = 10
+
     /// Reconciles label states for recent messages to catch missed label changes
     ///
     /// This is especially important for detecting archive actions that might have been missed.
     /// Compares local labels against Gmail's truth and updates accordingly.
+    ///
+    /// Optimized with:
+    /// - Batch Core Data fetch for local messages
+    /// - Parallel Gmail API calls with bounded concurrency
+    /// - In-memory mismatch processing
     ///
     /// - Parameters:
     ///   - context: Core Data context
@@ -131,7 +139,6 @@ final class SyncReconciliation: Sendable {
     ) async {
         do {
             // Query recent messages (last 24 hours)
-            // Extended from 2 hours to catch label drift from older messages
             let oneDayAgo = Date().addingTimeInterval(-86400)
             let epochSeconds = Int(oneDayAgo.timeIntervalSince1970)
             let query = "after:\(epochSeconds) -label:spam -label:drafts"
@@ -148,18 +155,15 @@ final class SyncReconciliation: Sendable {
 
             log.debug("Reconciling labels for \(recentMessageIds.count) recent messages")
 
-            var stats = ReconciliationStats()
+            // Step 1: Fetch Gmail metadata in parallel with bounded concurrency
+            let gmailMetadata = await fetchGmailMetadataInParallel(messageIds: recentMessageIds)
 
-            for messageId in recentMessageIds {
-                let result = await reconcileMessageLabels(
-                    messageId: messageId,
-                    context: context,
-                    labelIds: labelIds
-                )
-                if result.hadMismatch { stats.labelMismatches += 1 }
-                if result.wasUpdated { stats.updatedMessages += 1 }
-                if result.notInLocalDB { stats.notInLocalDB += 1 }
-            }
+            // Step 2: Process mismatches (local messages fetched inside context.perform for thread safety)
+            let stats = await processReconciliationMismatches(
+                gmailMetadata: gmailMetadata,
+                messageIds: recentMessageIds,
+                context: context
+            )
 
             if stats.labelMismatches > 0 {
                 log.info("Label reconciliation: found \(stats.labelMismatches) mismatches, updated \(stats.updatedMessages) messages")
@@ -171,6 +175,49 @@ final class SyncReconciliation: Sendable {
         }
     }
 
+    /// Gmail message metadata needed for reconciliation
+    private struct GmailMetadata {
+        let messageId: String
+        let hasInbox: Bool
+        let isUnread: Bool
+    }
+
+    /// Fetches Gmail metadata in parallel with bounded concurrency
+    private func fetchGmailMetadataInParallel(messageIds: [String]) async -> [String: GmailMetadata] {
+        // Use chunks to limit concurrent requests
+        let chunks = messageIds.chunked(into: Self.maxConcurrentGmailRequests)
+        var allMetadata: [String: GmailMetadata] = [:]
+
+        for chunk in chunks {
+            await withTaskGroup(of: GmailMetadata?.self) { group in
+                for messageId in chunk {
+                    group.addTask {
+                        do {
+                            let gmailMessage = try await GmailAPIClient.shared.getMessage(id: messageId, format: "metadata")
+                            let labelIds = Set(gmailMessage.labelIds ?? [])
+                            return GmailMetadata(
+                                messageId: messageId,
+                                hasInbox: labelIds.contains("INBOX"),
+                                isUnread: labelIds.contains("UNREAD")
+                            )
+                        } catch {
+                            // Skip messages that fail to fetch (might be deleted)
+                            return nil
+                        }
+                    }
+                }
+
+                for await metadata in group {
+                    if let metadata = metadata {
+                        allMetadata[metadata.messageId] = metadata
+                    }
+                }
+            }
+        }
+
+        return allMetadata
+    }
+
     /// Result of reconciling a single message
     private struct MessageReconcileResult {
         var hadMismatch = false
@@ -178,83 +225,91 @@ final class SyncReconciliation: Sendable {
         var notInLocalDB = false
     }
 
-    /// Reconciles labels for a single message
-    private func reconcileMessageLabels(
-        messageId: String,
-        context: NSManagedObjectContext,
-        labelIds: Set<String>
-    ) async -> MessageReconcileResult {
-        do {
-            // Fetch message from Gmail
-            let gmailMessage = try await GmailAPIClient.shared.getMessage(id: messageId, format: "metadata")
-            let gmailLabelIds = Set(gmailMessage.labelIds ?? [])
-            let gmailHasInbox = gmailLabelIds.contains("INBOX")
-            let gmailIsUnread = gmailLabelIds.contains("UNREAD")
+    /// Processes reconciliation mismatches using pre-fetched data
+    /// Returns stats and conversation ObjectIDs that were modified
+    private func processReconciliationMismatches(
+        gmailMetadata: [String: GmailMetadata],
+        messageIds: [String],
+        context: NSManagedObjectContext
+    ) async -> ReconciliationStats {
+        // Capture only Sendable data for the closure
+        let gmailData = gmailMetadata
 
-            let (result, conversationToTrack): (MessageReconcileResult, Conversation?) = await context.perform {
-                let request = Message.fetchRequest()
-                request.predicate = NSPredicate(format: "id == %@", messageId)
-                request.fetchLimit = 1
+        let (stats, conversationObjectIDs): (ReconciliationStats, [NSManagedObjectID]) = await context.perform {
+            var stats = ReconciliationStats()
+            var modifiedConversationIDs: [NSManagedObjectID] = []
 
-                guard let localMessage = try? context.fetch(request).first else {
-                    return (MessageReconcileResult(notInLocalDB: true), nil)
+            // Fetch local messages inside context.perform for thread safety
+            let messageRequest = Message.fetchRequest()
+            messageRequest.predicate = NSPredicate(format: "id IN %@", messageIds)
+            messageRequest.relationshipKeyPathsForPrefetching = ["labels", "conversation"]
+
+            guard let localMessages = try? context.fetch(messageRequest) else {
+                return (stats, modifiedConversationIDs)
+            }
+
+            let localMessageDict = Dictionary(uniqueKeysWithValues: localMessages.map { ($0.id, $0) })
+
+            // Pre-fetch INBOX label once for all messages that might need it
+            let labelRequest = Label.fetchRequest()
+            labelRequest.predicate = NSPredicate(format: "id == %@", "INBOX")
+            labelRequest.fetchLimit = 1
+            let inboxLabel = try? context.fetch(labelRequest).first
+
+            for (messageId, gmail) in gmailData {
+                guard let localMessage = localMessageDict[messageId] else {
+                    stats.notInLocalDB += 1
+                    continue
                 }
 
                 // Skip if message has pending local changes (modified in last 30 minutes)
-                // This matches HistoryProcessor.maxLocalModificationAge
                 if let localModifiedAt = localMessage.localModifiedAtValue,
                    localModifiedAt > Date().addingTimeInterval(-1800) {
-                    return (MessageReconcileResult(), nil)
+                    continue
                 }
 
-                var result = MessageReconcileResult()
-                var conversationToTrack: Conversation? = nil
                 let localLabels = localMessage.labels ?? []
                 let localHasInbox = localLabels.contains { $0.id == "INBOX" }
+                var wasModified = false
 
-                // Check INBOX label discrepancy (most important for archive detection)
-                if gmailHasInbox != localHasInbox {
-                    result.hadMismatch = true
+                // Check INBOX label discrepancy
+                if gmail.hasInbox != localHasInbox {
+                    stats.labelMismatches += 1
 
-                    if gmailHasInbox {
-                        // Fetch INBOX label inside context.perform for thread safety
-                        let labelRequest = Label.fetchRequest()
-                        labelRequest.predicate = NSPredicate(format: "id == %@", "INBOX")
-                        labelRequest.fetchLimit = 1
-                        if let inboxLabel = try? context.fetch(labelRequest).first {
+                    if gmail.hasInbox {
+                        if let inboxLabel = inboxLabel {
                             localMessage.addToLabels(inboxLabel)
                         }
                     } else {
-                        if let inboxLabel = localLabels.first(where: { $0.id == "INBOX" }) {
-                            localMessage.removeFromLabels(inboxLabel)
+                        if let existingInbox = localLabels.first(where: { $0.id == "INBOX" }) {
+                            localMessage.removeFromLabels(existingInbox)
                         }
                     }
 
-                    conversationToTrack = localMessage.conversation
-                    result.wasUpdated = true
+                    wasModified = true
+                    stats.updatedMessages += 1
                 }
 
                 // Check UNREAD status
-                if localMessage.isUnread != gmailIsUnread {
-                    localMessage.isUnread = gmailIsUnread
-                    if conversationToTrack == nil {
-                        conversationToTrack = localMessage.conversation
-                    }
+                if localMessage.isUnread != gmail.isUnread {
+                    localMessage.isUnread = gmail.isUnread
+                    wasModified = true
                 }
 
-                return (result, conversationToTrack)
+                if wasModified, let conversationID = localMessage.conversation?.objectID {
+                    modifiedConversationIDs.append(conversationID)
+                }
             }
 
-            // Track modified conversation outside the closure (actor-isolated)
-            if let conversation = conversationToTrack {
-                await historyProcessor.trackModifiedConversationForReconciliation(conversation)
-            }
-
-            return result
-        } catch {
-            // Skip messages that fail to fetch (might be deleted)
-            return MessageReconcileResult()
+            return (stats, modifiedConversationIDs)
         }
+
+        // Track modified conversations using ObjectIDs (actor-isolated)
+        for objectID in conversationObjectIDs {
+            await historyProcessor.trackModifiedConversation(objectID)
+        }
+
+        return stats
     }
 }
 

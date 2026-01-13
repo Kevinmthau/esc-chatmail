@@ -59,9 +59,9 @@ actor HistoryProcessor {
 
     /// Extracts message IDs that need to be fetched from history records
     /// - Parameter records: Array of history records
-    /// - Returns: Array of message IDs (excluding spam)
-    nonisolated func extractNewMessageIds(from records: [HistoryRecord]) -> [String] {
-        var messageIds: [String] = []
+    /// - Returns: Set of unique message IDs (excluding spam), deduplicated across records
+    nonisolated func extractNewMessageIds(from records: [HistoryRecord]) -> Set<String> {
+        var messageIds: Set<String> = []
 
         for record in records {
             if let messagesAdded = record.messagesAdded {
@@ -73,12 +73,12 @@ actor HistoryProcessor {
                         continue
                     }
                     Log.debug("Will fetch: \(added.message.id)", category: .sync)
-                    messageIds.append(added.message.id)
+                    messageIds.insert(added.message.id)
                 }
             }
         }
 
-        Log.debug("Total new messages to fetch: \(messageIds.count)", category: .sync)
+        Log.debug("Total unique messages to fetch: \(messageIds.count)", category: .sync)
         return messageIds
     }
 
