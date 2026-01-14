@@ -171,8 +171,8 @@ final class PendingActionsManagerTests: XCTestCase {
             .withParticipantHash("abc123")
             .withSnippet("Latest message preview")
             .visible()
-            .pinned()
-            .muted()
+            .setPinned()
+            .setMuted()
             .withUnreadCount(5)
             .recentlyActive()
             .build(in: context)
@@ -335,10 +335,10 @@ final class PendingActionsManagerTests: XCTestCase {
 
     // MARK: - Async Test Helper Tests
 
-    func testAsyncTestHelper_waitsForCompletion() {
+    func testAsyncTestHelper_waitsForCompletion() throws {
         var completed = false
 
-        waitForAsync {
+        try waitForAsync {
             try await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
             completed = true
         }

@@ -39,7 +39,8 @@ extension GmailSendService {
 
         // Fetch conversation on main thread using the objectID
         guard let conversation = try? viewContext.existingObject(with: conversationID) as? Conversation else {
-            fatalError("Failed to fetch conversation on main thread")
+            Log.error("Failed to fetch conversation on main thread", category: .message)
+            throw SendError.conversationNotFound
         }
 
         let message = Message(context: viewContext)

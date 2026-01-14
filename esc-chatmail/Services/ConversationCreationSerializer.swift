@@ -42,7 +42,15 @@ actor ConversationCreationSerializer {
             request.fetchLimit = 1
             request.includesPendingChanges = false  // Query persistent store, not just in-memory
 
-            if let existing = try? context.fetch(request).first {
+            let existing: Conversation?
+            do {
+                existing = try context.fetch(request).first
+            } catch {
+                Log.error("Failed to fetch existing conversation for participantHash", category: .coreData, error: error)
+                existing = nil
+            }
+
+            if let existing = existing {
                 // If the conversation was archived, un-archive it (new message reactivates it)
                 if existing.archivedAt != nil {
                     existing.archivedAt = nil

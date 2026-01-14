@@ -106,7 +106,14 @@ final class SyncReconciliation: Sendable {
             request.resultType = .dictionaryResultType
             request.propertiesToFetch = ["id"]
 
-            guard let results = try? context.fetch(request) as? [[String: String]] else {
+            let results: [[String: String]]
+            do {
+                guard let fetched = try context.fetch(request) as? [[String: String]] else {
+                    return ids  // Unexpected result type, assume all missing
+                }
+                results = fetched
+            } catch {
+                Log.error("Failed to query local messages for reconciliation", category: .sync, error: error)
                 return ids  // If fetch fails, assume all missing
             }
 
@@ -244,7 +251,11 @@ final class SyncReconciliation: Sendable {
             messageRequest.predicate = NSPredicate(format: "id IN %@", messageIds)
             messageRequest.relationshipKeyPathsForPrefetching = ["labels", "conversation"]
 
-            guard let localMessages = try? context.fetch(messageRequest) else {
+            let localMessages: [Message]
+            do {
+                localMessages = try context.fetch(messageRequest)
+            } catch {
+                Log.error("Failed to fetch local messages for label reconciliation", category: .sync, error: error)
                 return (stats, modifiedConversationIDs)
             }
 

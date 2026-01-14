@@ -30,10 +30,19 @@
 		<dict/>
 	</dict>
 	<key>UILaunchScreen</key>
-	<dict/>
+	<dict>
+		<key>UIColorName</key>
+		<string>AccentColor</string>
+		<key>UIImageName</key>
+		<string>AppIcon</string>
+	</dict>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright 2025. All rights reserved.</string>
 	<key>UIRequiredDeviceCapabilities</key>
 	<array>
-		<string>armv7</string>
+		<string>arm64</string>
 	</array>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
@@ -84,7 +93,7 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 		<key>NSAllowsArbitraryLoadsInWebContent</key>
-		<true/>
+		<false/>
 		<key>NSExceptionDomains</key>
 		<dict>
 			<key>googleapis.com</key>

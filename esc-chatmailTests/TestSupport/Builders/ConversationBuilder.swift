@@ -88,17 +88,17 @@ final class ConversationBuilder {
         return self
     }
 
-    func hidden() -> Self {
+    func setHidden() -> Self {
         self.hidden = true
         return self
     }
 
-    func muted() -> Self {
+    func setMuted() -> Self {
         self.muted = true
         return self
     }
 
-    func pinned() -> Self {
+    func setPinned() -> Self {
         self.pinned = true
         return self
     }
@@ -172,7 +172,7 @@ extension ConversationBuilder {
     static func pinnedConversation(in context: NSManagedObjectContext) -> Conversation {
         ConversationBuilder()
             .visible()
-            .pinned()
+            .setPinned()
             .recentlyActive()
             .build(in: context)
     }

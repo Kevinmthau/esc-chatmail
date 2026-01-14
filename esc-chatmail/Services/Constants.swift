@@ -4,17 +4,61 @@ struct GoogleConfig {
     // Read configuration from Info.plist (which uses xcconfig values)
     private static let bundle = Bundle.main
 
-    private static func requiredConfig(_ key: String) -> String {
+    /// Error thrown when required configuration is missing
+    enum ConfigurationError: LocalizedError {
+        case missingKey(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .missingKey(let key):
+                return """
+                    Missing configuration for \(key).
+                    Please ensure Debug.xcconfig and Release.xcconfig are properly linked in Xcode.
+                    See esc-chatmail/Configuration/Config.xcconfig.template for setup instructions.
+                    """
+            }
+        }
+    }
+
+    private static func optionalConfig(_ key: String) -> String? {
         guard let value = bundle.object(forInfoDictionaryKey: key) as? String,
               !value.isEmpty,
               !value.contains("$") else {
-            fatalError("""
-                Missing configuration for \(key).
-                Please ensure Debug.xcconfig and Release.xcconfig are properly linked in Xcode.
-                See esc-chatmail/Configuration/Config.xcconfig.template for setup instructions.
-                """)
+            return nil
         }
         return value
+    }
+
+    private static func requiredConfig(_ key: String) -> String {
+        guard let value = optionalConfig(key) else {
+            #if DEBUG
+            fatalError(ConfigurationError.missingKey(key).localizedDescription)
+            #else
+            Log.error("Missing required configuration: \(key)", category: .auth)
+            return ""
+            #endif
+        }
+        return value
+    }
+
+    /// Indicates whether all required Google configuration is present
+    static var isConfigured: Bool {
+        return optionalConfig("GOOGLE_CLIENT_ID") != nil &&
+               optionalConfig("GOOGLE_API_KEY") != nil &&
+               optionalConfig("GOOGLE_PROJECT_NUMBER") != nil &&
+               optionalConfig("GOOGLE_PROJECT_ID") != nil &&
+               optionalConfig("GOOGLE_REDIRECT_URI") != nil
+    }
+
+    /// Returns a list of missing configuration keys (for error display)
+    static var missingKeys: [String] {
+        var missing: [String] = []
+        if optionalConfig("GOOGLE_CLIENT_ID") == nil { missing.append("GOOGLE_CLIENT_ID") }
+        if optionalConfig("GOOGLE_API_KEY") == nil { missing.append("GOOGLE_API_KEY") }
+        if optionalConfig("GOOGLE_PROJECT_NUMBER") == nil { missing.append("GOOGLE_PROJECT_NUMBER") }
+        if optionalConfig("GOOGLE_PROJECT_ID") == nil { missing.append("GOOGLE_PROJECT_ID") }
+        if optionalConfig("GOOGLE_REDIRECT_URI") == nil { missing.append("GOOGLE_REDIRECT_URI") }
+        return missing
     }
 
     static let clientId: String = requiredConfig("GOOGLE_CLIENT_ID")

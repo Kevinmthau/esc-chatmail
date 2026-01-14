@@ -22,7 +22,14 @@ struct ConversationMerger: Sendable {
             countRequest.resultType = .dictionaryResultType
             countRequest.propertiesToFetch = ["keyHash"]
 
-            guard let results = try? context.fetch(countRequest) as? [[String: Any]] else { return }
+            let results: [[String: Any]]
+            do {
+                guard let fetched = try context.fetch(countRequest) as? [[String: Any]] else { return }
+                results = fetched
+            } catch {
+                Log.error("Failed to fetch conversation keyHashes for duplicate detection", category: .coreData, error: error)
+                return
+            }
 
             // Build a map of keyHash -> count
             var keyHashCounts = [String: Int]()
@@ -48,7 +55,14 @@ struct ConversationMerger: Sendable {
                 request.predicate = NSPredicate(format: "keyHash == %@", keyHash)
                 request.returnsObjectsAsFaults = false
 
-                guard let group = try? context.fetch(request), group.count > 1 else { continue }
+                let group: [Conversation]
+                do {
+                    group = try context.fetch(request)
+                    guard group.count > 1 else { continue }
+                } catch {
+                    Log.warning("Failed to fetch duplicate group for keyHash: \(keyHash.prefix(16))...", category: .coreData)
+                    continue
+                }
 
                 let winner = self.selectWinner(from: group)
                 let losers = group.filter { $0 != winner }
@@ -91,7 +105,13 @@ struct ConversationMerger: Sendable {
             request.predicate = NSPredicate(format: "archivedAt == nil")
             request.returnsObjectsAsFaults = false
 
-            guard let conversations = try? context.fetch(request) else { return }
+            let conversations: [Conversation]
+            do {
+                conversations = try context.fetch(request)
+            } catch {
+                Log.error("Failed to fetch active conversations for duplicate merge", category: .coreData, error: error)
+                return
+            }
 
             // Group by participantHash
             var byHash: [String: [Conversation]] = [:]

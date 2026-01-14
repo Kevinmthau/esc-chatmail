@@ -22,6 +22,8 @@ xcodebuild -scheme esc-chatmail -destination 'platform=iOS Simulator,name=iPhone
 xcodebuild -scheme esc-chatmail -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test -only-testing:esc-chatmailTests/DisplayNameFormatterTests/testSingleName
 ```
 
+**Note:** The test target uses file system synchronization - new `.swift` files added to `esc-chatmailTests/` are automatically included.
+
 ## Architecture
 
 iOS email client that syncs Gmail and presents emails as chat-style conversations.
@@ -303,6 +305,15 @@ Use centralized config structs from `Constants.swift` instead of magic numbers:
 - **NetworkConfig** - Request timeouts, retry delays
 - **CoreDataConfig** - Fetch batch sizes, save retry limits
 
+**GoogleConfig validation** - Check configuration at runtime:
+```swift
+if GoogleConfig.isConfigured {
+    // All required keys present
+} else {
+    let missing = GoogleConfig.missingKeys  // ["GOOGLE_CLIENT_ID", ...]
+}
+```
+
 ### Fresh Install Detection
 
 `FreshInstallHandler` detects app reinstalls by comparing UserDefaults (cleared on uninstall) vs Keychain (persists). On fresh install:
@@ -310,3 +321,23 @@ Use centralized config structs from `Constants.swift` instead of magic numbers:
 2. Signs out from Google
 3. Clears Core Data and caches
 4. Generates new installation ID
+
+### Testing
+
+Test infrastructure in `esc-chatmailTests/TestSupport/`:
+
+- **TestCoreDataStack** - In-memory Core Data for isolated, fast tests
+- **TestDependencies** - Mock dependency container
+- **Builders** - Fluent test data builders:
+  - `ConversationBuilder` - `.withDisplayName("Test").visible().setPinned().build(in: context)`
+  - `MessageBuilder` - `.withSubject("Test").unread().inConversation(conv).build(in: context)`
+  - `PendingActionBuilder` - `.markAsRead().forMessage("id").pending().build(in: context)`
+- **Mocks** - `MockTokenManager`, `MockKeychainService`
+- **XCTestCase+Async** - `waitForAsync { }`, `waitForAsyncResult { }`, `assertAsyncThrows { }`
+
+**Test suites:**
+- `DisplayNameFormatterTests` - Name formatting logic
+- `ConversationMergerTests` - Duplicate detection and merge logic
+- `PendingActionsManagerTests` - Offline action queue patterns
+- `SendErrorTests` - Send error handling
+- `GoogleConfigTests` - Configuration validation

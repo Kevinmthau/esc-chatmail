@@ -23,6 +23,7 @@ extension GmailSendService {
         case apiError(String)
         case authenticationFailed
         case optimisticCreationFailed
+        case conversationNotFound
 
         var errorDescription: String? {
             switch self {
@@ -34,6 +35,8 @@ extension GmailSendService {
                 return "Authentication failed"
             case .optimisticCreationFailed:
                 return "Failed to prepare message for sending"
+            case .conversationNotFound:
+                return "Failed to find conversation for message"
             }
         }
     }
