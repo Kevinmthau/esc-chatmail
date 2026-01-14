@@ -151,6 +151,14 @@ struct NetworkConfig {
 
     /// Maximum retry delay cap (in seconds)
     static let maxRetryDelay: TimeInterval = 30.0
+
+    /// Maximum total time for all retry attempts (circuit breaker)
+    /// Prevents indefinite waiting on repeated failures
+    static let maxTotalRetryTime: TimeInterval = 120.0
+
+    /// Maximum allowed Retry-After header value (in seconds)
+    /// Prevents honoring excessively long server-requested delays
+    static let maxRetryAfterSeconds: TimeInterval = 60.0
 }
 
 // MARK: - UI Configuration

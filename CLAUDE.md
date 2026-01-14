@@ -48,6 +48,7 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
   /CoreData/          - CoreDataStack, FetchRequestBuilder, batch operations
   /Fetcher/           - ParallelMessageFetcher, adaptive fetch optimization
   /HTMLSanitization/  - Security pipeline for email HTML
+  /ErrorHandling/     - FileSystemErrorHandler for explicit file operation logging
   /Logging/           - Log categories: sync, api, coreData, auth, ui, background, conversation
   /PendingActions/    - Offline action queue with retry logic
   /Security/          - TokenManager, KeychainService, OAuth
@@ -254,6 +255,19 @@ do {
 }
 ```
 
+**File system operations** - Use `FileSystemErrorHandler` instead of silent `try?`:
+```swift
+// Avoid:
+try? fileManager.createDirectory(at: url, withIntermediateDirectories: true)
+try? fileManager.removeItem(at: url)
+let data = try? Data(contentsOf: url)
+
+// Prefer:
+FileSystemErrorHandler.createDirectory(at: url, category: .attachment)
+FileSystemErrorHandler.removeItem(at: url, category: .attachment)
+let data = FileSystemErrorHandler.loadData(from: url, category: .attachment)
+```
+
 **Core Data saves** - Use `saveOrLog` instead of `try? context.save()` inside `context.perform {}` blocks:
 ```swift
 // Avoid:
@@ -341,3 +355,7 @@ Test infrastructure in `esc-chatmailTests/TestSupport/`:
 - `PendingActionsManagerTests` - Offline action queue patterns
 - `SendErrorTests` - Send error handling
 - `GoogleConfigTests` - Configuration validation
+- `LRUCacheActorTests` - LRU cache eviction, TTL, memory limits
+- `PlainTextQuoteRemoverTests` - Email quote and signature removal
+- `HTMLQuoteRemoverTests` - HTML-specific quote patterns
+- `HTMLSanitizerServiceTests` - XSS prevention, script/tracking removal

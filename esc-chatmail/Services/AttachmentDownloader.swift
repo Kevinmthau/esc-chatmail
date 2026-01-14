@@ -26,7 +26,13 @@ final class AttachmentDownloader: ObservableObject {
         request.predicate = NSPredicate(format: "stateRaw == %@", "queued")
         request.fetchBatchSize = 10  // Process attachments in small batches to reduce memory usage
 
-        guard let attachments = try? context.fetch(request) else { return }
+        let attachments: [Attachment]
+        do {
+            attachments = try context.fetch(request)
+        } catch {
+            Log.warning("Failed to fetch pending attachments", category: .attachment)
+            return
+        }
         
         for attachment in attachments {
             if let message = attachment.message {
@@ -177,7 +183,14 @@ final class AttachmentDownloader: ObservableObject {
         retryAttempts.removeValue(forKey: attachmentId)
 
         let context = coreDataStack.newBackgroundContext()
-        guard let attachmentInContext = try? context.existingObject(with: attachment.objectID) as? Attachment else { return }
+        let attachmentInContext: Attachment
+        do {
+            guard let att = try context.existingObject(with: attachment.objectID) as? Attachment else { return }
+            attachmentInContext = att
+        } catch {
+            Log.warning("Failed to fetch attachment for retry", category: .attachment)
+            return
+        }
 
         attachmentInContext.state = .queued
         coreDataStack.saveIfNeeded(context: context)
@@ -190,7 +203,14 @@ final class AttachmentDownloader: ObservableObject {
               let message = attachment.message else { return }
 
         let context = coreDataStack.newBackgroundContext()
-        guard let attachmentInContext = try? context.existingObject(with: attachment.objectID) as? Attachment else { return }
+        let attachmentInContext: Attachment
+        do {
+            guard let att = try context.existingObject(with: attachment.objectID) as? Attachment else { return }
+            attachmentInContext = att
+        } catch {
+            Log.warning("Failed to fetch attachment for download check", category: .attachment)
+            return
+        }
 
         await downloadAttachment(attachmentInContext, messageId: message.id, in: context)
     }
@@ -203,15 +223,20 @@ final class AttachmentDownloader: ObservableObject {
     }
 
     func cleanupOrphanedFiles() {
-        let fileManager = FileManager.default
-        guard let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
-        
+        guard let appSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+
         let context = coreDataStack.viewContext
         let request = NSFetchRequest<NSManagedObject>(entityName: "Attachment")
         request.fetchBatchSize = 50  // Process in batches for better memory usage
 
-        guard let attachments = try? context.fetch(request) else { return }
-        
+        let attachments: [NSManagedObject]
+        do {
+            attachments = try context.fetch(request)
+        } catch {
+            Log.warning("Failed to fetch attachments for cleanup", category: .attachment)
+            return
+        }
+
         let validFiles = Set(attachments.compactMap { attachment -> [String] in
             guard let att = attachment as? Attachment else { return [] }
             var files: [String] = []
@@ -223,26 +248,24 @@ final class AttachmentDownloader: ObservableObject {
             }
             return files
         }.flatMap { $0 })
-        
+
         // Clean attachments folder
         let attachmentsURL = appSupportURL.appendingPathComponent("Attachments")
-        if let contents = try? fileManager.contentsOfDirectory(at: attachmentsURL, includingPropertiesForKeys: nil) {
-            for fileURL in contents {
-                let relativePath = AttachmentPaths.relativePath(from: fileURL)
-                if let path = relativePath, !validFiles.contains(path) {
-                    try? fileManager.removeItem(at: fileURL)
-                }
+        let attachmentContents = FileSystemErrorHandler.contentsOfDirectory(at: attachmentsURL, category: .attachment)
+        for fileURL in attachmentContents {
+            let relativePath = AttachmentPaths.relativePath(from: fileURL)
+            if let path = relativePath, !validFiles.contains(path) {
+                FileSystemErrorHandler.removeItem(at: fileURL, category: .attachment)
             }
         }
-        
+
         // Clean previews folder
         let previewsURL = appSupportURL.appendingPathComponent("Previews")
-        if let contents = try? fileManager.contentsOfDirectory(at: previewsURL, includingPropertiesForKeys: nil) {
-            for fileURL in contents {
-                let relativePath = AttachmentPaths.relativePath(from: fileURL)
-                if let path = relativePath, !validFiles.contains(path) {
-                    try? fileManager.removeItem(at: fileURL)
-                }
+        let previewContents = FileSystemErrorHandler.contentsOfDirectory(at: previewsURL, category: .attachment)
+        for fileURL in previewContents {
+            let relativePath = AttachmentPaths.relativePath(from: fileURL)
+            if let path = relativePath, !validFiles.contains(path) {
+                FileSystemErrorHandler.removeItem(at: fileURL, category: .attachment)
             }
         }
     }

@@ -52,15 +52,17 @@ actor ProcessedTextCache {
         }
         guard !uncachedIds.isEmpty else { return }
 
-        // Process in batches on background thread
-        await Task.detached(priority: .utility) { [uncachedIds] in
+        // Fire-and-forget: process in background without blocking caller
+        // This enables true prefetching - caller continues immediately while
+        // cache entries are populated asynchronously
+        Task.detached(priority: .utility) { [weak self, uncachedIds] in
             let handler = HTMLContentHandler.shared
 
             for messageId in uncachedIds {
-                let result = Self.processMessage(messageId: messageId, handler: handler)
-                await self.set(messageId: messageId, plainText: result.plainText, hasRichContent: result.hasRichContent)
+                let result = ProcessedTextCache.processMessage(messageId: messageId, handler: handler)
+                await self?.set(messageId: messageId, plainText: result.plainText, hasRichContent: result.hasRichContent)
             }
-        }.value
+        }
     }
 
     /// Process a single message - can be called from background thread

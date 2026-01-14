@@ -2,7 +2,7 @@ import SwiftUI
 import GoogleSignIn
 
 struct SignInView: View {
-    @StateObject private var authSession = AuthSession.shared
+    @EnvironmentObject private var authSession: AuthSession
     @State private var isSigningIn = false
     @State private var errorMessage: String?
     

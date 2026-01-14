@@ -23,6 +23,7 @@ final class ChatViewModel: ObservableObject {
 
     private let coreDataStack: CoreDataStack
     private let syncEngine: SyncEngine
+    private let authSession: AuthSession
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Initialization
@@ -33,6 +34,7 @@ final class ChatViewModel: ObservableObject {
         self.conversation = conversation
         self.coreDataStack = dependencies.coreDataStack
         self.syncEngine = dependencies.syncEngine
+        self.authSession = dependencies.authSession
         self.messageActions = dependencies.makeMessageActions()
         self.sendService = dependencies.makeSendService()
         self.contactManager = ChatContactManager()
@@ -161,7 +163,7 @@ final class ChatViewModel: ObservableObject {
             replyingTo: replyingTo,
             body: replyText,
             attachments: attachments,
-            currentUserEmail: AuthSession.shared.userEmail ?? ""
+            currentUserEmail: authSession.userEmail ?? ""
         )
 
         guard !replyData.recipients.isEmpty else { return }

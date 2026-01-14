@@ -63,7 +63,7 @@ struct TokenInfo: Codable {
 
 // MARK: - Token Manager Protocol
 
-protocol TokenManagerProtocol {
+protocol TokenManagerProtocol: Sendable {
     func getCurrentToken() async throws -> String
     func refreshToken() async throws -> String
     func saveTokens(access: String, refresh: String?, expirationDate: Date) throws

@@ -10,7 +10,7 @@ import Foundation
 /// - `GmailAPIClient+Labels.swift` - Profile, labels, and aliases
 /// - `GmailAPIClient+History.swift` - History API with specialized error handling
 /// - `GmailAPIClient+Attachments.swift` - Attachment downloading
-class GmailAPIClient {
+final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     @MainActor static let shared = GmailAPIClient()
 
     let session: URLSession
@@ -78,29 +78,53 @@ class GmailAPIClient {
         return !urlString.isEmpty && !urlString.contains(" ")
     }
 
-    /// Performs a request with automatic retry handling.
+    /// Performs a request with automatic retry handling and circuit breaker.
+    ///
+    /// The circuit breaker prevents indefinite waiting by:
+    /// - Capping individual Retry-After delays to `NetworkConfig.maxRetryAfterSeconds`
+    /// - Aborting if total elapsed time exceeds `NetworkConfig.maxTotalRetryTime`
     nonisolated func performRequestWithRetry<T: Decodable>(_ request: URLRequest, maxRetries: Int? = nil) async throws -> T {
         let retries = maxRetries ?? retryStrategy.maxRetries
+        let startTime = Date()
         var lastError: Error?
         var retryDelay = retryStrategy.initialDelay
 
         for attempt in 0..<retries {
+            // Circuit breaker: check if we've exceeded max total retry time
+            let elapsedTime = Date().timeIntervalSince(startTime)
+            if elapsedTime >= NetworkConfig.maxTotalRetryTime {
+                Log.warning("Circuit breaker triggered: exceeded max total retry time (\(NetworkConfig.maxTotalRetryTime)s)", category: .api)
+                throw lastError ?? APIError.timeout
+            }
+
             do {
                 let (data, response) = try await session.data(for: request)
 
                 if let httpResponse = response as? HTTPURLResponse {
                     switch httpResponse.statusCode {
                     case 429:
-                        // Respect Retry-After header if present, otherwise use exponential backoff
-                        let delay: TimeInterval
+                        // Respect Retry-After header if present, but cap it
+                        var delay: TimeInterval
                         if let retryAfter = httpResponse.value(forHTTPHeaderField: "Retry-After"),
                            let retryAfterSeconds = TimeInterval(retryAfter) {
-                            delay = retryAfterSeconds
-                            Log.warning("Rate limited, Retry-After header requests \(delay) seconds", category: .api)
+                            delay = min(retryAfterSeconds, NetworkConfig.maxRetryAfterSeconds)
+                            if retryAfterSeconds > NetworkConfig.maxRetryAfterSeconds {
+                                Log.warning("Rate limited, Retry-After (\(retryAfterSeconds)s) capped to \(delay)s", category: .api)
+                            } else {
+                                Log.warning("Rate limited, Retry-After header requests \(delay) seconds", category: .api)
+                            }
                         } else {
                             delay = retryDelay * 2
                             Log.warning("Rate limited, using exponential backoff: \(delay) seconds", category: .api)
                         }
+
+                        // Check if delay would exceed remaining time budget
+                        let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
+                        if delay > remainingTime {
+                            Log.warning("Circuit breaker: delay (\(delay)s) exceeds remaining time budget (\(remainingTime)s)", category: .api)
+                            throw APIError.rateLimited
+                        }
+
                         try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                         retryDelay = min(delay * 2, retryStrategy.maxDelay)
                         continue
@@ -108,6 +132,12 @@ class GmailAPIClient {
                     case 500...599:
                         Log.warning("Server error \(httpResponse.statusCode), attempt \(attempt + 1)/\(retries)", category: .api)
                         if attempt < retries - 1 {
+                            // Check time budget before sleeping
+                            let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
+                            if retryDelay > remainingTime {
+                                Log.warning("Circuit breaker: retry delay exceeds remaining time budget", category: .api)
+                                throw APIError.serverError(httpResponse.statusCode)
+                            }
                             try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
                             retryDelay = min(retryDelay * 2, retryStrategy.maxDelay)
                             continue
@@ -140,6 +170,12 @@ class GmailAPIClient {
                 }
 
                 if attempt < retries - 1 {
+                    // Check time budget before sleeping
+                    let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
+                    if retryDelay > remainingTime {
+                        Log.warning("Circuit breaker: retry delay exceeds remaining time budget", category: .api)
+                        throw lastError ?? URLError(.timedOut)
+                    }
                     Log.info("Retrying in \(retryDelay) seconds...", category: .api)
                     try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
                     retryDelay = min(retryDelay * 2, retryStrategy.maxDelay)

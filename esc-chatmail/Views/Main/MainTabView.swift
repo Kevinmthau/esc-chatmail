@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct MainTabView: View {
-    @StateObject private var syncEngine = SyncEngine.shared
+    @EnvironmentObject private var deps: Dependencies
     
     var body: some View {
         TabView {
@@ -28,7 +28,7 @@ struct MainTabView: View {
     private func performInitialSync() {
         Task {
             do {
-                try await syncEngine.performInitialSync()
+                try await deps.syncEngine.performInitialSync()
             } catch {
                 Log.error("Initial sync error", category: .sync, error: error)
             }

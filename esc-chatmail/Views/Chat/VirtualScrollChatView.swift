@@ -6,7 +6,7 @@ import Combine
 struct VirtualScrollChatView: View {
     @ObservedObject var conversation: Conversation
     @StateObject private var scrollState: VirtualScrollState
-    @StateObject private var cache = ConversationCache.shared
+    @EnvironmentObject private var deps: Dependencies
     @State private var scrollViewReader: ScrollViewProxy?
 
     init(conversation: Conversation) {

@@ -4,7 +4,7 @@ import QuickLook
 
 struct AttachmentGridView: View {
     let attachments: [Attachment]
-    @StateObject private var downloader = AttachmentDownloader.shared
+    @EnvironmentObject private var deps: Dependencies
     @State private var selectedAttachment: Attachment?
     @State private var showFullScreen = false
     @State private var currentIndex = 0
@@ -14,7 +14,7 @@ struct AttachmentGridView: View {
             if attachments.count == 1, let attachment = attachments.first {
                 SingleAttachmentView(
                     attachment: attachment,
-                    downloader: downloader,
+                    downloader: deps.attachmentDownloader,
                     onTap: {
                         selectedAttachment = attachment
                         currentIndex = 0
@@ -24,7 +24,7 @@ struct AttachmentGridView: View {
             } else if attachments.count > 1 {
                 AttachmentGrid(
                     attachments: attachments,
-                    downloader: downloader,
+                    downloader: deps.attachmentDownloader,
                     onTap: { attachment in
                         if let index = attachments.firstIndex(of: attachment) {
                             currentIndex = index

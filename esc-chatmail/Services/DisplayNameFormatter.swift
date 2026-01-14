@@ -35,7 +35,9 @@ enum DisplayNameFormatter {
             default:
                 // 4 or more: "John, Jane, Bob & Alice"
                 let allButLast = firstNames.dropLast()
-                let last = firstNames.last!
+                guard let last = firstNames.last else {
+                    return allButLast.joined(separator: ", ")
+                }
                 return "\(allButLast.joined(separator: ", ")) & \(last)"
             }
         }

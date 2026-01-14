@@ -8,12 +8,12 @@ struct AttachmentPaths {
     static func setupDirectories() {
         let fileManager = FileManager.default
         guard let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
-        
+
         let attachmentsURL = appSupportURL.appendingPathComponent(attachmentsFolder)
         let previewsURL = appSupportURL.appendingPathComponent(previewsFolder)
-        
-        try? fileManager.createDirectory(at: attachmentsURL, withIntermediateDirectories: true)
-        try? fileManager.createDirectory(at: previewsURL, withIntermediateDirectories: true)
+
+        FileSystemErrorHandler.createDirectory(at: attachmentsURL, category: .attachment)
+        FileSystemErrorHandler.createDirectory(at: previewsURL, category: .attachment)
     }
     
     static func originalPath(idOrUUID: String, ext: String) -> String {
@@ -81,12 +81,12 @@ struct AttachmentPaths {
     
     static func loadData(from relativePath: String?) -> Data? {
         guard let url = fullURL(for: relativePath) else { return nil }
-        return try? Data(contentsOf: url)
+        return FileSystemErrorHandler.loadData(from: url, category: .attachment)
     }
-    
+
     static func deleteFile(at relativePath: String?) {
         guard let url = fullURL(for: relativePath) else { return }
-        try? FileManager.default.removeItem(at: url)
+        FileSystemErrorHandler.removeItem(at: url, category: .attachment)
     }
     
     static func fileExtension(for mimeType: String) -> String {
