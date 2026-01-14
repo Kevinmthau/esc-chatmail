@@ -191,6 +191,8 @@ This is used in `InitialSyncOrchestrator`, `IncrementalSyncOrchestrator`, `Conve
 
 **Set-based message ID deduplication** - `HistoryCollectionPhase` and `HistoryProcessor.extractNewMessageIds()` use `Set<String>` to prevent duplicate message fetches across history pages.
 
+**Chronological message persistence** - `MessageFetcher.fetchBatch()` fetches messages in parallel for performance, but collects all results and sorts by `internalDate` before calling the persistence callback. This ensures messages are persisted in chronological order, preventing temporary out-of-order display in the UI during sync.
+
 ### Sync Conflict Resolution
 
 **Local modification tracking** - When users take actions locally (mark read/unread, archive), `message.localModifiedAt` is set to prevent server sync from overwriting:

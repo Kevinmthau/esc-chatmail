@@ -67,6 +67,7 @@ final class MessageFetcher: @unchecked Sendable {
 
         var currentFailedIds: [String] = []
         var permanentlyFailed: [String] = []
+        var successfulMessages: [GmailMessage] = []
 
         // First attempt with timeout per message
         await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
@@ -88,7 +89,7 @@ final class MessageFetcher: @unchecked Sendable {
 
                 switch result {
                 case .success(let message):
-                    await onSuccess(message)
+                    successfulMessages.append(message)
                 case .failure(let error):
                     if self.isRetriableError(error) {
                         currentFailedIds.append(id)
@@ -98,6 +99,15 @@ final class MessageFetcher: @unchecked Sendable {
                     }
                 }
             }
+        }
+
+        // Sort by internalDate and persist in chronological order
+        // internalDate is milliseconds since epoch as a string; nil sorts to beginning
+        let sortedMessages = successfulMessages.sorted {
+            ($0.internalDate ?? "0") < ($1.internalDate ?? "0")
+        }
+        for message in sortedMessages {
+            await onSuccess(message)
         }
 
         // Retry loop with exponential backoff
@@ -120,6 +130,7 @@ final class MessageFetcher: @unchecked Sendable {
             guard !Task.isCancelled else { break }
 
             var stillFailed: [String] = []
+            var retrySuccessfulMessages: [GmailMessage] = []
 
             await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
                 for id in currentFailedIds {
@@ -140,8 +151,8 @@ final class MessageFetcher: @unchecked Sendable {
 
                     switch result {
                     case .success(let message):
-                        await onSuccess(message)
-                        Log.debug("Successfully fetched message \(id) on retry attempt \(attempt)", category: .sync)
+                        retrySuccessfulMessages.append(message)
+                        Log.debug("Successfully fetched message \(message.id) on retry attempt \(attempt)", category: .sync)
                     case .failure(let error):
                         if attempt == maxRetryAttempts || !self.isRetriableError(error) {
                             // Final attempt or non-retriable error
@@ -152,6 +163,14 @@ final class MessageFetcher: @unchecked Sendable {
                         }
                     }
                 }
+            }
+
+            // Sort retry successes by internalDate and persist in chronological order
+            let sortedRetryMessages = retrySuccessfulMessages.sorted {
+                ($0.internalDate ?? "0") < ($1.internalDate ?? "0")
+            }
+            for message in sortedRetryMessages {
+                await onSuccess(message)
             }
 
             currentFailedIds = stillFailed
