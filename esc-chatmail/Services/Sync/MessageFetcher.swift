@@ -69,9 +69,15 @@ final class MessageFetcher: @unchecked Sendable {
         var permanentlyFailed: [String] = []
         var successfulMessages: [GmailMessage] = []
 
-        // First attempt with timeout per message
+        // First attempt with timeout per message, using bounded concurrency
+        // to prevent resource exhaustion with large mailboxes
         await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
-            for id in ids {
+            var iterator = ids.makeIterator()
+            var activeTasks = 0
+            let maxConcurrent = SyncConfig.maxConcurrentMessageFetches
+
+            // Start initial batch of concurrent tasks
+            while activeTasks < maxConcurrent, let id = iterator.next() {
                 group.addTask { [apiClient] in
                     do {
                         let message = try await withTimeout(seconds: SyncConfig.messageFetchTimeout) {
@@ -82,10 +88,14 @@ final class MessageFetcher: @unchecked Sendable {
                         return (id, .failure(error))
                     }
                 }
+                activeTasks += 1
             }
 
+            // Process results and start new tasks as others complete
             for await (id, result) in group {
                 if Task.isCancelled { break }
+
+                activeTasks -= 1
 
                 switch result {
                 case .success(let message):
@@ -97,6 +107,21 @@ final class MessageFetcher: @unchecked Sendable {
                         Log.warning("Non-retriable error for message \(id): \(error.localizedDescription)", category: .sync)
                         permanentlyFailed.append(id)
                     }
+                }
+
+                // Start next task if there are more IDs
+                if let nextId = iterator.next() {
+                    group.addTask { [apiClient] in
+                        do {
+                            let message = try await withTimeout(seconds: SyncConfig.messageFetchTimeout) {
+                                try await apiClient.getMessage(id: nextId)
+                            }
+                            return (nextId, .success(message))
+                        } catch {
+                            return (nextId, .failure(error))
+                        }
+                    }
+                    activeTasks += 1
                 }
             }
         }
@@ -132,8 +157,14 @@ final class MessageFetcher: @unchecked Sendable {
             var stillFailed: [String] = []
             var retrySuccessfulMessages: [GmailMessage] = []
 
+            // Use bounded concurrency for retries as well
             await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
-                for id in currentFailedIds {
+                var iterator = currentFailedIds.makeIterator()
+                var activeTasks = 0
+                let maxConcurrent = SyncConfig.maxConcurrentMessageFetches
+
+                // Start initial batch of retry tasks
+                while activeTasks < maxConcurrent, let id = iterator.next() {
                     group.addTask { [apiClient] in
                         do {
                             let message = try await withTimeout(seconds: SyncConfig.messageFetchTimeout) {
@@ -144,10 +175,13 @@ final class MessageFetcher: @unchecked Sendable {
                             return (id, .failure(error))
                         }
                     }
+                    activeTasks += 1
                 }
 
                 for await (id, result) in group {
                     if Task.isCancelled { break }
+
+                    activeTasks -= 1
 
                     switch result {
                     case .success(let message):
@@ -161,6 +195,21 @@ final class MessageFetcher: @unchecked Sendable {
                         } else {
                             stillFailed.append(id)
                         }
+                    }
+
+                    // Start next retry task if there are more
+                    if let nextId = iterator.next() {
+                        group.addTask { [apiClient] in
+                            do {
+                                let message = try await withTimeout(seconds: SyncConfig.messageFetchTimeout) {
+                                    try await apiClient.getMessage(id: nextId)
+                                }
+                                return (nextId, .success(message))
+                            } catch {
+                                return (nextId, .failure(error))
+                            }
+                        }
+                        activeTasks += 1
                     }
                 }
             }

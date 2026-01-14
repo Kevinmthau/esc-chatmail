@@ -28,9 +28,11 @@ actor LRUCacheActor<Key: Hashable & Sendable, Value: Sendable>: CacheProtocol {
     // MARK: - Properties
 
     private var storage: [Key: CacheEntry] = [:]
-    private var accessOrder: [Key] = []
     private let config: CacheConfiguration
     private var stats = LRUCacheStatistics()
+
+    // Note: LRU ordering is determined by lastAccessedAt timestamps in CacheEntry,
+    // eliminating the O(n) array operations that were previously required for every access.
 
     // MARK: - Initialization
 
@@ -49,16 +51,14 @@ actor LRUCacheActor<Key: Hashable & Sendable, Value: Sendable>: CacheProtocol {
         // Check TTL if configured
         if let ttl = config.ttlSeconds, entry.age > ttl {
             storage.removeValue(forKey: key)
-            removeFromAccessOrder(key)
             stats.recordMiss()
             stats.recordEviction()
             return nil
         }
 
-        // Update access time and order
+        // Update access time (O(1) - timestamp determines LRU order)
         entry.lastAccessedAt = Date()
         storage[key] = entry
-        updateAccessOrder(for: key)
 
         stats.recordHit()
         return entry.value
@@ -70,13 +70,11 @@ actor LRUCacheActor<Key: Hashable & Sendable, Value: Sendable>: CacheProtocol {
 
     func remove(_ key: Key) async {
         storage.removeValue(forKey: key)
-        removeFromAccessOrder(key)
         stats.currentItemCount = storage.count
     }
 
     func clear() async {
         storage.removeAll()
-        accessOrder.removeAll()
         stats.currentItemCount = 0
     }
 
@@ -91,15 +89,13 @@ actor LRUCacheActor<Key: Hashable & Sendable, Value: Sendable>: CacheProtocol {
     func set(_ key: Key, value: Value, sizeBytes: Int?) {
         let entry = CacheEntry(value: value, sizeBytes: sizeBytes)
 
-        // If key already exists, update it
+        // If key already exists, just update it (O(1))
         if storage[key] != nil {
             storage[key] = entry
-            updateAccessOrder(for: key)
         } else {
-            // New entry - may need to evict
+            // New entry - may need to evict first
             evictIfNeeded()
             storage[key] = entry
-            accessOrder.append(key)
         }
 
         stats.currentItemCount = storage.count
@@ -144,7 +140,6 @@ actor LRUCacheActor<Key: Hashable & Sendable, Value: Sendable>: CacheProtocol {
 
         for key in keysToRemove {
             storage.removeValue(forKey: key)
-            removeFromAccessOrder(key)
             stats.recordEviction()
         }
 
@@ -161,28 +156,32 @@ actor LRUCacheActor<Key: Hashable & Sendable, Value: Sendable>: CacheProtocol {
 
         // Check memory limit if configured
         if let maxBytes = config.maxMemoryBytes {
-            while currentMemoryUsage() > maxBytes && !accessOrder.isEmpty {
+            while currentMemoryUsage() > maxBytes && !storage.isEmpty {
                 evictLeastRecentlyUsed()
             }
         }
     }
 
+    /// Finds and removes the entry with the oldest lastAccessedAt timestamp.
+    /// This is O(n) but only called during eviction when cache is full.
     private func evictLeastRecentlyUsed() {
-        guard let lruKey = accessOrder.first else { return }
-        storage.removeValue(forKey: lruKey)
-        accessOrder.removeFirst()
-        stats.recordEviction()
-        stats.currentItemCount = storage.count
-    }
+        guard !storage.isEmpty else { return }
 
-    private func updateAccessOrder(for key: Key) {
-        removeFromAccessOrder(key)
-        accessOrder.append(key)
-    }
+        // Find the key with the oldest lastAccessedAt timestamp
+        var lruKey: Key?
+        var oldestTime = Date.distantFuture
 
-    private func removeFromAccessOrder(_ key: Key) {
-        if let index = accessOrder.firstIndex(of: key) {
-            accessOrder.remove(at: index)
+        for (key, entry) in storage {
+            if entry.lastAccessedAt < oldestTime {
+                oldestTime = entry.lastAccessedAt
+                lruKey = key
+            }
+        }
+
+        if let keyToRemove = lruKey {
+            storage.removeValue(forKey: keyToRemove)
+            stats.recordEviction()
+            stats.currentItemCount = storage.count
         }
     }
 

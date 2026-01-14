@@ -10,6 +10,9 @@ actor PersonCache {
     private var cache: [String: CachedPerson] = [:]
     private let coreDataStack = CoreDataStack.shared
 
+    // Cleanup timer task
+    private var cleanupTask: Task<Void, Never>?
+
     // Cache entry with timestamp for expiration
     private struct CachedPerson: Sendable {
         let displayName: String?
@@ -22,7 +25,30 @@ actor PersonCache {
         }
     }
 
-    private init() {}
+    private init() {
+        // Start periodic cleanup in a Task to avoid calling actor-isolated method from nonisolated init
+        Task { await self.startPeriodicCleanup() }
+    }
+
+    /// Starts a periodic cleanup task that removes expired entries every 5 minutes
+    private func startPeriodicCleanup() {
+        cleanupTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    // Wait 5 minutes between cleanups
+                    try await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+                    await self?.cleanupExpiredEntries()
+                } catch {
+                    // Task was cancelled
+                    break
+                }
+            }
+        }
+    }
+
+    deinit {
+        cleanupTask?.cancel()
+    }
 
     /// Prefetch Person entities for a batch of emails to avoid N+1 queries
     func prefetch(emails: [String]) async {

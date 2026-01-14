@@ -39,6 +39,9 @@ struct SyncConfig {
     /// Maximum messages to fetch per API call
     static let maxMessagesPerRequest = 500
 
+    /// Maximum concurrent message fetch requests to prevent resource exhaustion
+    static let maxConcurrentMessageFetches = 15
+
     /// Delay before retrying failed message fetches (in seconds)
     static let retryDelaySeconds: UInt64 = 1_000_000_000
 
@@ -122,6 +125,9 @@ struct UIConfig {
 struct CacheConfig {
     /// Maximum items in processed text cache
     static let textCacheSize = 500
+
+    /// Maximum memory in bytes for processed text cache (5 MB)
+    static let textCacheMaxBytes = 5 * 1024 * 1024
 
     /// Maximum items in profile photo cache
     static let photoCacheSize = 500

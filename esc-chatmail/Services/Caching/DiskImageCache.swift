@@ -11,6 +11,11 @@ actor DiskImageCache {
     private let maxCacheAge: TimeInterval = 7 * 24 * 60 * 60 // 7 days
     private let maxCacheSize: Int64 = 100 * 1024 * 1024 // 100 MB
 
+    // Track estimated cache size to avoid frequent disk scans
+    private var estimatedCacheSize: Int64 = 0
+    private var lastCleanupTime: Date = .distantPast
+    private let cleanupInterval: TimeInterval = 300 // 5 minutes between cleanups
+
     private init() {
         let cachesPath = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
@@ -20,7 +25,14 @@ actor DiskImageCache {
         // Clean old entries on init (in background)
         Task.detached(priority: .utility) { [self] in
             await self.cleanExpiredEntries()
+            // Update estimated size after cleanup
+            let size = await self.totalSize()
+            await self.updateEstimatedSize(size)
         }
+    }
+
+    private func updateEstimatedSize(_ size: Int64) {
+        estimatedCacheSize = size
     }
 
     private static func createDirectoryIfNeeded(at directory: URL) {
@@ -61,6 +73,21 @@ actor DiskImageCache {
     func save(_ data: Data, for urlString: String) {
         let fileURL = cacheFileURL(for: urlString)
         try? data.write(to: fileURL, options: .atomic)
+
+        // Update estimated size
+        estimatedCacheSize += Int64(data.count)
+
+        // Check if cleanup is needed (rate limited to avoid frequent disk scans)
+        if estimatedCacheSize > maxCacheSize &&
+           Date().timeIntervalSince(lastCleanupTime) > cleanupInterval {
+            Task.detached(priority: .utility) { [self] in
+                await self.cleanExpiredEntries()
+                // Update estimated size after cleanup
+                let size = await self.totalSize()
+                await self.updateEstimatedSize(size)
+            }
+            lastCleanupTime = Date()
+        }
     }
 
     /// Saves UIImage to cache (as JPEG)

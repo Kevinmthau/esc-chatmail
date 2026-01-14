@@ -29,12 +29,15 @@ final class CachedConversation {
     }
 
     private static func calculateMemorySize(messages: [Message]) -> Int {
-        // Estimate memory usage
+        // Estimate memory usage more accurately using UTF-8 byte counts
         var size = 0
         for message in messages {
-            size += (message.snippet?.count ?? 0) * 2 // Unicode chars
-            size += (message.bodyTextValue?.count ?? 0) * 2
-            size += 1024 // Overhead per message
+            // Use utf8.count for accurate byte size instead of character count * 2
+            size += message.snippet?.utf8.count ?? 0
+            size += message.bodyTextValue?.utf8.count ?? 0
+            // Message object overhead: properties, relationships, managed object context
+            size += MemoryLayout<Message>.stride
+            size += 512 // Additional overhead for Core Data managed object
         }
         return size
     }
@@ -53,7 +56,8 @@ final class ConversationCache: ObservableObject {
 
     // Cache storage
     var cache: [String: CachedConversation] = [:]
-    var lruOrder: [String] = []
+    // Note: LRU ordering is determined by lastAccessed timestamps in CachedConversation,
+    // eliminating O(n) array operations that were previously required for every access.
 
     // Preloader (extracted)
     private let preloader: ConversationPreloader
@@ -130,7 +134,6 @@ final class ConversationCache: ObservableObject {
 
     func invalidate(_ conversationId: String) {
         cache.removeValue(forKey: conversationId)
-        lruOrder.removeAll { $0 == conversationId }
         updateMemoryUsage()
         cacheItemCount = cache.count
         stats.currentItemCount = cache.count
@@ -138,7 +141,6 @@ final class ConversationCache: ObservableObject {
 
     func clear() {
         cache.removeAll()
-        lruOrder.removeAll()
         preloader.cancel()
 
         currentMemoryUsage = 0

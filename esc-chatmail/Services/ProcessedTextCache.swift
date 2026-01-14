@@ -16,11 +16,20 @@ actor ProcessedTextCache {
 
     init() {
         self.cache = LRUCacheActor(config: CacheConfiguration(
-            maxItems: 500,
-            maxMemoryBytes: nil,
+            maxItems: CacheConfig.textCacheSize,
+            maxMemoryBytes: CacheConfig.textCacheMaxBytes,
             ttlSeconds: nil,
             evictionPolicy: .lru
         ))
+    }
+
+    /// Estimates memory size of a cached text entry
+    private static func estimateSize(_ plainText: String?, _ hasRichContent: Bool) -> Int {
+        // String size: UTF-8 bytes + some overhead
+        let textSize = (plainText?.utf8.count ?? 0)
+        // Bool size + struct overhead
+        let overheadSize = 24
+        return textSize + overheadSize
     }
 
     func get(messageId: String) async -> (plainText: String?, hasRichContent: Bool)? {
@@ -29,7 +38,8 @@ actor ProcessedTextCache {
     }
 
     func set(messageId: String, plainText: String?, hasRichContent: Bool) async {
-        await cache.set(messageId, value: CachedText(plainText: plainText, hasRichContent: hasRichContent))
+        let size = Self.estimateSize(plainText, hasRichContent)
+        await cache.set(messageId, value: CachedText(plainText: plainText, hasRichContent: hasRichContent), sizeBytes: size)
     }
 
     func prefetch(messageIds: [String]) async {

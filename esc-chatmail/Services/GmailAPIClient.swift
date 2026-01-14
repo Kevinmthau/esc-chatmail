@@ -91,8 +91,16 @@ class GmailAPIClient {
                 if let httpResponse = response as? HTTPURLResponse {
                     switch httpResponse.statusCode {
                     case 429:
-                        let delay = retryDelay * 2
-                        Log.warning("Rate limited, waiting \(delay) seconds before retry", category: .api)
+                        // Respect Retry-After header if present, otherwise use exponential backoff
+                        let delay: TimeInterval
+                        if let retryAfter = httpResponse.value(forHTTPHeaderField: "Retry-After"),
+                           let retryAfterSeconds = TimeInterval(retryAfter) {
+                            delay = retryAfterSeconds
+                            Log.warning("Rate limited, Retry-After header requests \(delay) seconds", category: .api)
+                        } else {
+                            delay = retryDelay * 2
+                            Log.warning("Rate limited, using exponential backoff: \(delay) seconds", category: .api)
+                        }
                         try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                         retryDelay = min(delay * 2, retryStrategy.maxDelay)
                         continue

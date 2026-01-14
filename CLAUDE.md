@@ -106,11 +106,14 @@ MiniEmailWebView (50% scaled) or HTMLMessageView (full)
 
 ### Caching (Actor-based, LRU)
 
-- **ProcessedTextCache** - Plain text extractions (500 items)
+LRU caches use **timestamp-based eviction** (not array-based) for O(1) access time. The `lastAccessedAt` timestamp in each entry determines eviction order. Eviction scans for oldest timestamp only when cache is full.
+
+- **ProcessedTextCache** - Plain text extractions (500 items, 5MB limit)
 - **AttachmentCacheActor** - Thumbnails (500/50MB) and full images (20/100MB)
 - **ConversationCache** - Preloaded conversations (100 items, 5min TTL)
 - **EnhancedImageCache** - Two-tier cache (memory + disk) for remote images
-- **DiskImageCache** - Persistent disk cache (7-day TTL, 100MB limit)
+- **DiskImageCache** - Persistent disk cache (7-day TTL, 100MB limit, periodic size enforcement)
+- **PersonCache** - Email → display name mapping (5min TTL per entry, periodic cleanup every 5 minutes)
 
 ### Core Data Entities
 
@@ -193,6 +196,8 @@ This is used in `InitialSyncOrchestrator`, `IncrementalSyncOrchestrator`, `Conve
 
 **Chronological message persistence** - `MessageFetcher.fetchBatch()` fetches messages in parallel for performance, but collects all results and sorts by `internalDate` before calling the persistence callback. This ensures messages are persisted in chronological order, preventing temporary out-of-order display in the UI during sync.
 
+**Bounded message fetch concurrency** - `MessageFetcher.fetchBatch()` limits concurrent API requests to `SyncConfig.maxConcurrentMessageFetches` (default 15) to prevent resource exhaustion with large mailboxes. Uses iterator pattern with TaskGroup to maintain constant concurrency.
+
 ### Sync Conflict Resolution
 
 **Local modification tracking** - When users take actions locally (mark read/unread, archive), `message.localModifiedAt` is set to prevent server sync from overwriting:
@@ -255,6 +260,10 @@ try? context.save()
 // Prefer:
 context.saveOrLog(operation: "update message read status")
 ```
+
+### Rate Limiting
+
+`GmailAPIClient.performRequestWithRetry()` respects the `Retry-After` HTTP header on 429 responses. Falls back to exponential backoff if header not present.
 
 ### SwiftUI Singletons
 
