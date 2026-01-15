@@ -10,6 +10,9 @@ final class ConversationPreloader {
     private let coreDataStack: CoreDataStack
     private weak var cache: ConversationCache?
 
+    /// Maximum queue size to prevent unbounded growth during rapid scrolling
+    private let maxQueueSize = 100
+
     var isPreloading: Bool {
         preloadTask != nil
     }
@@ -31,6 +34,15 @@ final class ConversationPreloader {
         guard !idsToPreload.isEmpty else { return }
 
         preloadQueue.formUnion(idsToPreload)
+
+        // Prevent unbounded queue growth during rapid scrolling
+        // Drop excess items when queue exceeds limit (older items are less relevant)
+        if preloadQueue.count > maxQueueSize {
+            let excess = preloadQueue.count - maxQueueSize
+            for _ in 0..<excess {
+                preloadQueue.remove(preloadQueue.first!)
+            }
+        }
 
         if preloadTask == nil {
             startPreloading()

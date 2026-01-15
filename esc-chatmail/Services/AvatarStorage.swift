@@ -19,7 +19,7 @@ actor AvatarStorage {
     private static func createDirectoryIfNeeded(at directory: URL) {
         let fm = FileManager.default
         if !fm.fileExists(atPath: directory.path) {
-            try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
+            FileSystemErrorHandler.createDirectory(at: directory, category: .general)
         }
     }
 
@@ -54,7 +54,7 @@ actor AvatarStorage {
             return nil
         }
 
-        return try? Data(contentsOf: url)
+        return FileSystemErrorHandler.loadData(from: url, category: .general)
     }
 
     /// Checks if avatar exists for email
@@ -75,12 +75,12 @@ actor AvatarStorage {
     func deleteAvatar(for email: String) {
         let filename = safeFilename(for: email)
         let fileURL = avatarsDirectory.appendingPathComponent(filename)
-        try? fileManager.removeItem(at: fileURL)
+        FileSystemErrorHandler.removeItem(at: fileURL, category: .general)
     }
 
     /// Deletes all cached avatars
     func deleteAllAvatars() {
-        try? fileManager.removeItem(at: avatarsDirectory)
+        FileSystemErrorHandler.removeItem(at: avatarsDirectory, category: .general)
         Self.createDirectoryIfNeeded(at: avatarsDirectory)
     }
 

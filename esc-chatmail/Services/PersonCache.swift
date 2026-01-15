@@ -13,6 +13,9 @@ actor PersonCache {
     // Cleanup timer task
     private var cleanupTask: Task<Void, Never>?
 
+    /// Maximum cache size to prevent unbounded growth when cleanup is delayed
+    private let maxCacheSize = 1000
+
     // Cache entry with timestamp for expiration
     private struct CachedPerson: Sendable {
         let displayName: String?
@@ -105,6 +108,9 @@ actor PersonCache {
                 )
             }
         }
+
+        // Enforce max size to prevent unbounded growth
+        enforceMaxSize()
     }
 
     /// Get cached Person display name, returns nil if not in cache
@@ -145,12 +151,28 @@ actor PersonCache {
             cachedAt: Date()
         )
 
+        // Enforce max size to prevent unbounded growth
+        enforceMaxSize()
+
         return displayName ?? fallbackDisplayName(for: email)
     }
 
     /// Clear expired cache entries
     func cleanupExpiredEntries() {
         cache = cache.filter { !$0.value.isExpired }
+    }
+
+    /// Enforces maximum cache size by removing oldest entries when exceeded
+    private func enforceMaxSize() {
+        guard cache.count > maxCacheSize else { return }
+
+        // Remove oldest entries (by cachedAt timestamp) until we're under the limit
+        let sortedEntries = cache.sorted { $0.value.cachedAt < $1.value.cachedAt }
+        let entriesToRemove = cache.count - maxCacheSize
+
+        for (key, _) in sortedEntries.prefix(entriesToRemove) {
+            cache.removeValue(forKey: key)
+        }
     }
 
     /// Clear all cached entries

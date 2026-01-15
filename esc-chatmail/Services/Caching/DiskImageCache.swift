@@ -16,6 +16,9 @@ actor DiskImageCache {
     private var lastCleanupTime: Date = .distantPast
     private let cleanupInterval: TimeInterval = 300 // 5 minutes between cleanups
 
+    /// Prevents concurrent cleanup operations from racing
+    private var isCleaningUp = false
+
     /// Periodic cleanup task to ensure cleanup runs even when no new images are saved
     private var periodicCleanupTask: Task<Void, Never>?
 
@@ -32,26 +35,30 @@ actor DiskImageCache {
     /// Starts the periodic cleanup task - must be called from actor context
     private func startPeriodicCleanup() {
         periodicCleanupTask = Task { [weak self] in
-            // Initial cleanup
-            await self?.cleanExpiredEntries()
-            if let size = await self?.totalSize() {
-                await self?.updateEstimatedSize(size)
-            }
+            // Initial cleanup - measure actual size on startup to correct any drift
+            await self?.performCleanupIfNotBusy()
 
             // Periodic cleanup every hour
             while !Task.isCancelled {
                 do {
                     try await Task.sleep(nanoseconds: 60 * 60 * 1_000_000_000) // 1 hour
-                    await self?.cleanExpiredEntries()
-                    if let size = await self?.totalSize() {
-                        await self?.updateEstimatedSize(size)
-                    }
+                    await self?.performCleanupIfNotBusy()
                 } catch {
                     // Task was cancelled
                     break
                 }
             }
         }
+    }
+
+    /// Performs cleanup only if not already in progress, measuring actual disk size
+    private func performCleanupIfNotBusy() async {
+        guard !isCleaningUp else { return }
+        isCleaningUp = true
+        await cleanExpiredEntries()
+        let size = totalSize()
+        estimatedCacheSize = size
+        isCleaningUp = false
     }
 
     deinit {
@@ -65,7 +72,7 @@ actor DiskImageCache {
     private static func createDirectoryIfNeeded(at directory: URL) {
         let fm = FileManager.default
         if !fm.fileExists(atPath: directory.path) {
-            try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
+            FileSystemErrorHandler.createDirectory(at: directory, category: .general)
         }
     }
 
@@ -80,14 +87,18 @@ actor DiskImageCache {
         }
 
         // Check if expired
-        if let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
-           let modDate = attributes[.modificationDate] as? Date,
-           Date().timeIntervalSince(modDate) > maxCacheAge {
-            try? fileManager.removeItem(at: fileURL)
-            return nil
+        do {
+            let attributes = try fileManager.attributesOfItem(atPath: fileURL.path)
+            if let modDate = attributes[.modificationDate] as? Date,
+               Date().timeIntervalSince(modDate) > maxCacheAge {
+                FileSystemErrorHandler.removeItem(at: fileURL, category: .general)
+                return nil
+            }
+        } catch {
+            Log.debug("Failed to read cache file attributes: \(fileURL.lastPathComponent)", category: .general)
         }
 
-        return try? Data(contentsOf: fileURL)
+        return FileSystemErrorHandler.loadData(from: fileURL, category: .general)
     }
 
     /// Gets cached image for a URL
@@ -99,22 +110,30 @@ actor DiskImageCache {
     /// Saves image data to cache
     func save(_ data: Data, for urlString: String) {
         let fileURL = cacheFileURL(for: urlString)
-        try? data.write(to: fileURL, options: .atomic)
+        FileSystemErrorHandler.writeData(data, to: fileURL, category: .general)
 
         // Update estimated size
         estimatedCacheSize += Int64(data.count)
 
         // Check if cleanup is needed (rate limited to avoid frequent disk scans)
+        // Also prevent concurrent cleanups with isCleaningUp flag
         if estimatedCacheSize > maxCacheSize &&
-           Date().timeIntervalSince(lastCleanupTime) > cleanupInterval {
+           Date().timeIntervalSince(lastCleanupTime) > cleanupInterval &&
+           !isCleaningUp {
+            isCleaningUp = true
+            lastCleanupTime = Date()
             Task.detached(priority: .utility) { [self] in
                 await self.cleanExpiredEntries()
-                // Update estimated size after cleanup
+                // Update estimated size after cleanup (measure actual disk usage)
                 let size = await self.totalSize()
                 await self.updateEstimatedSize(size)
+                await self.setCleaningUp(false)
             }
-            lastCleanupTime = Date()
         }
+    }
+
+    private func setCleaningUp(_ value: Bool) {
+        isCleaningUp = value
     }
 
     /// Saves UIImage to cache (as JPEG)
@@ -126,12 +145,12 @@ actor DiskImageCache {
     /// Removes cached image for URL
     func remove(for urlString: String) {
         let fileURL = cacheFileURL(for: urlString)
-        try? fileManager.removeItem(at: fileURL)
+        FileSystemErrorHandler.removeItem(at: fileURL, category: .general)
     }
 
     /// Clears all cached images
     func clearAll() {
-        try? fileManager.removeItem(at: cacheDirectory)
+        FileSystemErrorHandler.removeItem(at: cacheDirectory, category: .general)
         Self.createDirectoryIfNeeded(at: cacheDirectory)
     }
 
@@ -205,7 +224,7 @@ actor DiskImageCache {
 
         // Delete expired files
         for fileURL in filesToDelete {
-            try? fileManager.removeItem(at: fileURL)
+            FileSystemErrorHandler.removeItem(at: fileURL, category: .general)
         }
 
         // If still over size limit, delete oldest files
@@ -217,7 +236,7 @@ actor DiskImageCache {
                 if currentSize <= maxCacheSize {
                     break
                 }
-                try? fileManager.removeItem(at: fileInfo.url)
+                FileSystemErrorHandler.removeItem(at: fileInfo.url, category: .general)
                 currentSize -= fileInfo.size
             }
         }

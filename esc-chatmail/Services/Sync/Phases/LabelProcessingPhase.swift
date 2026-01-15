@@ -26,6 +26,9 @@ struct LabelProcessingPhase: SyncPhase {
         log.debug("Processing \(records.count) history records for label changes")
 
         for (index, record) in records.enumerated() {
+            // Check for cancellation to respect sync cancel requests
+            try Task.checkCancellation()
+
             await historyProcessor.processLightweightOperations(
                 record,
                 in: context.coreDataContext,

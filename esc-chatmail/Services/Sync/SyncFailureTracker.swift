@@ -100,13 +100,22 @@ actor SyncFailureTracker {
         await context.perform {
             let abandonedAt = Date()
 
-            for messageId in messageIds {
-                // Check if already exists (uniqueness constraint will handle duplicates, but this avoids extra work)
-                let existingRequest = NSFetchRequest<AbandonedSyncMessage>(entityName: "AbandonedSyncMessage")
-                existingRequest.predicate = NSPredicate(format: "gmailMessageId == %@", messageId)
-                existingRequest.fetchLimit = 1
+            // Batch fetch all existing abandoned messages in a single query (eliminates N+1)
+            let existingRequest = NSFetchRequest<AbandonedSyncMessage>(entityName: "AbandonedSyncMessage")
+            existingRequest.predicate = NSPredicate(format: "gmailMessageId IN %@", messageIds)
+            let existingMessages = (try? context.fetch(existingRequest)) ?? []
 
-                if let existing = try? context.fetch(existingRequest).first {
+            // Create dictionary for O(1) lookup
+            var existingByGmailId: [String: AbandonedSyncMessage] = [:]
+            for message in existingMessages {
+                if let gmailId = message.value(forKey: "gmailMessageId") as? String {
+                    existingByGmailId[gmailId] = message
+                }
+            }
+
+            // Update or create records
+            for messageId in messageIds {
+                if let existing = existingByGmailId[messageId] {
                     // Update existing record
                     existing.setValue(abandonedAt, forKey: "abandonedAt")
                     let currentRetryCount = existing.value(forKey: "retryCount") as? Int16 ?? 0

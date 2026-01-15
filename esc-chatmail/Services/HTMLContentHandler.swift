@@ -20,7 +20,7 @@ final class HTMLContentHandler {
 
     private func createMessagesDirectoryIfNeeded() {
         if !FileManager.default.fileExists(atPath: messagesDirectory.path) {
-            try? FileManager.default.createDirectory(at: messagesDirectory, withIntermediateDirectories: true)
+            FileSystemErrorHandler.createDirectory(at: messagesDirectory, category: .general)
         }
     }
 
@@ -52,7 +52,7 @@ final class HTMLContentHandler {
 
     func deleteHTML(for messageId: String) {
         let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
-        try? FileManager.default.removeItem(at: fileURL)
+        FileSystemErrorHandler.removeItem(at: fileURL, category: .general)
     }
 
     func deleteAllHTML() {
@@ -61,13 +61,9 @@ final class HTMLContentHandler {
         exclusiveQueue.sync {
             // Delete contents instead of directory to avoid race conditions
             // This prevents other operations from failing when directory is temporarily missing
-            if let contents = try? FileManager.default.contentsOfDirectory(
-                at: messagesDirectory,
-                includingPropertiesForKeys: nil
-            ) {
-                for fileURL in contents {
-                    try? FileManager.default.removeItem(at: fileURL)
-                }
+            let contents = FileSystemErrorHandler.contentsOfDirectory(at: messagesDirectory, category: .general)
+            for fileURL in contents {
+                FileSystemErrorHandler.removeItem(at: fileURL, category: .general)
             }
         }
     }
@@ -100,9 +96,13 @@ final class HTMLContentHandler {
                                                           includingPropertiesForKeys: [.creationDateKey],
                                                           options: [.skipsHiddenFiles]) {
             for case let fileURL as URL in enumerator {
-                if let creationDate = try? fileURL.resourceValues(forKeys: [.creationDateKey]).creationDate,
-                   creationDate < cutoffDate {
-                    try? FileManager.default.removeItem(at: fileURL)
+                do {
+                    let values = try fileURL.resourceValues(forKeys: [.creationDateKey])
+                    if let creationDate = values.creationDate, creationDate < cutoffDate {
+                        FileSystemErrorHandler.removeItem(at: fileURL, category: .general)
+                    }
+                } catch {
+                    Log.debug("Failed to read creation date for \(fileURL.lastPathComponent)", category: .general)
                 }
             }
         }

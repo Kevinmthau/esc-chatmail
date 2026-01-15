@@ -88,14 +88,20 @@ actor LRUCacheActor<Key: Hashable & Sendable, Value: Sendable>: CacheProtocol {
     /// Sets a value with optional size tracking for memory-based eviction
     func set(_ key: Key, value: Value, sizeBytes: Int?) {
         let entry = CacheEntry(value: value, sizeBytes: sizeBytes)
+        let isUpdate = storage[key] != nil
 
-        // If key already exists, just update it (O(1))
-        if storage[key] != nil {
-            storage[key] = entry
-        } else {
-            // New entry - may need to evict first
+        if !isUpdate {
+            // New entry - evict before to make room
             evictIfNeeded()
-            storage[key] = entry
+        }
+
+        // Set the entry
+        storage[key] = entry
+
+        // For updates with memory tracking, ensure we're still within limits
+        // (the new value might be larger than the old one)
+        if isUpdate && config.maxMemoryBytes != nil {
+            evictIfNeeded()
         }
 
         stats.currentItemCount = storage.count

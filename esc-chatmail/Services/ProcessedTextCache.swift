@@ -17,6 +17,9 @@ actor ProcessedTextCache {
     /// Track active prefetch task to prevent unbounded task accumulation
     private var activePrefetchTask: Task<Void, Never>?
 
+    /// Track task identity to prevent cancelled tasks from clearing newer task references
+    private var activePrefetchTaskId: UUID?
+
     /// Maximum number of messages to process in a single prefetch batch
     private let maxPrefetchBatchSize = 20
 
@@ -64,8 +67,12 @@ actor ProcessedTextCache {
         // Cancel any existing prefetch task to prevent accumulation during rapid scroll
         activePrefetchTask?.cancel()
 
+        // Generate unique ID for this task to prevent race conditions on cleanup
+        let taskId = UUID()
+        activePrefetchTaskId = taskId
+
         // Track the new prefetch task
-        activePrefetchTask = Task.detached(priority: .utility) { [weak self, idsToProcess] in
+        activePrefetchTask = Task.detached(priority: .utility) { [weak self, idsToProcess, taskId] in
             let handler = HTMLContentHandler.shared
 
             for messageId in idsToProcess {
@@ -75,6 +82,18 @@ actor ProcessedTextCache {
                 let result = ProcessedTextCache.processMessage(messageId: messageId, handler: handler)
                 await self?.set(messageId: messageId, plainText: result.plainText, hasRichContent: result.hasRichContent)
             }
+
+            // Clear task reference on completion, but only if this is still the active task
+            // (prevents cancelled tasks from clearing a newer task's reference)
+            await self?.clearPrefetchTaskIfMatches(taskId)
+        }
+    }
+
+    /// Clears the prefetch task reference only if it matches the given task ID
+    private func clearPrefetchTaskIfMatches(_ taskId: UUID) {
+        if activePrefetchTaskId == taskId {
+            activePrefetchTask = nil
+            activePrefetchTaskId = nil
         }
     }
 
@@ -82,6 +101,7 @@ actor ProcessedTextCache {
     func cancelPrefetch() {
         activePrefetchTask?.cancel()
         activePrefetchTask = nil
+        activePrefetchTaskId = nil
     }
 
     /// Process a single message - can be called from background thread

@@ -111,13 +111,15 @@ MiniEmailWebView (50% scaled) or HTMLMessageView (full)
 
 LRU caches use **timestamp-based eviction** (not array-based) for O(1) access time. The `lastAccessedAt` timestamp in each entry determines eviction order. Eviction scans for oldest timestamp only when cache is full.
 
-- **ProcessedTextCache** - Plain text extractions (500 items, 5MB limit), tracked prefetch task with cancellation
+- **ProcessedTextCache** - Plain text extractions (500 items, 5MB limit), tracked prefetch task with ID-based cleanup to prevent race conditions
 - **AttachmentCacheActor** - Thumbnails (500/50MB) and full images (20/100MB)
-- **ConversationCache** - Preloaded conversations (100 items, 5min TTL)
+- **ConversationCache** - Preloaded conversations (100 items, 5min TTL), 50% clearing on memory warning
+- **ConversationPreloader** - Bounded preload queue (100 max) to prevent memory exhaustion during rapid scrolling
 - **EnhancedImageCache** - Two-tier cache (memory + disk) for remote images, memory warning observer with stored token
-- **DiskImageCache** - Persistent disk cache (7-day TTL, 100MB limit, hourly periodic cleanup)
-- **PersonCache** - Email → display name mapping (5min TTL per entry, periodic cleanup every 5 minutes)
+- **DiskImageCache** - Persistent disk cache (7-day TTL, 100MB limit, hourly periodic cleanup, concurrent cleanup prevention)
+- **PersonCache** - Email → display name mapping (5min TTL, 1000 max entries, periodic cleanup every 5 minutes)
 - **ImageRequestManager** - Failed URL tracking (500 max entries with 20% pruning)
+- **AttachmentThumbnailLoader** - Cancels previous task before starting new load to prevent orphaned tasks
 
 **Cache stability patterns:**
 - **Bound all collections** - Never let Sets/Dictionaries grow unbounded. Add max size with pruning:
@@ -132,7 +134,48 @@ if failedURLs.count >= maxFailedURLs {
 ```
 - **Periodic cleanup** - Don't rely solely on save-triggered cleanup. Add hourly background cleanup tasks.
 - **NSCache totalCostLimit** - Always set both `countLimit` AND `totalCostLimit` for proper memory pressure response.
-- **Track prefetch tasks** - Cancel previous prefetch when new one starts to prevent accumulation during rapid scroll.
+- **Track prefetch tasks with ID** - Use task IDs to prevent cancelled tasks from clearing newer task references:
+```swift
+private var activePrefetchTask: Task<Void, Never>?
+private var activePrefetchTaskId: UUID?
+
+func prefetch(...) async {
+    activePrefetchTask?.cancel()
+    let taskId = UUID()
+    activePrefetchTaskId = taskId
+
+    activePrefetchTask = Task { [weak self, taskId] in
+        // ... do work ...
+        await self?.clearPrefetchTaskIfMatches(taskId)
+    }
+}
+
+private func clearPrefetchTaskIfMatches(_ taskId: UUID) {
+    if activePrefetchTaskId == taskId {
+        activePrefetchTask = nil
+        activePrefetchTaskId = nil
+    }
+}
+```
+- **Cancel before reassign** - Always cancel existing tasks before assigning new ones to prevent orphaned tasks:
+```swift
+func load(...) {
+    loadTask?.cancel()  // Prevent orphaned task
+    loadTask = Task { ... }
+}
+```
+- **Prevent concurrent cleanup** - Use flags to prevent multiple cleanup operations from racing:
+```swift
+private var isCleaningUp = false
+
+func save(...) {
+    if shouldCleanup && !isCleaningUp {
+        isCleaningUp = true
+        Task { await cleanup(); isCleaningUp = false }
+    }
+}
+```
+- **LRU eviction on updates** - Check memory limits when updating existing keys (not just new entries), as the new value may be larger.
 
 ### Core Data Entities
 
@@ -304,6 +347,12 @@ This is used in `InitialSyncOrchestrator`, `IncrementalSyncOrchestrator`, `Conve
 **Chronological message persistence** - `MessageFetcher.fetchBatch()` fetches messages in parallel for performance, but collects all results and sorts by `internalDate` before calling the persistence callback. This ensures messages are persisted in chronological order, preventing temporary out-of-order display in the UI during sync.
 
 **Bounded message fetch concurrency** - `MessageFetcher.fetchBatch()` limits concurrent API requests to `SyncConfig.maxConcurrentMessageFetches` (default 15) to prevent resource exhaustion with large mailboxes. Uses iterator pattern with TaskGroup to maintain constant concurrency.
+
+**Sync phase cancellation** - All sync phases should check `try Task.checkCancellation()` in loops to respect sync cancellation requests. `LabelProcessingPhase` checks cancellation between processing each history record.
+
+**History page limits** - `HistoryCollectionPhase` limits to 50 pages maximum (`maxHistoryPages`) to prevent OOM on large mailboxes with thousands of changes. If exceeded, partial sync continues and next sync catches remaining.
+
+**Batch persistence for abandoned messages** - `SyncFailureTracker.persistAbandonedMessages()` uses batch fetch with dictionary lookup instead of N+1 queries when persisting failed message IDs.
 
 ### Sync Conflict Resolution
 

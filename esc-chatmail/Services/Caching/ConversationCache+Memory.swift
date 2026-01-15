@@ -13,8 +13,8 @@ extension ConversationCache {
     }
 
     func handleMemoryWarning() {
-        // Aggressively clear cache on memory warning
-        let itemsToKeep = min(5, cache.count / 4)
+        // Clear half the cache on memory warning (less aggressive to avoid thrashing)
+        let itemsToKeep = max(5, cache.count / 2)
 
         while cache.count > itemsToKeep {
             evictLeastRecentlyUsed()

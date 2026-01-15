@@ -14,6 +14,9 @@ final class AttachmentThumbnailLoader: ObservableObject {
     func load(attachmentId: String?, previewPath: String?) {
         guard let attachmentId, image == nil, !isLoading else { return }
 
+        // Cancel any existing task to prevent orphaned tasks
+        loadTask?.cancel()
+
         isLoading = true
         loadTask = Task {
             let loadedImage = await cache.loadThumbnail(for: attachmentId, from: previewPath)
@@ -32,6 +35,9 @@ final class AttachmentThumbnailLoader: ObservableObject {
         isImage: Bool
     ) {
         guard let attachmentId, image == nil, !isLoading else { return }
+
+        // Cancel any existing task to prevent orphaned tasks
+        loadTask?.cancel()
 
         isLoading = true
         loadTask = Task {

@@ -12,6 +12,10 @@ struct HistoryCollectionPhase: SyncPhase {
     private let historyProcessor: HistoryProcessor
     private let log = LogCategory.sync.logger
 
+    /// Maximum number of history pages to fetch to prevent unbounded memory growth
+    /// If exceeded, sync will continue with partial data (next sync will catch remaining)
+    private let maxHistoryPages = 50
+
     init(messageFetcher: MessageFetcher, historyProcessor: HistoryProcessor) {
         self.messageFetcher = messageFetcher
         self.historyProcessor = historyProcessor
@@ -27,6 +31,7 @@ struct HistoryCollectionPhase: SyncPhase {
         var latestHistoryId = startHistoryId
         var allNewMessageIds: Set<String> = []
         var allHistoryRecords: [HistoryRecord] = []
+        var pageCount = 0
 
         repeat {
             try Task.checkCancellation()
@@ -48,6 +53,13 @@ struct HistoryCollectionPhase: SyncPhase {
             }
 
             pageToken = nextPageToken
+            pageCount += 1
+
+            // Prevent unbounded memory growth by limiting pages
+            if pageCount >= maxHistoryPages && pageToken != nil {
+                log.warning("History collection reached page limit (\(maxHistoryPages)). Partial sync will continue; next sync will catch remaining changes.")
+                break
+            }
         } while pageToken != nil
 
         log.info("History collection: \(allNewMessageIds.count) unique messages, \(allHistoryRecords.count) records")
