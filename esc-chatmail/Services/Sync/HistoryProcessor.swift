@@ -69,6 +69,11 @@ actor HistoryProcessor {
                         Log.debug("Skipping spam: \(added.message.id)", category: .sync)
                         continue
                     }
+                    // Skip draft messages
+                    if let labelIds = added.message.labelIds, labelIds.contains("DRAFT") {
+                        Log.debug("Skipping draft: \(added.message.id)", category: .sync)
+                        continue
+                    }
                     Log.debug("Will fetch: \(added.message.id)", category: .sync)
                     messageIds.insert(added.message.id)
                 }

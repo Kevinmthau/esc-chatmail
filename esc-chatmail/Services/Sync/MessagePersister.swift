@@ -67,6 +67,12 @@ actor MessagePersister {
             return
         }
 
+        // Skip draft messages
+        if let labelIds = gmailMessage.labelIds, labelIds.contains("DRAFT") {
+            Log.debug("Skipping draft message: \(gmailMessage.id)", category: .sync)
+            return
+        }
+
         // Debug: Log incoming message details
         let fromHeader = gmailMessage.payload?.headers?.first(where: { $0.name.lowercased() == "from" })?.value ?? "unknown"
         let subjectHeader = gmailMessage.payload?.headers?.first(where: { $0.name.lowercased() == "subject" })?.value ?? "no subject"

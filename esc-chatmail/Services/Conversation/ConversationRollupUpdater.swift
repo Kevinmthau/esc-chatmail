@@ -150,7 +150,7 @@ struct ConversationRollupUpdater: Sendable {
     private func filterNonDraftMessages(_ messages: Set<Message>) -> [Message] {
         messages.filter { message in
             guard let labels = message.labels else { return true }
-            let isDraft = labels.contains { $0.id == "DRAFTS" }
+            let isDraft = labels.contains { $0.id == "DRAFT" }
             return !isDraft
         }
     }

@@ -222,8 +222,8 @@ enum MessagePredicates {
     static let unread = NSPredicate(format: "isUnread == YES")
     static let read = NSPredicate(format: "isUnread == NO")
     static let inbox = hasLabel("INBOX")
-    static let drafts = hasLabel("DRAFTS")
-    static let excludingDrafts = notHavingLabel("DRAFTS")
+    static let drafts = hasLabel("DRAFT")
+    static let excludingDrafts = notHavingLabel("DRAFT")
 
     static func olderThan(_ date: Date) -> NSPredicate {
         NSPredicate(format: "internalDate < %@", date as CVarArg)

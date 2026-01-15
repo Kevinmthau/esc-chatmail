@@ -8,7 +8,7 @@ struct InboxListView: View {
         let request = NSFetchRequest<Message>(entityName: "Message")
         request.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: false)]
         // Only show inbox messages that are not drafts
-        request.predicate = NSPredicate(format: "ANY labels.id == %@ AND NOT (ANY labels.id == %@)", "INBOX", "DRAFTS")
+        request.predicate = NSPredicate(format: "ANY labels.id == %@ AND NOT (ANY labels.id == %@)", "INBOX", "DRAFT")
         request.fetchBatchSize = 25  // Load messages in batches for better performance
         _messages = FetchRequest(fetchRequest: request)
     }

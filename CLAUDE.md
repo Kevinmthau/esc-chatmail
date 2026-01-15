@@ -151,6 +151,20 @@ Log.error("message", category: .api, error: error)
 - **Nested ObservableObject forwarding** - Forward `objectWillChange` via Combine subscriptions when composing ObservableObjects
 - User's aliases must be excluded from `participantHash` - load from Account entity if not in memory
 
+### Gmail System Label IDs
+
+Gmail API uses **singular** label IDs for system labels. Always use these exact IDs:
+- `"INBOX"` - Inbox messages
+- `"SENT"` - Sent messages
+- `"DRAFT"` - Draft messages (NOT "DRAFTS")
+- `"SPAM"` - Spam messages
+- `"TRASH"` - Deleted messages
+- `"UNREAD"` - Unread flag
+- `"STARRED"` - Starred messages
+- `"IMPORTANT"` - Important messages
+
+**Critical:** Gmail API queries use lowercase (`-label:drafts`), but label IDs in responses are uppercase (`"DRAFT"`). The sync queries and Core Data predicates use different formats.
+
 ### Email Normalization (Gmail)
 
 Gmail treats dots in the local part as insignificant: `firstname.lastname@gmail.com` and `firstnamelastname@gmail.com` are the same account. Use `EmailNormalizer.normalize()` for all email comparisons:
