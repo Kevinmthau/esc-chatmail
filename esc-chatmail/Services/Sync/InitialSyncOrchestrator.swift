@@ -184,16 +184,12 @@ final class InitialSyncOrchestrator {
         let installTimestamp = UserDefaults.standard.double(forKey: "installTimestamp")
 
         if installTimestamp > 0 {
-            // Use install timestamp minus 5-minute buffer
-            let cutoffTimestamp = Int(installTimestamp) - 300
             log.info("Fetching messages after install time: \(Date(timeIntervalSince1970: installTimestamp))")
-            return "after:\(cutoffTimestamp) -label:spam -label:drafts"
         } else {
-            // Fallback: 30 days
-            let thirtyDaysAgo = Int(Date().timeIntervalSince1970) - (30 * 24 * 60 * 60)
-            log.warning("No install timestamp found, using 30-day fallback")
-            return "after:\(thirtyDaysAgo) -label:spam -label:drafts"
+            log.warning("No install timestamp found, using fallback window")
         }
+
+        return SyncTimeCalculator.buildSyncQuery(config: .initialSync)
     }
 
     private func fetchAndProcessMessages(
@@ -202,19 +198,11 @@ final class InitialSyncOrchestrator {
         context: NSManagedObjectContext,
         progressHandler: @escaping (Double, String) -> Void
     ) async throws -> BatchProcessingResult {
-        // Collect all message IDs
-        var pageToken: String? = nil
-        var allMessageIds: [String] = []
-
-        repeat {
-            try Task.checkCancellation()
-            let (messageIds, nextPageToken) = try await messageFetcher.listMessages(
-                query: query,
-                pageToken: pageToken
-            )
-            allMessageIds.append(contentsOf: messageIds)
-            pageToken = nextPageToken
-        } while pageToken != nil
+        // Collect all message IDs using shared paginator
+        let allMessageIds = try await MessageListPaginator.fetchAllMessageIds(
+            query: query,
+            using: messageFetcher
+        )
 
         log.info("Found \(allMessageIds.count) messages to process")
 

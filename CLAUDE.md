@@ -234,6 +234,50 @@ Conversations appear in the chat list based on `archivedAt == nil`. Archive stat
 - **All INBOX labels removed** → Auto-archived (`archivedAt = Date()`)
 - **New message arrives for archived conversation** → Auto un-archived by `ConversationCreationSerializer`
 
+### Sync Utilities
+
+The sync system uses shared utilities to eliminate code duplication:
+
+**SyncTimeCalculator** - Centralized time calculations for sync operations:
+```swift
+// Build Gmail query with proper time window
+let query = SyncTimeCalculator.buildSyncQuery(config: .initialSync)
+
+// Get start time for different sync types
+let startTime = SyncTimeCalculator.calculateStartTime(config: .historyRecovery)
+let startDate = SyncTimeCalculator.calculateStartDate(config: .reconciliation)
+
+// Available configs: .initialSync, .historyRecovery, .reconciliation
+```
+
+**MessageListPaginator** - Shared pagination for message list fetching:
+```swift
+// Fetch all message IDs with automatic pagination
+let messageIds = try await MessageListPaginator.fetchAllMessageIds(
+    query: query,
+    using: messageFetcher
+)
+
+// Or fetch and process in one call
+let result = try await MessageListPaginator.fetchAndProcess(
+    query: query,
+    messageFetcher: messageFetcher,
+    progressHandler: { processed, total in ... },
+    messageHandler: { message in ... }
+)
+```
+
+**LabelOperationProcessor** - Unified processor for label additions/removals:
+```swift
+// Process label changes (add or remove)
+let modifiedConversations = await LabelOperationProcessor.process(
+    items: labelsAdded,      // or labelsRemoved
+    operation: .add,          // or .remove
+    in: context,
+    syncStartTime: syncStartTime
+)
+```
+
 ### Sync Optimization
 
 **Differential rollup updates** - Instead of updating all conversation rollups after sync (O(n×m) operation), only modified conversations are updated:
@@ -244,7 +288,7 @@ Conversations appear in the chat list based on `archivedAt == nil`. Archive stat
 
 This is used in `InitialSyncOrchestrator`, `IncrementalSyncOrchestrator`, `ConversationUpdatePhase`, and `SyncEngine.updateConversationRollups()`.
 
-**Batch fetching in label operations** - `HistoryProcessor+LabelOperations.swift` uses batch Core Data queries:
+**Batch fetching in label operations** - `LabelOperationProcessor` uses batch Core Data queries:
 - Collect all message IDs and label IDs upfront before processing
 - Single batch fetch with `NSPredicate(format: "id IN %@", allMessageIds)`
 - Prefetch relationships: `["labels", "conversation"]`
@@ -419,7 +463,13 @@ let viewModel = ChatViewModel(deps: testDeps)
 
 Use centralized config structs from `Constants.swift` instead of magic numbers:
 - **CacheConfig** - Cache sizes (`textCacheSize`, `photoCacheSize`) and TTLs (`photoCacheTTL`, `diskImageCacheTTL`)
-- **SyncConfig** - Batch sizes, timeouts, retry limits
+- **SyncConfig** - Batch sizes, timeouts, retry limits, time buffer constants:
+  - `timestampBufferSeconds` (300) - 5-min buffer for sync timestamps
+  - `recoveryBufferSeconds` (600) - 10-min buffer for recovery operations
+  - `maxLocalModificationAge` (1800) - 30-min protection for local changes
+  - `maxReconciliationWindow` (86400) - 24-hour cap for reconciliation
+  - `initialSyncFallbackWindow` - 30-day fallback for initial sync
+  - `recoveryFallbackWindow` - 7-day fallback for history recovery
 - **NetworkConfig** - Request timeouts, retry delays
 - **CoreDataConfig** - Fetch batch sizes, save retry limits
 

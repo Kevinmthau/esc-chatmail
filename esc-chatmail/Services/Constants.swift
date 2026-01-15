@@ -118,6 +118,27 @@ struct SyncConfig {
     /// Interval between forced label reconciliations even when history is empty (in seconds)
     /// Running reconciliation hourly ensures label drift is caught even without history changes
     static let reconciliationInterval: TimeInterval = 3600 // 1 hour
+
+    // MARK: - Time Buffer Constants
+
+    /// Buffer subtracted from timestamps to ensure we don't miss messages due to clock drift (5 minutes)
+    static let timestampBufferSeconds: TimeInterval = 300
+
+    /// Larger buffer for recovery operations where we want extra safety margin (10 minutes)
+    static let recoveryBufferSeconds: TimeInterval = 600
+
+    /// Maximum age for local modifications before server updates are allowed (30 minutes)
+    /// Prevents indefinite blocking of server sync while protecting recent local changes
+    static let maxLocalModificationAge: TimeInterval = 1800
+
+    /// Maximum reconciliation window to prevent excessive API calls (24 hours)
+    static let maxReconciliationWindow: TimeInterval = 86400
+
+    /// Fallback window when no sync history exists - initial sync (30 days)
+    static let initialSyncFallbackWindow: TimeInterval = 30 * 24 * 60 * 60
+
+    /// Fallback window for history recovery sync (7 days)
+    static let recoveryFallbackWindow: TimeInterval = 7 * 24 * 60 * 60
 }
 
 // MARK: - Core Data Configuration

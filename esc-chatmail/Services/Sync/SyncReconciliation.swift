@@ -75,27 +75,17 @@ final class SyncReconciliation: Sendable {
         let defaults = UserDefaults.standard
         let lastSuccessfulSync = defaults.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
 
-        let reconciliationStartTime: Date
         if lastSuccessfulSync > 0 {
-            // Use last successful sync time with 5-minute buffer
-            reconciliationStartTime = Date(timeIntervalSince1970: lastSuccessfulSync - 300)
             let timeSinceLastSync = Date().timeIntervalSince1970 - lastSuccessfulSync
             log.debug("Reconciliation window: since last sync (\(Int(timeSinceLastSync / 60)) minutes ago)")
         } else {
-            // Fallback to 1 hour
-            reconciliationStartTime = Date().addingTimeInterval(-3600)
-            log.debug("Reconciliation window: last 1 hour (no previous sync time)")
+            log.debug("Reconciliation window: using fallback (no previous sync time)")
         }
 
-        // Cap to 24 hours maximum
-        let maxReconciliationTime = Date().addingTimeInterval(-86400)
-
-        // Never reconcile messages from before install
-        let installCutoff = installTimestamp > 0
-            ? Date(timeIntervalSince1970: installTimestamp - 300)
-            : Date.distantPast
-
-        return max(reconciliationStartTime, maxReconciliationTime, installCutoff)
+        return SyncTimeCalculator.calculateStartDate(
+            config: .reconciliation,
+            installTimestamp: installTimestamp
+        )
     }
 
     /// Finds message IDs that don't exist in local database using efficient batch query

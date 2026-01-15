@@ -210,19 +210,11 @@ final class IncrementalSyncOrchestrator {
 
         progressHandler(0.1, "Recovering missed messages...")
 
-        // Collect all message IDs
-        var pageToken: String? = nil
-        var allMessageIds: [String] = []
-
-        repeat {
-            try Task.checkCancellation()
-            let (messageIds, nextPageToken) = try await messageFetcher.listMessages(
-                query: query,
-                pageToken: pageToken
-            )
-            allMessageIds.append(contentsOf: messageIds)
-            pageToken = nextPageToken
-        } while pageToken != nil
+        // Collect all message IDs using shared paginator
+        let allMessageIds = try await MessageListPaginator.fetchAllMessageIds(
+            query: query,
+            using: messageFetcher
+        )
 
         // Fetch messages
         let result = try await BatchProcessor.processMessages(
@@ -269,21 +261,7 @@ final class IncrementalSyncOrchestrator {
     }
 
     private func calculateRecoveryStartTime() -> TimeInterval {
-        let defaults = UserDefaults.standard
-        let lastSuccessfulSync = defaults.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
-
-        if lastSuccessfulSync > 0 {
-            // Last sync minus 10-minute buffer
-            return lastSuccessfulSync - 600
-        }
-
-        let installTimestamp = defaults.double(forKey: "installTimestamp")
-        if installTimestamp > 0 {
-            return installTimestamp - 300
-        }
-
-        // Ultimate fallback: 7 days ago
-        return Date().timeIntervalSince1970 - (7 * 24 * 60 * 60)
+        return SyncTimeCalculator.calculateStartTime(config: .historyRecovery)
     }
 
     /// Checks if forced label reconciliation is needed based on time since last reconciliation

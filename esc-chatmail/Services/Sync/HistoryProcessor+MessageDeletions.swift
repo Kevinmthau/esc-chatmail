@@ -8,27 +8,30 @@ extension HistoryProcessor {
     ) async {
         guard let messagesDeleted = messagesDeleted, !messagesDeleted.isEmpty else { return }
 
-        let messageIds = messagesDeleted.map { $0.message.id }
+        let messageIds = Set(messagesDeleted.map { $0.message.id })
 
         let modifiedObjectIDs: [NSManagedObjectID] = await context.perform {
-            var objectIDs: [NSManagedObjectID] = []
-            for messageId in messageIds {
-                let request = Message.fetchRequest()
-                request.predicate = NSPredicate(format: "id == %@", messageId)
-                request.fetchLimit = 1
+            // Batch fetch all messages in a single query (avoids N+1 queries)
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id IN %@", messageIds)
+            request.fetchBatchSize = 100
+            request.relationshipKeyPathsForPrefetching = ["conversation"]
 
-                do {
-                    if let message = try context.fetch(request).first {
-                        // Track conversation BEFORE deletion for rollup updates
-                        if let conversationID = message.conversation?.objectID {
-                            objectIDs.append(conversationID)
-                        }
-                        context.delete(message)
+            var objectIDs: [NSManagedObjectID] = []
+
+            do {
+                let messages = try context.fetch(request)
+                for message in messages {
+                    // Track conversation BEFORE deletion for rollup updates
+                    if let conversationID = message.conversation?.objectID {
+                        objectIDs.append(conversationID)
                     }
-                } catch {
-                    Log.error("Failed to fetch message for deletion \(messageId)", category: .sync, error: error)
+                    context.delete(message)
                 }
+            } catch {
+                Log.error("Failed to batch fetch messages for deletion", category: .sync, error: error)
             }
+
             return objectIDs
         }
 
