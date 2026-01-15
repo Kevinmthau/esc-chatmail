@@ -111,12 +111,28 @@ MiniEmailWebView (50% scaled) or HTMLMessageView (full)
 
 LRU caches use **timestamp-based eviction** (not array-based) for O(1) access time. The `lastAccessedAt` timestamp in each entry determines eviction order. Eviction scans for oldest timestamp only when cache is full.
 
-- **ProcessedTextCache** - Plain text extractions (500 items, 5MB limit)
+- **ProcessedTextCache** - Plain text extractions (500 items, 5MB limit), tracked prefetch task with cancellation
 - **AttachmentCacheActor** - Thumbnails (500/50MB) and full images (20/100MB)
 - **ConversationCache** - Preloaded conversations (100 items, 5min TTL)
-- **EnhancedImageCache** - Two-tier cache (memory + disk) for remote images
-- **DiskImageCache** - Persistent disk cache (7-day TTL, 100MB limit, periodic size enforcement)
+- **EnhancedImageCache** - Two-tier cache (memory + disk) for remote images, memory warning observer with stored token
+- **DiskImageCache** - Persistent disk cache (7-day TTL, 100MB limit, hourly periodic cleanup)
 - **PersonCache** - Email → display name mapping (5min TTL per entry, periodic cleanup every 5 minutes)
+- **ImageRequestManager** - Failed URL tracking (500 max entries with 20% pruning)
+
+**Cache stability patterns:**
+- **Bound all collections** - Never let Sets/Dictionaries grow unbounded. Add max size with pruning:
+```swift
+private let maxFailedURLs = 500
+if failedURLs.count >= maxFailedURLs {
+    let removeCount = maxFailedURLs / 5  // Remove 20%
+    for _ in 0..<removeCount {
+        failedURLs.remove(failedURLs.first!)
+    }
+}
+```
+- **Periodic cleanup** - Don't rely solely on save-triggered cleanup. Add hourly background cleanup tasks.
+- **NSCache totalCostLimit** - Always set both `countLimit` AND `totalCostLimit` for proper memory pressure response.
+- **Track prefetch tasks** - Cancel previous prefetch when new one starts to prevent accumulation during rapid scroll.
 
 ### Core Data Entities
 
@@ -142,7 +158,37 @@ Log.error("message", category: .api, error: error)
 - **Heavy work off MainActor** - Image processing, PDF operations, file I/O, SQLite operations must use `Task.detached { }.value`
 - **Sendable conformance** - Pure service classes with only `let` properties use `@unchecked Sendable`
 - **Actor isolation** for thread-safe mutable state (TokenManager, PendingActionsManager, caches)
+- **Swift 6 actor init pattern** - Cannot assign to actor-isolated properties in `init`. Use `Task { await self.setupMethod() }` where the setup method assigns the property:
+```swift
+actor MyCache {
+    private var cleanupTask: Task<Void, Never>?
+
+    private init() {
+        Task { await self.startPeriodicCleanup() }  // Defer to actor context
+    }
+
+    private func startPeriodicCleanup() {
+        cleanupTask = Task { ... }  // Now allowed - we're in actor context
+    }
+}
+```
 - **NotificationCenter in actors** - Store observer token, remove in `deinit`. Use `Task { @MainActor [weak self] in }` to register.
+- **Task deduplication for callbacks** - When network or system callbacks spawn tasks, track pending tasks to prevent accumulation during rapid events (e.g., network flaps):
+```swift
+private var pendingProcessTask: Task<Void, Never>?
+
+networkMonitor.onConnectivityChange = { [weak self] isConnected in
+    Task { await self?.scheduleProcessing() }
+}
+
+private func scheduleProcessing() {
+    guard pendingProcessTask == nil, !isProcessing else { return }
+    pendingProcessTask = Task { [weak self] in
+        await self?.processAllPendingActions()
+        await self?.clearPendingTask()
+    }
+}
+```
 - **Core Data threading** - Use `viewContext.perform { }` or `coreDataStack.newBackgroundContext()` - never synchronous fetches on MainActor
 - **FetchedResults not thread-safe** - SwiftUI's `@FetchRequest` results are MainActor-bound. Collect needed data (IDs, values) on MainActor before passing to `Task.detached`
 - **Async batch operations** - `saveContextWithRetry` is async; perform Core Data work in `context.perform { }`, save/sleep outside
@@ -244,6 +290,28 @@ This is used in `InitialSyncOrchestrator`, `IncrementalSyncOrchestrator`, `Conve
 - Clear via `removeAbandonedSyncMessage()`, `clearAllAbandonedSyncMessages()`
 
 ### Core Data Performance
+
+**Always set fetchBatchSize** - All fetch requests that may return large result sets MUST set `fetchBatchSize` to prevent loading all objects into memory at once:
+```swift
+let request = Conversation.fetchRequest()
+request.fetchBatchSize = 50  // Required for large result sets
+```
+
+**Batch fetch instead of N+1 loops** - Never fetch individual objects in a loop. Use `IN` predicate:
+```swift
+// Avoid (N+1 queries):
+for messageId in messageIds {
+    let request = Message.fetchRequest()
+    request.predicate = NSPredicate(format: "id == %@", messageId)
+    if let message = try context.fetch(request).first { ... }
+}
+
+// Prefer (single query):
+let request = Message.fetchRequest()
+request.predicate = NSPredicate(format: "id IN %@", messageIds)
+request.fetchBatchSize = 100
+let messages = try context.fetch(request)
+```
 
 **Prefetching relationships** - When accessing `Conversation.participantsArray` in loops, prefetch relationships to avoid N+1 queries:
 ```swift

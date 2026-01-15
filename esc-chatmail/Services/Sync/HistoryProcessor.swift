@@ -86,29 +86,27 @@ actor HistoryProcessor {
 
     /// Clear localModifiedAt for messages whose pending actions have been processed
     func clearLocalModifications(for messageIds: [String]) async {
+        guard !messageIds.isEmpty else { return }
+
         let context = coreDataStack.newBackgroundContext()
         await context.perform {
-            var successCount = 0
-            for messageId in messageIds {
-                let request = Message.fetchRequest()
-                request.predicate = NSPredicate(format: "id == %@", messageId)
-                do {
-                    if let message = try context.fetch(request).first {
-                        message.setValue(nil, forKey: "localModifiedAt")
-                        successCount += 1
-                    }
-                } catch {
-                    Log.error("Failed to fetch message \(messageId) for clearing local modifications", category: .sync, error: error)
-                }
-            }
+            // Batch fetch all messages at once to avoid N+1 queries
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id IN %@", messageIds)
+            request.fetchBatchSize = 100
 
             do {
+                let messages = try context.fetch(request)
+                for message in messages {
+                    message.setValue(nil, forKey: "localModifiedAt")
+                }
+
                 if context.hasChanges {
                     try context.save()
-                    Log.debug("Cleared local modifications for \(successCount) messages", category: .sync)
+                    Log.debug("Cleared local modifications for \(messages.count) messages", category: .sync)
                 }
             } catch {
-                Log.error("Failed to save after clearing local modifications", category: .sync, error: error)
+                Log.error("Failed to clear local modifications for \(messageIds.count) messages", category: .sync, error: error)
             }
         }
     }

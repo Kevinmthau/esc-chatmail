@@ -16,19 +16,46 @@ actor DiskImageCache {
     private var lastCleanupTime: Date = .distantPast
     private let cleanupInterval: TimeInterval = 300 // 5 minutes between cleanups
 
+    /// Periodic cleanup task to ensure cleanup runs even when no new images are saved
+    private var periodicCleanupTask: Task<Void, Never>?
+
     private init() {
         let cachesPath = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         self.cacheDirectory = cachesPath.appendingPathComponent("ImageCache")
         Self.createDirectoryIfNeeded(at: cacheDirectory)
 
-        // Clean old entries on init (in background)
-        Task.detached(priority: .utility) { [self] in
-            await self.cleanExpiredEntries()
-            // Update estimated size after cleanup
-            let size = await self.totalSize()
-            await self.updateEstimatedSize(size)
+        // Start periodic cleanup in a separate task to comply with Swift 6 actor init rules
+        Task { await self.startPeriodicCleanup() }
+    }
+
+    /// Starts the periodic cleanup task - must be called from actor context
+    private func startPeriodicCleanup() {
+        periodicCleanupTask = Task { [weak self] in
+            // Initial cleanup
+            await self?.cleanExpiredEntries()
+            if let size = await self?.totalSize() {
+                await self?.updateEstimatedSize(size)
+            }
+
+            // Periodic cleanup every hour
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 60 * 60 * 1_000_000_000) // 1 hour
+                    await self?.cleanExpiredEntries()
+                    if let size = await self?.totalSize() {
+                        await self?.updateEstimatedSize(size)
+                    }
+                } catch {
+                    // Task was cancelled
+                    break
+                }
+            }
         }
+    }
+
+    deinit {
+        periodicCleanupTask?.cancel()
     }
 
     private func updateEstimatedSize(_ size: Int64) {

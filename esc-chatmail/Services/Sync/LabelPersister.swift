@@ -56,6 +56,7 @@ extension MessagePersister {
         await context.perform {
             // Fetch all existing labels into a dictionary for efficient lookup
             let request = Label.fetchRequest()
+            request.fetchBatchSize = 100
             let existingLabels = (try? context.fetch(request)) ?? []
             var labelDict = Dictionary(uniqueKeysWithValues: existingLabels.map { ($0.id, $0) })
 

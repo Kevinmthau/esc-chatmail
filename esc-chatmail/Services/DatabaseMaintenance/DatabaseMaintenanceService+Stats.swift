@@ -11,6 +11,7 @@ extension DatabaseMaintenanceService {
         await context.perform {
             // Update conversation message counts
             let conversationRequest = Conversation.fetchRequest()
+            conversationRequest.fetchBatchSize = 50
 
             let conversations: [Conversation]
             do {

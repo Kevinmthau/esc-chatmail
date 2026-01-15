@@ -33,6 +33,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
 
     private var isProcessing = false
     private var isInitialized = false
+    private var pendingProcessTask: Task<Void, Never>?
 
     // MARK: - Initialization
 
@@ -62,10 +63,26 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         networkMonitor.onConnectivityChange = { [weak self] isConnected in
             guard isConnected else { return }
             Task { [weak self] in
-                await self?.processAllPendingActions()
+                await self?.scheduleProcessing()
             }
         }
         networkMonitor.start()
+    }
+
+    /// Schedules processing with deduplication to prevent multiple concurrent processing tasks
+    /// during network flaps (rapid connect/disconnect cycles)
+    private func scheduleProcessing() {
+        // If already processing or a task is pending, skip
+        guard pendingProcessTask == nil, !isProcessing else { return }
+
+        pendingProcessTask = Task { [weak self] in
+            await self?.processAllPendingActions()
+            await self?.clearPendingTask()
+        }
+    }
+
+    private func clearPendingTask() {
+        pendingProcessTask = nil
     }
 
     public func stopMonitoring() {

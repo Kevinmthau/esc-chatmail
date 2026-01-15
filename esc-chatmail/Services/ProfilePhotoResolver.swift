@@ -18,6 +18,8 @@ actor ProfilePhotoResolver {
 
     private init() {
         cache.countLimit = CacheConfig.photoCacheSize
+        // Set memory limit (assume ~50KB average per photo, allows ~25MB)
+        cache.totalCostLimit = 25 * 1024 * 1024
 
         // Add memory warning observer to clear cache under memory pressure
         Task { @MainActor [weak self] in

@@ -26,11 +26,11 @@ actor PersonCache {
     }
 
     private init() {
-        // Start periodic cleanup in a Task to avoid calling actor-isolated method from nonisolated init
+        // Start periodic cleanup in a separate task to comply with Swift 6 actor init rules
         Task { await self.startPeriodicCleanup() }
     }
 
-    /// Starts a periodic cleanup task that removes expired entries every 5 minutes
+    /// Starts the periodic cleanup task - must be called from actor context
     private func startPeriodicCleanup() {
         cleanupTask = Task { [weak self] in
             while !Task.isCancelled {

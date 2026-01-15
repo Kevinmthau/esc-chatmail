@@ -104,6 +104,7 @@ struct ConversationMerger: Sendable {
             let request = Conversation.fetchRequest()
             request.predicate = NSPredicate(format: "archivedAt == nil")
             request.returnsObjectsAsFaults = false
+            request.fetchBatchSize = 50
 
             let conversations: [Conversation]
             do {

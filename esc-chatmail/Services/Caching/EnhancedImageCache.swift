@@ -9,13 +9,16 @@ actor EnhancedImageCache {
     private let diskCache = DiskImageCache.shared
     private let requestManager = ImageRequestManager()
 
+    /// Store observer token for proper cleanup
+    private var memoryWarningObserver: (any NSObjectProtocol)?
+
     private init() {
         memoryCache.countLimit = 100
         memoryCache.totalCostLimit = 50 * 1024 * 1024 // 50 MB
 
         // Add memory warning observer to clear cache under memory pressure
-        Task { @MainActor in
-            NotificationCenter.default.addObserver(
+        Task { @MainActor [weak self] in
+            let observer = NotificationCenter.default.addObserver(
                 forName: UIApplication.didReceiveMemoryWarningNotification,
                 object: nil,
                 queue: .main
@@ -24,6 +27,17 @@ actor EnhancedImageCache {
                     await self?.clearMemory()
                 }
             }
+            await self?.setMemoryWarningObserver(observer)
+        }
+    }
+
+    private func setMemoryWarningObserver(_ observer: any NSObjectProtocol) {
+        memoryWarningObserver = observer
+    }
+
+    deinit {
+        if let observer = memoryWarningObserver {
+            NotificationCenter.default.removeObserver(observer)
         }
     }
 

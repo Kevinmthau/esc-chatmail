@@ -14,6 +14,12 @@ actor ProcessedTextCache {
 
     private let cache: LRUCacheActor<String, CachedText>
 
+    /// Track active prefetch task to prevent unbounded task accumulation
+    private var activePrefetchTask: Task<Void, Never>?
+
+    /// Maximum number of messages to process in a single prefetch batch
+    private let maxPrefetchBatchSize = 20
+
     init() {
         self.cache = LRUCacheActor(config: CacheConfiguration(
             maxItems: CacheConfig.textCacheSize,
@@ -52,17 +58,30 @@ actor ProcessedTextCache {
         }
         guard !uncachedIds.isEmpty else { return }
 
-        // Fire-and-forget: process in background without blocking caller
-        // This enables true prefetching - caller continues immediately while
-        // cache entries are populated asynchronously
-        Task.detached(priority: .utility) { [weak self, uncachedIds] in
+        // Limit batch size to prevent processing too many at once
+        let idsToProcess = Array(uncachedIds.prefix(maxPrefetchBatchSize))
+
+        // Cancel any existing prefetch task to prevent accumulation during rapid scroll
+        activePrefetchTask?.cancel()
+
+        // Track the new prefetch task
+        activePrefetchTask = Task.detached(priority: .utility) { [weak self, idsToProcess] in
             let handler = HTMLContentHandler.shared
 
-            for messageId in uncachedIds {
+            for messageId in idsToProcess {
+                // Check for cancellation between messages
+                guard !Task.isCancelled else { break }
+
                 let result = ProcessedTextCache.processMessage(messageId: messageId, handler: handler)
                 await self?.set(messageId: messageId, plainText: result.plainText, hasRichContent: result.hasRichContent)
             }
         }
+    }
+
+    /// Cancel any active prefetch task (call when view disappears)
+    func cancelPrefetch() {
+        activePrefetchTask?.cancel()
+        activePrefetchTask = nil
     }
 
     /// Process a single message - can be called from background thread

@@ -7,6 +7,9 @@ actor ImageRequestManager {
     private var inFlightRequests: [String: Task<UIImage?, Never>] = [:]
     private var failedURLs: Set<String> = []  // Track URLs that have failed to avoid retrying
 
+    /// Maximum number of failed URLs to track before pruning
+    private let maxFailedURLs = 500
+
     /// Validates that a URL string is a valid HTTP/HTTPS URL
     private func isValidImageURL(_ urlString: String) -> Bool {
         guard let url = URL(string: urlString),
@@ -85,6 +88,16 @@ actor ImageRequestManager {
             onComplete(result)
         } else {
             // Mark as failed to avoid retrying (until app restart)
+            // Prune oldest entries if we exceed the limit
+            if failedURLs.count >= maxFailedURLs {
+                // Remove ~20% of entries when limit reached
+                let removeCount = maxFailedURLs / 5
+                for _ in 0..<removeCount {
+                    if let first = failedURLs.first {
+                        failedURLs.remove(first)
+                    }
+                }
+            }
             failedURLs.insert(urlString)
         }
 

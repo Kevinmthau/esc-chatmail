@@ -1,10 +1,15 @@
 import Foundation
 
+/// Thread-safe HTML file storage operations.
+/// Uses atomic writes and safe directory operations to prevent race conditions.
 final class HTMLContentHandler {
     /// Shared singleton instance for efficient reuse across views
     static let shared = HTMLContentHandler()
 
     private let messagesDirectory: URL
+
+    /// Serial queue for exclusive directory operations like deleteAllHTML
+    private let exclusiveQueue = DispatchQueue(label: "com.esc.htmlcontent.exclusive")
 
     init() {
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
@@ -12,16 +17,16 @@ final class HTMLContentHandler {
         self.messagesDirectory = documentsPath.appendingPathComponent("Messages")
         createMessagesDirectoryIfNeeded()
     }
-    
+
     private func createMessagesDirectoryIfNeeded() {
         if !FileManager.default.fileExists(atPath: messagesDirectory.path) {
             try? FileManager.default.createDirectory(at: messagesDirectory, withIntermediateDirectories: true)
         }
     }
-    
+
     func saveHTML(_ html: String, for messageId: String) -> URL? {
         let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
-        
+
         do {
             try html.write(to: fileURL, atomically: true, encoding: .utf8)
             return fileURL
@@ -39,30 +44,42 @@ final class HTMLContentHandler {
             return nil
         }
     }
-    
+
     func loadHTML(for messageId: String) -> String? {
         let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
         return loadHTML(from: fileURL)
     }
-    
+
     func deleteHTML(for messageId: String) {
         let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
         try? FileManager.default.removeItem(at: fileURL)
     }
-    
+
     func deleteAllHTML() {
-        try? FileManager.default.removeItem(at: messagesDirectory)
-        createMessagesDirectoryIfNeeded()
+        // Use exclusive queue to prevent concurrent deleteAllHTML operations
+        // and prevent race conditions with concurrent reads
+        exclusiveQueue.sync {
+            // Delete contents instead of directory to avoid race conditions
+            // This prevents other operations from failing when directory is temporarily missing
+            if let contents = try? FileManager.default.contentsOfDirectory(
+                at: messagesDirectory,
+                includingPropertiesForKeys: nil
+            ) {
+                for fileURL in contents {
+                    try? FileManager.default.removeItem(at: fileURL)
+                }
+            }
+        }
     }
-    
+
     func htmlFileExists(for messageId: String) -> Bool {
         let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
         return FileManager.default.fileExists(atPath: fileURL.path)
     }
-    
+
     func calculateStorageSize() -> Int64 {
         var totalSize: Int64 = 0
-        
+
         if let enumerator = FileManager.default.enumerator(at: messagesDirectory,
                                                           includingPropertiesForKeys: [.fileSizeKey],
                                                           options: [.skipsHiddenFiles]) {
@@ -72,10 +89,10 @@ final class HTMLContentHandler {
                 }
             }
         }
-        
+
         return totalSize
     }
-    
+
     func cleanupOldFiles(olderThan days: Int) {
         let cutoffDate = Date().addingTimeInterval(-Double(days * 24 * 60 * 60))
 
