@@ -74,6 +74,19 @@ struct AttachmentGridItem: View {
                 }
             }
         }
+        .onChange(of: attachment.localURL) { oldValue, newValue in
+            // Reload when localURL becomes available after download (preferred over previewURL)
+            if newValue != nil && thumbnailLoader.image == nil {
+                thumbnailLoader.reset()
+                thumbnailLoader.loadDownsampled(
+                    attachmentId: attachment.id,
+                    localPath: newValue,
+                    previewPath: attachment.previewURL,
+                    targetSize: CGSize(width: 200, height: 200),
+                    isImage: attachment.isImage
+                )
+            }
+        }
         .onDisappear {
             thumbnailLoader.cancel()
         }

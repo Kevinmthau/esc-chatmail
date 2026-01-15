@@ -478,6 +478,34 @@ context.saveOrLog(operation: "update message read status")
 
 `GmailAPIClient.performRequestWithRetry()` respects the `Retry-After` HTTP header on 429 responses. Falls back to exponential backoff if header not present.
 
+### Observing Core Data Changes for Async Operations
+
+When a view displays data that will be populated asynchronously (e.g., attachment downloads), use `onChange` to reload when the property becomes available:
+
+```swift
+// Problem: onAppear runs once with nil values, download completes later but view doesn't update
+.onAppear {
+    thumbnailLoader.load(attachmentId: attachment.id, previewPath: attachment.previewURL)  // previewURL is nil
+    if attachment.state == .queued {
+        Task { await downloader.downloadAttachmentIfNeeded(for: attachment) }  // Sets previewURL later
+    }
+}
+
+// Solution: Add onChange to reload when the property becomes available
+.onChange(of: attachment.previewURL) { oldValue, newValue in
+    if newValue != nil && thumbnailLoader.image == nil {
+        thumbnailLoader.reset()
+        thumbnailLoader.load(attachmentId: attachment.id, previewPath: newValue)
+    }
+}
+```
+
+This pattern is used in:
+- `ImageAttachmentBubble` - Observes `previewURL` to show inline image after download
+- `AttachmentGridItem` - Observes `localURL` to show grid thumbnail after download
+
+**Why it works:** Core Data entities (NSManagedObject) are observable. When `AttachmentDownloader` saves the background context, changes merge to the view context and trigger `onChange`.
+
 ### SwiftUI Singletons
 
 Use `@EnvironmentObject` for shared singletons injected at app root, not `@StateObject`:

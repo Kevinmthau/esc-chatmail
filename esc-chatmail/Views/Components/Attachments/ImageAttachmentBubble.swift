@@ -70,6 +70,13 @@ struct ImageAttachmentBubble: View {
                 }
             }
         }
+        .onChange(of: attachment.previewURL) { oldValue, newValue in
+            // Reload thumbnail when previewURL becomes available after download
+            if newValue != nil && thumbnailLoader.image == nil {
+                thumbnailLoader.reset()
+                thumbnailLoader.load(attachmentId: attachment.id, previewPath: newValue)
+            }
+        }
         .onDisappear {
             thumbnailLoader.cancel()
         }
