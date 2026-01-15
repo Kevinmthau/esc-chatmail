@@ -172,6 +172,60 @@ final class MessageActions: ObservableObject {
         }
     }
 
+    /// Archives multiple conversations in a single batch operation for instant UI response.
+    /// - Parameter conversations: The conversations to archive
+    /// - Note: Performs a single Core Data save and queues a single pending action.
+    func archiveConversations(conversations: [Conversation]) async {
+        guard !conversations.isEmpty else { return }
+
+        Log.info("Batch archiving \(conversations.count) conversations", category: .message)
+
+        let context = coreDataStack.viewContext
+
+        // Fetch INBOX label once
+        let labelRequest = Label.fetchRequest()
+        labelRequest.predicate = LabelPredicates.id("INBOX")
+        guard let inboxLabel = try? context.fetch(labelRequest).first else {
+            Log.warning("INBOX label not found, cannot archive", category: .message)
+            return
+        }
+
+        // Collect all message IDs and update local state in memory
+        var allMessageIds: [String] = []
+        let modificationDate = Date()
+
+        for conversation in conversations {
+            guard let messages = conversation.messages else { continue }
+
+            for message in messages {
+                message.removeFromLabels(inboxLabel)
+                message.localModifiedAt = modificationDate
+                if !message.id.isEmpty {
+                    allMessageIds.append(message.id)
+                }
+            }
+
+            // Mark conversation as archived and update rollup fields directly
+            conversation.archivedAt = modificationDate
+            conversation.hasInbox = false
+            conversation.inboxUnreadCount = 0
+            conversation.latestInboxDate = nil
+        }
+
+        // Single Core Data save for all changes
+        coreDataStack.saveIfNeeded(context: context)
+        Log.info("Batch archived \(conversations.count) conversations (\(allMessageIds.count) messages)", category: .message)
+
+        // Queue single pending action with all message IDs
+        if !allMessageIds.isEmpty {
+            await pendingActionsManager.queueConversationAction(
+                type: .archiveConversation,
+                conversationId: conversations.first!.id,
+                messageIds: allMessageIds
+            )
+        }
+    }
+
     // MARK: - Star/Unstar
 
     func star(message: Message) async {

@@ -322,6 +322,28 @@ request.relationshipKeyPathsForPrefetching = ["participants", "participants.pers
 
 **Composite indexes** - `CoreDataIndexes.swift` creates SQLite indexes for common query patterns. The conversation list uses `idx_conversation_visible_sorted` for `hidden == NO AND archivedAt == nil ORDER BY lastMessageDate DESC`.
 
+### Batch Operations for Instant UI
+
+When performing bulk actions (e.g., "select all and archive"), use batch methods for instant UI response:
+
+```swift
+// Avoid: Sequential loop (slow - N saves, N pending actions)
+for conversation in selectedConversations {
+    await messageActions.archiveConversation(conversation: conversation)
+}
+
+// Prefer: Single batch operation (instant - 1 save, 1 pending action)
+await messageActions.archiveConversations(conversations: selectedConversations)
+```
+
+**Batch archive pattern** (`MessageActions.archiveConversations`):
+1. Fetch shared resources once (e.g., INBOX label)
+2. Loop through all items in memory, updating state
+3. Single `saveIfNeeded()` for all Core Data changes
+4. Single pending action with combined payload (`messageIds: [all IDs]`)
+
+The existing `archiveConversation` action type handles batch message IDs via `apiClient.batchModify()`.
+
 ### Error Handling
 
 Prefer explicit error logging over silent `try?`:

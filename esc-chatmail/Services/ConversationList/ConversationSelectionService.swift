@@ -68,30 +68,27 @@ final class ConversationSelectionService: ObservableObject {
 
     // MARK: - Batch Operations
 
-    /// Archives all selected conversations
+    /// Archives all selected conversations in a single batch operation
     func archiveSelectedConversations() {
         let context = coreDataStack.viewContext
         let conversationsToArchive = selectedConversationIDs.compactMap { objectID in
             try? context.existingObject(with: objectID) as? Conversation
         }
 
-        let count = conversationsToArchive.count
-        Log.debug("Starting batch archive of \(count) conversations from \(selectedConversationIDs.count) selected IDs", category: .message)
-        for (index, conv) in conversationsToArchive.enumerated() {
-            let messageCount = conv.messages?.count ?? 0
-            Log.debug("[\(index + 1)/\(count)] '\(conv.displayName ?? "unknown")' (id: \(conv.id), messages: \(messageCount))", category: .message)
+        guard !conversationsToArchive.isEmpty else {
+            Log.debug("No conversations to archive", category: .message)
+            return
         }
 
+        Log.info("Batch archive: \(conversationsToArchive.count) conversations", category: .message)
+
+        // Clear selection immediately for instant UI feedback
         selectedConversationIDs.removeAll()
         isSelecting = false
 
+        // Single batch operation instead of sequential loop
         Task {
-            for (index, conversation) in conversationsToArchive.enumerated() {
-                Log.debug("[\(index + 1)/\(count)] Processing '\(conversation.displayName ?? "unknown")'...", category: .message)
-                await messageActions.archiveConversation(conversation: conversation)
-                Log.debug("[\(index + 1)/\(count)] Archived '\(conversation.displayName ?? "unknown")'", category: .message)
-            }
-            Log.info("Batch archive complete - \(count) conversations archived", category: .message)
+            await messageActions.archiveConversations(conversations: conversationsToArchive)
         }
     }
 }
