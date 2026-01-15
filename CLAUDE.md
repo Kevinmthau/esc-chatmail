@@ -517,6 +517,21 @@ Use `@EnvironmentObject` for shared singletons injected at app root, not `@State
 @EnvironmentObject private var authSession: AuthSession
 ```
 
+### Disabling List Reorder Animations
+
+When a List is backed by `@FetchRequest` with sort descriptors, SwiftUI automatically animates rows when their sort order changes (e.g., conversation moves to top when `lastMessageDate` updates). To prevent this visual "reshuffling":
+
+```swift
+List {
+    ForEach(items, id: \.objectID) { item in
+        RowView(item: item)
+    }
+}
+.animation(nil, value: items.map { $0.objectID })
+```
+
+This tells SwiftUI to skip animation when the array of IDs changes (reorders or insertions). Used in `ConversationListView` to make new/updated conversations appear at the top instantly.
+
 ### Dependency Injection
 
 Use `Dependencies` container for testability. Actor instances are stored as private properties and exposed via nonisolated getters:

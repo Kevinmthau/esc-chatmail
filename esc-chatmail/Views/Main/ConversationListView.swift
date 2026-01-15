@@ -78,6 +78,7 @@ struct ConversationListView: View {
             }
         }
         .listStyle(.plain)
+        .animation(nil, value: filteredConversations.map { $0.objectID })
         .scrollDismissesKeyboard(.interactively)
         .navigationTitle(viewModel.isSelecting ? "\(viewModel.selectedConversationIDs.count) Selected" : "Chats")
         .navigationDestination(item: $selectedConversation) { conversation in
