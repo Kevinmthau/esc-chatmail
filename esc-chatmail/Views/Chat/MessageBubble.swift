@@ -97,12 +97,13 @@ struct MessageBubble: View {
 
     @ViewBuilder
     private var attachmentsView: some View {
-        if !message.typedAttachments.isEmpty {
+        let displayable = message.displayableAttachments
+        if !displayable.isEmpty {
             if style.showAttachmentGrid {
-                AttachmentGridView(attachments: message.attachmentsArray)
+                AttachmentGridView(attachments: displayable)
                     .frame(maxWidth: UIScreen.main.bounds.width * 0.65)
             } else {
-                AttachmentIndicator(count: message.typedAttachments.count)
+                AttachmentIndicator(count: displayable.count)
             }
         }
     }

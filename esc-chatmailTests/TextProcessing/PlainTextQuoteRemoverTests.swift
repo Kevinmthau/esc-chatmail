@@ -482,4 +482,56 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         let result = PlainTextQuoteRemover.removeQuotes(from: text)
         XCTAssertEqual(result, "Approved.")
     }
+
+    // MARK: - Apple Mail Style Quotes
+
+    func testRemoveQuotes_appleMailStyle_withDate_cleansCorrectly() {
+        let text = """
+        Sounds good, I'll review the documents.
+
+        From: Ally Varady <ally@cv-partners.com>
+        Date: Thursday, January 15, 2026 at 9:23 AM
+        To: Brynn Putnam <brynn.putnam@gmail.com>
+        Subject: 1040 5th | AWO's for Approval
+
+        Hi Brynn,
+
+        Please find attached the documents for your review.
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, "Sounds good, I'll review the documents.")
+    }
+
+    func testRemoveQuotes_appleMailStyle_withCc_cleansCorrectly() {
+        let text = """
+        Thanks for looping me in!
+
+        From: Ally Varady <ally@cv-partners.com>
+        Date: Thursday, January 15, 2026 at 9:23 AM
+        To: Brynn Putnam <brynn.putnam@gmail.com>
+        Cc: Victoria Stadlin <victoria@cv-partners.com>
+        Subject: 1040 5th | AWO's for Approval
+
+        Hi team,
+
+        Please review the attached items.
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, "Thanks for looping me in!")
+    }
+
+    func testRemoveQuotes_appleMailStyle_shortDate_cleansCorrectly() {
+        let text = """
+        Got it.
+
+        From: John Doe <john@example.com>
+        Date: Jan 15, 2026
+        To: Jane Smith <jane@example.com>
+        Subject: Quick question
+
+        Original message here.
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, "Got it.")
+    }
 }

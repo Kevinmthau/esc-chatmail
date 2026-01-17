@@ -81,6 +81,12 @@ Messages render differently based on `message.isNewsletter` (detected via Gmail 
 - **Newsletter emails** → `MiniEmailWebView` (scaled HTML preview)
 - **Personal emails** → Chat bubbles with extracted plain text
 
+**Attachment filtering** - `MessageBubble` uses `message.displayableAttachments` to filter out likely signature images:
+- `Attachment.isLikelySignatureImage` returns true for images that are:
+  - Smaller than 10KB (`AttachmentConfig.signatureImageMaxBytes`), OR
+  - Both dimensions <= 100px (`AttachmentConfig.signatureImageMaxDimension`)
+- This prevents small logo images in email signatures from cluttering the chat view
+
 ### Text Processing Pipeline
 
 Plain text for chat bubbles goes through:
@@ -92,6 +98,13 @@ HTML/bodyText → extractPlainText() → unwrapEmailLineBreaks() → stripQuoted
 - Normalizes CRLF/CR to LF, special whitespace (NBSP, em space, etc.) to regular space
 - Joins lines unless: previous ends with `.!?` OR next starts with uppercase
 - Preserves intentional paragraph breaks (blank lines between sentences)
+
+**`PlainTextQuoteRemover`** strips quoted email content and signatures:
+- Detects header-based quotes from multiple email clients:
+  - Outlook style: `From: ... Sent: ... To: ... Subject: ...`
+  - Apple Mail style: `From: ... Date: ... To: ... Subject: ...` (with optional Cc:)
+- Detects "On X wrote:" patterns, forwarded message markers, consecutive `>` quote lines
+- Removes signatures: `--` delimiters, sign-offs (Thanks, Best regards, etc.), mobile signatures, legal disclaimers
 
 ### HTML Content Pipeline
 
@@ -564,6 +577,9 @@ Use centralized config structs from `Constants.swift` instead of magic numbers:
   - `recoveryFallbackWindow` - 7-day fallback for history recovery
 - **NetworkConfig** - Request timeouts, retry delays
 - **CoreDataConfig** - Fetch batch sizes, save retry limits
+- **AttachmentConfig** - Signature image detection thresholds:
+  - `signatureImageMaxBytes` (10KB) - Images smaller than this are likely signatures
+  - `signatureImageMaxDimension` (100px) - Images with both dimensions <= this are likely signatures
 
 **GoogleConfig validation** - Check configuration at runtime:
 ```swift

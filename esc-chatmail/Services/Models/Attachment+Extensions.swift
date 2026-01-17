@@ -47,4 +47,23 @@ extension Attachment {
     var mimeTypeValue: String {
         mimeType
     }
+
+    /// Whether this attachment is likely a signature/logo image (small dimensions or tiny file size)
+    var isLikelySignatureImage: Bool {
+        guard mimeType.hasPrefix("image/") else { return false }
+
+        // Small file size (< 10KB) - catches tracking pixels and small logos
+        if byteSize > 0 && byteSize < AttachmentConfig.signatureImageMaxBytes {
+            return true
+        }
+
+        // Small dimensions (both <= 100px) - catches logo images after download
+        if width > 0 && height > 0 &&
+           width <= AttachmentConfig.signatureImageMaxDimension &&
+           height <= AttachmentConfig.signatureImageMaxDimension {
+            return true
+        }
+
+        return false
+    }
 }

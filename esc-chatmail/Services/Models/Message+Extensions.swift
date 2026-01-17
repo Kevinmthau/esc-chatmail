@@ -43,6 +43,11 @@ extension Message {
         Array(typedAttachments)
     }
 
+    /// Attachments suitable for display (excludes likely signature images)
+    var displayableAttachments: [Attachment] {
+        attachmentsArray.filter { !$0.isLikelySignatureImage }
+    }
+
     /// Type-safe accessor for bodyText (alias for consistency)
     var bodyTextValue: String? {
         bodyText

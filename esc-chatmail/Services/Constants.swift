@@ -230,6 +230,15 @@ struct CacheConfig {
     static let maxFullImageCacheSize: Int = 100 * 1024 * 1024
 }
 
+// MARK: - Attachment Configuration
+struct AttachmentConfig {
+    /// Maximum byte size for signature images (10 KB)
+    static let signatureImageMaxBytes: Int64 = 10 * 1024
+
+    /// Maximum dimension for signature images (100 pixels)
+    static let signatureImageMaxDimension: Int16 = 100
+}
+
 struct APIEndpoints {
     static let baseURL = "https://gmail.googleapis.com/gmail/v1"
     
