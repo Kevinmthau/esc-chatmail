@@ -61,11 +61,10 @@ final class ConversationFilterService: ObservableObject {
 
         // Update cache
         filteredCache = FilteredConversationsCache(
-            sourceCount: conversations.count,
+            sourceObjectIDs: conversations.map(\.objectID),
             searchText: searchText,
             filter: currentFilter,
-            results: result,
-            firstObjectID: conversations.first?.objectID
+            results: result
         )
 
         return result
@@ -127,17 +126,15 @@ final class ConversationFilterService: ObservableObject {
 
 /// Caches filtered conversation results to avoid re-filtering on every render
 private struct FilteredConversationsCache {
-    let sourceCount: Int
+    let sourceObjectIDs: [NSManagedObjectID]
     let searchText: String
     let filter: ConversationFilter
     let results: [Conversation]
-    let firstObjectID: NSManagedObjectID?
 
     /// Checks if cache is still valid for the given parameters
     func isValid(for conversations: [Conversation], searchText: String, filter: ConversationFilter) -> Bool {
-        return self.sourceCount == conversations.count &&
+        return self.sourceObjectIDs == conversations.map(\.objectID) &&
                self.searchText == searchText &&
-               self.filter == filter &&
-               self.firstObjectID == conversations.first?.objectID
+               self.filter == filter
     }
 }

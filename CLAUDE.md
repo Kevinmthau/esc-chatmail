@@ -586,7 +586,7 @@ private func performInitialScroll(proxy: ScrollViewProxy) {
 @State private var cachedFilteredConversations: [Conversation] = []
 
 .onAppear { updateFiltered() }
-.onChange(of: conversations.count) { _, _ in updateFiltered() }
+.onChange(of: conversations.map(\.objectID)) { _, _ in updateFiltered() }
 .onChange(of: viewModel.searchText) { _, _ in updateFiltered() }
 .onChange(of: viewModel.currentFilter) { _, _ in updateFiltered() }
 
@@ -594,6 +594,8 @@ private func updateFiltered() {
     cachedFilteredConversations = viewModel.filteredConversations(from: Array(conversations))
 }
 ```
+
+**Important:** Use `conversations.map(\.objectID)` instead of `conversations.count` to detect reordering. When a `@FetchRequest` re-sorts (e.g., conversation moves to top after receiving a new message), the count stays the same but the order changes. Observing the ObjectID array detects both additions/removals AND reordering.
 
 **Use AttachmentThumbnailLoader for attachment views** - Instead of creating untracked tasks for thumbnail loading, use the reusable `@StateObject`:
 ```swift

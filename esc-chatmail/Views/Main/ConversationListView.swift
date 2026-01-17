@@ -95,7 +95,7 @@ struct ConversationListView: View {
         .onDisappear {
             viewModel.onDisappear()
         }
-        .onChange(of: conversations.count) { _, _ in
+        .onChange(of: conversations.map(\.objectID)) { _, _ in
             updateFilteredConversations()
         }
         .onChange(of: viewModel.searchText) { _, _ in

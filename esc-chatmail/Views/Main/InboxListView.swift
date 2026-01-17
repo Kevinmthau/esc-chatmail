@@ -64,7 +64,7 @@ struct InboxListView: View {
             .onAppear {
                 updateFilteredMessages()
             }
-            .onChange(of: messages.count) { _, _ in
+            .onChange(of: messages.map(\.objectID)) { _, _ in
                 updateFilteredMessages()
             }
             .onChange(of: searchText) { _, _ in
