@@ -11,6 +11,7 @@ struct ChatView: View {
     @Namespace private var bottomID
     @State private var resolvedDisplayName: String?
     @State private var isReadyToShow = false
+    @State private var initialScrollTask: Task<Void, Never>?
 
     init(conversation: Conversation) {
         self.conversation = conversation
@@ -69,16 +70,9 @@ struct ChatView: View {
                 viewModel.markConversationAsRead(messageObjectIDs: unreadMessageIDs)
                 viewModel.initializeReplyingTo(lastMessage: messages.last)
 
-                // If messages already loaded (Core Data cache), scroll and reveal after layout
+                // If messages already loaded (Core Data cache), trigger initial scroll
                 if !isReadyToShow && !messages.isEmpty {
-                    Task { @MainActor in
-                        // Wait for layout to complete before scrolling
-                        try? await Task.sleep(nanoseconds: UInt64(UIConfig.contentChangeScrollDelay * 1_000_000_000))
-                        if let lastMessage = messages.last {
-                            proxy.scrollTo(lastMessage.id, anchor: .bottom)
-                        }
-                        isReadyToShow = true
-                    }
+                    performInitialScroll(proxy: proxy)
                 }
 
                 // Limit prefetch to visible + buffer messages (not all)
@@ -103,14 +97,8 @@ struct ChatView: View {
             }
             .onChange(of: messages.count) { oldCount, newCount in
                 if !isReadyToShow && newCount > 0 {
-                    // Initial load: scroll to bottom after layout, then reveal
-                    Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: UInt64(UIConfig.contentChangeScrollDelay * 1_000_000_000))
-                        if let lastMessage = messages.last {
-                            proxy.scrollTo(lastMessage.id, anchor: .bottom)
-                        }
-                        isReadyToShow = true
-                    }
+                    // Initial load: trigger scroll with task tracking to prevent race conditions
+                    performInitialScroll(proxy: proxy)
                 } else if isReadyToShow && newCount > oldCount {
                     // New message arrived: animate the scroll
                     viewModel.updateReplyingToIfNewSubject(lastMessage: messages.last)
@@ -244,6 +232,22 @@ struct ChatView: View {
     }
 
     // MARK: - Scroll Helpers
+
+    /// Performs the initial scroll to bottom with task tracking to prevent race conditions
+    /// when both onAppear and onChange fire for cached data
+    private func performInitialScroll(proxy: ScrollViewProxy) {
+        // Cancel any existing initial scroll task to prevent race conditions
+        initialScrollTask?.cancel()
+        initialScrollTask = Task { @MainActor in
+            // Wait for layout to complete before scrolling
+            try? await Task.sleep(nanoseconds: UInt64(UIConfig.contentChangeScrollDelay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            if let lastMessage = messages.last {
+                proxy.scrollTo(lastMessage.id, anchor: .bottom)
+            }
+            isReadyToShow = true
+        }
+    }
 
     private func scrollToBottom(proxy: ScrollViewProxy, delay: TimeInterval) {
         Task { @MainActor in

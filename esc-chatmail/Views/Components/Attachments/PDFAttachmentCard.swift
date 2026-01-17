@@ -4,17 +4,13 @@ struct PDFAttachmentCard: View {
     let attachment: Attachment
     @ObservedObject var downloader: AttachmentDownloader
     let onTap: () -> Void
-    @State private var thumbnailImage: UIImage?
-    @State private var isLoadingImage = false
-    private let cache = AttachmentCacheActor.shared
+    @StateObject private var thumbnailLoader = AttachmentThumbnailLoader()
 
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 12) {
                 // Thumbnail
-                if let previewURL = attachment.previewURL,
-                   let previewData = AttachmentPaths.loadData(from: previewURL),
-                   let uiImage = UIImage(data: previewData) {
+                if let uiImage = thumbnailLoader.image {
                     Image(uiImage: uiImage)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
@@ -29,8 +25,14 @@ struct PDFAttachmentCard: View {
                         .fill(Color.gray.opacity(0.1))
                         .frame(width: 60, height: 80)
                         .overlay(
-                            Image(systemName: "doc.fill")
-                                .foregroundColor(.gray)
+                            Group {
+                                if thumbnailLoader.isLoading {
+                                    ProgressView()
+                                } else {
+                                    Image(systemName: "doc.fill")
+                                        .foregroundColor(.gray)
+                                }
+                            }
                         )
                 }
 
@@ -79,32 +81,21 @@ struct PDFAttachmentCard: View {
         }
         .buttonStyle(PlainButtonStyle())
         .onAppear {
-            loadThumbnail()
+            thumbnailLoader.load(attachmentId: attachment.id, previewPath: attachment.previewURL)
             if attachment.state == .queued {
                 Task {
                     await downloader.downloadAttachmentIfNeeded(for: attachment)
                 }
             }
         }
-    }
-
-    private func loadThumbnail() {
-        guard thumbnailImage == nil,
-              !isLoadingImage,
-              let attachmentId = attachment.id else { return }
-
-        isLoadingImage = true
-        Task {
-            let previewPath = attachment.previewURL
-            if let image = await cache.loadThumbnail(for: attachmentId, from: previewPath) {
-                await MainActor.run {
-                    self.thumbnailImage = image
-                    self.isLoadingImage = false
-                }
-            } else {
-                await MainActor.run {
-                    self.isLoadingImage = false
-                }
+        .onDisappear {
+            thumbnailLoader.cancel()
+        }
+        .onChange(of: attachment.previewURL) { oldValue, newValue in
+            // Reload when preview becomes available after download
+            if newValue != nil && thumbnailLoader.image == nil {
+                thumbnailLoader.reset()
+                thumbnailLoader.load(attachmentId: attachment.id, previewPath: newValue)
             }
         }
     }

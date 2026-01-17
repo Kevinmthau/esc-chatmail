@@ -221,7 +221,11 @@ final class ChatViewModel: ObservableObject {
             // Trigger sync to fetch the sent message from Gmail
             let syncEngine = self.syncEngine
             Task.detached {
-                try? await syncEngine.performIncrementalSync()
+                do {
+                    try await syncEngine.performIncrementalSync()
+                } catch {
+                    Log.error("Post-send sync failed", category: .sync, error: error)
+                }
             }
         } catch {
             if let optimisticMessage = await sendService.fetchMessage(byID: optimisticMessageID) {

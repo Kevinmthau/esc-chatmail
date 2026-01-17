@@ -103,9 +103,6 @@ struct ConversationRowView: View {
     }
 
     private func loadContactInfo() async {
-        // Small yield to avoid blocking UI interactions
-        await Task.yield()
-
         let myEmail = authSession.userEmail ?? ""
 
         // Use ParticipantLoader for all participant resolution

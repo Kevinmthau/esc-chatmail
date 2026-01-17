@@ -545,6 +545,79 @@ List {
 
 This tells SwiftUI to skip animation when the array of IDs changes (reorders or insertions). Used in `ConversationListView` to make new/updated conversations appear at the top instantly.
 
+### SwiftUI Task Management
+
+**Track tasks in scroll-heavy views** - `VirtualScrollState` tracks all async tasks to prevent orphaned tasks during rapid scrolling:
+```swift
+private var loadWindowTask: Task<Void, Never>?
+private var preloadNextTask: Task<Void, Never>?
+
+func loadWindow(...) {
+    loadWindowTask?.cancel()
+    loadWindowTask = Task {
+        // ... async work ...
+        guard !Task.isCancelled else { return }
+        // ... update state ...
+    }
+}
+
+func cleanup() {
+    loadWindowTask?.cancel()
+    preloadNextTask?.cancel()
+}
+```
+
+**Consolidate duplicate scroll logic** - When both `onAppear` and `onChange` need to trigger the same scroll behavior (e.g., initial scroll to bottom), extract to a single method with task tracking to prevent race conditions:
+```swift
+@State private var initialScrollTask: Task<Void, Never>?
+
+private func performInitialScroll(proxy: ScrollViewProxy) {
+    initialScrollTask?.cancel()
+    initialScrollTask = Task { @MainActor in
+        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        guard !Task.isCancelled else { return }
+        proxy.scrollTo(lastMessage.id, anchor: .bottom)
+    }
+}
+```
+
+**Cache filtered lists** - Computed properties that filter `@FetchRequest` results recalculate on every render. Cache the result and update only when dependencies change:
+```swift
+@State private var cachedFilteredConversations: [Conversation] = []
+
+.onAppear { updateFiltered() }
+.onChange(of: conversations.count) { _, _ in updateFiltered() }
+.onChange(of: viewModel.searchText) { _, _ in updateFiltered() }
+.onChange(of: viewModel.currentFilter) { _, _ in updateFiltered() }
+
+private func updateFiltered() {
+    cachedFilteredConversations = viewModel.filteredConversations(from: Array(conversations))
+}
+```
+
+**Use AttachmentThumbnailLoader for attachment views** - Instead of creating untracked tasks for thumbnail loading, use the reusable `@StateObject`:
+```swift
+@StateObject private var thumbnailLoader = AttachmentThumbnailLoader()
+
+.onAppear { thumbnailLoader.load(attachmentId: id, previewPath: path) }
+.onDisappear { thumbnailLoader.cancel() }
+.onChange(of: attachment.previewURL) { _, newValue in
+    if newValue != nil && thumbnailLoader.image == nil {
+        thumbnailLoader.reset()
+        thumbnailLoader.load(attachmentId: id, previewPath: newValue)
+    }
+}
+```
+
+**Add threshold checks for scroll callbacks** - When `onAppear` fires for every visible item, add a threshold to skip small position changes:
+```swift
+func scrollTo(index: Int) {
+    guard abs(index - scrollPosition) > 2 else { return }  // Skip small changes
+    scrollPosition = index
+    updateVisibleMessages()
+}
+```
+
 ### Dependency Injection
 
 Use `Dependencies` container for testability. Actor instances are stored as private properties and exposed via nonisolated getters:

@@ -4,6 +4,7 @@ import CoreData
 struct ConversationListView: View {
     @FetchRequest private var conversations: FetchedResults<Conversation>
     @StateObject private var viewModel = ConversationListViewModel()
+    @State private var cachedFilteredConversations: [Conversation] = []
 
     init() {
         let request = NSFetchRequest<Conversation>(entityName: "Conversation")
@@ -19,10 +20,6 @@ struct ConversationListView: View {
         _conversations = FetchRequest(fetchRequest: request)
     }
 
-    private var filteredConversations: [Conversation] {
-        viewModel.filteredConversations(from: Array(conversations))
-    }
-
     var body: some View {
         ZStack {
             conversationList
@@ -36,7 +33,7 @@ struct ConversationListView: View {
 
     private var conversationList: some View {
         List {
-            ForEach(Array(filteredConversations.enumerated()), id: \.element.objectID) { index, conversation in
+            ForEach(Array(cachedFilteredConversations.enumerated()), id: \.element.objectID) { index, conversation in
                 if viewModel.isSelecting {
                     HStack(spacing: 0) {
                         selectionButton(for: conversation)
@@ -78,7 +75,7 @@ struct ConversationListView: View {
             }
         }
         .listStyle(.plain)
-        .animation(nil, value: filteredConversations.map { $0.objectID })
+        .animation(nil, value: cachedFilteredConversations.map { $0.objectID })
         .scrollDismissesKeyboard(.interactively)
         .navigationTitle(viewModel.isSelecting ? "\(viewModel.selectedConversationIDs.count) Selected" : "Chats")
         .navigationDestination(item: $selectedConversation) { conversation in
@@ -93,9 +90,19 @@ struct ConversationListView: View {
         .onAppear {
             AppPrewarmer.prewarmAll()
             viewModel.onAppear(conversations: Array(conversations))
+            updateFilteredConversations()
         }
         .onDisappear {
             viewModel.onDisappear()
+        }
+        .onChange(of: conversations.count) { _, _ in
+            updateFilteredConversations()
+        }
+        .onChange(of: viewModel.searchText) { _, _ in
+            updateFilteredConversations()
+        }
+        .onChange(of: viewModel.currentFilter) { _, _ in
+            updateFilteredConversations()
         }
         .safeAreaInset(edge: .bottom) {
             Color.clear.frame(height: 80)
@@ -121,8 +128,8 @@ struct ConversationListView: View {
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .navigationBarLeading) {
             if viewModel.isSelecting {
-                Button(viewModel.selectedConversationIDs.count == filteredConversations.count ? "Deselect All" : "Select All") {
-                    viewModel.selectAll(from: filteredConversations)
+                Button(viewModel.selectedConversationIDs.count == cachedFilteredConversations.count ? "Deselect All" : "Select All") {
+                    viewModel.selectAll(from: cachedFilteredConversations)
                 }
             } else {
                 Button(action: { viewModel.showingSettings = true }) {
@@ -254,6 +261,14 @@ struct ConversationListView: View {
         Button(action: { viewModel.showingComposer = true }) {
             circleButton(icon: "square.and.pencil")
         }
+    }
+
+    // MARK: - Filtering
+
+    /// Updates the cached filtered conversations when dependencies change.
+    /// Caching prevents recalculation on every view body evaluation.
+    private func updateFilteredConversations() {
+        cachedFilteredConversations = viewModel.filteredConversations(from: Array(conversations))
     }
 
     private func circleButton(icon: String) -> some View {

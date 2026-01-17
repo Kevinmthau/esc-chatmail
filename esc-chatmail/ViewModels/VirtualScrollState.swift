@@ -17,6 +17,12 @@ final class VirtualScrollState: ObservableObject {
     private let coreDataStack = CoreDataStack.shared
     private var cancellables = Set<AnyCancellable>()
 
+    // Task tracking to prevent orphaned tasks during rapid scrolling
+    private var loadInitialTask: Task<Void, Never>?
+    private var loadWindowTask: Task<Void, Never>?
+    private var preloadNextTask: Task<Void, Never>?
+    private var preloadPreviousTask: Task<Void, Never>?
+
     init(conversationId: String, configuration: VirtualScrollConfiguration = .default) {
         self.conversationId = conversationId
         self.configuration = configuration
@@ -24,6 +30,10 @@ final class VirtualScrollState: ObservableObject {
     }
 
     func scrollTo(index: Int) {
+        // Skip small position changes to avoid excessive updates during scroll
+        // This prevents 10+ calls per scroll when each visible message fires onAppear
+        guard abs(index - scrollPosition) > 2 else { return }
+
         scrollPosition = index
         updateVisibleMessages()
         preloadIfNeeded()
@@ -32,12 +42,15 @@ final class VirtualScrollState: ObservableObject {
     private func loadInitialMessages() {
         isLoadingMore = true
 
-        Task {
+        loadInitialTask?.cancel()
+        loadInitialTask = Task {
             let context = coreDataStack.newBackgroundContext()
             let (messages, total) = await loadMessages(
                 range: 0..<configuration.visibleItemCount,
                 in: context
             )
+
+            guard !Task.isCancelled else { return }
 
             await MainActor.run {
                 self.visibleMessages = messages
@@ -76,12 +89,15 @@ final class VirtualScrollState: ObservableObject {
         // Show placeholders while loading
         placeholderIndices = Set(startIndex..<endIndex)
 
-        Task {
+        loadWindowTask?.cancel()
+        loadWindowTask = Task {
             let context = coreDataStack.newBackgroundContext()
             let (messages, _) = await loadMessages(
                 range: startIndex..<endIndex,
                 in: context
             )
+
+            guard !Task.isCancelled else { return }
 
             await MainActor.run {
                 self.messageWindow = MessageWindow(
@@ -118,12 +134,15 @@ final class VirtualScrollState: ObservableObject {
         let startIndex = window.endIndex
         let endIndex = min(totalMessageCount, startIndex + configuration.pageSize)
 
-        Task {
+        preloadNextTask?.cancel()
+        preloadNextTask = Task {
             let context = coreDataStack.newBackgroundContext()
             let (messages, _) = await loadMessages(
                 range: startIndex..<endIndex,
                 in: context
             )
+
+            guard !Task.isCancelled else { return }
 
             await MainActor.run {
                 guard var currentWindow = self.messageWindow else { return }
@@ -146,12 +165,15 @@ final class VirtualScrollState: ObservableObject {
         let endIndex = window.startIndex
         let startIndex = max(0, endIndex - configuration.pageSize)
 
-        Task {
+        preloadPreviousTask?.cancel()
+        preloadPreviousTask = Task {
             let context = coreDataStack.newBackgroundContext()
             let (messages, _) = await loadMessages(
                 range: startIndex..<endIndex,
                 in: context
             )
+
+            guard !Task.isCancelled else { return }
 
             await MainActor.run {
                 guard var currentWindow = self.messageWindow else { return }
@@ -165,6 +187,19 @@ final class VirtualScrollState: ObservableObject {
                 self.messageWindow = currentWindow
             }
         }
+    }
+
+    /// Cancels all pending tasks when the scroll state is no longer needed
+    func cleanup() {
+        loadInitialTask?.cancel()
+        loadWindowTask?.cancel()
+        preloadNextTask?.cancel()
+        preloadPreviousTask?.cancel()
+
+        loadInitialTask = nil
+        loadWindowTask = nil
+        preloadNextTask = nil
+        preloadPreviousTask = nil
     }
 
     private func loadMessages(range: Range<Int>, in context: NSManagedObjectContext) async -> ([Message], Int) {

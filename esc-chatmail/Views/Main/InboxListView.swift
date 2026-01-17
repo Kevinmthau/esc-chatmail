@@ -18,11 +18,12 @@ struct InboxListView: View {
     @State private var selectedMessage: Message?
     @State private var showingWebView = false
     @State private var showingComposer = false
+    @State private var cachedFilteredMessages: [Message] = []
     
     var body: some View {
         NavigationStack {
             List {
-                ForEach(filteredMessages) { message in
+                ForEach(cachedFilteredMessages) { message in
                     MessageRow(message: message)
                         .onTapGesture {
                             selectedMessage = message
@@ -60,14 +61,25 @@ struct InboxListView: View {
             .sheet(isPresented: $showingComposer) {
                 ComposeView(mode: .newMessage)
             }
+            .onAppear {
+                updateFilteredMessages()
+            }
+            .onChange(of: messages.count) { _, _ in
+                updateFilteredMessages()
+            }
+            .onChange(of: searchText) { _, _ in
+                updateFilteredMessages()
+            }
         }
     }
-    
-    private var filteredMessages: [Message] {
+
+    /// Updates the cached filtered messages when dependencies change.
+    /// Caching prevents recalculation on every view body evaluation.
+    private func updateFilteredMessages() {
         if searchText.isEmpty {
-            return Array(messages)
+            cachedFilteredMessages = Array(messages)
         } else {
-            return messages.filter { message in
+            cachedFilteredMessages = messages.filter { message in
                 message.subject?.localizedCaseInsensitiveContains(searchText) ?? false ||
                 message.snippet?.localizedCaseInsensitiveContains(searchText) ?? false
             }
