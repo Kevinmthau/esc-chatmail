@@ -2,43 +2,29 @@ import Foundation
 import UIKit
 
 /// Two-tier image cache: fast memory cache backed by persistent disk cache
-actor EnhancedImageCache {
+actor EnhancedImageCache: MemoryWarningHandler {
     static let shared = EnhancedImageCache()
 
     private let memoryCache = NSCache<NSString, UIImage>()
     private let diskCache = DiskImageCache.shared
     private let requestManager = ImageRequestManager()
-
-    /// Store observer token for proper cleanup
-    private var memoryWarningObserver: (any NSObjectProtocol)?
+    private let memoryObserver = MemoryWarningObserver()
 
     private init() {
         memoryCache.countLimit = 100
         memoryCache.totalCostLimit = 50 * 1024 * 1024 // 50 MB
 
-        // Add memory warning observer to clear cache under memory pressure
+        // Observe memory warnings
         Task { @MainActor [weak self] in
-            let observer = NotificationCenter.default.addObserver(
-                forName: UIApplication.didReceiveMemoryWarningNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                Task {
-                    await self?.clearMemory()
-                }
-            }
-            await self?.setMemoryWarningObserver(observer)
+            guard let self = self else { return }
+            self.memoryObserver.start(handler: self)
         }
     }
 
-    private func setMemoryWarningObserver(_ observer: any NSObjectProtocol) {
-        memoryWarningObserver = observer
-    }
+    // MARK: - MemoryWarningHandler
 
-    deinit {
-        if let observer = memoryWarningObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
+    func handleMemoryWarning() async {
+        clearMemory()
     }
 
     /// Gets image from cache (memory first, then disk)

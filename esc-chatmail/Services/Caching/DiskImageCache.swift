@@ -3,7 +3,7 @@ import UIKit
 
 /// Persistent disk cache for remote images (Google People API photos, etc.)
 /// Survives app restarts, reducing network requests significantly.
-actor DiskImageCache {
+actor DiskImageCache: PeriodicCleanupHandler {
     static let shared = DiskImageCache()
 
     private nonisolated let cacheDirectory: URL
@@ -19,8 +19,8 @@ actor DiskImageCache {
     /// Prevents concurrent cleanup operations from racing
     private var isCleaningUp = false
 
-    /// Periodic cleanup task to ensure cleanup runs even when no new images are saved
-    private var periodicCleanupTask: Task<Void, Never>?
+    /// Periodic cleanup task helper
+    private let cleanupTask = PeriodicCleanupTask()
 
     private init() {
         let cachesPath = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
@@ -29,40 +29,18 @@ actor DiskImageCache {
         Self.createDirectoryIfNeeded(at: cacheDirectory)
 
         // Start periodic cleanup in a separate task to comply with Swift 6 actor init rules
-        Task { await self.startPeriodicCleanup() }
+        Task { self.cleanupTask.start(handler: self, interval: .hours(1), runImmediately: true) }
     }
 
-    /// Starts the periodic cleanup task - must be called from actor context
-    private func startPeriodicCleanup() {
-        periodicCleanupTask = Task { [weak self] in
-            // Initial cleanup - measure actual size on startup to correct any drift
-            await self?.performCleanupIfNotBusy()
+    // MARK: - PeriodicCleanupHandler
 
-            // Periodic cleanup every hour
-            while !Task.isCancelled {
-                do {
-                    try await Task.sleep(nanoseconds: 60 * 60 * 1_000_000_000) // 1 hour
-                    await self?.performCleanupIfNotBusy()
-                } catch {
-                    // Task was cancelled
-                    break
-                }
-            }
-        }
-    }
-
-    /// Performs cleanup only if not already in progress, measuring actual disk size
-    private func performCleanupIfNotBusy() async {
+    func performCleanup() async {
         guard !isCleaningUp else { return }
         isCleaningUp = true
         await cleanExpiredEntries()
         let size = totalSize()
         estimatedCacheSize = size
         isCleaningUp = false
-    }
-
-    deinit {
-        periodicCleanupTask?.cancel()
     }
 
     private func updateEstimatedSize(_ size: Int64) {

@@ -7,43 +7,31 @@ import UIKit
 /// 2. Cached results in CoreData Person entities
 ///
 /// Uses InFlightRequestManager for request deduplication to prevent duplicate fetches
-actor ProfilePhotoResolver {
+actor ProfilePhotoResolver: MemoryWarningHandler {
     static let shared = ProfilePhotoResolver()
 
     private let contactsResolver = ContactsResolver.shared
     private let coreDataStack = CoreDataStack.shared
     private let cache = NSCache<NSString, CachedPhoto>()
     private let requestManager = InFlightRequestManager<String, ProfilePhoto>()
-    private var memoryWarningObserver: (any NSObjectProtocol)?
+    private let memoryObserver = MemoryWarningObserver()
 
     private init() {
         cache.countLimit = CacheConfig.photoCacheSize
         // Set memory limit (assume ~50KB average per photo, allows ~25MB)
         cache.totalCostLimit = 25 * 1024 * 1024
 
-        // Add memory warning observer to clear cache under memory pressure
+        // Observe memory warnings
         Task { @MainActor [weak self] in
-            let observer = NotificationCenter.default.addObserver(
-                forName: UIApplication.didReceiveMemoryWarningNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                Task {
-                    await self?.clearCache()
-                }
-            }
-            await self?.setMemoryWarningObserver(observer)
+            guard let self = self else { return }
+            self.memoryObserver.start(handler: self)
         }
     }
 
-    private func setMemoryWarningObserver(_ observer: any NSObjectProtocol) {
-        memoryWarningObserver = observer
-    }
+    // MARK: - MemoryWarningHandler
 
-    deinit {
-        if let observer = memoryWarningObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
+    func handleMemoryWarning() async {
+        clearCache()
     }
 
     // MARK: - Public API

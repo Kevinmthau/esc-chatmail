@@ -2,7 +2,7 @@ import UIKit
 
 /// Thread-safe actor-based cache for attachment images and data.
 /// Uses LRUCacheActor internally for proper concurrency.
-actor AttachmentCacheActor {
+actor AttachmentCacheActor: MemoryWarningHandler {
     static let shared = AttachmentCacheActor()
 
     // MARK: - Cache Instances
@@ -11,26 +11,16 @@ actor AttachmentCacheActor {
     private let fullImageCache: LRUCacheActor<String, UIImage>
     private let dataCache: LRUCacheActor<String, Data>
     private let requestManager = InFlightRequestManager<String, UIImage>()
-    private var memoryWarningObserver: (any NSObjectProtocol)?
+    private let memoryObserver = MemoryWarningObserver()
 
     // MARK: - Initialization
 
     init() {
         // Thumbnail cache: ~50MB (assuming ~100KB per thumbnail)
-        self.thumbnailCache = LRUCacheActor(config: CacheConfiguration(
-            maxItems: 500,
-            maxMemoryBytes: 50 * 1024 * 1024,
-            ttlSeconds: nil,
-            evictionPolicy: .lru
-        ))
+        self.thumbnailCache = LRUCacheActor(config: .thumbnailCache())
 
         // Full image cache: ~100MB (for viewing)
-        self.fullImageCache = LRUCacheActor(config: CacheConfiguration(
-            maxItems: 20,
-            maxMemoryBytes: 100 * 1024 * 1024,
-            ttlSeconds: nil,
-            evictionPolicy: .lru
-        ))
+        self.fullImageCache = LRUCacheActor(config: .fullImageCache())
 
         // Data cache: ~25MB (for quick access to raw data)
         self.dataCache = LRUCacheActor(config: CacheConfiguration(
@@ -40,29 +30,17 @@ actor AttachmentCacheActor {
             evictionPolicy: .lru
         ))
 
-        // Observe memory warnings on the main actor
+        // Observe memory warnings
         Task { @MainActor [weak self] in
-            let observer = NotificationCenter.default.addObserver(
-                forName: UIApplication.didReceiveMemoryWarningNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                Task {
-                    await self?.clearCache(level: .aggressive)
-                }
-            }
-            await self?.setMemoryWarningObserver(observer)
+            guard let self = self else { return }
+            self.memoryObserver.start(handler: self)
         }
     }
 
-    private func setMemoryWarningObserver(_ observer: any NSObjectProtocol) {
-        memoryWarningObserver = observer
-    }
+    // MARK: - MemoryWarningHandler
 
-    deinit {
-        if let observer = memoryWarningObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
+    func handleMemoryWarning() async {
+        await clearCache(level: .aggressive)
     }
 
     // MARK: - Cache Clear Levels

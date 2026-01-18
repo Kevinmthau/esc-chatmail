@@ -55,6 +55,39 @@ struct CacheConfiguration: Sendable {
         evictionPolicy: .lru
     )
 
+    // MARK: - Preset Configurations
+
+    /// Configuration for thumbnail caches (500 items, 50MB)
+    static func thumbnailCache() -> CacheConfiguration {
+        CacheConfiguration(
+            maxItems: 500,
+            maxMemoryBytes: 50 * 1024 * 1024,
+            ttlSeconds: nil,
+            evictionPolicy: .lru
+        )
+    }
+
+    /// Configuration for full image caches (20 items, 100MB)
+    static func fullImageCache() -> CacheConfiguration {
+        CacheConfiguration(
+            maxItems: 20,
+            maxMemoryBytes: 100 * 1024 * 1024,
+            ttlSeconds: nil,
+            evictionPolicy: .lru
+        )
+    }
+
+    /// Configuration for small memory caches with TTL
+    /// - Parameter ttlSeconds: Time-to-live for entries in seconds
+    static func smallMemory(ttlSeconds: TimeInterval) -> CacheConfiguration {
+        CacheConfiguration(
+            maxItems: 1000,
+            maxMemoryBytes: nil,
+            ttlSeconds: ttlSeconds,
+            evictionPolicy: .lru
+        )
+    }
+
     init(
         maxItems: Int,
         maxMemoryBytes: Int? = nil,

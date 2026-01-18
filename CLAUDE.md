@@ -134,18 +134,59 @@ LRU caches use **timestamp-based eviction** (not array-based) for O(1) access ti
 - **ImageRequestManager** - Failed URL tracking (500 max entries with 20% pruning)
 - **AttachmentThumbnailLoader** - Cancels previous task before starting new load to prevent orphaned tasks
 
-**Cache stability patterns:**
-- **Bound all collections** - Never let Sets/Dictionaries grow unbounded. Add max size with pruning:
+**Cache utilities** - Reusable helpers in `/Services/Caching/` eliminate boilerplate:
+
+- **MemoryWarningObserver** - Encapsulates NotificationCenter memory warning handling for actors:
 ```swift
-private let maxFailedURLs = 500
-if failedURLs.count >= maxFailedURLs {
-    let removeCount = maxFailedURLs / 5  // Remove 20%
-    for _ in 0..<removeCount {
-        failedURLs.remove(failedURLs.first!)
+actor MyCache: MemoryWarningHandler {
+    private let memoryObserver = MemoryWarningObserver()
+
+    init() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.memoryObserver.start(handler: self)
+        }
+    }
+
+    func handleMemoryWarning() async {
+        // Clear caches
     }
 }
 ```
-- **Periodic cleanup** - Don't rely solely on save-triggered cleanup. Add hourly background cleanup tasks.
+
+- **PeriodicCleanupTask** - Encapsulates Task.sleep + cleanup loop pattern:
+```swift
+actor MyCache: PeriodicCleanupHandler {
+    private let cleanupTask = PeriodicCleanupTask()
+
+    init() {
+        Task { self.cleanupTask.start(handler: self, interval: .hours(1), runImmediately: true) }
+    }
+
+    func performCleanup() async {
+        // Cleanup logic
+    }
+}
+```
+
+- **BoundedSet** - Set with max size and FIFO pruning (replaces manual pruning logic):
+```swift
+var failedURLs = BoundedSet<String>(maxSize: 500, prunePercentage: 0.2)
+failedURLs.insert(url)  // Auto-prunes oldest 20% when full
+if failedURLs.contains(url) { ... }
+```
+
+- **CacheConfiguration presets** - Standard configs for common cache types:
+```swift
+LRUCacheActor(config: .thumbnailCache())  // 500 items, 50MB
+LRUCacheActor(config: .fullImageCache())  // 20 items, 100MB
+LRUCacheActor(config: .smallMemory(ttlSeconds: 300))  // 1000 items, 5min TTL
+```
+
+**Cache stability patterns:**
+- **Bound all collections** - Use `BoundedSet` or manual pruning. Never let Sets/Dictionaries grow unbounded.
+- **Periodic cleanup** - Use `PeriodicCleanupTask` instead of manual Task loops.
+- **Memory warnings** - Use `MemoryWarningObserver` instead of manual NotificationCenter setup.
 - **NSCache totalCostLimit** - Always set both `countLimit` AND `totalCostLimit` for proper memory pressure response.
 - **Track prefetch tasks with ID** - Use task IDs to prevent cancelled tasks from clearing newer task references:
 ```swift
@@ -693,6 +734,9 @@ Test infrastructure in `esc-chatmailTests/TestSupport/`:
 - `SendErrorTests` - Send error handling
 - `GoogleConfigTests` - Configuration validation
 - `LRUCacheActorTests` - LRU cache eviction, TTL, memory limits
+- `BoundedSetTests` - Bounded set pruning and FIFO eviction
+- `PeriodicCleanupTaskTests` - Periodic cleanup task lifecycle
+- `MemoryWarningObserverTests` - Memory warning observer setup/teardown
 - `PlainTextQuoteRemoverTests` - Email quote and signature removal
 - `HTMLQuoteRemoverTests` - HTML-specific quote patterns
 - `HTMLSanitizerServiceTests` - XSS prevention, script/tracking removal

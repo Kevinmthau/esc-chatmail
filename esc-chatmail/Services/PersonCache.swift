@@ -3,15 +3,15 @@ import CoreData
 
 /// Thread-safe cache for Person entities to avoid N+1 query problems in conversation lists
 /// Uses actor isolation for automatic thread-safety instead of @MainActor
-actor PersonCache {
+actor PersonCache: PeriodicCleanupHandler {
     static let shared = PersonCache()
 
     // In-memory cache: email -> Person
     private var cache: [String: CachedPerson] = [:]
     private let coreDataStack = CoreDataStack.shared
 
-    // Cleanup timer task
-    private var cleanupTask: Task<Void, Never>?
+    /// Periodic cleanup task helper
+    private let cleanupTask = PeriodicCleanupTask()
 
     /// Maximum cache size to prevent unbounded growth when cleanup is delayed
     private let maxCacheSize = 1000
@@ -30,27 +30,13 @@ actor PersonCache {
 
     private init() {
         // Start periodic cleanup in a separate task to comply with Swift 6 actor init rules
-        Task { await self.startPeriodicCleanup() }
+        Task { self.cleanupTask.start(handler: self, interval: .minutes(5), runImmediately: false) }
     }
 
-    /// Starts the periodic cleanup task - must be called from actor context
-    private func startPeriodicCleanup() {
-        cleanupTask = Task { [weak self] in
-            while !Task.isCancelled {
-                do {
-                    // Wait 5 minutes between cleanups
-                    try await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
-                    await self?.cleanupExpiredEntries()
-                } catch {
-                    // Task was cancelled
-                    break
-                }
-            }
-        }
-    }
+    // MARK: - PeriodicCleanupHandler
 
-    deinit {
-        cleanupTask?.cancel()
+    func performCleanup() async {
+        cleanupExpiredEntries()
     }
 
     /// Prefetch Person entities for a batch of emails to avoid N+1 queries
