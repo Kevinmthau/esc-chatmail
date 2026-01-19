@@ -33,12 +33,6 @@ struct LabelOperationProcessor {
         case remove
     }
 
-    /// Maximum age for local modifications before they're considered stale
-    /// Uses the centralized config value from SyncConfig
-    private static var maxLocalModificationAge: TimeInterval {
-        SyncConfig.maxLocalModificationAge
-    }
-
     /// Processes label changes (additions or removals) for history records
     ///
     /// - Parameters:
@@ -108,7 +102,7 @@ struct LabelOperationProcessor {
                 }
 
                 // Conflict resolution: skip if message has pending local changes
-                if hasConflict(message: message, syncStartTime: syncStartTime) {
+                if HistoryProcessor.hasConflict(message: message, syncStartTime: syncStartTime) {
                     Log.debug("Skipping server label \(operation) for message \(messageId) - local changes pending", category: .sync)
                     continue
                 }
@@ -150,29 +144,4 @@ struct LabelOperationProcessor {
         }
     }
 
-    /// Check if a message has local modifications that haven't been synced yet
-    ///
-    /// This prevents server updates from overwriting local changes.
-    /// However, if the local modification is too old (stale), we allow the server update.
-    private static func hasConflict(message: Message, syncStartTime: Date?) -> Bool {
-        guard let syncStartTime = syncStartTime else { return false }
-        guard let localModifiedAt = message.localModifiedAtValue else { return false }
-
-        // If the message was modified locally after the sync started,
-        // it means there's a pending local change that should take precedence
-        let hasPendingChange = localModifiedAt > syncStartTime
-
-        // However, if the local modification is too old, consider it stale
-        // This prevents local changes from blocking server updates indefinitely
-        let now = Date()
-        let modificationAge = now.timeIntervalSince(localModifiedAt)
-        let isStaleModification = modificationAge > maxLocalModificationAge
-
-        if hasPendingChange && isStaleModification {
-            Log.warning("Local modification is stale (age: \(Int(modificationAge))s), allowing server update", category: .sync)
-            return false
-        }
-
-        return hasPendingChange
-    }
 }

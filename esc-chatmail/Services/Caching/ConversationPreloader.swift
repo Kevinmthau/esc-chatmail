@@ -123,14 +123,27 @@ final class ConversationPreloader {
             request.predicate = NSPredicate(format: "id == %@", conversationId)
             request.relationshipKeyPathsForPrefetching = ["messages", "participants"]
 
-            guard let conversation = try? context.fetch(request).first else { return }
+            let conversation: Conversation?
+            do {
+                conversation = try context.fetch(request).first
+            } catch {
+                Log.error("Failed to fetch conversation for preloading", category: .coreData, error: error)
+                return
+            }
+            guard let conversation = conversation else { return }
 
             let messageRequest = Message.fetchRequest()
             messageRequest.predicate = NSPredicate(format: "conversation == %@", conversation)
             messageRequest.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: true)]
             messageRequest.fetchBatchSize = 50
 
-            guard let messages = try? context.fetch(messageRequest) else { return }
+            let messages: [Message]
+            do {
+                messages = try context.fetch(messageRequest)
+            } catch {
+                Log.error("Failed to fetch messages for conversation preloading", category: .coreData, error: error)
+                return
+            }
 
             Task { @MainActor in
                 self.cache?.set(conversation, messages: messages)

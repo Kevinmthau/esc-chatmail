@@ -15,7 +15,14 @@ extension MessagePersister {
         let request = Message.fetchRequest()
         request.predicate = MessagePredicates.id(processedMessage.id)
 
-        guard let existingMessage = try? context.fetch(request).first else {
+        let existingMessage: Message?
+        do {
+            existingMessage = try context.fetch(request).first
+        } catch {
+            Log.error("Failed to fetch message for update", category: .coreData, error: error)
+            return false
+        }
+        guard let existingMessage = existingMessage else {
             return false
         }
 

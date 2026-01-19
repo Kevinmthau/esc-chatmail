@@ -30,8 +30,9 @@ final class HTMLContentLoader {
     ) {
         self.contentHandler = contentHandler
         self.sanitizer = sanitizer
-        // Limit cache to ~50MB assuming average 50KB per HTML
+        // Limit cache to ~50MB with both count and cost limits for proper memory pressure response
         htmlCache.countLimit = 1000
+        htmlCache.totalCostLimit = 50 * 1024 * 1024 // 50 MB
     }
 
     /// Resolves a storage URI string to a valid file URL
@@ -68,7 +69,8 @@ final class HTMLContentLoader {
         if contentHandler.htmlFileExists(for: messageId),
            let html = contentHandler.loadHTML(for: messageId) {
             let wrapped = sanitizer.wrapHTMLForDisplay(html, isDarkMode: isDarkMode)
-            htmlCache.setObject(wrapped as NSString, forKey: cacheKey)
+            let cost = wrapped.utf8.count
+            htmlCache.setObject(wrapped as NSString, forKey: cacheKey, cost: cost)
             return HTMLLoadResult(html: wrapped, source: .messageId)
         }
 
@@ -78,7 +80,8 @@ final class HTMLContentLoader {
            FileManager.default.fileExists(atPath: url.path),
            let html = contentHandler.loadHTML(from: url) {
             let wrapped = sanitizer.wrapHTMLForDisplay(html, isDarkMode: isDarkMode)
-            htmlCache.setObject(wrapped as NSString, forKey: cacheKey)
+            let cost = wrapped.utf8.count
+            htmlCache.setObject(wrapped as NSString, forKey: cacheKey, cost: cost)
             return HTMLLoadResult(html: wrapped, source: .storageURI)
         }
 

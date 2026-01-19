@@ -12,6 +12,8 @@ struct ChatView: View {
     @State private var resolvedDisplayName: String?
     @State private var isReadyToShow = false
     @State private var initialScrollTask: Task<Void, Never>?
+    @State private var prefetchTextTask: Task<Void, Never>?
+    @State private var prefetchContactsTask: Task<Void, Never>?
 
     init(conversation: Conversation) {
         self.conversation = conversation
@@ -86,14 +88,22 @@ struct ChatView: View {
                 let uniqueEmails = Array(Set(senderEmails))
 
                 // Batch prefetch text content for recent messages (eliminates N+1 queries)
-                Task.detached(priority: .userInitiated) {
+                prefetchTextTask?.cancel()
+                prefetchTextTask = Task.detached(priority: .userInitiated) {
                     await ProcessedTextCache.shared.prefetch(messageIds: messageIds)
                 }
 
                 // Batch prefetch contacts to avoid thundering herd on first load
-                Task.detached(priority: .userInitiated) {
+                prefetchContactsTask?.cancel()
+                prefetchContactsTask = Task.detached(priority: .userInitiated) {
                     await ContactsResolver.shared.prewarm(emails: uniqueEmails)
                 }
+            }
+            .onDisappear {
+                // Cancel prefetch tasks to prevent memory leaks
+                initialScrollTask?.cancel()
+                prefetchTextTask?.cancel()
+                prefetchContactsTask?.cancel()
             }
             .onChange(of: messages.count) { oldCount, newCount in
                 if !isReadyToShow && newCount > 0 {

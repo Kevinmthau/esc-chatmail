@@ -3,9 +3,9 @@ import Foundation
 /// Centralized time calculations for sync operations
 ///
 /// Eliminates duplicate timestamp buffer logic across:
-/// - InitialSyncOrchestrator.buildInitialSyncQuery()
-/// - IncrementalSyncOrchestrator.calculateRecoveryStartTime()
-/// - SyncReconciliation.calculateReconciliationStartTime()
+/// - InitialSyncOrchestrator
+/// - IncrementalSyncOrchestrator (history recovery)
+/// - SyncReconciliation
 struct SyncTimeCalculator {
 
     // MARK: - Configuration

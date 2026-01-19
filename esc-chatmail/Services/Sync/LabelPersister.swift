@@ -8,7 +8,11 @@ extension MessagePersister {
         return await context.perform {
             let request = Label.fetchRequest()
             request.fetchBatchSize = 100
-            guard let labels = try? context.fetch(request) else {
+            let labels: [Label]
+            do {
+                labels = try context.fetch(request)
+            } catch {
+                Log.error("Failed to prefetch label IDs", category: .coreData, error: error)
                 return []
             }
             let ids = Set(labels.map { $0.id })
@@ -28,7 +32,13 @@ extension MessagePersister {
         guard !ids.isEmpty else { return [:] }
         let request = Label.fetchRequest()
         request.predicate = NSPredicate(format: "id IN %@", ids)
-        guard let labels = try? context.fetch(request) else { return [:] }
+        let labels: [Label]
+        do {
+            labels = try context.fetch(request)
+        } catch {
+            Log.error("Failed to fetch labels by IDs", category: .coreData, error: error)
+            return [:]
+        }
         return Dictionary(uniqueKeysWithValues: labels.map { ($0.id, $0) })
     }
 
@@ -38,7 +48,11 @@ extension MessagePersister {
         return await context.perform {
             let request = Label.fetchRequest()
             request.fetchBatchSize = 100
-            guard let labels = try? context.fetch(request) else {
+            let labels: [Label]
+            do {
+                labels = try context.fetch(request)
+            } catch {
+                Log.error("Failed to prefetch labels", category: .coreData, error: error)
                 return [:]
             }
             var labelCache: [String: Label] = [:]
@@ -57,7 +71,13 @@ extension MessagePersister {
             // Fetch all existing labels into a dictionary for efficient lookup
             let request = Label.fetchRequest()
             request.fetchBatchSize = 100
-            let existingLabels = (try? context.fetch(request)) ?? []
+            let existingLabels: [Label]
+            do {
+                existingLabels = try context.fetch(request)
+            } catch {
+                Log.error("Failed to fetch existing labels for save", category: .coreData, error: error)
+                existingLabels = []
+            }
             var labelDict = Dictionary(uniqueKeysWithValues: existingLabels.map { ($0.id, $0) })
 
             var insertedCount = 0

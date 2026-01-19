@@ -203,8 +203,7 @@ final class IncrementalSyncOrchestrator {
         let context = coreDataStack.newBackgroundContext()
         let labelIds = await messagePersister.prefetchLabelIds(in: context)
 
-        let recoveryStartTime = calculateRecoveryStartTime()
-        let query = "after:\(Int(recoveryStartTime)) -label:spam -label:drafts"
+        let query = SyncTimeCalculator.buildSyncQuery(config: .historyRecovery)
 
         log.info("Recovery query: \(query)")
 
@@ -258,10 +257,6 @@ final class IncrementalSyncOrchestrator {
         await failureTracker.recordSuccess()
 
         log.info("History recovery complete, new historyId: \(profile.historyId)")
-    }
-
-    private func calculateRecoveryStartTime() -> TimeInterval {
-        return SyncTimeCalculator.calculateStartTime(config: .historyRecovery)
     }
 
     /// Checks if forced label reconciliation is needed based on time since last reconciliation

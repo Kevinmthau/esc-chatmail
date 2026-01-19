@@ -27,8 +27,12 @@ extension GmailSendService {
             let accountRequest = Account.fetchRequest()
             accountRequest.fetchLimit = 1
             accountRequest.fetchBatchSize = 1
-            if let account = try? viewContext.fetch(accountRequest).first {
-                return Set(([account.email] + account.aliasesArray).map(normalizedEmail))
+            do {
+                if let account = try viewContext.fetch(accountRequest).first {
+                    return Set(([account.email] + account.aliasesArray).map(normalizedEmail))
+                }
+            } catch {
+                Log.error("Failed to fetch account for aliases", category: .coreData, error: error)
             }
             return []
         }()

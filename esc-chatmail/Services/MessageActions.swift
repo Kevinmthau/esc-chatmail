@@ -133,7 +133,13 @@ final class MessageActions: ObservableObject {
         let context = coreDataStack.viewContext
         let labelRequest = Label.fetchRequest()
         labelRequest.predicate = LabelPredicates.id("INBOX")
-        let inboxLabel = try? context.fetch(labelRequest).first
+        let inboxLabel: Label?
+        do {
+            inboxLabel = try context.fetch(labelRequest).first
+        } catch {
+            Log.error("Failed to fetch INBOX label for archive", category: .coreData, error: error)
+            inboxLabel = nil
+        }
         Log.debug("INBOX label found: \(inboxLabel != nil)", category: .message)
 
         // Collect message IDs for syncing and mark as locally modified
@@ -185,7 +191,14 @@ final class MessageActions: ObservableObject {
         // Fetch INBOX label once
         let labelRequest = Label.fetchRequest()
         labelRequest.predicate = LabelPredicates.id("INBOX")
-        guard let inboxLabel = try? context.fetch(labelRequest).first else {
+        let inboxLabel: Label?
+        do {
+            inboxLabel = try context.fetch(labelRequest).first
+        } catch {
+            Log.error("Failed to fetch INBOX label for batch archive", category: .coreData, error: error)
+            return
+        }
+        guard let inboxLabel = inboxLabel else {
             Log.warning("INBOX label not found, cannot archive", category: .message)
             return
         }
@@ -249,7 +262,12 @@ final class MessageActions: ObservableObject {
             NSPredicate(format: "ANY labels.id == %@", "INBOX")
         ])
         request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: false)]
-        return (try? context.fetch(request)) ?? []
+        do {
+            return try context.fetch(request)
+        } catch {
+            Log.error("Failed to fetch INBOX messages for conversation", category: .coreData, error: error)
+            return []
+        }
     }
 
     /// Fetches unread INBOX messages for a conversation using Core Data predicates (avoids N+1)
@@ -260,7 +278,12 @@ final class MessageActions: ObservableObject {
             NSPredicate(format: "ANY labels.id == %@", "INBOX"),
             NSPredicate(format: "isUnread == YES")
         ])
-        return (try? context.fetch(request)) ?? []
+        do {
+            return try context.fetch(request)
+        } catch {
+            Log.error("Failed to fetch unread INBOX messages for conversation", category: .coreData, error: error)
+            return []
+        }
     }
 
     private func updateConversationInboxStatus(_ conversation: Conversation) {

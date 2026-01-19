@@ -120,13 +120,12 @@ struct ChatReplyBar: View {
 struct AttachmentThumbnail: View {
     let attachment: Attachment
     let onRemove: () -> Void
-    @State private var thumbnailImage: UIImage?
-    private let cache = AttachmentCacheActor.shared
-    
+    @StateObject private var thumbnailLoader = AttachmentThumbnailLoader()
+
     var body: some View {
         ZStack(alignment: .topTrailing) {
             // Thumbnail
-            if let image = thumbnailImage {
+            if let image = thumbnailLoader.image {
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -137,11 +136,11 @@ struct AttachmentThumbnail: View {
                     .fill(Color.gray.opacity(0.2))
                     .frame(width: 60, height: 60)
                     .overlay(
-                        Image(systemName: isPDF(attachment) ? "doc.fill" : "photo")
+                        Image(systemName: attachment.isPDF ? "doc.fill" : "photo")
                             .foregroundColor(.gray)
                     )
             }
-            
+
             // Remove button
             Button(action: onRemove) {
                 Image(systemName: "xmark.circle.fill")
@@ -152,25 +151,17 @@ struct AttachmentThumbnail: View {
             .offset(x: 4, y: -4)
         }
         .onAppear {
-            loadThumbnail()
+            thumbnailLoader.load(attachmentId: attachment.id, previewPath: attachment.previewURL)
         }
-    }
-    
-    private func loadThumbnail() {
-        guard thumbnailImage == nil,
-              let attachmentId = attachment.id else { return }
-
-        Task {
-            if let image = await cache.loadThumbnail(for: attachmentId, from: attachment.previewURL) {
-                await MainActor.run {
-                    self.thumbnailImage = image
-                }
+        .onDisappear {
+            thumbnailLoader.cancel()
+        }
+        .onChange(of: attachment.previewURL) { _, newValue in
+            if newValue != nil && thumbnailLoader.image == nil {
+                thumbnailLoader.reset()
+                thumbnailLoader.load(attachmentId: attachment.id, previewPath: newValue)
             }
         }
-    }
-
-    private func isPDF(_ attachment: Attachment) -> Bool {
-        attachment.isPDF
     }
 }
 

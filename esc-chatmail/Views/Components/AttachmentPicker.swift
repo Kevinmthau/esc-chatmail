@@ -10,6 +10,7 @@ struct AttachmentPicker: View {
     @State private var showDocumentPicker = false
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var isProcessing = false
+    @State private var photoProcessingTask: Task<Void, Never>?
     
     let maxAttachmentSize: Int64 = 25 * 1024 * 1024 // 25 MB
     
@@ -36,9 +37,13 @@ struct AttachmentPicker: View {
             matching: .images
         )
         .onChange(of: selectedPhotoItems) { oldValue, newValue in
-            Task {
+            photoProcessingTask?.cancel()
+            photoProcessingTask = Task {
                 await processPhotoSelections(newValue)
             }
+        }
+        .onDisappear {
+            photoProcessingTask?.cancel()
         }
         .sheet(isPresented: $showDocumentPicker) {
             DocumentPicker(attachments: $attachments)

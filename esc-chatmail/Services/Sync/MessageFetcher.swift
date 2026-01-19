@@ -37,18 +37,24 @@ final class MessageFetcher: @unchecked Sendable {
             case .authenticationError, .historyIdExpired, .notFound:
                 return false
             default:
-                return true // Default to retriable for unknown API errors
+                // Default to non-retriable for unknown API errors to avoid infinite retry loops
+                return false
             }
         }
 
-        // NSError timeout codes
+        // NSError timeout codes using URLError constants for clarity
         if let nsError = error as NSError? {
             if nsError.domain == NSURLErrorDomain {
-                return [-1001, -1009, -1004, -1005].contains(nsError.code) // timeout, not connected, can't connect, connection lost
+                // Map error codes to URLError equivalents for clarity:
+                // -1001 = .timedOut, -1009 = .notConnectedToInternet,
+                // -1004 = .cannotConnectToHost, -1005 = .networkConnectionLost
+                return [URLError.timedOut.rawValue, URLError.notConnectedToInternet.rawValue,
+                        URLError.cannotConnectToHost.rawValue, URLError.networkConnectionLost.rawValue].contains(nsError.code)
             }
         }
 
-        return true // Default to retriable for unknown errors
+        // Default to non-retriable for unknown errors to avoid infinite retry loops
+        return false
     }
 
     /// Fetches a batch of messages by ID with automatic retry on failure

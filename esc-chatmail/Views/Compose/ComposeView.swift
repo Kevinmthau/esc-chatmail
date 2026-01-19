@@ -100,7 +100,9 @@ struct ComposeView: View {
             viewModel.setupForMode()
 
             // Auto-focus recipient field after a brief delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                guard !Task.isCancelled else { return }
                 focusedField = .recipient
             }
         }

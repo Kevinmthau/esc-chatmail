@@ -43,8 +43,8 @@ extension HistoryProcessor {
     }
 
     /// Check if a message has local modifications that haven't been synced yet
-    /// Note: This method is kept for use by other components (e.g., SyncReconciliation)
-    nonisolated func hasConflict(message: Message, syncStartTime: Date?) -> Bool {
+    /// Note: This method is kept for use by other components (e.g., SyncReconciliation, LabelOperationProcessor)
+    nonisolated static func hasConflict(message: Message, syncStartTime: Date?) -> Bool {
         guard let syncStartTime = syncStartTime else { return false }
         guard let localModifiedAt = message.localModifiedAtValue else { return false }
 

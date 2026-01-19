@@ -255,7 +255,13 @@ final class SyncReconciliation: Sendable {
             let labelRequest = Label.fetchRequest()
             labelRequest.predicate = NSPredicate(format: "id == %@", "INBOX")
             labelRequest.fetchLimit = 1
-            let inboxLabel = try? context.fetch(labelRequest).first
+            let inboxLabel: Label?
+            do {
+                inboxLabel = try context.fetch(labelRequest).first
+            } catch {
+                Log.error("Failed to fetch INBOX label for reconciliation", category: .coreData, error: error)
+                inboxLabel = nil
+            }
 
             for (messageId, gmail) in gmailData {
                 guard let localMessage = localMessageDict[messageId] else {
