@@ -15,36 +15,68 @@ struct esc_chatmailApp: App {
     @Environment(\.scenePhase) var scenePhase
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
-    init() {
-        // IMPORTANT: Check for fresh install FIRST, before any auth restoration
-        FreshInstallHandler().checkAndHandleFreshInstall()
+    @State private var isInitialized = false
 
+    init() {
         configureGoogleSignIn()
         configureBackgroundTasks()
 
-        // Initialize Core Data stack early
+        // Trigger Core Data stack initialization (async load starts here)
         _ = CoreDataStack.shared.persistentContainer
 
         // Setup attachment directories
         AttachmentPaths.setupDirectories()
 
-        // NOW restore previous sign-in (after fresh install check)
-        // This ensures we don't restore a session from a deleted app
-        AuthSession.shared.restorePreviousSignIn()
+        // NOTE: Fresh install check and auth restoration moved to initializeApp()
+        // to properly await async operations before showing ContentView
     }
     
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environment(\.managedObjectContext, dependencies.viewContext)
-                .environmentObject(dependencies)
-                .environmentObject(dependencies.authSession) // backward compatibility
-                .onOpenURL { url in
-                    GIDSignIn.sharedInstance.handle(url)
-                }
-                .onChange(of: scenePhase) { oldPhase, newPhase in
-                    handleScenePhaseChange(newPhase)
-                }
+            if isInitialized {
+                ContentView()
+                    .environment(\.managedObjectContext, dependencies.viewContext)
+                    .environmentObject(dependencies)
+                    .environmentObject(dependencies.authSession) // backward compatibility
+                    .onOpenURL { url in
+                        GIDSignIn.sharedInstance.handle(url)
+                    }
+                    .onChange(of: scenePhase) { oldPhase, newPhase in
+                        handleScenePhaseChange(newPhase)
+                    }
+            } else {
+                AppLoadingView()
+                    .task {
+                        await initializeApp()
+                    }
+            }
+        }
+    }
+
+    private func initializeApp() async {
+        // 1. Fresh install check (awaited - completes before continuing)
+        await FreshInstallHandler().checkAndHandleFreshInstall()
+
+        // 2. Wait for Core Data store to load
+        await waitForCoreData()
+
+        // 3. Restore auth session (after cleanup complete)
+        AuthSession.shared.restorePreviousSignIn()
+
+        // 4. Ready to show main UI
+        isInitialized = true
+    }
+
+    private func waitForCoreData() async {
+        let startTime = Date()
+        let timeout: TimeInterval = 10.0
+
+        while !CoreDataStack.shared.isStoreLoaded {
+            if Date().timeIntervalSince(startTime) > timeout {
+                Log.error("Core Data store load timeout", category: .coreData)
+                break
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
         }
     }
     

@@ -24,14 +24,14 @@ struct FreshInstallHandler {
 
     /// Checks for fresh install and performs cleanup if needed.
     /// Should be called early in app launch, before auth restoration.
-    func checkAndHandleFreshInstall() {
+    func checkAndHandleFreshInstall() async {
         let hasUserDefaultsID = userDefaults.string(forKey: Self.installationKey) != nil
         let hasKeychainData = (try? keychainService.loadString(for: .installationId)) != nil
 
         if !hasUserDefaultsID {
-            handleFreshInstall(hasKeychainData: hasKeychainData)
+            await handleFreshInstall(hasKeychainData: hasKeychainData)
         } else if let storedID = userDefaults.string(forKey: Self.installationKey) {
-            verifyInstallationConsistency(storedID: storedID)
+            await verifyInstallationConsistency(storedID: storedID)
         }
 
         ensureInstallTimestampExists()
@@ -39,21 +39,21 @@ struct FreshInstallHandler {
 
     // MARK: - Private Methods
 
-    private func handleFreshInstall(hasKeychainData: Bool) {
+    private func handleFreshInstall(hasKeychainData: Bool) async {
         Log.info("Fresh install detected - UserDefaults cleared", category: .auth)
 
         if hasKeychainData {
             Log.warning("Keychain data from previous installation found - cleaning up", category: .auth)
         }
 
-        performCleanup()
+        await performCleanup()
         setupNewInstallation()
     }
 
-    private func verifyInstallationConsistency(storedID: String) {
+    private func verifyInstallationConsistency(storedID: String) async {
         if !keychainService.verifyInstallationId(storedID) {
             Log.warning("Installation ID mismatch - performing cleanup", category: .auth)
-            performCleanup()
+            await performCleanup()
             setupNewInstallation()
         }
     }
@@ -90,16 +90,16 @@ struct FreshInstallHandler {
         }
     }
 
-    private func performCleanup() {
+    private func performCleanup() async {
         Log.info("Performing fresh install cleanup...", category: .auth)
 
         signOutFromGoogle()
-        clearAuthSession()
+        await clearAuthSession()
         clearKeychain()
-        clearTokens()
+        await clearTokens()
         clearUserDefaults()
         clearCoreData()
-        clearCaches()
+        await clearCaches()
         clearAttachmentFiles()
 
         Log.info("Fresh install cleanup complete", category: .auth)
@@ -110,9 +110,9 @@ struct FreshInstallHandler {
         GIDSignIn.sharedInstance.signOut()
     }
 
-    private func clearAuthSession() {
+    private func clearAuthSession() async {
         Log.debug("Clearing AuthSession", category: .auth)
-        Task { @MainActor in
+        await MainActor.run {
             AuthSession.shared.currentUser = nil
             AuthSession.shared.isAuthenticated = false
             AuthSession.shared.userEmail = nil
@@ -131,9 +131,9 @@ struct FreshInstallHandler {
         }
     }
 
-    private func clearTokens() {
+    private func clearTokens() async {
         Log.debug("Clearing tokens", category: .auth)
-        Task { @MainActor in
+        await MainActor.run {
             do {
                 try TokenManager.shared.clearTokens()
                 Log.debug("Tokens cleared", category: .auth)
@@ -162,20 +162,16 @@ struct FreshInstallHandler {
         }
     }
 
-    private func clearCaches() {
+    private func clearCaches() async {
         Log.debug("Clearing in-memory caches", category: .general)
-        Task { @MainActor in
+        await MainActor.run {
             ConversationCache.shared.clear()
         }
-        Task {
-            await PersonCache.shared.clearCache()
-        }
+        await PersonCache.shared.clearCache()
         Log.debug("In-memory caches cleared", category: .general)
 
         Log.debug("Clearing attachment caches", category: .attachment)
-        Task {
-            await AttachmentCacheActor.shared.clearCache(level: .aggressive)
-        }
+        await AttachmentCacheActor.shared.clearCache(level: .aggressive)
     }
 
     private func clearAttachmentFiles() {
