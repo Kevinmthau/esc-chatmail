@@ -210,11 +210,19 @@ class MessageProcessor {
                !(part.mimeType?.hasPrefix("multipart/") ?? false),
                !seenIds.contains(attachmentId) {
                 seenIds.insert(attachmentId)
+
+                // Extract Content-ID header for inline attachments (cid: URLs)
+                // Content-ID format is typically: <unique-id@domain.com>
+                // We strip the angle brackets for matching against cid: URLs
+                let contentId = part.headers?.first(where: { $0.name.lowercased() == "content-id" })?.value
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "<>"))
+
                 let attachment = AttachmentInfo(
                     id: attachmentId,
                     filename: part.filename ?? "attachment",
                     mimeType: part.mimeType ?? "application/octet-stream",
-                    size: part.body?.size ?? 0
+                    size: part.body?.size ?? 0,
+                    contentId: contentId
                 )
                 attachments.append(attachment)
             }
@@ -274,4 +282,5 @@ struct AttachmentInfo: Sendable {
     let filename: String
     let mimeType: String
     let size: Int
+    let contentId: String?
 }

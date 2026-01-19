@@ -148,6 +148,7 @@ struct AttachmentFactory {
             into: context
         ) as! Attachment
         attachment.setValue(info.id, forKey: "id")
+        attachment.setValue(info.contentId, forKey: "contentId")
         attachment.setValue(info.filename, forKey: "filename")
         attachment.setValue(info.mimeType, forKey: "mimeType")
         attachment.setValue(Int64(info.size), forKey: "byteSize")

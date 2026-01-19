@@ -5,27 +5,15 @@ struct ParticipantsListView: View {
     let onAddContact: (Person) -> Void
     let onEditContact: (String) -> Void
     @Environment(\.dismiss) private var dismiss
-    private let contactsResolver = ContactsResolver.shared
     private let participantLoader = ParticipantLoader.shared
 
-    private var otherParticipants: [Person] {
-        let currentUserEmail = AuthSession.shared.userEmail ?? ""
-        let otherEmails = Set(participantLoader.extractNonMeParticipants(
-            from: conversation,
-            currentUserEmail: currentUserEmail
-        ).map { EmailNormalizer.normalize($0) })
-
-        guard let participants = conversation.participants else { return [] }
-        return participants.compactMap { participant -> Person? in
-            guard let person = participant.person else { return nil }
-            return otherEmails.contains(EmailNormalizer.normalize(person.email)) ? person : nil
-        }
-    }
+    /// Cached list of other participants to avoid recomputation on every render.
+    @State private var cachedOtherParticipants: [Person] = []
 
     var body: some View {
         NavigationView {
             List {
-                ForEach(otherParticipants, id: \.email) { person in
+                ForEach(cachedOtherParticipants, id: \.email) { person in
                     ParticipantRow(
                         person: person,
                         onAddContact: {
@@ -46,6 +34,29 @@ struct ParticipantsListView: View {
                     }
                 }
             }
+            .onAppear {
+                updateOtherParticipants()
+            }
+        }
+    }
+
+    /// Computes the list of other participants (non-current-user).
+    /// Uses email normalization to properly match participants.
+    private func updateOtherParticipants() {
+        let currentUserEmail = AuthSession.shared.userEmail ?? ""
+        let otherEmails = Set(participantLoader.extractNonMeParticipants(
+            from: conversation,
+            currentUserEmail: currentUserEmail
+        ).map { EmailNormalizer.normalize($0) })
+
+        guard let participants = conversation.participants else {
+            cachedOtherParticipants = []
+            return
+        }
+
+        cachedOtherParticipants = participants.compactMap { participant -> Person? in
+            guard let person = participant.person else { return nil }
+            return otherEmails.contains(EmailNormalizer.normalize(person.email)) ? person : nil
         }
     }
 }

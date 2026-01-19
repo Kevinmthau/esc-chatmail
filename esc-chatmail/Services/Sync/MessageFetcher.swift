@@ -2,6 +2,13 @@ import Foundation
 
 // Note: SyncConfig is defined in Constants.swift
 
+/// Result of a bounded concurrency fetch operation
+private struct BoundedFetchResult {
+    let successfulMessages: [GmailMessage]
+    let retriableFailedIds: [String]
+    let permanentlyFailedIds: [String]
+}
+
 /// Handles fetching messages from the Gmail API with retry logic and timeout handling
 final class MessageFetcher: @unchecked Sendable {
     private let apiClient: GmailAPIClient
@@ -57,26 +64,19 @@ final class MessageFetcher: @unchecked Sendable {
         return false
     }
 
-    /// Fetches a batch of messages by ID with automatic retry on failure
+    /// Fetches messages with bounded concurrency to prevent resource exhaustion.
     /// - Parameters:
-    ///   - ids: Array of Gmail message IDs to fetch
-    ///   - onSuccess: Callback for each successfully fetched message
-    /// - Returns: Array of message IDs that permanently failed to fetch
-    func fetchBatch(
-        _ ids: [String],
-        onSuccess: @escaping @Sendable (GmailMessage) async -> Void
-    ) async -> [String] {
-        guard !Task.isCancelled else {
-            Log.debug("Batch processing cancelled", category: .sync)
-            return ids
-        }
-
-        var currentFailedIds: [String] = []
-        var permanentlyFailed: [String] = []
+    ///   - ids: Array of message IDs to fetch
+    ///   - isFinalAttempt: If true, all failures are treated as permanent
+    /// - Returns: Result containing successful messages and categorized failures
+    private func fetchWithBoundedConcurrency(
+        ids: [String],
+        isFinalAttempt: Bool = false
+    ) async -> BoundedFetchResult {
         var successfulMessages: [GmailMessage] = []
+        var retriableFailedIds: [String] = []
+        var permanentlyFailedIds: [String] = []
 
-        // First attempt with timeout per message, using bounded concurrency
-        // to prevent resource exhaustion with large mailboxes
         await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
             var iterator = ids.makeIterator()
             var activeTasks = 0
@@ -107,11 +107,10 @@ final class MessageFetcher: @unchecked Sendable {
                 case .success(let message):
                     successfulMessages.append(message)
                 case .failure(let error):
-                    if self.isRetriableError(error) {
-                        currentFailedIds.append(id)
+                    if isFinalAttempt || !self.isRetriableError(error) {
+                        permanentlyFailedIds.append(id)
                     } else {
-                        Log.warning("Non-retriable error for message \(id): \(error.localizedDescription)", category: .sync)
-                        permanentlyFailed.append(id)
+                        retriableFailedIds.append(id)
                     }
                 }
 
@@ -132,14 +131,54 @@ final class MessageFetcher: @unchecked Sendable {
             }
         }
 
-        // Sort by internalDate and persist in chronological order
+        return BoundedFetchResult(
+            successfulMessages: successfulMessages,
+            retriableFailedIds: retriableFailedIds,
+            permanentlyFailedIds: permanentlyFailedIds
+        )
+    }
+
+    /// Sorts messages by internalDate and invokes callback for each in chronological order.
+    private func persistInChronologicalOrder(
+        _ messages: [GmailMessage],
+        onSuccess: @escaping @Sendable (GmailMessage) async -> Void
+    ) async {
         // internalDate is milliseconds since epoch as a string; nil sorts to beginning
-        let sortedMessages = successfulMessages.sorted {
+        let sortedMessages = messages.sorted {
             ($0.internalDate ?? "0") < ($1.internalDate ?? "0")
         }
         for message in sortedMessages {
             await onSuccess(message)
         }
+    }
+
+    /// Fetches a batch of messages by ID with automatic retry on failure
+    /// - Parameters:
+    ///   - ids: Array of Gmail message IDs to fetch
+    ///   - onSuccess: Callback for each successfully fetched message
+    /// - Returns: Array of message IDs that permanently failed to fetch
+    func fetchBatch(
+        _ ids: [String],
+        onSuccess: @escaping @Sendable (GmailMessage) async -> Void
+    ) async -> [String] {
+        guard !Task.isCancelled else {
+            Log.debug("Batch processing cancelled", category: .sync)
+            return ids
+        }
+
+        var permanentlyFailed: [String] = []
+
+        // First attempt
+        let initialResult = await fetchWithBoundedConcurrency(ids: ids)
+        permanentlyFailed.append(contentsOf: initialResult.permanentlyFailedIds)
+
+        for id in initialResult.permanentlyFailedIds {
+            Log.warning("Non-retriable error for message \(id)", category: .sync)
+        }
+
+        await persistInChronologicalOrder(initialResult.successfulMessages, onSuccess: onSuccess)
+
+        var currentFailedIds = initialResult.retriableFailedIds
 
         // Retry loop with exponential backoff
         for attempt in 1...maxRetryAttempts {
@@ -160,75 +199,21 @@ final class MessageFetcher: @unchecked Sendable {
 
             guard !Task.isCancelled else { break }
 
-            var stillFailed: [String] = []
-            var retrySuccessfulMessages: [GmailMessage] = []
+            let isFinalAttempt = attempt == maxRetryAttempts
+            let retryResult = await fetchWithBoundedConcurrency(ids: currentFailedIds, isFinalAttempt: isFinalAttempt)
 
-            // Use bounded concurrency for retries as well
-            await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
-                var iterator = currentFailedIds.makeIterator()
-                var activeTasks = 0
-                let maxConcurrent = SyncConfig.maxConcurrentMessageFetches
-
-                // Start initial batch of retry tasks
-                while activeTasks < maxConcurrent, let id = iterator.next() {
-                    group.addTask { [apiClient] in
-                        do {
-                            let message = try await withTimeout(seconds: SyncConfig.messageFetchTimeout) {
-                                try await apiClient.getMessage(id: id)
-                            }
-                            return (id, .success(message))
-                        } catch {
-                            return (id, .failure(error))
-                        }
-                    }
-                    activeTasks += 1
-                }
-
-                for await (id, result) in group {
-                    if Task.isCancelled { break }
-
-                    activeTasks -= 1
-
-                    switch result {
-                    case .success(let message):
-                        retrySuccessfulMessages.append(message)
-                        Log.debug("Successfully fetched message \(message.id) on retry attempt \(attempt)", category: .sync)
-                    case .failure(let error):
-                        if attempt == maxRetryAttempts || !self.isRetriableError(error) {
-                            // Final attempt or non-retriable error
-                            Log.warning("Permanently failed to fetch message \(id) after \(attempt) attempts: \(error.localizedDescription)", category: .sync)
-                            permanentlyFailed.append(id)
-                        } else {
-                            stillFailed.append(id)
-                        }
-                    }
-
-                    // Start next retry task if there are more
-                    if let nextId = iterator.next() {
-                        group.addTask { [apiClient] in
-                            do {
-                                let message = try await withTimeout(seconds: SyncConfig.messageFetchTimeout) {
-                                    try await apiClient.getMessage(id: nextId)
-                                }
-                                return (nextId, .success(message))
-                            } catch {
-                                return (nextId, .failure(error))
-                            }
-                        }
-                        activeTasks += 1
-                    }
-                }
+            for message in retryResult.successfulMessages {
+                Log.debug("Successfully fetched message \(message.id) on retry attempt \(attempt)", category: .sync)
             }
 
-            // Sort retry successes by internalDate and persist in chronological order
-            let sortedRetryMessages = retrySuccessfulMessages.sorted {
-                ($0.internalDate ?? "0") < ($1.internalDate ?? "0")
-            }
-            for message in sortedRetryMessages {
-                await onSuccess(message)
+            for id in retryResult.permanentlyFailedIds {
+                Log.warning("Permanently failed to fetch message \(id) after \(attempt) attempts", category: .sync)
             }
 
-            currentFailedIds = stillFailed
+            permanentlyFailed.append(contentsOf: retryResult.permanentlyFailedIds)
+            await persistInChronologicalOrder(retryResult.successfulMessages, onSuccess: onSuccess)
+
+            currentFailedIds = retryResult.retriableFailedIds
         }
 
         // Any remaining failed IDs should be added to permanently failed

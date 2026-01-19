@@ -78,12 +78,8 @@ struct HTMLURLSanitizer {
                     // Only block explicitly dangerous URLs
                     guard let fullRange = Range(match.range, in: result) else { continue }
                     result.replaceSubrange(fullRange, with: transparentPixel)
-                } else if url.hasPrefix("cid:") {
-                    // Replace cid: (Content-ID) URLs with transparent placeholder
-                    // These are inline email attachments that WKWebView can't load directly
-                    guard let fullRange = Range(match.range, in: result) else { continue }
-                    result.replaceSubrange(fullRange, with: transparentPixel)
                 }
+                // cid: URLs are preserved - they'll be handled by CIDSchemeHandler
                 // Allow all other URLs including tracking pixels and newsletter images
             }
         }

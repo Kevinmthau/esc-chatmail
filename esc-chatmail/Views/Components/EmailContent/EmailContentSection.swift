@@ -14,7 +14,7 @@ struct EmailContentSection: View {
             if let html = htmlContent {
                 // Tappable mini WebView preview
                 Button(action: { showingHTMLView = true }) {
-                    MiniEmailWebView(htmlContent: html)
+                    MiniEmailWebView(htmlContent: html, message: message)
                         .frame(height: 200)
                         .cornerRadius(12)
                         .clipped()

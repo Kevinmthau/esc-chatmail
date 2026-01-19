@@ -6,20 +6,11 @@ extension GmailAPIClient {
 
     /// Lists history changes since a given history ID.
     nonisolated func listHistory(startHistoryId: String, pageToken: String? = nil) async throws -> HistoryResponse {
-        let endpoint = APIEndpoints.history()
-        guard var components = URLComponents(string: endpoint) else {
-            throw APIError.invalidURL(endpoint)
-        }
-        components.queryItems = [
-            URLQueryItem(name: "startHistoryId", value: startHistoryId)
-        ]
+        var queryItems = [URLQueryItem(name: "startHistoryId", value: startHistoryId)]
         if let pageToken = pageToken {
-            components.queryItems?.append(URLQueryItem(name: "pageToken", value: pageToken))
+            queryItems.append(URLQueryItem(name: "pageToken", value: pageToken))
         }
-
-        guard let url = components.url else {
-            throw APIError.invalidURL(endpoint)
-        }
+        let url = try buildURL(endpoint: APIEndpoints.history(), queryItems: queryItems)
         let request = try await authenticatedRequest(url: url)
 
         // Use specialized error handling for history API

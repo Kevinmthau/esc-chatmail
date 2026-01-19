@@ -5,12 +5,15 @@ import SwiftUI
 struct HTMLWebView: View {
     let htmlContent: String
     let isDarkMode: Bool
+    /// Optional message for resolving cid: URLs to inline attachments
+    var message: Message?
 
     var body: some View {
         BaseEmailWebView(
             htmlContent: htmlContent,
             mode: .fullInteractive,
-            isDarkMode: isDarkMode
+            isDarkMode: isDarkMode,
+            message: message
         )
     }
 }

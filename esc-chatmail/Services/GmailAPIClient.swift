@@ -42,6 +42,28 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         return URLSession(configuration: configuration)
     }
 
+    // MARK: - URL Building
+
+    /// Builds a URL from an endpoint string with optional query parameters.
+    /// Uses URLComponents to ensure proper escaping of special characters.
+    /// - Parameters:
+    ///   - endpoint: The API endpoint URL string
+    ///   - queryItems: Optional array of query parameters
+    /// - Returns: The constructed URL
+    /// - Throws: APIError.invalidURL if the URL cannot be constructed
+    nonisolated func buildURL(endpoint: String, queryItems: [URLQueryItem]? = nil) throws -> URL {
+        guard var components = URLComponents(string: endpoint) else {
+            throw APIError.invalidURL(endpoint)
+        }
+        if let queryItems = queryItems, !queryItems.isEmpty {
+            components.queryItems = queryItems
+        }
+        guard let url = components.url else {
+            throw APIError.invalidURL(endpoint)
+        }
+        return url
+    }
+
     // MARK: - Request Helpers
 
     /// Creates an authenticated request with the current access token.

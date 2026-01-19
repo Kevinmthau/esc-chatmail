@@ -6,10 +6,7 @@ extension GmailAPIClient {
 
     /// Fetches attachment data for a message.
     nonisolated func getAttachment(messageId: String, attachmentId: String) async throws -> Data {
-        let endpoint = APIEndpoints.attachment(messageId: messageId, attachmentId: attachmentId)
-        guard let url = URL(string: endpoint) else {
-            throw APIError.invalidURL(endpoint)
-        }
+        let url = try buildURL(endpoint: APIEndpoints.attachment(messageId: messageId, attachmentId: attachmentId))
         let request = try await authenticatedRequest(url: url)
         let response: AttachmentResponse = try await performRequestWithRetry(request)
 

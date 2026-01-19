@@ -222,51 +222,61 @@ final class AttachmentDownloader: ObservableObject {
         }
     }
 
-    func cleanupOrphanedFiles() {
+    /// Cleans up orphaned attachment files that no longer have corresponding Core Data entities.
+    /// Runs all operations in background to avoid blocking the main thread.
+    func cleanupOrphanedFiles() async {
         guard let appSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
 
-        let context = coreDataStack.viewContext
-        let request = NSFetchRequest<NSManagedObject>(entityName: "Attachment")
-        request.fetchBatchSize = 50  // Process in batches for better memory usage
+        // Fetch valid file paths in background context
+        let context = coreDataStack.newBackgroundContext()
+        let validFiles: Set<String> = await context.perform {
+            let request = NSFetchRequest<NSManagedObject>(entityName: "Attachment")
+            request.fetchBatchSize = 50
 
-        let attachments: [NSManagedObject]
-        do {
-            attachments = try context.fetch(request)
-        } catch {
-            Log.warning("Failed to fetch attachments for cleanup", category: .attachment)
-            return
+            let attachments: [NSManagedObject]
+            do {
+                attachments = try context.fetch(request)
+            } catch {
+                Log.warning("Failed to fetch attachments for cleanup", category: .attachment)
+                return Set<String>()
+            }
+
+            return Set(attachments.compactMap { attachment -> [String] in
+                guard let att = attachment as? Attachment else { return [] }
+                var files: [String] = []
+                if let localURL = att.localURL {
+                    files.append(localURL)
+                }
+                if let previewURL = att.previewURL {
+                    files.append(previewURL)
+                }
+                return files
+            }.flatMap { $0 })
         }
 
-        let validFiles = Set(attachments.compactMap { attachment -> [String] in
-            guard let att = attachment as? Attachment else { return [] }
-            var files: [String] = []
-            if let localURL = att.localURL {
-                files.append(localURL)
-            }
-            if let previewURL = att.previewURL {
-                files.append(previewURL)
-            }
-            return files
-        }.flatMap { $0 })
+        guard !validFiles.isEmpty || Task.isCancelled == false else { return }
 
-        // Clean attachments folder
-        let attachmentsURL = appSupportURL.appendingPathComponent("Attachments")
-        let attachmentContents = FileSystemErrorHandler.contentsOfDirectory(at: attachmentsURL, category: .attachment)
-        for fileURL in attachmentContents {
-            let relativePath = AttachmentPaths.relativePath(from: fileURL)
-            if let path = relativePath, !validFiles.contains(path) {
-                FileSystemErrorHandler.removeItem(at: fileURL, category: .attachment)
+        // Perform file I/O in detached task to avoid blocking
+        await Task.detached {
+            // Clean attachments folder
+            let attachmentsURL = appSupportURL.appendingPathComponent("Attachments")
+            let attachmentContents = FileSystemErrorHandler.contentsOfDirectory(at: attachmentsURL, category: .attachment)
+            for fileURL in attachmentContents {
+                let relativePath = AttachmentPaths.relativePath(from: fileURL)
+                if let path = relativePath, !validFiles.contains(path) {
+                    FileSystemErrorHandler.removeItem(at: fileURL, category: .attachment)
+                }
             }
-        }
 
-        // Clean previews folder
-        let previewsURL = appSupportURL.appendingPathComponent("Previews")
-        let previewContents = FileSystemErrorHandler.contentsOfDirectory(at: previewsURL, category: .attachment)
-        for fileURL in previewContents {
-            let relativePath = AttachmentPaths.relativePath(from: fileURL)
-            if let path = relativePath, !validFiles.contains(path) {
-                FileSystemErrorHandler.removeItem(at: fileURL, category: .attachment)
+            // Clean previews folder
+            let previewsURL = appSupportURL.appendingPathComponent("Previews")
+            let previewContents = FileSystemErrorHandler.contentsOfDirectory(at: previewsURL, category: .attachment)
+            for fileURL in previewContents {
+                let relativePath = AttachmentPaths.relativePath(from: fileURL)
+                if let path = relativePath, !validFiles.contains(path) {
+                    FileSystemErrorHandler.removeItem(at: fileURL, category: .attachment)
+                }
             }
-        }
+        }.value
     }
 }

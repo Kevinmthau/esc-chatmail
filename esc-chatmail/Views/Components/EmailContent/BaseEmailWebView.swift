@@ -17,9 +17,16 @@ struct BaseEmailWebView: UIViewRepresentable {
     let htmlContent: String
     let mode: EmailWebViewMode
     var isDarkMode: Bool = false
+    /// Optional message for resolving cid: URLs to inline attachments
+    var message: Message?
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
+
+        // Register cid: scheme handler for inline attachments
+        let cidHandler = CIDSchemeHandler(message: message)
+        context.coordinator.cidHandler = cidHandler
+        configuration.setURLSchemeHandler(cidHandler, forURLScheme: "cid")
 
         switch mode {
         case .fullInteractive:
@@ -80,6 +87,8 @@ struct BaseEmailWebView: UIViewRepresentable {
         var parent: BaseEmailWebView
         var lastLoadedContent: String = ""
         private var isLoading = false
+        /// Holds strong reference to the cid: scheme handler
+        var cidHandler: CIDSchemeHandler?
 
         init(_ parent: BaseEmailWebView) {
             self.parent = parent
@@ -164,8 +173,9 @@ struct BaseEmailWebView: UIViewRepresentable {
                 }
 
                 // Block unsupported schemes that cause errors
+                // Note: "cid" is NOT blocked - it's handled by CIDSchemeHandler
                 let scheme = url.scheme?.lowercased() ?? ""
-                let unsupportedSchemes = ["javascript", "vbscript", "file", "x-apple-data-detectors", "cid"]
+                let unsupportedSchemes = ["javascript", "vbscript", "file", "x-apple-data-detectors"]
                 if unsupportedSchemes.contains(scheme) {
                     decisionHandler(.cancel)
                     return

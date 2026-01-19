@@ -8,6 +8,7 @@
     </entity>
     <entity name="Attachment" representedClassName="Attachment" syncable="YES">
         <attribute name="byteSize" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="contentId" optional="YES" attributeType="String"/>
         <attribute name="filename" attributeType="String"/>
         <attribute name="height" optional="YES" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
         <attribute name="id" optional="YES" attributeType="String"/>

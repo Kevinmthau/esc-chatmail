@@ -5,11 +5,14 @@ import SwiftUI
 struct MiniEmailWebView: View {
     let htmlContent: String
     var scale: CGFloat = 0.5
+    /// Optional message for resolving cid: URLs to inline attachments
+    var message: Message?
 
     var body: some View {
         BaseEmailWebView(
             htmlContent: htmlContent,
-            mode: .scaledPreview(scale: scale)
+            mode: .scaledPreview(scale: scale),
+            message: message
         )
     }
 }

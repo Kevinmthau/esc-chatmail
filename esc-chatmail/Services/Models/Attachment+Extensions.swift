@@ -7,6 +7,7 @@ extension Attachment {
     }
 
     @NSManaged public var id: String?
+    @NSManaged public var contentId: String?
     @NSManaged public var filename: String
     @NSManaged public var mimeType: String
     @NSManaged public var stateRaw: String

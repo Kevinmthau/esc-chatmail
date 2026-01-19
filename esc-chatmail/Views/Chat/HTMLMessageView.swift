@@ -25,7 +25,8 @@ struct HTMLPreviewView: View {
                 HTMLPreviewWebView(
                     htmlContent: html,
                     isDarkMode: colorScheme == .dark,
-                    maxHeight: maxHeight
+                    maxHeight: maxHeight,
+                    message: message
                 )
                 .frame(height: maxHeight)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -82,7 +83,8 @@ struct HTMLMessageView: View {
                 } else if let html = htmlContent {
                     HTMLWebView(
                         htmlContent: html,
-                        isDarkMode: colorScheme == .dark
+                        isDarkMode: colorScheme == .dark,
+                        message: message
                     )
                 } else {
                     ContentUnavailableView(

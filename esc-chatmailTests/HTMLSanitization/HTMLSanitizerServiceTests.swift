@@ -526,12 +526,11 @@ final class HTMLSanitizerServiceTests: XCTestCase {
         XCTAssertFalse(result.contains("<script"))
     }
 
-    func testSanitize_cidURLs_replacesWithPlaceholder() {
+    func testSanitize_cidURLs_preserves() {
+        // cid: URLs are preserved for CIDSchemeHandler to resolve at runtime
         let html = "<img src=\"cid:image001.png@01D12345.67890ABC\">"
         let result = sut.sanitize(html)
-        XCTAssertFalse(result.contains("cid:"))
-        // Should be replaced with transparent pixel
-        XCTAssertTrue(result.contains("data:image/gif;base64"))
+        XCTAssertTrue(result.contains("cid:image001.png@01D12345.67890ABC"))
     }
 
     func testSanitize_emptyImageSrc_replacesWithPlaceholder() {
@@ -644,11 +643,11 @@ final class HTMLURLSanitizerTests: XCTestCase {
         XCTAssertFalse(result.contains("javascript:"))
     }
 
-    func testSanitizeURLs_cidSrc_replaces() {
+    func testSanitizeURLs_cidSrc_preserves() {
+        // cid: URLs are preserved for CIDSchemeHandler to resolve at runtime
         let html = "<img src=\"cid:image001\">"
         let result = sut.sanitizeURLs(html)
-        XCTAssertFalse(result.contains("cid:"))
-        XCTAssertTrue(result.contains("data:image/gif;base64"))
+        XCTAssertTrue(result.contains("cid:image001"))
     }
 
     func testSanitizeURLs_emptySrc_replaces() {

@@ -6,47 +6,31 @@ extension GmailAPIClient {
 
     /// Lists messages in the mailbox.
     nonisolated func listMessages(pageToken: String? = nil, maxResults: Int = 100, query: String? = nil) async throws -> MessagesListResponse {
-        guard var components = URLComponents(string: APIEndpoints.messages()) else {
-            throw APIError.invalidURL(APIEndpoints.messages())
-        }
-        components.queryItems = [
-            URLQueryItem(name: "maxResults", value: String(maxResults))
-        ]
+        var queryItems = [URLQueryItem(name: "maxResults", value: String(maxResults))]
         if let pageToken = pageToken {
-            components.queryItems?.append(URLQueryItem(name: "pageToken", value: pageToken))
+            queryItems.append(URLQueryItem(name: "pageToken", value: pageToken))
         }
         if let query = query {
-            components.queryItems?.append(URLQueryItem(name: "q", value: query))
+            queryItems.append(URLQueryItem(name: "q", value: query))
         }
-
-        guard let url = components.url else {
-            throw APIError.invalidURL(APIEndpoints.messages())
-        }
+        let url = try buildURL(endpoint: APIEndpoints.messages(), queryItems: queryItems)
         let request = try await authenticatedRequest(url: url)
         return try await performRequestWithRetry(request)
     }
 
     /// Fetches a single message by ID.
     nonisolated func getMessage(id: String, format: String = "full") async throws -> GmailMessage {
-        let endpoint = APIEndpoints.message(id: id)
-        guard var components = URLComponents(string: endpoint) else {
-            throw APIError.invalidURL(endpoint)
-        }
-        components.queryItems = [URLQueryItem(name: "format", value: format)]
-
-        guard let url = components.url else {
-            throw APIError.invalidURL(endpoint)
-        }
+        let url = try buildURL(
+            endpoint: APIEndpoints.message(id: id),
+            queryItems: [URLQueryItem(name: "format", value: format)]
+        )
         let request = try await authenticatedRequest(url: url)
         return try await performRequestWithRetry(request)
     }
 
     /// Modifies a message's labels.
     nonisolated func modifyMessage(id: String, addLabelIds: [String]? = nil, removeLabelIds: [String]? = nil) async throws -> GmailMessage {
-        let endpoint = APIEndpoints.modifyMessage(id: id)
-        guard let url = URL(string: endpoint) else {
-            throw APIError.invalidURL(endpoint)
-        }
+        let url = try buildURL(endpoint: APIEndpoints.modifyMessage(id: id))
         var request = try await authenticatedRequest(url: url)
         request.httpMethod = "POST"
 
@@ -58,10 +42,7 @@ extension GmailAPIClient {
 
     /// Batch modifies multiple messages.
     nonisolated func batchModify(ids: [String], addLabelIds: [String]? = nil, removeLabelIds: [String]? = nil) async throws {
-        let endpoint = APIEndpoints.batchModify()
-        guard let url = URL(string: endpoint) else {
-            throw APIError.invalidURL(endpoint)
-        }
+        let url = try buildURL(endpoint: APIEndpoints.batchModify())
         var request = try await authenticatedRequest(url: url)
         request.httpMethod = "POST"
 
