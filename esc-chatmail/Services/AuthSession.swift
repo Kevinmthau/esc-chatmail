@@ -25,9 +25,12 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         currentUser?.refreshToken.tokenString
     }
     
-    func restorePreviousSignIn() {
-        // First check if we have a valid previous session
-        if GIDSignIn.sharedInstance.hasPreviousSignIn() {
+    func restorePreviousSignIn() async {
+        guard GIDSignIn.sharedInstance.hasPreviousSignIn() else {
+            return
+        }
+
+        await withCheckedContinuation { continuation in
             GIDSignIn.sharedInstance.restorePreviousSignIn { [weak self] user, error in
                 DispatchQueue.main.async {
                     if let user = user {
@@ -37,6 +40,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                         self?.isAuthenticated = true
                         self?.accessToken = user.accessToken.tokenString
                     }
+                    continuation.resume()
                 }
             }
         }

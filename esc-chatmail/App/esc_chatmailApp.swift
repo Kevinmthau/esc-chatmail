@@ -61,7 +61,7 @@ struct esc_chatmailApp: App {
         await waitForCoreData()
 
         // 3. Restore auth session (after cleanup complete)
-        AuthSession.shared.restorePreviousSignIn()
+        await AuthSession.shared.restorePreviousSignIn()
 
         // 4. Ready to show main UI
         isInitialized = true
