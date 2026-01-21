@@ -164,14 +164,8 @@ struct ChatView: View {
                         SwiftUI.Label("Archive", systemImage: "archivebox")
                     }
 
-                    Button(action: { viewModel.togglePin() }) {
-                        SwiftUI.Label(conversation.pinned ? "Unpin" : "Pin",
-                              systemImage: conversation.pinned ? "pin.slash" : "pin")
-                    }
-
-                    Button(action: { viewModel.toggleMute() }) {
-                        SwiftUI.Label(conversation.muted ? "Unmute" : "Mute",
-                              systemImage: conversation.muted ? "bell" : "bell.slash")
+                    Button(action: { viewModel.reportSpam() }) {
+                        SwiftUI.Label("Report Spam", systemImage: "exclamationmark.triangle")
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")

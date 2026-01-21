@@ -8,6 +8,7 @@ struct HTMLLoadResult {
     enum HTMLLoadSource {
         case messageId
         case storageURI
+        case recovered
         case plainTextFallback
         case notFound
     }
@@ -85,7 +86,15 @@ final class HTMLContentLoader {
             return HTMLLoadResult(html: wrapped, source: .storageURI)
         }
 
-        // Method 3: Plain text fallback (don't cache as it's trivial to generate)
+        // Method 3: Recovery - fetch from Gmail API if local content missing
+        if let html = await HTMLContentRecoveryService.shared.recoverHTMLContent(messageId: messageId) {
+            let wrapped = sanitizer.wrapHTMLForDisplay(html, isDarkMode: isDarkMode)
+            let cost = wrapped.utf8.count
+            htmlCache.setObject(wrapped as NSString, forKey: cacheKey, cost: cost)
+            return HTMLLoadResult(html: wrapped, source: .recovered)
+        }
+
+        // Method 4: Plain text fallback (don't cache as it's trivial to generate)
         if let text = bodyText, !text.isEmpty {
             let html = convertPlainTextToHTML(text)
             let wrapped = sanitizer.wrapHTMLForDisplay(html, isDarkMode: isDarkMode)

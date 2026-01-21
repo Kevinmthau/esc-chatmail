@@ -221,6 +221,7 @@ struct AbandonedActionInfo: Identifiable {
         case .archiveConversation: return "Archive conversation"
         case .star: return "Star message"
         case .unstar: return "Unstar message"
+        case .reportSpam: return "Report spam"
         }
     }
 }

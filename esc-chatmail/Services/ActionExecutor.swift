@@ -74,6 +74,13 @@ actor GmailActionExecutor: ActionExecutorProtocol {
             }
             _ = try await apiClient.modifyMessage(id: messageId, removeLabelIds: ["STARRED"])
             Log.debug("Executed unstar for message: \(messageId)", category: .sync)
+
+        case .reportSpam:
+            guard let messageIds = payload?["messageIds"] as? [String], !messageIds.isEmpty else {
+                throw PendingActionError.missingMessageIds
+            }
+            try await apiClient.batchModify(ids: messageIds, addLabelIds: ["SPAM"])
+            Log.debug("Executed reportSpam for \(messageIds.count) messages", category: .sync)
         }
     }
 }

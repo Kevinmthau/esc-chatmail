@@ -102,23 +102,9 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Conversation Settings
 
-    func togglePin() {
-        conversation.pinned.toggle()
-        do {
-            try coreDataStack.save(context: coreDataStack.viewContext)
-        } catch {
-            Log.error("Failed to toggle pin", category: .ui, error: error)
-            conversation.pinned.toggle()
-        }
-    }
-
-    func toggleMute() {
-        conversation.muted.toggle()
-        do {
-            try coreDataStack.save(context: coreDataStack.viewContext)
-        } catch {
-            Log.error("Failed to toggle mute", category: .ui, error: error)
-            conversation.muted.toggle()
+    func reportSpam() {
+        Task {
+            await messageActions.reportSpamConversation(conversation: conversation)
         }
     }
 

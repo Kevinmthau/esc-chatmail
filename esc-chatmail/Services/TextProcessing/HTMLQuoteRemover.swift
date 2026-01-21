@@ -6,8 +6,8 @@ enum HTMLQuoteRemover {
 
     // MARK: - Quote Patterns
 
-    /// HTML quote block patterns to remove entirely
-    private static let quoteBlockPatterns = [
+    /// HTML quote block patterns to remove entirely (string form for reference)
+    private static let quoteBlockPatternStrings = [
         // Gmail quote blocks
         "<div class=\"gmail_quote\">.*?</div>",
         "<blockquote[^>]*>.*?</blockquote>",
@@ -51,8 +51,8 @@ enum HTMLQuoteRemover {
         "<table[^>]*class=\"[^\"]*signature[^\"]*\"[^>]*>.*?</table>",
     ]
 
-    /// Patterns that indicate the start of quoted content (truncate from here)
-    private static let quoteTruncationPatterns = [
+    /// Patterns that indicate the start of quoted content (truncate from here) - string form
+    private static let quoteTruncationPatternStrings = [
         "On .+? wrote:",
         "From:</strong>.*?Subject:</strong>",
         "-----Original Message-----",
@@ -97,6 +97,20 @@ enum HTMLQuoteRemover {
         "If you are not the intended recipient",
     ]
 
+    /// Pre-compiled regex patterns for quote block removal (compiled once at class load)
+    private static let compiledQuoteBlockPatterns: [NSRegularExpression] = {
+        quoteBlockPatternStrings.compactMap {
+            try? NSRegularExpression(pattern: $0, options: [.caseInsensitive, .dotMatchesLineSeparators])
+        }
+    }()
+
+    /// Pre-compiled regex patterns for truncation (compiled once at class load)
+    private static let compiledTruncationPatterns: [NSRegularExpression] = {
+        quoteTruncationPatternStrings.compactMap {
+            try? NSRegularExpression(pattern: $0, options: [.caseInsensitive, .dotMatchesLineSeparators])
+        }
+    }()
+
     // MARK: - Public API
 
     /// Removes quoted text from HTML email content
@@ -107,27 +121,22 @@ enum HTMLQuoteRemover {
 
         var cleanedHTML = html
 
-        // Remove quote block patterns
-        cleanedHTML = removePatterns(quoteBlockPatterns, from: cleanedHTML)
+        // Remove quote block patterns using pre-compiled regex
+        cleanedHTML = removePatterns(compiledQuoteBlockPatterns, from: cleanedHTML)
 
-        // Truncate at "On ... wrote:" and similar patterns
-        cleanedHTML = truncateAtPatterns(quoteTruncationPatterns, in: cleanedHTML)
+        // Truncate at "On ... wrote:" and similar patterns using pre-compiled regex
+        cleanedHTML = truncateAtPatterns(compiledTruncationPatterns, in: cleanedHTML)
 
         return cleanedHTML
     }
 
     // MARK: - Private Helpers
 
-    /// Removes all occurrences of patterns from the text
-    private static func removePatterns(_ patterns: [String], from text: String) -> String {
+    /// Removes all occurrences of patterns from the text using pre-compiled regex
+    private static func removePatterns(_ patterns: [NSRegularExpression], from text: String) -> String {
         var result = text
 
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(
-                pattern: pattern,
-                options: [.caseInsensitive, .dotMatchesLineSeparators]
-            ) else { continue }
-
+        for regex in patterns {
             let range = NSRange(location: 0, length: result.utf16.count)
             result = regex.stringByReplacingMatches(
                 in: result,
@@ -140,16 +149,11 @@ enum HTMLQuoteRemover {
         return result
     }
 
-    /// Truncates text at the first occurrence of any pattern
-    private static func truncateAtPatterns(_ patterns: [String], in text: String) -> String {
+    /// Truncates text at the first occurrence of any pattern using pre-compiled regex
+    private static func truncateAtPatterns(_ patterns: [NSRegularExpression], in text: String) -> String {
         var result = text
 
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(
-                pattern: pattern,
-                options: [.caseInsensitive, .dotMatchesLineSeparators]
-            ) else { continue }
-
+        for regex in patterns {
             let range = NSRange(location: 0, length: result.utf16.count)
             if let match = regex.firstMatch(in: result, options: [], range: range),
                let matchRange = Range(match.range, in: result) {

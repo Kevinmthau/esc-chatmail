@@ -6,8 +6,8 @@ enum PlainTextQuoteRemover {
 
     // MARK: - Quote Indicator Patterns
 
-    /// Regex patterns that indicate quoted content
-    private static let quoteIndicatorPatterns = [
+    /// Regex patterns that indicate quoted content (string form for reference)
+    private static let quoteIndicatorPatternStrings = [
         // Time-based quotes
         "On .+ wrote:",
         "On .+, .+ wrote:",
@@ -26,6 +26,13 @@ enum PlainTextQuoteRemover {
         "---------- Forwarded message ---------",
         "------ Original Message ------",
     ]
+
+    /// Pre-compiled regex patterns for performance (compiled once at class load)
+    private static let compiledQuotePatterns: [NSRegularExpression] = {
+        quoteIndicatorPatternStrings.compactMap {
+            try? NSRegularExpression(pattern: $0, options: [.caseInsensitive])
+        }
+    }()
 
     // MARK: - Signature Patterns
 
@@ -199,13 +206,9 @@ enum PlainTextQuoteRemover {
     /// Finds the earliest match of any quote indicator pattern
     private static func findEarliestPatternMatch(in text: String) -> Int {
         var earliestIndex = text.count
+        let range = NSRange(location: 0, length: text.utf16.count)
 
-        for pattern in quoteIndicatorPatterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-                continue
-            }
-
-            let range = NSRange(location: 0, length: text.utf16.count)
+        for regex in compiledQuotePatterns {
             if let match = regex.firstMatch(in: text, options: [], range: range),
                let matchRange = Range(match.range, in: text) {
                 let index = text.distance(from: text.startIndex, to: matchRange.lowerBound)

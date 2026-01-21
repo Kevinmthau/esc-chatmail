@@ -239,6 +239,46 @@ final class MessageActions: ObservableObject {
         }
     }
 
+    /// Reports a conversation as spam by adding the SPAM label to all messages.
+    /// Also archives the conversation locally to remove it from the chat list.
+    /// - Parameter conversation: The conversation to report as spam
+    func reportSpamConversation(conversation: Conversation) async {
+        Log.debug("reportSpamConversation called for '\(conversation.displayName ?? "unknown")' (id: \(conversation.id))", category: .message)
+
+        guard let messages = conversation.messages, !messages.isEmpty else {
+            Log.warning("No messages in conversation '\(conversation.displayName ?? "unknown")' (id: \(conversation.id))", category: .message)
+            return
+        }
+
+        Log.debug("Found \(messages.count) messages to report as spam", category: .message)
+
+        // Collect message IDs and mark as locally modified
+        var messageIds: [String] = []
+        let modificationDate = Date()
+        for message in messages {
+            message.localModifiedAt = modificationDate
+            if !message.id.isEmpty {
+                messageIds.append(message.id)
+            }
+        }
+
+        // Archive the conversation locally to remove from chat list
+        conversation.archivedAt = modificationDate
+
+        let context = coreDataStack.viewContext
+        coreDataStack.saveIfNeeded(context: context)
+        Log.debug("Marked \(messageIds.count) messages for spam, archived conversation", category: .message)
+
+        // Queue sync to Gmail
+        if !messageIds.isEmpty {
+            await pendingActionsManager.queueConversationAction(
+                type: .reportSpam,
+                conversationId: conversation.id,
+                messageIds: messageIds
+            )
+        }
+    }
+
     // MARK: - Star/Unstar
 
     func star(message: Message) async {

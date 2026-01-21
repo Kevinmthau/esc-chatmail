@@ -3,9 +3,10 @@ import Foundation
 /// Wraps HTML content for display in WebView with proper styling and security
 struct HTMLDisplayWrapper {
     /// Wraps HTML content with full HTML document structure and styling
+    /// Note: HTML should already be sanitized by HTMLSanitizerService.sanitize() before calling this
     func wrapHTMLForDisplay(_ html: String, isDarkMode: Bool) -> String {
-        // Use lighter sanitization to preserve email formatting
-        let sanitized = lightSanitize(html)
+        // Content is pre-sanitized by HTMLSanitizerService, so we just wrap it
+        let sanitized = html
 
         let backgroundColor = isDarkMode ? "#1c1c1e" : "#ffffff"
         let textColor = isDarkMode ? "#ffffff" : "#000000"
@@ -53,7 +54,6 @@ struct HTMLDisplayWrapper {
                     max-width: 100% !important;
                     height: auto !important;
                     border: 0;
-                    display: block;
                 }
                 /* Respect table layouts for newsletters */
                 table {
@@ -132,37 +132,5 @@ struct HTMLDisplayWrapper {
         </body>
         </html>
         """
-    }
-
-    /// Lighter sanitization that preserves more formatting
-    func lightSanitize(_ html: String) -> String {
-        var sanitized = html
-
-        // Remove only the most dangerous elements
-        sanitized = RegexSanitizer.replace(
-            in: sanitized,
-            pattern: "<script\\b[^<]*(?:(?!<\\/script>)<[^<]*)*<\\/script>|<script\\b[^>]*\\/>"
-        )
-        sanitized = RegexSanitizer.replace(
-            in: sanitized,
-            pattern: "\\s*on\\w+\\s*=\\s*[\"'][^\"']*[\"']|\\s*on\\w+\\s*=\\s*[^\\s>]+"
-        )
-        sanitized = RegexSanitizer.replace(
-            in: sanitized,
-            pattern: "<meta\\s+[^>]*http-equiv\\s*=\\s*[\"']refresh[\"'][^>]*>"
-        )
-        sanitized = RegexSanitizer.replace(
-            in: sanitized,
-            pattern: "<form\\b[^<]*(?:(?!<\\/form>)<[^<]*)*<\\/form>|<form\\b[^>]*\\/>"
-        )
-        sanitized = RegexSanitizer.replace(
-            in: sanitized,
-            pattern: "<iframe\\b[^<]*(?:(?!<\\/iframe>)<[^<]*)*<\\/iframe>|<iframe\\b[^>]*\\/>"
-        )
-
-        // Keep style tags for email formatting
-        // Keep most HTML structure intact
-
-        return sanitized
     }
 }

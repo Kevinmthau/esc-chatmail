@@ -80,6 +80,7 @@ extension PendingAction {
         case archiveConversation = "archiveConversation"
         case star = "star"
         case unstar = "unstar"
+        case reportSpam = "reportSpam"
     }
 
     enum Status: String {

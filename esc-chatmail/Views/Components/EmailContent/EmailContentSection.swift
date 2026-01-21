@@ -58,10 +58,11 @@ struct EmailContentSection: View {
 
     private func loadHTML() async {
         let messageId = message.id
-
-        // Try loading from cache first
         let handler = HTMLContentHandler.shared
-        if let html = handler.loadHTML(for: messageId) {
+
+        // Method 1: Try loading from message ID (checks if file exists)
+        if handler.htmlFileExists(for: messageId),
+           let html = handler.loadHTML(for: messageId) {
             await MainActor.run {
                 htmlContent = html
                 isLoading = false
@@ -69,23 +70,58 @@ struct EmailContentSection: View {
             return
         }
 
-        // Try loading from storage URI
-        if let uri = message.bodyStorageURI {
-            if let resolved = resolveStorageURI(uri) {
-                if let html = try? String(contentsOf: resolved, encoding: .utf8) {
-                    await MainActor.run {
-                        htmlContent = html
-                        isLoading = false
-                    }
-                    return
-                }
+        // Method 2: Try loading from storage URI
+        if let uri = message.bodyStorageURI,
+           let resolved = resolveStorageURI(uri),
+           FileManager.default.fileExists(atPath: resolved.path),
+           let html = try? String(contentsOf: resolved, encoding: .utf8) {
+            await MainActor.run {
+                htmlContent = html
+                isLoading = false
             }
+            return
+        }
+
+        // Method 3: Recovery - fetch from Gmail API if local content missing
+        // Try recovery before plain text fallback to get proper HTML formatting
+        if let html = await HTMLContentRecoveryService.shared.recoverHTMLContent(messageId: messageId) {
+            await MainActor.run {
+                htmlContent = html
+                isLoading = false
+            }
+            return
+        }
+
+        // Method 4: Fallback to bodyText (last resort, loses HTML formatting)
+        if let text = message.bodyText, !text.isEmpty {
+            let html = convertPlainTextToHTML(text)
+            await MainActor.run {
+                htmlContent = html
+                isLoading = false
+            }
+            return
         }
 
         Log.info("EmailContentSection: No HTML content for message \(messageId)", category: .ui)
         await MainActor.run {
             isLoading = false
         }
+    }
+
+    private func convertPlainTextToHTML(_ text: String) -> String {
+        let escaped = text
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\n", with: "<br>")
+
+        return """
+        <html>
+        <body style="font-family: -apple-system, system-ui; padding: 10px;">
+        \(escaped)
+        </body>
+        </html>
+        """
     }
 
     /// Resolves a storage URI string to a valid file URL
