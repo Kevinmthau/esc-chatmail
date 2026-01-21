@@ -24,6 +24,11 @@ final class HTMLContentHandler {
         }
     }
 
+    /// Ensures the Messages directory exists. Call after cleanup operations that may delete it.
+    func ensureDirectoryExists() {
+        createMessagesDirectoryIfNeeded()
+    }
+
     func saveHTML(_ html: String, for messageId: String) -> URL? {
         let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
 

@@ -64,7 +64,8 @@ struct ImageAttachmentBubble: View {
         .disabled(!attachment.isReady)
         .onAppear {
             thumbnailLoader.load(attachmentId: attachment.id, previewPath: attachment.previewURL)
-            if attachment.state == .queued {
+            // Download if queued, failed, or file is missing from disk
+            if attachment.state == .queued || attachment.state == .failed || attachment.needsRedownload {
                 Task {
                     await downloader.downloadAttachmentIfNeeded(for: attachment)
                 }

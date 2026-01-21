@@ -49,6 +49,14 @@ extension Attachment {
         mimeType
     }
 
+    /// Whether this attachment is marked as downloaded but the file is missing from disk
+    var needsRedownload: Bool {
+        guard state == .downloaded || state == .uploaded else { return false }
+        guard let localPath = localURL else { return true }
+        guard let fullURL = AttachmentPaths.fullURL(for: localPath) else { return true }
+        return !FileManager.default.fileExists(atPath: fullURL.path)
+    }
+
     /// Whether this attachment is likely a signature/logo image (small dimensions or tiny file size)
     var isLikelySignatureImage: Bool {
         guard mimeType.hasPrefix("image/") else { return false }

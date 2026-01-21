@@ -712,7 +712,37 @@ if GoogleConfig.isConfigured {
 1. Clears stale keychain credentials
 2. Signs out from Google
 3. Clears Core Data and caches
-4. Generates new installation ID
+4. Clears attachment/HTML storage directories
+5. **Recreates storage directories** - Critical: after clearing, calls `AttachmentPaths.setupDirectories()` and `HTMLContentHandler.shared.ensureDirectoryExists()` so sync can immediately write files
+6. Generates new installation ID
+
+### Attachment Download Recovery
+
+Attachments can end up in an inconsistent state (marked as `.downloaded` but file missing from disk) if:
+- Directory didn't exist during initial download
+- File was deleted externally
+- Fresh install cleanup ran after singletons were initialized
+
+**Detection** - `Attachment.needsRedownload` checks if state is `.downloaded`/`.uploaded` but file is missing:
+```swift
+var needsRedownload: Bool {
+    guard state == .downloaded || state == .uploaded else { return false }
+    guard let localPath = localURL else { return true }
+    guard let fullURL = AttachmentPaths.fullURL(for: localPath) else { return true }
+    return !FileManager.default.fileExists(atPath: fullURL.path)
+}
+```
+
+**Auto-recovery** - Views trigger re-download on appear:
+```swift
+.onAppear {
+    if attachment.state == .queued || attachment.state == .failed || attachment.needsRedownload {
+        Task { await downloader.downloadAttachmentIfNeeded(for: attachment) }
+    }
+}
+```
+
+**Prevention** - `AttachmentDownloader` marks attachment as `.failed` (not `.downloaded`) if file save fails, enabling automatic retry on next view.
 
 ### Testing
 

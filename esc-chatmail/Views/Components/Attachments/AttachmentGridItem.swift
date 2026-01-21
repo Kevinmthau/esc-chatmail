@@ -68,7 +68,8 @@ struct AttachmentGridItem: View {
                 targetSize: CGSize(width: 200, height: 200),
                 isImage: attachment.isImage
             )
-            if attachment.state == .queued {
+            // Download if queued, failed, or file is missing from disk
+            if attachment.state == .queued || attachment.state == .failed || attachment.needsRedownload {
                 Task {
                     await downloader.downloadAttachmentIfNeeded(for: attachment)
                 }

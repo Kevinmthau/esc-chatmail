@@ -114,6 +114,15 @@ final class AttachmentDownloader: ObservableObject {
                 attachment.localURL = originalPath
             } else {
                 Log.warning("Failed to save original attachment file for ID: \(attachmentId)", category: .attachment)
+                // Mark as failed so retry can work
+                attachment.state = .failed
+                coreDataStack.saveIfNeeded(context: context)
+
+                await MainActor.run {
+                    activeDownloads.remove(attachmentId)
+                    downloadProgress.removeValue(forKey: attachmentId)
+                }
+                return
             }
 
             if let width = processedResult.width {
@@ -199,8 +208,16 @@ final class AttachmentDownloader: ObservableObject {
     }
     
     func downloadAttachmentIfNeeded(for attachment: Attachment) async {
-        guard attachment.state == .queued || attachment.state == .failed,
-              let message = attachment.message else { return }
+        // Check if download needed: queued, failed, or file missing from disk
+        let needsDownload = attachment.state == .queued ||
+                           attachment.state == .failed ||
+                           attachment.needsRedownload
+
+        guard needsDownload, let message = attachment.message else { return }
+
+        if attachment.needsRedownload {
+            Log.info("Attachment \(attachment.id ?? "unknown") marked as downloaded but file missing - re-downloading", category: .attachment)
+        }
 
         let context = coreDataStack.newBackgroundContext()
         let attachmentInContext: Attachment
@@ -210,6 +227,11 @@ final class AttachmentDownloader: ObservableObject {
         } catch {
             Log.warning("Failed to fetch attachment for download check", category: .attachment)
             return
+        }
+
+        // Reset state to queued if re-downloading
+        if attachmentInContext.state == .downloaded || attachmentInContext.state == .uploaded {
+            attachmentInContext.state = .queued
         }
 
         await downloadAttachment(attachmentInContext, messageId: message.id, in: context)

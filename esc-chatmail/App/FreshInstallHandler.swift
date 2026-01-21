@@ -196,5 +196,10 @@ struct FreshInstallHandler {
         }
 
         Log.debug("Attachment files cleared", category: .attachment)
+
+        // Recreate directories for sync to use
+        AttachmentPaths.setupDirectories()
+        HTMLContentHandler.shared.ensureDirectoryExists()
+        Log.debug("Storage directories recreated", category: .attachment)
     }
 }
