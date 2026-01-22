@@ -165,12 +165,15 @@ enum TextProcessing {
         // Convert consecutive <br> tags to paragraph breaks, single <br> to space (soft wrap)
         // First: <br><br> or <br>\s*<br> → paragraph break
         text = text.replacingOccurrences(of: "<br[^>]*>\\s*<br[^>]*>", with: "\n\n", options: .regularExpression, range: nil)
-        // Then: remaining single <br> → space (for soft line wrapping)
-        text = text.replacingOccurrences(of: "<br[^>]*>", with: " ", options: .regularExpression, range: nil)
+        // Then: remaining single <br> → newline (let unwrapEmailLineBreaks decide whether to join)
+        text = text.replacingOccurrences(of: "<br[^>]*>", with: "\n", options: .regularExpression, range: nil)
 
         // Paragraphs and headings get double newlines (actual content breaks)
         text = text.replacingOccurrences(of: "</p>", with: "\n\n", options: .regularExpression, range: nil)
         text = text.replacingOccurrences(of: "</h[1-6]>", with: "\n\n", options: .regularExpression, range: nil)
+
+        // Div closures should create line breaks (many email clients use divs instead of p/br)
+        text = text.replacingOccurrences(of: "</div>", with: "\n", options: .caseInsensitive, range: nil)
 
         // Remove all HTML tags
         text = text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression, range: nil)
