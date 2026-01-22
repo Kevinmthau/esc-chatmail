@@ -44,7 +44,7 @@ struct NetworkRetryStrategy: RetryStrategy {
         // Don't retry authentication errors
         if let apiError = error as? APIError {
             switch apiError {
-            case .authenticationError, .decodingError, .invalidURL:
+            case .authenticationError, .decodingError, .invalidURL, .invalidData:
                 return false
             case .rateLimited, .serverError, .timeout, .networkError:
                 return true

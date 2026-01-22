@@ -9,11 +9,9 @@ struct ChatView: View {
     @ObservedObject private var keyboard = KeyboardResponder.shared
     @FocusState private var isTextFieldFocused: Bool
     @Namespace private var bottomID
-    @State private var resolvedDisplayName: String?
     @State private var isReadyToShow = false
     @State private var initialScrollTask: Task<Void, Never>?
-    @State private var prefetchTextTask: Task<Void, Never>?
-    @State private var prefetchContactsTask: Task<Void, Never>?
+    @State private var scrollTask: Task<Void, Never>?
 
     init(conversation: Conversation) {
         self.conversation = conversation
@@ -85,25 +83,16 @@ struct ChatView: View {
                 let recentMessages = messages.suffix(prefetchLimit)
                 let messageIds = recentMessages.map { $0.id }
                 let senderEmails = recentMessages.compactMap { $0.senderEmail }
-                let uniqueEmails = Array(Set(senderEmails))
 
-                // Batch prefetch text content for recent messages (eliminates N+1 queries)
-                prefetchTextTask?.cancel()
-                prefetchTextTask = Task.detached(priority: .userInitiated) {
-                    await ProcessedTextCache.shared.prefetch(messageIds: messageIds)
-                }
-
-                // Batch prefetch contacts to avoid thundering herd on first load
-                prefetchContactsTask?.cancel()
-                prefetchContactsTask = Task.detached(priority: .userInitiated) {
-                    await ContactsResolver.shared.prewarm(emails: uniqueEmails)
-                }
+                // Delegate prefetching to ViewModel
+                viewModel.prefetchRecentContent(messageIds: messageIds, senderEmails: senderEmails)
+                viewModel.loadResolvedDisplayName()
             }
             .onDisappear {
-                // Cancel prefetch tasks to prevent memory leaks
+                // Cancel all tasks to prevent memory leaks
                 initialScrollTask?.cancel()
-                prefetchTextTask?.cancel()
-                prefetchContactsTask?.cancel()
+                scrollTask?.cancel()
+                viewModel.cancelPrefetch()
             }
             .onChange(of: messages.count) { oldCount, newCount in
                 if !isReadyToShow && newCount > 0 {
@@ -141,14 +130,11 @@ struct ChatView: View {
                 }
             }
         }
-        .navigationTitle(resolvedDisplayName ?? conversation.displayName ?? "Chat")
+        .navigationTitle(viewModel.resolvedDisplayName ?? conversation.displayName ?? "Chat")
         .navigationBarTitleDisplayMode(.inline)
-        .task {
-            await loadResolvedDisplayName()
-        }
         .toolbar {
             ToolbarItem(placement: .principal) {
-                Text(resolvedDisplayName ?? conversation.displayName ?? "Chat")
+                Text(viewModel.resolvedDisplayName ?? conversation.displayName ?? "Chat")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .contentShape(Rectangle())
@@ -254,8 +240,11 @@ struct ChatView: View {
     }
 
     private func scrollToBottom(proxy: ScrollViewProxy, delay: TimeInterval) {
-        Task { @MainActor in
+        // Cancel any existing scroll task to prevent accumulation from multiple onChange handlers
+        scrollTask?.cancel()
+        scrollTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
             withAnimation(.easeOut(duration: UIConfig.scrollAnimationDuration)) {
                 if let lastMessage = messages.last {
                     proxy.scrollTo(lastMessage.id, anchor: .bottom)
@@ -266,15 +255,4 @@ struct ChatView: View {
         }
     }
 
-    // MARK: - Display Name Resolution
-
-    private func loadResolvedDisplayName() async {
-        guard let myEmail = AuthSession.shared.userEmail else { return }
-        let info = await ParticipantLoader.shared.loadParticipants(
-            from: conversation,
-            currentUserEmail: myEmail,
-            maxParticipants: 4
-        )
-        resolvedDisplayName = info.formattedDisplayName
-    }
 }

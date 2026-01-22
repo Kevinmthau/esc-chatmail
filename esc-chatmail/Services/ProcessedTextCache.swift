@@ -3,7 +3,7 @@ import Foundation
 /// Thread-safe cache for processed message text content
 /// Eliminates redundant HTML parsing and regex operations during scroll
 /// Uses LRUCacheActor for automatic eviction management
-actor ProcessedTextCache {
+actor ProcessedTextCache: MemoryWarningHandler {
     static let shared = ProcessedTextCache()
 
     /// Cached text content with rich content indicator
@@ -23,6 +23,9 @@ actor ProcessedTextCache {
     /// Maximum number of messages to process in a single prefetch batch
     private let maxPrefetchBatchSize = 20
 
+    /// Observes memory warnings to clear cache under pressure
+    private let memoryObserver = MemoryWarningObserver()
+
     init() {
         self.cache = LRUCacheActor(config: CacheConfiguration(
             maxItems: CacheConfig.textCacheSize,
@@ -30,6 +33,15 @@ actor ProcessedTextCache {
             ttlSeconds: nil,
             evictionPolicy: .lru
         ))
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.memoryObserver.start(handler: self)
+        }
+    }
+
+    func handleMemoryWarning() async {
+        await cache.clear()
+        Log.info("ProcessedTextCache cleared due to memory warning", category: .coreData)
     }
 
     /// Estimates memory size of a cached text entry

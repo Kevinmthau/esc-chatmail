@@ -13,19 +13,15 @@ extension GmailAPIClient {
         if let query = query {
             queryItems.append(URLQueryItem(name: "q", value: query))
         }
-        let url = try buildURL(endpoint: APIEndpoints.messages(), queryItems: queryItems)
-        let request = try await authenticatedRequest(url: url)
-        return try await performRequestWithRetry(request)
+        return try await performGET(endpoint: APIEndpoints.messages(), queryItems: queryItems)
     }
 
     /// Fetches a single message by ID.
     nonisolated func getMessage(id: String, format: String = "full") async throws -> GmailMessage {
-        let url = try buildURL(
+        try await performGET(
             endpoint: APIEndpoints.message(id: id),
             queryItems: [URLQueryItem(name: "format", value: format)]
         )
-        let request = try await authenticatedRequest(url: url)
-        return try await performRequestWithRetry(request)
     }
 
     /// Modifies a message's labels.

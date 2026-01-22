@@ -7,6 +7,7 @@ import CoreData
 final class ConversationPreloader {
     private var preloadQueue: Set<String> = []
     private var preloadTask: Task<Void, Never>?
+    private var preloadTaskId: UUID?
     private let coreDataStack: CoreDataStack
     private weak var cache: ConversationCache?
 
@@ -52,6 +53,7 @@ final class ConversationPreloader {
     func cancel() {
         preloadTask?.cancel()
         preloadTask = nil
+        preloadTaskId = nil
         preloadQueue.removeAll()
     }
 
@@ -96,7 +98,10 @@ final class ConversationPreloader {
     private func startPreloading() {
         guard preloadTask == nil else { return }
 
-        preloadTask = Task { [weak self] in
+        let taskId = UUID()
+        preloadTaskId = taskId
+
+        preloadTask = Task { [weak self, taskId] in
             guard let self = self else { return }
 
             while !self.preloadQueue.isEmpty {
@@ -109,7 +114,17 @@ final class ConversationPreloader {
                 try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
             }
 
-            self.preloadTask = nil
+            // Only clear task reference if this is still the active task
+            // (prevents cancelled tasks from clearing a newer task's reference)
+            self.clearTaskIfMatches(taskId)
+        }
+    }
+
+    /// Clears the preload task reference only if it matches the given task ID
+    private func clearTaskIfMatches(_ taskId: UUID) {
+        if preloadTaskId == taskId {
+            preloadTask = nil
+            preloadTaskId = nil
         }
     }
 

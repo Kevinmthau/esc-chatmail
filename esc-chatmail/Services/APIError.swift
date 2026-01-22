@@ -6,6 +6,7 @@ enum APIError: LocalizedError {
     case invalidURL(String)
     case networkError(Error)
     case decodingError(Error)
+    case invalidData(String)
     case authenticationError
     case rateLimited
     case serverError(Int)
@@ -21,6 +22,8 @@ enum APIError: LocalizedError {
             return "Network error: \(error.localizedDescription)"
         case .decodingError(let error):
             return "Failed to decode response: \(error.localizedDescription)"
+        case .invalidData(let message):
+            return "Invalid data: \(message)"
         case .authenticationError:
             return "Authentication failed"
         case .rateLimited:

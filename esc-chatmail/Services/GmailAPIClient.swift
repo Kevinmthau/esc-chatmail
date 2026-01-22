@@ -66,6 +66,17 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
     // MARK: - Request Helpers
 
+    /// Performs a simple GET request to an endpoint with optional query parameters.
+    /// Consolidates the common pattern: buildURL → authenticatedRequest → performRequestWithRetry
+    nonisolated func performGET<T: Decodable>(
+        endpoint: String,
+        queryItems: [URLQueryItem]? = nil
+    ) async throws -> T {
+        let url = try buildURL(endpoint: endpoint, queryItems: queryItems)
+        let request = try await authenticatedRequest(url: url)
+        return try await performRequestWithRetry(request)
+    }
+
     /// Creates an authenticated request with the current access token.
     nonisolated func authenticatedRequest(url: URL) async throws -> URLRequest {
         guard isValidURL(url) else {

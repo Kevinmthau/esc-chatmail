@@ -6,12 +6,12 @@ extension GmailAPIClient {
 
     /// Fetches attachment data for a message.
     nonisolated func getAttachment(messageId: String, attachmentId: String) async throws -> Data {
-        let url = try buildURL(endpoint: APIEndpoints.attachment(messageId: messageId, attachmentId: attachmentId))
-        let request = try await authenticatedRequest(url: url)
-        let response: AttachmentResponse = try await performRequestWithRetry(request)
+        let response: AttachmentResponse = try await performGET(
+            endpoint: APIEndpoints.attachment(messageId: messageId, attachmentId: attachmentId)
+        )
 
         guard let attachmentData = Data(base64UrlEncoded: response.data) else {
-            throw NSError(domain: "GmailAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to decode attachment data"])
+            throw APIError.invalidData("Failed to decode attachment data from base64")
         }
 
         return attachmentData

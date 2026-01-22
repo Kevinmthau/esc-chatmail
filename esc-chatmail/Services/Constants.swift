@@ -239,6 +239,19 @@ struct AttachmentConfig {
     static let signatureImageMaxDimension: Int16 = 100
 }
 
+// MARK: - Cleanup Intervals
+/// Centralized cleanup intervals for periodic maintenance tasks
+struct CleanupIntervals {
+    /// Disk image cache cleanup interval (1 hour)
+    static let diskImageCache: TimeInterval = 3600
+
+    /// Person cache cleanup interval (5 minutes)
+    static let personCache: TimeInterval = 300
+
+    /// Disk files cache cleanup interval (24 hours)
+    static let diskFilesCache: TimeInterval = 86400
+}
+
 struct APIEndpoints {
     static let baseURL = "https://gmail.googleapis.com/gmail/v1"
     

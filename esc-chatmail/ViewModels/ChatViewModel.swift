@@ -10,6 +10,7 @@ final class ChatViewModel: ObservableObject {
     @Published var replyText = ""
     @Published var replyingTo: Message?
     @Published var messageToForward: Message?
+    @Published var resolvedDisplayName: String?
 
     // MARK: - Composed Services
 
@@ -25,6 +26,12 @@ final class ChatViewModel: ObservableObject {
     private let syncEngine: SyncEngine
     private let authSession: AuthSession
     private var cancellables = Set<AnyCancellable>()
+
+    // MARK: - Prefetch Tasks
+
+    private var prefetchTextTask: Task<Void, Never>?
+    private var prefetchContactsTask: Task<Void, Never>?
+    private var displayNameTask: Task<Void, Never>?
 
     // MARK: - Initialization
 
@@ -218,6 +225,51 @@ final class ChatViewModel: ObservableObject {
                 sendService.deleteOptimisticMessage(optimisticMessage)
             }
             Log.error("Failed to send reply", category: .message, error: error)
+        }
+    }
+
+    // MARK: - Prefetch Operations
+
+    /// Prefetches text content and contacts for the given messages.
+    /// Call from ChatView.onAppear with recent messages.
+    func prefetchRecentContent(messageIds: [String], senderEmails: [String]) {
+        // Cancel existing prefetch tasks to prevent accumulation
+        prefetchTextTask?.cancel()
+        prefetchContactsTask?.cancel()
+
+        // Batch prefetch text content for recent messages (eliminates N+1 queries)
+        prefetchTextTask = Task.detached(priority: .userInitiated) {
+            await ProcessedTextCache.shared.prefetch(messageIds: messageIds)
+        }
+
+        // Batch prefetch contacts to avoid thundering herd on first load
+        let uniqueEmails = Array(Set(senderEmails))
+        prefetchContactsTask = Task.detached(priority: .userInitiated) {
+            await ContactsResolver.shared.prewarm(emails: uniqueEmails)
+        }
+    }
+
+    /// Cancels all prefetch tasks. Call from ChatView.onDisappear.
+    func cancelPrefetch() {
+        prefetchTextTask?.cancel()
+        prefetchContactsTask?.cancel()
+        displayNameTask?.cancel()
+    }
+
+    // MARK: - Display Name Resolution
+
+    /// Loads the resolved display name for the conversation participants.
+    /// Call from ChatView on appear.
+    func loadResolvedDisplayName() {
+        displayNameTask?.cancel()
+        displayNameTask = Task {
+            guard let myEmail = authSession.userEmail else { return }
+            let info = await ParticipantLoader.shared.loadParticipants(
+                from: conversation,
+                currentUserEmail: myEmail,
+                maxParticipants: 4
+            )
+            resolvedDisplayName = info.formattedDisplayName
         }
     }
 }
