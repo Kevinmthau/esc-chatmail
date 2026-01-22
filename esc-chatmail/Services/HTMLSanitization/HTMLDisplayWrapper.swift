@@ -64,6 +64,20 @@ struct HTMLDisplayWrapper {
                 table table {
                     width: 100% !important;
                 }
+                /* Force all elements with explicit widths to respect viewport */
+                [width] {
+                    max-width: 100% !important;
+                }
+                td[width], th[width] {
+                    width: auto !important;
+                    max-width: 100% !important;
+                }
+                div, td, th, table {
+                    max-width: 100% !important;
+                    min-width: 0 !important;
+                    overflow-wrap: break-word !important;
+                    word-break: break-word !important;
+                }
                 /* Preserve newsletter cell styling */
                 td, th {
                     vertical-align: top;
