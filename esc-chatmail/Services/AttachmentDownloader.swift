@@ -70,8 +70,10 @@ final class AttachmentDownloader: ObservableObject {
             }
             
             // Generate file extension and paths
+            // Prefer extension from original filename, fall back to MIME type mapping
             let mimeType = attachment.mimeType
-            let ext = AttachmentPaths.fileExtension(for: mimeType)
+            let filenameExt = (attachment.filename as NSString).pathExtension.lowercased()
+            let ext = filenameExt.isEmpty ? AttachmentPaths.fileExtension(for: mimeType) : filenameExt
             let originalPath = AttachmentPaths.originalPath(idOrUUID: attachmentId, ext: ext)
             let previewPath = AttachmentPaths.previewPath(idOrUUID: attachmentId)
 

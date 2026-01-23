@@ -8,6 +8,9 @@ class MessageProcessor {
     func processGmailMessage(_ gmailMessage: GmailMessage, myAliases: Set<String>, in context: NSManagedObjectContext) -> ProcessedMessage? {
         guard let payload = gmailMessage.payload,
               let headers = payload.headers else { return nil }
+
+        // Debug: dump MIME structure to understand attachment handling
+        dumpMimeStructure(payload, messageId: gmailMessage.id)
         
         var processedMessage = ProcessedMessage()
         processedMessage.id = gmailMessage.id
@@ -176,17 +179,59 @@ class MessageProcessor {
     private func createCleanedSnippet(html: String?, plainText: String?, snippet: String?, isFromMe: Bool) -> String? {
         if let html = html {
             // First try to remove quoted content for snippets
-            let cleanedHTML = emailTextProcessor.removeQuotedFromHTML(html) ?? html
-            let plainFromHTML = emailTextProcessor.extractPlainFromHTML(cleanedHTML)
-            // Show full content for all emails without any length limit
-            return emailTextProcessor.createCleanSnippet(from: plainFromHTML, maxLength: Int.max, firstSentenceOnly: false)
-        } else if let plainText = plainText {
-            return emailTextProcessor.createCleanSnippet(from: plainText, maxLength: Int.max, firstSentenceOnly: false)
-        } else {
-            return emailTextProcessor.createCleanSnippet(from: snippet, maxLength: Int.max, firstSentenceOnly: false)
+            let cleanedHTML = EmailTextProcessor.removeQuotedFromHTML(html) ?? html
+            let plainFromHTML = EmailTextProcessor.extractPlainFromHTML(cleanedHTML)
+            let result = EmailTextProcessor.createCleanSnippet(from: plainFromHTML, maxLength: Int.max, firstSentenceOnly: false)
+
+            // If quote removal stripped everything, try without HTML quote removal
+            if result.isEmpty {
+                let plainFromRawHTML = EmailTextProcessor.extractPlainFromHTML(html)
+                let fallbackResult = EmailTextProcessor.createCleanSnippet(from: plainFromRawHTML, maxLength: Int.max, firstSentenceOnly: false)
+                if !fallbackResult.isEmpty {
+                    return fallbackResult
+                }
+            } else {
+                return result
+            }
         }
+
+        if let plainText = plainText {
+            let result = EmailTextProcessor.createCleanSnippet(from: plainText, maxLength: Int.max, firstSentenceOnly: false)
+            if !result.isEmpty {
+                return result
+            }
+        }
+
+        if let snippet = snippet {
+            let result = EmailTextProcessor.createCleanSnippet(from: snippet, maxLength: Int.max, firstSentenceOnly: false)
+            if !result.isEmpty {
+                return result
+            }
+            // Ultimate fallback: return raw snippet if all cleaning strips it
+            return snippet.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        return nil
     }
     
+    /// Debug helper to dump MIME structure
+    private func dumpMimeStructure(_ part: MessagePart, messageId: String, depth: Int = 0) {
+        let indent = String(repeating: "  ", count: depth)
+        let attachId = part.body?.attachmentId ?? "none"
+        let filename = part.filename ?? ""
+        let size = part.body?.size ?? 0
+        let mime = part.mimeType ?? "unknown"
+        let partCount = part.parts?.count ?? 0
+
+        Log.warning("MIME_DEBUG \(indent)[\(messageId)] mime=\(mime) file='\(filename)' attachId=\(attachId != "none" ? "YES" : "no") size=\(size) parts=\(partCount)", category: .sync)
+
+        if let subparts = part.parts {
+            for subpart in subparts {
+                dumpMimeStructure(subpart, messageId: messageId, depth: depth + 1)
+            }
+        }
+    }
+
     private func checkForAttachments(in part: MessagePart) -> Bool {
         if part.body?.attachmentId != nil {
             return true
@@ -204,6 +249,13 @@ class MessageProcessor {
         var seenIds: Set<String> = []
 
         func traverse(_ part: MessagePart) {
+            // Log parts that have attachment indicators for debugging (warning level for visibility)
+            let hasAttachmentId = part.body?.attachmentId != nil
+            let hasFilename = part.filename != nil && !part.filename!.isEmpty
+            if hasAttachmentId || hasFilename {
+                Log.warning("ATTACH_DEBUG Part: mime=\(part.mimeType ?? "nil") file=\(part.filename ?? "nil") attachId=\(hasAttachmentId) size=\(part.body?.size ?? 0)", category: .sync)
+            }
+
             // Only process actual file parts, not multipart containers
             // Also skip duplicate attachment IDs
             if let attachmentId = part.body?.attachmentId,
@@ -235,6 +287,12 @@ class MessageProcessor {
         }
 
         traverse(part)
+
+        if attachments.isEmpty && checkForAttachments(in: part) {
+            Log.warning("checkForAttachments=true but extractAttachments=0. Part structure may need review.", category: .sync)
+        }
+        Log.warning("ATTACH_DEBUG extractAttachments result: \(attachments.count) attachments found", category: .sync)
+
         return attachments
     }
 }

@@ -87,12 +87,41 @@ Messages render differently based on `message.isNewsletter` (detected via Gmail 
   - Both dimensions <= 100px (`AttachmentConfig.signatureImageMaxDimension`)
 - This prevents small logo images in email signatures from cluttering the chat view
 
+**Document attachment display** - `DocumentAttachmentCard` shows non-image/PDF attachments with native iOS styling:
+- Uses `QLThumbnailGenerator` with `.icon` representation for native document icons (paper with folded corner)
+- Displays filename (middle-truncated) with file size below
+- Download indicator: cloud icon when queued, spinner when downloading, nothing when complete
+- Tapping opens QuickLook previewer for supported document types
+
+**File extension handling** - `AttachmentDownloader` prefers the original filename's extension over MIME type mapping:
+```swift
+let filenameExt = (attachment.filename as NSString).pathExtension.lowercased()
+let ext = filenameExt.isEmpty ? AttachmentPaths.fileExtension(for: mimeType) : filenameExt
+```
+This ensures files like `.pages`, `.numbers`, `.keynote` are saved with correct extensions even if MIME type is generic.
+
+**Supported document MIME types** - `AttachmentPaths.fileExtension(for:)` maps MIME types to extensions:
+- Microsoft Office: `.doc`, `.docx`, `.xls`, `.xlsx`, `.ppt`, `.pptx`
+- Apple iWork: `.pages`, `.numbers`, `.keynote`
+- Text: `.txt`, `.csv`, `.rtf`, `.html`, `.xml`, `.json`
+- Archives: `.zip`, `.rar`, `.7z`, `.gz`, `.tar`
+- Falls back to `.dat` for unknown types
+
 ### Text Processing Pipeline
 
 Plain text for chat bubbles goes through:
 ```
 HTML/bodyText → extractPlainText() → unwrapEmailLineBreaks() → stripQuotedText()
 ```
+
+**Fallback chain for text extraction** - When displaying message text in chat bubbles, the system tries multiple sources in order:
+1. `fullTextContent` - HTML processed with quote removal
+2. If empty, retry HTML extraction without `HTMLQuoteRemover` (some Apple Mail structures get over-stripped)
+3. `message.cleanedSnippet` - Pre-computed during sync
+4. `cleanedSnippet(message.snippet)` - Raw Gmail snippet with quote removal
+5. `message.snippet` - Raw Gmail API snippet (ultimate fallback, may contain quoted text)
+
+This ensures content is shown even when aggressive quote removal strips legitimate content (common with Apple Mail reply structures).
 
 **`unwrapEmailLineBreaks`** handles email line wrapping (RFC 2822 mandates 72-80 char line breaks):
 - Normalizes CRLF/CR to LF, special whitespace (NBSP, em space, etc.) to regular space

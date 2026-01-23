@@ -129,7 +129,19 @@ actor ProcessedTextCache: MemoryWarningHandler {
             let extracted = TextProcessing.extractPlainText(from: cleanedHTML)
             if !extracted.isEmpty {
                 let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: extracted)
-                plainText = TextProcessing.stripQuotedText(from: unwrapped)
+                let stripped = TextProcessing.stripQuotedText(from: unwrapped)
+                // Only set plainText if we actually have content after stripping
+                plainText = stripped.isEmpty ? nil : stripped
+            }
+
+            // If quote removal stripped everything, try without HTML quote removal
+            if plainText == nil {
+                let rawExtracted = TextProcessing.extractPlainText(from: html)
+                if !rawExtracted.isEmpty {
+                    let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: rawExtracted)
+                    let stripped = TextProcessing.stripQuotedText(from: unwrapped)
+                    plainText = stripped.isEmpty ? nil : stripped
+                }
             }
 
             // Check for rich content in cleaned HTML only (not quoted sections)

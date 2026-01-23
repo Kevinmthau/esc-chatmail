@@ -27,7 +27,8 @@ struct MessageContentView: View {
 
     @ViewBuilder
     private var textContent: some View {
-        if let text = fullTextContent ?? message.cleanedSnippet ?? cleanedSnippet(message.snippet), !text.isEmpty {
+        // Try extracted text, then cleaned snippet, then cleaned raw snippet, then raw snippet as last resort
+        if let text = fullTextContent ?? message.cleanedSnippet ?? cleanedSnippet(message.snippet) ?? message.snippet, !text.isEmpty {
             textBubble(text: text)
         } else if message.bodyStorageURI != nil || htmlContentHandler.htmlFileExists(for: message.id) {
             // No text content but HTML exists - show button to view it

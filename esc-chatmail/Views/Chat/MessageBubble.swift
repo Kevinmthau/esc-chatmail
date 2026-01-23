@@ -98,6 +98,11 @@ struct MessageBubble: View {
     @ViewBuilder
     private var attachmentsView: some View {
         let displayable = message.displayableAttachments
+        let _ = {
+            if message.hasAttachments {
+                Log.warning("UI_DEBUG msg=\(message.id) hasAttachments=\(message.hasAttachments) attachmentsArray=\(message.attachmentsArray.count) displayable=\(displayable.count)", category: .ui)
+            }
+        }()
         if !displayable.isEmpty {
             if style.showAttachmentGrid {
                 AttachmentGridView(attachments: displayable)
@@ -152,7 +157,9 @@ struct MessageBubble: View {
             // If no HTML content, try bodyText
             if processedResult.plainText == nil, let text = bodyText {
                 let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: text)
-                processedResult = (TextProcessing.stripQuotedText(from: unwrapped), false)
+                let stripped = TextProcessing.stripQuotedText(from: unwrapped)
+                // Only use if we actually have content after stripping
+                processedResult = (stripped.isEmpty ? nil : stripped, false)
             }
 
             // Cache the result for future use
