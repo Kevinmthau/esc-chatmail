@@ -10,8 +10,10 @@ struct ComposeSendOrchestrator {
     struct SendInput: Sendable {
         let recipientEmails: [String]
         let body: String
+        let htmlBody: String?
         let subject: String?
         let attachmentInfos: [GmailSendService.AttachmentInfo]
+        let inlineAttachmentInfos: [GmailSendService.AttachmentInfo]
         let replyData: ReplyData?
 
         /// Reply-specific data extracted before background execution
@@ -64,8 +66,10 @@ struct ComposeSendOrchestrator {
                     result = try await sendService.sendNew(
                         to: input.recipientEmails,
                         body: input.body,
+                        htmlBody: input.htmlBody,
                         subject: input.subject,
-                        attachmentInfos: input.attachmentInfos
+                        attachmentInfos: input.attachmentInfos,
+                        inlineAttachmentInfos: input.inlineAttachmentInfos
                     )
                 }
 

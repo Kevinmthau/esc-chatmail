@@ -15,6 +15,14 @@ extension GmailSendService {
         let localURL: String?
         let filename: String
         let mimeType: String
+        let contentId: String?
+
+        init(localURL: String?, filename: String, mimeType: String, contentId: String? = nil) {
+            self.localURL = localURL
+            self.filename = filename
+            self.mimeType = mimeType
+            self.contentId = contentId
+        }
     }
 
     /// Errors that can occur during message sending.

@@ -35,8 +35,10 @@ final class GmailSendService: ObservableObject {
     nonisolated func sendNew(
         to recipients: [String],
         body: String,
+        htmlBody: String? = nil,
         subject: String? = nil,
-        attachmentInfos: [AttachmentInfo] = []
+        attachmentInfos: [AttachmentInfo] = [],
+        inlineAttachmentInfos: [AttachmentInfo] = []
     ) async throws -> SendResult {
         let (fromEmail, fromName) = await MainActor.run { (authSession.userEmail, authSession.userName) }
         guard let fromEmail = fromEmail else {
@@ -44,13 +46,16 @@ final class GmailSendService: ObservableObject {
         }
 
         let attachmentData = try await prepareAttachmentInfos(attachmentInfos)
+        let inlineAttachmentData = try await prepareInlineAttachmentInfos(inlineAttachmentInfos)
         let mimeData = MimeBuilder.buildNew(
             to: recipients,
             from: fromEmail,
             fromName: fromName,
             body: body,
+            htmlBody: htmlBody,
             subject: subject,
-            attachments: attachmentData
+            attachments: attachmentData,
+            inlineAttachments: inlineAttachmentData
         )
 
         return try await sendMessage(mimeData: mimeData, threadId: nil)

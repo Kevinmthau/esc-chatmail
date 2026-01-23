@@ -6,6 +6,13 @@ struct AttachmentData {
     let mimeType: String
 }
 
+struct InlineAttachmentData {
+    let data: Data
+    let contentId: String
+    let filename: String
+    let mimeType: String
+}
+
 struct QuotedMessage {
     let senderName: String?
     let senderEmail: String
@@ -15,7 +22,33 @@ struct QuotedMessage {
 
 struct MimeBuilder {
 
-    static func buildNew(to: [String], from: String, fromName: String? = nil, body: String, subject: String? = nil, attachments: [AttachmentData] = []) -> Data {
+    static func buildNew(
+        to: [String],
+        from: String,
+        fromName: String? = nil,
+        body: String,
+        htmlBody: String? = nil,
+        subject: String? = nil,
+        attachments: [AttachmentData] = [],
+        inlineAttachments: [InlineAttachmentData] = []
+    ) -> Data {
+        // If we have HTML content, use the alternative builder for multipart/alternative structure
+        if let htmlBody = htmlBody {
+            return buildAlternativeMessage(
+                to: to,
+                from: from,
+                fromName: fromName,
+                body: body,
+                htmlBody: htmlBody,
+                subject: subject,
+                inReplyTo: nil,
+                references: [],
+                attachments: attachments,
+                inlineAttachments: inlineAttachments
+            )
+        }
+
+        // Plain text only
         if attachments.isEmpty {
             return buildSimpleMessage(to: to, from: from, fromName: fromName, body: body, subject: subject, inReplyTo: nil, references: [])
         } else {
@@ -45,7 +78,7 @@ struct MimeBuilder {
     // MARK: - Convenience Overloads
 
     static func buildNew(to: [String], from: String, body: String) -> Data {
-        return buildNew(to: to, from: from, fromName: nil, body: body, subject: nil, attachments: [])
+        return buildNew(to: to, from: from, fromName: nil, body: body, htmlBody: nil, subject: nil, attachments: [], inlineAttachments: [])
     }
 
     static func buildReply(

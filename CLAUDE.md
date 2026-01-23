@@ -120,6 +120,44 @@ MiniEmailWebView (50% scaled) or HTMLMessageView (full)
 
 **HTMLContentLoader** uses NSCache to avoid repeated disk I/O for recently viewed messages. Cache key includes message ID and dark mode flag.
 
+### Email Forwarding with HTML Preservation
+
+When forwarding emails, HTML formatting, images, and attachments are preserved:
+
+```
+MessageFormatBuilder.formatForwardedMessage()
+       ↓
+ForwardResult { body, htmlBody, subject, attachments, inlineAttachments }
+       ↓
+MimeBuilder.buildAlternativeMessage() → multipart MIME structure
+       ↓
+Gmail API send
+```
+
+**ForwardResult** contains:
+- `body` - Plain text version (fallback for clients that don't support HTML)
+- `htmlBody` - Original HTML with forward header injected after `<body>` tag
+- `attachments` - Regular file attachments
+- `inlineAttachments` - Images with `contentId` (referenced by `cid:` URLs in HTML)
+
+**MIME Structure** for HTML forwards (`MimeBuilder+Alternative.swift`):
+```
+multipart/mixed
+├── multipart/related (if inline images exist)
+│   ├── multipart/alternative
+│   │   ├── text/plain (base64 encoded)
+│   │   └── text/html (base64 encoded)
+│   └── inline images (Content-ID headers match cid: URLs)
+└── regular attachments
+```
+
+**Key implementation details:**
+- HTML is loaded from disk via `HTMLContentHandler.shared.loadHTML(for: messageId)`
+- Forward header is injected after existing `<body>` tag (not wrapped in new HTML structure) to avoid invalid nested HTML
+- Both text/plain and text/html use **base64 encoding** (not 8bit) for maximum email client compatibility (Apple Mail has issues with 8bit)
+- Inline attachments are identified by non-nil `contentId` on the Attachment entity
+- If HTML isn't available, falls back to plain text only
+
 ### Caching (Actor-based, LRU)
 
 LRU caches use **timestamp-based eviction** (not array-based) for O(1) access time. The `lastAccessedAt` timestamp in each entry determines eviction order. Eviction scans for oldest timestamp only when cache is full.

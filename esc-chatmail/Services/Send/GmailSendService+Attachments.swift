@@ -24,6 +24,34 @@ extension GmailSendService {
         return attachmentData
     }
 
+    /// Prepares inline attachment data for sending by loading content from local URLs.
+    /// Only processes attachments that have both localURL and contentId.
+    func prepareInlineAttachmentInfos(_ attachmentInfos: [AttachmentInfo]) async throws -> [InlineAttachmentData] {
+        var inlineData: [InlineAttachmentData] = []
+
+        for info in attachmentInfos {
+            // Skip if no contentId (not an inline attachment)
+            guard let contentId = info.contentId, !contentId.isEmpty else {
+                continue
+            }
+
+            // Skip if no local data available (attachment not downloaded)
+            guard let data = AttachmentPaths.loadData(from: info.localURL) else {
+                Log.warning("Skipping inline attachment \(info.filename) - file not downloaded", category: .attachment)
+                continue
+            }
+
+            inlineData.append(InlineAttachmentData(
+                data: data,
+                contentId: contentId,
+                filename: info.filename,
+                mimeType: info.mimeType
+            ))
+        }
+
+        return inlineData
+    }
+
     /// Converts an Attachment entity to AttachmentInfo for sending.
     /// Updates the attachment state to uploading.
     func attachmentToInfo(_ attachment: Attachment) -> AttachmentInfo {
@@ -33,7 +61,8 @@ extension GmailSendService {
         return AttachmentInfo(
             localURL: attachment.localURLValue,
             filename: attachment.filenameValue,
-            mimeType: attachment.mimeTypeValue
+            mimeType: attachment.mimeTypeValue,
+            contentId: attachment.contentId
         )
     }
 

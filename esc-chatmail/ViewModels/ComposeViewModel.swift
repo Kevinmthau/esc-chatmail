@@ -38,6 +38,14 @@ final class ComposeViewModel: ObservableObject {
 
     private var cancellables = Set<AnyCancellable>()
 
+    // MARK: - Forward HTML Content
+
+    /// HTML body content from forwarded message (nil for non-forward modes)
+    private var forwardedHTMLBody: String?
+
+    /// Inline attachments from forwarded message (images referenced by cid: URLs)
+    private var forwardedInlineAttachments: [Attachment] = []
+
     // MARK: - Composed Services
 
     let recipientManager: RecipientManager
@@ -122,7 +130,13 @@ final class ComposeViewModel: ObservableObject {
             body = result.body
             subject = result.subject ?? ""
 
-            // Copy attachments from original message
+            // Store HTML content for forwarding
+            forwardedHTMLBody = result.htmlBody
+
+            // Store inline attachments for forwarding (these will be included in multipart/related)
+            forwardedInlineAttachments = result.inlineAttachments
+
+            // Copy regular attachments from original message
             for original in result.attachments {
                 if let copied = attachmentManager.copyAttachmentForForward(original) {
                     attachmentManager.addAttachment(copied)
@@ -213,6 +227,9 @@ final class ComposeViewModel: ObservableObject {
         // Prepare attachment infos for background send
         let attachmentInfos = attachments.map { sendService.attachmentToInfo($0) }
 
+        // Prepare inline attachment infos for forwarded messages
+        let inlineAttachmentInfos = forwardedInlineAttachments.map { sendService.attachmentToInfo($0) }
+
         // Build reply data on main actor before background task (Core Data objects aren't Sendable)
         let orchestratorReplyData: ComposeSendOrchestrator.SendInput.ReplyData?
         switch mode {
@@ -238,8 +255,10 @@ final class ComposeViewModel: ObservableObject {
         let input = ComposeSendOrchestrator.SendInput(
             recipientEmails: recipientEmails,
             body: messageBody,
+            htmlBody: forwardedHTMLBody,
             subject: messageSubject,
             attachmentInfos: attachmentInfos,
+            inlineAttachmentInfos: inlineAttachmentInfos,
             replyData: orchestratorReplyData
         )
 
