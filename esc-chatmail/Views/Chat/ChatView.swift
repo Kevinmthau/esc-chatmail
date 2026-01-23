@@ -12,6 +12,7 @@ struct ChatView: View {
     @State private var isReadyToShow = false
     @State private var initialScrollTask: Task<Void, Never>?
     @State private var scrollTask: Task<Void, Never>?
+    @Environment(\.dismiss) private var dismiss
 
     init(conversation: Conversation) {
         self.conversation = conversation
@@ -150,7 +151,10 @@ struct ChatView: View {
                         SwiftUI.Label("Archive", systemImage: "archivebox")
                     }
 
-                    Button(action: { viewModel.reportSpam() }) {
+                    Button(action: {
+                        viewModel.reportSpam()
+                        dismiss()
+                    }) {
                         SwiftUI.Label("Report Spam", systemImage: "exclamationmark.triangle")
                     }
                 } label: {
