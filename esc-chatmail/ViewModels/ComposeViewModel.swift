@@ -110,17 +110,8 @@ final class ComposeViewModel: ObservableObject {
         self.messageFormatBuilder = MessageFormatBuilder(authSession: resolvedDeps.authSession)
 
         // Forward child observable changes to trigger view updates
-        autocompleteService.objectWillChange
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
-            }
-            .store(in: &cancellables)
-
-        recipientManager.objectWillChange
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
-            }
-            .store(in: &cancellables)
+        forwardChanges(from: autocompleteService, storing: &cancellables)
+        forwardChanges(from: recipientManager, storing: &cancellables)
     }
 
     func setupForMode() {

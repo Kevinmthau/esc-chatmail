@@ -18,10 +18,7 @@ final class VirtualScrollState: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     // Task tracking to prevent orphaned tasks during rapid scrolling
-    private var loadInitialTask: Task<Void, Never>?
-    private var loadWindowTask: Task<Void, Never>?
-    private var preloadNextTask: Task<Void, Never>?
-    private var preloadPreviousTask: Task<Void, Never>?
+    private let taskManager = ViewModelTaskManager()
 
     init(conversationId: String, configuration: VirtualScrollConfiguration = .default) {
         self.conversationId = conversationId
@@ -42,8 +39,8 @@ final class VirtualScrollState: ObservableObject {
     private func loadInitialMessages() {
         isLoadingMore = true
 
-        loadInitialTask?.cancel()
-        loadInitialTask = Task {
+        taskManager.run("loadInitial") { [weak self] in
+            guard let self = self else { return }
             let context = coreDataStack.newBackgroundContext()
             let (messages, total) = await loadMessages(
                 range: 0..<configuration.visibleItemCount,
@@ -52,17 +49,15 @@ final class VirtualScrollState: ObservableObject {
 
             guard !Task.isCancelled else { return }
 
-            await MainActor.run {
-                self.visibleMessages = messages
-                self.totalMessageCount = total
-                self.messageWindow = MessageWindow(
-                    startIndex: 0,
-                    endIndex: min(configuration.visibleItemCount, total),
-                    messages: messages,
-                    isLoading: false
-                )
-                self.isLoadingMore = false
-            }
+            self.visibleMessages = messages
+            self.totalMessageCount = total
+            self.messageWindow = MessageWindow(
+                startIndex: 0,
+                endIndex: min(configuration.visibleItemCount, total),
+                messages: messages,
+                isLoading: false
+            )
+            self.isLoadingMore = false
         }
     }
 
@@ -89,8 +84,8 @@ final class VirtualScrollState: ObservableObject {
         // Show placeholders while loading
         placeholderIndices = Set(startIndex..<endIndex)
 
-        loadWindowTask?.cancel()
-        loadWindowTask = Task {
+        taskManager.run("loadWindow") { [weak self] in
+            guard let self = self else { return }
             let context = coreDataStack.newBackgroundContext()
             let (messages, _) = await loadMessages(
                 range: startIndex..<endIndex,
@@ -99,17 +94,15 @@ final class VirtualScrollState: ObservableObject {
 
             guard !Task.isCancelled else { return }
 
-            await MainActor.run {
-                self.messageWindow = MessageWindow(
-                    startIndex: startIndex,
-                    endIndex: endIndex,
-                    messages: messages,
-                    isLoading: false
-                )
-                self.visibleMessages = messages
-                self.placeholderIndices.removeAll()
-                self.isLoadingMore = false
-            }
+            self.messageWindow = MessageWindow(
+                startIndex: startIndex,
+                endIndex: endIndex,
+                messages: messages,
+                isLoading: false
+            )
+            self.visibleMessages = messages
+            self.placeholderIndices.removeAll()
+            self.isLoadingMore = false
         }
     }
 
@@ -134,8 +127,8 @@ final class VirtualScrollState: ObservableObject {
         let startIndex = window.endIndex
         let endIndex = min(totalMessageCount, startIndex + configuration.pageSize)
 
-        preloadNextTask?.cancel()
-        preloadNextTask = Task {
+        taskManager.run("preloadNext") { [weak self] in
+            guard let self = self else { return }
             let context = coreDataStack.newBackgroundContext()
             let (messages, _) = await loadMessages(
                 range: startIndex..<endIndex,
@@ -144,17 +137,15 @@ final class VirtualScrollState: ObservableObject {
 
             guard !Task.isCancelled else { return }
 
-            await MainActor.run {
-                guard var currentWindow = self.messageWindow else { return }
-                currentWindow.messages.append(contentsOf: messages)
-                currentWindow = MessageWindow(
-                    startIndex: currentWindow.startIndex,
-                    endIndex: endIndex,
-                    messages: currentWindow.messages,
-                    isLoading: false
-                )
-                self.messageWindow = currentWindow
-            }
+            guard var currentWindow = self.messageWindow else { return }
+            currentWindow.messages.append(contentsOf: messages)
+            currentWindow = MessageWindow(
+                startIndex: currentWindow.startIndex,
+                endIndex: endIndex,
+                messages: currentWindow.messages,
+                isLoading: false
+            )
+            self.messageWindow = currentWindow
         }
     }
 
@@ -165,8 +156,8 @@ final class VirtualScrollState: ObservableObject {
         let endIndex = window.startIndex
         let startIndex = max(0, endIndex - configuration.pageSize)
 
-        preloadPreviousTask?.cancel()
-        preloadPreviousTask = Task {
+        taskManager.run("preloadPrevious") { [weak self] in
+            guard let self = self else { return }
             let context = coreDataStack.newBackgroundContext()
             let (messages, _) = await loadMessages(
                 range: startIndex..<endIndex,
@@ -175,31 +166,21 @@ final class VirtualScrollState: ObservableObject {
 
             guard !Task.isCancelled else { return }
 
-            await MainActor.run {
-                guard var currentWindow = self.messageWindow else { return }
-                currentWindow.messages = messages + currentWindow.messages
-                currentWindow = MessageWindow(
-                    startIndex: startIndex,
-                    endIndex: currentWindow.endIndex,
-                    messages: currentWindow.messages,
-                    isLoading: false
-                )
-                self.messageWindow = currentWindow
-            }
+            guard var currentWindow = self.messageWindow else { return }
+            currentWindow.messages = messages + currentWindow.messages
+            currentWindow = MessageWindow(
+                startIndex: startIndex,
+                endIndex: currentWindow.endIndex,
+                messages: currentWindow.messages,
+                isLoading: false
+            )
+            self.messageWindow = currentWindow
         }
     }
 
     /// Cancels all pending tasks when the scroll state is no longer needed
     func cleanup() {
-        loadInitialTask?.cancel()
-        loadWindowTask?.cancel()
-        preloadNextTask?.cancel()
-        preloadPreviousTask?.cancel()
-
-        loadInitialTask = nil
-        loadWindowTask = nil
-        preloadNextTask = nil
-        preloadPreviousTask = nil
+        taskManager.cancelAll()
     }
 
     private func loadMessages(range: Range<Int>, in context: NSManagedObjectContext) async -> ([Message], Int) {

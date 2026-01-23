@@ -77,6 +77,7 @@ final class InitialSyncOrchestrator {
             progressHandler(0.05, "Fetching profile...")
             let (profile, aliases) = try await fetchProfileAndAliases()
             myAliases = Set(([profile.emailAddress] + aliases).map(normalizedEmail))
+            await AliasManager.shared.setAliases(myAliases)
             _ = await messagePersister.saveAccount(profile: profile, aliases: aliases, in: context)
 
             // Phase 2: Fetch and save labels
@@ -154,11 +155,6 @@ final class InitialSyncOrchestrator {
             log.error("Initial sync failed", error: error)
             throw error
         }
-    }
-
-    /// Returns the user's email aliases
-    func getMyAliases() -> Set<String> {
-        myAliases
     }
 
     // MARK: - Private Methods

@@ -9,31 +9,6 @@ actor HistoryProcessor {
         self.coreDataStack = coreDataStack
     }
 
-    // MARK: - Modified Conversations Tracking
-    // Tracking is now delegated to ModificationTracker.shared for consolidated
-    // tracking across MessagePersister and HistoryProcessor.
-
-    /// Returns and clears the set of modified conversation IDs
-    /// NOTE: Prefer using ModificationTracker.shared.getAndClearModifiedConversations() directly.
-    func getAndClearModifiedConversations() async -> Set<NSManagedObjectID> {
-        await ModificationTracker.shared.getAndClearModifiedConversations()
-    }
-
-    /// Tracks a conversation as modified by its objectID
-    func trackModifiedConversation(_ objectID: NSManagedObjectID) async {
-        await ModificationTracker.shared.trackModifiedConversation(objectID)
-    }
-
-    /// Tracks multiple conversations as modified
-    func trackModifiedConversations(_ objectIDs: [NSManagedObjectID]) async {
-        await ModificationTracker.shared.trackModifiedConversations(objectIDs)
-    }
-
-    /// Tracks a conversation as modified (public version for reconciliation)
-    func trackModifiedConversationForReconciliation(_ conversation: Conversation) async {
-        await ModificationTracker.shared.trackModifiedConversation(conversation.objectID)
-    }
-
     /// Processes a history record for lightweight operations (label changes and deletions)
     /// - Parameters:
     ///   - record: The history record to process

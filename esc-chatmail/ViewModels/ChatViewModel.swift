@@ -27,11 +27,9 @@ final class ChatViewModel: ObservableObject {
     private let authSession: AuthSession
     private var cancellables = Set<AnyCancellable>()
 
-    // MARK: - Prefetch Tasks
+    // MARK: - Task Management
 
-    private var prefetchTextTask: Task<Void, Never>?
-    private var prefetchContactsTask: Task<Void, Never>?
-    private var displayNameTask: Task<Void, Never>?
+    private let taskManager = ViewModelTaskManager()
 
     // MARK: - Initialization
 
@@ -47,11 +45,7 @@ final class ChatViewModel: ObservableObject {
         self.contactManager = ChatContactManager()
 
         // Forward child observable changes to trigger view updates
-        contactManager.objectWillChange
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
-            }
-            .store(in: &cancellables)
+        forwardChanges(from: contactManager, storing: &cancellables)
     }
 
     // MARK: - Message Actions
@@ -233,27 +227,21 @@ final class ChatViewModel: ObservableObject {
     /// Prefetches text content and contacts for the given messages.
     /// Call from ChatView.onAppear with recent messages.
     func prefetchRecentContent(messageIds: [String], senderEmails: [String]) {
-        // Cancel existing prefetch tasks to prevent accumulation
-        prefetchTextTask?.cancel()
-        prefetchContactsTask?.cancel()
-
         // Batch prefetch text content for recent messages (eliminates N+1 queries)
-        prefetchTextTask = Task.detached(priority: .userInitiated) {
+        taskManager.runDetached("prefetchText") {
             await ProcessedTextCache.shared.prefetch(messageIds: messageIds)
         }
 
         // Batch prefetch contacts to avoid thundering herd on first load
         let uniqueEmails = Array(Set(senderEmails))
-        prefetchContactsTask = Task.detached(priority: .userInitiated) {
+        taskManager.runDetached("prefetchContacts") {
             await ContactsResolver.shared.prewarm(emails: uniqueEmails)
         }
     }
 
     /// Cancels all prefetch tasks. Call from ChatView.onDisappear.
     func cancelPrefetch() {
-        prefetchTextTask?.cancel()
-        prefetchContactsTask?.cancel()
-        displayNameTask?.cancel()
+        taskManager.cancelAll()
     }
 
     // MARK: - Display Name Resolution
@@ -261,9 +249,9 @@ final class ChatViewModel: ObservableObject {
     /// Loads the resolved display name for the conversation participants.
     /// Call from ChatView on appear.
     func loadResolvedDisplayName() {
-        displayNameTask?.cancel()
-        displayNameTask = Task {
-            guard let myEmail = authSession.userEmail else { return }
+        taskManager.run("displayName") { [weak self] in
+            guard let self = self,
+                  let myEmail = authSession.userEmail else { return }
             let info = await ParticipantLoader.shared.loadParticipants(
                 from: conversation,
                 currentUserEmail: myEmail,

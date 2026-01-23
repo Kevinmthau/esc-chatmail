@@ -21,8 +21,8 @@ extension HistoryProcessor {
             syncStartTime: syncStartTime
         )
 
-        // Track all modified conversations (actor-isolated)
-        await trackModifiedConversations(modifiedObjectIDs)
+        // Track all modified conversations
+        await ModificationTracker.shared.trackModifiedConversations(modifiedObjectIDs)
     }
 
     /// Processes label removals using the shared LabelOperationProcessor
@@ -38,8 +38,8 @@ extension HistoryProcessor {
             syncStartTime: syncStartTime
         )
 
-        // Track all modified conversations (actor-isolated)
-        await trackModifiedConversations(modifiedObjectIDs)
+        // Track all modified conversations
+        await ModificationTracker.shared.trackModifiedConversations(modifiedObjectIDs)
     }
 
     /// Check if a message has local modifications that haven't been synced yet

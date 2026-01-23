@@ -44,6 +44,7 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
   /API/               - GmailAPIClient (Messages, Labels, History, Attachments)
   /Caching/           - Image caching, conversation preloading, request deduplication
   /Compose/           - Email composition, MIME building, recipient management
+  /Concurrency/       - ViewModelTaskManager for task lifecycle management
   /Contacts/          - CNContact search, contact persistence
   /CoreData/          - CoreDataStack, FetchRequestBuilder, batch operations
   /Fetcher/           - ParallelMessageFetcher, adaptive fetch optimization
@@ -54,6 +55,7 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
   /Security/          - TokenManager, KeychainService, OAuth
   /Sync/              - SyncEngine, orchestrators, persisters, composable phases
   /TextProcessing/    - Email text extraction, quote removal
+  /Utilities/         - ObservableForwarding for nested ObservableObject patterns
   Constants.swift     - GoogleConfig, SyncConfig, CacheConfig, NetworkConfig, UIConfig
   Dependencies.swift  - Dependency injection container for testability
 /Views/
@@ -72,7 +74,8 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
 - **ContactsResolver** - Actor for contact lookup with caching
 - **PendingActionsManager** - Actor-based offline action queue with retry logic
 - **ProfilePhotoResolver** - Resolves profile photos from contacts and cache
-- **ModificationTracker** - Shared actor tracking modified conversations during sync (single source of truth for both MessagePersister and HistoryProcessor)
+- **ModificationTracker** - Shared actor tracking modified conversations during sync (single source of truth). Use `ModificationTracker.shared` directly.
+- **AliasManager** - Centralized actor for user email alias management with caching. Use `AliasManager.shared.getAliases(from:)` or `getCachedAliases()`.
 - **MessagePersister** - Persists Gmail messages to Core Data, delegates modification tracking to ModificationTracker
 
 ### Message Display Logic
@@ -358,7 +361,13 @@ private func scheduleProcessing() {
 - **Async batch operations** - `saveContextWithRetry` is async; perform Core Data work in `context.perform { }`, save/sleep outside
 - **Typed accessors** in `/Services/Models/` per-entity extensions (avoid `value(forKey:)`)
 - **Extensions for code organization** - Large actors/structs split into extensions in separate files. Properties must be `internal` (not `private`) for extensions to access.
-- **Nested ObservableObject forwarding** - Forward `objectWillChange` via Combine subscriptions when composing ObservableObjects
+- **Nested ObservableObject forwarding** - Use `forwardChanges(from:storing:)` extension when composing ObservableObjects:
+```swift
+init() {
+    self.childService = SomeObservableService()
+    forwardChanges(from: childService, storing: &cancellables)
+}
+```
 - User's aliases must be excluded from `participantHash` - load from Account entity if not in memory
 
 ### Gmail System Label IDs
@@ -655,25 +664,31 @@ This tells SwiftUI to skip animation when the array of IDs changes (reorders or 
 
 ### SwiftUI Task Management
 
-**Track tasks in scroll-heavy views** - `VirtualScrollState` tracks all async tasks to prevent orphaned tasks during rapid scrolling:
+**Use ViewModelTaskManager for task lifecycle** - Manages cancel-before-reassign pattern in ViewModels:
 ```swift
-private var loadWindowTask: Task<Void, Never>?
-private var preloadNextTask: Task<Void, Never>?
+@MainActor
+final class MyViewModel: ObservableObject {
+    private let taskManager = ViewModelTaskManager()
 
-func loadWindow(...) {
-    loadWindowTask?.cancel()
-    loadWindowTask = Task {
-        // ... async work ...
-        guard !Task.isCancelled else { return }
-        // ... update state ...
+    func load() {
+        taskManager.run("load") { [weak self] in
+            await self?.performLoad()
+        }
+    }
+
+    func loadDetached() {
+        taskManager.runDetached("heavyWork") {
+            await self?.performHeavyWork()
+        }
+    }
+
+    func cleanup() {
+        taskManager.cancelAll()
     }
 }
-
-func cleanup() {
-    loadWindowTask?.cancel()
-    preloadNextTask?.cancel()
-}
 ```
+
+Used in `ChatViewModel` (3 tasks) and `VirtualScrollState` (4 tasks) to prevent orphaned tasks during rapid state changes.
 
 **Consolidate duplicate scroll logic** - When both `onAppear` and `onChange` need to trigger the same scroll behavior (e.g., initial scroll to bottom), extract to a single method with task tracking to prevent race conditions:
 ```swift
@@ -826,6 +841,7 @@ Test infrastructure in `esc-chatmailTests/TestSupport/`:
 
 **Test suites:**
 - `DisplayNameFormatterTests` - Name formatting logic
+- `EmailNormalizerTests` - Gmail dot normalization, plus addressing, email extraction
 - `ConversationMergerTests` - Duplicate detection and merge logic
 - `PendingActionsManagerTests` - Offline action queue patterns
 - `SendErrorTests` - Send error handling
@@ -834,6 +850,7 @@ Test infrastructure in `esc-chatmailTests/TestSupport/`:
 - `BoundedSetTests` - Bounded set pruning and FIFO eviction
 - `PeriodicCleanupTaskTests` - Periodic cleanup task lifecycle
 - `MemoryWarningObserverTests` - Memory warning observer setup/teardown
+- `SyncTimeCalculatorTests` - Sync timestamp calculations and query building
 - `PlainTextQuoteRemoverTests` - Email quote and signature removal
 - `HTMLQuoteRemoverTests` - HTML-specific quote patterns
 - `HTMLSanitizerServiceTests` - XSS prevention, script/tracking removal

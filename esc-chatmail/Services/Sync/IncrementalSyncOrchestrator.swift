@@ -103,7 +103,7 @@ final class IncrementalSyncOrchestrator {
         }
 
         log.info("Starting incremental sync with historyId: \(historyId)")
-        myAliases = Set(([accountData.email] + accountData.aliases).map(normalizedEmail))
+        myAliases = await AliasManager.shared.getAliases(from: coreDataStack.newBackgroundContext())
 
         let context = coreDataStack.newBackgroundContext()
         let labelIds = await messagePersister.prefetchLabelIds(in: context)
@@ -185,11 +185,6 @@ final class IncrementalSyncOrchestrator {
             }
             throw error
         }
-    }
-
-    /// Sets the user's email aliases (called from SyncEngine)
-    func setMyAliases(_ aliases: Set<String>) {
-        myAliases = aliases
     }
 
     // MARK: - History Recovery

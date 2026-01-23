@@ -55,8 +55,7 @@ final class SyncEngine: ObservableObject {
         let attachmentDownloader = AttachmentDownloader.shared
 
         let reconciliation = SyncReconciliation(
-            messageFetcher: messageFetcher,
-            historyProcessor: historyProcessor
+            messageFetcher: messageFetcher
         )
 
         self.messageFetcher = messageFetcher
@@ -107,20 +106,7 @@ final class SyncEngine: ObservableObject {
             try await performInitialSyncInternal()
         }
 
-        await syncStateActor.setSyncTask(syncTask)
-
-        do {
-            try await syncTask.value
-            await syncStateActor.endSync()
-        } catch is CancellationError {
-            await syncStateActor.endSync()
-            log.info("Initial sync was cancelled")
-            uiState.update(isSyncing: false, status: "Sync cancelled")
-        } catch {
-            await syncStateActor.endSync()
-            log.error("Initial sync failed", error: error)
-            uiState.update(isSyncing: false, status: "Sync failed: \(error.localizedDescription)")
-        }
+        await runSyncTask(syncTask, syncType: "Initial")
     }
 
     /// Performs incremental sync using Gmail history API
@@ -142,18 +128,23 @@ final class SyncEngine: ObservableObject {
             try await self.performIncrementalSyncInternal()
         }
 
-        await syncStateActor.setSyncTask(syncTask)
+        await runSyncTask(syncTask, syncType: "Incremental")
+    }
+
+    /// Executes a sync task with unified error handling
+    private func runSyncTask(_ task: Task<Void, Error>, syncType: String) async {
+        await syncStateActor.setSyncTask(task)
 
         do {
-            try await syncTask.value
+            try await task.value
             await syncStateActor.endSync()
         } catch is CancellationError {
             await syncStateActor.endSync()
-            log.info("Incremental sync was cancelled")
+            log.info("\(syncType) sync was cancelled")
             uiState.update(isSyncing: false, status: "Sync cancelled")
         } catch {
             await syncStateActor.endSync()
-            log.error("Incremental sync failed", error: error)
+            log.error("\(syncType) sync failed", error: error)
             uiState.update(isSyncing: false, status: "Sync failed: \(formatSyncError(error))")
         }
     }
@@ -188,13 +179,8 @@ final class SyncEngine: ObservableObject {
 
     /// Saves a message (used by BackgroundSyncManager)
     func saveMessage(_ gmailMessage: GmailMessage, labelIds: Set<String>? = nil, in context: NSManagedObjectContext) async {
-        var myAliases = initialSyncOrchestrator.getMyAliases()
-
-        // If aliases aren't loaded in memory, fetch from Core Data
-        // This happens during background sync when the app hasn't done a foreground sync yet
-        if myAliases.isEmpty {
-            myAliases = await loadAliasesFromCoreData(in: context)
-        }
+        // Use centralized AliasManager for alias resolution
+        let myAliases = await AliasManager.shared.getAliases(from: context)
 
         await messagePersister.saveMessage(
             gmailMessage,
@@ -202,19 +188,6 @@ final class SyncEngine: ObservableObject {
             myAliases: myAliases,
             in: context
         )
-    }
-
-    /// Loads user aliases from Core Data Account entity
-    private func loadAliasesFromCoreData(in context: NSManagedObjectContext) async -> Set<String> {
-        await context.perform {
-            let request = Account.fetchRequest()
-            request.fetchLimit = 1
-            guard let account = try? context.fetch(request).first else {
-                return Set<String>()
-            }
-            let aliases = ([account.email] + account.aliasesArray).map(normalizedEmail)
-            return Set(aliases)
-        }
     }
 
     // MARK: - Private Implementation
@@ -234,9 +207,6 @@ final class SyncEngine: ObservableObject {
 
     private func performIncrementalSyncInternal() async throws {
         uiState.update(isSyncing: true, progress: 0.0, status: "Checking for updates...")
-
-        // Share aliases with incremental sync
-        incrementalSyncOrchestrator.setMyAliases(initialSyncOrchestrator.getMyAliases())
 
         let result = try await incrementalSyncOrchestrator.performSync(
             progressHandler: { [weak self] progress, status in

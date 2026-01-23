@@ -37,7 +37,7 @@ extension HistoryProcessor {
 
         // Track modified conversations for rollup updates
         if !modifiedObjectIDs.isEmpty {
-            await trackModifiedConversations(modifiedObjectIDs)
+            await ModificationTracker.shared.trackModifiedConversations(modifiedObjectIDs)
         }
     }
 }

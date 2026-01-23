@@ -10,17 +10,14 @@ import CoreData
 final class SyncReconciliation: Sendable {
 
     private let messageFetcher: MessageFetcher
-    private let historyProcessor: HistoryProcessor
     private let failureTracker: SyncFailureTracker
     private let log = LogCategory.sync.logger
 
     init(
         messageFetcher: MessageFetcher,
-        historyProcessor: HistoryProcessor,
         failureTracker: SyncFailureTracker = .shared
     ) {
         self.messageFetcher = messageFetcher
-        self.historyProcessor = historyProcessor
         self.failureTracker = failureTracker
     }
 
@@ -313,7 +310,7 @@ final class SyncReconciliation: Sendable {
 
         // Track modified conversations using ObjectIDs (actor-isolated)
         for objectID in conversationObjectIDs {
-            await historyProcessor.trackModifiedConversation(objectID)
+            await ModificationTracker.shared.trackModifiedConversation(objectID)
         }
 
         return stats

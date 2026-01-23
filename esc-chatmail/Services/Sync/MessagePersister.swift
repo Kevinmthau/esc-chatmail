@@ -32,21 +32,6 @@ actor MessagePersister {
         self.conversationManager = conversationManager
     }
 
-    // MARK: - Modified Conversations Tracking
-    // Tracking is now delegated to ModificationTracker.shared for consolidated
-    // tracking across MessagePersister and HistoryProcessor.
-
-    /// Resets the modified conversations tracker - call at start of sync.
-    func resetModifiedConversations() async {
-        await ModificationTracker.shared.reset()
-    }
-
-    /// Returns and clears the set of modified conversation IDs.
-    /// NOTE: Prefer using ModificationTracker.shared.getAndClearModifiedConversations() directly.
-    func getAndClearModifiedConversations() async -> Set<NSManagedObjectID> {
-        await ModificationTracker.shared.getAndClearModifiedConversations()
-    }
-
     // MARK: - Message Persistence
 
     /// Saves a Gmail message to Core Data.

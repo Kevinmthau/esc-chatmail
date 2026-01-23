@@ -69,17 +69,9 @@ final class ConversationListViewModel: ObservableObject {
         )
 
         // Forward objectWillChange from child services
-        searchService.objectWillChange
-            .sink { [weak self] _ in self?.objectWillChange.send() }
-            .store(in: &cancellables)
-
-        selectionService.objectWillChange
-            .sink { [weak self] _ in self?.objectWillChange.send() }
-            .store(in: &cancellables)
-
-        filterService.objectWillChange
-            .sink { [weak self] _ in self?.objectWillChange.send() }
-            .store(in: &cancellables)
+        forwardChanges(from: searchService, storing: &cancellables)
+        forwardChanges(from: selectionService, storing: &cancellables)
+        forwardChanges(from: filterService, storing: &cancellables)
     }
 
     deinit {
