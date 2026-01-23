@@ -27,8 +27,13 @@ struct MessageContentView: View {
 
     @ViewBuilder
     private var textContent: some View {
-        // Try extracted text, then cleaned snippet, then cleaned raw snippet, then raw snippet as last resort
-        if let text = fullTextContent ?? message.cleanedSnippet ?? cleanedSnippet(message.snippet) ?? message.snippet, !text.isEmpty {
+        // Fallback chain:
+        // 1. fullTextContent - Async-loaded processed text (best quality, but may not be ready on first render)
+        // 2. processedText(bodyText) - Full body text with processing (immediate, full content)
+        // 3. processedText(snippet) - Gmail API snippet with processing (truncated, rarely used)
+        // 4. message.snippet - Raw truncated snippet (last resort)
+        // Note: We skip message.cleanedSnippet because TextSnippetCreator destroys all newlines
+        if let text = fullTextContent ?? processedText(message.bodyText) ?? processedText(message.snippet) ?? message.snippet, !text.isEmpty {
             textBubble(text: text)
         } else if message.bodyStorageURI != nil || htmlContentHandler.htmlFileExists(for: message.id) {
             // No text content but HTML exists - show button to view it
@@ -97,10 +102,14 @@ struct MessageContentView: View {
             .cornerRadius(12)
     }
 
-    /// Cleans a raw snippet by removing quoted text and signatures
-    private func cleanedSnippet(_ snippet: String?) -> String? {
-        guard let snippet = snippet else { return nil }
-        let cleaned = PlainTextQuoteRemover.removeQuotes(from: snippet)
-        return cleaned?.isEmpty == true ? nil : cleaned
+    /// Processes text while preserving paragraph structure and decoding HTML entities
+    /// Uses the same processing as ProcessedTextCache but preserves line breaks
+    /// (unlike cleanedSnippet which destroyed all newlines for conversation list previews)
+    private func processedText(_ text: String?) -> String? {
+        guard let text = text else { return nil }
+        let decoded = HTMLEntityDecoder.decode(text)
+        let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: decoded)
+        let stripped = TextProcessing.stripQuotedText(from: unwrapped)
+        return stripped.isEmpty ? nil : stripped
     }
 }
