@@ -162,6 +162,7 @@ struct ConversationListView: View {
     private var selectionActionBar: some View {
         HStack(spacing: 20) {
             archiveButton
+            spamButton
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 14)
@@ -173,6 +174,21 @@ struct ConversationListView: View {
                 Image(systemName: "archivebox")
                     .font(.system(size: 20, weight: .medium))
                 Text("Archive")
+                    .font(.system(size: 17, weight: .medium))
+            }
+            .foregroundColor(.primary)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+            .background(glassBackground)
+        }
+    }
+
+    private var spamButton: some View {
+        Button(action: { viewModel.reportSpamSelectedConversations() }) {
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 20, weight: .medium))
+                Text("Spam")
                     .font(.system(size: 17, weight: .medium))
             }
             .foregroundColor(.primary)

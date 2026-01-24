@@ -91,4 +91,28 @@ final class ConversationSelectionService: ObservableObject {
             await messageActions.archiveConversations(conversations: conversationsToArchive)
         }
     }
+
+    /// Reports all selected conversations as spam in a single batch operation
+    func reportSpamSelectedConversations() {
+        let context = coreDataStack.viewContext
+        let conversationsToReport = selectedConversationIDs.compactMap { objectID in
+            try? context.existingObject(with: objectID) as? Conversation
+        }
+
+        guard !conversationsToReport.isEmpty else {
+            Log.debug("No conversations to report as spam", category: .message)
+            return
+        }
+
+        Log.info("Batch spam report: \(conversationsToReport.count) conversations", category: .message)
+
+        // Clear selection immediately for instant UI feedback
+        selectedConversationIDs.removeAll()
+        isSelecting = false
+
+        // Single batch operation instead of sequential loop
+        Task {
+            await messageActions.reportSpamConversations(conversations: conversationsToReport)
+        }
+    }
 }

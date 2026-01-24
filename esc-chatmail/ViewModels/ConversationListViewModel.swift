@@ -200,6 +200,10 @@ final class ConversationListViewModel: ObservableObject {
         selectionService.archiveSelectedConversations()
     }
 
+    func reportSpamSelectedConversations() {
+        selectionService.reportSpamSelectedConversations()
+    }
+
     // MARK: - Filtering (Delegate to Service)
 
     func filteredConversations(from conversations: [Conversation]) -> [Conversation] {

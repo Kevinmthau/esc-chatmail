@@ -239,6 +239,47 @@ final class MessageActions: ObservableObject {
         }
     }
 
+    /// Reports multiple conversations as spam in a single batch operation for instant UI response.
+    /// - Parameter conversations: The conversations to report as spam
+    /// - Note: Performs a single Core Data save and queues a single pending action.
+    func reportSpamConversations(conversations: [Conversation]) async {
+        guard !conversations.isEmpty else { return }
+
+        Log.info("Batch reporting \(conversations.count) conversations as spam", category: .message)
+
+        // Collect all message IDs and update local state in memory
+        var allMessageIds: [String] = []
+        let modificationDate = Date()
+
+        for conversation in conversations {
+            guard let messages = conversation.messages else { continue }
+
+            for message in messages {
+                message.localModifiedAt = modificationDate
+                if !message.id.isEmpty {
+                    allMessageIds.append(message.id)
+                }
+            }
+
+            // Mark conversation as archived to remove from chat list
+            conversation.archivedAt = modificationDate
+        }
+
+        // Single Core Data save for all changes
+        let context = coreDataStack.viewContext
+        coreDataStack.saveIfNeeded(context: context)
+        Log.info("Batch reported \(conversations.count) conversations as spam (\(allMessageIds.count) messages)", category: .message)
+
+        // Queue single pending action with all message IDs
+        if !allMessageIds.isEmpty {
+            await pendingActionsManager.queueConversationAction(
+                type: .reportSpam,
+                conversationId: conversations.first!.id,
+                messageIds: allMessageIds
+            )
+        }
+    }
+
     /// Reports a conversation as spam by adding the SPAM label to all messages.
     /// Also archives the conversation locally to remove it from the chat list.
     /// - Parameter conversation: The conversation to report as spam
