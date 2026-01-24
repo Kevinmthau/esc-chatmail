@@ -1,6 +1,61 @@
 import Foundation
 import CoreData
 
+/// Checkpoint for resumable batch operations
+struct BatchCheckpoint: Codable {
+    let operationId: String
+    let lastProcessedIndex: Int
+    let totalCount: Int
+    let timestamp: Date
+
+    var progress: Double {
+        guard totalCount > 0 else { return 0 }
+        return Double(lastProcessedIndex) / Double(totalCount)
+    }
+}
+
+/// Manager for batch operation checkpoints
+/// Enables resumption of interrupted batch operations (e.g., after app crash during sync)
+enum BatchCheckpointManager {
+    private static let checkpointKey = "batchOperationCheckpoints"
+
+    /// Saves a checkpoint for a batch operation
+    static func saveCheckpoint(_ checkpoint: BatchCheckpoint) {
+        var checkpoints = loadAllCheckpoints()
+        checkpoints[checkpoint.operationId] = checkpoint
+        if let data = try? JSONEncoder().encode(checkpoints) {
+            UserDefaults.standard.set(data, forKey: checkpointKey)
+        }
+    }
+
+    /// Loads a checkpoint for a specific operation
+    static func loadCheckpoint(operationId: String) -> BatchCheckpoint? {
+        return loadAllCheckpoints()[operationId]
+    }
+
+    /// Clears a checkpoint after successful completion
+    static func clearCheckpoint(operationId: String) {
+        var checkpoints = loadAllCheckpoints()
+        checkpoints.removeValue(forKey: operationId)
+        if let data = try? JSONEncoder().encode(checkpoints) {
+            UserDefaults.standard.set(data, forKey: checkpointKey)
+        }
+    }
+
+    /// Clears all checkpoints (e.g., on fresh install)
+    static func clearAllCheckpoints() {
+        UserDefaults.standard.removeObject(forKey: checkpointKey)
+    }
+
+    private static func loadAllCheckpoints() -> [String: BatchCheckpoint] {
+        guard let data = UserDefaults.standard.data(forKey: checkpointKey),
+              let checkpoints = try? JSONDecoder().decode([String: BatchCheckpoint].self, from: data) else {
+            return [:]
+        }
+        return checkpoints
+    }
+}
+
 /// Extension containing message batch operations for CoreDataBatchOperations.
 extension CoreDataBatchOperations {
 

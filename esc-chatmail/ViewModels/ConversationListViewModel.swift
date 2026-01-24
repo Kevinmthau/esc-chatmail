@@ -45,6 +45,7 @@ final class ConversationListViewModel: ObservableObject {
     private var syncTimer: Timer?
     private var hasPerformedInitialSync = false
     private var cancellables = Set<AnyCancellable>()
+    private let taskManager = ViewModelTaskManager()
 
     // MARK: - Initialization
 
@@ -120,7 +121,8 @@ final class ConversationListViewModel: ObservableObject {
 
         hasPerformedInitialSync = true
 
-        Task {
+        taskManager.run("initialSync") { [weak self] in
+            guard let self = self else { return }
             do {
                 try await syncEngine.performIncrementalSync()
             } catch {
@@ -181,13 +183,17 @@ final class ConversationListViewModel: ObservableObject {
     // MARK: - Conversation Actions
 
     func archiveConversation(_ conversation: Conversation) {
-        Task {
+        let convID = conversation.objectID
+        taskManager.run("archive-\(convID)") { [weak self] in
+            guard let self = self else { return }
             await messageActions.archiveConversation(conversation: conversation)
         }
     }
 
     func toggleConversationReadState(_ conversation: Conversation) {
-        Task {
+        let convID = conversation.objectID
+        taskManager.run("toggleRead-\(convID)") { [weak self] in
+            guard let self = self else { return }
             if conversation.inboxUnreadCount > 0 {
                 await messageActions.markConversationAsRead(conversation: conversation)
             } else {
@@ -225,16 +231,19 @@ final class ConversationListViewModel: ObservableObject {
 
     func prefetchPersonData(from conversations: [Conversation]) {
         let personCache = self.personCache
-        Task {
-            // Use VirtualScrollConfiguration for consistent prefetch limits
-            let config = VirtualScrollConfiguration.default
-            let prefetchCount = config.visibleItemCount + config.bufferSize  // 30
 
-            let allEmails = conversations.prefix(prefetchCount).flatMap { conversation -> [String] in
-                guard let participants = conversation.participants else { return [] }
-                return participants.compactMap { $0.person?.email }
-            }
-            let uniqueEmails = Array(Set(allEmails))
+        // Extract emails on MainActor before entering detached task
+        // (NSManagedObjects are not Sendable)
+        let config = VirtualScrollConfiguration.default
+        let prefetchCount = config.visibleItemCount + config.bufferSize  // 30
+
+        let allEmails = conversations.prefix(prefetchCount).flatMap { conversation -> [String] in
+            guard let participants = conversation.participants else { return [] }
+            return participants.compactMap { $0.person?.email }
+        }
+        let uniqueEmails = Array(Set(allEmails))
+
+        taskManager.runDetached("prefetchPersonData") {
             await personCache.prefetch(emails: uniqueEmails)
 
             // Also prefetch profile photos to avoid thundering herd on first load
@@ -251,7 +260,8 @@ final class ConversationListViewModel: ObservableObject {
         let hasRefreshedKey = "hasRefreshedConversationNamesV2"
         guard !UserDefaults.standard.bool(forKey: hasRefreshedKey) else { return }
 
-        Task {
+        taskManager.run("refreshNames") { [weak self] in
+            guard let self = self else { return }
             let conversationManager = ConversationManager()
             await conversationManager.updateAllConversationRollups(in: coreDataStack.viewContext)
             UserDefaults.standard.set(true, forKey: hasRefreshedKey)
@@ -283,5 +293,6 @@ final class ConversationListViewModel: ObservableObject {
     func onDisappear() {
         stopPeriodicSync()
         searchService.cleanup()
+        taskManager.cancelAll()
     }
 }

@@ -156,18 +156,17 @@ final class IncrementalSyncOrchestrator {
                 context: phaseContext
             )
 
-            // Phase 6: Save
+            // Phase 6: Atomic Save (historyId + all changes in single transaction)
             progressHandler(0.95, "Saving changes...")
             let shouldAdvance = await failureTracker.shouldAdvanceHistoryId(
                 hadFailures: fetchResult.hasFailures,
                 latestHistoryId: historyResult.latestHistoryId
             )
 
-            if shouldAdvance {
-                await messagePersister.setAccountHistoryId(historyResult.latestHistoryId, in: context)
-            }
-
-            try await coreDataStack.saveAsync(context: context)
+            // Use atomic finalizeSync to prevent data loss if app crashes between
+            // setting historyId and saving messages
+            let historyIdToSave = shouldAdvance ? historyResult.latestHistoryId : nil
+            try await messagePersister.finalizeSync(historyId: historyIdToSave, in: context)
 
             NotificationCenter.default.post(name: .syncCompleted, object: nil)
 

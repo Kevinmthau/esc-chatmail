@@ -131,9 +131,9 @@ final class ConversationPreloader {
     private func loadConversation(_ conversationId: String) async {
         let context = coreDataStack.newBackgroundContext()
 
-        await context.perform { [weak self] in
-            guard let self = self else { return }
-
+        // Capture ObjectIDs from the background context, then re-fetch on MainActor
+        // This prevents passing NSManagedObjects across context boundaries
+        let objectIds: (conversationId: NSManagedObjectID, messageIds: [NSManagedObjectID])? = await context.perform {
             let request = Conversation.fetchRequest()
             request.predicate = NSPredicate(format: "id == %@", conversationId)
             request.relationshipKeyPathsForPrefetching = ["messages", "participants"]
@@ -143,9 +143,9 @@ final class ConversationPreloader {
                 conversation = try context.fetch(request).first
             } catch {
                 Log.error("Failed to fetch conversation for preloading", category: .coreData, error: error)
-                return
+                return nil
             }
-            guard let conversation = conversation else { return }
+            guard let conversation = conversation else { return nil }
 
             let messageRequest = Message.fetchRequest()
             messageRequest.predicate = NSPredicate(format: "conversation == %@", conversation)
@@ -157,12 +157,18 @@ final class ConversationPreloader {
                 messages = try context.fetch(messageRequest)
             } catch {
                 Log.error("Failed to fetch messages for conversation preloading", category: .coreData, error: error)
-                return
+                return nil
             }
 
-            Task { @MainActor in
-                self.cache?.set(conversation, messages: messages)
-            }
+            return (conversation.objectID, messages.map { $0.objectID })
         }
+
+        guard let objectIds = objectIds else { return }
+
+        // Re-fetch objects on MainActor using viewContext to ensure thread safety
+        let viewContext = coreDataStack.viewContext
+        guard let conv = try? viewContext.existingObject(with: objectIds.conversationId) as? Conversation else { return }
+        let msgs = objectIds.messageIds.compactMap { try? viewContext.existingObject(with: $0) as? Message }
+        cache?.set(conv, messages: msgs)
     }
 }

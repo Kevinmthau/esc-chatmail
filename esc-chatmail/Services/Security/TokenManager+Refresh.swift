@@ -62,9 +62,20 @@ extension TokenManager {
                 return true
             case .noValidToken, .invalidCredentials, .tokenExpired:
                 return false
-            case .refreshFailed:
-                return true // Could be transient
+            case .refreshFailed(let underlying):
+                // Check for invalid_grant error - this means the refresh token is revoked
+                // and retry won't help; user needs to re-authenticate
+                if isInvalidGrantError(underlying) {
+                    Log.warning("Refresh token revoked (invalid_grant) - user must re-authenticate", category: .auth)
+                    return false
+                }
+                return true // Other refresh failures could be transient
             }
+        }
+
+        // Check for invalid_grant in the raw error
+        if isInvalidGrantError(error) {
+            return false
         }
 
         // Check for network errors
@@ -77,5 +88,37 @@ extension TokenManager {
         ]
 
         return networkErrorCodes.contains(nsError.code)
+    }
+
+    /// Checks if an error indicates an invalid_grant OAuth error.
+    /// This occurs when:
+    /// - User has revoked app access
+    /// - Refresh token has expired (rare, but possible after 6 months of inactivity)
+    /// - Account password changed and security settings require re-auth
+    /// - Token was issued to a deleted Google account
+    private func isInvalidGrantError(_ error: Error?) -> Bool {
+        guard let error = error else { return false }
+
+        let nsError = error as NSError
+        let errorDescription = nsError.localizedDescription.lowercased()
+        let errorDomain = nsError.domain.lowercased()
+
+        // Check for OAuth-specific invalid_grant error
+        // HTTP 400 with "invalid_grant" in the response indicates revoked token
+        if nsError.code == 400 && errorDescription.contains("invalid_grant") {
+            return true
+        }
+
+        // Check userInfo for additional error details
+        if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            return isInvalidGrantError(underlyingError)
+        }
+
+        // Check for common OAuth error patterns in domain/description
+        if errorDomain.contains("oauth") && errorDescription.contains("invalid_grant") {
+            return true
+        }
+
+        return false
     }
 }

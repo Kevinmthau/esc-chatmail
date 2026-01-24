@@ -145,11 +145,15 @@ actor ProcessedTextCache: MemoryWarningHandler {
             }
 
             // Check for rich content in cleaned HTML only (not quoted sections)
+            // Includes <object>/<embed> for inline PDFs and cid: for any inline attachments
             let lowercased = cleanedHTML.lowercased()
             hasRichContent = lowercased.contains("<table") ||
                             lowercased.contains("<img") ||
                             lowercased.contains("<video") ||
-                            lowercased.contains("<iframe")
+                            lowercased.contains("<iframe") ||
+                            lowercased.contains("<object") ||
+                            lowercased.contains("<embed") ||
+                            lowercased.contains("cid:")
         }
 
         return (plainText, hasRichContent)
@@ -157,6 +161,12 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
     func clear() async {
         await cache.clear()
+    }
+
+    /// Invalidates a specific cache entry by message ID.
+    /// Use this when a Message entity is deleted.
+    func invalidate(messageId: String) async {
+        await cache.remove(messageId)
     }
 
     /// Returns cache statistics for monitoring

@@ -10,6 +10,24 @@ actor SyncStateActor {
     private var isCurrentlySyncing = false
     private var syncTask: Task<Void, Error>?
 
+    /// Atomically begins a sync and sets the task in a single operation.
+    /// This prevents race conditions where beginSync() succeeds but setSyncTask()
+    /// could be called by a different caller between the two operations.
+    ///
+    /// - Parameter taskBuilder: Closure that creates the sync task (called only if sync can begin)
+    /// - Returns: The created task if sync began successfully, nil if sync was already in progress
+    func beginSyncWithTask(_ taskBuilder: () -> Task<Void, Error>) -> Task<Void, Error>? {
+        guard !isCurrentlySyncing else {
+            Log.debug("Sync already in progress, skipping", category: .sync)
+            return nil
+        }
+        isCurrentlySyncing = true
+        let task = taskBuilder()
+        syncTask = task
+        return task
+    }
+
+    /// Legacy method - prefer beginSyncWithTask for atomic sync+task creation
     func beginSync() async -> Bool {
         guard !isCurrentlySyncing else {
             Log.debug("Sync already in progress, skipping", category: .sync)
@@ -24,6 +42,7 @@ actor SyncStateActor {
         syncTask = nil
     }
 
+    /// Legacy method - prefer beginSyncWithTask for atomic sync+task creation
     func setSyncTask(_ task: Task<Void, Error>?) {
         syncTask?.cancel()
         syncTask = task

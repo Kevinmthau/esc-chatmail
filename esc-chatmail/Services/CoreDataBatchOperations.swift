@@ -30,6 +30,7 @@ struct CoreDataBatchOperations: Sendable {
     ///   - context: The managed object context to save
     ///   - maxRetries: Maximum number of retry attempts
     /// - Note: Uses exponential backoff with async sleep to avoid blocking.
+    ///         Special handling for SQLITE_BUSY errors with longer backoff.
     func saveContextWithRetry(_ context: NSManagedObjectContext, maxRetries: Int = 3) async throws {
         var lastError: Error?
 
@@ -64,9 +65,22 @@ struct CoreDataBatchOperations: Sendable {
                         Log.warning("Validation errors: \(nsError.userInfo)", category: .coreData)
                         throw BatchOperationError.contextSaveFailure(error)
                     }
+
+                    // Check for SQLite BUSY errors (code 5 in SQLite)
+                    // These occur when multiple processes are trying to write to the database
+                    if isSQLiteBusyError(nsError) {
+                        Log.warning("SQLite busy error on attempt \(attempt)/\(maxRetries), using longer backoff", category: .coreData)
+
+                        if attempt < maxRetries {
+                            // Use longer backoff for SQLite busy errors: 500ms, 1s, 2s
+                            let delayNanoseconds = UInt64(pow(2.0, Double(attempt - 1)) * 0.5 * 1_000_000_000)
+                            try? await Task.sleep(nanoseconds: delayNanoseconds)
+                            continue
+                        }
+                    }
                 }
 
-                // Retry with exponential backoff (non-blocking, outside perform block)
+                // Standard retry with exponential backoff (non-blocking, outside perform block)
                 if attempt < maxRetries {
                     let delayNanoseconds = UInt64(pow(2.0, Double(attempt - 1)) * 0.1 * 1_000_000_000)
                     try? await Task.sleep(nanoseconds: delayNanoseconds)
@@ -75,6 +89,28 @@ struct CoreDataBatchOperations: Sendable {
         }
 
         throw BatchOperationError.contextSaveFailure(lastError ?? NSError())
+    }
+
+    /// Checks if an error is a SQLite BUSY error
+    private func isSQLiteBusyError(_ error: NSError) -> Bool {
+        // SQLite BUSY error code is 5
+        // Can appear directly or in underlying error
+        if error.domain == NSSQLiteErrorDomain && error.code == 5 {
+            return true
+        }
+
+        // Check for "database is locked" message
+        let description = error.localizedDescription.lowercased()
+        if description.contains("database is locked") || description.contains("sqlite_busy") {
+            return true
+        }
+
+        // Check underlying error
+        if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
+            return isSQLiteBusyError(underlying)
+        }
+
+        return false
     }
 
     // MARK: - Mapping Functions

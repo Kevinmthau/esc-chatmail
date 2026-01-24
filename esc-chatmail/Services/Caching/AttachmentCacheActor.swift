@@ -237,4 +237,22 @@ actor AttachmentCacheActor: MemoryWarningHandler {
             }
         }
     }
+
+    // MARK: - Cache Removal
+
+    /// Removes all cached data for a specific attachment ID.
+    /// Use this when an attachment download fails and needs rollback.
+    func removeFromCache(_ attachmentId: String) async {
+        // Remove thumbnail
+        await thumbnailCache.remove("thumb_\(attachmentId)")
+
+        // Remove full image (various sizes may be cached)
+        await fullImageCache.remove("full_\(attachmentId)")
+
+        // Remove any downsampled versions - we can't know all sizes, so just remove the full
+        // Downsampled versions will be regenerated if needed
+
+        // Remove from data cache
+        await dataCache.remove(attachmentId)
+    }
 }

@@ -1,5 +1,52 @@
 import Foundation
 
+// MARK: - Rate Limit Tracker
+
+/// Tracks cumulative rate limit backoff time to prevent API exhaustion.
+/// If we spend too much time in rate-limited backoff, we should stop making requests
+/// temporarily rather than continuing to hammer the API.
+actor RateLimitTracker {
+    private var cumulativeBackoffTime: TimeInterval = 0
+    private var windowStartTime: Date = Date()
+
+    /// Maximum cumulative backoff time allowed in the window before circuit breaking
+    private let maxCumulativeBackoff: TimeInterval = 120 // 2 minutes
+
+    /// Time window for tracking cumulative backoff
+    private let windowDuration: TimeInterval = 300 // 5 minutes
+
+    /// Records time spent in rate limit backoff
+    func recordBackoff(_ duration: TimeInterval) {
+        resetWindowIfNeeded()
+        cumulativeBackoffTime += duration
+    }
+
+    /// Returns true if we should abort due to excessive rate limiting
+    func shouldAbort() -> Bool {
+        resetWindowIfNeeded()
+        return cumulativeBackoffTime >= maxCumulativeBackoff
+    }
+
+    /// Resets tracking after successful request
+    func recordSuccess() {
+        // Reduce cumulative backoff on success to allow recovery
+        cumulativeBackoffTime = max(0, cumulativeBackoffTime - 10)
+    }
+
+    /// Returns current cumulative backoff for monitoring
+    var currentCumulativeBackoff: TimeInterval {
+        cumulativeBackoffTime
+    }
+
+    private func resetWindowIfNeeded() {
+        let now = Date()
+        if now.timeIntervalSince(windowStartTime) >= windowDuration {
+            windowStartTime = now
+            cumulativeBackoffTime = 0
+        }
+    }
+}
+
 // MARK: - Gmail API Client
 
 /// Client for Gmail API operations.
@@ -16,6 +63,9 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     let session: URLSession
     let tokenManager: TokenManagerProtocol
     let retryStrategy: RetryStrategy
+
+    /// Tracks cumulative rate limit backoff time to prevent API exhaustion
+    private let rateLimitTracker = RateLimitTracker()
 
     // MARK: - Initialization
 
@@ -151,6 +201,13 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                             Log.warning("Rate limited, using exponential backoff: \(delay) seconds", category: .api)
                         }
 
+                        // Track cumulative backoff to prevent API exhaustion
+                        await rateLimitTracker.recordBackoff(delay)
+                        if await rateLimitTracker.shouldAbort() {
+                            Log.warning("Circuit breaker: excessive cumulative rate limiting, aborting", category: .api)
+                            throw APIError.rateLimited
+                        }
+
                         // Check if delay would exceed remaining time budget
                         let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
                         if delay > remainingTime {
@@ -189,6 +246,8 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                     }
                 }
 
+                // Record success to help recover from rate limiting
+                await rateLimitTracker.recordSuccess()
                 return try JSONDecoder().decode(T.self, from: data)
 
             } catch {

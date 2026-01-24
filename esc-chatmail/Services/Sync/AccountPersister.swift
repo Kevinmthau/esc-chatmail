@@ -72,6 +72,32 @@ extension MessagePersister {
         }
     }
 
+    /// Atomically finalizes a sync by setting the historyId and saving all pending changes in a single transaction.
+    /// This prevents data loss if the app crashes between setting historyId and saving messages.
+    /// - Parameters:
+    ///   - historyId: Optional new history ID to set (nil if historyId should not be updated)
+    ///   - context: The Core Data context containing all pending sync changes
+    /// - Throws: CoreDataError.saveFailed if the save fails
+    func finalizeSync(historyId: String?, in context: NSManagedObjectContext) async throws {
+        try await context.perform {
+            // Set historyId if provided
+            if let historyId = historyId {
+                let request = Account.fetchRequest()
+                request.fetchLimit = 1
+                if let account = try? context.fetch(request).first {
+                    account.historyId = historyId
+                    Log.debug("Finalizing sync with historyId: \(historyId)", category: .sync)
+                } else {
+                    Log.warning("No account found to set history ID during finalize", category: .sync)
+                }
+            }
+
+            // Atomic save of all changes (messages + historyId together)
+            guard context.hasChanges else { return }
+            try context.save()
+        }
+    }
+
     /// Updates account's history ID in a SEPARATE transaction
     /// WARNING: Use setAccountHistoryId(_:in:) for transactional sync updates
     /// This method is only for standalone historyId updates outside of sync

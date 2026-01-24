@@ -180,14 +180,14 @@ final class MessageFetcher: @unchecked Sendable {
 
         var currentFailedIds = initialResult.retriableFailedIds
 
-        // Retry loop with exponential backoff
+        // Retry loop with exponential backoff and jitter
         for attempt in 1...maxRetryAttempts {
             guard !Task.isCancelled, !currentFailedIds.isEmpty else {
                 break
             }
 
-            // Exponential backoff: 500ms, 1s, 2s
-            let delay = baseRetryDelay * UInt64(1 << (attempt - 1))
+            // Exponential backoff with jitter to prevent thundering herd
+            let delay = calculateRetryDelay(attempt: attempt)
             Log.debug("Retry attempt \(attempt)/\(maxRetryAttempts) for \(currentFailedIds.count) failed messages after \(delay / 1_000_000)ms...", category: .sync)
 
             do {
@@ -277,6 +277,25 @@ final class MessageFetcher: @unchecked Sendable {
     /// Fetches all labels from Gmail API
     func listLabels() async throws -> [GmailLabel] {
         return try await apiClient.listLabels()
+    }
+
+    // MARK: - Private Helpers
+
+    /// Calculates retry delay with exponential backoff and jitter to prevent thundering herd.
+    ///
+    /// Jitter adds 0-25% randomness to the base delay, spreading out retry attempts
+    /// when multiple operations fail simultaneously.
+    ///
+    /// - Parameter attempt: The current retry attempt number (1-based)
+    /// - Returns: Delay in nanoseconds
+    private func calculateRetryDelay(attempt: Int) -> UInt64 {
+        // Base exponential backoff: 500ms, 1s, 2s, etc.
+        let baseDelay = baseRetryDelay * UInt64(1 << (attempt - 1))
+
+        // Add 0-25% jitter to prevent thundering herd
+        let jitter = UInt64.random(in: 0...(baseDelay / 4))
+
+        return baseDelay + jitter
     }
 }
 // Note: withTimeout function is defined in GmailAPIClient.swift

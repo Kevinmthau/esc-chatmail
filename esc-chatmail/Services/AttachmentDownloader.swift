@@ -156,6 +156,9 @@ final class AttachmentDownloader: ObservableObject {
         } catch {
             Log.error("Failed to download attachment \(attachmentId)", category: .attachment, error: error)
 
+            // Rollback any partial download artifacts to prevent orphaned files
+            rollbackPartialDownload(attachmentId: attachmentId)
+
             // Check if we should retry
             let attempts = (retryAttempts[attachmentId] ?? 0) + 1
             retryAttempts[attachmentId] = attempts
@@ -243,6 +246,30 @@ final class AttachmentDownloader: ObservableObject {
         let executor = RetryExecutor<Data>.network(maxAttempts: 3, baseDelay: 1.0, maxDelay: 10.0)
         return try await executor.execute { [apiClient] in
             try await apiClient.getAttachment(messageId: messageId, attachmentId: attachmentId)
+        }
+    }
+
+    /// Cleans up any partial download artifacts to prevent orphaned files.
+    /// Called when a download fails to ensure clean state for retry.
+    private func rollbackPartialDownload(attachmentId: String) {
+        // Remove any partial original file (all possible extensions)
+        let commonExtensions = ["", "jpg", "jpeg", "png", "gif", "pdf", "doc", "docx", "dat"]
+        for ext in commonExtensions {
+            let originalPath = AttachmentPaths.originalPath(idOrUUID: attachmentId, ext: ext)
+            if let originalURL = AttachmentPaths.fullURL(for: originalPath) {
+                FileSystemErrorHandler.removeItem(at: originalURL, category: .attachment)
+            }
+        }
+
+        // Remove any partial preview file
+        let previewPath = AttachmentPaths.previewPath(idOrUUID: attachmentId)
+        if let previewURL = AttachmentPaths.fullURL(for: previewPath) {
+            FileSystemErrorHandler.removeItem(at: previewURL, category: .attachment)
+        }
+
+        // Clear from in-memory cache
+        Task {
+            await AttachmentCacheActor.shared.removeFromCache(attachmentId)
         }
     }
 

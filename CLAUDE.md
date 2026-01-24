@@ -42,18 +42,18 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
   FreshInstallHandler.swift - Detects app reinstalls, clears stale keychain data
 /Services/
   /API/               - GmailAPIClient (Messages, Labels, History, Attachments)
-  /Caching/           - Image caching, conversation preloading, request deduplication
+  /Caching/           - Image caching, conversation preloading, request deduplication, CacheCoordinator
   /Compose/           - Email composition, MIME building, recipient management
   /Concurrency/       - ViewModelTaskManager for task lifecycle management
   /Contacts/          - CNContact search, contact persistence
   /CoreData/          - CoreDataStack, FetchRequestBuilder, batch operations
   /Fetcher/           - ParallelMessageFetcher, adaptive fetch optimization
   /HTMLSanitization/  - Security pipeline for email HTML
-  /ErrorHandling/     - FileSystemErrorHandler for explicit file operation logging
+  /ErrorHandling/     - FileSystemErrorHandler, UnifiedErrorClassifier for error classification
   /Logging/           - Log categories: sync, api, coreData, auth, ui, background, conversation
   /PendingActions/    - Offline action queue with retry logic
   /Security/          - TokenManager, KeychainService, OAuth
-  /Sync/              - SyncEngine, orchestrators, persisters, composable phases
+  /Sync/              - SyncEngine, orchestrators, persisters, composable phases, SyncCircuitBreaker
   /TextProcessing/    - Email text extraction, quote removal
   /Utilities/         - ObservableForwarding for nested ObservableObject patterns
   Constants.swift     - GoogleConfig, SyncConfig, CacheConfig, NetworkConfig, UIConfig
@@ -74,7 +74,10 @@ Gmail API → SyncEngine → Core Data → SwiftUI Views
 - **ContactsResolver** - Actor for contact lookup with caching
 - **PendingActionsManager** - Actor-based offline action queue with retry logic
 - **ProfilePhotoResolver** - Resolves profile photos from contacts and cache
-- **ModificationTracker** - Shared actor tracking modified conversations during sync (single source of truth). Use `ModificationTracker.shared` directly.
+- **ModificationTracker** - Shared actor tracking modified conversations during sync (single source of truth). Use `ModificationTracker.shared` directly. Supports transaction-based tracking with `beginTransaction()`, `commitTransaction()`, `rollbackTransaction()` to prevent losing modifications if sync fails.
+- **CacheCoordinator** - Listens for `NSManagedObjectContextDidSave` and automatically invalidates `ConversationCache`, `PersonCache`, and `ProcessedTextCache` when entities change. Initialized at app startup.
+- **SyncCircuitBreaker** - Circuit breaker for sync operations. Opens after 5 consecutive failures, resets after 5 minutes. Check `canAttemptSync()` before starting, call `recordSuccess()`/`recordFailure()` after completion.
+- **UnifiedErrorClassifier** - Centralized error classification with severity levels (debug/info/warning/error/critical) and recovery strategies (retry/reauth/abort/ignore). Use `UnifiedErrorClassifier.classify(error)` to get handling recommendations.
 - **AliasManager** - Centralized actor for user email alias management with caching. Use `AliasManager.shared.getAliases(from:)` or `getCachedAliases()`.
 - **MessagePersister** - Persists Gmail messages to Core Data, delegates modification tracking to ModificationTracker
 
@@ -461,6 +464,29 @@ let modifiedConversations = await LabelOperationProcessor.process(
 
 This is used in `InitialSyncOrchestrator`, `IncrementalSyncOrchestrator`, `ConversationUpdatePhase`, and `SyncEngine.updateConversationRollups()`.
 
+**Transaction-based modification tracking** - `ModificationTracker` supports transactions to prevent losing modifications if sync fails:
+```swift
+let txId = await ModificationTracker.shared.beginTransaction()
+do {
+    // ... sync operations that call trackModifiedConversation() ...
+    let modifiedIds = await ModificationTracker.shared.commitTransaction(txId)
+    // Update rollups for modifiedIds
+} catch {
+    await ModificationTracker.shared.rollbackTransaction(txId)
+    // Modifications discarded, will be re-discovered on next sync
+}
+```
+
+**Atomic sync finalization** - Use `AccountPersister.finalizeSync()` instead of separate historyId update + save:
+```swift
+// Avoid: Non-atomic (crash between these = data loss)
+await accountPersister.setAccountHistoryId(historyId, in: context)
+try await coreDataStack.saveAsync(context: context)
+
+// Prefer: Atomic (single save includes historyId update)
+try await accountPersister.finalizeSync(historyId: historyId, in: context)
+```
+
 **Batch fetching in label operations** - `LabelOperationProcessor` uses batch Core Data queries:
 - Collect all message IDs and label IDs upfront before processing
 - Single batch fetch with `NSPredicate(format: "id IN %@", allMessageIds)`
@@ -483,6 +509,16 @@ This is used in `InitialSyncOrchestrator`, `IncrementalSyncOrchestrator`, `Conve
 **History page limits** - `HistoryCollectionPhase` limits to 50 pages maximum (`maxHistoryPages`) to prevent OOM on large mailboxes with thousands of changes. If exceeded, partial sync continues and next sync catches remaining.
 
 **Batch persistence for abandoned messages** - `SyncFailureTracker.persistAbandonedMessages()` uses batch fetch with dictionary lookup instead of N+1 queries when persisting failed message IDs.
+
+**Batch operation checkpointing** - `MessageBatchOperations` supports checkpointing for large operations that may be interrupted:
+```swift
+let checkpointManager = BatchCheckpointManager()
+await checkpointManager.save(BatchCheckpoint(processedChunkIndex: i, ...))
+// On resume:
+if let checkpoint = await checkpointManager.load(for: sessionId) {
+    startFromChunk = checkpoint.processedChunkIndex + 1
+}
+```
 
 ### Sync Conflict Resolution
 
@@ -604,9 +640,46 @@ try? context.save()
 context.saveOrLog(operation: "update message read status")
 ```
 
+**Attachment download rollback** - `AttachmentDownloader` calls `rollbackPartialDownload()` on failure to clean up orphaned files:
+```swift
+private func rollbackPartialDownload(attachmentId: String, tempURL: URL?) {
+    // Remove temp file, preview file, and cache entries
+    // Prevents orphaned partial downloads accumulating on disk
+}
+```
+
+**Unified error classification** - Use `UnifiedErrorClassifier` for consistent error handling:
+```swift
+let classification = UnifiedErrorClassifier.classify(error)
+switch classification.recoveryStrategy {
+case .retry(let delay):
+    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+    // retry operation
+case .reauth:
+    // prompt user to sign in again
+case .abort:
+    // stop and report error
+case .ignore:
+    // log and continue
+}
+```
+
+Classification provides: `severity`, `category`, `isRetryable`, `userMessage`, `technicalDescription`.
+
 ### Rate Limiting
 
 `GmailAPIClient.performRequestWithRetry()` respects the `Retry-After` HTTP header on 429 responses. Falls back to exponential backoff if header not present.
+
+**Circuit breaker** - The client includes:
+- Individual retry delay capped to `NetworkConfig.maxRetryAfterSeconds` (2 minutes)
+- Total retry time capped to `NetworkConfig.maxTotalRetryTime` (5 minutes)
+- Cumulative rate limit tracking via `RateLimitTracker` - aborts if cumulative backoff exceeds 2 minutes in a 5-minute window
+
+**Retry jitter** - `MessageFetcher` adds 0-25% jitter to retry delays to prevent thundering herd:
+```swift
+let baseDelay = baseRetryDelay * UInt64(1 << (attempt - 1))
+let jitter = UInt64.random(in: 0...(baseDelay / 4))
+```
 
 ### Observing Core Data Changes for Async Operations
 
@@ -688,7 +761,7 @@ final class MyViewModel: ObservableObject {
 }
 ```
 
-Used in `ChatViewModel` (3 tasks) and `VirtualScrollState` (4 tasks) to prevent orphaned tasks during rapid state changes.
+Used in `ChatViewModel`, `ConversationListViewModel`, and `VirtualScrollState` to prevent orphaned tasks during rapid state changes. Always call `taskManager.cancelAll()` in view's `onDisappear`.
 
 **Consolidate duplicate scroll logic** - When both `onAppear` and `onChange` need to trigger the same scroll behavior (e.g., initial scroll to bottom), extract to a single method with task tracking to prevent race conditions:
 ```swift

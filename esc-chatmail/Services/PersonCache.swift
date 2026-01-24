@@ -166,6 +166,13 @@ actor PersonCache: PeriodicCleanupHandler {
         cache.removeAll()
     }
 
+    /// Invalidates a specific cache entry by email.
+    /// Use this when a Person entity is updated or deleted.
+    func invalidateEntry(for email: String) {
+        let normalized = EmailNormalizer.normalize(email)
+        cache.removeValue(forKey: normalized)
+    }
+
     /// Get fallback display name from email, formatted as a proper name
     private func fallbackDisplayName(for email: String) -> String {
         EmailNormalizer.formatAsDisplayName(email: email)

@@ -74,7 +74,9 @@ final class ChatViewModel: ObservableObject {
     }
 
     func toggleMessageRead(_ message: Message) {
-        Task {
+        let messageID = message.objectID
+        taskManager.run("toggleRead-\(messageID)") { [weak self] in
+            guard let self = self else { return }
             if message.isUnread {
                 await messageActions.markAsRead(message: message)
             } else {
@@ -84,19 +86,24 @@ final class ChatViewModel: ObservableObject {
     }
 
     func archiveMessage(_ message: Message) {
-        Task {
+        let messageID = message.objectID
+        taskManager.run("archiveMessage-\(messageID)") { [weak self] in
+            guard let self = self else { return }
             await messageActions.archive(message: message)
         }
     }
 
     func archiveConversation() {
-        Task {
+        taskManager.run("archiveConversation") { [weak self] in
+            guard let self = self else { return }
             await messageActions.archiveConversation(conversation: conversation)
         }
     }
 
     func starMessage(_ message: Message) {
-        Task {
+        let messageID = message.objectID
+        taskManager.run("starMessage-\(messageID)") { [weak self] in
+            guard let self = self else { return }
             await messageActions.star(message: message)
         }
     }
@@ -104,7 +111,8 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Conversation Settings
 
     func reportSpam() {
-        Task {
+        taskManager.run("reportSpam") { [weak self] in
+            guard let self = self else { return }
             await messageActions.reportSpamConversation(conversation: conversation)
         }
     }
