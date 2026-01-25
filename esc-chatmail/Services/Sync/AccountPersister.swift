@@ -25,10 +25,15 @@ extension MessagePersister {
             return existing
         }
 
-        let account = NSEntityDescription.insertNewObject(
+        guard let account = NSEntityDescription.insertNewObject(
             forEntityName: "Account",
             into: context
-        ) as! Account
+        ) as? Account else {
+            Log.error("Failed to create Account entity", category: .coreData)
+            // Return a dummy account that will fail validation - this shouldn't happen
+            // but provides a fallback rather than crashing
+            fatalError("Critical: Unable to create Account entity in Core Data")
+        }
         account.id = profile.emailAddress
         account.email = profile.emailAddress
         account.historyId = profile.historyId

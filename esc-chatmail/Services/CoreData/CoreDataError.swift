@@ -7,6 +7,7 @@ enum CoreDataError: LocalizedError {
     case transientFailure(Error)
     case persistentFailure(Error)
     case stackDestroyed
+    case entityCreationFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -22,12 +23,14 @@ enum CoreDataError: LocalizedError {
             return "Critical data error: \(error.localizedDescription)"
         case .stackDestroyed:
             return "Data stack has been destroyed"
+        case .entityCreationFailed(let entityName):
+            return "Failed to create entity: \(entityName)"
         }
     }
 
     var recoverySuggestion: String? {
         switch self {
-        case .storeLoadFailed, .migrationFailed, .persistentFailure, .stackDestroyed:
+        case .storeLoadFailed, .migrationFailed, .persistentFailure, .stackDestroyed, .entityCreationFailed:
             return "Please restart the app. If the problem persists, you may need to reinstall."
         case .saveFailed, .transientFailure:
             return "Please try again. Your data is safe."

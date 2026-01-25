@@ -92,10 +92,13 @@ extension MessagePersister {
                     }
                 } else {
                     // Insert new label
-                    let label = NSEntityDescription.insertNewObject(
+                    guard let label = NSEntityDescription.insertNewObject(
                         forEntityName: "Label",
                         into: context
-                    ) as! Label
+                    ) as? Label else {
+                        Log.error("Failed to create Label entity", category: .coreData)
+                        continue
+                    }
                     label.id = gmailLabel.id
                     label.name = gmailLabel.name
                     labelDict[gmailLabel.id] = label

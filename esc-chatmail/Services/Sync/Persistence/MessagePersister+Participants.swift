@@ -46,11 +46,15 @@ extension MessagePersister {
         for message: Message,
         in context: NSManagedObjectContext
     ) async {
-        _ = MessageParticipantFactory.create(
-            from: headerValue,
-            kind: kind,
-            for: message,
-            in: context
-        )
+        do {
+            _ = try MessageParticipantFactory.create(
+                from: headerValue,
+                kind: kind,
+                for: message,
+                in: context
+            )
+        } catch {
+            Log.error("Failed to create participant for message \(message.id): \(error)", category: .coreData)
+        }
     }
 }

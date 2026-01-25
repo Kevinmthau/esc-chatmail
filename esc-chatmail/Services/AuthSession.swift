@@ -128,6 +128,12 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             await AttachmentCacheActor.shared.clearCache(level: .aggressive)
         }
 
+        // Clear conversation cache to prevent leaking previous user's data
+        ConversationCache.shared.clearAllCaches()
+
+        // Clear attachment downloader tracking data
+        AttachmentDownloader.shared.cleanupAll()
+
         // Clear attachment files from disk
         clearAttachmentFiles()
     }

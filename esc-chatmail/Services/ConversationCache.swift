@@ -148,6 +148,26 @@ final class ConversationCache: ObservableObject {
         stats.currentItemCount = 0
     }
 
+    /// Clears all caches and resets state for logout.
+    /// Call this from the auth flow when user logs out to prevent leaking previous user's data.
+    func clearAllCaches() {
+        // Clear conversation cache
+        cache.removeAll()
+
+        // Cancel any pending preload operations
+        preloader.cancel()
+
+        // Reset all state
+        currentMemoryUsage = 0
+        cacheItemCount = 0
+
+        // Reset statistics to prevent carrying over to new user
+        stats = LRUCacheStatistics()
+        accessTimes.removeAll()
+
+        Log.info("Cleared all conversation caches on logout", category: .general)
+    }
+
     // MARK: - Preloading (delegated)
 
     func preloadAdjacentConversations(currentId: String, in conversationIds: [String]) {

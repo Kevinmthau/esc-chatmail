@@ -134,6 +134,39 @@ final class CoreDataStack: @unchecked Sendable {
         }
     }
 
+    /// Loads persistent stores asynchronously without blocking the main thread.
+    /// Use this instead of destroyAndReloadSync when async behavior is acceptable.
+    func loadStoresAsync() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            persistentContainer.loadPersistentStores { [weak self] storeDescription, error in
+                if let error = error {
+                    Log.error("Failed to load Core Data store async", category: .coreData, error: error)
+                    continuation.resume(throwing: CoreDataError.storeLoadFailed(error))
+                } else {
+                    self?.setStoreLoaded(true)
+                    self?.loadAttempts = 0
+                    Log.info("Core Data store loaded successfully (async): \(storeDescription)", category: .coreData)
+                    continuation.resume()
+                }
+            }
+        }
+    }
+
+    /// Destroys all data and reloads stores asynchronously.
+    /// Preferred over destroyAndReloadSync when not on the main thread or when async is acceptable.
+    func destroyAndReloadAsync() async throws {
+        try destroyAllData()
+
+        // Reset the viewContext to clear any stale managed objects
+        persistentContainer.viewContext.reset()
+
+        // Reload stores asynchronously
+        try await loadStoresAsync()
+
+        // Reset viewContext again after stores are loaded to ensure clean state
+        persistentContainer.viewContext.reset()
+    }
+
     func newBackgroundContext() -> NSManagedObjectContext {
         let context = persistentContainer.newBackgroundContext()
         context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy

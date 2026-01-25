@@ -182,6 +182,77 @@ struct NetworkConfig {
     static let maxRetryAfterSeconds: TimeInterval = 60.0
 }
 
+// MARK: - Retry Configuration
+/// Centralized retry configuration to eliminate inconsistent backoff values across the codebase
+struct RetryConfig {
+    /// Default base delay for exponential backoff (in seconds)
+    static let baseDelay: TimeInterval = 1.0
+
+    /// Maximum retry attempts for most operations
+    static let maxAttempts = 3
+
+    /// Maximum delay cap for exponential backoff (in seconds)
+    static let maxBackoffDelay: TimeInterval = 60.0
+
+    /// Base delay for pending action retries (in seconds)
+    static let pendingActionBaseDelay: TimeInterval = 2.0
+
+    /// Maximum retries for pending actions (higher due to importance)
+    static let pendingActionMaxRetries = 5
+
+    /// Base delay for attachment downloads (in seconds)
+    static let attachmentBaseDelay: TimeInterval = 2.0
+
+    /// Base delay for message fetches (in nanoseconds for compatibility)
+    static let messageFetchBaseDelayNanos: UInt64 = 500_000_000
+}
+
+// MARK: - Backoff Calculator
+/// Utility for calculating exponential backoff delays with optional jitter
+/// Use this instead of duplicating backoff calculations across the codebase
+struct BackoffCalculator {
+    /// Calculates exponential backoff delay
+    /// - Parameters:
+    ///   - attempt: The current retry attempt number (1-based)
+    ///   - baseDelay: Initial delay (default: RetryConfig.baseDelay)
+    ///   - maxDelay: Maximum delay cap (default: RetryConfig.maxBackoffDelay)
+    /// - Returns: Delay in seconds
+    static func delay(
+        attempt: Int,
+        baseDelay: TimeInterval = RetryConfig.baseDelay,
+        maxDelay: TimeInterval = RetryConfig.maxBackoffDelay
+    ) -> TimeInterval {
+        min(baseDelay * pow(2.0, Double(attempt - 1)), maxDelay)
+    }
+
+    /// Calculates exponential backoff delay with jitter to prevent thundering herd
+    /// - Parameters:
+    ///   - attempt: The current retry attempt number (1-based)
+    ///   - baseDelay: Initial delay (default: RetryConfig.baseDelay)
+    ///   - maxDelay: Maximum delay cap (default: RetryConfig.maxBackoffDelay)
+    ///   - jitterFraction: Fraction of delay to use as jitter range (default: 0.25 = 25%)
+    /// - Returns: Delay in seconds with added jitter
+    static func delayWithJitter(
+        attempt: Int,
+        baseDelay: TimeInterval = RetryConfig.baseDelay,
+        maxDelay: TimeInterval = RetryConfig.maxBackoffDelay,
+        jitterFraction: Double = 0.25
+    ) -> TimeInterval {
+        let baseBackoff = delay(attempt: attempt, baseDelay: baseDelay, maxDelay: maxDelay)
+        let jitter = Double.random(in: 0...(baseBackoff * jitterFraction))
+        return baseBackoff + jitter
+    }
+
+    /// Calculates delay in nanoseconds for use with Task.sleep
+    /// - Parameters:
+    ///   - attempt: The current retry attempt number (1-based)
+    ///   - baseDelayNanos: Initial delay in nanoseconds
+    /// - Returns: Delay in nanoseconds
+    static func delayNanos(attempt: Int, baseDelayNanos: UInt64) -> UInt64 {
+        baseDelayNanos * UInt64(1 << (attempt - 1))
+    }
+}
+
 // MARK: - UI Configuration
 struct UIConfig {
     /// Delay for initial scroll after view appears (in seconds)

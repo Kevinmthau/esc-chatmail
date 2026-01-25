@@ -11,7 +11,11 @@ extension MessagePersister {
         for message: Message,
         in context: NSManagedObjectContext
     ) {
-        _ = AttachmentFactory.create(from: info, for: message, in: context)
+        do {
+            _ = try AttachmentFactory.create(from: info, for: message, in: context)
+        } catch {
+            Log.error("Failed to create attachment for message \(message.id): \(error)", category: .coreData)
+        }
     }
 
     /// Finds a label by ID.

@@ -22,7 +22,9 @@ extension MessagePersister {
         let conversation = try await conversationManager.findOrCreateConversation(for: identity, in: context)
 
         // Create Core Data message entity
-        let message = NSEntityDescription.insertNewObject(forEntityName: "Message", into: context) as! Message
+        guard let message = NSEntityDescription.insertNewObject(forEntityName: "Message", into: context) as? Message else {
+            throw CoreDataError.entityCreationFailed("Message")
+        }
         message.id = processedMessage.id
         message.gmThreadId = processedMessage.gmThreadId
         message.snippet = processedMessage.snippet

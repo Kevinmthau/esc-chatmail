@@ -247,6 +247,16 @@ enum UnifiedErrorClassifier {
                 userMessage: "Data system unavailable. Please restart the app.",
                 technicalDescription: "Core Data stack has been destroyed"
             )
+
+        case .entityCreationFailed(let entityName):
+            return Classification(
+                severity: .critical,
+                category: .coreData,
+                recoveryStrategy: .abort,
+                isRetryable: false,
+                userMessage: "Failed to create data. Please restart the app.",
+                technicalDescription: "Failed to create Core Data entity: \(entityName)"
+            )
         }
     }
 

@@ -224,7 +224,7 @@ class MessageProcessor {
         let mime = part.mimeType ?? "unknown"
         let partCount = part.parts?.count ?? 0
 
-        Log.warning("MIME_DEBUG \(indent)[\(messageId)] mime=\(mime) file='\(filename)' attachId=\(attachId != "none" ? "YES" : "no") size=\(size) parts=\(partCount)", category: .sync)
+        Log.debug("MIME_DEBUG \(indent)[\(messageId)] mime=\(mime) file='\(filename)' attachId=\(attachId != "none" ? "YES" : "no") size=\(size) parts=\(partCount)", category: .sync)
 
         if let subparts = part.parts {
             for subpart in subparts {
@@ -252,11 +252,11 @@ class MessageProcessor {
 
         func traverse(_ part: MessagePart) {
             #if DEBUG
-            // Log parts that have attachment indicators for debugging (warning level for visibility)
+            // Log parts that have attachment indicators for debugging
             let hasAttachmentId = part.body?.attachmentId != nil
             let hasFilename = part.filename != nil && !part.filename!.isEmpty
             if hasAttachmentId || hasFilename {
-                Log.warning("ATTACH_DEBUG Part: mime=\(part.mimeType ?? "nil") file=\(part.filename ?? "nil") attachId=\(hasAttachmentId) size=\(part.body?.size ?? 0)", category: .sync)
+                Log.debug("ATTACH_DEBUG Part: mime=\(part.mimeType ?? "nil") file=\(part.filename ?? "nil") attachId=\(hasAttachmentId) size=\(part.body?.size ?? 0)", category: .sync)
             }
             #endif
 
@@ -294,9 +294,9 @@ class MessageProcessor {
 
         #if DEBUG
         if attachments.isEmpty && checkForAttachments(in: part) {
-            Log.warning("checkForAttachments=true but extractAttachments=0. Part structure may need review.", category: .sync)
+            Log.debug("checkForAttachments=true but extractAttachments=0. Part structure may need review.", category: .sync)
         }
-        Log.warning("ATTACH_DEBUG extractAttachments result: \(attachments.count) attachments found", category: .sync)
+        Log.debug("ATTACH_DEBUG extractAttachments result: \(attachments.count) attachments found", category: .sync)
         #endif
 
         return attachments

@@ -19,6 +19,23 @@ final class AttachmentDownloader: ObservableObject {
     private init() {
         AttachmentPaths.setupDirectories()
     }
+
+    // MARK: - Cleanup
+
+    /// Cleans up tracking data for a completed or cancelled download.
+    /// Call this after a download finishes (success or failure) to prevent memory leaks.
+    func cleanupDownload(attachmentId: String) {
+        downloadProgress.removeValue(forKey: attachmentId)
+        activeDownloads.remove(attachmentId)
+        retryAttempts.removeValue(forKey: attachmentId)
+    }
+
+    /// Cleans up all tracking data. Call on logout to prevent leaking previous user's data.
+    func cleanupAll() {
+        downloadProgress.removeAll()
+        activeDownloads.removeAll()
+        retryAttempts.removeAll()
+    }
     
     func enqueueAllPendingAttachments() async {
         let context = coreDataStack.newBackgroundContext()

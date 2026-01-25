@@ -36,12 +36,13 @@ final class ConversationManager: Sendable {
     }
 
     /// Delegates to PersonFactory for consistent person creation.
+    /// - Throws: CoreDataError.entityCreationFailed if entity creation fails
     func findOrCreatePerson(
         email: String,
         displayName: String?,
         in context: NSManagedObjectContext
-    ) -> Person {
-        PersonFactory.findOrCreate(email: email, displayName: displayName, in: context)
+    ) throws -> Person {
+        try PersonFactory.findOrCreate(email: email, displayName: displayName, in: context)
     }
 
     // MARK: - Rollup Updates (delegated to ConversationRollupUpdater)

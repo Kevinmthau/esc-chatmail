@@ -93,6 +93,48 @@ final class MessageActions: ObservableObject {
         }
     }
 
+    /// Batch mark messages as read - prevents race condition with new messages
+    /// Uses a single transaction to ensure atomic update of conversation unread count
+    func markMessagesAsReadBatch(messageIDs: [NSManagedObjectID], in conversation: Conversation) async {
+        guard !messageIDs.isEmpty else { return }
+
+        let context = coreDataStack.newBackgroundContext()
+        let conversationID = conversation.objectID
+
+        let gmailMessageIds: [String] = await context.perform {
+            var markedIds: [String] = []
+            let modificationDate = Date()
+
+            for messageID in messageIDs {
+                guard let message = try? context.existingObject(with: messageID) as? Message else { continue }
+                guard message.isUnread else { continue }
+
+                message.isUnread = false
+                message.localModifiedAt = modificationDate
+
+                if !message.id.isEmpty {
+                    markedIds.append(message.id)
+                }
+            }
+
+            // Update conversation unread count atomically
+            if let conv = try? context.existingObject(with: conversationID) as? Conversation {
+                conv.inboxUnreadCount = 0
+            }
+
+            context.saveOrLog(operation: "batch mark messages as read")
+            return markedIds
+        }
+
+        // Queue actions for Gmail sync
+        for messageId in gmailMessageIds {
+            await pendingActionsManager.queueAction(
+                type: .markRead,
+                messageId: messageId
+            )
+        }
+    }
+
     // MARK: - Archive
 
     func archive(message: Message) async {

@@ -32,7 +32,8 @@ actor ConversationCreationSerializer {
         recentlyCreatedHashes.insert(participantHash)
 
         // Use NSManagedObjectID (which is Sendable) to avoid capturing non-Sendable Conversation
-        let resultObjectID: NSManagedObjectID = await context.perform {
+        // Use Result type since context.perform can't throw
+        let result: Result<NSManagedObjectID, Error> = await context.perform {
             // Look for ANY conversation with these participants (including archived)
             // This ensures replies to sent messages join the existing conversation
             // Use includesPendingChanges = false to query the persistent store directly,
@@ -57,11 +58,17 @@ actor ConversationCreationSerializer {
                     existing.hidden = false
                     Log.debug("Un-archived conversation \(existing.id) due to new message", category: .conversation)
                 }
-                return existing.objectID
+                return .success(existing.objectID)
             }
 
             // Create new conversation
-            let conversation = ConversationFactory.create(for: identity, in: context)
+            let conversation: Conversation
+            do {
+                conversation = try ConversationFactory.create(for: identity, in: context)
+            } catch {
+                Log.error("Failed to create conversation: \(error)", category: .coreData)
+                return .failure(error)
+            }
 
             // Save immediately
             if context.hasChanges {
@@ -72,8 +79,10 @@ actor ConversationCreationSerializer {
                 }
             }
 
-            return conversation.objectID
+            return .success(conversation.objectID)
         }
+
+        let resultObjectID = try result.get()
 
         // Schedule cleanup after 30 seconds (only if we registered it)
         if isNewRegistration {

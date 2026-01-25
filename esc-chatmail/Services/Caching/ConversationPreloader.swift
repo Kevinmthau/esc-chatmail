@@ -14,6 +14,12 @@ final class ConversationPreloader {
     /// Maximum queue size to prevent unbounded growth during rapid scrolling
     private let maxQueueSize = 100
 
+    /// Maximum concurrent in-flight preload operations to prevent resource exhaustion
+    private let maxInFlightOperations = 10
+
+    /// Currently in-flight operation count
+    private var inFlightCount = 0
+
     var isPreloading: Bool {
         preloadTask != nil
     }
@@ -103,10 +109,20 @@ final class ConversationPreloader {
             guard let self = self else { return }
 
             while !self.preloadQueue.isEmpty {
+                // Check in-flight limit to prevent resource exhaustion
+                guard self.inFlightCount < self.maxInFlightOperations else {
+                    // Wait before checking again
+                    try? await Task.sleep(nanoseconds: 50_000_000) // 0.05 seconds
+                    continue
+                }
+
                 let conversationId = self.preloadQueue.removeFirst()
+                self.inFlightCount += 1
 
                 // Load from Core Data
                 await self.loadConversation(conversationId)
+
+                self.inFlightCount -= 1
 
                 // Small delay between loads to avoid blocking
                 try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds

@@ -20,7 +20,7 @@ struct VirtualScrollChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 8) {
-                    ForEach(Array(scrollState.visibleMessages.enumerated()), id: \.element.id) { index, message in
+                    ForEach(Array(scrollState.visibleMessages.enumerated()), id: \.element.objectID) { index, message in
                         Group {
                             if scrollState.placeholderIndices.contains(index) {
                                 MessageSkeletonView()
@@ -32,7 +32,7 @@ struct VirtualScrollChatView: View {
                                 )
                             }
                         }
-                        .id(index)
+                        .id(message.objectID) // Use stable objectID instead of volatile index
                         .onAppear {
                             scrollState.scrollTo(index: index)
                         }
@@ -47,9 +47,9 @@ struct VirtualScrollChatView: View {
             }
             .onAppear {
                 scrollViewReader = proxy
-                // Scroll to bottom on appear
-                if let lastIndex = scrollState.visibleMessages.indices.last {
-                    proxy.scrollTo(lastIndex, anchor: .bottom)
+                // Scroll to bottom on appear using stable objectID
+                if let lastMessage = scrollState.visibleMessages.last {
+                    proxy.scrollTo(lastMessage.objectID, anchor: .bottom)
                 }
             }
         }

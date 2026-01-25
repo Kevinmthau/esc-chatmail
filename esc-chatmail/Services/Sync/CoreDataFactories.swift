@@ -8,11 +8,12 @@ import CoreData
 struct PersonFactory {
 
     /// Finds an existing person by email or creates a new one
+    /// - Throws: CoreDataError.entityCreationFailed if entity creation fails
     static func findOrCreate(
         email: String,
         displayName: String?,
         in context: NSManagedObjectContext
-    ) -> Person {
+    ) throws -> Person {
         let request = Person.fetchRequest()
         request.predicate = NSPredicate(format: "email == %@", email)
         request.fetchLimit = 1
@@ -26,7 +27,9 @@ struct PersonFactory {
             return existing
         }
 
-        let person = NSEntityDescription.insertNewObject(forEntityName: "Person", into: context) as! Person
+        guard let person = NSEntityDescription.insertNewObject(forEntityName: "Person", into: context) as? Person else {
+            throw CoreDataError.entityCreationFailed("Person")
+        }
         person.id = UUID()
         person.email = email
         person.displayName = displayName
@@ -53,14 +56,17 @@ struct PersonFactory {
 struct ConversationFactory {
 
     /// Creates a new conversation with the given identity
+    /// - Throws: CoreDataError.entityCreationFailed if entity creation fails
     static func create(
         for identity: ConversationIdentity,
         in context: NSManagedObjectContext
-    ) -> Conversation {
-        let conversation = NSEntityDescription.insertNewObject(
+    ) throws -> Conversation {
+        guard let conversation = NSEntityDescription.insertNewObject(
             forEntityName: "Conversation",
             into: context
-        ) as! Conversation
+        ) as? Conversation else {
+            throw CoreDataError.entityCreationFailed("Conversation")
+        }
         conversation.id = UUID()
         conversation.keyHash = identity.keyHash
         conversation.participantHash = identity.participantHash
@@ -71,24 +77,27 @@ struct ConversationFactory {
         // Create participants with display names from email headers
         for email in identity.participants {
             let displayName = identity.participantDisplayNames[email]
-            let person = PersonFactory.findOrCreate(email: email, displayName: displayName, in: context)
-            createParticipant(person: person, conversation: conversation, role: .normal, in: context)
+            let person = try PersonFactory.findOrCreate(email: email, displayName: displayName, in: context)
+            try createParticipant(person: person, conversation: conversation, role: .normal, in: context)
         }
 
         return conversation
     }
 
     /// Creates a conversation participant
+    /// - Throws: CoreDataError.entityCreationFailed if entity creation fails
     static func createParticipant(
         person: Person,
         conversation: Conversation,
         role: ParticipantRole,
         in context: NSManagedObjectContext
-    ) {
-        let participant = NSEntityDescription.insertNewObject(
+    ) throws {
+        guard let participant = NSEntityDescription.insertNewObject(
             forEntityName: "ConversationParticipant",
             into: context
-        ) as! ConversationParticipant
+        ) as? ConversationParticipant else {
+            throw CoreDataError.entityCreationFailed("ConversationParticipant")
+        }
         participant.id = UUID()
         participant.participantRole = role
         participant.person = person
@@ -102,27 +111,30 @@ struct ConversationFactory {
 struct MessageParticipantFactory {
 
     /// Creates a message participant from a header value
+    /// Returns nil if email extraction fails, throws if entity creation fails
     static func create(
         from headerValue: String,
         kind: ParticipantKind,
         for message: Message,
         in context: NSManagedObjectContext
-    ) -> MessageParticipant? {
+    ) throws -> MessageParticipant? {
         guard let email = EmailNormalizer.extractEmail(from: headerValue) else { return nil }
 
         let normalizedEmail = EmailNormalizer.normalize(email)
         let displayName = EmailNormalizer.extractDisplayName(from: headerValue)
 
-        let person = PersonFactory.findOrCreate(
+        let person = try PersonFactory.findOrCreate(
             email: normalizedEmail,
             displayName: displayName,
             in: context
         )
 
-        let participant = NSEntityDescription.insertNewObject(
+        guard let participant = NSEntityDescription.insertNewObject(
             forEntityName: "MessageParticipant",
             into: context
-        ) as! MessageParticipant
+        ) as? MessageParticipant else {
+            throw CoreDataError.entityCreationFailed("MessageParticipant")
+        }
         participant.id = UUID()
         participant.participantKind = kind
         participant.person = person
@@ -138,15 +150,18 @@ struct MessageParticipantFactory {
 struct AttachmentFactory {
 
     /// Creates an attachment from attachment info
+    /// - Throws: CoreDataError.entityCreationFailed if entity creation fails
     static func create(
         from info: AttachmentInfo,
         for message: Message,
         in context: NSManagedObjectContext
-    ) -> Attachment {
-        let attachment = NSEntityDescription.insertNewObject(
+    ) throws -> Attachment {
+        guard let attachment = NSEntityDescription.insertNewObject(
             forEntityName: "Attachment",
             into: context
-        ) as! Attachment
+        ) as? Attachment else {
+            throw CoreDataError.entityCreationFailed("Attachment")
+        }
         attachment.setValue(info.id, forKey: "id")
         attachment.setValue(info.contentId, forKey: "contentId")
         attachment.setValue(info.filename, forKey: "filename")
