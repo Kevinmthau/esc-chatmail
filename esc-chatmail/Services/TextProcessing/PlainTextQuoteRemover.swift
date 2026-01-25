@@ -140,6 +140,53 @@ enum PlainTextQuoteRemover {
         "\nForward to a friend",
         "\nShare this email",
         "\nReply STOP to unsubscribe",
+
+        // Professional contact prefixes (often start signature blocks)
+        "\nM: ",           // Mobile
+        "\nC: ",           // Cell
+        "\nO: ",           // Office
+        "\nF: ",           // Fax
+        "\nD: ",           // Direct
+        "\nT: ",           // Telephone
+        "\nMobile: ",
+        "\nCell: ",
+        "\nOffice: ",
+        "\nDirect: ",
+        "\nPhone: ",
+        "\nTel: ",
+        "\nFax: ",
+
+        // Professional designations (real estate, financial, etc.)
+        "\nLicensed Real Estate",
+        "\nRealtor®",
+        "\nREALTOR®",
+        "\nRealtor",
+        "\nREALTOR",
+        "\nAssociate Broker",
+        "\nSales Associate",
+        "\nBroker Associate",
+        "\nDRE#",
+        "\nDRE #",
+        "\nLic#",
+        "\nLic #",
+        "\nNMLS#",
+        "\nNMLS ID",
+        "\nNMLSID",
+        "\nBRE#",
+        "\nBRE #",
+
+        // Office/brokerage patterns
+        "\nSuite ",
+        "\nFloor ",
+        "\nBrokered by",
+        "\nPowered by",
+        "\nAffiliated with",
+        "\nA member of",
+
+        // Wire fraud warnings (common in real estate)
+        "\n*Wire Fraud",
+        "\nWire Fraud is Real",
+        "\nBefore wiring any money",
     ]
 
     // MARK: - Public API

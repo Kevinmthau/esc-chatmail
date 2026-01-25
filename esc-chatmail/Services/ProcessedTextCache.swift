@@ -153,8 +153,8 @@ actor ProcessedTextCache: MemoryWarningHandler {
     }
 
     /// Determines if HTML contains genuine rich content (newsletters, receipts) vs personal email signature cruft
-    /// Personal emails typically have 0-3 small images (signature logo + social icons) and 0-2 simple layout tables
-    /// Newsletters and marketing emails have significantly more elements
+    /// Personal emails can have elaborate signatures (logo + headshot + 6-8 social icons + layout tables)
+    /// Newsletters and marketing emails have many elements AND substantial text content
     nonisolated private static func hasGenuineRichContent(_ html: String) -> Bool {
         let lowercased = html.lowercased()
 
@@ -169,20 +169,51 @@ actor ProcessedTextCache: MemoryWarningHandler {
         let tableCount = html.components(separatedBy: "<table").count - 1
         let cidCount = html.components(separatedBy: "cid:").count - 1
 
-        // Personal emails typically have:
-        // - 0-3 images (signature logo + 1-2 social icons)
-        // - 0-2 tables (signature layout)
-        // - 0-3 cid references (inline signature attachments)
-        // Newsletters have significantly more elements
-        let isLikelySignatureOnly = imgCount <= 3 && tableCount <= 2 && cidCount <= 3
+        // Professional signatures (real estate agents, etc.) can have:
+        // - 1 company logo + 1 headshot + 6-8 social icons = up to 10 images
+        // - 3-4 layout tables for contact info formatting
+        // - Multiple CID references for inline images
+        // Increased thresholds to accommodate elaborate professional signatures
+        let isLikelySignatureOnly = imgCount <= 10 && tableCount <= 5 && cidCount <= 10
 
         // If it looks like just signature elements, don't flag as rich
         if isLikelySignatureOnly {
             return false
         }
 
-        // Otherwise, if there are tables, images, or cid references, it's rich content
-        return tableCount > 0 || imgCount > 0 || cidCount > 0
+        // For content above signature thresholds, check if it's genuinely rich content
+        // or just an elaborate signature with little actual message text
+        let totalElements = imgCount + tableCount + cidCount
+
+        // Extract approximate text content length (rough estimate without full parsing)
+        let textContent = html
+            .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Newsletters have substantial text content relative to elements
+        // Signatures have many elements but relatively little text
+        // Use ratio: if less than 50 chars per element, likely signature-heavy
+        let charsPerElement = totalElements > 0 ? textContent.count / totalElements : textContent.count
+
+        // If there's very little text relative to the number of elements, it's likely just signature
+        if charsPerElement < 50 && textContent.count < 500 {
+            return false
+        }
+
+        // Check for newsletter-specific indicators
+        let hasNewsletterIndicators = lowercased.contains("unsubscribe") ||
+                                       lowercased.contains("view in browser") ||
+                                       lowercased.contains("email preferences") ||
+                                       lowercased.contains("privacy policy")
+
+        // If it has newsletter indicators and many elements, it's rich content
+        if hasNewsletterIndicators && totalElements > 5 {
+            return true
+        }
+
+        // Otherwise, if there are many tables/images with substantial text, it's rich content
+        return (tableCount > 5 || imgCount > 10) && textContent.count > 500
     }
 
     func clear() async {
