@@ -145,18 +145,44 @@ actor ProcessedTextCache: MemoryWarningHandler {
             }
 
             // Check for rich content in cleaned HTML only (not quoted sections)
-            // Includes <object>/<embed> for inline PDFs and cid: for any inline attachments
-            let lowercased = cleanedHTML.lowercased()
-            hasRichContent = lowercased.contains("<table") ||
-                            lowercased.contains("<img") ||
-                            lowercased.contains("<video") ||
-                            lowercased.contains("<iframe") ||
-                            lowercased.contains("<object") ||
-                            lowercased.contains("<embed") ||
-                            lowercased.contains("cid:")
+            // Uses heuristic to distinguish newsletters from personal emails with signature cruft
+            hasRichContent = hasGenuineRichContent(cleanedHTML)
         }
 
         return (plainText, hasRichContent)
+    }
+
+    /// Determines if HTML contains genuine rich content (newsletters, receipts) vs personal email signature cruft
+    /// Personal emails typically have 0-3 small images (signature logo + social icons) and 0-2 simple layout tables
+    /// Newsletters and marketing emails have significantly more elements
+    nonisolated private static func hasGenuineRichContent(_ html: String) -> Bool {
+        let lowercased = html.lowercased()
+
+        // Always rich: video/iframe/embed/object (inline PDFs, videos, embedded content)
+        if lowercased.contains("<video") || lowercased.contains("<iframe") ||
+           lowercased.contains("<object") || lowercased.contains("<embed") {
+            return true
+        }
+
+        // Count elements to distinguish signature cruft from actual rich content
+        let imgCount = html.components(separatedBy: "<img").count - 1
+        let tableCount = html.components(separatedBy: "<table").count - 1
+        let cidCount = html.components(separatedBy: "cid:").count - 1
+
+        // Personal emails typically have:
+        // - 0-3 images (signature logo + 1-2 social icons)
+        // - 0-2 tables (signature layout)
+        // - 0-3 cid references (inline signature attachments)
+        // Newsletters have significantly more elements
+        let isLikelySignatureOnly = imgCount <= 3 && tableCount <= 2 && cidCount <= 3
+
+        // If it looks like just signature elements, don't flag as rich
+        if isLikelySignatureOnly {
+            return false
+        }
+
+        // Otherwise, if there are tables, images, or cid references, it's rich content
+        return tableCount > 0 || imgCount > 0 || cidCount > 0
     }
 
     func clear() async {
