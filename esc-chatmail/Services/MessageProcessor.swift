@@ -216,6 +216,7 @@ class MessageProcessor {
     
     /// Debug helper to dump MIME structure
     private func dumpMimeStructure(_ part: MessagePart, messageId: String, depth: Int = 0) {
+        #if DEBUG
         let indent = String(repeating: "  ", count: depth)
         let attachId = part.body?.attachmentId ?? "none"
         let filename = part.filename ?? ""
@@ -230,6 +231,7 @@ class MessageProcessor {
                 dumpMimeStructure(subpart, messageId: messageId, depth: depth + 1)
             }
         }
+        #endif
     }
 
     private func checkForAttachments(in part: MessagePart) -> Bool {
@@ -249,12 +251,14 @@ class MessageProcessor {
         var seenIds: Set<String> = []
 
         func traverse(_ part: MessagePart) {
+            #if DEBUG
             // Log parts that have attachment indicators for debugging (warning level for visibility)
             let hasAttachmentId = part.body?.attachmentId != nil
             let hasFilename = part.filename != nil && !part.filename!.isEmpty
             if hasAttachmentId || hasFilename {
                 Log.warning("ATTACH_DEBUG Part: mime=\(part.mimeType ?? "nil") file=\(part.filename ?? "nil") attachId=\(hasAttachmentId) size=\(part.body?.size ?? 0)", category: .sync)
             }
+            #endif
 
             // Only process actual file parts, not multipart containers
             // Also skip duplicate attachment IDs
@@ -288,10 +292,12 @@ class MessageProcessor {
 
         traverse(part)
 
+        #if DEBUG
         if attachments.isEmpty && checkForAttachments(in: part) {
             Log.warning("checkForAttachments=true but extractAttachments=0. Part structure may need review.", category: .sync)
         }
         Log.warning("ATTACH_DEBUG extractAttachments result: \(attachments.count) attachments found", category: .sync)
+        #endif
 
         return attachments
     }

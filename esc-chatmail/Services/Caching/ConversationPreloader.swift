@@ -38,11 +38,9 @@ final class ConversationPreloader {
 
         // Prevent unbounded queue growth during rapid scrolling
         // Drop excess items when queue exceeds limit (older items are less relevant)
-        if preloadQueue.count > maxQueueSize {
-            let excess = preloadQueue.count - maxQueueSize
-            for _ in 0..<excess {
-                preloadQueue.remove(preloadQueue.first!)
-            }
+        while preloadQueue.count > maxQueueSize {
+            guard let first = preloadQueue.first else { break }
+            preloadQueue.remove(first)
         }
 
         if preloadTask == nil {

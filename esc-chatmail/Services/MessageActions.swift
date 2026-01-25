@@ -230,10 +230,11 @@ final class MessageActions: ObservableObject {
         Log.info("Batch archived \(conversations.count) conversations (\(allMessageIds.count) messages)", category: .message)
 
         // Queue single pending action with all message IDs
+        guard let firstConversation = conversations.first else { return }
         if !allMessageIds.isEmpty {
             await pendingActionsManager.queueConversationAction(
                 type: .archiveConversation,
-                conversationId: conversations.first!.id,
+                conversationId: firstConversation.id,
                 messageIds: allMessageIds
             )
         }
@@ -271,10 +272,11 @@ final class MessageActions: ObservableObject {
         Log.info("Batch reported \(conversations.count) conversations as spam (\(allMessageIds.count) messages)", category: .message)
 
         // Queue single pending action with all message IDs
+        guard let firstConversation = conversations.first else { return }
         if !allMessageIds.isEmpty {
             await pendingActionsManager.queueConversationAction(
                 type: .reportSpam,
-                conversationId: conversations.first!.id,
+                conversationId: firstConversation.id,
                 messageIds: allMessageIds
             )
         }

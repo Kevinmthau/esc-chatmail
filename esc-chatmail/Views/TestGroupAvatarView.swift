@@ -1,3 +1,4 @@
+#if DEBUG
 import SwiftUI
 
 struct TestGroupAvatarView: View {
@@ -87,3 +88,4 @@ struct TestGroupAvatarView_Previews: PreviewProvider {
         TestGroupAvatarView()
     }
 }
+#endif

@@ -234,6 +234,7 @@ struct ConversationListView: View {
         } label: {
             circleButton(icon: viewModel.currentFilter.icon)
         }
+        .accessibilityLabel("Filter conversations")
     }
 
     private var searchBar: some View {
@@ -252,12 +253,7 @@ struct ConversationListView: View {
                         .foregroundColor(.secondary)
                         .font(.system(size: 18, weight: .medium))
                 }
-            }
-
-            Button(action: { }) {
-                Image(systemName: "mic")
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundColor(.secondary)
+                .accessibilityLabel("Clear search")
             }
         }
         .padding(.horizontal, 16)
@@ -277,6 +273,7 @@ struct ConversationListView: View {
         Button(action: { viewModel.showingComposer = true }) {
             circleButton(icon: "square.and.pencil")
         }
+        .accessibilityLabel("Compose new message")
     }
 
     // MARK: - Filtering

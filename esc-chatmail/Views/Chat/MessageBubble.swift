@@ -106,12 +106,14 @@ struct MessageBubble: View {
             }
             return true
         }
+        #if DEBUG
         let _ = {
             if message.hasAttachments {
                 let attachmentDetails = message.attachmentsArray.map { "[\($0.filename), cid:\($0.contentId ?? "nil")]" }.joined(separator: ", ")
                 Log.warning("UI_DEBUG msg=\(message.id) hasAttachments=\(message.hasAttachments) attachmentsArray=\(message.attachmentsArray.count) displayable=\(displayable.count) showsHTML=\(showsHTML) hasRichContent=\(hasRichContent) attachments=\(attachmentDetails)", category: .ui)
             }
         }()
+        #endif
         if !displayable.isEmpty {
             if style.showAttachmentGrid {
                 AttachmentGridView(attachments: displayable)

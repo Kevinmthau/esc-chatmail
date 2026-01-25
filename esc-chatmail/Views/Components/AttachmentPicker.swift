@@ -22,13 +22,15 @@ struct AttachmentPicker: View {
                     .foregroundColor(.blue)
             }
             .disabled(isProcessing)
-            
+            .accessibilityLabel("Attach photo")
+
             Button(action: { showDocumentPicker = true }) {
                 Image(systemName: "paperclip")
                     .font(.system(size: 20))
                     .foregroundColor(.blue)
             }
             .disabled(isProcessing)
+            .accessibilityLabel("Attach document")
         }
         .photosPicker(
             isPresented: $showPhotoPicker,

@@ -35,6 +35,7 @@ struct ComposeInputBar: View {
                         .foregroundColor(.blue)
                 }
                 .disabled(isProcessing)
+                .accessibilityLabel("Attach photo")
 
                 Button(action: { showDocumentPicker = true }) {
                     Image(systemName: "paperclip")
@@ -42,6 +43,7 @@ struct ComposeInputBar: View {
                         .foregroundColor(.blue)
                 }
                 .disabled(isProcessing)
+                .accessibilityLabel("Attach document")
 
                 PlaceholderTextField(text: $viewModel.body, placeholder: "iMessage")
                     .focused(focusedField, equals: .body)
