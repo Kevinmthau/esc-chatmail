@@ -79,7 +79,8 @@ actor GmailActionExecutor: ActionExecutorProtocol {
             guard let messageIds = payload?["messageIds"] as? [String], !messageIds.isEmpty else {
                 throw PendingActionError.missingMessageIds
             }
-            try await apiClient.batchModify(ids: messageIds, addLabelIds: ["SPAM"])
+            // Add SPAM label AND remove INBOX label (matches Gmail behavior)
+            try await apiClient.batchModify(ids: messageIds, addLabelIds: ["SPAM"], removeLabelIds: ["INBOX"])
             Log.debug("Executed reportSpam for \(messageIds.count) messages", category: .sync)
         }
     }
