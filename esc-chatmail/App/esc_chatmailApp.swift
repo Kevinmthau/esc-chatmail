@@ -60,10 +60,13 @@ struct esc_chatmailApp: App {
         // 2. Wait for Core Data store to load
         await waitForCoreData()
 
-        // 3. Restore auth session (after cleanup complete)
+        // 3. Start cache coordinator for Core Data change notifications
+        CacheCoordinator.shared.start()
+
+        // 4. Restore auth session (after cleanup complete)
         await AuthSession.shared.restorePreviousSignIn()
 
-        // 4. Ready to show main UI
+        // 5. Ready to show main UI
         isInitialized = true
     }
 

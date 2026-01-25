@@ -34,7 +34,9 @@ struct AddContactView: UIViewControllerRepresentable {
             if let contact = contact {
                 Task {
                     for email in contact.emailAddresses {
-                        await ContactsResolver.shared.invalidateCache(for: email.value as String)
+                        let emailString = email.value as String
+                        await ContactsResolver.shared.invalidateCache(for: emailString)
+                        await PersonCache.shared.invalidateEntry(for: emailString)
                     }
                 }
             }

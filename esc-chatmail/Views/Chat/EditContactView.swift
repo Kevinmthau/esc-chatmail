@@ -96,6 +96,7 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
                 // Invalidate cache for the email we added
                 Task {
                     await ContactsResolver.shared.invalidateCache(for: emailToAdd)
+                    await PersonCache.shared.invalidateEntry(for: emailToAdd)
                 }
             } catch {
                 Log.error("Failed to save email to contact", category: .ui, error: error)
@@ -118,6 +119,7 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
         if let email = emailToInvalidate {
             Task {
                 await ContactsResolver.shared.invalidateCache(for: email)
+                await PersonCache.shared.invalidateEntry(for: email)
             }
         }
         presentedNavController?.dismiss(animated: true)
@@ -127,13 +129,16 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
         if let contact = contact {
             Task {
                 for email in contact.emailAddresses {
-                    await ContactsResolver.shared.invalidateCache(for: email.value as String)
+                    let emailString = email.value as String
+                    await ContactsResolver.shared.invalidateCache(for: emailString)
+                    await PersonCache.shared.invalidateEntry(for: emailString)
                 }
             }
         }
         if let email = emailToInvalidate {
             Task {
                 await ContactsResolver.shared.invalidateCache(for: email)
+                await PersonCache.shared.invalidateEntry(for: email)
             }
         }
         presentedNavController?.dismiss(animated: true)
