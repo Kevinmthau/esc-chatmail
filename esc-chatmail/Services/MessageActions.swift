@@ -248,6 +248,19 @@ final class MessageActions: ObservableObject {
 
         Log.info("Batch reporting \(conversations.count) conversations as spam", category: .message)
 
+        let context = coreDataStack.viewContext
+
+        // Fetch INBOX label once for removal (same as batch archive)
+        let labelRequest = Label.fetchRequest()
+        labelRequest.predicate = LabelPredicates.id("INBOX")
+        let inboxLabel: Label?
+        do {
+            inboxLabel = try context.fetch(labelRequest).first
+        } catch {
+            Log.error("Failed to fetch INBOX label for batch spam", category: .coreData, error: error)
+            inboxLabel = nil
+        }
+
         // Collect all message IDs and update local state in memory
         var allMessageIds: [String] = []
         let modificationDate = Date()
@@ -256,18 +269,24 @@ final class MessageActions: ObservableObject {
             guard let messages = conversation.messages else { continue }
 
             for message in messages {
+                // Remove INBOX label locally (same as archive)
+                if let inboxLabel = inboxLabel {
+                    message.removeFromLabels(inboxLabel)
+                }
                 message.localModifiedAt = modificationDate
                 if !message.id.isEmpty {
                     allMessageIds.append(message.id)
                 }
             }
 
-            // Mark conversation as archived to remove from chat list
+            // Mark conversation as archived and update rollup fields to prevent un-archiving
             conversation.archivedAt = modificationDate
+            conversation.hasInbox = false
+            conversation.inboxUnreadCount = 0
+            conversation.latestInboxDate = nil
         }
 
         // Single Core Data save for all changes
-        let context = coreDataStack.viewContext
         coreDataStack.saveIfNeeded(context: context)
         Log.info("Batch reported \(conversations.count) conversations as spam (\(allMessageIds.count) messages)", category: .message)
 
@@ -295,22 +314,41 @@ final class MessageActions: ObservableObject {
 
         Log.debug("Found \(messages.count) messages to report as spam", category: .message)
 
-        // Collect message IDs and mark as locally modified
+        let context = coreDataStack.viewContext
+
+        // Fetch INBOX label for removal (same as archive)
+        let labelRequest = Label.fetchRequest()
+        labelRequest.predicate = LabelPredicates.id("INBOX")
+        let inboxLabel: Label?
+        do {
+            inboxLabel = try context.fetch(labelRequest).first
+        } catch {
+            Log.error("Failed to fetch INBOX label for spam", category: .coreData, error: error)
+            inboxLabel = nil
+        }
+
+        // Collect message IDs, remove INBOX label locally, and mark as locally modified
         var messageIds: [String] = []
         let modificationDate = Date()
         for message in messages {
+            // Remove INBOX label locally (same as archive)
+            if let inboxLabel = inboxLabel {
+                message.removeFromLabels(inboxLabel)
+            }
             message.localModifiedAt = modificationDate
             if !message.id.isEmpty {
                 messageIds.append(message.id)
             }
         }
 
-        // Archive the conversation locally to remove from chat list
+        // Archive the conversation locally and update rollup fields to prevent un-archiving
         conversation.archivedAt = modificationDate
+        conversation.hasInbox = false
+        conversation.inboxUnreadCount = 0
+        conversation.latestInboxDate = nil
 
-        let context = coreDataStack.viewContext
         coreDataStack.saveIfNeeded(context: context)
-        Log.debug("Marked \(messageIds.count) messages for spam, archived conversation", category: .message)
+        Log.debug("Marked \(messageIds.count) messages for spam, removed INBOX labels, archived conversation", category: .message)
 
         // Queue sync to Gmail
         if !messageIds.isEmpty {
