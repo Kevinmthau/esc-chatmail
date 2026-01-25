@@ -144,8 +144,8 @@ final class ConversationListViewModel: ObservableObject {
 
         syncTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self = self else { return }
-                if !self.syncEngine.isSyncing {
+                self?.taskManager.run("periodicSync") { [weak self] in
+                    guard let self = self, !self.syncEngine.isSyncing else { return }
                     Log.debug("Performing periodic sync", category: .sync)
                     do {
                         try await self.syncEngine.performIncrementalSync()

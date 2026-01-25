@@ -39,22 +39,34 @@ final class AttachmentDownloader: ObservableObject {
     
     func enqueueAllPendingAttachments() async {
         let context = coreDataStack.newBackgroundContext()
-        let request = NSFetchRequest<Attachment>(entityName: "Attachment")
-        request.predicate = NSPredicate(format: "stateRaw == %@", "queued")
-        request.fetchBatchSize = 10  // Process attachments in small batches to reduce memory usage
 
-        let attachments: [Attachment]
-        do {
-            attachments = try context.fetch(request)
-        } catch {
-            Log.warning("Failed to fetch pending attachments", category: .attachment)
-            return
-        }
-        
-        for attachment in attachments {
-            if let message = attachment.message {
-                await downloadAttachment(attachment, messageId: message.id, in: context)
+        // Extract needed data inside context.perform to avoid faulting on wrong thread
+        let attachmentData: [(objectID: NSManagedObjectID, messageId: String)] = await context.perform {
+            let request = NSFetchRequest<Attachment>(entityName: "Attachment")
+            request.predicate = NSPredicate(format: "stateRaw == %@", "queued")
+            request.fetchBatchSize = 10  // Process attachments in small batches to reduce memory usage
+
+            let attachments: [Attachment]
+            do {
+                attachments = try context.fetch(request)
+            } catch {
+                Log.warning("Failed to fetch pending attachments", category: .attachment)
+                return []
             }
+
+            return attachments.compactMap { attachment in
+                guard let message = attachment.message else { return nil }
+                return (attachment.objectID, message.id)
+            }
+        }
+
+        for data in attachmentData {
+            // Re-fetch the attachment inside context.perform for thread-safe access
+            let attachment: Attachment? = await context.perform {
+                try? context.existingObject(with: data.objectID) as? Attachment
+            }
+            guard let attachment = attachment else { continue }
+            await downloadAttachment(attachment, messageId: data.messageId, in: context)
         }
     }
     

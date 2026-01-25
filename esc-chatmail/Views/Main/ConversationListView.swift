@@ -75,7 +75,7 @@ struct ConversationListView: View {
             }
         }
         .listStyle(.plain)
-        .animation(nil, value: cachedFilteredConversations.map { $0.objectID })
+        .animation(nil, value: cachedFilteredConversations.count)
         .scrollDismissesKeyboard(.interactively)
         .navigationTitle(viewModel.isSelecting ? "\(viewModel.selectedConversationIDs.count) Selected" : "Chats")
         .navigationDestination(item: $selectedConversation) { conversation in
@@ -95,7 +95,10 @@ struct ConversationListView: View {
         .onDisappear {
             viewModel.onDisappear()
         }
-        .onChange(of: conversations.map(\.objectID)) { _, _ in
+        .onChange(of: conversations.first?.objectID) { _, _ in
+            updateFilteredConversations()
+        }
+        .onChange(of: conversations.count) { _, _ in
             updateFilteredConversations()
         }
         .onChange(of: viewModel.searchText) { _, _ in
