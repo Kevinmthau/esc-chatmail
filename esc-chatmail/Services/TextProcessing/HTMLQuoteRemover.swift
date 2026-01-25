@@ -49,6 +49,16 @@ enum HTMLQuoteRemover {
         // Generic signature wrappers
         "<div[^>]*class=\"[^\"]*sig[^\"]*\"[^>]*>.*?</div>",
         "<table[^>]*class=\"[^\"]*signature[^\"]*\"[^>]*>.*?</table>",
+
+        // Professional signature tables (contain phone/contact info patterns)
+        "<table[^>]*>(?:[^<]*<(?:tr|td|th|tbody|thead)[^>]*>)*[^<]*(?:phone|tel:|mobile|cell|office|fax|direct)[^<]*(?:</(?:tr|td|th|tbody|thead)>[^<]*)*</table>",
+
+        // Real estate and professional signature patterns
+        "<table[^>]*>(?:[^<]*<[^>]*>)*[^<]*(?:realtor|licensed|broker|brokerage|DRE#|Lic#|NMLS|sales associate)[^<]*(?:<[^>]*>[^<]*)*</table>",
+        "<div[^>]*>(?:[^<]*<[^>]*>)*[^<]*(?:realtor|licensed|broker|brokerage|DRE#|Lic#|NMLS|sales associate)[^<]*(?:<[^>]*>[^<]*)*</div>",
+
+        // Company branding blocks (tables with company names followed by contact info)
+        "<table[^>]*>(?:[^<]*<[^>]*>)*[^<]*(?:corcoran|compass|sotheby|keller williams|coldwell banker|remax|re/max|century 21|berkshire hathaway)[^<]*(?:<[^>]*>[^<]*)*</table>",
     ]
 
     /// Patterns that indicate the start of quoted content (truncate from here) - string form
@@ -95,6 +105,23 @@ enum HTMLQuoteRemover {
         "This message is confidential",
         "The information contained in this",
         "If you are not the intended recipient",
+
+        // Professional contact patterns (often start signature blocks)
+        "<br[^>]*>\\s*M:\\s*\\d",    // Mobile: followed by number
+        "<br[^>]*>\\s*C:\\s*\\d",    // Cell: followed by number
+        "<br[^>]*>\\s*O:\\s*\\d",    // Office: followed by number
+        "<br[^>]*>\\s*F:\\s*\\d",    // Fax: followed by number
+        "<br[^>]*>\\s*Direct:\\s*\\d",
+        "<br[^>]*>\\s*Mobile:\\s*\\d",
+        "<br[^>]*>\\s*Cell:\\s*\\d",
+        "<br[^>]*>\\s*Office:\\s*\\d",
+        "<br[^>]*>\\s*Phone:\\s*\\d",
+        "<br[^>]*>\\s*Tel:\\s*\\d",
+
+        // Wire fraud warnings (common in real estate emails)
+        "\\*Wire Fraud",
+        "Wire Fraud is Real",
+        "Before wiring any money",
     ]
 
     /// Pre-compiled regex patterns for quote block removal (compiled once at class load)
