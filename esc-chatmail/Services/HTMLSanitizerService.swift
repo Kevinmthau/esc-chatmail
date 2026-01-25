@@ -79,8 +79,8 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
         // Remove script tags and content
         sanitized = removeScriptTags(sanitized)
 
-        // Remove style tags but preserve inline styles (sanitized)
-        sanitized = removeStyleTags(sanitized)
+        // Note: We intentionally preserve <style> tags to keep responsive CSS/media queries
+        // Marketing emails need these for proper mobile layouts
 
         // Remove event handlers
         sanitized = removeEventHandlers(sanitized)
@@ -119,13 +119,6 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
         RegexSanitizer.replace(
             in: html,
             pattern: "<script\\b[^<]*(?:(?!<\\/script>)<[^<]*)*<\\/script>|<script\\b[^>]*\\/>"
-        )
-    }
-
-    private func removeStyleTags(_ html: String) -> String {
-        RegexSanitizer.replace(
-            in: html,
-            pattern: "<style\\b[^<]*(?:(?!<\\/style>)<[^<]*)*<\\/style>"
         )
     }
 

@@ -46,11 +46,16 @@ struct BaseEmailWebView: UIViewRepresentable {
 
         switch mode {
         case .fullInteractive:
-            webView.scrollView.contentInsetAdjustmentBehavior = .automatic
+            // Match Apple Mail's WebView behavior
+            webView.scrollView.contentInsetAdjustmentBehavior = .never
+            webView.scrollView.automaticallyAdjustsScrollIndicatorInsets = true
             webView.isOpaque = false
             webView.backgroundColor = .clear
             webView.scrollView.backgroundColor = .clear
-            webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
+            // Use mobile user agent to trigger responsive media queries
+            webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
+            // Prevent automatic font size adjustment that can break layouts
+            webView.configuration.preferences.minimumFontSize = 0
         case .scaledPreview:
             webView.scrollView.isScrollEnabled = false
             webView.scrollView.bounces = false
@@ -114,9 +119,9 @@ struct BaseEmailWebView: UIViewRepresentable {
         private func wrapWithScale(_ html: String, scale: CGFloat) -> String {
             let isDarkMode = UITraitCollection.current.userInterfaceStyle == .dark
             let bgColor = isDarkMode ? "#1c1c1e" : "#f2f2f7"
-            let textColor = isDarkMode ? "#ffffff" : "#000000"
             let linkColor = isDarkMode ? "#0a84ff" : "#007aff"
 
+            // For previews, we wrap in a scale container but preserve the email's original styles
             return """
             <!DOCTYPE html>
             <html>
@@ -129,16 +134,17 @@ struct BaseEmailWebView: UIViewRepresentable {
                         margin: 0;
                         padding: 0;
                         background-color: \(bgColor);
-                        color: \(textColor);
                         overflow: hidden;
+                        -webkit-text-size-adjust: 100%;
                     }
                     .scale-wrapper {
                         transform: scale(\(scale));
                         transform-origin: top left;
                         width: \(100.0 / scale)%;
                     }
-                    img { max-width: 100% !important; height: auto !important; }
-                    table { max-width: 100% !important; }
+                    /* Only constrain, don't force widths */
+                    img { max-width: 100%; height: auto; }
+                    table { max-width: 100%; }
                     a { color: \(linkColor); }
                 </style>
             </head>

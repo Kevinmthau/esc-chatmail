@@ -179,30 +179,34 @@ final class HTMLSanitizerServiceTests: XCTestCase {
         XCTAssertTrue(result.contains("tel:+1234567890"))
     }
 
-    // MARK: - Style Tag Removal
+    // MARK: - Style Tag Preservation (for responsive email layouts)
 
-    func testSanitize_styleTag_removes() {
+    func testSanitize_styleTag_preserves() {
+        // Style tags are preserved to maintain responsive media queries in emails
         let html = """
         <style>
             body { background: red; }
-            .evil { display: none; }
+            @media (max-width: 600px) { .content { width: 100%; } }
         </style>
         <p>Content</p>
         """
         let result = sut.sanitize(html)
-        XCTAssertFalse(result.contains("<style"))
-        XCTAssertFalse(result.contains("background: red"))
+        XCTAssertTrue(result.contains("<style>"))
+        XCTAssertTrue(result.contains("@media"))
         XCTAssertTrue(result.contains("<p>Content</p>"))
     }
 
-    func testSanitize_multipleStyleTags_removesAll() {
+    func testSanitize_multipleStyleTags_preservesAll() {
+        // Style tags are preserved for proper email rendering
         let html = """
         <style>.a {}</style>
         <p>Content</p>
         <style>.b {}</style>
         """
         let result = sut.sanitize(html)
-        XCTAssertFalse(result.contains("<style"))
+        XCTAssertTrue(result.contains("<style>"))
+        XCTAssertTrue(result.contains(".a {}"))
+        XCTAssertTrue(result.contains(".b {}"))
         XCTAssertTrue(result.contains("<p>Content</p>"))
     }
 
