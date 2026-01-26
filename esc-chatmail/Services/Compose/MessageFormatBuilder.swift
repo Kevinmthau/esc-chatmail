@@ -149,4 +149,189 @@ struct MessageFormatBuilder {
         result = result.replacingOccurrences(of: "'", with: "&#39;")
         return result
     }
+
+    // MARK: - HTML Content Building for Send
+
+    /// Builds the final HTML body by merging user's new content with the forwarded HTML.
+    ///
+    /// When forwarding, the user types their message in plain text. This method converts
+    /// that text to HTML and prepends it to the forwarded HTML content so email clients
+    /// render the complete message properly.
+    ///
+    /// - Parameters:
+    ///   - userContent: The new text the user typed (will be converted to HTML)
+    ///   - forwardedHTML: The original forwarded HTML content (already includes forward header)
+    /// - Returns: Complete HTML with user's content prepended
+    func buildFinalHTMLForForward(userContent: String, forwardedHTML: String) -> String {
+        // Extract just the user's new content (everything before the forward header)
+        let userMessage = extractUserContent(from: userContent)
+
+        // If user didn't add any content, return the forwarded HTML as-is
+        if userMessage.isEmpty {
+            return forwardedHTML
+        }
+
+        // Convert user's plain text to HTML
+        let userHTML = convertPlainTextToHTML(userMessage)
+
+        // Insert user's content at the beginning of the body
+        return insertContentAfterBodyTag(content: userHTML, into: forwardedHTML)
+    }
+
+    /// Generates a complete HTML document from plain text when no HTML version exists.
+    ///
+    /// This is used when forwarding an email that only has plain text content.
+    /// The generated HTML:
+    /// - Preserves whitespace and line breaks
+    /// - Auto-links URLs
+    /// - Uses a readable font stack
+    ///
+    /// - Parameters:
+    ///   - plainText: The complete plain text content (user message + forwarded text)
+    /// - Returns: A complete HTML document
+    func generateHTMLFromPlainText(_ plainText: String) -> String {
+        let htmlContent = convertPlainTextToHTML(plainText)
+
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            font-size: 14px;
+            line-height: 1.5;
+            color: #333;
+            margin: 0;
+            padding: 0;
+        }
+        </style>
+        </head>
+        <body>
+        \(htmlContent)
+        </body>
+        </html>
+        """
+    }
+
+    /// Extracts the user's new content from the full plain text body.
+    ///
+    /// The plain text body contains the user's new message followed by the forwarded
+    /// message header. This extracts just the user's portion.
+    private func extractUserContent(from fullBody: String) -> String {
+        // Find the forward header separator
+        let forwardMarkers = [
+            "---------- Forwarded message ---------",
+            "---------- Forwarded message ----------",
+            "----- Forwarded message -----"
+        ]
+
+        for marker in forwardMarkers {
+            if let range = fullBody.range(of: marker) {
+                let userPart = String(fullBody[..<range.lowerBound])
+                return userPart.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
+        // No forward marker found - this shouldn't happen for forwards
+        return ""
+    }
+
+    /// Converts plain text to HTML, preserving formatting and auto-linking URLs.
+    private func convertPlainTextToHTML(_ text: String) -> String {
+        // First escape HTML characters
+        var html = escapeHTML(text)
+
+        // Auto-link URLs
+        html = autoLinkURLs(html)
+
+        // Convert line breaks to proper HTML
+        // Use <br> tags to preserve line breaks
+        html = html.replacingOccurrences(of: "\r\n", with: "\n")
+        html = html.replacingOccurrences(of: "\r", with: "\n")
+
+        // Split into paragraphs on double newlines
+        let paragraphs = html.components(separatedBy: "\n\n")
+        if paragraphs.count > 1 {
+            // Multiple paragraphs - wrap each in <p> tags
+            html = paragraphs
+                .map { paragraph in
+                    let trimmed = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.isEmpty { return "" }
+                    // Convert single newlines to <br> within paragraphs
+                    let withBreaks = trimmed.replacingOccurrences(of: "\n", with: "<br>\n")
+                    return "<p style=\"margin: 0 0 1em 0;\">\(withBreaks)</p>"
+                }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+        } else {
+            // Single paragraph - just convert newlines to <br>
+            html = html.replacingOccurrences(of: "\n", with: "<br>\n")
+            html = "<div style=\"margin: 0;\">\(html)</div>"
+        }
+
+        return html
+    }
+
+    /// Auto-links URLs in HTML-escaped text.
+    ///
+    /// Finds URLs and wraps them in anchor tags. Works on already HTML-escaped text.
+    private func autoLinkURLs(_ text: String) -> String {
+        // URL pattern that works with HTML-escaped text
+        // Matches http://, https://, and www. URLs
+        let urlPattern = #"(https?://[^\s<>&\"']+|www\.[^\s<>&\"']+)"#
+
+        guard let regex = try? NSRegularExpression(pattern: urlPattern, options: .caseInsensitive) else {
+            return text
+        }
+
+        var result = text
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+
+        // Process matches in reverse order to preserve indices
+        for match in matches.reversed() {
+            guard let range = Range(match.range, in: result) else { continue }
+            let url = String(result[range])
+
+            // Add protocol if missing (for www. URLs)
+            let href = url.lowercased().hasPrefix("http") ? url : "https://\(url)"
+
+            // Create anchor tag
+            let link = "<a href=\"\(href)\" style=\"color: #007AFF; text-decoration: none;\">\(url)</a>"
+
+            result.replaceSubrange(range, with: link)
+        }
+
+        return result
+    }
+
+    /// Inserts HTML content after the body tag in an existing HTML document.
+    private func insertContentAfterBodyTag(content: String, into html: String) -> String {
+        let bodyTagPattern = try? NSRegularExpression(pattern: "<body[^>]*>", options: .caseInsensitive)
+
+        if let match = bodyTagPattern?.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+           let range = Range(match.range, in: html) {
+            var modifiedHTML = html
+            let insertIndex = range.upperBound
+            // Add user content followed by a spacing div
+            let spacedContent = "\n\(content)\n<div style=\"margin-bottom: 20px;\"></div>\n"
+            modifiedHTML.insert(contentsOf: spacedContent, at: insertIndex)
+            return modifiedHTML
+        } else {
+            // No body tag - wrap the whole thing
+            return """
+            <!DOCTYPE html>
+            <html>
+            <head><meta charset="UTF-8"></head>
+            <body>
+            \(content)
+            <div style="margin-bottom: 20px;"></div>
+            \(html)
+            </body>
+            </html>
+            """
+        }
+    }
 }

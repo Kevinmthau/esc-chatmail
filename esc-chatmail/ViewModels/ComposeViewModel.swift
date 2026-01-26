@@ -243,10 +243,27 @@ final class ComposeViewModel: ObservableObject {
             orchestratorReplyData = nil
         }
 
+        // Build final HTML body for forwards (merge user content with forwarded HTML)
+        let finalHTMLBody: String?
+        if case .forward = mode {
+            if let existingHTML = forwardedHTMLBody {
+                // Merge user's new content into the existing forwarded HTML
+                finalHTMLBody = messageFormatBuilder.buildFinalHTMLForForward(
+                    userContent: messageBody,
+                    forwardedHTML: existingHTML
+                )
+            } else {
+                // No HTML exists - generate from plain text to preserve formatting and links
+                finalHTMLBody = messageFormatBuilder.generateHTMLFromPlainText(messageBody)
+            }
+        } else {
+            finalHTMLBody = forwardedHTMLBody
+        }
+
         let input = ComposeSendOrchestrator.SendInput(
             recipientEmails: recipientEmails,
             body: messageBody,
-            htmlBody: forwardedHTMLBody,
+            htmlBody: finalHTMLBody,
             subject: messageSubject,
             attachmentInfos: attachmentInfos,
             inlineAttachmentInfos: inlineAttachmentInfos,
