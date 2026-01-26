@@ -100,18 +100,21 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         ensureInitialized()
 
         let context = coreDataStack.viewContext
-        await context.perform {
+        let saveSucceeded = await context.perform {
             self.createPendingAction(
                 in: context,
                 type: type,
                 messageId: messageId,
                 payload: payload
             )
-            context.saveOrLog(operation: "queue pending action: \(type.rawValue)")
+            return context.saveOrLog(operation: "queue pending action: \(type.rawValue)")
         }
 
-        if networkMonitor.isConnected {
+        // Only process if save succeeded - prevents processing stale/incomplete actions
+        if saveSucceeded && networkMonitor.isConnected {
             await processAllPendingActions()
+        } else if !saveSucceeded {
+            Log.error("Failed to save pending action \(type.rawValue) for message \(messageId) - action will not be queued", category: .sync)
         }
     }
 
@@ -126,18 +129,21 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
 
         let context = coreDataStack.viewContext
         let payload: [String: Any] = ["messageIds": messageIds]
-        await context.perform {
+        let saveSucceeded = await context.perform {
             self.createPendingAction(
                 in: context,
                 type: type,
                 conversationId: conversationId,
                 payload: payload
             )
-            context.saveOrLog(operation: "queue conversation action: \(type.rawValue)")
+            return context.saveOrLog(operation: "queue conversation action: \(type.rawValue)")
         }
 
-        if networkMonitor.isConnected {
+        // Only process if save succeeded - prevents processing stale/incomplete actions
+        if saveSucceeded && networkMonitor.isConnected {
             await processAllPendingActions()
+        } else if !saveSucceeded {
+            Log.error("Failed to save conversation action \(type.rawValue) for conversation \(conversationId) - action will not be queued", category: .sync)
         }
     }
 

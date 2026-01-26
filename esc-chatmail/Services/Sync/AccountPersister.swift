@@ -8,21 +8,44 @@ struct AccountData {
     let aliases: [String]
 }
 
+/// Errors that can occur during account persistence operations
+enum AccountPersisterError: LocalizedError {
+    case entityCreationFailed(String)
+    case fetchFailed(Error)
+
+    var errorDescription: String? {
+        switch self {
+        case .entityCreationFailed(let entityName):
+            return "Failed to create \(entityName) entity in Core Data"
+        case .fetchFailed(let underlyingError):
+            return "Failed to fetch account: \(underlyingError.localizedDescription)"
+        }
+    }
+}
+
 extension MessagePersister {
     /// Saves or updates account information
+    /// - Throws: AccountPersisterError.entityCreationFailed if Account entity cannot be created,
+    ///           AccountPersisterError.fetchFailed if existing account lookup fails
     func saveAccount(
         profile: GmailProfile,
         aliases: [String],
         in context: NSManagedObjectContext
-    ) async -> Account {
+    ) async throws -> Account {
         let request = Account.fetchRequest()
         request.predicate = NSPredicate(format: "email == %@", profile.emailAddress)
 
-        if let existing = try? context.fetch(request).first {
-            existing.aliasesArray = aliases
-            existing.historyId = profile.historyId
-            Log.debug("Updated existing account: \(profile.emailAddress)", category: .sync)
-            return existing
+        // Explicit error handling - don't create new account on ANY error
+        do {
+            if let existing = try context.fetch(request).first {
+                existing.aliasesArray = aliases
+                existing.historyId = profile.historyId
+                Log.debug("Updated existing account: \(profile.emailAddress)", category: .sync)
+                return existing
+            }
+        } catch {
+            Log.error("Failed to fetch existing account", category: .coreData, error: error)
+            throw AccountPersisterError.fetchFailed(error)
         }
 
         guard let account = NSEntityDescription.insertNewObject(
@@ -30,9 +53,7 @@ extension MessagePersister {
             into: context
         ) as? Account else {
             Log.error("Failed to create Account entity", category: .coreData)
-            // Return a dummy account that will fail validation - this shouldn't happen
-            // but provides a fallback rather than crashing
-            fatalError("Critical: Unable to create Account entity in Core Data")
+            throw AccountPersisterError.entityCreationFailed("Account")
         }
         account.id = profile.emailAddress
         account.email = profile.emailAddress

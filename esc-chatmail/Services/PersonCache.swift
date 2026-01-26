@@ -54,25 +54,25 @@ actor PersonCache: PeriodicCleanupHandler {
         guard !uncached.isEmpty else { return }
 
         // Batch fetch from Core Data in background
+        // Note: Directly await context.perform instead of using Task.detached { }.value
+        // which breaks actor isolation and then blocks unnecessarily
         let context = coreDataStack.newBackgroundContext()
 
-        let personsData: [(email: String, displayName: String?)] = await Task.detached {
-            await context.perform {
-                let request = Person.fetchRequest()
-                request.predicate = NSPredicate(format: "email IN %@", uncached)
-                request.fetchBatchSize = 50
+        let personsData: [(email: String, displayName: String?)] = await context.perform {
+            let request = Person.fetchRequest()
+            request.predicate = NSPredicate(format: "email IN %@", uncached)
+            request.fetchBatchSize = 50
 
-                do {
-                    let persons = try context.fetch(request)
-                    return persons.map { person in
-                        (person.email, person.displayName)
-                    }
-                } catch {
-                    Log.error("Failed to prefetch Person entities", category: .coreData, error: error)
-                    return []
+            do {
+                let persons = try context.fetch(request)
+                return persons.map { person in
+                    (person.email, person.displayName)
                 }
+            } catch {
+                Log.error("Failed to prefetch Person entities", category: .coreData, error: error)
+                return []
             }
-        }.value
+        }
 
         // Update cache (actor-isolated)
         let now = Date()
@@ -120,15 +120,15 @@ actor PersonCache: PeriodicCleanupHandler {
         }
 
         // Fetch from Core Data in background to avoid blocking main thread
+        // Note: Directly await context.perform instead of using Task.detached { }.value
+        // which breaks actor isolation and then blocks unnecessarily
         let context = coreDataStack.newBackgroundContext()
-        let displayName: String? = await Task.detached {
-            await context.perform {
-                let request = Person.fetchRequest()
-                request.predicate = NSPredicate(format: "email == %@", normalized)
-                request.fetchLimit = 1
-                return try? context.fetch(request).first?.displayName
-            }
-        }.value
+        let displayName: String? = await context.perform {
+            let request = Person.fetchRequest()
+            request.predicate = NSPredicate(format: "email == %@", normalized)
+            request.fetchLimit = 1
+            return try? context.fetch(request).first?.displayName
+        }
 
         // Cache the result (actor-isolated)
         cache[normalized] = CachedPerson(

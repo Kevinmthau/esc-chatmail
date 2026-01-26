@@ -13,12 +13,21 @@ extension ConversationCache {
     }
 
     func handleMemoryWarning() {
-        // Clear half the cache on memory warning (less aggressive to avoid thrashing)
-        let itemsToKeep = max(5, cache.count / 2)
+        Log.info("Memory warning received - aggressively clearing conversation cache", category: .general)
+
+        // Clear preloaded HTML first (often the largest memory consumers)
+        for cached in cache.values {
+            cached.preloadedHTML.removeAll()
+        }
+
+        // Aggressively clear 75% of cache on memory warning to free resources
+        let itemsToKeep = max(3, cache.count / 4)
 
         while cache.count > itemsToKeep {
             evictLeastRecentlyUsed()
         }
+
+        Log.info("Cache reduced to \(cache.count) items after memory warning", category: .general)
     }
 
     func updateMemoryUsage() {

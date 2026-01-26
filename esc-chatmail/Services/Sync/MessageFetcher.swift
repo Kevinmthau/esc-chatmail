@@ -85,7 +85,9 @@ final class MessageFetcher: @unchecked Sendable {
             // Start initial batch of concurrent tasks
             while activeTasks < maxConcurrent, let id = iterator.next() {
                 group.addTask { [apiClient] in
+                    // Check cancellation at start of child task to propagate cancellation quickly
                     do {
+                        try Task.checkCancellation()
                         let message = try await withTimeout(seconds: SyncConfig.messageFetchTimeout) {
                             try await apiClient.getMessage(id: id)
                         }
@@ -99,7 +101,11 @@ final class MessageFetcher: @unchecked Sendable {
 
             // Process results and start new tasks as others complete
             for await (id, result) in group {
-                if Task.isCancelled { break }
+                if Task.isCancelled {
+                    // Cancel all remaining child tasks when parent is cancelled
+                    group.cancelAll()
+                    break
+                }
 
                 activeTasks -= 1
 
@@ -117,7 +123,9 @@ final class MessageFetcher: @unchecked Sendable {
                 // Start next task if there are more IDs
                 if let nextId = iterator.next() {
                     group.addTask { [apiClient] in
+                        // Check cancellation at start of child task to propagate cancellation quickly
                         do {
+                            try Task.checkCancellation()
                             let message = try await withTimeout(seconds: SyncConfig.messageFetchTimeout) {
                                 try await apiClient.getMessage(id: nextId)
                             }

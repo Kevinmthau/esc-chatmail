@@ -96,27 +96,49 @@ extension TokenManager {
     /// - Refresh token has expired (rare, but possible after 6 months of inactivity)
     /// - Account password changed and security settings require re-auth
     /// - Token was issued to a deleted Google account
+    ///
+    /// Note: This check is locale-independent - it examines userInfo directly
+    /// rather than relying on localizedDescription which varies by locale.
     private func isInvalidGrantError(_ error: Error?) -> Bool {
         guard let error = error else { return false }
 
         let nsError = error as NSError
-        let errorDescription = nsError.localizedDescription.lowercased()
-        let errorDomain = nsError.domain.lowercased()
 
-        // Check for OAuth-specific invalid_grant error
-        // HTTP 400 with "invalid_grant" in the response indicates revoked token
-        if nsError.code == 400 && errorDescription.contains("invalid_grant") {
-            return true
+        // Check userInfo directly for OAuth error code (locale-independent)
+        // This is the most reliable way to detect invalid_grant
+        if nsError.code == 400 {
+            // Check for "error" key in userInfo (common OAuth error format)
+            if let oauthError = nsError.userInfo["error"] as? String,
+               oauthError == "invalid_grant" {
+                return true
+            }
+
+            // Check for JSON response body in userInfo["data"]
+            if let data = nsError.userInfo["data"] as? Data,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               (json["error"] as? String) == "invalid_grant" {
+                return true
+            }
+
+            // Check for NSLocalizedFailure with raw error (not localized string)
+            if let failure = nsError.userInfo[NSLocalizedFailureReasonErrorKey] as? String,
+               failure.contains("invalid_grant") {
+                return true
+            }
         }
 
-        // Check userInfo for additional error details
+        // Check underlying error recursively
         if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
             return isInvalidGrantError(underlyingError)
         }
 
-        // Check for common OAuth error patterns in domain/description
-        if errorDomain.contains("oauth") && errorDescription.contains("invalid_grant") {
-            return true
+        // Last resort: check localizedDescription, but only for 400 errors
+        // This is less reliable but catches edge cases
+        if nsError.code == 400 {
+            let description = nsError.localizedDescription.lowercased()
+            if description.contains("invalid_grant") {
+                return true
+            }
         }
 
         return false

@@ -21,20 +21,47 @@ final class CoreDataStack: @unchecked Sendable {
     private let recoveryHandler = CoreDataRecoveryHandler()
 
     var isStoreLoaded: Bool {
-        isolationQueue.sync { _isStoreLoaded }
+        // DEBUG-only check to catch potential deadlocks when calling from actor contexts
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+        #endif
+        return isolationQueue.sync { _isStoreLoaded }
     }
 
     private var loadAttempts: Int {
-        get { isolationQueue.sync { _loadAttempts } }
-        set { isolationQueue.sync { _loadAttempts = newValue } }
+        get {
+            #if DEBUG
+            dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+            #endif
+            return isolationQueue.sync { _loadAttempts }
+        }
+        set {
+            #if DEBUG
+            dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+            #endif
+            isolationQueue.sync { _loadAttempts = newValue }
+        }
     }
 
     private var storeLoadError: Error? {
-        get { isolationQueue.sync { _storeLoadError } }
-        set { isolationQueue.sync { _storeLoadError = newValue } }
+        get {
+            #if DEBUG
+            dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+            #endif
+            return isolationQueue.sync { _storeLoadError }
+        }
+        set {
+            #if DEBUG
+            dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+            #endif
+            isolationQueue.sync { _storeLoadError = newValue }
+        }
     }
 
     private func setStoreLoaded(_ loaded: Bool) {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+        #endif
         isolationQueue.sync { _isStoreLoaded = loaded }
     }
 

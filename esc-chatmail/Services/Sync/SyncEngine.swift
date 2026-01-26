@@ -97,13 +97,21 @@ final class SyncEngine: ObservableObject {
 
     /// Performs initial full sync
     func performInitialSync() async throws {
-        guard await syncStateActor.beginSync() else {
-            log.debug("Sync already in progress, skipping initial sync")
-            return
+        // Use atomic beginSyncWithTask to prevent race conditions between
+        // beginSync() and setSyncTask() calls
+        let syncTask = await syncStateActor.beginSyncWithTask {
+            Task { [weak self] in
+                guard let self else {
+                    Log.warning("SyncEngine deallocated during initial sync setup", category: .sync)
+                    throw CancellationError()
+                }
+                try await self.performInitialSyncInternal()
+            }
         }
 
-        let syncTask = Task {
-            try await performInitialSyncInternal()
+        guard let syncTask else {
+            log.debug("Sync already in progress, skipping initial sync")
+            return
         }
 
         await runSyncTask(syncTask, syncType: "Initial")
@@ -111,29 +119,35 @@ final class SyncEngine: ObservableObject {
 
     /// Performs incremental sync using Gmail history API
     func performIncrementalSync() async throws {
-        guard await syncStateActor.beginSync() else {
-            log.debug("Sync already in progress, skipping incremental sync")
-            return
-        }
-
         guard await networkMonitor.isNetworkAvailable() else {
-            await syncStateActor.endSync()
             log.info("Network not available, skipping sync")
             uiState.update(isSyncing: false, status: "Network unavailable")
             return
         }
 
-        let syncTask = Task { [weak self] () -> Void in
-            guard let self = self else { return }
-            try await self.performIncrementalSyncInternal()
+        // Use atomic beginSyncWithTask to prevent race conditions between
+        // beginSync() and setSyncTask() calls
+        let syncTask = await syncStateActor.beginSyncWithTask {
+            Task { [weak self] in
+                guard let self else {
+                    Log.warning("SyncEngine deallocated during incremental sync setup", category: .sync)
+                    throw CancellationError()
+                }
+                try await self.performIncrementalSyncInternal()
+            }
+        }
+
+        guard let syncTask else {
+            log.debug("Sync already in progress, skipping incremental sync")
+            return
         }
 
         await runSyncTask(syncTask, syncType: "Incremental")
     }
 
     /// Executes a sync task with unified error handling
+    /// Note: Task is already set atomically by beginSyncWithTask, so no setSyncTask call needed
     private func runSyncTask(_ task: Task<Void, Error>, syncType: String) async {
-        await syncStateActor.setSyncTask(task)
 
         do {
             try await task.value
@@ -213,7 +227,11 @@ final class SyncEngine: ObservableObject {
                 self?.uiState.update(progress: progress, status: status)
             },
             initialSyncFallback: { [weak self] in
-                try await self?.performInitialSyncInternal()
+                guard let self else {
+                    Log.warning("SyncEngine deallocated during initial sync fallback", category: .sync)
+                    throw CancellationError()
+                }
+                try await self.performInitialSyncInternal()
             }
         )
 

@@ -47,16 +47,20 @@ actor ModificationTracker {
 
     /// Begins a new sync transaction. All modifications tracked while the transaction
     /// is active will be associated with this transaction.
-    /// - Returns: Transaction ID for use with commit/rollback
+    /// - Returns: Transaction ID for use with commit/rollback, or existing transaction ID if one is active
+    /// - Note: If a transaction is already active, returns the existing transaction ID
+    ///         to prevent data loss from accidentally creating overlapping transactions
     func beginTransaction() -> UUID {
-        // If there's an existing transaction, commit it first to avoid losing data
+        // If there's an existing transaction, return its ID to prevent data loss
+        // The caller should complete the existing transaction before starting a new one
         if let existingTx = activeTransaction {
-            Log.warning("Beginning new transaction while one is active - auto-committing existing", category: .sync)
-            pendingModifications.formUnion(existingTx.modifications)
+            Log.warning("Transaction already active (id: \(existingTx.id)) - returning existing instead of creating new", category: .sync)
+            return existingTx.id
         }
 
         let txId = UUID()
         activeTransaction = SyncTransaction(id: txId, modifications: [])
+        Log.debug("Started new transaction: \(txId)", category: .sync)
         return txId
     }
 
@@ -64,13 +68,19 @@ actor ModificationTracker {
     /// - Parameter txId: The transaction ID returned from beginTransaction()
     /// - Returns: Set of modified conversation ObjectIDs from this transaction
     func commitTransaction(_ txId: UUID) -> Set<NSManagedObjectID> {
-        guard let tx = activeTransaction, tx.id == txId else {
-            Log.warning("Attempted to commit unknown or already-committed transaction", category: .sync)
+        guard let tx = activeTransaction else {
+            Log.warning("Attempted to commit transaction \(txId) but no active transaction exists", category: .sync)
+            return []
+        }
+
+        guard tx.id == txId else {
+            Log.warning("Transaction ID mismatch: attempting to commit \(txId) but active transaction is \(tx.id)", category: .sync)
             return []
         }
 
         let result = tx.modifications
         activeTransaction = nil
+        Log.debug("Committed transaction \(txId) with \(result.count) modifications", category: .sync)
         return result
     }
 
@@ -128,13 +138,21 @@ actor ModificationTracker {
     ///
     /// Note: For new code, prefer using transaction-based tracking with
     /// beginTransaction/commitTransaction for better error recovery.
+    ///
+    /// - Warning: If an active transaction exists, this will clear it and log a warning.
+    ///            Use commitTransaction() instead if you have an active transaction.
     func getAndClearModifiedConversations() -> Set<NSManagedObjectID> {
         // Include both pending modifications and any active transaction modifications
         var result = pendingModifications
+
         if let tx = activeTransaction {
+            // Warn about clearing an active transaction - this could indicate a bug
+            // where sync failed but didn't properly rollback the transaction
+            Log.warning("getAndClearModifiedConversations called with active transaction (id: \(tx.id), \(tx.modifications.count) modifications) - this may indicate improper transaction handling", category: .sync)
             result.formUnion(tx.modifications)
             activeTransaction = nil
         }
+
         pendingModifications.removeAll()
         return result
     }

@@ -209,6 +209,8 @@ final class CachedConversationLoader: ObservableObject {
             let request = Message.fetchRequest()
             request.predicate = NSPredicate(format: "conversation.id == %@", conversationId)
             request.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: true)]
+            // Prefetch relationships to avoid faults during rendering
+            request.relationshipKeyPathsForPrefetching = ["sender", "attachments", "conversation", "labels"]
             return (try? viewContext.fetch(request)) ?? []
         }
 

@@ -44,5 +44,6 @@ struct DataCleanupService: Sendable {
         await fixAndMergeIncorrectParticipantHashes(in: context)
         await removeEmptyConversations(in: context)
         await removeDraftMessages(in: context)
+        await cleanupOrphanedData(in: context)
     }
 }
