@@ -30,10 +30,11 @@ final class ViewModelTaskManager {
     ///
     /// - Parameters:
     ///   - key: Unique identifier for this task type
+    ///   - priority: Task priority (default: nil, inherits from current context)
     ///   - operation: The async operation to perform
-    func run(_ key: String, operation: @escaping () async -> Void) {
+    func run(_ key: String, priority: TaskPriority? = nil, operation: @escaping () async -> Void) {
         tasks[key]?.cancel()
-        tasks[key] = Task {
+        tasks[key] = Task(priority: priority) {
             await operation()
         }
     }

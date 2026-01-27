@@ -121,7 +121,7 @@ final class ConversationListViewModel: ObservableObject {
 
         hasPerformedInitialSync = true
 
-        taskManager.run("initialSync") { [weak self] in
+        taskManager.run("initialSync", priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
             do {
                 try await syncEngine.performIncrementalSync()

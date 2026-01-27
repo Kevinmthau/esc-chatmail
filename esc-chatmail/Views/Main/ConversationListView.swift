@@ -88,7 +88,7 @@ struct ConversationListView: View {
             NavigationStack { SettingsView() }
         }
         .onAppear {
-            AppPrewarmer.prewarmAll()
+            AppPrewarmer.prewarmAll()  // WebKit already prewarmed in initializeApp; this handles API + Contacts
             viewModel.onAppear(conversations: Array(conversations))
             updateFilteredConversations()
         }

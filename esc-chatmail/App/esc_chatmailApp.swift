@@ -9,6 +9,17 @@ import SwiftUI
 import GoogleSignIn
 import BackgroundTasks
 
+#if DEBUG
+private let appStartTime = Date()
+#endif
+
+private func logStartupTiming(_ message: String) {
+    #if DEBUG
+    let elapsed = Date().timeIntervalSince(appStartTime)
+    Log.info("STARTUP[\(String(format: "%.3f", elapsed))s]: \(message)", category: .general)
+    #endif
+}
+
 @main
 struct esc_chatmailApp: App {
     @StateObject private var dependencies = Dependencies.shared
@@ -18,17 +29,25 @@ struct esc_chatmailApp: App {
     @State private var isInitialized = false
 
     init() {
+        logStartupTiming("App init started")
+
         configureGoogleSignIn()
+        logStartupTiming("GoogleSignIn configured")
+
         configureBackgroundTasks()
+        logStartupTiming("BackgroundTasks configured")
 
         // Trigger Core Data stack initialization (async load starts here)
         _ = CoreDataStack.shared.persistentContainer
+        logStartupTiming("Core Data container accessed")
 
         // Setup attachment directories
         AttachmentPaths.setupDirectories()
+        logStartupTiming("Directories setup")
 
         // NOTE: Fresh install check and auth restoration moved to initializeApp()
         // to properly await async operations before showing ContentView
+        logStartupTiming("App init complete")
     }
     
     var body: some Scene {
@@ -47,6 +66,7 @@ struct esc_chatmailApp: App {
             } else {
                 AppLoadingView()
                     .task {
+                        logStartupTiming("AppLoadingView.task started")
                         await initializeApp()
                     }
             }
@@ -54,20 +74,32 @@ struct esc_chatmailApp: App {
     }
 
     private func initializeApp() async {
+        logStartupTiming("initializeApp() started")
+
+        // Start WebKit prewarm FIRST - 12s GPU launch runs in background
+        // This overlaps the GPU process launch with auth restoration and initial UI rendering
+        AppPrewarmer.prewarmWebKitIfNeeded()
+        logStartupTiming("WebKit prewarm triggered")
+
         // 1. Fresh install check (awaited - completes before continuing)
         await FreshInstallHandler().checkAndHandleFreshInstall()
+        logStartupTiming("FreshInstallHandler complete")
 
         // 2. Wait for Core Data store to load
         await waitForCoreData()
+        logStartupTiming("Core Data ready")
 
         // 3. Start cache coordinator for Core Data change notifications
         CacheCoordinator.shared.start()
+        logStartupTiming("CacheCoordinator started")
 
         // 4. Restore auth session (after cleanup complete)
         await AuthSession.shared.restorePreviousSignIn()
+        logStartupTiming("Auth restored")
 
         // 5. Ready to show main UI
         isInitialized = true
+        logStartupTiming("initializeApp() complete")
     }
 
     private func waitForCoreData() async {
