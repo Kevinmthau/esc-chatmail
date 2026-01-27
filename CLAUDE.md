@@ -8,6 +8,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Build (Debug)
 xcodebuild build -scheme esc-chatmail -configuration Debug -sdk iphoneos
 
+# Build for simulator (faster iteration)
+xcodebuild build -scheme esc-chatmail -configuration Debug -destination 'platform=iOS Simulator,name=iPhone 16'
+
 # Build (Release)
 xcodebuild build -scheme esc-chatmail -configuration Release -sdk iphoneos
 
@@ -45,6 +48,14 @@ Six main entities in `ESCChatmail.xcdatamodel`:
 - **Actor** - Background services requiring thread safety: `PendingActionsManager`, `PersonCache`, `AttachmentCacheActor`, `HistoryProcessor`, `TokenManager`
 - **@unchecked Sendable** - Classes mixing main/background work: `CoreDataStack`, `AuthSession`
 
+Concurrency utilities in `Services/Concurrency/`:
+- **ViewModelTaskManager** - Cancels previous tasks before starting new ones (prevents orphaned tasks):
+  ```swift
+  taskManager.run("load") { await self?.performLoad() }
+  ```
+- **TaskCoordinator** - Actor preventing duplicate concurrent operations; returns existing in-flight task or creates new
+- **BackgroundWork** - Cleaner API for `Task.detached` with logging support
+
 ### Sync Engine
 
 The sync system in `Services/Sync/` uses two orchestrators:
@@ -58,6 +69,8 @@ Configuration in `Constants.swift`:
 SyncConfig.messageBatchSize = 50
 SyncConfig.maxConcurrentMessageFetches = 15
 ```
+
+**Rate Limiting**: `GmailAPIClient` uses `RateLimitTracker` actor - circuit-breaks if >2 minutes cumulative backoff in 5-minute window.
 
 ### HTML Email Rendering
 
@@ -79,6 +92,21 @@ User actions (archive, star, mark spam) are queued as `PendingAction` entities:
 2. `PendingActionsManager` (Actor) executes via `GmailActionExecutor`
 3. Success removes the action; failure triggers retry with backoff
 
+### Error Handling
+
+Centralized error classification in `UnifiedErrorClassifier`:
+```swift
+let classification = UnifiedErrorClassifier.classify(error)
+switch classification.recoveryStrategy {
+case .retry(let delay): // Retry with backoff
+case .reauth:           // Re-authenticate user
+case .abort:            // Stop and report
+case .ignore:           // Log and continue
+}
+```
+
+Error types: `APIError` (network/API), `CoreDataError` (persistence), `TokenManagerError` (auth tokens).
+
 ## Testing
 
 Tests use in-memory Core Data via `TestCoreDataStack`. Test data is created with builders:
@@ -88,6 +116,10 @@ let message = MessageBuilder(context: testContext)
     .withIsUnread(true)
     .build()
 ```
+
+Available builders: `MessageBuilder`, `ConversationBuilder`, `PendingActionBuilder`, `PersonBuilder`
+
+Mocks: `MockGmailAPIClient`, `MockKeychainService`, `MockTokenManager`, `MockNetworkMonitor`
 
 Key test files: `ConversationMergerTests`, `PendingActionsManagerTests`, `HTMLSanitizerServiceTests`, `AttachmentDownloaderTests`
 

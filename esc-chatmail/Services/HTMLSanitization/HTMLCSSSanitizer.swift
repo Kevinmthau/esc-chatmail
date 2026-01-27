@@ -10,26 +10,50 @@ struct HTMLCSSSanitizer {
         ("-moz-binding\\s*:[^;]*;", "")                // Remove -moz-binding (Firefox specific)
     ]
 
-    // Cached compiled regex pattern for performance
-    private static let styleRegex: NSRegularExpression? = {
+    // Cached compiled regex patterns for performance
+    // Need separate patterns for double-quoted and single-quoted attributes
+    // to correctly handle quotes inside the value (e.g., font-family: 'Arial')
+    private static let styleRegexDoubleQuote: NSRegularExpression? = {
         try? NSRegularExpression(
-            pattern: "style\\s*=\\s*[\"']([^\"']*)[\"']",
+            pattern: "style\\s*=\\s*\"([^\"]*)\"",
+            options: .caseInsensitive
+        )
+    }()
+
+    private static let styleRegexSingleQuote: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: "style\\s*=\\s*'([^']*)'",
             options: .caseInsensitive
         )
     }()
 
     /// Sanitizes inline style attributes in HTML
     func sanitizeInlineStyles(_ html: String) -> String {
-        guard let regex = Self.styleRegex else { return html }
-        let matches = regex.matches(in: html, range: NSRange(html.startIndex..., in: html))
-
         var result = html
-        for match in matches.reversed() {
-            if let range = Range(match.range(at: 1), in: result) {
-                let styleContent = String(result[range])
-                let sanitizedStyle = sanitizeCSS(styleContent)
-                guard let fullRange = Range(match.range, in: result) else { continue }
-                result.replaceSubrange(fullRange, with: "style=\"\(sanitizedStyle)\"")
+
+        // Process double-quoted style attributes: style="..."
+        if let regex = Self.styleRegexDoubleQuote {
+            let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
+            for match in matches.reversed() {
+                if let range = Range(match.range(at: 1), in: result) {
+                    let styleContent = String(result[range])
+                    let sanitizedStyle = sanitizeCSS(styleContent)
+                    guard let fullRange = Range(match.range, in: result) else { continue }
+                    result.replaceSubrange(fullRange, with: "style=\"\(sanitizedStyle)\"")
+                }
+            }
+        }
+
+        // Process single-quoted style attributes: style='...'
+        if let regex = Self.styleRegexSingleQuote {
+            let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
+            for match in matches.reversed() {
+                if let range = Range(match.range(at: 1), in: result) {
+                    let styleContent = String(result[range])
+                    let sanitizedStyle = sanitizeCSS(styleContent)
+                    guard let fullRange = Range(match.range, in: result) else { continue }
+                    result.replaceSubrange(fullRange, with: "style=\"\(sanitizedStyle)\"")
+                }
             }
         }
 

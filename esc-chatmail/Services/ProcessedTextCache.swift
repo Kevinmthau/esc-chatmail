@@ -503,8 +503,9 @@ enum TextProcessing {
                 // Handles: 1. 10. 100. a) A. - * • · (a) (1)
                 let isListItem = TextProcessing.isListItem(trimmedLine)
 
-                // Don't join very short lines (likely intentional breaks like greetings)
-                let isShortLine = currentParagraph.count < 15
+                // Don't join short lines - only unwrap lines that look like hard-wrapped text (~70-80 cols)
+                // If current line is well below 60 chars, it was probably intentionally short
+                let isShortLine = currentParagraph.count < 60
 
                 if !endsWithPunctuation && !endsWithColon && !startsWithUppercase &&
                    !isListItem && !isShortLine {

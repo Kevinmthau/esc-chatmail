@@ -51,6 +51,11 @@ struct HTMLDisplayWrapper {
             table {
                 max-width: 100%;
             }
+            /* Reset link styling to inherit - allows email's inline styles to work */
+            a {
+                color: inherit;
+                text-decoration: inherit;
+            }
             \(isDarkMode ? darkModeCSS(textColor: textColor) : "")
         </style>
         """
@@ -107,13 +112,6 @@ struct HTMLDisplayWrapper {
                     margin: 0;
                     word-wrap: break-word;
                 }
-                /* Preserve email's original link colors */
-                a {
-                    text-decoration: none;
-                }
-                a:hover {
-                    text-decoration: underline;
-                }
                 /* Constrain images without breaking layout */
                 img {
                     max-width: 100%;
@@ -124,6 +122,11 @@ struct HTMLDisplayWrapper {
                 table {
                     max-width: 100%;
                     border-collapse: collapse;
+                }
+                /* Reset link styling to inherit - allows email's inline styles to work */
+                a {
+                    color: inherit;
+                    text-decoration: inherit;
                 }
                 /* Text wrapping */
                 div, td, th, p {

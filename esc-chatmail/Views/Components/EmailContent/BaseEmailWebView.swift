@@ -119,7 +119,6 @@ struct BaseEmailWebView: UIViewRepresentable {
         private func wrapWithScale(_ html: String, scale: CGFloat) -> String {
             let isDarkMode = UITraitCollection.current.userInterfaceStyle == .dark
             let bgColor = isDarkMode ? "#1c1c1e" : "#f2f2f7"
-            let linkColor = isDarkMode ? "#0a84ff" : "#007aff"
 
             // For previews, we wrap in a scale container but preserve the email's original styles
             return """
@@ -145,7 +144,6 @@ struct BaseEmailWebView: UIViewRepresentable {
                     /* Only constrain, don't force widths */
                     img { max-width: 100%; height: auto; }
                     table { max-width: 100%; }
-                    a { color: \(linkColor); }
                 </style>
             </head>
             <body>
