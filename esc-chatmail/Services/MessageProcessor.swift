@@ -53,33 +53,182 @@ class MessageProcessor {
         return processedMessage
     }
 
+    // MARK: - Newsletter Detection
+
+    /// Signals that indicate an email may be a newsletter or promotion
+    enum NewsletterSignal: String, CaseIterable {
+        // Gmail categorization
+        case gmailPromotions = "gmail_promotions"
+        case gmailUpdates = "gmail_updates"
+        case gmailForums = "gmail_forums"
+
+        // Headers
+        case listUnsubscribe = "list_unsubscribe"
+        case listId = "list_id"
+        case precedenceBulk = "precedence_bulk"
+
+        // Sender patterns - strong indicators
+        case senderNoreply = "sender_noreply"
+        case senderNewsletter = "sender_newsletter"
+        case senderMarketing = "sender_marketing"
+
+        // Sender patterns - weak indicators
+        case senderNotifications = "sender_notifications"
+        case senderSupport = "sender_support"
+
+        // Other signals
+        case replyToMismatch = "reply_to_mismatch"
+        case highRecipientCount = "high_recipient_count"
+        case veryHighRecipientCount = "very_high_recipient_count"
+
+        // Subject patterns - strong
+        case subjectDiscount = "subject_discount"
+        case subjectNewsletter = "subject_newsletter"
+        case subjectUrgency = "subject_urgency"
+
+        // Subject patterns - weak
+        case subjectPeriodic = "subject_periodic"
+    }
+
+    /// Result of newsletter detection with score and triggered signals
+    struct NewsletterDetectionResult {
+        let isNewsletter: Bool
+        let score: Int
+        let signals: [NewsletterSignal]
+
+        static let threshold = 50
+    }
+
+    /// Calculates newsletter score using weighted signals
+    /// Returns true if score >= 50 (threshold)
     private func isNewsletterOrPromotion(labelIds: [String], headers: ProcessedHeaders) -> Bool {
-        // Check Gmail's automatic categorization
-        let promotionLabels = ["CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS"]
-        if labelIds.contains(where: { promotionLabels.contains($0) }) {
-            return true
+        calculateNewsletterScore(labelIds: labelIds, headers: headers).isNewsletter
+    }
+
+    /// Calculates newsletter detection score with detailed signal tracking
+    func calculateNewsletterScore(labelIds: [String], headers: ProcessedHeaders) -> NewsletterDetectionResult {
+        var score = 0
+        var signals: [NewsletterSignal] = []
+
+        // Gmail categorization (ML-based, generally accurate)
+        if labelIds.contains("CATEGORY_PROMOTIONS") {
+            score += 40
+            signals.append(.gmailPromotions)
+        }
+        if labelIds.contains("CATEGORY_UPDATES") {
+            score += 30
+            signals.append(.gmailUpdates)
+        }
+        if labelIds.contains("CATEGORY_FORUMS") {
+            score += 20
+            signals.append(.gmailForums)
         }
 
-        // Check for mailing list headers
-        if headers.listUnsubscribe != nil || headers.listId != nil {
-            return true
+        // Mailing list headers
+        if headers.listUnsubscribe != nil {
+            score += 35
+            signals.append(.listUnsubscribe)
+        }
+        if headers.listId != nil {
+            score += 25
+            signals.append(.listId)
         }
 
-        // Check precedence header
+        // Precedence header
         if let precedence = headers.precedence?.lowercased(),
            ["bulk", "list", "junk"].contains(precedence) {
-            return true
+            score += 30
+            signals.append(.precedenceBulk)
         }
 
-        // Check for no-reply sender
+        // Sender patterns - use else-if to only count the strongest matching signal
+        // This prevents double-counting when an address like "marketing-notifications@" matches multiple patterns
         if let from = headers.from?.lowercased() {
-            let noReplyPatterns = ["noreply@", "no-reply@", "donotreply@", "do-not-reply@", "newsletter@", "notifications@"]
-            if noReplyPatterns.contains(where: { from.contains($0) }) {
-                return true
+            // Check patterns in order of specificity/strength (strongest first)
+            let newsletterPatterns = ["newsletter@", "marketing@", "promo@", "promotions@"]
+            let strongPatterns = ["noreply@", "no-reply@", "donotreply@", "do-not-reply@"]
+            let notificationPatterns = ["notifications@", "alerts@", "digest@", "updates@", "news@", "mailer@"]
+            let supportPatterns = ["support@", "hello@", "team@", "info@"]
+
+            if newsletterPatterns.contains(where: { from.contains($0) }) {
+                // Strongest indicator - explicit newsletter/marketing sender
+                score += 35
+                signals.append(.senderNewsletter)
+            } else if strongPatterns.contains(where: { from.contains($0) }) {
+                // Strong indicator - no-reply addresses
+                score += 25
+                signals.append(.senderNoreply)
+            } else if notificationPatterns.contains(where: { from.contains($0) }) {
+                // Weak indicator - could be legitimate notifications
+                score += 20
+                signals.append(.senderNotifications)
+            } else if supportPatterns.contains(where: { from.contains($0) }) {
+                // Very weak indicator - often legitimate
+                score += 5
+                signals.append(.senderSupport)
             }
         }
 
-        return false
+        // Reply-To mismatch (weak signal - many legitimate uses)
+        if let from = headers.from?.lowercased(),
+           let replyTo = headers.replyTo?.lowercased() {
+            let fromEmail = emailNormalizer.extractEmail(from: from)?.lowercased()
+            let replyToEmail = emailNormalizer.extractEmail(from: replyTo)?.lowercased()
+            if let fromEmail = fromEmail, let replyToEmail = replyToEmail,
+               fromEmail != replyToEmail {
+                score += 10
+                signals.append(.replyToMismatch)
+            }
+        }
+
+        // Recipient count (higher threshold to reduce false positives)
+        let totalRecipients = headers.to.count + headers.cc.count
+        if totalRecipients > 50 {
+            score += 25
+            signals.append(.veryHighRecipientCount)
+        } else if totalRecipients > 20 {
+            score += 15
+            signals.append(.highRecipientCount)
+        }
+
+        // Subject patterns
+        if let subject = headers.subject?.lowercased() {
+            // Strong marketing indicators
+            let discountPatterns = ["% off", "sale", "discount"]
+            if discountPatterns.contains(where: { subject.contains($0) }) {
+                score += 15
+                signals.append(.subjectDiscount)
+            }
+
+            let newsletterPatterns = ["newsletter", "digest"]
+            if newsletterPatterns.contains(where: { subject.contains($0) }) {
+                score += 20
+                signals.append(.subjectNewsletter)
+            }
+
+            let urgencyPatterns = ["unsubscribe", "limited time", "don't miss", "act now", "expires", "special offer"]
+            if urgencyPatterns.contains(where: { subject.contains($0) }) {
+                score += 20
+                signals.append(.subjectUrgency)
+            }
+
+            // Weak indicators (could be legitimate recurring updates)
+            let periodicPatterns = ["weekly", "monthly"]
+            if periodicPatterns.contains(where: { subject.contains($0) }) {
+                score += 5
+                signals.append(.subjectPeriodic)
+            }
+        }
+
+        let isNewsletter = score >= NewsletterDetectionResult.threshold
+
+        #if DEBUG
+        if !signals.isEmpty {
+            Log.debug("Newsletter detection: score=\(score) threshold=\(NewsletterDetectionResult.threshold) isNewsletter=\(isNewsletter) signals=\(signals.map { $0.rawValue })", category: .sync)
+        }
+        #endif
+
+        return NewsletterDetectionResult(isNewsletter: isNewsletter, score: score, signals: signals)
     }
     
     private func extractHeaders(from headers: [MessageHeader], myAliases: Set<String>) -> ProcessedHeaders {
@@ -100,6 +249,8 @@ class MessageProcessor {
                 processedHeaders.cc = parseEmailAddresses(from: header.value)
             case "bcc":
                 processedHeaders.bcc = parseEmailAddresses(from: header.value)
+            case "reply-to":
+                processedHeaders.replyTo = header.value
             case "in-reply-to":
                 processedHeaders.inReplyTo = header.value
             case "references":
@@ -324,6 +475,7 @@ struct ProcessedMessage: Sendable {
 struct ProcessedHeaders: Sendable {
     var subject: String?
     var from: String?
+    var replyTo: String?
     var to: [EmailAddress] = []
     var cc: [EmailAddress] = []
     var bcc: [EmailAddress] = []

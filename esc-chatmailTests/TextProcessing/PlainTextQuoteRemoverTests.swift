@@ -534,4 +534,228 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         let result = PlainTextQuoteRemover.removeQuotes(from: text)
         XCTAssertEqual(result, "Got it.")
     }
+
+    // MARK: - International Quote Patterns
+
+    func testRemoveQuotes_germanPattern_schrieb_cleansCorrectly() {
+        let text = """
+        Danke für die Nachricht!
+
+        Am 15. Januar 2024 schrieb Hans Müller:
+        > Hallo,
+        > Hier ist der Bericht.
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, "Danke für die Nachricht!")
+    }
+
+    func testRemoveQuotes_germanHeader_cleansCorrectly() {
+        let text = """
+        In Ordnung.
+
+        Von: Hans Müller <hans@example.de>
+        Gesendet: Montag, 15. Januar 2024
+        An: Maria Schmidt <maria@example.de>
+        Betreff: Re: Projekt
+
+        Original text here.
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, "In Ordnung.")
+    }
+
+    func testRemoveQuotes_frenchPattern_aEcrit_cleansCorrectly() {
+        let text = """
+        Merci beaucoup!
+
+        Le 15 janvier 2024, Jean Dupont a écrit :
+        > Bonjour,
+        > Voici le rapport.
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, "Merci beaucoup!")
+    }
+
+    func testRemoveQuotes_spanishPattern_escribio_cleansCorrectly() {
+        let text = """
+        Gracias por la información.
+
+        El 15 de enero de 2024, Carlos García escribió:
+        > Hola,
+        > Aquí está el informe.
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, "Gracias por la información.")
+    }
+
+    func testRemoveQuotes_italianPattern_haScritto_cleansCorrectly() {
+        let text = """
+        Grazie mille!
+
+        Il 15 gennaio 2024, Marco Rossi ha scritto:
+        > Ciao,
+        > Ecco il rapporto.
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, "Grazie mille!")
+    }
+
+    func testRemoveQuotes_portuguesePattern_escreveu_cleansCorrectly() {
+        let text = """
+        Obrigado!
+
+        Em 15 de janeiro de 2024, João Silva escreveu:
+        > Olá,
+        > Aqui está o relatório.
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, "Obrigado!")
+    }
+
+    func testRemoveQuotes_dutchPattern_schreef_cleansCorrectly() {
+        let text = """
+        Bedankt!
+
+        Op 15 januari 2024 schreef Jan de Vries:
+        > Hallo,
+        > Hier is het rapport.
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, "Bedankt!")
+    }
+
+    func testRemoveQuotes_germanForwardedMessage_cleansCorrectly() {
+        let text = """
+        Siehe unten.
+
+        Weitergeleitete Nachricht:
+        Von: Hans <hans@example.de>
+        Betreff: Info
+
+        Original content.
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, "Siehe unten.")
+    }
+
+    func testRemoveQuotes_frenchForwardedMessage_cleansCorrectly() {
+        let text = """
+        Voir ci-dessous.
+
+        Message transféré:
+        De: Jean <jean@example.fr>
+        Objet: Info
+
+        Original content.
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, "Voir ci-dessous.")
+    }
+
+    // MARK: - Nested Quote Level Tests
+
+    func testExtractQuotes_nestedQuotes_tracksNestingLevel() {
+        let text = """
+        My reply.
+
+        On Jan 15, John wrote:
+        > Original message
+        >> Even older message
+        >>> Very old message
+        """
+        let result = PlainTextQuoteRemover.extractQuotes(from: text)
+        XCTAssertEqual(result.mainContent, "My reply.")
+        XCTAssertEqual(result.quotedParts.count, 1)
+
+        // The nested quote should have max nesting level of 3
+        let quotedPart = result.quotedParts.first
+        XCTAssertNotNil(quotedPart)
+        XCTAssertEqual(quotedPart?.nestingLevel, 3)
+    }
+
+    func testExtractQuotes_singleLevelQuote_hasNestingLevelOne() {
+        let text = """
+        Thanks!
+
+        On Jan 15, John wrote:
+        > Just one level
+        > of quoting here
+        """
+        let result = PlainTextQuoteRemover.extractQuotes(from: text)
+        XCTAssertEqual(result.mainContent, "Thanks!")
+        XCTAssertEqual(result.quotedParts.count, 1)
+        XCTAssertEqual(result.quotedParts.first?.nestingLevel, 1)
+    }
+
+    func testExtractQuotes_mixedNestingLevels_tracksMaxLevel() {
+        let text = """
+        Got it.
+
+        On Jan 15, John wrote:
+        > First level
+        >> Second level
+        > Back to first
+        >> Second again
+        >>> Third level!
+        > First level
+        """
+        let result = PlainTextQuoteRemover.extractQuotes(from: text)
+        XCTAssertEqual(result.mainContent, "Got it.")
+
+        // Max nesting level encountered should be 3
+        let quotedPart = result.quotedParts.first
+        XCTAssertEqual(quotedPart?.nestingLevel, 3)
+    }
+
+    func testExtractQuotes_noQuoteMarkers_hasNestingLevelZero() {
+        let text = """
+        My response.
+
+        On Jan 15, John wrote:
+        Original message without quote markers
+        Just plain text in the quote section
+        """
+        let result = PlainTextQuoteRemover.extractQuotes(from: text)
+        XCTAssertEqual(result.mainContent, "My response.")
+
+        // No ">" markers means nesting level 0
+        let quotedPart = result.quotedParts.first
+        XCTAssertEqual(quotedPart?.nestingLevel, 0)
+    }
+
+    // MARK: - Attribution Without Date Prefix
+
+    func testExtractQuotes_attributionWithoutDatePrefix_filtersCorrectly() {
+        // Bug fix: "John wrote:" without a date prefix like "On Jan 15" should still be filtered
+        let text = """
+        Thanks for the update!
+
+        John Smith wrote:
+        > Here is the original message
+        > with some content
+        """
+        let result = PlainTextQuoteRemover.extractQuotes(from: text)
+        XCTAssertEqual(result.mainContent, "Thanks for the update!")
+        XCTAssertEqual(result.quotedParts.count, 1)
+
+        // The quoted part should not contain "John Smith wrote:" attribution line
+        let quotedContent = result.quotedParts.first?.text ?? ""
+        XCTAssertFalse(quotedContent.lowercased().contains("wrote:"))
+        XCTAssertTrue(quotedContent.contains("Here is the original message"))
+    }
+
+    func testExtractQuotes_germanAttributionWithoutDatePrefix_filtersCorrectly() {
+        let text = """
+        Danke!
+
+        Hans Müller schrieb:
+        > Original nachricht
+        > Zweite zeile
+        """
+        let result = PlainTextQuoteRemover.extractQuotes(from: text)
+        XCTAssertEqual(result.mainContent, "Danke!")
+
+        let quotedContent = result.quotedParts.first?.text ?? ""
+        XCTAssertFalse(quotedContent.lowercased().contains("schrieb:"))
+    }
 }

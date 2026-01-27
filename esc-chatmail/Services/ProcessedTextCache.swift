@@ -6,10 +6,17 @@ import Foundation
 actor ProcessedTextCache: MemoryWarningHandler {
     static let shared = ProcessedTextCache()
 
-    /// Cached text content with rich content indicator
+    /// Cached text content with rich content indicator and extracted quotes
     struct CachedText: Sendable {
         let plainText: String?
         let hasRichContent: Bool
+        let quotedParts: [QuotedPart]
+
+        init(plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart] = []) {
+            self.plainText = plainText
+            self.hasRichContent = hasRichContent
+            self.quotedParts = quotedParts
+        }
     }
 
     private let cache: LRUCacheActor<String, CachedText>
@@ -45,22 +52,27 @@ actor ProcessedTextCache: MemoryWarningHandler {
     }
 
     /// Estimates memory size of a cached text entry
-    private static func estimateSize(_ plainText: String?, _ hasRichContent: Bool) -> Int {
+    private static func estimateSize(_ plainText: String?, _ hasRichContent: Bool, _ quotedParts: [QuotedPart] = []) -> Int {
         // String size: UTF-8 bytes + some overhead
         let textSize = (plainText?.utf8.count ?? 0)
+        // QuotedPart size: String header (16 bytes) + String data + Optional<String> (1 byte + 16 if present) + Int (8 bytes) + alignment padding
+        // Estimated 56 bytes per QuotedPart struct overhead
+        let quotedSize = quotedParts.reduce(0) { sum, part in
+            sum + part.text.utf8.count + (part.attribution?.utf8.count ?? 0) + 56
+        }
         // Bool size + struct overhead
         let overheadSize = 24
-        return textSize + overheadSize
+        return textSize + quotedSize + overheadSize
     }
 
-    func get(messageId: String) async -> (plainText: String?, hasRichContent: Bool)? {
+    func get(messageId: String) async -> (plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart])? {
         guard let entry = await cache.get(messageId) else { return nil }
-        return (entry.plainText, entry.hasRichContent)
+        return (entry.plainText, entry.hasRichContent, entry.quotedParts)
     }
 
-    func set(messageId: String, plainText: String?, hasRichContent: Bool) async {
-        let size = Self.estimateSize(plainText, hasRichContent)
-        await cache.set(messageId, value: CachedText(plainText: plainText, hasRichContent: hasRichContent), sizeBytes: size)
+    func set(messageId: String, plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart] = []) async {
+        let size = Self.estimateSize(plainText, hasRichContent, quotedParts)
+        await cache.set(messageId, value: CachedText(plainText: plainText, hasRichContent: hasRichContent, quotedParts: quotedParts), sizeBytes: size)
     }
 
     func prefetch(messageIds: [String]) async {
@@ -92,7 +104,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
                 guard !Task.isCancelled else { break }
 
                 let result = ProcessedTextCache.processMessage(messageId: messageId, handler: handler)
-                await self?.set(messageId: messageId, plainText: result.plainText, hasRichContent: result.hasRichContent)
+                await self?.set(messageId: messageId, plainText: result.plainText, hasRichContent: result.hasRichContent, quotedParts: result.quotedParts)
             }
 
             // Clear task reference on completion, but only if this is still the active task
@@ -117,9 +129,10 @@ actor ProcessedTextCache: MemoryWarningHandler {
     }
 
     /// Process a single message - can be called from background thread
-    nonisolated static func processMessage(messageId: String, handler: HTMLContentHandler) -> (plainText: String?, hasRichContent: Bool) {
+    nonisolated static func processMessage(messageId: String, handler: HTMLContentHandler) -> (plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart]) {
         var plainText: String?
         var hasRichContent = false
+        var quotedParts: [QuotedPart] = []
 
         if handler.htmlFileExists(for: messageId),
            let html = handler.loadHTML(for: messageId) {
@@ -129,9 +142,10 @@ actor ProcessedTextCache: MemoryWarningHandler {
             let extracted = TextProcessing.extractPlainText(from: cleanedHTML)
             if !extracted.isEmpty {
                 let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: extracted)
-                let stripped = TextProcessing.stripQuotedText(from: unwrapped)
-                // Only set plainText if we actually have content after stripping
-                plainText = stripped.isEmpty ? nil : stripped
+                // Extract quotes separately instead of just stripping
+                let extractionResult = PlainTextQuoteRemover.extractQuotes(from: unwrapped)
+                plainText = extractionResult.mainContent.isEmpty ? nil : extractionResult.mainContent
+                quotedParts = extractionResult.quotedParts
             }
 
             // If quote removal stripped everything, try without HTML quote removal
@@ -139,8 +153,11 @@ actor ProcessedTextCache: MemoryWarningHandler {
                 let rawExtracted = TextProcessing.extractPlainText(from: html)
                 if !rawExtracted.isEmpty {
                     let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: rawExtracted)
-                    let stripped = TextProcessing.stripQuotedText(from: unwrapped)
-                    plainText = stripped.isEmpty ? nil : stripped
+                    let extractionResult = PlainTextQuoteRemover.extractQuotes(from: unwrapped)
+                    plainText = extractionResult.mainContent.isEmpty ? nil : extractionResult.mainContent
+                    // Always update quotedParts to match the mainContent we're using
+                    // This ensures consistency between plainText and quotedParts
+                    quotedParts = extractionResult.quotedParts
                 }
             }
 
@@ -149,7 +166,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
             hasRichContent = hasGenuineRichContent(cleanedHTML)
         }
 
-        return (plainText, hasRichContent)
+        return (plainText, hasRichContent, quotedParts)
     }
 
     /// Determines if HTML contains genuine rich content (newsletters, receipts) vs personal email signature cruft
@@ -164,20 +181,44 @@ actor ProcessedTextCache: MemoryWarningHandler {
             return true
         }
 
+        // Always rich: semantic HTML5 elements indicating structured content
+        if lowercased.contains("<article") || lowercased.contains("<section") ||
+           lowercased.contains("<header") || lowercased.contains("<footer") ||
+           lowercased.contains("<nav") {
+            return true
+        }
+
         // Count elements to distinguish signature cruft from actual rich content
-        let imgCount = html.components(separatedBy: "<img").count - 1
-        let tableCount = html.components(separatedBy: "<table").count - 1
-        let cidCount = html.components(separatedBy: "cid:").count - 1
+        // Single-pass counting for better performance
+        let (imgCount, tableCount, cidCount, linkCount) = countHTMLElements(html)
+
+        // Check for CSS background images (often used in marketing emails)
+        let hasBackgroundImages = lowercased.contains("background-image") ||
+                                   lowercased.contains("background:url") ||
+                                   lowercased.contains("background: url")
+
+        // Check for button/CTA elements (common in marketing emails)
+        let hasButtonElements = lowercased.contains("class=\"button") ||
+                                 lowercased.contains("class='button") ||
+                                 lowercased.contains("role=\"button") ||
+                                 lowercased.contains("class=\"btn") ||
+                                 lowercased.contains("class=\"cta")
 
         // Professional signatures (real estate agents, etc.) can have:
         // - 1 company logo + 1 headshot + 6-8 social icons = up to 10 images
         // - 3-4 layout tables for contact info formatting
         // - Multiple CID references for inline images
         // Increased thresholds to accommodate elaborate professional signatures
-        let isLikelySignatureOnly = imgCount <= 10 && tableCount <= 5 && cidCount <= 10
+        let isLikelySignatureOnly = imgCount <= 10 && tableCount <= 5 && cidCount <= 10 &&
+                                    !hasBackgroundImages && !hasButtonElements
 
         // If it looks like just signature elements, don't flag as rich
         if isLikelySignatureOnly {
+            // But check link density - newsletters often have many links
+            // If >15 links, it's likely a newsletter regardless of other indicators
+            if linkCount > 15 {
+                return true
+            }
             return false
         }
 
@@ -198,6 +239,10 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
         // If there's very little text relative to the number of elements, it's likely just signature
         if charsPerElement < 50 && textContent.count < 500 {
+            // Exception: high link density with reasonable text suggests newsletter
+            if linkCount > 15 && textContent.count > 300 {
+                return true
+            }
             return false
         }
 
@@ -205,15 +250,48 @@ actor ProcessedTextCache: MemoryWarningHandler {
         let hasNewsletterIndicators = lowercased.contains("unsubscribe") ||
                                        lowercased.contains("view in browser") ||
                                        lowercased.contains("email preferences") ||
-                                       lowercased.contains("privacy policy")
+                                       lowercased.contains("privacy policy") ||
+                                       lowercased.contains("manage preferences") ||
+                                       lowercased.contains("update your preferences")
 
         // If it has newsletter indicators and many elements, it's rich content
         if hasNewsletterIndicators && totalElements > 5 {
             return true
         }
 
+        // Background images or button elements with substantial content = rich
+        if (hasBackgroundImages || hasButtonElements) && textContent.count > 300 {
+            return true
+        }
+
         // Otherwise, if there are many tables/images with substantial text, it's rich content
         return (tableCount > 5 || imgCount > 10) && textContent.count > 500
+    }
+
+    /// Counts HTML elements using efficient substring search
+    /// Returns (imgCount, tableCount, cidCount, linkCount)
+    nonisolated private static func countHTMLElements(_ html: String) -> (Int, Int, Int, Int) {
+        let imgCount = countOccurrences(of: "<img", in: html)
+        let tableCount = countOccurrences(of: "<table", in: html)
+        let cidCount = countOccurrences(of: "cid:", in: html)
+        // Count <a> tags - need to check for both "<a " and "<a>" patterns
+        let linkCountSpace = countOccurrences(of: "<a ", in: html)
+        let linkCountDirect = countOccurrences(of: "<a>", in: html)
+
+        return (imgCount, tableCount, cidCount, linkCountSpace + linkCountDirect)
+    }
+
+    /// Counts case-insensitive occurrences of a substring
+    nonisolated private static func countOccurrences(of substring: String, in string: String) -> Int {
+        var count = 0
+        var searchRange = string.startIndex..<string.endIndex
+
+        while let foundRange = string.range(of: substring, options: .caseInsensitive, range: searchRange) {
+            count += 1
+            searchRange = foundRange.upperBound..<string.endIndex
+        }
+
+        return count
     }
 
     func clear() async {
@@ -234,6 +312,24 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
 // MARK: - Text Processing Helpers (nonisolated for background thread usage)
 enum TextProcessing {
+    /// Pre-compiled regex for list item detection
+    /// Matches: 1. 10. 100. a) A. - * • · (a) (1)
+    private static let listItemPattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: "^(\\d{1,3}[.)]|[a-zA-Z][.)]|[-*•·]|\\([a-zA-Z0-9]{1,3}\\))\\s",
+            options: []
+        )
+    }()
+
+    /// Checks if a line starts with a list item marker
+    static func isListItem(_ line: String) -> Bool {
+        guard let regex = listItemPattern else {
+            // Fallback to simple check
+            return line.hasPrefix("-") || line.hasPrefix("*") || line.hasPrefix("•") || line.hasPrefix("·")
+        }
+        let range = NSRange(location: 0, length: min(line.utf16.count, 10)) // Only check first 10 chars
+        return regex.firstMatch(in: line, options: [], range: range) != nil
+    }
     static func extractPlainText(from html: String) -> String {
         var text = html
 
@@ -400,7 +496,18 @@ enum TextProcessing {
                 // Join unless next line starts with uppercase (new sentence)
                 let startsWithUppercase = firstChar?.isUppercase ?? false
 
-                if !endsWithPunctuation && !startsWithUppercase {
+                // Don't join if current line ends with colon (often precedes lists)
+                let endsWithColon = lastChar == ":"
+
+                // Don't join if next line looks like a list item
+                // Handles: 1. 10. 100. a) A. - * • · (a) (1)
+                let isListItem = TextProcessing.isListItem(trimmedLine)
+
+                // Don't join very short lines (likely intentional breaks like greetings)
+                let isShortLine = currentParagraph.count < 15
+
+                if !endsWithPunctuation && !endsWithColon && !startsWithUppercase &&
+                   !isListItem && !isShortLine {
                     // Join with space (unwrap soft line break)
                     currentParagraph += " " + trimmedLine
                 } else {

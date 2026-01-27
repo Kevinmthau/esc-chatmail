@@ -17,7 +17,10 @@ struct MessageBubble: View {
     @State private var showingHTMLView = false
     @State private var hasRichContent = false
     @State private var fullTextContent: String?
+    @State private var quotedParts: [QuotedPart] = []
     @State private var hasLoadedContent = false
+    /// Tracks the message ID we're currently loading to prevent stale updates during cell reuse
+    @State private var loadingMessageId: String?
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
@@ -41,6 +44,11 @@ struct MessageBubble: View {
                     fullTextContent: fullTextContent,
                     showingHTMLView: $showingHTMLView
                 )
+
+                // Show collapsible quotes if available (only for text bubbles, not newsletters)
+                if !message.isNewsletter && !hasRichContent && !quotedParts.isEmpty {
+                    CollapsibleQuoteView(quotedParts: quotedParts, isFromMe: message.isFromMe)
+                }
 
                 MessageMetadata(
                     date: message.internalDate,
@@ -133,8 +141,20 @@ struct MessageBubble: View {
     // MARK: - Content Loading
 
     private func loadContentIfNeeded() async {
-        guard !hasLoadedContent else { return }
-        hasLoadedContent = true
+        let currentMessageId = message.id
+
+        // Early exit: content already loaded for this exact message
+        if hasLoadedContent && loadingMessageId == currentMessageId {
+            return
+        }
+
+        // Claim this message ID and reset all state for new load
+        // This ensures a clean slate when cell is reused for a different message
+        loadingMessageId = currentMessageId
+        hasLoadedContent = false
+        fullTextContent = nil
+        hasRichContent = false
+        quotedParts = []
 
         // Use prefetched sender name if available, otherwise load (needed for avatar)
         if !message.isFromMe {
@@ -145,10 +165,17 @@ struct MessageBubble: View {
             await loadSenderName()
         }
 
+        // Verify message ID hasn't changed during async work (cell reuse protection)
+        guard loadingMessageId == currentMessageId else { return }
+
         // Try cache first (populated by batch prefetch in ChatView.onAppear)
         if let cached = await ProcessedTextCache.shared.get(messageId: message.id) {
+            // Final check before updating state - ensure this is still the active message
+            guard loadingMessageId == currentMessageId else { return }
             fullTextContent = cached.plainText
             hasRichContent = message.isForwardedEmail || (!message.isFromMe && cached.hasRichContent)
+            quotedParts = cached.quotedParts
+            hasLoadedContent = true
         } else {
             // Fallback: process on background thread and cache result
             await loadFullTextContentWithCache()
@@ -161,30 +188,40 @@ struct MessageBubble: View {
         let isFromMe = message.isFromMe
         let isForwarded = message.isForwardedEmail
 
-        let result: (plainText: String?, hasRichContent: Bool) = await Task.detached(priority: .userInitiated) {
+        let result: (plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart]) = await Task.detached(priority: .userInitiated) {
             let handler = HTMLContentHandler.shared
             var processedResult = ProcessedTextCache.processMessage(messageId: messageId, handler: handler)
 
             // If no HTML content, try bodyText
             if processedResult.plainText == nil, let text = bodyText {
                 let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: text)
-                let stripped = TextProcessing.stripQuotedText(from: unwrapped)
+                let extractionResult = PlainTextQuoteRemover.extractQuotes(from: unwrapped)
                 // Only use if we actually have content after stripping
-                processedResult = (stripped.isEmpty ? nil : stripped, false)
+                processedResult = (
+                    extractionResult.mainContent.isEmpty ? nil : extractionResult.mainContent,
+                    false,
+                    extractionResult.quotedParts
+                )
             }
 
             // Cache the result for future use
             await ProcessedTextCache.shared.set(
                 messageId: messageId,
                 plainText: processedResult.plainText,
-                hasRichContent: processedResult.hasRichContent
+                hasRichContent: processedResult.hasRichContent,
+                quotedParts: processedResult.quotedParts
             )
 
             return processedResult
         }.value
 
+        // Verify message ID hasn't changed during async processing (cell reuse protection)
+        guard loadingMessageId == messageId else { return }
+
         fullTextContent = result.plainText
         hasRichContent = isForwarded || (!isFromMe && result.hasRichContent)
+        quotedParts = result.quotedParts
+        hasLoadedContent = true
     }
 
     private func loadSenderName() async {

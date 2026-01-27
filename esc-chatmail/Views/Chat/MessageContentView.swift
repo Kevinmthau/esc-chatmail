@@ -3,6 +3,13 @@ import SwiftUI
 /// Displays the content portion of a message bubble.
 /// Handles rich HTML, plain text, attachments, and empty states.
 struct MessageContentView: View {
+    /// Pre-compiled regex to detect actual HTML tags (not math expressions like 5 < 10 > 3)
+    private static let htmlTagPattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: "<[a-zA-Z][a-zA-Z0-9]*(?:\\s[^>]*)?>|</[a-zA-Z][a-zA-Z0-9]*>",
+            options: []
+        )
+    }()
     let message: Message
     let style: MessageBubbleStyle
     let hasRichContent: Bool
@@ -107,9 +114,43 @@ struct MessageContentView: View {
     /// (unlike cleanedSnippet which destroyed all newlines for conversation list previews)
     private func processedText(_ text: String?) -> String? {
         guard let text = text else { return nil }
-        let decoded = HTMLEntityDecoder.decode(text)
+
+        var processed = text
+        var alreadyStrippedQuotes = false
+
+        // If text contains actual HTML tags, strip HTML quotes first
+        // This ensures consistency with ProcessedTextCache which also uses HTMLQuoteRemover
+        // Uses proper regex to avoid false positives on math like "5 < 10 > 3"
+        if Self.containsHTMLTags(text) {
+            // Always extract plain text from HTML content
+            if let strippedHTML = HTMLQuoteRemover.removeQuotes(from: text) {
+                processed = TextProcessing.extractPlainText(from: strippedHTML)
+                alreadyStrippedQuotes = true
+            } else {
+                // HTMLQuoteRemover returned nil (empty result) - the HTML was entirely quotes
+                // Extract plain text and let plain text quote stripping handle it
+                processed = TextProcessing.extractPlainText(from: text)
+                // Note: alreadyStrippedQuotes stays false so we still strip plain text quotes
+                // This handles the case where HTML quote removal failed but there may still
+                // be plain text quote markers in the extracted content
+            }
+        }
+
+        let decoded = HTMLEntityDecoder.decode(processed)
         let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: decoded)
-        let stripped = TextProcessing.stripQuotedText(from: unwrapped)
-        return stripped.isEmpty ? nil : stripped
+
+        // Only strip plain text quotes if we haven't already stripped HTML quotes
+        let result = alreadyStrippedQuotes ? unwrapped : TextProcessing.stripQuotedText(from: unwrapped)
+        return result.isEmpty ? nil : result
+    }
+
+    /// Checks if text contains actual HTML tags (not math expressions)
+    private static func containsHTMLTags(_ text: String) -> Bool {
+        guard let regex = htmlTagPattern else {
+            // Fallback to simple check if regex compilation failed
+            return text.contains("<") && text.contains(">")
+        }
+        let range = NSRange(location: 0, length: text.utf16.count)
+        return regex.firstMatch(in: text, options: [], range: range) != nil
     }
 }
