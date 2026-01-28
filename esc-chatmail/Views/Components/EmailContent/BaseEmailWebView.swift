@@ -112,8 +112,8 @@ struct BaseEmailWebView: UIViewRepresentable {
                 htmlToLoad = parent.htmlContent
             }
 
-            let baseURL = URL(string: "https://localhost/")
-            webView.loadHTMLString(htmlToLoad, baseURL: baseURL)
+            // Use nil baseURL to avoid sending Referer header that CDNs may block
+            webView.loadHTMLString(htmlToLoad, baseURL: nil)
         }
 
         private func wrapWithScale(_ html: String, scale: CGFloat) -> String {

@@ -142,8 +142,8 @@ private struct HTMLDebugWebView: UIViewRepresentable {
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
-        let baseURL = URL(string: "https://localhost/")
-        webView.loadHTMLString(html, baseURL: baseURL)
+        // Use nil baseURL to avoid sending Referer header that CDNs may block
+        webView.loadHTMLString(html, baseURL: nil)
     }
 }
 
