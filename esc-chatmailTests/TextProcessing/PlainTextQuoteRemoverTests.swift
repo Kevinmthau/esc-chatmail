@@ -210,9 +210,12 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(result, "Got it.")
     }
 
-    // MARK: - Signature Removal - Sign-offs
+    // MARK: - Signature Removal - Sign-offs (Context-Aware)
 
-    func testRemoveSignature_thanksComma_removes() {
+    // Simple sign-offs without strong indicators should NOT truncate
+    // (they're legitimate message closings, not signatures)
+
+    func testRemoveSignature_thanksComma_preservedWithoutStrongIndicator() {
         let text = """
         I'll send that over now.
 
@@ -220,10 +223,25 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         John
         """
         let result = PlainTextQuoteRemover.removeSignature(from: text)
+        // Should preserve the closing - it's just a name, not a signature block
+        XCTAssertEqual(result, "I'll send that over now.\n\nThanks,\nJohn")
+    }
+
+    func testRemoveSignature_thanksComma_removesWithStrongIndicator() {
+        let text = """
+        I'll send that over now.
+
+        Thanks,
+        John Doe
+        Mobile: 555-1234
+        john@example.com
+        """
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        // Should truncate because "Mobile:" is a strong signature indicator
         XCTAssertEqual(result, "I'll send that over now.")
     }
 
-    func testRemoveSignature_bestRegards_removes() {
+    func testRemoveSignature_bestRegards_preservedWithoutStrongIndicator() {
         let text = """
         Let me know if you need anything else.
 
@@ -231,10 +249,24 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         Jane Doe
         """
         let result = PlainTextQuoteRemover.removeSignature(from: text)
+        // Should preserve - just a name after sign-off
+        XCTAssertEqual(result, "Let me know if you need anything else.\n\nBest regards,\nJane Doe")
+    }
+
+    func testRemoveSignature_bestRegards_removesWithURL() {
+        let text = """
+        Let me know if you need anything else.
+
+        Best regards,
+        Jane Doe
+        www.example.com
+        """
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        // Should truncate because URL is a strong indicator
         XCTAssertEqual(result, "Let me know if you need anything else.")
     }
 
-    func testRemoveSignature_cheers_removes() {
+    func testRemoveSignature_cheers_preservedWithoutStrongIndicator() {
         let text = """
         Sounds great!
 
@@ -242,10 +274,25 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         Bob
         """
         let result = PlainTextQuoteRemover.removeSignature(from: text)
+        // Should preserve - just a name
+        XCTAssertEqual(result, "Sounds great!\n\nCheers,\nBob")
+    }
+
+    func testRemoveSignature_cheers_removesWithDisclaimer() {
+        let text = """
+        Sounds great!
+
+        Cheers,
+        Bob
+
+        This email and any attachments are confidential.
+        """
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        // Should truncate because disclaimer is a strong indicator
         XCTAssertEqual(result, "Sounds great!")
     }
 
-    func testRemoveSignature_sincerely_removes() {
+    func testRemoveSignature_sincerely_preservedWithoutStrongIndicator() {
         let text = """
         Please review at your earliest convenience.
 
@@ -253,7 +300,40 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         Dr. Smith
         """
         let result = PlainTextQuoteRemover.removeSignature(from: text)
+        // Should preserve - just a name
+        XCTAssertEqual(result, "Please review at your earliest convenience.\n\nSincerely,\nDr. Smith")
+    }
+
+    func testRemoveSignature_sincerely_removesWithPhoneNumber() {
+        let text = """
+        Please review at your earliest convenience.
+
+        Sincerely,
+        Dr. Smith
+        T: 555-123-4567
+        """
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        // Should truncate because phone prefix is a strong indicator
         XCTAssertEqual(result, "Please review at your earliest convenience.")
+    }
+
+    func testRemoveSignature_multipleOccurrencesOfSameSignOff_findsLaterOneWithIndicator() {
+        let text = """
+        First section content.
+
+        Thanks,
+        Alice
+
+        Second section content.
+
+        Thanks,
+        Bob
+        Mobile: 555-1234
+        """
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        // First "Thanks," has no strong indicator, so it's preserved
+        // Second "Thanks," has phone number indicator, so it triggers truncation
+        XCTAssertEqual(result, "First section content.\n\nThanks,\nAlice\n\nSecond section content.")
     }
 
     // MARK: - Signature Removal - Mobile Signatures
@@ -357,13 +437,30 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
 
         Best regards,
         Jane
+        Tel: 555-1234
 
         On Monday, John wrote:
         > Previous message
         """
         let result = PlainTextQuoteRemover.removeQuotes(from: text)
-        // Should remove both the signature and the quote
+        // Should remove both the signature (has phone indicator) and the quote
         XCTAssertEqual(result, "Thanks for the update!")
+    }
+
+    func testRemoveQuotes_quoteWithSimpleSignOff_preservesSignOff() {
+        let text = """
+        Thanks for the update!
+
+        Best regards,
+        Jane
+
+        On Monday, John wrote:
+        > Previous message
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        // Simple sign-off without strong indicator should be preserved
+        // Quote is still removed
+        XCTAssertEqual(result, "Thanks for the update!\n\nBest regards,\nJane")
     }
 
     // MARK: - Case Sensitivity
@@ -448,6 +545,28 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         > John
         """
         let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        // Simple "Thanks,\nJane" closing is preserved (no strong signature indicator)
+        // Quote is still removed
+        XCTAssertEqual(result, "Hi John,\n\nYes, that works for me. Let's schedule the call for 2pm tomorrow.\n\nThanks,\nJane")
+    }
+
+    func testRemoveQuotes_typicalReplyWithSignature_cleansCorrectly() {
+        let text = """
+        Hi John,
+
+        Yes, that works for me. Let's schedule the call for 2pm tomorrow.
+
+        Thanks,
+        Jane
+        Mobile: 555-9876
+
+        On Mon, Jan 15, 2024 at 10:30 AM John Doe <john@example.com> wrote:
+        > Hi Jane,
+        >
+        > Would tomorrow afternoon work for a quick call?
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        // "Thanks,\nJane" with phone number IS a signature
         XCTAssertEqual(result, "Hi John,\n\nYes, that works for me. Let's schedule the call for 2pm tomorrow.")
     }
 
