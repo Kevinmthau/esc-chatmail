@@ -142,8 +142,8 @@ private struct HTMLDebugWebView: UIViewRepresentable {
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
-        // Use nil baseURL to avoid sending Referer header that CDNs may block
-        webView.loadHTMLString(html, baseURL: nil)
+        // Use about:blank baseURL to provide URL resolution context while avoiding Referer header issues
+        webView.loadHTMLString(html, baseURL: URL(string: "about:blank"))
     }
 }
 

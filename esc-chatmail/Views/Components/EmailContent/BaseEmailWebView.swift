@@ -112,8 +112,8 @@ struct BaseEmailWebView: UIViewRepresentable {
                 htmlToLoad = parent.htmlContent
             }
 
-            // Use nil baseURL to avoid sending Referer header that CDNs may block
-            webView.loadHTMLString(htmlToLoad, baseURL: nil)
+            // Use about:blank baseURL to provide URL resolution context while avoiding Referer header issues
+            webView.loadHTMLString(htmlToLoad, baseURL: URL(string: "about:blank"))
         }
 
         private func wrapWithScale(_ html: String, scale: CGFloat) -> String {
@@ -167,6 +167,13 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
 
         private func handleFullInteractiveNavigation(_ navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            // Allow initial load and resource loads first (before other checks)
+            // This is critical for loadHTMLString with about:blank baseURL
+            if navigationAction.navigationType == .other || navigationAction.navigationType == .reload {
+                decisionHandler(.allow)
+                return
+            }
+
             if let url = navigationAction.request.url {
                 let urlString = url.absoluteString
 
@@ -184,12 +191,6 @@ struct BaseEmailWebView: UIViewRepresentable {
                     decisionHandler(.cancel)
                     return
                 }
-            }
-
-            // Allow initial load and resource loads
-            if navigationAction.navigationType == .other || navigationAction.navigationType == .reload {
-                decisionHandler(.allow)
-                return
             }
 
             // Handle link clicks
