@@ -279,7 +279,7 @@ final class ConversationListViewModel: ObservableObject {
         prefetchPersonData(from: conversations)
 
         // Defer non-critical work to avoid blocking initial render
-        Task.detached(priority: .utility) { [weak self] in
+        taskManager.runDetached("deferredSetup") { [weak self] in
             try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
             await MainActor.run { [weak self] in
                 guard let self = self else { return }

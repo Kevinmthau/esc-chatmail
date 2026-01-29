@@ -112,8 +112,29 @@ struct BaseEmailWebView: UIViewRepresentable {
                 htmlToLoad = parent.htmlContent
             }
 
-            // Use about:blank baseURL to provide URL resolution context while avoiding Referer header issues
-            webView.loadHTMLString(htmlToLoad, baseURL: URL(string: "about:blank"))
+            // Use sender domain as baseURL to provide correct Referer header for CDN images
+            // (e.g., Beehiiv CDN checks Referer for hotlink protection)
+            // Falls back to about:blank if no sender information available
+            let baseURL = deriveBaseURL(from: parent.message) ?? URL(string: "about:blank")
+            webView.loadHTMLString(htmlToLoad, baseURL: baseURL)
+        }
+
+        /// Derives a baseURL from the sender's email domain for proper Referer headers
+        private func deriveBaseURL(from message: Message?) -> URL? {
+            guard let email = message?.senderEmail,
+                  let atIndex = email.lastIndex(of: "@") else {
+                return nil
+            }
+            let domain = String(email[email.index(after: atIndex)...])
+            // Validate domain: must be non-empty, contain a dot, and have no spaces or invalid URL chars
+            guard !domain.isEmpty,
+                  domain.contains("."),
+                  !domain.contains(" "),
+                  !domain.contains("/"),
+                  !domain.contains("@") else {
+                return nil
+            }
+            return URL(string: "https://\(domain)/")
         }
 
         private func wrapWithScale(_ html: String, scale: CGFloat) -> String {

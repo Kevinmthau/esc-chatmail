@@ -126,21 +126,26 @@ extension DataCleanupService {
 
             do {
                 let actions = try context.fetch(request)
+
+                // Collect all conversation IDs that need to be checked
+                let conversationIds = Set(actions.compactMap { $0.conversationId })
+                guard !conversationIds.isEmpty else { return }
+
+                // Single batch fetch to find which conversations exist
+                let existingRequest = NSFetchRequest<NSDictionary>(entityName: "Conversation")
+                existingRequest.predicate = NSPredicate(format: "id IN %@", conversationIds as CVarArg)
+                existingRequest.propertiesToFetch = ["id"]
+                existingRequest.resultType = .dictionaryResultType
+                let existingResults = try context.fetch(existingRequest)
+                let existingIds = Set(existingResults.compactMap { $0["id"] as? UUID })
+
+                // Delete actions whose conversation no longer exists
                 var removedCount = 0
-
                 for action in actions {
-                    // Check if action references a conversation that no longer exists
-                    if let conversationId = action.conversationId {
-                        let conversationRequest = Conversation.fetchRequest()
-                        conversationRequest.predicate = NSPredicate(format: "id == %@", conversationId as CVarArg)
-                        conversationRequest.fetchLimit = 1
-
-                        let existingConversations = try context.fetch(conversationRequest)
-                        if existingConversations.isEmpty {
-                            Log.debug("Removing orphaned pending action for deleted conversation: \(conversationId)", category: .coreData)
-                            context.delete(action)
-                            removedCount += 1
-                        }
+                    if let conversationId = action.conversationId, !existingIds.contains(conversationId) {
+                        Log.debug("Removing orphaned pending action for deleted conversation: \(conversationId)", category: .coreData)
+                        context.delete(action)
+                        removedCount += 1
                     }
                 }
 
@@ -219,6 +224,39 @@ extension DataCleanupService {
         }
     }
 
+    /// Removes orphaned Message entries that have no conversation.
+    /// This can happen if a conversation is deleted but its messages weren't properly cascade-deleted.
+    func removeOrphanedMessages(in context: NSManagedObjectContext) async {
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        await context.perform {
+            // Use batch delete for efficiency - find messages where conversation is nil
+            let fetchRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
+            fetchRequest.predicate = NSPredicate(format: "conversation == nil")
+            fetchRequest.resultType = .managedObjectIDResultType
+
+            do {
+                guard let objectIDs = try context.fetch(fetchRequest) as? [NSManagedObjectID],
+                      !objectIDs.isEmpty else {
+                    return
+                }
+
+                let batchDeleteRequest = NSBatchDeleteRequest(objectIDs: objectIDs)
+                batchDeleteRequest.resultType = .resultTypeCount
+
+                let result = try context.execute(batchDeleteRequest) as? NSBatchDeleteResult
+                let deletedCount = result?.result as? Int ?? 0
+
+                if deletedCount > 0 {
+                    let duration = CFAbsoluteTimeGetCurrent() - startTime
+                    Log.info("Removed \(deletedCount) orphaned messages in \(String(format: "%.3f", duration))s", category: .coreData)
+                }
+            } catch {
+                Log.error("Failed to cleanup orphaned messages", category: .coreData, error: error)
+            }
+        }
+    }
+
     /// Removes stale Label entities that have no associated messages.
     /// Excludes system labels (INBOX, SENT, etc.) that should always exist.
     func removeStaleLabels(in context: NSManagedObjectContext) async {
@@ -266,6 +304,7 @@ extension DataCleanupService {
         let startTime = CFAbsoluteTimeGetCurrent()
 
         await removeOrphanedPendingActions(in: context)
+        await removeOrphanedMessages(in: context)
         await removeOrphanedConversationParticipants(in: context)
         await removeOrphanedMessageParticipants(in: context)
         await removeStaleLabels(in: context)

@@ -162,6 +162,10 @@ struct ConversationMerger: Sendable {
     /// Winner is the one with most messages, or if equal, the most recent.
     /// - Precondition: group must not be empty
     func selectWinner(from group: [Conversation]) -> Conversation {
+        guard let first = group.first else {
+            fatalError("selectWinner called with empty group - this indicates a logic error in the caller")
+        }
+
         let winner = group.max { (a, b) in
             let aCount = a.messages?.count ?? 0
             let bCount = b.messages?.count ?? 0
@@ -170,8 +174,7 @@ struct ConversationMerger: Sendable {
             let bDate = b.lastMessageDate ?? .distantPast
             return aDate < bDate
         }
-        // Fallback to first element if max fails (should never happen with non-empty group)
-        return winner ?? group[0]
+        return winner ?? first
     }
 
     // MARK: - Merge Logic
