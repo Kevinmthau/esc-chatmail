@@ -115,21 +115,41 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
         let memoryToken = await MainActor.run { authSession.accessToken }
         if let memoryToken = memoryToken {
             // Verify it's still valid
-            if let tokenInfo = try? loadTokenInfo(), !tokenInfo.isExpiringSoon {
-                return memoryToken
+            do {
+                let tokenInfo = try loadTokenInfo()
+                if !tokenInfo.isExpiringSoon {
+                    return memoryToken
+                }
+            } catch {
+                // Memory token exists but keychain read failed - log and continue to refresh
+                Log.warning("Keychain read failed while validating memory token", category: .auth)
             }
         }
 
         // Try to load from keychain
-        if let tokenInfo = try? loadTokenInfo(), !tokenInfo.isExpiringSoon {
-            // Update memory cache
-            await MainActor.run {
-                authSession.accessToken = tokenInfo.accessToken
+        do {
+            let tokenInfo = try loadTokenInfo()
+            if !tokenInfo.isExpiringSoon {
+                // Update memory cache
+                await MainActor.run {
+                    authSession.accessToken = tokenInfo.accessToken
+                }
+                return tokenInfo.accessToken
             }
-            return tokenInfo.accessToken
+            // Token is expiring soon, fall through to refresh
+        } catch let error as KeychainError {
+            // Distinguish between "not found" (expected on first launch) and actual errors
+            switch error {
+            case .itemNotFound:
+                Log.debug("No token found in keychain - will attempt refresh", category: .auth)
+            default:
+                Log.error("Keychain error loading token info", category: .auth, error: error)
+            }
+        } catch {
+            Log.error("Unexpected error loading token info from keychain", category: .auth, error: error)
         }
 
-        // Token is expired or expiring soon, refresh it
+        // Token is expired, expiring soon, or not found - refresh it
         return try await refreshToken()
     }
 
@@ -201,10 +221,20 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
 
     nonisolated func isAuthenticated() -> Bool {
         // Check if we have valid tokens
-        if let tokenInfo = try? loadTokenInfo() {
+        do {
+            let tokenInfo = try loadTokenInfo()
             return !tokenInfo.isExpired
+        } catch let error as KeychainError {
+            // itemNotFound is expected when not authenticated
+            if case .itemNotFound = error {
+                return false
+            }
+            Log.warning("Keychain error checking authentication status", category: .auth)
+            return false
+        } catch {
+            Log.warning("Unexpected error checking authentication status", category: .auth)
+            return false
         }
-        return false
     }
 
 }

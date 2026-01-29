@@ -84,7 +84,8 @@ final class ConversationManager: Sendable {
     }
 
     /// Selects the winner conversation from a group of duplicates.
-    func selectWinnerConversation(from group: [Conversation]) -> Conversation {
+    /// Returns nil if group is empty (logs error instead of crashing).
+    func selectWinnerConversation(from group: [Conversation]) -> Conversation? {
         merger.selectWinner(from: group)
     }
 

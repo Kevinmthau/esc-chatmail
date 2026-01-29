@@ -64,7 +64,9 @@ struct ConversationMerger: Sendable {
                     continue
                 }
 
-                let winner = self.selectWinner(from: group)
+                guard let winner = self.selectWinner(from: group) else {
+                    continue
+                }
                 let losers = group.filter { $0 != winner }
 
                 for loser in losers {
@@ -128,7 +130,9 @@ struct ConversationMerger: Sendable {
             for (hash, group) in byHash where group.count > 1 {
                 Log.debug("Found \(group.count) duplicate active conversations for participantHash: \(hash.prefix(16))...", category: .conversation)
 
-                let winner = self.selectWinner(from: group)
+                guard let winner = self.selectWinner(from: group) else {
+                    continue
+                }
                 let losers = group.filter { $0 != winner }
 
                 for loser in losers {
@@ -160,10 +164,11 @@ struct ConversationMerger: Sendable {
 
     /// Selects the winner conversation from a group of duplicates.
     /// Winner is the one with most messages, or if equal, the most recent.
-    /// - Precondition: group must not be empty
-    func selectWinner(from group: [Conversation]) -> Conversation {
+    /// Returns nil if the group is empty (logs error instead of crashing).
+    func selectWinner(from group: [Conversation]) -> Conversation? {
         guard let first = group.first else {
-            fatalError("selectWinner called with empty group - this indicates a logic error in the caller")
+            Log.error("selectWinner called with empty group - this indicates a logic error in the caller", category: .conversation)
+            return nil
         }
 
         let winner = group.max { (a, b) in

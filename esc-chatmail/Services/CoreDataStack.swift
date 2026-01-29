@@ -289,7 +289,19 @@ final class CoreDataStack: @unchecked Sendable {
 
     /// Destroys all data and reloads the persistent stores synchronously.
     /// Use this for fresh install cleanup where you need to ensure stores are ready before continuing.
+    ///
+    /// - Warning: This method uses a semaphore and will block the calling thread for up to 10 seconds.
+    ///   Do NOT call from the main thread as it will freeze the UI. Use `destroyAndReloadAsync()` instead
+    ///   when async behavior is acceptable.
     func destroyAndReloadSync() throws {
+        // Assert we're not on the main thread to prevent UI freezes
+        #if DEBUG
+        assert(!Thread.isMainThread, "destroyAndReloadSync must not be called from the main thread - use destroyAndReloadAsync instead")
+        #endif
+        if Thread.isMainThread {
+            Log.error("destroyAndReloadSync called from main thread - this may freeze the UI", category: .coreData)
+        }
+
         try destroyAllData()
 
         // Reset the viewContext to clear any stale managed objects

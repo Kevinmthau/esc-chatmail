@@ -43,7 +43,7 @@ final class AttachmentDownloader: ObservableObject {
         // Extract needed data inside context.perform to avoid faulting on wrong thread
         let attachmentData: [(objectID: NSManagedObjectID, messageId: String)] = await context.perform {
             let request = NSFetchRequest<Attachment>(entityName: "Attachment")
-            request.predicate = NSPredicate(format: "stateRaw == %@", "queued")
+            request.predicate = NSPredicate(format: "stateRaw == %@", Attachment.State.queued.rawValue)
             request.fetchBatchSize = 10  // Process attachments in small batches to reduce memory usage
 
             let attachments: [Attachment]

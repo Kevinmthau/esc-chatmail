@@ -160,6 +160,7 @@ extension PendingActionsManager {
             do {
                 if let message = try context.fetch(request).first {
                     message.setValue(nil, forKey: "localModifiedAt")
+                    try context.save()
                 }
             } catch {
                 // Non-critical: local modification flag will be cleared on next sync

@@ -107,7 +107,9 @@ extension DataCleanupService {
             for (hash, group) in byCorrectHash where group.count > 1 {
                 Log.debug("Merging \(group.count) conversations with corrected participantHash: \(hash.prefix(16))...", category: .coreData)
 
-                let winner = conversationManager.selectWinnerConversation(from: group)
+                guard let winner = conversationManager.selectWinnerConversation(from: group) else {
+                    continue
+                }
                 let losers = group.filter { $0 != winner }
 
                 for loser in losers {

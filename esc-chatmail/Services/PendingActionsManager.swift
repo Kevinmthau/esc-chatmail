@@ -76,8 +76,9 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         guard pendingProcessTask == nil, !isProcessing else { return }
 
         pendingProcessTask = Task { [weak self] in
-            await self?.processAllPendingActions()
-            await self?.clearPendingTask()
+            guard let self = self else { return }
+            await self.processAllPendingActions()
+            await self.clearPendingTask()
         }
     }
 

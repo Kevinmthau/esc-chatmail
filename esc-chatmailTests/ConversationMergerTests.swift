@@ -53,7 +53,8 @@ final class ConversationMergerTests: XCTestCase {
         // Test winner selection
         let winner = merger.selectWinner(from: [conv1, conv2])
 
-        XCTAssertEqual(winner.displayName, "Conv 2", "Should select conversation with more messages")
+        XCTAssertNotNil(winner, "Should return a winner for non-empty group")
+        XCTAssertEqual(winner?.displayName, "Conv 2", "Should select conversation with more messages")
     }
 
     func testSelectWinner_prefersMoreRecentWhenEqualMessageCount() throws {
@@ -79,7 +80,8 @@ final class ConversationMergerTests: XCTestCase {
         // Both have 0 messages, should prefer newer
         let winner = merger.selectWinner(from: [oldConv, newConv])
 
-        XCTAssertEqual(winner.displayName, "New Conv", "Should select more recent conversation")
+        XCTAssertNotNil(winner, "Should return a winner for non-empty group")
+        XCTAssertEqual(winner?.displayName, "New Conv", "Should select more recent conversation")
     }
 
     // MARK: - Merge Logic Tests
