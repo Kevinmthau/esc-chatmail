@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var authSession: AuthSession
     @State private var showingSignOutConfirmation = false
+    @State private var isSigningOut = false
 
     var body: some View {
         NavigationStack {
@@ -27,11 +28,18 @@ struct SettingsView: View {
 
                     Button(action: { showingSignOutConfirmation = true }) {
                         HStack {
-                            Image(systemName: "arrow.right.square")
-                            Text("Sign Out")
+                            if isSigningOut {
+                                ProgressView()
+                                    .progressViewStyle(CircularProgressViewStyle())
+                                Text("Signing Out...")
+                            } else {
+                                Image(systemName: "arrow.right.square")
+                                Text("Sign Out")
+                            }
                         }
                         .foregroundColor(.red)
                     }
+                    .disabled(isSigningOut)
                 }
 
                 Section("About") {
@@ -68,6 +76,10 @@ struct SettingsView: View {
     }
     
     private func signOut() {
-        authSession.signOut()
+        isSigningOut = true
+        Task {
+            await authSession.signOut()
+            // isSigningOut will reset when view is replaced by SignInView
+        }
     }
 }

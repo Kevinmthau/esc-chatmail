@@ -63,11 +63,15 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                 }
 
                 DispatchQueue.main.async { [weak self] in
-                    self?.currentUser = result.user
-                    self?.userEmail = result.user.profile?.email
-                    self?.userName = result.user.profile?.name
-                    self?.isAuthenticated = true
-                    self?.accessToken = result.user.accessToken.tokenString
+                    guard let self = self else {
+                        continuation.resume(throwing: AuthError.noUser)
+                        return
+                    }
+
+                    self.currentUser = result.user
+                    self.userEmail = result.user.profile?.email
+                    self.userName = result.user.profile?.name
+                    self.accessToken = result.user.accessToken.tokenString
 
                     // Save tokens securely using TokenManager
                     do {
@@ -81,21 +85,32 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                         if let email = result.user.profile?.email {
                             try KeychainService.shared.saveString(email, for: .googleUserEmail, withAccess: .whenUnlockedThisDeviceOnly)
                         }
+
+                        // Only mark as authenticated after tokens are successfully saved
+                        self.isAuthenticated = true
+
+                        // Mark that user has successfully signed in
+                        UserDefaults.standard.set(true, forKey: "hasCompletedSignIn")
+
+                        // Success - resume inside do block after all state is set
+                        continuation.resume()
                     } catch {
-                        Log.error("Failed to save tokens", category: .auth, error: error)
+                        Log.error("Failed to save tokens - clearing auth state", category: .auth, error: error)
+                        // Clear auth state since tokens weren't persisted
+                        self.currentUser = nil
+                        self.userEmail = nil
+                        self.userName = nil
+                        self.accessToken = nil
+                        self.isAuthenticated = false
+                        continuation.resume(throwing: AuthError.tokenPersistenceFailed(error))
                     }
-
-                    // Mark that user has successfully signed in
-                    UserDefaults.standard.set(true, forKey: "hasCompletedSignIn")
                 }
-
-                continuation.resume()
             }
         }
     }
     
     @MainActor
-    func signOut() {
+    func signOut() async {
         GIDSignIn.sharedInstance.signOut()
         currentUser = nil
         userEmail = nil
@@ -113,20 +128,6 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
         // Clear the sign-in flag
         UserDefaults.standard.removeObject(forKey: "hasCompletedSignIn")
-
-        // Clear all Core Data (emails, conversations, etc.)
-        Task {
-            do {
-                try await CoreDataStack.shared.resetStore()
-            } catch {
-                Log.error("Failed to clear Core Data", category: .coreData, error: error)
-            }
-        }
-
-        // Clear all attachment caches
-        Task {
-            await AttachmentCacheActor.shared.clearCache(level: .aggressive)
-        }
 
         // Clear conversation cache to prevent leaking previous user's data
         ConversationCache.shared.clearAllCaches()
@@ -136,6 +137,22 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
         // Clear attachment files from disk
         clearAttachmentFiles()
+
+        // Await async cleanup tasks to ensure completion before allowing new sign-in
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                do {
+                    try await CoreDataStack.shared.resetStore()
+                } catch {
+                    Log.error("Failed to clear Core Data during sign-out", category: .coreData, error: error)
+                }
+            }
+
+            group.addTask {
+                await AttachmentCacheActor.shared.clearCache(level: .aggressive)
+            }
+        }
+        Log.info("Sign-out cleanup completed", category: .auth)
     }
 
     private func clearAttachmentFiles() {
@@ -143,60 +160,65 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
         // Get app support directory
         guard let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            Log.warning("Could not find application support directory for cleanup", category: .auth)
             return
         }
 
         // Clear Attachments directory
         let attachmentsURL = appSupportURL.appendingPathComponent("Attachments")
         if fileManager.fileExists(atPath: attachmentsURL.path) {
-            try? fileManager.removeItem(at: attachmentsURL)
+            do {
+                try fileManager.removeItem(at: attachmentsURL)
+            } catch {
+                Log.error("Failed to remove Attachments directory during sign-out - previous user's files may persist", category: .auth, error: error)
+            }
         }
 
         // Clear Previews directory
         let previewsURL = appSupportURL.appendingPathComponent("Previews")
         if fileManager.fileExists(atPath: previewsURL.path) {
-            try? fileManager.removeItem(at: previewsURL)
+            do {
+                try fileManager.removeItem(at: previewsURL)
+            } catch {
+                Log.error("Failed to remove Previews directory during sign-out - previous user's files may persist", category: .auth, error: error)
+            }
         }
 
         // Clear any cache directories
         if let cacheURL = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first {
             let attachmentCacheURL = cacheURL.appendingPathComponent("AttachmentCache")
             if fileManager.fileExists(atPath: attachmentCacheURL.path) {
-                try? fileManager.removeItem(at: attachmentCacheURL)
+                do {
+                    try fileManager.removeItem(at: attachmentCacheURL)
+                } catch {
+                    Log.error("Failed to remove AttachmentCache directory during sign-out - previous user's files may persist", category: .auth, error: error)
+                }
             }
         }
     }
 
     @MainActor
-    func signOutAndDisconnect(completion: ((Error?) -> Void)? = nil) {
+    func signOutAndDisconnect() async throws {
         // First sign out
         GIDSignIn.sharedInstance.signOut()
 
-        // Then disconnect to revoke tokens
-        GIDSignIn.sharedInstance.disconnect { [weak self] error in
-            Task { @MainActor in
-                guard let self = self else {
-                    completion?(error)
-                    return
-                }
-
-                // Clear local state
-                self.currentUser = nil
-                self.userEmail = nil
-                self.userName = nil
-                self.isAuthenticated = false
-                self.accessToken = nil
-
-                completion?(error)
-            }
-        }
-
-        // Clear local state immediately as well
+        // Clear local state immediately
         currentUser = nil
         userEmail = nil
         userName = nil
         isAuthenticated = false
         accessToken = nil
+
+        // Then disconnect to revoke tokens (wrap callback in continuation)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            GIDSignIn.sharedInstance.disconnect { error in
+                if let error = error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            }
+        }
 
         // Clear tokens from secure storage
         do {
@@ -209,22 +231,30 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         // Clear the sign-in flag
         UserDefaults.standard.removeObject(forKey: "hasCompletedSignIn")
 
-        // Clear all Core Data (emails, conversations, etc.)
-        Task {
-            do {
-                try await CoreDataStack.shared.resetStore()
-            } catch {
-                Log.error("Failed to clear Core Data", category: .coreData, error: error)
-            }
-        }
+        // Clear conversation cache to prevent leaking previous user's data
+        ConversationCache.shared.clearAllCaches()
 
-        // Clear all attachment caches
-        Task {
-            await AttachmentCacheActor.shared.clearCache(level: .aggressive)
-        }
+        // Clear attachment downloader tracking data
+        AttachmentDownloader.shared.cleanupAll()
 
         // Clear attachment files from disk
         clearAttachmentFiles()
+
+        // Await async cleanup tasks to ensure completion before allowing new sign-in
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                do {
+                    try await CoreDataStack.shared.resetStore()
+                } catch {
+                    Log.error("Failed to clear Core Data during disconnect", category: .coreData, error: error)
+                }
+            }
+
+            group.addTask {
+                await AttachmentCacheActor.shared.clearCache(level: .aggressive)
+            }
+        }
+        Log.info("Disconnect cleanup completed", category: .auth)
     }
 
     nonisolated func withFreshToken() async throws -> String {
@@ -236,13 +266,16 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 enum AuthError: LocalizedError {
     case noUser
     case noAccessToken
-    
+    case tokenPersistenceFailed(Error)
+
     var errorDescription: String? {
         switch self {
         case .noUser:
             return "No authenticated user"
         case .noAccessToken:
             return "Failed to get access token"
+        case .tokenPersistenceFailed(let underlyingError):
+            return "Failed to save authentication tokens: \(underlyingError.localizedDescription)"
         }
     }
 }
