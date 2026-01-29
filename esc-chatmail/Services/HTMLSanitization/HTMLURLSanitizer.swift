@@ -3,7 +3,12 @@ import Foundation
 /// Handles URL sanitization within HTML content
 struct HTMLURLSanitizer {
     private static let allowedProtocols: Set<String> = [
-        "http", "https", "mailto", "tel"
+        "http", "https", "mailto", "tel", "cid"
+    ]
+
+    /// Dangerous protocols that should always be blocked
+    private static let dangerousProtocols: Set<String> = [
+        "javascript", "vbscript", "data"  // data: handled separately for images
     ]
 
     // Cached compiled regex patterns for performance
@@ -24,10 +29,11 @@ struct HTMLURLSanitizer {
         )
     }()
 
+    // Safe image MIME types for data URLs (excludes SVG which can contain scripts)
     private static let dataURLRegex: NSRegularExpression = {
         // swiftlint:disable:next force_try
         try! NSRegularExpression(
-            pattern: "^data:image\\/(png|jpeg|jpg|gif|webp|bmp|svg\\+xml|x-icon|vnd\\.microsoft\\.icon)(;base64)?,",
+            pattern: "^data:image\\/(png|jpeg|jpg|gif|webp|bmp|x-icon|vnd\\.microsoft\\.icon)(;base64)?,",
             options: .caseInsensitive
         )
     }()
@@ -85,12 +91,22 @@ struct HTMLURLSanitizer {
             if let range = Range(match.range(at: 1), in: result) {
                 let url = String(result[range]).trimmingCharacters(in: .whitespacesAndNewlines)
 
-                // Skip empty URLs but don't replace valid newsletter tracking pixels
+                // Skip empty URLs
                 if url.isEmpty {
                     guard let fullRange = Range(match.range, in: result) else { continue }
                     result.replaceSubrange(fullRange, with: transparentPixel)
-                } else if url.hasPrefix("javascript:") || url.hasPrefix("vbscript:") {
-                    // Only block explicitly dangerous URLs
+                    continue
+                }
+
+                // Normalize URL to catch bypass attempts
+                let normalized = normalizeURL(url)
+
+                // Block dangerous protocols (javascript:, vbscript:, and unsafe data: URLs)
+                if normalized.hasPrefix("javascript:") || normalized.hasPrefix("vbscript:") {
+                    guard let fullRange = Range(match.range, in: result) else { continue }
+                    result.replaceSubrange(fullRange, with: transparentPixel)
+                } else if normalized.hasPrefix("data:") && !isDataURL(normalized) {
+                    // Block non-image data URLs (e.g., data:text/html)
                     guard let fullRange = Range(match.range, in: result) else { continue }
                     result.replaceSubrange(fullRange, with: transparentPixel)
                 }
@@ -102,34 +118,122 @@ struct HTMLURLSanitizer {
         return result
     }
 
-    /// Checks if a URL is safe to include
-    func isURLSafe(_ url: String) -> Bool {
-        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    /// Normalizes a URL by decoding percent-encoding, HTML entities, and removing control characters
+    /// This prevents bypass attempts like `java%73cript:` or `&#106;avascript:`
+    private func normalizeURL(_ url: String) -> String {
+        var result = url
 
-        // Block javascript: and vbscript: URLs
-        if trimmed.hasPrefix("javascript:") || trimmed.hasPrefix("vbscript:") {
-            return false
+        // Step 1: Decode percent-encoding (may need multiple passes for double-encoding)
+        var previousResult = ""
+        var iterations = 0
+        while previousResult != result && iterations < 3 {
+            previousResult = result
+            if let decoded = result.removingPercentEncoding {
+                result = decoded
+            }
+            iterations += 1
         }
 
-        // Allow data URLs for images only
-        if trimmed.hasPrefix("data:") {
-            return isDataURL(trimmed)
-        }
+        // Step 2: Decode HTML entities (numeric and named)
+        result = decodeHTMLEntities(result)
 
-        // Check if URL starts with allowed protocol
-        for proto in Self.allowedProtocols {
-            if trimmed.hasPrefix("\(proto)://") || trimmed.hasPrefix("\(proto):") {
-                return true
+        // Step 3: Remove whitespace and control characters within protocol portion
+        // This prevents bypasses like "java\nscript:" or "java\tscript:"
+        result = removeControlCharactersFromProtocol(result)
+
+        return result.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    /// Decodes HTML entities in URL strings
+    private func decodeHTMLEntities(_ text: String) -> String {
+        var result = text
+
+        // Decode numeric entities (&#106; -> j, &#x6A; -> j)
+        // Decimal entities
+        let decimalPattern = "&#(\\d+);"
+        if let regex = try? NSRegularExpression(pattern: decimalPattern, options: .caseInsensitive) {
+            let range = NSRange(result.startIndex..., in: result)
+            let matches = regex.matches(in: result, range: range)
+            for match in matches.reversed() {
+                if let codeRange = Range(match.range(at: 1), in: result),
+                   let fullRange = Range(match.range, in: result),
+                   let codePoint = Int(result[codeRange]),
+                   let scalar = Unicode.Scalar(codePoint) {
+                    result.replaceSubrange(fullRange, with: String(Character(scalar)))
+                }
             }
         }
 
+        // Hex entities (&#x6A; -> j)
+        let hexPattern = "&#x([0-9a-fA-F]+);"
+        if let regex = try? NSRegularExpression(pattern: hexPattern, options: .caseInsensitive) {
+            let range = NSRange(result.startIndex..., in: result)
+            let matches = regex.matches(in: result, range: range)
+            for match in matches.reversed() {
+                if let codeRange = Range(match.range(at: 1), in: result),
+                   let fullRange = Range(match.range, in: result),
+                   let codePoint = Int(result[codeRange], radix: 16),
+                   let scalar = Unicode.Scalar(codePoint) {
+                    result.replaceSubrange(fullRange, with: String(Character(scalar)))
+                }
+            }
+        }
+
+        return result
+    }
+
+    /// Removes control characters and whitespace from the protocol portion of a URL
+    private func removeControlCharactersFromProtocol(_ url: String) -> String {
+        // Find the colon that separates protocol from the rest
+        guard let colonIndex = url.firstIndex(of: ":") else {
+            return url
+        }
+
+        // Extract and clean the protocol portion
+        let protocolPart = url[..<colonIndex]
+        let cleanProtocol = protocolPart.filter { char in
+            // Only allow alphanumeric characters in protocol
+            char.isLetter || char.isNumber
+        }
+
+        let rest = url[colonIndex...]
+        return String(cleanProtocol) + String(rest)
+    }
+
+    /// Checks if a URL is safe to include
+    func isURLSafe(_ url: String) -> Bool {
+        // Normalize URL to prevent bypass attempts
+        let normalized = normalizeURL(url)
+
+        // Extract protocol from normalized URL
+        if let colonIndex = normalized.firstIndex(of: ":") {
+            let proto = String(normalized[..<colonIndex])
+
+            // Block dangerous protocols
+            if Self.dangerousProtocols.contains(proto) {
+                // Special case: allow data: URLs for images only
+                if proto == "data" {
+                    return isDataURL(normalized)
+                }
+                return false
+            }
+
+            // Allow known safe protocols
+            if Self.allowedProtocols.contains(proto) {
+                return true
+            }
+
+            // Block unknown protocols
+            return false
+        }
+
         // Allow relative URLs
-        if trimmed.hasPrefix("/") || trimmed.hasPrefix("#") || trimmed.hasPrefix("?") {
+        if normalized.hasPrefix("/") || normalized.hasPrefix("#") || normalized.hasPrefix("?") {
             return true
         }
 
         // Allow URLs without protocol (will be treated as relative)
-        if !trimmed.contains(":") {
+        if !normalized.contains(":") {
             return true
         }
 

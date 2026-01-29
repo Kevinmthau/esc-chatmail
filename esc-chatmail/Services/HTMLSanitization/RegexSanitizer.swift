@@ -43,8 +43,13 @@ struct RegexSanitizer {
     }
 
     /// Removes HTML tags (with content) matching any of the given tag names
+    /// Uses compiled patterns with dotMatchesLineSeparators to handle multiline content
     static func removeTags(from html: String, tags: [String]) -> String {
         tags.reduce(html) { result, tag in
+            if let regex = compileTagPattern(tag) {
+                return replace(in: result, regex: regex)
+            }
+            // Fallback to string-based replacement if regex compilation fails
             let pattern = "<\(tag)\\b[^>]*>.*?</\(tag)>|<\(tag)\\b[^>]*/?>"
             return replace(in: result, pattern: pattern)
         }

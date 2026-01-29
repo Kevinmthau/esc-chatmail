@@ -17,47 +17,6 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
 
     private init() {}
 
-    // MARK: - Allowed HTML Elements & Attributes
-
-    private let allowedTags: Set<String> = [
-        // Text formatting
-        "p", "br", "span", "div", "blockquote",
-        "b", "strong", "i", "em", "u", "s", "strike",
-        "h1", "h2", "h3", "h4", "h5", "h6",
-
-        // Lists
-        "ul", "ol", "li", "dl", "dt", "dd",
-
-        // Links (with sanitized href)
-        "a",
-
-        // Tables
-        "table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption",
-
-        // Media (with sanitized src)
-        "img",
-
-        // Code
-        "code", "pre", "kbd", "var", "samp",
-
-        // Semantic
-        "article", "section", "nav", "aside", "header", "footer", "main",
-
-        // Other
-        "hr", "abbr", "time", "mark", "small", "sub", "sup"
-    ]
-
-    private let allowedAttributes: [String: Set<String>] = [
-        "a": ["href", "title", "target", "rel"],
-        "img": ["src", "alt", "title", "width", "height"],
-        "blockquote": ["cite"],
-        "time": ["datetime"],
-        "abbr": ["title"],
-        "td": ["colspan", "rowspan"],
-        "th": ["colspan", "rowspan", "scope"],
-        "*": ["class", "id", "style"] // Carefully sanitized
-    ]
-
     // MARK: - Dangerous Tags Configuration
 
     private static let dangerousTags = [
@@ -68,16 +27,27 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
         "meta", "link"
     ]
 
+    // Pre-compiled regex patterns for dangerous tag removal (performance optimization)
+    private static let compiledDangerousTagPatterns: [NSRegularExpression] = {
+        dangerousTags.compactMap { RegexSanitizer.compileTagPattern($0) }
+    }()
+
+    // Pre-compiled event handler removal pattern
+    // swiftlint:disable:next force_try
+    private static let eventHandlerRegex: NSRegularExpression = {
+        try! NSRegularExpression(
+            pattern: "\\s*on\\w+\\s*=\\s*[\"'][^\"']*[\"']|\\s*on\\w+\\s*=\\s*[^\\s>]+",
+            options: .caseInsensitive
+        )
+    }()
+
     // MARK: - Main Sanitization Method
 
     func sanitize(_ html: String) -> String {
         var sanitized = html
 
-        // Remove dangerous elements
+        // Remove dangerous elements (script, form, iframe, etc.) using pre-compiled patterns
         sanitized = removeDangerousElements(sanitized)
-
-        // Remove script tags and content
-        sanitized = removeScriptTags(sanitized)
 
         // Note: We intentionally preserve <style> tags to keep responsive CSS/media queries
         // Marketing emails need these for proper mobile layouts
@@ -88,23 +58,11 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
         // Sanitize URLs (delegated)
         sanitized = urlSanitizer.sanitizeURLs(sanitized)
 
-        // Remove meta refresh
-        sanitized = removeMetaRefresh(sanitized)
-
-        // Remove forms
-        sanitized = removeForms(sanitized)
-
-        // Remove iframes
-        sanitized = removeIframes(sanitized)
-
-        // Clean up Gmail-specific elements
-        sanitized = removeGmailElements(sanitized)
-
         // Remove tracking pixels (delegated)
         sanitized = trackingRemover.removeTrackingPixels(sanitized)
 
-        // Sanitize CSS in style attributes (delegated)
-        sanitized = cssSanitizer.sanitizeInlineStyles(sanitized)
+        // Sanitize CSS in both <style> tags and inline style attributes (delegated)
+        sanitized = cssSanitizer.sanitizeStyles(sanitized)
 
         return sanitized
     }
@@ -112,48 +70,11 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
     // MARK: - Specific Sanitization Methods
 
     private func removeDangerousElements(_ html: String) -> String {
-        RegexSanitizer.removeTags(from: html, tags: Self.dangerousTags)
-    }
-
-    private func removeScriptTags(_ html: String) -> String {
-        RegexSanitizer.replace(
-            in: html,
-            pattern: "<script\\b[^<]*(?:(?!<\\/script>)<[^<]*)*<\\/script>|<script\\b[^>]*\\/>"
-        )
+        RegexSanitizer.removeTags(from: html, compiledPatterns: Self.compiledDangerousTagPatterns)
     }
 
     private func removeEventHandlers(_ html: String) -> String {
-        RegexSanitizer.replace(
-            in: html,
-            pattern: "\\s*on\\w+\\s*=\\s*[\"'][^\"']*[\"']|\\s*on\\w+\\s*=\\s*[^\\s>]+"
-        )
-    }
-
-    private func removeMetaRefresh(_ html: String) -> String {
-        RegexSanitizer.replace(
-            in: html,
-            pattern: "<meta\\s+[^>]*http-equiv\\s*=\\s*[\"']refresh[\"'][^>]*>"
-        )
-    }
-
-    private func removeForms(_ html: String) -> String {
-        RegexSanitizer.replace(
-            in: html,
-            pattern: "<form\\b[^<]*(?:(?!<\\/form>)<[^<]*)*<\\/form>|<form\\b[^>]*\\/>"
-        )
-    }
-
-    private func removeIframes(_ html: String) -> String {
-        RegexSanitizer.replace(
-            in: html,
-            pattern: "<iframe\\b[^<]*(?:(?!<\\/iframe>)<[^<]*)*<\\/iframe>|<iframe\\b[^>]*\\/>"
-        )
-    }
-
-    private func removeGmailElements(_ html: String) -> String {
-        // Don't remove Gmail signatures and quotes - keep them for full display
-        // Users want to see the complete email when viewing rich content
-        return html
+        RegexSanitizer.replace(in: html, regex: Self.eventHandlerRegex)
     }
 
     // MARK: - HTML to AttributedString Conversion
