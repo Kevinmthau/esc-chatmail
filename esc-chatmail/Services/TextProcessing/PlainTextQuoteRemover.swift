@@ -220,6 +220,9 @@ enum PlainTextQuoteRemover {
         "\n*Wire Fraud",
         "\nWire Fraud is Real",
         "\nBefore wiring any money",
+
+        // CID image references (embedded images, typically signature logos/banners)
+        "\n[cid:",
     ]
 
     // MARK: - Public API
@@ -321,6 +324,12 @@ enum PlainTextQuoteRemover {
             }
         }
 
+        // If we found a strong indicator, look backwards to find the actual signature start
+        // Signatures often have name/title lines BEFORE the strong indicator (CID, URL, phone)
+        if earliestCutIndex < cleanText.count {
+            earliestCutIndex = findSignatureStartBackward(from: earliestCutIndex, in: cleanText)
+        }
+
         // Cut at the earliest valid signature marker
         if earliestCutIndex < cleanText.count {
             let endIndex = cleanText.index(cleanText.startIndex, offsetBy: earliestCutIndex)
@@ -328,6 +337,62 @@ enum PlainTextQuoteRemover {
         }
 
         return cleanText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Looks backwards from a strong indicator position to find the actual signature start.
+    /// Signatures often have name/title lines BEFORE the strong indicator (CID, URL, phone).
+    /// Returns the adjusted cut index (character offset in the string).
+    private static func findSignatureStartBackward(from indicatorIndex: Int, in text: String) -> Int {
+        // Get text up to the indicator
+        let endIndex = text.index(text.startIndex, offsetBy: indicatorIndex)
+        let textBefore = String(text[..<endIndex])
+        // Normalize line endings before splitting to ensure character count matches when rejoining with "\n"
+        let normalizedText = textBefore.replacingOccurrences(of: "\r\n", with: "\n")
+                                       .replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalizedText.components(separatedBy: "\n")
+
+        // Look backwards for signature pattern:
+        // - Short lines (name, title, org are typically < 80 chars)
+        // - MUST be preceded by a blank line (separates from message body)
+        var signatureStartLine: Int? = nil  // Line index of the blank separator
+        var foundShortLines = false
+
+        for i in stride(from: lines.count - 1, through: 0, by: -1) {
+            let line = lines[i].trimmingCharacters(in: .whitespaces)
+
+            if line.isEmpty {
+                // Found a blank line
+                if foundShortLines {
+                    // This blank line precedes the short lines - this is the signature start
+                    signatureStartLine = i
+                    break
+                }
+                // Otherwise, skip blank lines between indicator and short lines
+                continue
+            }
+
+            // Check if this looks like a signature line (short, not a sentence)
+            let isShortLine = line.count < 80
+            let hasNoEndPunctuation = !line.hasSuffix(".") && !line.hasSuffix("!") && !line.hasSuffix("?")
+            let looksLikeSignature = isShortLine && (hasNoEndPunctuation || line.hasSuffix(","))
+
+            if looksLikeSignature {
+                foundShortLines = true
+                // Don't set signatureStartLine here - we need to find a blank line separator
+            } else {
+                // Found a normal content line - stop searching backwards
+                break
+            }
+        }
+
+        // Only extend backwards if we found both short lines AND a blank line separator
+        // This prevents removing content that happens to be short
+        if let startLine = signatureStartLine {
+            let linesToKeep = lines[0..<startLine]
+            return linesToKeep.joined(separator: "\n").count
+        }
+
+        return indicatorIndex
     }
 
     /// Checks if there's a strong signature indicator within the lookahead window after a sign-off
