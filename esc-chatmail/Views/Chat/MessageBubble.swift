@@ -15,12 +15,35 @@ struct MessageBubble: View {
     @State private var senderAvatarURL: String?
     @State private var senderImageData: Data?
     @State private var showingHTMLView = false
-    @State private var hasRichContent = false
+    @State private var hasRichContent: Bool
     @State private var fullTextContent: String?
     @State private var quotedParts: [QuotedPart] = []
     @State private var hasLoadedContent = false
     /// Tracks the message ID we're currently loading to prevent stale updates during cell reuse
     @State private var loadingMessageId: String?
+
+    init(
+        message: Message,
+        conversation: Conversation,
+        prefetchedSenderName: String? = nil,
+        isLastFromSender: Bool = true,
+        style: MessageBubbleStyle = .standard
+    ) {
+        self.message = message
+        self.conversation = conversation
+        self.prefetchedSenderName = prefetchedSenderName
+        self.isLastFromSender = isLastFromSender
+        self.style = style
+
+        // Compute initial hasRichContent synchronously to avoid flash of raw HTML
+        // For forwarded emails or received messages with stored HTML, assume rich content
+        let initialRich = message.isForwardedEmail ||
+            (!message.isFromMe && (
+                message.bodyStorageURI != nil ||
+                HTMLContentHandler.shared.htmlFileExists(for: message.id)
+            ))
+        _hasRichContent = State(initialValue: initialRich)
+    }
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
@@ -148,12 +171,13 @@ struct MessageBubble: View {
             return
         }
 
-        // Claim this message ID and reset all state for new load
+        // Claim this message ID and reset state for new load
         // This ensures a clean slate when cell is reused for a different message
+        // Note: hasRichContent is NOT reset here - we preserve the initial guess from init
+        // to avoid flashing raw HTML before async content loads
         loadingMessageId = currentMessageId
         hasLoadedContent = false
         fullTextContent = nil
-        hasRichContent = false
         quotedParts = []
 
         // Use prefetched sender name if available, otherwise load (needed for avatar)
