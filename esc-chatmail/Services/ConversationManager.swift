@@ -130,12 +130,12 @@ final class ConversationManager: Sendable {
         }
 
         for recipient in headers.to {
-            let value = recipient.displayName != nil ? "\(recipient.displayName!) <\(recipient.email)>" : recipient.email
+            let value = recipient.displayName.map { "\($0) <\(recipient.email)>" } ?? recipient.email
             messageHeaders.append(MessageHeader(name: "To", value: value))
         }
 
         for recipient in headers.cc {
-            let value = recipient.displayName != nil ? "\(recipient.displayName!) <\(recipient.email)>" : recipient.email
+            let value = recipient.displayName.map { "\($0) <\(recipient.email)>" } ?? recipient.email
             messageHeaders.append(MessageHeader(name: "Cc", value: value))
         }
 

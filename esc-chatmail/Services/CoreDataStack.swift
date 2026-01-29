@@ -282,8 +282,8 @@ final class CoreDataStack: @unchecked Sendable {
         setStoreLoaded(false)
         loadAttempts = 0
 
-        if !errors.isEmpty {
-            throw CoreDataError.persistentFailure(errors.first!)
+        if let firstError = errors.first {
+            throw CoreDataError.persistentFailure(firstError)
         }
     }
 

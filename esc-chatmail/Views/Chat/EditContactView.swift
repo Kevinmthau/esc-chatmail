@@ -58,7 +58,10 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
             let contactStore = CNContactStore()
 
             // Create mutable copy and add the email
-            let mutableContact = existingContact.mutableCopy() as! CNMutableContact
+            guard let mutableContact = existingContact.mutableCopy() as? CNMutableContact else {
+                Log.error("Failed to create mutable copy of contact", category: .ui)
+                return
+            }
             let newEmail = CNLabeledValue(label: CNLabelOther, value: emailToAdd as NSString)
             mutableContact.emailAddresses.append(newEmail)
 

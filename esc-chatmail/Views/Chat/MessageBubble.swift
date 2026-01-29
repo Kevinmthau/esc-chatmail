@@ -85,8 +85,8 @@ struct MessageBubble: View {
 
     @ViewBuilder
     private var senderNameView: some View {
-        if !message.isFromMe && style.showSenderName && isGroupConversation && senderName != nil {
-            Text(senderName!)
+        if !message.isFromMe && style.showSenderName && isGroupConversation, let name = senderName {
+            Text(name)
                 .font(.caption2)
                 .fontWeight(.medium)
                 .foregroundColor(.secondary)
