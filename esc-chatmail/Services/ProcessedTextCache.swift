@@ -389,6 +389,9 @@ enum TextProcessing {
         // Div closures should create line breaks (many email clients use divs instead of p/br)
         text = text.replacingOccurrences(of: "</div>", with: "\n", options: .caseInsensitive, range: nil)
 
+        // List items should each appear on their own line
+        text = text.replacingOccurrences(of: "</li>", with: "\n", options: .caseInsensitive, range: nil)
+
         // Remove all HTML tags
         text = text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression, range: nil)
 

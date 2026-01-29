@@ -244,4 +244,16 @@ final class ProcessedTextCacheTests: XCTestCase {
         // Should have paragraph break between them
         XCTAssertTrue(result.contains("\n"))
     }
+
+    func testExtractPlainText_handlesListItems() {
+        let html = "<ul><li>thinking</li><li>another thinking</li><li>and another</li></ul>"
+        let result = TextProcessing.extractPlainText(from: html)
+
+        XCTAssertTrue(result.contains("thinking"))
+        XCTAssertTrue(result.contains("another thinking"))
+        XCTAssertTrue(result.contains("and another"))
+        // Each list item should be on its own line
+        let lines = result.split(separator: "\n", omittingEmptySubsequences: true)
+        XCTAssertEqual(lines.count, 3)
+    }
 }
