@@ -83,36 +83,16 @@ extension Message {
         set { internalDate = newValue }
     }
 
-    /// Checks if the message is a forwarded email by looking for forward indicators
+    /// Checks if the message is a forwarded email by looking for forward indicators in the subject
     var isForwardedEmail: Bool {
-        // Check subject line for "FW:" or "Fwd:" prefix
-        if let subject = subject, !subject.isEmpty {
-            let subjectLower = subject.lowercased()
-            if subjectLower.hasPrefix("fwd:") ||
-               subjectLower.hasPrefix("fw:") ||
-               subjectLower.contains("fwd:") ||
-               subjectLower.contains("fw:") {
-                return true
-            }
+        guard let subject = subject, !subject.isEmpty else {
+            return false
         }
 
-        // Check body content for strong forward indicators
-        let bodyText = [snippet, cleanedSnippet].compactMap { $0 }.joined(separator: " ")
+        let subjectLower = subject.lowercased().trimmingCharacters(in: .whitespaces)
 
-        let strongForwardIndicators = [
-            "Begin forwarded message:",
-            "---------- Forwarded message",
-            "------ Original Message ------",
-            "-----Original Message-----",
-            "Forwarded message from"
-        ]
-
-        for indicator in strongForwardIndicators {
-            if bodyText.range(of: indicator, options: .caseInsensitive) != nil {
-                return true
-            }
-        }
-
-        return false
+        // Only check subject prefix - body content can contain forward indicators
+        // from quoted messages in reply threads, leading to false positives
+        return subjectLower.hasPrefix("fwd:") || subjectLower.hasPrefix("fw:")
     }
 }
