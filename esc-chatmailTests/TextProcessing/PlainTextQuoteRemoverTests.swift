@@ -842,6 +842,82 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(quotedPart?.nestingLevel, 0)
     }
 
+    // MARK: - Signature Removal - CID Image References
+
+    func testRemoveSignature_cidWithNameTitleBlock_removesEntireSignature() {
+        let text = """
+        Thank you so much. We truly appreciate your flexibility!
+
+        Lauren Vien
+        Director of Admissions and Community Engagement,
+        Nursery School
+
+        [cid:bfa5a8c2-a3e9-4924-9df3-d3fd51d2c906]
+
+        New York's global center for culture,
+        connection and enrichment
+        """
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        XCTAssertEqual(result, "Thank you so much. We truly appreciate your flexibility!")
+    }
+
+    func testRemoveSignature_cidAlone_removes() {
+        let text = """
+        Thanks for your help!
+
+        [cid:abc123]
+        """
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        XCTAssertEqual(result, "Thanks for your help!")
+    }
+
+    func testRemoveSignature_cidWithOnlyNameBefore_removesNameAndCid() {
+        let text = """
+        Looking forward to it.
+
+        John Doe
+
+        [cid:logo123]
+        """
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        XCTAssertEqual(result, "Looking forward to it.")
+    }
+
+    func testRemoveSignature_cidWithMultipleShortLinesBeforeBlank_removesAll() {
+        let text = """
+        See you tomorrow!
+
+        Jane Smith
+        Senior Vice President
+        Acme Corporation
+        New York, NY
+
+        [cid:company-logo]
+        """
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        XCTAssertEqual(result, "See you tomorrow!")
+    }
+
+    func testRemoveSignature_cidAfterContentSentence_preservesContent() {
+        // If the line before CID ends with sentence punctuation, it's likely content
+        let text = """
+        Here is the document you requested.
+
+        [cid:attachment123]
+        """
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        // The line ends with period, so backward search stops there
+        XCTAssertEqual(result, "Here is the document you requested.")
+    }
+
+    func testRemoveSignature_cidInlineNotRemoved() {
+        // CID references that are inline (not at start of line) should not trigger removal
+        // Our pattern requires "\n[cid:" so inline CIDs are not matched
+        let text = "Check out this image: [cid:inline-image] in my message."
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        XCTAssertEqual(result, text)
+    }
+
     // MARK: - Attribution Without Date Prefix
 
     func testExtractQuotes_attributionWithoutDatePrefix_filtersCorrectly() {
