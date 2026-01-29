@@ -68,11 +68,6 @@ struct MessageBubble: View {
                     showingHTMLView: $showingHTMLView
                 )
 
-                // Show collapsible quotes if available (only for text bubbles)
-                if !hasRichContent && !quotedParts.isEmpty {
-                    CollapsibleQuoteView(quotedParts: quotedParts, isFromMe: message.isFromMe)
-                }
-
                 MessageMetadata(
                     date: message.internalDate,
                     isUnread: message.isUnread,
