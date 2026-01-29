@@ -56,9 +56,11 @@ final class ChatViewModel: ObservableObject {
         // Immediately clear the unread count in UI (optimistic update)
         conversation.inboxUnreadCount = 0
 
-        Task.detached { [messageActions, conversation] in
+        let messageActions = self.messageActions
+        let conversationID = conversation.objectID
+        taskManager.runDetached("markConversationAsRead") {
             // Use batch operation for atomic update - prevents race condition
-            await messageActions.markMessagesAsReadBatch(messageIDs: messageObjectIDs, in: conversation)
+            await messageActions.markMessagesAsReadBatch(messageIDs: messageObjectIDs, conversationID: conversationID)
         }
     }
 
@@ -204,7 +206,7 @@ final class ChatViewModel: ObservableObject {
 
             // Trigger sync to fetch the sent message from Gmail
             let syncEngine = self.syncEngine
-            Task.detached {
+            taskManager.runDetached("postSendSync") {
                 do {
                     try await syncEngine.performIncrementalSync()
                 } catch {

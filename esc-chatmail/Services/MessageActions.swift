@@ -95,11 +95,10 @@ final class MessageActions: ObservableObject {
 
     /// Batch mark messages as read - prevents race condition with new messages
     /// Uses a single transaction to ensure atomic update of conversation unread count
-    func markMessagesAsReadBatch(messageIDs: [NSManagedObjectID], in conversation: Conversation) async {
+    func markMessagesAsReadBatch(messageIDs: [NSManagedObjectID], conversationID: NSManagedObjectID) async {
         guard !messageIDs.isEmpty else { return }
 
         let context = coreDataStack.newBackgroundContext()
-        let conversationID = conversation.objectID
 
         let gmailMessageIds: [String] = await context.perform {
             var markedIds: [String] = []
