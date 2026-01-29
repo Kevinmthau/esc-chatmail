@@ -200,8 +200,9 @@ final class MessageActions: ObservableObject {
 
         // CRITICAL: Set archivedAt to mark this conversation as archived
         // This ensures that future emails from these participants create a NEW conversation
-        conversation.archivedAt = Date()
-        Log.debug("Set archivedAt to \(conversation.archivedAt!)", category: .message)
+        let archiveDate = Date()
+        conversation.archivedAt = archiveDate
+        Log.debug("Set archivedAt to \(archiveDate)", category: .message)
 
         coreDataStack.saveIfNeeded(context: context)
         Log.debug("Removed INBOX label from \(removedCount) messages, saved context", category: .message)

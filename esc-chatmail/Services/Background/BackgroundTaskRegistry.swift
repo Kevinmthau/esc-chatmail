@@ -31,7 +31,12 @@ final class BackgroundTaskRegistry {
                 forTaskWithIdentifier: config.identifier,
                 using: nil
             ) { [weak self] task in
-                self?.handleTask(task as! BGAppRefreshTask, identifier: config.identifier)
+                guard let appRefreshTask = task as? BGAppRefreshTask else {
+                    Log.error("Unexpected task type for appRefresh: \(type(of: task))", category: .background)
+                    task.setTaskCompleted(success: false)
+                    return
+                }
+                self?.handleTask(appRefreshTask, identifier: config.identifier)
             }
 
         case .processing:
@@ -39,7 +44,12 @@ final class BackgroundTaskRegistry {
                 forTaskWithIdentifier: config.identifier,
                 using: nil
             ) { [weak self] task in
-                self?.handleTask(task as! BGProcessingTask, identifier: config.identifier)
+                guard let processingTask = task as? BGProcessingTask else {
+                    Log.error("Unexpected task type for processing: \(type(of: task))", category: .background)
+                    task.setTaskCompleted(success: false)
+                    return
+                }
+                self?.handleTask(processingTask, identifier: config.identifier)
             }
         }
 

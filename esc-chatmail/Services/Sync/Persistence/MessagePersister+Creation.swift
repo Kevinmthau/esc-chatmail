@@ -91,7 +91,16 @@ extension MessagePersister {
         }
 
         // Update conversation's lastMessageDate to bump it to the top
-        if conversation.lastMessageDate == nil || message.internalDate > conversation.lastMessageDate! {
+        if let lastDate = conversation.lastMessageDate {
+            if message.internalDate > lastDate {
+                conversation.lastMessageDate = message.internalDate
+                if message.isNewsletter, let subject = message.subject, !subject.isEmpty {
+                    conversation.snippet = subject
+                } else {
+                    conversation.snippet = message.cleanedSnippet ?? message.snippet
+                }
+            }
+        } else {
             conversation.lastMessageDate = message.internalDate
             if message.isNewsletter, let subject = message.subject, !subject.isEmpty {
                 conversation.snippet = subject

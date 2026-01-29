@@ -405,7 +405,7 @@ class MessageProcessor {
             #if DEBUG
             // Log parts that have attachment indicators for debugging
             let hasAttachmentId = part.body?.attachmentId != nil
-            let hasFilename = part.filename != nil && !part.filename!.isEmpty
+            let hasFilename = part.filename.map { !$0.isEmpty } ?? false
             if hasAttachmentId || hasFilename {
                 Log.debug("ATTACH_DEBUG Part: mime=\(part.mimeType ?? "nil") file=\(part.filename ?? "nil") attachId=\(hasAttachmentId) size=\(part.body?.size ?? 0)", category: .sync)
             }
