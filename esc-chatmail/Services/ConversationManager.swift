@@ -28,11 +28,16 @@ final class ConversationManager: Sendable {
     /// 3. If not found (all archived or none exist), create a NEW conversation
     ///
     /// Note: This method is serialized per participantHash to prevent duplicate conversations.
+    /// - Parameters:
+    ///   - identity: The conversation identity containing participants and type
+    ///   - initialLastMessageDate: Optional date to set as lastMessageDate when creating a new conversation (prevents UI flash where conversation appears at bottom before moving to top)
+    ///   - context: The Core Data context to use
     func findOrCreateConversation(
         for identity: ConversationIdentity,
+        initialLastMessageDate: Date? = nil,
         in context: NSManagedObjectContext
     ) async throws -> Conversation {
-        try await ConversationCreationSerializer.shared.findOrCreateConversation(for: identity, in: context)
+        try await ConversationCreationSerializer.shared.findOrCreateConversation(for: identity, initialLastMessageDate: initialLastMessageDate, in: context)
     }
 
     /// Delegates to PersonFactory for consistent person creation.

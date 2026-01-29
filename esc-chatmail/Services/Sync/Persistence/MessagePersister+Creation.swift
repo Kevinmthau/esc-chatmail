@@ -19,7 +19,13 @@ extension MessagePersister {
             gmThreadId: processedMessage.gmThreadId,
             myAliases: myAliases
         )
-        let conversation = try await conversationManager.findOrCreateConversation(for: identity, in: context)
+        // Pass internalDate so new conversations appear at the correct position immediately
+        // (prevents UI flash where conversation appears at bottom before moving to top)
+        let conversation = try await conversationManager.findOrCreateConversation(
+            for: identity,
+            initialLastMessageDate: processedMessage.internalDate,
+            in: context
+        )
 
         // Create Core Data message entity
         guard let message = NSEntityDescription.insertNewObject(forEntityName: "Message", into: context) as? Message else {

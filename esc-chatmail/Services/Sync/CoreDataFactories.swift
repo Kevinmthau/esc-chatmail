@@ -56,9 +56,14 @@ struct PersonFactory {
 struct ConversationFactory {
 
     /// Creates a new conversation with the given identity
+    /// - Parameters:
+    ///   - identity: The conversation identity containing participants and type
+    ///   - initialLastMessageDate: Optional date to set as lastMessageDate immediately (prevents UI flash where conversation appears at bottom)
+    ///   - context: The Core Data context to create the conversation in
     /// - Throws: CoreDataError.entityCreationFailed if entity creation fails
     static func create(
         for identity: ConversationIdentity,
+        initialLastMessageDate: Date? = nil,
         in context: NSManagedObjectContext
     ) throws -> Conversation {
         guard let conversation = NSEntityDescription.insertNewObject(
@@ -73,6 +78,8 @@ struct ConversationFactory {
         conversation.conversationType = identity.type
         // New conversations start as active (not archived)
         conversation.archivedAt = nil
+        // Set initial lastMessageDate if provided (ensures conversation sorts correctly before message is fully saved)
+        conversation.lastMessageDate = initialLastMessageDate
 
         // Create participants with display names from email headers
         for email in identity.participants {

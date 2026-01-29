@@ -18,8 +18,13 @@ actor ConversationCreationSerializer {
     private var recentlyCreatedHashes: Set<String> = []
 
     /// Finds or creates a conversation, ensuring no duplicates are created.
+    /// - Parameters:
+    ///   - identity: The conversation identity containing participants and type
+    ///   - initialLastMessageDate: Optional date to set as lastMessageDate when creating a new conversation (prevents UI flash)
+    ///   - context: The Core Data context to use
     func findOrCreateConversation(
         for identity: ConversationIdentity,
+        initialLastMessageDate: Date? = nil,
         in context: NSManagedObjectContext
     ) async throws -> Conversation {
         let participantHash = identity.participantHash
@@ -64,7 +69,7 @@ actor ConversationCreationSerializer {
             // Create new conversation
             let conversation: Conversation
             do {
-                conversation = try ConversationFactory.create(for: identity, in: context)
+                conversation = try ConversationFactory.create(for: identity, initialLastMessageDate: initialLastMessageDate, in: context)
             } catch {
                 Log.error("Failed to create conversation: \(error)", category: .coreData)
                 return .failure(error)

@@ -151,7 +151,12 @@ extension GmailSendService {
         let identity = makeConversationIdentity(from: identityHeaders, myAliases: myAliases)
 
         // Use the serializer to prevent race conditions when creating conversations
-        let conversation = try await ConversationCreationSerializer.shared.findOrCreateConversation(for: identity, in: context)
+        // Pass current date so sent conversations appear at top immediately (prevents UI flash)
+        let conversation = try await ConversationCreationSerializer.shared.findOrCreateConversation(
+            for: identity,
+            initialLastMessageDate: Date(),
+            in: context
+        )
 
         // Update display name for sent messages
         conversation.displayName = DisplayNameFormatter.formatGroupNames(recipients)
