@@ -67,24 +67,28 @@ final class ChatContactManager: ObservableObject {
     func handleContactSelected(_ contact: CNContact) {
         guard let person = personForExistingContact else { return }
 
-        // Fetch full contact with required keys
-        let contactStore = CNContactStore()
-        let keysToFetch: [CNKeyDescriptor] = [
-            CNContactViewController.descriptorForRequiredKeys()
-        ]
+        let contactIdentifier = contact.identifier
+        let emailToAdd = person.email
 
-        do {
-            let fullContact = try contactStore.unifiedContact(
-                withIdentifier: contact.identifier,
-                keysToFetch: keysToFetch
-            )
-            personForExistingContact = nil
-            showingContactPicker = false
-            ContactPresenter.shared.addEmailToContact(existingContact: fullContact, emailToAdd: person.email)
-        } catch {
-            Log.error("Failed to fetch contact for editing", category: .ui, error: error)
-            personForExistingContact = nil
-            showingContactPicker = false
+        // Clear state immediately for responsive UI
+        personForExistingContact = nil
+        showingContactPicker = false
+
+        Task {
+            let contactStore = CNContactStore()
+            let keysToFetch: [CNKeyDescriptor] = [CNContactViewController.descriptorForRequiredKeys()]
+
+            // Background thread for CNContactStore
+            let fullContact: CNContact? = await Task.detached(priority: .userInitiated) {
+                try? contactStore.unifiedContact(withIdentifier: contactIdentifier, keysToFetch: keysToFetch)
+            }.value
+
+            guard let contact = fullContact else {
+                Log.error("Failed to fetch contact for editing", category: .ui)
+                return
+            }
+
+            ContactPresenter.shared.addEmailToContact(existingContact: contact, emailToAdd: emailToAdd)
         }
     }
 

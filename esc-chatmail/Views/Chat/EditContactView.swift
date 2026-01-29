@@ -11,98 +11,96 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
     func presentContact(identifier: String) {
         emailToInvalidate = nil
 
-        // Delay to allow any dismissing sheets to complete
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+        Task { @MainActor [weak self] in
             guard let self = self else { return }
+            // Delay to allow any dismissing sheets to complete
+            try? await Task.sleep(nanoseconds: 300_000_000)
             guard let topVC = self.getTopViewController() else { return }
 
+            let keysToFetch: [CNKeyDescriptor] = [CNContactViewController.descriptorForRequiredKeys()]
             let contactStore = CNContactStore()
-            let keysToFetch: [CNKeyDescriptor] = [
-                CNContactViewController.descriptorForRequiredKeys()
-            ]
 
-            do {
-                let contact = try contactStore.unifiedContact(
-                    withIdentifier: identifier,
-                    keysToFetch: keysToFetch
-                )
+            // Background thread for CNContactStore
+            let contact: CNContact? = await Task.detached(priority: .userInitiated) {
+                try? contactStore.unifiedContact(withIdentifier: identifier, keysToFetch: keysToFetch)
+            }.value
 
-                let contactVC = CNContactViewController(for: contact)
-                contactVC.contactStore = contactStore
-                contactVC.delegate = self
-                contactVC.allowsEditing = true
-                contactVC.navigationItem.leftBarButtonItem = UIBarButtonItem(
-                    barButtonSystemItem: .close,
-                    target: self,
-                    action: #selector(self.dismissTapped)
-                )
-
-                let navController = UINavigationController(rootViewController: contactVC)
-                navController.modalPresentationStyle = .pageSheet
-                self.presentedNavController = navController
-                topVC.present(navController, animated: true)
-            } catch {
-                Log.error("Failed to fetch contact", category: .ui, error: error)
+            guard let contact = contact else {
+                Log.error("Failed to fetch contact", category: .ui)
+                return
             }
+
+            let contactVC = CNContactViewController(for: contact)
+            contactVC.contactStore = contactStore
+            contactVC.delegate = self
+            contactVC.allowsEditing = true
+            contactVC.navigationItem.leftBarButtonItem = UIBarButtonItem(
+                barButtonSystemItem: .close,
+                target: self,
+                action: #selector(self.dismissTapped)
+            )
+
+            let navController = UINavigationController(rootViewController: contactVC)
+            navController.modalPresentationStyle = .pageSheet
+            self.presentedNavController = navController
+            topVC.present(navController, animated: true)
         }
     }
 
     func addEmailToContact(existingContact: CNContact, emailToAdd: String) {
         emailToInvalidate = emailToAdd
 
-        // Delay to allow any dismissing sheets to complete
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+        Task { @MainActor [weak self] in
             guard let self = self else { return }
+            // Delay to allow any dismissing sheets to complete
+            try? await Task.sleep(nanoseconds: 300_000_000)
             guard let topVC = self.getTopViewController() else { return }
 
-            let contactStore = CNContactStore()
-
-            // Create mutable copy and add the email
             guard let mutableContact = existingContact.mutableCopy() as? CNMutableContact else {
                 Log.error("Failed to create mutable copy of contact", category: .ui)
                 return
             }
-            let newEmail = CNLabeledValue(label: CNLabelOther, value: emailToAdd as NSString)
-            mutableContact.emailAddresses.append(newEmail)
+            mutableContact.emailAddresses.append(
+                CNLabeledValue(label: CNLabelOther, value: emailToAdd as NSString)
+            )
 
-            // Save the updated contact
             let saveRequest = CNSaveRequest()
             saveRequest.update(mutableContact)
+            let contactStore = CNContactStore()
+            let keysToFetch: [CNKeyDescriptor] = [CNContactViewController.descriptorForRequiredKeys()]
+            let contactIdentifier = existingContact.identifier
 
-            do {
-                try contactStore.execute(saveRequest)
-
-                // Fetch the updated contact to display
-                let keysToFetch: [CNKeyDescriptor] = [
-                    CNContactViewController.descriptorForRequiredKeys()
-                ]
-                let updatedContact = try contactStore.unifiedContact(
-                    withIdentifier: existingContact.identifier,
-                    keysToFetch: keysToFetch
-                )
-
-                let contactVC = CNContactViewController(for: updatedContact)
-                contactVC.contactStore = contactStore
-                contactVC.delegate = self
-                contactVC.allowsEditing = true
-                contactVC.navigationItem.leftBarButtonItem = UIBarButtonItem(
-                    barButtonSystemItem: .close,
-                    target: self,
-                    action: #selector(self.dismissTapped)
-                )
-
-                let navController = UINavigationController(rootViewController: contactVC)
-                navController.modalPresentationStyle = .pageSheet
-                self.presentedNavController = navController
-                topVC.present(navController, animated: true)
-
-                // Invalidate cache for the email we added
-                Task {
-                    await ContactsResolver.shared.invalidateCache(for: emailToAdd)
-                    await PersonCache.shared.invalidateEntry(for: emailToAdd)
+            // Background thread for CNContactStore save + fetch
+            let updatedContact: CNContact? = await Task.detached(priority: .userInitiated) {
+                do {
+                    try contactStore.execute(saveRequest)
+                    return try contactStore.unifiedContact(withIdentifier: contactIdentifier, keysToFetch: keysToFetch)
+                } catch {
+                    Log.error("Failed to save email to contact", category: .ui, error: error)
+                    return nil
                 }
-            } catch {
-                Log.error("Failed to save email to contact", category: .ui, error: error)
+            }.value
+
+            guard let contact = updatedContact else { return }
+
+            let contactVC = CNContactViewController(for: contact)
+            contactVC.contactStore = contactStore
+            contactVC.delegate = self
+            contactVC.allowsEditing = true
+            contactVC.navigationItem.leftBarButtonItem = UIBarButtonItem(
+                barButtonSystemItem: .close,
+                target: self,
+                action: #selector(self.dismissTapped)
+            )
+
+            let navController = UINavigationController(rootViewController: contactVC)
+            navController.modalPresentationStyle = .pageSheet
+            self.presentedNavController = navController
+            topVC.present(navController, animated: true)
+
+            Task {
+                await ContactsResolver.shared.invalidateCache(for: emailToAdd)
+                await PersonCache.shared.invalidateEntry(for: emailToAdd)
             }
         }
     }
