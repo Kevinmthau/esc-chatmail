@@ -45,8 +45,8 @@ struct MessageBubble: View {
                     showingHTMLView: $showingHTMLView
                 )
 
-                // Show collapsible quotes if available (only for text bubbles, not newsletters)
-                if !message.isNewsletter && !hasRichContent && !quotedParts.isEmpty {
+                // Show collapsible quotes if available (only for text bubbles)
+                if !hasRichContent && !quotedParts.isEmpty {
                     CollapsibleQuoteView(quotedParts: quotedParts, isFromMe: message.isFromMe)
                 }
 
@@ -106,7 +106,7 @@ struct MessageBubble: View {
     @ViewBuilder
     private var attachmentsView: some View {
         // Filter out inline attachments when HTML is rendered (they're shown via cid: URLs)
-        let showsHTML = message.isNewsletter || hasRichContent
+        let showsHTML = hasRichContent
         let displayable = message.displayableAttachments.filter { attachment in
             // Inline attachments (with contentId) are shown in HTML content, so exclude them
             if showsHTML && attachment.contentId != nil {

@@ -19,8 +19,10 @@ struct MessageContentView: View {
     private var htmlContentHandler: HTMLContentHandler { HTMLContentHandler.shared }
 
     var body: some View {
-        if message.isNewsletter || hasRichContent {
+        if hasRichContent {
             // Rich HTML emails (newsletters, bank statements, etc.): Show HTML preview
+            // Note: hasRichContent is the primary determinant - even emails flagged as newsletters
+            // should display as plain text if their content is simple (e.g., mailing list replies)
             EmailContentSection(
                 message: message,
                 showingHTMLView: $showingHTMLView

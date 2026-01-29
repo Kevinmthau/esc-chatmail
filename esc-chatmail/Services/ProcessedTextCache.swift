@@ -192,6 +192,12 @@ actor ProcessedTextCache: MemoryWarningHandler {
         // Single-pass counting for better performance
         let (imgCount, tableCount, cidCount, linkCount) = countHTMLElements(html)
 
+        // Early exit for simple div-wrapped text (common Gmail mobile format)
+        // Must check AFTER element counts since we want to catch cases with 0 images/tables
+        if imgCount == 0 && tableCount == 0 && cidCount == 0 && isSimpleDivWrappedText(html) {
+            return false
+        }
+
         // Check for CSS background images (often used in marketing emails)
         let hasBackgroundImages = lowercased.contains("background-image") ||
                                    lowercased.contains("background:url") ||
@@ -292,6 +298,39 @@ actor ProcessedTextCache: MemoryWarningHandler {
         }
 
         return count
+    }
+
+    /// Detects simple div-wrapped text (Gmail mobile format) that should display as plain text
+    /// Example: <div dir="auto">Line 1</div><div dir="auto"><br></div><div dir="auto">Line 2</div>
+    nonisolated private static func isSimpleDivWrappedText(_ html: String) -> Bool {
+        let lowercased = html.lowercased()
+
+        // Must have divs (the wrapper pattern we're detecting)
+        guard lowercased.contains("<div") else { return false }
+
+        // Rich content indicators that disqualify simple text
+        let richIndicators = [
+            "<table", "<img", "<video", "<iframe", "<object", "<embed",
+            "<article", "<section", "<header", "<footer", "<nav",
+            "<style", "background-image", "background:url", "background: url",
+            "class=\"button", "class=\"btn", "class=\"cta", "role=\"button"
+        ]
+
+        for indicator in richIndicators {
+            if lowercased.contains(indicator) {
+                return false
+            }
+        }
+
+        // Check if content is predominantly simple div/span wrappers
+        // Strip simple formatting tags and count what HTML tags remain
+        let afterSimpleStrip = html
+            .replacingOccurrences(of: "</?(?:div|span|br|p|a|b|i|strong|em|font|blockquote)[^>]*>",
+                                  with: "", options: .regularExpression)
+
+        // Count remaining HTML tags (complex tags that weren't stripped)
+        let remainingTagCount = afterSimpleStrip.components(separatedBy: "<").count - 1
+        return remainingTagCount == 0
     }
 
     func clear() async {
