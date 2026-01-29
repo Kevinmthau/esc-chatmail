@@ -142,7 +142,7 @@ final class ConversationListViewModel: ObservableObject {
     func startPeriodicSync() {
         stopPeriodicSync()
 
-        syncTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
+        syncTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.taskManager.run("periodicSync") { [weak self] in
                     guard let self = self, !self.syncEngine.isSyncing else { return }

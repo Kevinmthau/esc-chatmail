@@ -256,13 +256,13 @@ struct BackoffCalculator {
 // MARK: - UI Configuration
 struct UIConfig {
     /// Delay for initial scroll after view appears (in seconds)
-    static let initialScrollDelay: TimeInterval = 0.3
+    static let initialScrollDelay: TimeInterval = 0.15
 
     /// Delay for scroll after content changes (in seconds)
-    static let contentChangeScrollDelay: TimeInterval = 0.1
+    static let contentChangeScrollDelay: TimeInterval = 0.05
 
     /// Duration of scroll animations (in seconds)
-    static let scrollAnimationDuration: TimeInterval = 0.25
+    static let scrollAnimationDuration: TimeInterval = 0.2
 }
 
 // MARK: - Cache Configuration
