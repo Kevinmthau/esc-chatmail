@@ -60,6 +60,32 @@ struct HTMLTrackingRemover {
         )
     }()
 
+    // Pre-compiled regex patterns for tracking domains (performance optimization)
+    private static let trackingDomainPatterns: [NSRegularExpression] = {
+        trackingDomains.compactMap { domain in
+            let escapedDomain = NSRegularExpression.escapedPattern(for: domain)
+            let pattern = "<img[^>]*src\\s*=\\s*[\"'][^\"']*\(escapedDomain)[^\"']*[\"'][^>]*>"
+            return try? NSRegularExpression(pattern: pattern, options: .caseInsensitive)
+        }
+    }()
+
+    // Pre-compiled regex patterns for tracking subdomains
+    private static let trackingSubdomainPatterns: [NSRegularExpression] = {
+        trackingSubdomains.compactMap { subdomain in
+            let pattern = "<img[^>]*src\\s*=\\s*[\"'][^\"']*(?://|\\.)\(subdomain)\\.[^\"']*[\"'][^>]*>"
+            return try? NSRegularExpression(pattern: pattern, options: .caseInsensitive)
+        }
+    }()
+
+    // Pre-compiled regex patterns for tracking filenames
+    private static let trackingFilenamePatterns: [NSRegularExpression] = {
+        trackingFilenames.compactMap { filename in
+            let escapedFilename = NSRegularExpression.escapedPattern(for: filename)
+            let pattern = "<img[^>]*src\\s*=\\s*[\"'][^\"']*/\(escapedFilename)[^\"']*[\"'][^>]*>"
+            return try? NSRegularExpression(pattern: pattern, options: .caseInsensitive)
+        }
+    }()
+
     /// Removes tracking pixels from HTML content
     func removeTrackingPixels(_ html: String) -> String {
         var result = html
@@ -72,37 +98,22 @@ struct HTMLTrackingRemover {
         let range2 = NSRange(result.startIndex..., in: result)
         result = Self.pixelByCSSRegex.stringByReplacingMatches(in: result, range: range2, withTemplate: "")
 
-        // Remove images from known tracking domains
-        for domain in Self.trackingDomains {
-            let escapedDomain = NSRegularExpression.escapedPattern(for: domain)
-            let pattern = "<img[^>]*src\\s*=\\s*[\"'][^\"']*\(escapedDomain)[^\"']*[\"'][^>]*>"
-            result = result.replacingOccurrences(
-                of: pattern,
-                with: "",
-                options: [.regularExpression, .caseInsensitive]
-            )
+        // Remove images from known tracking domains (using pre-compiled patterns)
+        for regex in Self.trackingDomainPatterns {
+            let range = NSRange(result.startIndex..., in: result)
+            result = regex.stringByReplacingMatches(in: result, range: range, withTemplate: "")
         }
 
-        // Remove images from tracking subdomains (match at domain boundary)
-        for subdomain in Self.trackingSubdomains {
-            // Match subdomain at the start of domain or after a dot: //analytics. or .analytics.
-            let pattern = "<img[^>]*src\\s*=\\s*[\"'][^\"']*(?://|\\.)\(subdomain)\\.[^\"']*[\"'][^>]*>"
-            result = result.replacingOccurrences(
-                of: pattern,
-                with: "",
-                options: [.regularExpression, .caseInsensitive]
-            )
+        // Remove images from tracking subdomains (using pre-compiled patterns)
+        for regex in Self.trackingSubdomainPatterns {
+            let range = NSRange(result.startIndex..., in: result)
+            result = regex.stringByReplacingMatches(in: result, range: range, withTemplate: "")
         }
 
-        // Remove images with common tracking filenames
-        for filename in Self.trackingFilenames {
-            let escapedFilename = NSRegularExpression.escapedPattern(for: filename)
-            let pattern = "<img[^>]*src\\s*=\\s*[\"'][^\"']*/\(escapedFilename)[^\"']*[\"'][^>]*>"
-            result = result.replacingOccurrences(
-                of: pattern,
-                with: "",
-                options: [.regularExpression, .caseInsensitive]
-            )
+        // Remove images with common tracking filenames (using pre-compiled patterns)
+        for regex in Self.trackingFilenamePatterns {
+            let range = NSRange(result.startIndex..., in: result)
+            result = regex.stringByReplacingMatches(in: result, range: range, withTemplate: "")
         }
 
         return result

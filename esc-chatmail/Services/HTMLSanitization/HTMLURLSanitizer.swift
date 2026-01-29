@@ -48,6 +48,17 @@ struct HTMLURLSanitizer {
         )
     }()
 
+    // Pre-compiled regex for HTML entity decoding (performance optimization)
+    // swiftlint:disable:next force_try
+    private static let decimalEntityRegex: NSRegularExpression = {
+        try! NSRegularExpression(pattern: "&#(\\d+);", options: .caseInsensitive)
+    }()
+
+    // swiftlint:disable:next force_try
+    private static let hexEntityRegex: NSRegularExpression = {
+        try! NSRegularExpression(pattern: "&#x([0-9a-fA-F]+);", options: .caseInsensitive)
+    }()
+
     /// Sanitizes href and src attributes in HTML
     func sanitizeURLs(_ html: String) -> String {
         var result = html
@@ -150,32 +161,26 @@ struct HTMLURLSanitizer {
 
         // Decode numeric entities (&#106; -> j, &#x6A; -> j)
         // Decimal entities
-        let decimalPattern = "&#(\\d+);"
-        if let regex = try? NSRegularExpression(pattern: decimalPattern, options: .caseInsensitive) {
-            let range = NSRange(result.startIndex..., in: result)
-            let matches = regex.matches(in: result, range: range)
-            for match in matches.reversed() {
-                if let codeRange = Range(match.range(at: 1), in: result),
-                   let fullRange = Range(match.range, in: result),
-                   let codePoint = Int(result[codeRange]),
-                   let scalar = Unicode.Scalar(codePoint) {
-                    result.replaceSubrange(fullRange, with: String(Character(scalar)))
-                }
+        let decimalRange = NSRange(result.startIndex..., in: result)
+        let decimalMatches = Self.decimalEntityRegex.matches(in: result, range: decimalRange)
+        for match in decimalMatches.reversed() {
+            if let codeRange = Range(match.range(at: 1), in: result),
+               let fullRange = Range(match.range, in: result),
+               let codePoint = Int(result[codeRange]),
+               let scalar = Unicode.Scalar(codePoint) {
+                result.replaceSubrange(fullRange, with: String(Character(scalar)))
             }
         }
 
         // Hex entities (&#x6A; -> j)
-        let hexPattern = "&#x([0-9a-fA-F]+);"
-        if let regex = try? NSRegularExpression(pattern: hexPattern, options: .caseInsensitive) {
-            let range = NSRange(result.startIndex..., in: result)
-            let matches = regex.matches(in: result, range: range)
-            for match in matches.reversed() {
-                if let codeRange = Range(match.range(at: 1), in: result),
-                   let fullRange = Range(match.range, in: result),
-                   let codePoint = Int(result[codeRange], radix: 16),
-                   let scalar = Unicode.Scalar(codePoint) {
-                    result.replaceSubrange(fullRange, with: String(Character(scalar)))
-                }
+        let hexRange = NSRange(result.startIndex..., in: result)
+        let hexMatches = Self.hexEntityRegex.matches(in: result, range: hexRange)
+        for match in hexMatches.reversed() {
+            if let codeRange = Range(match.range(at: 1), in: result),
+               let fullRange = Range(match.range, in: result),
+               let codePoint = Int(result[codeRange], radix: 16),
+               let scalar = Unicode.Scalar(codePoint) {
+                result.replaceSubrange(fullRange, with: String(Character(scalar)))
             }
         }
 
