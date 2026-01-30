@@ -8,8 +8,9 @@ enum HTMLQuoteRemover {
 
     /// HTML quote block patterns to remove entirely (string form for reference)
     private static let quoteBlockPatternStrings = [
-        // Gmail quote blocks
-        "<div class=\"gmail_quote\">.*?</div>",
+        // Gmail quote blocks (flexible class matching for multiple classes like "gmail_quote gmail_quote_container")
+        "<div[^>]*class=\"[^\"]*gmail_quote[^\"]*\"[^>]*>.*?</div>",
+        "<div[^>]*class=\"[^\"]*gmail_attr[^\"]*\"[^>]*>.*?</div>",
         "<blockquote[^>]*>.*?</blockquote>",
 
         // Outlook/Office 365
@@ -66,6 +67,12 @@ enum HTMLQuoteRemover {
         "On .+? wrote:",
         "From:</strong>.*?Subject:</strong>",
         "-----Original Message-----",
+        // Outlook reference container (ID-based, handles prefixed IDs like "x_mail-editor-reference-message-container")
+        "<div[^>]*id=\"[^\"]*mail-editor-reference-message-container[^\"]*\"[^>]*>",
+        // Outlook WordSection containers (typically contain quoted reply chains)
+        "<div[^>]*class=\"[^\"]*WordSection[^\"]*\"[^>]*>",
+        // Outlook blue border separator (#b5c4df)
+        "<div[^>]*style=\"[^\"]*border-top:[^\"]*solid[^\"]*#[Bb]5[Cc]4[Dd][Ff][^\"]*\"[^>]*>",
         // Signature delimiters (plain text within HTML)
         "<br>\\s*--\\s*<br>",
         "<br>\\s*--\\s*</div>",
