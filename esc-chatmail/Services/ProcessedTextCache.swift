@@ -395,8 +395,10 @@ enum TextProcessing {
         // Remove all HTML tags
         text = text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression, range: nil)
 
-        // Decode HTML entities
+        // Decode HTML entities (non-breaking space variants)
         text = text.replacingOccurrences(of: "&nbsp;", with: " ")
+        text = text.replacingOccurrences(of: "&#160;", with: " ")
+        text = text.replacingOccurrences(of: "&#xA0;", with: " ", options: .caseInsensitive)
         text = text.replacingOccurrences(of: "&amp;", with: "&")
         text = text.replacingOccurrences(of: "&lt;", with: "<")
         text = text.replacingOccurrences(of: "&gt;", with: ">")
@@ -431,38 +433,6 @@ enum TextProcessing {
         text = text.replacingOccurrences(of: "&#8212;", with: "—")
         text = text.replacingOccurrences(of: "&hellip;", with: "…")
         text = text.replacingOccurrences(of: "&#8230;", with: "…")
-
-        // Decode any remaining numeric entities (&#NNN;) not handled above
-        if let regex = try? NSRegularExpression(pattern: "&#(\\d+);") {
-            let range = NSRange(text.startIndex..., in: text)
-            let matches = regex.matches(in: text, range: range)
-            for match in matches.reversed() {
-                if let codeRange = Range(match.range(at: 1), in: text),
-                   let codePoint = Int(text[codeRange]),
-                   let scalar = Unicode.Scalar(codePoint) {
-                    let char = String(Character(scalar))
-                    if let fullRange = Range(match.range, in: text) {
-                        text.replaceSubrange(fullRange, with: char)
-                    }
-                }
-            }
-        }
-
-        // Decode any remaining hex numeric entities (&#xNNN;) not handled above
-        if let regex = try? NSRegularExpression(pattern: "&#[xX]([0-9a-fA-F]+);") {
-            let range = NSRange(text.startIndex..., in: text)
-            let matches = regex.matches(in: text, range: range)
-            for match in matches.reversed() {
-                if let codeRange = Range(match.range(at: 1), in: text),
-                   let codePoint = Int(text[codeRange], radix: 16),
-                   let scalar = Unicode.Scalar(codePoint) {
-                    let char = String(Character(scalar))
-                    if let fullRange = Range(match.range, in: text) {
-                        text.replaceSubrange(fullRange, with: char)
-                    }
-                }
-            }
-        }
 
         // Clean up whitespace
         text = text.replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression, range: nil)
