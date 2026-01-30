@@ -432,6 +432,38 @@ enum TextProcessing {
         text = text.replacingOccurrences(of: "&hellip;", with: "…")
         text = text.replacingOccurrences(of: "&#8230;", with: "…")
 
+        // Decode any remaining numeric entities (&#NNN;) not handled above
+        if let regex = try? NSRegularExpression(pattern: "&#(\\d+);") {
+            let range = NSRange(text.startIndex..., in: text)
+            let matches = regex.matches(in: text, range: range)
+            for match in matches.reversed() {
+                if let codeRange = Range(match.range(at: 1), in: text),
+                   let codePoint = Int(text[codeRange]),
+                   let scalar = Unicode.Scalar(codePoint) {
+                    let char = String(Character(scalar))
+                    if let fullRange = Range(match.range, in: text) {
+                        text.replaceSubrange(fullRange, with: char)
+                    }
+                }
+            }
+        }
+
+        // Decode any remaining hex numeric entities (&#xNNN;) not handled above
+        if let regex = try? NSRegularExpression(pattern: "&#[xX]([0-9a-fA-F]+);") {
+            let range = NSRange(text.startIndex..., in: text)
+            let matches = regex.matches(in: text, range: range)
+            for match in matches.reversed() {
+                if let codeRange = Range(match.range(at: 1), in: text),
+                   let codePoint = Int(text[codeRange], radix: 16),
+                   let scalar = Unicode.Scalar(codePoint) {
+                    let char = String(Character(scalar))
+                    if let fullRange = Range(match.range, in: text) {
+                        text.replaceSubrange(fullRange, with: char)
+                    }
+                }
+            }
+        }
+
         // Clean up whitespace
         text = text.replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression, range: nil)
         // Collapse whitespace-only lines to single newline

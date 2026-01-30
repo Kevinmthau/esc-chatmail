@@ -88,8 +88,54 @@ enum HTMLEntityDecoder {
             result = result.replacingOccurrences(of: entity, with: replacement, options: .caseInsensitive)
         }
 
+        // Decode any remaining numeric entities not in the hardcoded lists
+        result = decodeNumericEntities(result)
+
         // Strip zero-width Unicode characters
         result = result.filter { !zeroWidthCharacters.contains($0) }
+
+        return result
+    }
+
+    // MARK: - Universal Numeric Entity Decoder
+
+    /// Decodes all numeric HTML entities (&#NNN; and &#xNNN;) to their Unicode equivalents
+    /// This handles any numeric entity not covered by the hardcoded lookup tables
+    private static func decodeNumericEntities(_ text: String) -> String {
+        var result = text
+
+        // Decode decimal numeric entities: &#160; &#8217; etc.
+        let decimalPattern = "&#(\\d+);"
+        if let regex = try? NSRegularExpression(pattern: decimalPattern) {
+            let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
+            // Process in reverse to preserve indices
+            for match in matches.reversed() {
+                if let codeRange = Range(match.range(at: 1), in: result),
+                   let codePoint = Int(result[codeRange]),
+                   let scalar = Unicode.Scalar(codePoint) {
+                    let char = String(Character(scalar))
+                    if let fullRange = Range(match.range, in: result) {
+                        result.replaceSubrange(fullRange, with: char)
+                    }
+                }
+            }
+        }
+
+        // Decode hex numeric entities: &#x00A0; &#xA0; etc.
+        let hexPattern = "&#[xX]([0-9a-fA-F]+);"
+        if let regex = try? NSRegularExpression(pattern: hexPattern) {
+            let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
+            for match in matches.reversed() {
+                if let codeRange = Range(match.range(at: 1), in: result),
+                   let codePoint = Int(result[codeRange], radix: 16),
+                   let scalar = Unicode.Scalar(codePoint) {
+                    let char = String(Character(scalar))
+                    if let fullRange = Range(match.range, in: result) {
+                        result.replaceSubrange(fullRange, with: char)
+                    }
+                }
+            }
+        }
 
         return result
     }

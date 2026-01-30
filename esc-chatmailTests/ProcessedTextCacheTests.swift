@@ -256,4 +256,67 @@ final class ProcessedTextCacheTests: XCTestCase {
         let lines = result.split(separator: "\n", omittingEmptySubsequences: true)
         XCTAssertEqual(lines.count, 3)
     }
+
+    func testExtractPlainText_decodesNumericEntities() {
+        // &#160; is non-breaking space, &#169; is copyright symbol
+        let html = "<p>Hello&#160;World&#160;&#169;&#160;2024</p>"
+        let result = TextProcessing.extractPlainText(from: html)
+
+        // &#160; should become space (non-breaking space U+00A0)
+        // &#169; should become © (copyright symbol)
+        XCTAssertTrue(result.contains("Hello"))
+        XCTAssertTrue(result.contains("World"))
+        XCTAssertTrue(result.contains("©"))
+        XCTAssertTrue(result.contains("2024"))
+        // Should NOT contain raw entity text
+        XCTAssertFalse(result.contains("&#160;"))
+        XCTAssertFalse(result.contains("&#169;"))
+    }
+
+    func testExtractPlainText_decodesHexNumericEntities() {
+        // &#xA0; is non-breaking space (hex), &#xA9; is copyright symbol (hex)
+        let html = "<p>Test&#xA0;content&#xA9;</p>"
+        let result = TextProcessing.extractPlainText(from: html)
+
+        XCTAssertTrue(result.contains("Test"))
+        XCTAssertTrue(result.contains("content"))
+        XCTAssertTrue(result.contains("©"))
+        // Should NOT contain raw entity text
+        XCTAssertFalse(result.contains("&#xA0;"))
+        XCTAssertFalse(result.contains("&#xA9;"))
+    }
+
+    // MARK: - HTMLEntityDecoder Tests
+
+    func testHTMLEntityDecoder_decodesNumericEntities() {
+        let text = "Hello&#160;World&#8212;Test"
+        let result = HTMLEntityDecoder.decode(text)
+
+        // &#160; should become non-breaking space
+        // &#8212; should become em dash
+        XCTAssertFalse(result.contains("&#160;"))
+        XCTAssertFalse(result.contains("&#8212;"))
+        XCTAssertTrue(result.contains("—")) // em dash
+    }
+
+    func testHTMLEntityDecoder_decodesHexEntities() {
+        let text = "Price&#xA0;$100&#x2014;good deal"
+        let result = HTMLEntityDecoder.decode(text)
+
+        // &#xA0; should become non-breaking space
+        // &#x2014; should become em dash
+        XCTAssertFalse(result.contains("&#xA0;"))
+        XCTAssertFalse(result.contains("&#x2014;"))
+        XCTAssertTrue(result.contains("—")) // em dash
+    }
+
+    func testHTMLEntityDecoder_handlesVariousCodePoints() {
+        let text = "&#8364; &#169; &#174; &#8482;" // €, ©, ®, ™
+        let result = HTMLEntityDecoder.decode(text)
+
+        XCTAssertTrue(result.contains("€"))
+        XCTAssertTrue(result.contains("©"))
+        XCTAssertTrue(result.contains("®"))
+        XCTAssertTrue(result.contains("™"))
+    }
 }
