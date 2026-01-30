@@ -145,29 +145,37 @@ final class HTMLQuoteRemoverTests: XCTestCase {
         XCTAssertFalse(result?.contains("Original email") ?? true)
     }
 
-    func testRemoveQuotes_outlookWordSection_truncatesAtQuote() {
-        // Outlook Word-based emails use WordSection classes
+    func testRemoveQuotes_outlookWordSection_preservesMainContent() {
+        // WordSection1 is Outlook's MAIN CONTENT container, not quoted content
+        // It should NOT cause truncation
         let html = """
-        <p>My reply text.</p>
         <div class="WordSection1">
-            <p>Original formatted content</p>
+            <p>Well, gee, thanks....</p>
+            <p>This is the actual email content that should be preserved.</p>
         </div>
         """
         let result = HTMLQuoteRemover.removeQuotes(from: html)
-        XCTAssertTrue(result?.contains("My reply text.") ?? false)
-        XCTAssertFalse(result?.contains("Original formatted content") ?? true)
+        XCTAssertTrue(result?.contains("Well, gee, thanks....") ?? false)
+        XCTAssertTrue(result?.contains("This is the actual email content") ?? false)
     }
 
-    func testRemoveQuotes_outlookWordSectionWithMultipleClasses_truncatesAtQuote() {
+    func testRemoveQuotes_outlookWordSectionWithQuotedContent_preservesMainTruncatesQuote() {
+        // Real Outlook email structure: WordSection1 contains both main content AND quoted content
+        // The quote is identified by mail-editor-reference-message-container, not WordSection
         let html = """
-        <p>New content.</p>
-        <div class="OutlookFormat WordSection2">
-            <p>Previous message</p>
+        <div class="WordSection1">
+            <p>Well, gee, thanks....</p>
+            <div id="mail-editor-reference-message-container">
+                <div style="border-top:solid #B5C4DF 1.0pt">
+                    <p><b>From:</b> Someone</p>
+                </div>
+                <p>This is quoted content that should be removed</p>
+            </div>
         </div>
         """
         let result = HTMLQuoteRemover.removeQuotes(from: html)
-        XCTAssertTrue(result?.contains("New content.") ?? false)
-        XCTAssertFalse(result?.contains("Previous message") ?? true)
+        XCTAssertTrue(result?.contains("Well, gee, thanks....") ?? false)
+        XCTAssertFalse(result?.contains("This is quoted content") ?? true)
     }
 
     func testRemoveQuotes_outlookBlueBorderSeparator_truncatesAtQuote() {
