@@ -150,7 +150,7 @@ final class SyncReconciliation: Sendable {
             log.debug("Reconciling labels for \(recentMessageIds.count) recent messages")
 
             // Step 1: Fetch Gmail metadata in parallel with bounded concurrency
-            let gmailMetadata = await fetchGmailMetadataInParallel(messageIds: recentMessageIds)
+            let gmailMetadata = try await fetchGmailMetadataInParallel(messageIds: recentMessageIds)
 
             // Step 2: Process mismatches (local messages fetched inside context.perform for thread safety)
             let stats = await processReconciliationMismatches(
@@ -176,36 +176,77 @@ final class SyncReconciliation: Sendable {
         let isUnread: Bool
     }
 
+    /// Result of fetching Gmail metadata - either successful metadata or an error
+    private enum MetadataFetchResult {
+        case success(GmailMetadata)
+        case deleted(String)  // Message ID that was deleted
+        case error(String, Error)  // Message ID and the error
+    }
+
     /// Fetches Gmail metadata in parallel with bounded concurrency
-    private func fetchGmailMetadataInParallel(messageIds: [String]) async -> [String: GmailMetadata] {
+    /// Returns metadata for messages that still exist, skips deleted messages, and throws on transient errors
+    private func fetchGmailMetadataInParallel(messageIds: [String]) async throws -> [String: GmailMetadata] {
         // Use chunks to limit concurrent requests
         let chunks = messageIds.chunked(into: Self.maxConcurrentGmailRequests)
         var allMetadata: [String: GmailMetadata] = [:]
+        var transientErrors: [(String, Error)] = []
 
         for chunk in chunks {
-            await withTaskGroup(of: GmailMetadata?.self) { group in
+            let results = await withTaskGroup(of: MetadataFetchResult.self) { group -> [MetadataFetchResult] in
                 for messageId in chunk {
                     group.addTask {
                         do {
                             let gmailMessage = try await GmailAPIClient.shared.getMessage(id: messageId, format: "metadata")
                             let labelIds = Set(gmailMessage.labelIds ?? [])
-                            return GmailMetadata(
+                            return .success(GmailMetadata(
                                 messageId: messageId,
                                 hasInbox: labelIds.contains("INBOX"),
                                 isUnread: labelIds.contains("UNREAD")
-                            )
+                            ))
+                        } catch let error as APIError {
+                            // Only treat 404 (notFound) as "deleted"
+                            if case .notFound = error {
+                                return .deleted(messageId)
+                            }
+                            // All other API errors (rate limit, auth, server errors) are transient
+                            return .error(messageId, error)
                         } catch {
-                            // Skip messages that fail to fetch (might be deleted)
-                            return nil
+                            // Network errors and other failures are transient
+                            return .error(messageId, error)
                         }
                     }
                 }
 
-                for await metadata in group {
-                    if let metadata = metadata {
-                        allMetadata[metadata.messageId] = metadata
-                    }
+                var results: [MetadataFetchResult] = []
+                for await result in group {
+                    results.append(result)
                 }
+                return results
+            }
+
+            for result in results {
+                switch result {
+                case .success(let metadata):
+                    allMetadata[metadata.messageId] = metadata
+                case .deleted(let messageId):
+                    log.debug("Message \(messageId) was deleted from Gmail, skipping reconciliation")
+                case .error(let messageId, let error):
+                    transientErrors.append((messageId, error))
+                }
+            }
+        }
+
+        // If we had transient errors but got SOME metadata, log warning and continue
+        // If ALL requests failed, that's likely a systemic issue - throw to caller
+        if !transientErrors.isEmpty {
+            if allMetadata.isEmpty && !messageIds.isEmpty {
+                // All requests failed - likely auth/network/rate limit issue
+                let (_, firstError) = transientErrors[0]
+                log.error("All metadata fetches failed (\(transientErrors.count) errors), aborting reconciliation", error: firstError)
+                throw firstError
+            } else {
+                // Some succeeded, some failed - log and continue with what we have
+                log.warning("Metadata fetch had \(transientErrors.count) transient errors, continuing with \(allMetadata.count) successful fetches")
             }
         }
 

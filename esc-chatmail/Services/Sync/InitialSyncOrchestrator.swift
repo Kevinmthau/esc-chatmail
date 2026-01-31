@@ -213,7 +213,10 @@ final class InitialSyncOrchestrator {
                 progressHandler(progress, "Processing messages... \(processed)/\(total)")
             }
         } messageHandler: { [weak self] message in
-            guard let self = self else { return }
+            guard let self = self else {
+                Log.warning("InitialSyncOrchestrator deallocated during message processing - message \(message.id) not saved", category: .sync)
+                return
+            }
             await self.messagePersister.saveMessage(
                 message,
                 labelIds: labelIds,
@@ -240,7 +243,10 @@ final class InitialSyncOrchestrator {
                 failedIds: result.failedIds,
                 messageFetcher: messageFetcher
             ) { [weak self] message in
-                guard let self = self else { return }
+                guard let self = self else {
+                    Log.warning("InitialSyncOrchestrator deallocated during retry - message \(message.id) not saved", category: .sync)
+                    return
+                }
                 await self.messagePersister.saveMessage(
                     message,
                     labelIds: labelIds,

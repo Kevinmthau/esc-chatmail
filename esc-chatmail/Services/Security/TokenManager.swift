@@ -166,16 +166,18 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
                     self.lastRefreshError = nil
                 }
 
-                defer {
-                    Task { @MainActor in
-                        self.isRefreshing = false
-                    }
-                    Task {
-                        await self.refreshCoordinator.clearTask()
-                    }
+                do {
+                    let token = try await self.performTokenRefresh()
+                    // Clear state BEFORE returning to prevent race where second caller
+                    // gets the completed task before coordinator is cleared
+                    await MainActor.run { self.isRefreshing = false }
+                    await self.refreshCoordinator.clearTask()
+                    return token
+                } catch {
+                    await MainActor.run { self.isRefreshing = false }
+                    await self.refreshCoordinator.clearTask()
+                    throw error
                 }
-
-                return try await self.performTokenRefresh()
             }
         }
 
@@ -197,12 +199,17 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
             try keychainService.saveString(refresh, for: KeychainService.Key.googleRefreshToken.rawValue, withAccess: .afterFirstUnlockThisDeviceOnly)
         }
 
-        // Update memory cache
+        // Update memory cache asynchronously
+        // Note: This is fire-and-forget by design. The keychain is the source of truth,
+        // and getCurrentToken() will load from keychain if memory cache is stale.
+        // Making this synchronous would require blocking on MainActor, which could
+        // cause deadlocks when called from background contexts.
         Task { @MainActor in
             authSession.accessToken = access
         }
 
         // Reset backoff on successful save
+        // Fire-and-forget is acceptable here as backoff state only affects retry timing
         Task {
             await refreshBackoff.reset()
         }

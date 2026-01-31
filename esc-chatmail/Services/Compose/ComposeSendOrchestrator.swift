@@ -81,7 +81,13 @@ struct ComposeSendOrchestrator {
                 }
 
                 // Trigger sync to fetch the sent message from Gmail
-                try? await syncEngine.performIncrementalSync()
+                // Sync failure is non-critical - message was sent successfully, user will
+                // see it on next sync. Log warning for debugging but don't surface to user.
+                do {
+                    try await syncEngine.performIncrementalSync()
+                } catch {
+                    Log.warning("Post-send sync failed - sent message will appear on next sync: \(error.localizedDescription)", category: .sync)
+                }
 
             } catch {
                 // Mark attachments as failed so they show error indicator (on MainActor to avoid Sendable issues)

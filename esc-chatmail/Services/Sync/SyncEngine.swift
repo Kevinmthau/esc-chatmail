@@ -102,7 +102,8 @@ final class SyncEngine: ObservableObject {
         let syncTask = await syncStateActor.beginSyncWithTask {
             Task { [weak self] in
                 guard let self else {
-                    Log.warning("SyncEngine deallocated during initial sync setup", category: .sync)
+                    // This can happen if app is backgrounded/terminated during sync setup
+                    Log.warning("SyncEngine deallocated during initial sync setup - sync will not complete", category: .sync)
                     throw CancellationError()
                 }
                 try await self.performInitialSyncInternal()
@@ -130,7 +131,8 @@ final class SyncEngine: ObservableObject {
         let syncTask = await syncStateActor.beginSyncWithTask {
             Task { [weak self] in
                 guard let self else {
-                    Log.warning("SyncEngine deallocated during incremental sync setup", category: .sync)
+                    // This can happen if app is backgrounded/terminated during sync setup
+                    Log.warning("SyncEngine deallocated during incremental sync setup - sync will not complete", category: .sync)
                     throw CancellationError()
                 }
                 try await self.performIncrementalSyncInternal()

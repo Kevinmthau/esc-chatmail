@@ -6,7 +6,11 @@ import Foundation
 private struct BoundedFetchResult {
     let successfulMessages: [GmailMessage]
     let retriableFailedIds: [String]
+    /// Messages that failed with non-retriable errors (4xx client errors, not found, etc.)
     let permanentlyFailedIds: [String]
+    /// Messages that failed with retriable errors but we've exhausted retries
+    /// These might succeed on a future sync attempt
+    let exhaustedRetryIds: [String]
 }
 
 /// Handles fetching messages from the Gmail API with retry logic and timeout handling
@@ -67,7 +71,7 @@ final class MessageFetcher: @unchecked Sendable {
     /// Fetches messages with bounded concurrency to prevent resource exhaustion.
     /// - Parameters:
     ///   - ids: Array of message IDs to fetch
-    ///   - isFinalAttempt: If true, all failures are treated as permanent
+    ///   - isFinalAttempt: If true, retriable failures go to exhaustedRetryIds instead of retriableFailedIds
     /// - Returns: Result containing successful messages and categorized failures
     private func fetchWithBoundedConcurrency(
         ids: [String],
@@ -76,6 +80,7 @@ final class MessageFetcher: @unchecked Sendable {
         var successfulMessages: [GmailMessage] = []
         var retriableFailedIds: [String] = []
         var permanentlyFailedIds: [String] = []
+        var exhaustedRetryIds: [String] = []
 
         await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
             var iterator = ids.makeIterator()
@@ -113,10 +118,17 @@ final class MessageFetcher: @unchecked Sendable {
                 case .success(let message):
                     successfulMessages.append(message)
                 case .failure(let error):
-                    if isFinalAttempt || !self.isRetriableError(error) {
-                        permanentlyFailedIds.append(id)
+                    if self.isRetriableError(error) {
+                        // Transient error (timeout, network, 5xx)
+                        if isFinalAttempt {
+                            // We've exhausted retries, but this might succeed on future sync
+                            exhaustedRetryIds.append(id)
+                        } else {
+                            retriableFailedIds.append(id)
+                        }
                     } else {
-                        retriableFailedIds.append(id)
+                        // Non-retriable error (4xx, auth, not found) - truly permanent
+                        permanentlyFailedIds.append(id)
                     }
                 }
 
@@ -142,7 +154,8 @@ final class MessageFetcher: @unchecked Sendable {
         return BoundedFetchResult(
             successfulMessages: successfulMessages,
             retriableFailedIds: retriableFailedIds,
-            permanentlyFailedIds: permanentlyFailedIds
+            permanentlyFailedIds: permanentlyFailedIds,
+            exhaustedRetryIds: exhaustedRetryIds
         )
     }
 
@@ -164,7 +177,7 @@ final class MessageFetcher: @unchecked Sendable {
     /// - Parameters:
     ///   - ids: Array of Gmail message IDs to fetch
     ///   - onSuccess: Callback for each successfully fetched message
-    /// - Returns: Array of message IDs that permanently failed to fetch
+    /// - Returns: Array of message IDs that permanently failed to fetch (non-retriable errors only)
     func fetchBatch(
         _ ids: [String],
         onSuccess: @escaping @Sendable (GmailMessage) async -> Void
@@ -175,6 +188,7 @@ final class MessageFetcher: @unchecked Sendable {
         }
 
         var permanentlyFailed: [String] = []
+        var exhaustedRetries: [String] = []
 
         // First attempt
         let initialResult = await fetchWithBoundedConcurrency(ids: ids)
@@ -219,16 +233,21 @@ final class MessageFetcher: @unchecked Sendable {
             }
 
             permanentlyFailed.append(contentsOf: retryResult.permanentlyFailedIds)
+            exhaustedRetries.append(contentsOf: retryResult.exhaustedRetryIds)
             await persistInChronologicalOrder(retryResult.successfulMessages, onSuccess: onSuccess)
 
             currentFailedIds = retryResult.retriableFailedIds
         }
 
-        // Any remaining failed IDs should be added to permanently failed
-        permanentlyFailed.append(contentsOf: currentFailedIds)
+        // Log exhausted retries separately - these might succeed on next sync
+        if !exhaustedRetries.isEmpty {
+            Log.info("Messages with transient failures after \(maxRetryAttempts) retries (may succeed on next sync): \(exhaustedRetries.count)", category: .sync)
+        }
 
+        // Only return truly permanently failed messages (non-retriable errors)
+        // Exhausted retries are NOT included - they may succeed on next sync attempt
         if !permanentlyFailed.isEmpty {
-            Log.warning("Total permanently failed messages: \(permanentlyFailed.count)", category: .sync)
+            Log.warning("Total permanently failed messages (non-retriable errors): \(permanentlyFailed.count)", category: .sync)
         }
 
         return permanentlyFailed

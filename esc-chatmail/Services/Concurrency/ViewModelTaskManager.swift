@@ -71,11 +71,15 @@ final class ViewModelTaskManager {
         tasks.removeAll()
     }
 
-    /// Returns true if a task with the given key is currently running.
+    /// Returns true if a task with the given key exists and hasn't been cancelled.
+    ///
+    /// - Note: This only checks if the task was cancelled, not if it completed.
+    ///         Swift's Task API doesn't provide a way to check completion state.
+    ///         For reliable completion tracking, use the task's result or a separate flag.
     ///
     /// - Parameter key: The task key to check
-    /// - Returns: Whether the task exists and hasn't completed
-    func isRunning(_ key: String) -> Bool {
+    /// - Returns: Whether the task exists and hasn't been cancelled
+    func hasActiveTask(_ key: String) -> Bool {
         guard let task = tasks[key] else { return false }
         return !task.isCancelled
     }

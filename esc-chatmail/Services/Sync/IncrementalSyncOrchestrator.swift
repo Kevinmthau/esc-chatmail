@@ -220,7 +220,10 @@ final class IncrementalSyncOrchestrator {
                 progressHandler(progress, "Recovering... \(processed)/\(total)")
             }
         } messageHandler: { [weak self] message in
-            guard let self = self else { return }
+            guard let self = self else {
+                Log.warning("IncrementalSyncOrchestrator deallocated during history recovery - message \(message.id) not saved", category: .sync)
+                return
+            }
             await self.messagePersister.saveMessage(
                 message,
                 labelIds: labelIds,

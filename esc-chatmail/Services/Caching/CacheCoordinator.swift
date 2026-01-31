@@ -75,23 +75,29 @@ final class CacheCoordinator {
         }
 
         // Invalidate person cache
+        // Note: Fire-and-forget is acceptable here - caches are in-memory only and
+        // will be empty on next app launch. The async pattern is required because
+        // PersonCache is an actor.
         if !personEmailsToInvalidate.isEmpty {
+            let emails = personEmailsToInvalidate  // Capture for async closure
             Task {
-                for email in personEmailsToInvalidate {
+                for email in emails {
                     await PersonCache.shared.invalidateEntry(for: email)
                 }
             }
-            Log.debug("Invalidated \(personEmailsToInvalidate.count) person cache entries", category: .coreData)
+            Log.debug("Queued invalidation for \(personEmailsToInvalidate.count) person cache entries", category: .coreData)
         }
 
         // Invalidate processed text cache for deleted messages
+        // Note: Same fire-and-forget rationale as person cache above
         if !messageIdsToInvalidate.isEmpty {
+            let messageIds = messageIdsToInvalidate  // Capture for async closure
             Task {
-                for messageId in messageIdsToInvalidate {
+                for messageId in messageIds {
                     await ProcessedTextCache.shared.invalidate(messageId: messageId)
                 }
             }
-            Log.debug("Invalidated \(messageIdsToInvalidate.count) processed text cache entries", category: .coreData)
+            Log.debug("Queued invalidation for \(messageIdsToInvalidate.count) processed text cache entries", category: .coreData)
         }
     }
 }
