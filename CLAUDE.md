@@ -94,18 +94,12 @@ User actions (archive, star, mark spam) are queued as `PendingAction` entities:
 
 ### Error Handling
 
-Centralized error classification in `UnifiedErrorClassifier`:
-```swift
-let classification = UnifiedErrorClassifier.classify(error)
-switch classification.recoveryStrategy {
-case .retry(let delay): // Retry with backoff
-case .reauth:           // Re-authenticate user
-case .abort:            // Stop and report
-case .ignore:           // Log and continue
-}
-```
-
 Error types: `APIError` (network/API), `CoreDataError` (persistence), `TokenManagerError` (auth tokens).
+
+Error classification is done contextually in each service:
+- `RetryExecutor` - General retry with exponential backoff
+- `GmailAPIClient` - Rate limit handling with circuit breaker
+- `MessageFetcher` - Custom retry classification for message fetching
 
 ## Testing
 
