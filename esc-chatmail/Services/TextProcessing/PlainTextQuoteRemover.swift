@@ -66,29 +66,6 @@ enum PlainTextQuoteRemover {
 
     // MARK: - Signature Patterns
 
-    /// Sign-off patterns that only indicate a signature when followed by strong indicators
-    /// These are often just message closings (e.g., "Thanks,\nJohn") not actual signatures
-    private static let simpleSignOffPatterns = [
-        "\nThanks,",
-        "\nThank you,",
-        "\nThanks!",
-        "\nRegards,",
-        "\nBest regards,",
-        "\nKind regards,",
-        "\nWarm regards,",
-        "\nBest,",
-        "\nCheers,",
-        "\nAll the best,",
-        "\nTake care,",
-        "\nSincerely,",
-        "\nYours truly,",
-        "\nRespectfully,",
-        "\nWith thanks,",
-        "\nMany thanks,",
-        "\nWith best wishes,",
-        "\nBest wishes,",
-    ]
-
     /// Strong signature indicators that definitively mark signature/boilerplate content
     private static let strongSignaturePatterns = [
         // Standard signature delimiters
@@ -283,12 +260,7 @@ enum PlainTextQuoteRemover {
         return QuoteExtractionResult(mainContent: mainContent, quotedParts: quotedParts)
     }
 
-    /// Number of lines to look ahead from a simple sign-off for strong signature indicators
-    private static let signatureLookaheadLines = 5
-
     /// Removes email signatures and boilerplate from text
-    /// Uses context-aware detection: simple sign-offs (Thanks, Regards, etc.) only trigger
-    /// truncation when followed by strong signature indicators within a few lines
     /// - Parameter text: The text to clean
     /// - Returns: Text with signature removed
     static func removeSignature(from text: String) -> String {
@@ -300,27 +272,6 @@ enum PlainTextQuoteRemover {
             if let range = cleanText.range(of: pattern, options: [.caseInsensitive]) {
                 let index = cleanText.distance(from: cleanText.startIndex, to: range.lowerBound)
                 earliestCutIndex = min(earliestCutIndex, index)
-            }
-        }
-
-        // Find simple sign-offs and check if they're followed by strong indicators
-        // Check ALL occurrences of each pattern, not just the first
-        for pattern in simpleSignOffPatterns {
-            var searchStartIndex = cleanText.startIndex
-
-            while let range = cleanText.range(of: pattern, options: [.caseInsensitive], range: searchStartIndex..<cleanText.endIndex) {
-                let signOffIndex = cleanText.distance(from: cleanText.startIndex, to: range.lowerBound)
-
-                // Only consider if this would be earlier than current cut point
-                if signOffIndex < earliestCutIndex {
-                    // Check if there's a strong indicator within the lookahead window
-                    if hasStrongIndicatorAfter(signOffIndex: signOffIndex, in: cleanText) {
-                        earliestCutIndex = signOffIndex
-                    }
-                }
-
-                // Move past this match to find the next occurrence
-                searchStartIndex = range.upperBound
             }
         }
 
@@ -393,30 +344,6 @@ enum PlainTextQuoteRemover {
         }
 
         return indicatorIndex
-    }
-
-    /// Checks if there's a strong signature indicator within the lookahead window after a sign-off
-    private static func hasStrongIndicatorAfter(signOffIndex: Int, in text: String) -> Bool {
-        let startIndex = text.index(text.startIndex, offsetBy: signOffIndex)
-        let textAfterSignOff = String(text[startIndex...])
-
-        // Split into lines and check the lookahead window
-        // The first element is empty (from leading \n in sign-off pattern), so drop it
-        // Then take: sign-off line (e.g., "Thanks,") + name line + N more lines
-        let lines = textAfterSignOff.components(separatedBy: .newlines)
-        let meaningfulLines = lines.dropFirst() // Skip empty element from leading newline
-        let linesToCheck = meaningfulLines.prefix(signatureLookaheadLines + 1) // sign-off + 5 lines after
-        // Rejoin with leading newline so patterns like "\nMobile: " can match
-        let windowText = "\n" + linesToCheck.joined(separator: "\n")
-
-        // Check if any strong indicator appears in this window
-        for pattern in strongSignaturePatterns {
-            if windowText.range(of: pattern, options: [.caseInsensitive]) != nil {
-                return true
-            }
-        }
-
-        return false
     }
 
     // MARK: - Private Helpers

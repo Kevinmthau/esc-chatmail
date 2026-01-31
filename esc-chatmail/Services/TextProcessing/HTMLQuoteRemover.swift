@@ -77,18 +77,6 @@ enum HTMLQuoteRemover {
         "<p>\\s*--\\s*</p>",
         "<div>\\s*--\\s*</div>",
 
-        // Common sign-offs in HTML
-        "<br[^>]*>\\s*Thanks,",
-        "<br[^>]*>\\s*Regards,",
-        "<br[^>]*>\\s*Best,",
-        "<br[^>]*>\\s*Cheers,",
-        "<br[^>]*>\\s*Sincerely,",
-        "<p[^>]*>\\s*Thanks,",
-        "<p[^>]*>\\s*Regards,",
-        "<p[^>]*>\\s*Best,",
-        "<div[^>]*>\\s*Thanks,",
-        "<div[^>]*>\\s*Regards,",
-
         // Mobile signatures
         "Sent from my iPhone",
         "Sent from my iPad",
