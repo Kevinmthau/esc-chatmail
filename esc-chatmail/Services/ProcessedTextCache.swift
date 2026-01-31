@@ -475,7 +475,7 @@ enum TextProcessing {
         for signOff in signOffWords {
             // Case-insensitive search for ". SignOff" pattern
             let patterns = [
-                "([.!?])\\s+(\(signOff)),?\\s*$",  // "help. Regards" at end
+                "([.!?])\\s+(\(signOff))[!.]?,?\\s*$",  // "help. Regards" or "help. Thanks!" at end
                 "([.!?])\\s+(\(signOff)),\\s+([A-Z][a-z]+)\\s*$",  // "help. Regards, Kevin" at end
                 "([.!?])\\s+(\(signOff)),\\s+([A-Z][a-z]+)\\s+([A-Z][a-z]+)\\s*$",  // "help. Regards, Kevin Thau" at end
             ]
@@ -599,12 +599,7 @@ enum TextProcessing {
                 // Handles: 1. 10. 100. a) A. - * • · (a) (1)
                 let isListItem = TextProcessing.isListItem(trimmedLine)
 
-                // Don't join short lines - only unwrap lines that look like hard-wrapped text (~70-80 cols)
-                // If current line is well below 60 chars, it was probably intentionally short
-                let isShortLine = currentParagraph.count < 60
-
-                if !endsWithPunctuation && !endsWithColon && !startsWithUppercase &&
-                   !isListItem && !isShortLine {
+                if !endsWithPunctuation && !endsWithColon && !startsWithUppercase && !isListItem {
                     // Join with space (unwrap soft line break)
                     currentParagraph += " " + trimmedLine
                 } else {
