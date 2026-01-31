@@ -142,7 +142,9 @@ struct MessageContentView: View {
         let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: decoded)
 
         // Only strip plain text quotes if we haven't already stripped HTML quotes
-        let result = alreadyStrippedQuotes ? unwrapped : TextProcessing.stripQuotedText(from: unwrapped)
+        let quoteStripped = alreadyStrippedQuotes ? unwrapped : TextProcessing.stripQuotedText(from: unwrapped)
+        // Format sign-off line breaks (handles "...help. Regards, Kevin" → proper line breaks)
+        let result = TextProcessing.formatSignOffLineBreaks(in: quoteStripped)
         return result.isEmpty ? nil : result
     }
 

@@ -144,7 +144,9 @@ actor ProcessedTextCache: MemoryWarningHandler {
                 let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: extracted)
                 // Extract quotes separately instead of just stripping
                 let extractionResult = PlainTextQuoteRemover.extractQuotes(from: unwrapped)
-                plainText = extractionResult.mainContent.isEmpty ? nil : extractionResult.mainContent
+                // Format sign-off line breaks (handles "...help. Regards, Kevin" → proper line breaks)
+                let formatted = TextProcessing.formatSignOffLineBreaks(in: extractionResult.mainContent)
+                plainText = formatted.isEmpty ? nil : formatted
                 quotedParts = extractionResult.quotedParts
             }
 
@@ -154,7 +156,9 @@ actor ProcessedTextCache: MemoryWarningHandler {
                 if !rawExtracted.isEmpty {
                     let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: rawExtracted)
                     let extractionResult = PlainTextQuoteRemover.extractQuotes(from: unwrapped)
-                    plainText = extractionResult.mainContent.isEmpty ? nil : extractionResult.mainContent
+                    // Format sign-off line breaks (handles "...help. Regards, Kevin" → proper line breaks)
+                    let formatted = TextProcessing.formatSignOffLineBreaks(in: extractionResult.mainContent)
+                    plainText = formatted.isEmpty ? nil : formatted
                     // Always update quotedParts to match the mainContent we're using
                     // This ensures consistency between plainText and quotedParts
                     quotedParts = extractionResult.quotedParts
@@ -456,6 +460,51 @@ enum TextProcessing {
     static func stripQuotedText(from text: String) -> String {
         // Delegate to PlainTextQuoteRemover for unified quote and signature removal
         PlainTextQuoteRemover.removeQuotes(from: text) ?? text
+    }
+
+    /// Common sign-off words that should have a line break before them
+    private static let signOffWords = ["regards", "thanks", "thank you", "best", "cheers", "sincerely", "yours truly", "best wishes", "kind regards", "warm regards", "take care", "all the best"]
+
+    /// Adds line breaks before sign-offs when they appear inline at the end of text
+    /// Handles cases like "...for your help. Regards, Kevin" → "...for your help.\n\nRegards,\n\nKevin"
+    static func formatSignOffLineBreaks(in text: String) -> String {
+        var result = text
+
+        // Pattern: sentence ending (. ! ?) followed by space and a sign-off word
+        for signOff in signOffWords {
+            // Case-insensitive search for ". SignOff" pattern
+            let patterns = [
+                "([.!?])\\s+(\(signOff)),?\\s*$",  // "help. Regards" at end
+                "([.!?])\\s+(\(signOff)),\\s+([A-Z][a-z]+)\\s*$",  // "help. Regards, Kevin" at end
+                "([.!?])\\s+(\(signOff)),\\s+([A-Z][a-z]+)\\s+([A-Z][a-z]+)\\s*$",  // "help. Regards, Kevin Thau" at end
+            ]
+
+            for pattern in patterns {
+                if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+                    let range = NSRange(location: 0, length: result.utf16.count)
+                    if let match = regex.firstMatch(in: result, options: [], range: range) {
+                        // Found a sign-off pattern - add line breaks
+                        let punctuation = (result as NSString).substring(with: match.range(at: 1))
+                        let signOffText = (result as NSString).substring(with: match.range(at: 2))
+
+                        var replacement = "\(punctuation)\n\n\(signOffText),"
+                        if match.numberOfRanges > 3 {
+                            let name = (result as NSString).substring(with: match.range(at: 3))
+                            replacement += "\n\n\(name)"
+                            if match.numberOfRanges > 4 {
+                                let lastName = (result as NSString).substring(with: match.range(at: 4))
+                                replacement += " \(lastName)"
+                            }
+                        }
+
+                        result = regex.stringByReplacingMatches(in: result, options: [], range: range, withTemplate: replacement)
+                        break  // Only process one sign-off pattern
+                    }
+                }
+            }
+        }
+
+        return result
     }
 
     /// Unwraps artificial email line breaks (72-80 char wrapping) while preserving paragraph breaks
