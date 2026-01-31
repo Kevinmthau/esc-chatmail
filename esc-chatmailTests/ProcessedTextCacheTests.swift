@@ -316,4 +316,44 @@ final class ProcessedTextCacheTests: XCTestCase {
         XCTAssertTrue(result.contains("'")) // apostrophe
         XCTAssertTrue(result.contains("…")) // ellipsis
     }
+
+    // MARK: - Div Paragraph Preservation Tests
+
+    func testExtractPlainText_preservesDivParagraphs() {
+        // Gmail mobile format: each paragraph is a separate div
+        let html = """
+        <div dir="auto">Hey!</div>
+        <div dir="auto"><br></div>
+        <div dir="auto">I need to reload on the Chablis. When can you deliver?</div>
+        <div dir="auto"><br></div>
+        <div dir="auto">Thanks!</div>
+        """
+        let result = TextProcessing.extractPlainText(from: html)
+
+        // Should have paragraph breaks between distinct paragraphs
+        XCTAssertTrue(result.contains("Hey!"))
+        XCTAssertTrue(result.contains("I need to reload"))
+        XCTAssertTrue(result.contains("Thanks!"))
+
+        // Check paragraph structure: should be 3 distinct paragraphs
+        let paragraphs = result.components(separatedBy: "\n\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        XCTAssertEqual(paragraphs.count, 3)
+    }
+
+    func testExtractPlainText_divParagraphsWithoutBrTags() {
+        // Edge case: divs directly adjacent without <br> between them
+        let html = "<div>First paragraph.</div><div>Second paragraph.</div>"
+        let result = TextProcessing.extractPlainText(from: html)
+
+        XCTAssertTrue(result.contains("First paragraph."))
+        XCTAssertTrue(result.contains("Second paragraph."))
+
+        // Should have paragraph break between them
+        let paragraphs = result.components(separatedBy: "\n\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        XCTAssertEqual(paragraphs.count, 2)
+    }
 }
