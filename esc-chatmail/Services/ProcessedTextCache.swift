@@ -194,7 +194,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
         // Early exit for simple div-wrapped text (common Gmail mobile format)
         // Must check AFTER element counts since we want to catch cases with 0 images/tables
-        if imgCount == 0 && tableCount == 0 && cidCount == 0 && isSimpleDivWrappedText(html) {
+        if imgCount == 0 && tableCount == 0 && cidCount == 0 && isSimpleDivWrappedText(html, lowercased: lowercased) {
             return false
         }
 
@@ -302,8 +302,10 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
     /// Detects simple div-wrapped text (Gmail mobile format) that should display as plain text
     /// Example: <div dir="auto">Line 1</div><div dir="auto"><br></div><div dir="auto">Line 2</div>
-    nonisolated private static func isSimpleDivWrappedText(_ html: String) -> Bool {
-        let lowercased = html.lowercased()
+    /// - Parameters:
+    ///   - html: The original HTML string (used for regex replacement)
+    ///   - lowercased: Pre-lowercased version of the HTML for efficient contains() checks
+    nonisolated private static func isSimpleDivWrappedText(_ html: String, lowercased: String) -> Bool {
 
         // Must have divs (the wrapper pattern we're detecting)
         guard lowercased.contains("<div") else { return false }

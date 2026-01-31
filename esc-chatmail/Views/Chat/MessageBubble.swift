@@ -17,7 +17,6 @@ struct MessageBubble: View {
     @State private var showingHTMLView = false
     @State private var hasRichContent: Bool
     @State private var fullTextContent: String?
-    @State private var quotedParts: [QuotedPart] = []
     @State private var hasLoadedContent = false
     /// Tracks the message ID we're currently loading to prevent stale updates during cell reuse
     @State private var loadingMessageId: String?
@@ -118,6 +117,7 @@ struct MessageBubble: View {
                 .font(.footnote)
                 .fontWeight(.semibold)
                 .foregroundColor(message.isFromMe ? .secondary : .primary)
+                .lineLimit(2)
         }
     }
 
@@ -160,12 +160,18 @@ struct MessageBubble: View {
 
         // Claim this message ID and reset state for new load
         // This ensures a clean slate when cell is reused for a different message
-        // Note: hasRichContent is NOT reset here - we preserve the initial guess from init
-        // to avoid flashing raw HTML before async content loads
         loadingMessageId = currentMessageId
         hasLoadedContent = false
         fullTextContent = nil
-        quotedParts = []
+
+        // Reset hasRichContent to the initial computed value for the NEW message
+        // This prevents showing wrong UI type when cell is reused
+        let initialRich = message.isForwardedEmail ||
+            (!message.isFromMe && (
+                message.bodyStorageURI != nil ||
+                HTMLContentHandler.shared.htmlFileExists(for: message.id)
+            ))
+        hasRichContent = initialRich
 
         // Use prefetched sender name if available, otherwise load (needed for avatar)
         if !message.isFromMe {
@@ -185,7 +191,6 @@ struct MessageBubble: View {
             guard loadingMessageId == currentMessageId else { return }
             fullTextContent = cached.plainText
             hasRichContent = message.isForwardedEmail || (!message.isFromMe && cached.hasRichContent)
-            quotedParts = cached.quotedParts
             hasLoadedContent = true
         } else {
             // Fallback: process on background thread and cache result
@@ -199,7 +204,7 @@ struct MessageBubble: View {
         let isFromMe = message.isFromMe
         let isForwarded = message.isForwardedEmail
 
-        let result: (plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart]) = await Task.detached(priority: .userInitiated) {
+        let result: (plainText: String?, hasRichContent: Bool) = await Task.detached(priority: .userInitiated) {
             let handler = HTMLContentHandler.shared
             var processedResult = ProcessedTextCache.processMessage(messageId: messageId, handler: handler)
 
@@ -223,7 +228,7 @@ struct MessageBubble: View {
                 quotedParts: processedResult.quotedParts
             )
 
-            return processedResult
+            return (processedResult.plainText, processedResult.hasRichContent)
         }.value
 
         // Verify message ID hasn't changed during async processing (cell reuse protection)
@@ -231,7 +236,6 @@ struct MessageBubble: View {
 
         fullTextContent = result.plainText
         hasRichContent = isForwarded || (!isFromMe && result.hasRichContent)
-        quotedParts = result.quotedParts
         hasLoadedContent = true
     }
 
