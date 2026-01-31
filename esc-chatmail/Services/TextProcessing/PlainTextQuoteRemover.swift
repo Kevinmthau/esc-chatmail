@@ -9,8 +9,10 @@ enum PlainTextQuoteRemover {
     /// Regex patterns that indicate quoted content (string form for reference)
     private static let quoteIndicatorPatternStrings = [
         // Time-based quotes - English
-        "On .+ wrote:",
-        "On .+, .+ wrote:",
+        // Require "On" at start of string or after newline to avoid mid-sentence matches
+        // (e.g., "I need to reload on the Chablis" should not match)
+        "(?:^|\\n)On .+ wrote:",
+        "(?:^|\\n)On .+, .+ wrote:",
         "> On .+, at .+, .+ wrote:",
         // iOS/Apple Mail format: "On Jan 30, 2026 at 7:32 PM, Name" (wrote: may be on next line)
         "On [A-Z][a-z]+ \\d{1,2}, \\d{4} at \\d{1,2}:\\d{2}\\s*[AP]M,",

@@ -62,15 +62,24 @@ enum HTMLQuoteRemover {
         "<table[^>]*>(?:[^<]*<[^>]*>)*[^<]*(?:corcoran|compass|sotheby|keller williams|coldwell banker|remax|re/max|century 21|berkshire hathaway)[^<]*(?:<[^>]*>[^<]*)*</table>",
     ]
 
-    /// Patterns that indicate the start of quoted content (truncate from here) - string form
-    private static let quoteTruncationPatternStrings = [
-        "On .+? wrote:",
-        // iOS/Apple Mail format: "On Jan 30, 2026 at 7:32 PM, Name" (wrote: may be on next line)
-        "On [A-Z][a-z]+ \\d{1,2}, \\d{4} at \\d{1,2}:\\d{2}\\s*[AP]M,",
-        "From:</strong>.*?Subject:</strong>",
-        "-----Original Message-----",
+    /// Structural HTML patterns that definitively mark quote boundaries.
+    /// These are checked FIRST and if found, text-based patterns are skipped.
+    private static let structuralTruncationPatternStrings = [
         // Outlook reference container (ID-based, handles prefixed IDs like "x_mail-editor-reference-message-container")
         "<div[^>]*id=\"[^\"]*mail-editor-reference-message-container[^\"]*\"[^>]*>",
+    ]
+
+    /// Text-based patterns that indicate quoted content.
+    /// These are ONLY checked if no structural boundary was found, since they can
+    /// produce false positives when appearing in main email content.
+    private static let textBasedTruncationPatternStrings = [
+        // Require "On" at start of string, after line break, paragraph, or closing tag
+        // to avoid mid-sentence matches (e.g., "reload on the Chablis" should not match)
+        "(?:^|<br>|<p>|>)\\s*On .+? wrote:",
+        // iOS/Apple Mail format: "On Jan 30, 2026 at 7:32 PM, Name" (wrote: may be on next line)
+        "(?:^|<br>|<p>|>)\\s*On [A-Z][a-z]+ \\d{1,2}, \\d{4} at \\d{1,2}:\\d{2}\\s*[AP]M,",
+        "From:</strong>.*?Subject:</strong>",
+        "-----Original Message-----",
         // Signature delimiters (plain text within HTML)
         "<br>\\s*--\\s*<br>",
         "<br>\\s*--\\s*</div>",
@@ -124,9 +133,16 @@ enum HTMLQuoteRemover {
         }
     }()
 
-    /// Pre-compiled regex patterns for truncation (compiled once at class load)
-    private static let compiledTruncationPatterns: [NSRegularExpression] = {
-        quoteTruncationPatternStrings.compactMap {
+    /// Pre-compiled structural truncation patterns (checked first)
+    private static let compiledStructuralTruncationPatterns: [NSRegularExpression] = {
+        structuralTruncationPatternStrings.compactMap {
+            try? NSRegularExpression(pattern: $0, options: [.caseInsensitive, .dotMatchesLineSeparators])
+        }
+    }()
+
+    /// Pre-compiled text-based truncation patterns (checked only if no structural boundary found)
+    private static let compiledTextBasedTruncationPatterns: [NSRegularExpression] = {
+        textBasedTruncationPatternStrings.compactMap {
             try? NSRegularExpression(pattern: $0, options: [.caseInsensitive, .dotMatchesLineSeparators])
         }
     }()
@@ -144,8 +160,18 @@ enum HTMLQuoteRemover {
         // Remove quote block patterns using pre-compiled regex
         cleanedHTML = removePatterns(compiledQuoteBlockPatterns, from: cleanedHTML)
 
-        // Truncate at "On ... wrote:" and similar patterns using pre-compiled regex
-        cleanedHTML = truncateAtPatterns(compiledTruncationPatterns, in: cleanedHTML)
+        // Two-pass truncation approach:
+        // 1. First check structural patterns (definitive quote boundaries like Outlook containers)
+        // 2. Only apply text-based patterns if no structural boundary was found
+        //    (text patterns like "On ... wrote:" can produce false positives in main content)
+        let structuralResult = truncateAtEarliestMatch(compiledStructuralTruncationPatterns, in: cleanedHTML)
+        if structuralResult.didTruncate {
+            // Structural boundary found - use that result, skip text-based patterns
+            cleanedHTML = structuralResult.text
+        } else {
+            // No structural boundary - fall back to text-based patterns
+            cleanedHTML = truncateAtPatterns(compiledTextBasedTruncationPatterns, in: cleanedHTML)
+        }
 
         return cleanedHTML
     }
@@ -182,5 +208,29 @@ enum HTMLQuoteRemover {
         }
 
         return result
+    }
+
+    /// Truncates text at the earliest match among the given patterns
+    /// Returns the truncated text and whether any truncation occurred
+    private static func truncateAtEarliestMatch(
+        _ patterns: [NSRegularExpression],
+        in text: String
+    ) -> (text: String, didTruncate: Bool) {
+        var earliestPosition: String.Index?
+
+        for regex in patterns {
+            let range = NSRange(location: 0, length: text.utf16.count)
+            if let match = regex.firstMatch(in: text, options: [], range: range),
+               let matchRange = Range(match.range, in: text) {
+                if earliestPosition == nil || matchRange.lowerBound < earliestPosition! {
+                    earliestPosition = matchRange.lowerBound
+                }
+            }
+        }
+
+        if let position = earliestPosition {
+            return (String(text[..<position]), true)
+        }
+        return (text, false)
     }
 }

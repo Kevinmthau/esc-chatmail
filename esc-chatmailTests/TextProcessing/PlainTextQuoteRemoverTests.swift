@@ -918,6 +918,45 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(result, text)
     }
 
+    // MARK: - Mid-sentence "on the" preservation
+
+    func testRemoveQuotes_onTheInMiddleOfSentence_preservesContent() {
+        // Bug fix: "on the" in middle of sentence should NOT trigger "On ... wrote:" pattern
+        // This was causing "I need to reload on the Chablis" to be truncated
+        let text = """
+        Hey!
+
+        I need to reload on the Chablis. When can you deliver?
+
+        Thanks!
+
+        On Jan 31, 2026 at 12:31 PM, Scott Wunderlich wrote:
+        > Hey Kevin,
+        > Just checking in about the order.
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertTrue(result?.contains("on the Chablis") ?? false, "Should preserve 'on the Chablis'")
+        XCTAssertTrue(result?.contains("When can you deliver") ?? false, "Should preserve 'When can you deliver'")
+        XCTAssertTrue(result?.contains("Thanks!") ?? false, "Should preserve 'Thanks!'")
+        XCTAssertFalse(result?.contains("Hey Kevin") ?? true, "Should remove quoted content")
+    }
+
+    func testRemoveQuotes_onInMiddleOfSentence_preservesContent() {
+        // Various sentences with "on" mid-sentence should be preserved
+        let text = """
+        I'm working on the project now.
+
+        The meeting is on Thursday at 3pm.
+
+        On Monday, John wrote:
+        > Previous message
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertTrue(result?.contains("working on the project") ?? false)
+        XCTAssertTrue(result?.contains("meeting is on Thursday") ?? false)
+        XCTAssertFalse(result?.contains("Previous message") ?? true)
+    }
+
     // MARK: - Attribution Without Date Prefix
 
     func testExtractQuotes_attributionWithoutDatePrefix_filtersCorrectly() {

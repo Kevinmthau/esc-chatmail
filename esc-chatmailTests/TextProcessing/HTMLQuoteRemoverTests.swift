@@ -364,6 +364,77 @@ final class HTMLQuoteRemoverTests: XCTestCase {
         XCTAssertFalse(result?.contains("Previous message about artworks") ?? true)
     }
 
+    // MARK: - Pattern Ordering Tests
+
+    func testRemoveQuotes_onWroteInContentWithOutlookContainer_preservesContent() {
+        // "On ... wrote:" in main content should NOT truncate when Outlook container exists
+        // This tests the fix for Daisy Dixon's email being truncated prematurely
+        let html = """
+        <p>Hi Brynn and Kevin, I'm excited to be joining the project.</p>
+        <p>On the furniture schemes, I wrote: we need to finalize selections.</p>
+        <p>More important content here.</p>
+        <div id="mail-editor-reference-message-container">
+            <p>On Jan 15, 2024, Someone wrote:</p>
+            <p>Quoted content</p>
+        </div>
+        """
+        let result = HTMLQuoteRemover.removeQuotes(from: html)
+        XCTAssertTrue(result?.contains("I'm excited to be joining the project") ?? false)
+        XCTAssertTrue(result?.contains("On the furniture schemes, I wrote:") ?? false)
+        XCTAssertTrue(result?.contains("More important content here") ?? false)
+        XCTAssertFalse(result?.contains("Quoted content") ?? true)
+    }
+
+    func testRemoveQuotes_onWrotePatternMatchesBeforeContainer_containerTakesPriority() {
+        // Even if "On ... wrote:" would match earlier in the HTML, the Outlook container
+        // should be found first because it's checked first in pattern order
+        let html = """
+        <p>Response text.</p>
+        <p>On Monday, she wrote: some notes about the project.</p>
+        <p>Additional important content.</p>
+        <div id="x_mail-editor-reference-message-container">
+            <p>Previous email chain</p>
+        </div>
+        """
+        let result = HTMLQuoteRemover.removeQuotes(from: html)
+        XCTAssertTrue(result?.contains("Response text.") ?? false)
+        XCTAssertTrue(result?.contains("On Monday, she wrote:") ?? false)
+        XCTAssertTrue(result?.contains("Additional important content.") ?? false)
+        XCTAssertFalse(result?.contains("Previous email chain") ?? true)
+    }
+
+    // MARK: - Mid-sentence "on the" preservation
+
+    func testRemoveQuotes_onTheInMiddleOfSentence_preservesContent() {
+        // Bug fix: "on the" in middle of sentence should NOT trigger "On ... wrote:" pattern
+        let html = """
+        <p>Hey!</p>
+        <p>I need to reload on the Chablis. When can you deliver?</p>
+        <p>Thanks!</p>
+        <br>
+        <p>On Jan 31, 2026 at 12:31 PM, Scott Wunderlich wrote:</p>
+        <p>Hey Kevin, just checking in.</p>
+        """
+        let result = HTMLQuoteRemover.removeQuotes(from: html)
+        XCTAssertTrue(result?.contains("on the Chablis") ?? false, "Should preserve 'on the Chablis'")
+        XCTAssertTrue(result?.contains("When can you deliver") ?? false)
+        XCTAssertTrue(result?.contains("Thanks!") ?? false)
+        XCTAssertFalse(result?.contains("Hey Kevin") ?? true, "Should remove quoted content")
+    }
+
+    func testRemoveQuotes_onInMiddleParagraph_preservesContent() {
+        // "on" appearing mid-paragraph should be preserved
+        let html = """
+        <p>I'm working on the project and it's going well.</p>
+        <br>
+        <p>On Monday, January 15, 2024, John Doe wrote:</p>
+        <p>Original message here</p>
+        """
+        let result = HTMLQuoteRemover.removeQuotes(from: html)
+        XCTAssertTrue(result?.contains("working on the project") ?? false)
+        XCTAssertFalse(result?.contains("Original message here") ?? true)
+    }
+
     // MARK: - Edge Cases
 
     func testRemoveQuotes_emptyQuoteBlock_removesEmptyBlock() {
