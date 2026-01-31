@@ -65,6 +65,8 @@ enum HTMLQuoteRemover {
     /// Patterns that indicate the start of quoted content (truncate from here) - string form
     private static let quoteTruncationPatternStrings = [
         "On .+? wrote:",
+        // iOS/Apple Mail format: "On Jan 30, 2026 at 7:32 PM, Name" (wrote: may be on next line)
+        "On [A-Z][a-z]+ \\d{1,2}, \\d{4} at \\d{1,2}:\\d{2}\\s*[AP]M,",
         "From:</strong>.*?Subject:</strong>",
         "-----Original Message-----",
         // Outlook reference container (ID-based, handles prefixed IDs like "x_mail-editor-reference-message-container")
