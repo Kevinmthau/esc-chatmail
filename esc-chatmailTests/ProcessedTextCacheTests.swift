@@ -344,16 +344,68 @@ final class ProcessedTextCacheTests: XCTestCase {
 
     func testExtractPlainText_divParagraphsWithoutBrTags() {
         // Edge case: divs directly adjacent without <br> between them
+        // Full pipeline: extractPlainText → unwrapEmailLineBreaks determines paragraph breaks
         let html = "<div>First paragraph.</div><div>Second paragraph.</div>"
-        let result = TextProcessing.extractPlainText(from: html)
+        let extracted = TextProcessing.extractPlainText(from: html)
+        let result = TextProcessing.unwrapEmailLineBreaks(from: extracted)
 
         XCTAssertTrue(result.contains("First paragraph."))
         XCTAssertTrue(result.contains("Second paragraph."))
 
-        // Should have paragraph break between them
+        // Should have paragraph break between them (sentence-ending punctuation + uppercase start)
         let paragraphs = result.components(separatedBy: "\n\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         XCTAssertEqual(paragraphs.count, 2)
+    }
+
+    // MARK: - Sign-off Formatting Tests
+
+    func testFormatSignOffLineBreaks_preservesExclamationMark() {
+        // "Thanks!" should stay as "Thanks!" not become "Thanks,"
+        let text = "I appreciate the help. Thanks!"
+        let result = TextProcessing.formatSignOffLineBreaks(in: text)
+
+        XCTAssertTrue(result.contains("Thanks!"), "Exclamation mark should be preserved")
+        XCTAssertFalse(result.contains("Thanks,"), "Should not replace ! with comma")
+    }
+
+    func testFormatSignOffLineBreaks_preservesPeriod() {
+        // "Thanks." should stay as "Thanks."
+        let text = "I appreciate the help. Thanks."
+        let result = TextProcessing.formatSignOffLineBreaks(in: text)
+
+        XCTAssertTrue(result.contains("Thanks."), "Period should be preserved")
+        XCTAssertFalse(result.contains("Thanks,"), "Should not replace . with comma")
+    }
+
+    func testFormatSignOffLineBreaks_addsCommaWhenNoPunctuation() {
+        // "Thanks" without punctuation should get comma
+        let text = "I appreciate the help. Thanks"
+        let result = TextProcessing.formatSignOffLineBreaks(in: text)
+
+        XCTAssertTrue(result.contains("Thanks,"), "Comma should be added when no punctuation")
+    }
+
+    func testFormatSignOffLineBreaks_withNamePreservesComma() {
+        // "Regards, Kevin" should preserve comma format
+        let text = "Let me know if you need anything else. Regards, Kevin"
+        let result = TextProcessing.formatSignOffLineBreaks(in: text)
+
+        XCTAssertTrue(result.contains("Regards,"))
+        XCTAssertTrue(result.contains("Kevin"))
+    }
+
+    // MARK: - Div Line Unwrapping Tests
+
+    func testUnwrapEmailLineBreaks_joinsDivWrappedMidSentence() {
+        // When divs split a sentence mid-word (no sentence-ending punct, lowercase continuation)
+        // the lines should be joined
+        let html = "<div>You got it.  See</div><div>you Wednesday.</div>"
+        let extracted = TextProcessing.extractPlainText(from: html)
+        let result = TextProcessing.unwrapEmailLineBreaks(from: extracted)
+
+        // "See" ends without punctuation, "you" starts lowercase → should join
+        XCTAssertTrue(result.contains("See you Wednesday"), "Should join lines split mid-sentence")
     }
 }

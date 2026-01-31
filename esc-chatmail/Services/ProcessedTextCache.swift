@@ -392,9 +392,9 @@ enum TextProcessing {
         text = text.replacingOccurrences(of: "</p>", with: "\n\n", options: .regularExpression, range: nil)
         text = text.replacingOccurrences(of: "</h[1-6]>", with: "\n\n", options: .regularExpression, range: nil)
 
-        // Div closures create paragraph breaks - Gmail wraps each paragraph in separate <div> tags
-        // Using \n\n is safe because the cleanup step below collapses excessive newlines to max 2
-        text = text.replacingOccurrences(of: "</div>", with: "\n\n", options: .caseInsensitive, range: nil)
+        // Div closures create single newlines - let unwrapEmailLineBreaks decide whether to join
+        // Gmail mobile wraps each line in <div>, so using \n allows smart join logic to work
+        text = text.replacingOccurrences(of: "</div>", with: "\n", options: .caseInsensitive, range: nil)
 
         // List items should each appear on their own line
         text = text.replacingOccurrences(of: "</li>", with: "\n", options: .caseInsensitive, range: nil)
@@ -475,12 +475,12 @@ enum TextProcessing {
         for signOff in signOffWords {
             // Case-insensitive search for ". SignOff" pattern
             let patterns = [
-                "([.!?])\\s+(\(signOff))[!.]?,?\\s*$",  // "help. Regards" or "help. Thanks!" at end
+                "([.!?])\\s+(\(signOff))([!.])?,?\\s*$",  // "help. Regards" or "help. Thanks!" at end - group 3 captures trailing punct
                 "([.!?])\\s+(\(signOff)),\\s+([A-Z][a-z]+)\\s*$",  // "help. Regards, Kevin" at end
                 "([.!?])\\s+(\(signOff)),\\s+([A-Z][a-z]+)\\s+([A-Z][a-z]+)\\s*$",  // "help. Regards, Kevin Thau" at end
             ]
 
-            for pattern in patterns {
+            for (patternIndex, pattern) in patterns.enumerated() {
                 if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
                     let range = NSRange(location: 0, length: result.utf16.count)
                     if let match = regex.firstMatch(in: result, options: [], range: range) {
@@ -488,8 +488,17 @@ enum TextProcessing {
                         let punctuation = (result as NSString).substring(with: match.range(at: 1))
                         let signOffText = (result as NSString).substring(with: match.range(at: 2))
 
-                        var replacement = "\(punctuation)\n\n\(signOffText),"
-                        if match.numberOfRanges > 3 {
+                        // First pattern captures trailing punctuation in group 3; others have name in group 3
+                        let trailingPunct: String
+                        if patternIndex == 0 && match.numberOfRanges > 3 && match.range(at: 3).location != NSNotFound {
+                            trailingPunct = (result as NSString).substring(with: match.range(at: 3))
+                        } else {
+                            trailingPunct = ","
+                        }
+
+                        var replacement = "\(punctuation)\n\n\(signOffText)\(trailingPunct)"
+                        // For patterns 2 and 3 (with names), group 3 is first name, group 4 is last name
+                        if patternIndex > 0 && match.numberOfRanges > 3 {
                             let name = (result as NSString).substring(with: match.range(at: 3))
                             replacement += "\n\n\(name)"
                             if match.numberOfRanges > 4 {
