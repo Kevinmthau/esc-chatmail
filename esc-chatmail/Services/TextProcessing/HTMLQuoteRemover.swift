@@ -71,8 +71,6 @@ enum HTMLQuoteRemover {
         "-----Original Message-----",
         // Outlook reference container (ID-based, handles prefixed IDs like "x_mail-editor-reference-message-container")
         "<div[^>]*id=\"[^\"]*mail-editor-reference-message-container[^\"]*\"[^>]*>",
-        // Outlook blue border separator (#b5c4df)
-        "<div[^>]*style=\"[^\"]*border-top:[^\"]*solid[^\"]*#[Bb]5[Cc]4[Dd][Ff][^\"]*\"[^>]*>",
         // Signature delimiters (plain text within HTML)
         "<br>\\s*--\\s*<br>",
         "<br>\\s*--\\s*</div>",

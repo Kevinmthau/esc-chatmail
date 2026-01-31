@@ -178,26 +178,32 @@ final class HTMLQuoteRemoverTests: XCTestCase {
         XCTAssertFalse(result?.contains("This is quoted content") ?? true)
     }
 
-    func testRemoveQuotes_outlookBlueBorderSeparator_truncatesAtQuote() {
-        // Outlook uses a blue border (#b5c4df) to separate quoted content
+    func testRemoveQuotes_outlookBlueBorderSeparator_preservesContent() {
+        // Outlook blue border (#b5c4df) is used for layout throughout emails,
+        // not just for quote boundaries. This was causing legitimate content truncation.
+        // Quoted content should be detected via mail-editor-reference-message-container instead.
         let html = """
         <p>My response.</p>
         <div style="border-top:solid #B5C4DF 1.0pt;padding:3.0pt 0in 0in 0in">
             <p>From: John</p>
-            <p>Original message</p>
+            <p>Additional content</p>
         </div>
         """
         let result = HTMLQuoteRemover.removeQuotes(from: html)
         XCTAssertTrue(result?.contains("My response.") ?? false)
-        XCTAssertFalse(result?.contains("Original message") ?? true)
+        // Blue border alone should NOT cause truncation
+        XCTAssertTrue(result?.contains("Additional content") ?? false)
     }
 
-    func testRemoveQuotes_outlookBlueBorderLowercase_truncatesAtQuote() {
-        // Test lowercase hex color
+    func testRemoveQuotes_outlookBlueBorderWithReferenceContainer_truncatesAtContainer() {
+        // When blue border is inside a mail-editor-reference-message-container,
+        // the container ID (not the border) should trigger truncation
         let html = """
         <p>Reply.</p>
-        <div style="border-top:solid #b5c4df 1pt">
-            <p>Quoted</p>
+        <div id="mail-editor-reference-message-container">
+            <div style="border-top:solid #b5c4df 1pt">
+                <p>Quoted</p>
+            </div>
         </div>
         """
         let result = HTMLQuoteRemover.removeQuotes(from: html)
