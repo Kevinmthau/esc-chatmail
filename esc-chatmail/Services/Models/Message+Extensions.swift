@@ -43,9 +43,70 @@ extension Message {
         Array(typedAttachments)
     }
 
-    /// Attachments suitable for display (excludes likely signature images)
+    /// Attachments suitable for display (excludes signature images and inline images already shown in HTML)
     var displayableAttachments: [Attachment] {
-        attachmentsArray.filter { !$0.isLikelySignatureImage }
+        let allAttachments = attachmentsArray.filter { !$0.isLikelySignatureImage }
+
+        // Only filter inline images for received messages that will display HTML
+        // Messages from the user (isFromMe) display as plain text, so their inline images
+        // need to show in the attachment grid
+        guard !isFromMe else {
+            return allAttachments
+        }
+
+        // If message has HTML content, filter out attachments that are displayed inline via cid: URLs
+        let referencedCIDs = extractReferencedContentIDs()
+        guard !referencedCIDs.isEmpty else {
+            return allAttachments
+        }
+
+        return allAttachments.filter { attachment in
+            guard let contentId = attachment.contentId, !contentId.isEmpty else {
+                return true // No Content-ID, always show
+            }
+            // Hide if this Content-ID is referenced in the HTML body
+            return !referencedCIDs.contains(contentId)
+        }
+    }
+
+    /// Extracts Content-IDs referenced via cid: URLs in the message's HTML body
+    private func extractReferencedContentIDs() -> Set<String> {
+        // Try to load HTML content for this message
+        guard let html = HTMLContentHandler.shared.loadHTML(for: id) else {
+            return []
+        }
+
+        // Match cid: references in src attributes (e.g., src="cid:ii_ml1i6p6v0")
+        // Pattern matches: cid: followed by the Content-ID (which may contain letters, numbers, underscores, dots, @)
+        var referencedCIDs = Set<String>()
+
+        // Simple regex-free approach: find all occurrences of "cid:" and extract the ID
+        let cidPrefix = "cid:"
+        var searchRange = html.startIndex..<html.endIndex
+
+        while let cidRange = html.range(of: cidPrefix, options: .caseInsensitive, range: searchRange) {
+            let startOfCID = cidRange.upperBound
+            // Find the end of the CID (typically ends at quote, space, or angle bracket)
+            var endOfCID = startOfCID
+            while endOfCID < html.endIndex {
+                let char = html[endOfCID]
+                if char == "\"" || char == "'" || char == " " || char == ">" || char == "<" {
+                    break
+                }
+                endOfCID = html.index(after: endOfCID)
+            }
+
+            if startOfCID < endOfCID {
+                let contentId = String(html[startOfCID..<endOfCID])
+                if !contentId.isEmpty {
+                    referencedCIDs.insert(contentId)
+                }
+            }
+
+            searchRange = endOfCID..<html.endIndex
+        }
+
+        return referencedCIDs
     }
 
     /// Type-safe accessor for bodyText (alias for consistency)
