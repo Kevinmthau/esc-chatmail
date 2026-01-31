@@ -393,7 +393,7 @@ enum TextProcessing {
         text = text.replacingOccurrences(of: "</h[1-6]>", with: "\n\n", options: .regularExpression, range: nil)
 
         // Div closures create paragraph breaks - Gmail wraps each paragraph in separate <div> tags
-        // Using \n\n is safe because the regex at line 448 collapses excessive newlines to max 2
+        // Using \n\n is safe because the cleanup step below collapses excessive newlines to max 2
         text = text.replacingOccurrences(of: "</div>", with: "\n\n", options: .caseInsensitive, range: nil)
 
         // List items should each appear on their own line
