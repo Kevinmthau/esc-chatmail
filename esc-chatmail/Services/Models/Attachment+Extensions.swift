@@ -61,12 +61,6 @@ extension Attachment {
     var isLikelySignatureImage: Bool {
         guard mimeType.hasPrefix("image/") else { return false }
 
-        // Images with Content-ID are inline attachments (referenced via cid: URLs in HTML)
-        // These should never appear as downloadable attachments
-        if contentId != nil {
-            return true
-        }
-
         // Small file size (< 10KB) - catches tracking pixels and small logos
         if byteSize > 0 && byteSize < AttachmentConfig.signatureImageMaxBytes {
             return true

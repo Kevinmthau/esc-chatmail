@@ -123,20 +123,12 @@ struct MessageBubble: View {
 
     @ViewBuilder
     private var attachmentsView: some View {
-        // Filter out inline attachments when HTML is rendered (they're shown via cid: URLs)
-        let showsHTML = hasRichContent
-        let displayable = message.displayableAttachments.filter { attachment in
-            // Inline attachments (with contentId) are shown in HTML content, so exclude them
-            if showsHTML && attachment.contentId != nil {
-                return false
-            }
-            return true
-        }
+        let displayable = message.displayableAttachments
         #if DEBUG
         let _ = {
             if message.hasAttachments {
                 let attachmentDetails = message.attachmentsArray.map { "[\($0.filename), cid:\($0.contentId ?? "nil")]" }.joined(separator: ", ")
-                Log.warning("UI_DEBUG msg=\(message.id) hasAttachments=\(message.hasAttachments) attachmentsArray=\(message.attachmentsArray.count) displayable=\(displayable.count) showsHTML=\(showsHTML) hasRichContent=\(hasRichContent) attachments=\(attachmentDetails)", category: .ui)
+                Log.warning("UI_DEBUG msg=\(message.id) hasAttachments=\(message.hasAttachments) attachmentsArray=\(message.attachmentsArray.count) displayable=\(displayable.count) hasRichContent=\(hasRichContent) attachments=\(attachmentDetails)", category: .ui)
             }
         }()
         #endif
