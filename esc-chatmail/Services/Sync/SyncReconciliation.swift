@@ -319,6 +319,12 @@ final class SyncReconciliation: Sendable {
 
                 // Check INBOX label discrepancy
                 if gmail.hasInbox != localHasInbox {
+                    // Don't re-add INBOX if locally marked as SPAM - user intent takes precedence
+                    let localHasSpam = localLabels.contains { $0.id == "SPAM" }
+                    if gmail.hasInbox && localHasSpam {
+                        continue
+                    }
+
                     stats.labelMismatches += 1
 
                     if gmail.hasInbox {

@@ -292,7 +292,7 @@ final class MessageActions: ObservableObject {
 
         let context = coreDataStack.viewContext
 
-        // Fetch INBOX label once for removal (same as batch archive)
+        // Fetch INBOX label for removal and SPAM label for addition
         let labelRequest = Label.fetchRequest()
         labelRequest.predicate = LabelPredicates.id("INBOX")
         let inboxLabel: Label?
@@ -301,6 +301,16 @@ final class MessageActions: ObservableObject {
         } catch {
             Log.error("Failed to fetch INBOX label for batch spam", category: .coreData, error: error)
             inboxLabel = nil
+        }
+
+        let spamRequest = Label.fetchRequest()
+        spamRequest.predicate = LabelPredicates.id("SPAM")
+        let spamLabel: Label?
+        do {
+            spamLabel = try context.fetch(spamRequest).first
+        } catch {
+            Log.error("Failed to fetch SPAM label for batch spam", category: .coreData, error: error)
+            spamLabel = nil
         }
 
         // Collect all message IDs and update local state in memory
@@ -314,6 +324,10 @@ final class MessageActions: ObservableObject {
                 // Remove INBOX label locally (same as archive)
                 if let inboxLabel = inboxLabel {
                     message.removeFromLabels(inboxLabel)
+                }
+                // Add SPAM label locally to prevent reconciliation from re-adding INBOX
+                if let spamLabel = spamLabel {
+                    message.addToLabels(spamLabel)
                 }
                 message.localModifiedAt = modificationDate
                 if !message.id.isEmpty {
@@ -358,7 +372,7 @@ final class MessageActions: ObservableObject {
 
         let context = coreDataStack.viewContext
 
-        // Fetch INBOX label for removal (same as archive)
+        // Fetch INBOX label for removal and SPAM label for addition
         let labelRequest = Label.fetchRequest()
         labelRequest.predicate = LabelPredicates.id("INBOX")
         let inboxLabel: Label?
@@ -369,13 +383,27 @@ final class MessageActions: ObservableObject {
             inboxLabel = nil
         }
 
-        // Collect message IDs, remove INBOX label locally, and mark as locally modified
+        let spamRequest = Label.fetchRequest()
+        spamRequest.predicate = LabelPredicates.id("SPAM")
+        let spamLabel: Label?
+        do {
+            spamLabel = try context.fetch(spamRequest).first
+        } catch {
+            Log.error("Failed to fetch SPAM label for spam", category: .coreData, error: error)
+            spamLabel = nil
+        }
+
+        // Collect message IDs, remove INBOX label locally, add SPAM label, and mark as locally modified
         var messageIds: [String] = []
         let modificationDate = Date()
         for message in messages {
             // Remove INBOX label locally (same as archive)
             if let inboxLabel = inboxLabel {
                 message.removeFromLabels(inboxLabel)
+            }
+            // Add SPAM label locally to prevent reconciliation from re-adding INBOX
+            if let spamLabel = spamLabel {
+                message.addToLabels(spamLabel)
             }
             message.localModifiedAt = modificationDate
             if !message.id.isEmpty {
