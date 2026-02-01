@@ -21,9 +21,9 @@ actor HTMLContentRecoveryService {
             let apiClient = await MainActor.run { GmailAPIClient.shared }
             let gmailMessage = try await apiClient.getMessage(id: messageId, format: "full")
 
-            // 2. Extract HTML body from MIME structure
+            // 2. Extract HTML body from MIME structure (may fetch large body parts via API)
             guard let payload = gmailMessage.payload,
-                  let html = extractHTMLBody(from: payload) else {
+                  let html = await extractHTMLBody(from: payload, messageId: messageId) else {
                 Log.debug("No HTML body found for message \(messageId)", category: .ui)
                 return nil
             }
@@ -41,22 +41,40 @@ actor HTMLContentRecoveryService {
     }
 
     /// Extracts HTML body from MIME structure
-    private func extractHTMLBody(from part: MessagePart) -> String? {
+    private func extractHTMLBody(from part: MessagePart, messageId: String) async -> String? {
         // Check this part for text/html
-        if part.mimeType == "text/html", let data = part.body?.data {
-            return decodeBase64(data)
+        if part.mimeType == "text/html" {
+            if let data = part.body?.data {
+                return decodeBase64(data)
+            } else if let attachmentId = part.body?.attachmentId {
+                // Large HTML body - fetch via attachment API
+                return await fetchLargeBodyContent(attachmentId: attachmentId, messageId: messageId)
+            }
         }
 
         // Recursively check child parts
         if let parts = part.parts {
             for subpart in parts {
-                if let html = extractHTMLBody(from: subpart) {
+                if let html = await extractHTMLBody(from: subpart, messageId: messageId) {
                     return html
                 }
             }
         }
 
         return nil
+    }
+
+    /// Fetches large body content via the attachment API
+    /// Gmail returns body parts larger than ~25KB with attachmentId instead of inline data
+    private func fetchLargeBodyContent(attachmentId: String, messageId: String) async -> String? {
+        do {
+            let apiClient = await MainActor.run { GmailAPIClient.shared }
+            let attachmentData = try await apiClient.getAttachment(messageId: messageId, attachmentId: attachmentId)
+            return String(data: attachmentData, encoding: .utf8)
+        } catch {
+            Log.warning("Failed to fetch large body \(attachmentId) for message \(messageId): \(error)", category: .ui)
+            return nil
+        }
     }
 
     /// Decodes Gmail's URL-safe Base64 encoding

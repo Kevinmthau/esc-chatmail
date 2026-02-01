@@ -63,8 +63,8 @@ actor MessagePersister {
         let subjectHeader = gmailMessage.payload?.headers?.first(where: { $0.name.lowercased() == "subject" })?.value ?? "no subject"
         Log.debug("Processing: from=\(fromHeader.prefix(40)) subj=\(subjectHeader.prefix(40))", category: .sync)
 
-        // Process the Gmail message
-        guard let processedMessage = messageProcessor.processGmailMessage(
+        // Process the Gmail message (may fetch large body parts via API)
+        guard let processedMessage = await messageProcessor.processGmailMessage(
             gmailMessage,
             myAliases: myAliases,
             in: context

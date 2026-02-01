@@ -4,19 +4,19 @@ import CoreData
 class MessageProcessor {
     private let emailTextProcessor = EmailTextProcessor.self
     private let emailNormalizer = EmailNormalizer.self
-    
-    func processGmailMessage(_ gmailMessage: GmailMessage, myAliases: Set<String>, in context: NSManagedObjectContext) -> ProcessedMessage? {
+
+    func processGmailMessage(_ gmailMessage: GmailMessage, myAliases: Set<String>, in context: NSManagedObjectContext) async -> ProcessedMessage? {
         guard let payload = gmailMessage.payload,
               let headers = payload.headers else { return nil }
 
         // Debug: dump MIME structure to understand attachment handling
         dumpMimeStructure(payload, messageId: gmailMessage.id)
-        
+
         var processedMessage = ProcessedMessage()
         processedMessage.id = gmailMessage.id
         processedMessage.gmThreadId = gmailMessage.threadId ?? ""
         processedMessage.snippet = gmailMessage.snippet
-        
+
         // Process internal date
         if let internalDateStr = gmailMessage.internalDate,
            let internalDateMs = Double(internalDateStr) {
@@ -24,16 +24,16 @@ class MessageProcessor {
         } else {
             processedMessage.internalDate = Date()
         }
-        
+
         // Process headers
         processedMessage.headers = extractHeaders(from: headers, myAliases: myAliases)
-        
-        // Process content
-        let content = extractContent(from: payload)
+
+        // Process content (may fetch large body parts via API)
+        let content = await extractContent(from: payload, messageId: gmailMessage.id)
         processedMessage.htmlBody = content.html
         processedMessage.plainTextBody = content.plainText
         processedMessage.cleanedSnippet = createCleanedSnippet(html: content.html, plainText: content.plainText, snippet: gmailMessage.snippet, isFromMe: processedMessage.headers.isFromMe)
-        
+
         // Process labels
         if let labelIds = gmailMessage.labelIds {
             processedMessage.labelIds = labelIds
@@ -46,7 +46,7 @@ class MessageProcessor {
             headers: processedMessage.headers
         )
 
-        // Check for attachments
+        // Check for attachments (exclude body parts that we fetched as content)
         processedMessage.hasAttachments = checkForAttachments(in: payload)
         processedMessage.attachmentInfo = extractAttachments(from: payload)
 
@@ -282,31 +282,72 @@ class MessageProcessor {
         }
     }
     
-    private func extractContent(from part: MessagePart) -> (html: String?, plainText: String?) {
+    private func extractContent(from part: MessagePart, messageId: String) async -> (html: String?, plainText: String?) {
         var html: String? = nil
         var plainText: String? = nil
 
-        func traverse(_ part: MessagePart) {
-            if part.mimeType == "text/html", let data = part.body?.data {
-                html = decodeBase64(data)
-            } else if part.mimeType == "text/plain", let data = part.body?.data {
-                plainText = decodeBase64(data)
+        // Use a box to allow mutation in nested async function
+        actor ContentBox {
+            var html: String? = nil
+            var plainText: String? = nil
+
+            func setHTML(_ value: String?) { html = value }
+            func setPlainText(_ value: String?) { plainText = value }
+            func getHTML() -> String? { html }
+            func getPlainText() -> String? { plainText }
+        }
+
+        let box = ContentBox()
+
+        func traverse(_ part: MessagePart) async {
+            if part.mimeType == "text/html" {
+                if let data = part.body?.data {
+                    await box.setHTML(decodeBase64(data))
+                } else if let attachmentId = part.body?.attachmentId {
+                    // Large HTML body - fetch via attachment API
+                    await box.setHTML(await fetchLargeBodyContent(attachmentId: attachmentId, messageId: messageId))
+                }
+            } else if part.mimeType == "text/plain" {
+                if let data = part.body?.data {
+                    await box.setPlainText(decodeBase64(data))
+                } else if let attachmentId = part.body?.attachmentId {
+                    // Large plain text body - fetch via attachment API
+                    await box.setPlainText(await fetchLargeBodyContent(attachmentId: attachmentId, messageId: messageId))
+                }
             }
 
             if let parts = part.parts {
                 for subpart in parts {
-                    traverse(subpart)
-                    if html != nil && plainText != nil { break }
+                    await traverse(subpart)
+                    let hasHTML = await box.getHTML() != nil
+                    let hasPlainText = await box.getPlainText() != nil
+                    if hasHTML && hasPlainText { break }
                 }
             }
         }
 
-        traverse(part)
+        await traverse(part)
 
         // Don't clean HTML content here - preserve original for display
         // The cleaning will be done only when creating snippets
 
+        html = await box.getHTML()
+        plainText = await box.getPlainText()
+
         return (html, plainText)
+    }
+
+    /// Fetches large body content via the attachment API
+    /// Gmail returns body parts larger than ~25KB with attachmentId instead of inline data
+    private func fetchLargeBodyContent(attachmentId: String, messageId: String) async -> String? {
+        do {
+            let apiClient = await MainActor.run { GmailAPIClient.shared }
+            let attachmentData = try await apiClient.getAttachment(messageId: messageId, attachmentId: attachmentId)
+            return String(data: attachmentData, encoding: .utf8)
+        } catch {
+            Log.warning("Failed to fetch large body \(attachmentId) for message \(messageId): \(error)", category: .sync)
+            return nil
+        }
     }
     
     private func decodeBase64(_ data: String) -> String? {
