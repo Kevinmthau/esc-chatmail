@@ -202,7 +202,19 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
         // Early exit for simple div-wrapped text (common Gmail mobile format)
         // Must check AFTER element counts since we want to catch cases with 0 images/tables
+        // BUT: transactional emails (Google security alerts, etc.) have substantial text
+        // in simple divs and should still show as HTML to preserve formatting
         if imgCount == 0 && tableCount == 0 && cidCount == 0 && isSimpleDivWrappedText(html, lowercased: lowercased) {
+            // Check if there's substantial text content before downgrading to plain text
+            let textContent = html
+                .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // If substantial text content, keep as HTML to preserve formatting
+            if textContent.count > 200 {
+                return true
+            }
             return false
         }
 
