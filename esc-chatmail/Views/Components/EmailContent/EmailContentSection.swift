@@ -20,33 +20,34 @@ struct EmailContentSection: View {
                         .clipped()
                 }
                 .buttonStyle(PlainButtonStyle())
+
+                // View Full Email button - only shown with thumbnail
+                Button(action: {
+                    showingHTMLView = true
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "doc.richtext")
+                            .font(.caption)
+                        Text("View Full Email")
+                            .font(.caption)
+                            .fontWeight(.medium)
+                        Image(systemName: "arrow.up.forward")
+                            .font(.caption2)
+                    }
+                    .foregroundColor(.blue)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.blue.opacity(0.1))
+                    .cornerRadius(8)
+                }
             } else if isLoading {
                 EmailContentPlaceholder()
             } else {
                 // Fallback when no HTML content available
+                // (EmailContentFallback is already tappable, no extra button needed)
                 EmailContentFallback(subject: message.subject) {
                     showingHTMLView = true
                 }
-            }
-
-            // View Full Email button
-            Button(action: {
-                showingHTMLView = true
-            }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "doc.richtext")
-                        .font(.caption)
-                    Text("View Full Email")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                    Image(systemName: "arrow.up.forward")
-                        .font(.caption2)
-                }
-                .foregroundColor(.blue)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Color.blue.opacity(0.1))
-                .cornerRadius(8)
             }
         }
         .task {
