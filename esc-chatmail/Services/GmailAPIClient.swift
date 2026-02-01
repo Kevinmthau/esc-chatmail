@@ -30,7 +30,9 @@ actor RateLimitTracker {
     /// Resets tracking after successful request
     func recordSuccess() {
         // Reduce cumulative backoff on success to allow recovery
-        cumulativeBackoffTime = max(0, cumulativeBackoffTime - 10)
+        // Using 30s reduction allows faster recovery after hitting circuit breaker (120s max)
+        // This means ~4 successful requests recover from a fully tripped breaker
+        cumulativeBackoffTime = max(0, cumulativeBackoffTime - 30)
     }
 
     /// Returns current cumulative backoff for monitoring
@@ -65,7 +67,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     let retryStrategy: RetryStrategy
 
     /// Tracks cumulative rate limit backoff time to prevent API exhaustion
-    private let rateLimitTracker = RateLimitTracker()
+    let rateLimitTracker = RateLimitTracker()
 
     // MARK: - Initialization
 
@@ -171,6 +173,8 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         let startTime = Date()
         var lastError: Error?
         var retryDelay = retryStrategy.initialDelay
+        var currentRequest = request
+        var hasAttemptedTokenRefresh = false
 
         for attempt in 0..<retries {
             // Circuit breaker: check if we've exceeded max total retry time
@@ -181,7 +185,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             }
 
             do {
-                let (data, response) = try await session.data(for: request)
+                let (data, response) = try await session.data(for: currentRequest)
 
                 if let httpResponse = response as? HTTPURLResponse {
                     switch httpResponse.statusCode {
@@ -234,6 +238,23 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                         }
 
                     case 401:
+                        // Attempt reactive token refresh on 401
+                        // Only retry once to avoid infinite loops if refresh also fails
+                        if !hasAttemptedTokenRefresh {
+                            hasAttemptedTokenRefresh = true
+                            Log.info("Received 401, attempting token refresh", category: .api)
+                            do {
+                                _ = try await tokenManager.refreshToken()
+                                // Update request with refreshed token
+                                let newToken = try await tokenManager.getCurrentToken()
+                                currentRequest.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
+                                // Retry with new token
+                                continue
+                            } catch {
+                                Log.error("Token refresh failed during 401 recovery: \(error.localizedDescription)", category: .api)
+                                throw APIError.authenticationError
+                            }
+                        }
                         throw APIError.authenticationError
 
                     case 200...299 where data.isEmpty:

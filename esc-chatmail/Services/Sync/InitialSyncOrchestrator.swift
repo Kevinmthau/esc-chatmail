@@ -212,15 +212,12 @@ final class InitialSyncOrchestrator {
             await MainActor.run {
                 progressHandler(progress, "Processing messages... \(processed)/\(total)")
             }
-        } messageHandler: { [weak self] message in
-            guard let self = self else {
-                Log.warning("InitialSyncOrchestrator deallocated during message processing - message \(message.id) not saved", category: .sync)
-                return
-            }
-            await self.messagePersister.saveMessage(
+        } messageHandler: { [messagePersister, myAliases] message in
+            // Capture dependencies strongly to prevent message loss if orchestrator is deallocated
+            await messagePersister.saveMessage(
                 message,
                 labelIds: labelIds,
-                myAliases: self.myAliases,
+                myAliases: myAliases,
                 in: context
             )
         }
@@ -242,15 +239,12 @@ final class InitialSyncOrchestrator {
             let stillFailedIds = await BatchProcessor.retryFailedMessages(
                 failedIds: result.failedIds,
                 messageFetcher: messageFetcher
-            ) { [weak self] message in
-                guard let self = self else {
-                    Log.warning("InitialSyncOrchestrator deallocated during retry - message \(message.id) not saved", category: .sync)
-                    return
-                }
-                await self.messagePersister.saveMessage(
+            ) { [messagePersister, myAliases] message in
+                // Capture dependencies strongly to prevent message loss if orchestrator is deallocated
+                await messagePersister.saveMessage(
                     message,
                     labelIds: labelIds,
-                    myAliases: self.myAliases,
+                    myAliases: myAliases,
                     in: context
                 )
             }

@@ -57,8 +57,15 @@ struct HistoryCollectionPhase: SyncPhase {
 
             // Prevent unbounded memory growth by limiting pages
             if pageCount >= maxHistoryPages && pageToken != nil {
-                log.warning("History collection reached page limit (\(maxHistoryPages)). Partial sync will continue; next sync will catch remaining changes.")
-                break
+                log.warning("History collection reached page limit (\(maxHistoryPages)). Returning starting historyId to retry from same point on next sync.")
+                // Return starting historyId so next sync retries from same point,
+                // preventing permanent loss of changes on pages 51+
+                return HistoryCollectionResult(
+                    newMessageIds: Array(allNewMessageIds),
+                    records: allHistoryRecords,
+                    latestHistoryId: startHistoryId,
+                    wasTruncated: true
+                )
             }
         } while pageToken != nil
 
@@ -69,7 +76,8 @@ struct HistoryCollectionPhase: SyncPhase {
         return HistoryCollectionResult(
             newMessageIds: Array(allNewMessageIds),
             records: allHistoryRecords,
-            latestHistoryId: latestHistoryId
+            latestHistoryId: latestHistoryId,
+            wasTruncated: false
         )
     }
 }

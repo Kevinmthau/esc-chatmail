@@ -37,6 +37,9 @@ struct HistoryCollectionResult {
     let newMessageIds: [String]
     let records: [HistoryRecord]
     let latestHistoryId: String
+    /// True if history collection was truncated due to page limit.
+    /// When truncated, latestHistoryId returns the starting ID so next sync retries from same point.
+    let wasTruncated: Bool
 }
 
 // Note: BatchProcessingResult is defined in BatchProcessor.swift

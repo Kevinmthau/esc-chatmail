@@ -158,10 +158,19 @@ final class IncrementalSyncOrchestrator {
 
             // Phase 6: Atomic Save (historyId + all changes in single transaction)
             progressHandler(0.95, "Saving changes...")
-            let shouldAdvance = await failureTracker.shouldAdvanceHistoryId(
-                hadFailures: fetchResult.hasFailures,
-                latestHistoryId: historyResult.latestHistoryId
-            )
+
+            // Don't advance historyId if history collection was truncated - we need to
+            // retry from the same point to get remaining pages
+            let shouldAdvance: Bool
+            if historyResult.wasTruncated {
+                log.info("History was truncated - will retry from same point on next sync")
+                shouldAdvance = false
+            } else {
+                shouldAdvance = await failureTracker.shouldAdvanceHistoryId(
+                    hadFailures: fetchResult.hasFailures,
+                    latestHistoryId: historyResult.latestHistoryId
+                )
+            }
 
             // Use atomic finalizeSync to prevent data loss if app crashes between
             // setting historyId and saving messages
@@ -219,15 +228,12 @@ final class IncrementalSyncOrchestrator {
             await MainActor.run {
                 progressHandler(progress, "Recovering... \(processed)/\(total)")
             }
-        } messageHandler: { [weak self] message in
-            guard let self = self else {
-                Log.warning("IncrementalSyncOrchestrator deallocated during history recovery - message \(message.id) not saved", category: .sync)
-                return
-            }
-            await self.messagePersister.saveMessage(
+        } messageHandler: { [messagePersister, myAliases] message in
+            // Capture dependencies strongly to prevent message loss if orchestrator is deallocated
+            await messagePersister.saveMessage(
                 message,
                 labelIds: labelIds,
-                myAliases: self.myAliases,
+                myAliases: myAliases,
                 in: context
             )
         }
