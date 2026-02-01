@@ -34,8 +34,11 @@ final class ViewModelTaskManager {
     ///   - operation: The async operation to perform
     func run(_ key: String, priority: TaskPriority? = nil, operation: @escaping () async -> Void) {
         tasks[key]?.cancel()
-        tasks[key] = Task(priority: priority) {
+        tasks[key] = Task(priority: priority) { [weak self] in
             await operation()
+            _ = await MainActor.run {
+                self?.tasks.removeValue(forKey: key)
+            }
         }
     }
 
@@ -48,8 +51,12 @@ final class ViewModelTaskManager {
     ///   - operation: The async operation to perform
     func runDetached(_ key: String, operation: @Sendable @escaping () async -> Void) {
         tasks[key]?.cancel()
+        weak let weakSelf = self
         tasks[key] = Task.detached {
             await operation()
+            _ = await MainActor.run {
+                weakSelf?.tasks.removeValue(forKey: key)
+            }
         }
     }
 

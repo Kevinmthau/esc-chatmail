@@ -34,7 +34,7 @@ struct VirtualScrollChatView: View {
                         }
                         .id(message.objectID) // Use stable objectID instead of volatile index
                         .onAppear {
-                            scrollState.scrollTo(index: index)
+                            scrollState.markIndexVisible(index)
                         }
                     }
 

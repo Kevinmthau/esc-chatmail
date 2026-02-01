@@ -14,6 +14,7 @@ final class ConversationSelectionService: ObservableObject {
 
     private let messageActions: MessageActions
     private let coreDataStack: CoreDataStack
+    private let taskManager = ViewModelTaskManager()
 
     // MARK: - Initialization
 
@@ -87,7 +88,7 @@ final class ConversationSelectionService: ObservableObject {
         isSelecting = false
 
         // Single batch operation instead of sequential loop
-        Task {
+        taskManager.run("archive") { [messageActions] in
             await messageActions.archiveConversations(conversations: conversationsToArchive)
         }
     }
@@ -111,8 +112,13 @@ final class ConversationSelectionService: ObservableObject {
         isSelecting = false
 
         // Single batch operation instead of sequential loop
-        Task {
+        taskManager.run("reportSpam") { [messageActions] in
             await messageActions.reportSpamConversations(conversations: conversationsToReport)
         }
+    }
+
+    /// Cancels any pending batch operations
+    func cancelTasks() {
+        taskManager.cancelAll()
     }
 }

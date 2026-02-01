@@ -18,6 +18,7 @@ final class ConversationFilterService: ObservableObject {
     // MARK: - Private State
 
     private var filteredCache: FilteredConversationsCache?
+    private var contactsLoadTask: Task<Void, Never>?
 
     // MARK: - Initialization
 
@@ -93,7 +94,8 @@ final class ConversationFilterService: ObservableObject {
 
     /// Loads all contact emails into cache for filtering
     func loadContactsCache() {
-        Task.detached { [contactsService, weak self] in
+        contactsLoadTask?.cancel()
+        contactsLoadTask = Task.detached { [contactsService, weak self] in
             let authStatus = await MainActor.run { contactsService.authorizationStatus }
             if authStatus != .authorized {
                 let granted = await contactsService.requestAccess()
@@ -119,6 +121,12 @@ final class ConversationFilterService: ObservableObject {
                 Log.error("Failed to load contacts", category: .general, error: error)
             }
         }
+    }
+
+    /// Cancels any pending tasks
+    func cancelTasks() {
+        contactsLoadTask?.cancel()
+        contactsLoadTask = nil
     }
 }
 

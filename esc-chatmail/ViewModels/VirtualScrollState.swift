@@ -26,7 +26,9 @@ final class VirtualScrollState: ObservableObject {
         loadInitialMessages()
     }
 
-    func scrollTo(index: Int) {
+    /// Notifies the scroll state that a message at the given index is now visible.
+    /// Called from onAppear for each message in the LazyVStack.
+    func markIndexVisible(_ index: Int) {
         // Skip small position changes to avoid excessive updates during scroll
         // This prevents 10+ calls per scroll when each visible message fires onAppear
         guard abs(index - scrollPosition) > 2 else { return }
