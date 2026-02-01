@@ -60,19 +60,26 @@ extension PendingActionsManager {
 
         } catch {
             Log.error("Failed to process action: \(error)", category: .sync)
+
+            let shouldRetry = shouldRetryError(error)
             await handleActionFailure(
                 objectID: objectID,
                 retryCount: retryCount,
+                shouldRetry: shouldRetry,
                 context: context
             )
 
-            // Wait before processing next action using exponential backoff
-            // Uses the PRE-increment retryCount intentionally:
-            // - After 1st failure (retryCount was 0): 2^0 * base = 2s
-            // - After 2nd failure (retryCount was 1): 2^1 * base = 4s
-            // - After 3rd failure (retryCount was 2): 2^2 * base = 8s, etc.
-            let delay = baseRetryDelay * pow(2.0, Double(retryCount))
-            try? await Task.sleep(nanoseconds: UInt64(min(delay, 30.0) * 1_000_000_000))
+            // Only apply backoff delay for retryable errors
+            // Non-retryable errors (404, 401, validation) skip delay since retrying won't help
+            if shouldRetry {
+                // Wait before processing next action using exponential backoff
+                // Uses the PRE-increment retryCount intentionally:
+                // - After 1st failure (retryCount was 0): 2^0 * base = 2s
+                // - After 2nd failure (retryCount was 1): 2^1 * base = 4s
+                // - After 3rd failure (retryCount was 2): 2^2 * base = 8s, etc.
+                let delay = baseRetryDelay * pow(2.0, Double(retryCount))
+                try? await Task.sleep(nanoseconds: UInt64(min(delay, 30.0) * 1_000_000_000))
+            }
         }
     }
 
@@ -106,14 +113,50 @@ extension PendingActionsManager {
         }
     }
 
+    /// Determines if an error is retryable.
+    /// Non-retryable errors (auth failures, not found, validation) should not waste retry attempts.
+    private func shouldRetryError(_ error: Error) -> Bool {
+        // Validation errors from our own code - never retry
+        if error is PendingActionError { return false }
+
+        // API errors - check specific cases
+        if let apiError = error as? APIError {
+            switch apiError {
+            case .authenticationError, .notFound:
+                // 401/403 and 404 - resource doesn't exist or no access, retrying won't help
+                return false
+            case .rateLimited, .serverError, .networkError, .timeout:
+                // Transient errors that may succeed on retry
+                return true
+            case .invalidURL, .decodingError, .invalidData, .historyIdExpired:
+                // These indicate bugs or state issues, not transient failures
+                return false
+            }
+        }
+
+        // For unknown errors, default to retry (conservative approach)
+        return true
+    }
+
     /// Handles a failed action by incrementing retry count.
-    func handleActionFailure(objectID: NSManagedObjectID, retryCount: Int16, context: NSManagedObjectContext) async {
+    /// - Parameters:
+    ///   - shouldRetry: If false, immediately abandons the action without incrementing retry count
+    func handleActionFailure(objectID: NSManagedObjectID, retryCount: Int16, shouldRetry: Bool, context: NSManagedObjectContext) async {
         let shouldNotify = await context.perform {
             do {
                 guard let action = try context.existingObject(with: objectID) as? PendingAction else {
                     Log.warning("PendingAction not found for failure handling", category: .sync)
                     return false
                 }
+
+                // If error is not retryable, abandon immediately without wasting retry attempts
+                if !shouldRetry {
+                    action.setValue("abandoned", forKey: "status")
+                    Log.warning("Action abandoned (non-retryable error)", category: .sync)
+                    try context.save()
+                    return true  // Notify UI
+                }
+
                 let newRetryCount = retryCount + 1
                 action.setValue(newRetryCount, forKey: "retryCount")
 

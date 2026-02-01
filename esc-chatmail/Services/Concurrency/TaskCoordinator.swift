@@ -38,6 +38,21 @@ public actor TaskCoordinator<T: Sendable> {
     public var hasInFlightTask: Bool {
         currentTask != nil
     }
+
+    /// Convenience method that executes an operation with automatic task cleanup.
+    /// Returns the existing in-flight task's result if one exists, otherwise creates and runs a new task.
+    /// The task reference is automatically cleared when the operation completes.
+    /// - Parameter operation: The async operation to execute
+    /// - Returns: The result of the operation
+    public func execute(_ operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        if let existing = currentTask {
+            return try await existing.value
+        }
+        let task = Task<T, Error> { try await operation() }
+        currentTask = task
+        defer { currentTask = nil }
+        return try await task.value
+    }
 }
 
 /// A variant that supports non-throwing tasks.
@@ -64,5 +79,20 @@ public actor TaskCoordinatorNonThrowing<T: Sendable> {
     /// Returns whether there's currently an in-flight task.
     public var hasInFlightTask: Bool {
         currentTask != nil
+    }
+
+    /// Convenience method that executes an operation with automatic task cleanup.
+    /// Returns the existing in-flight task's result if one exists, otherwise creates and runs a new task.
+    /// The task reference is automatically cleared when the operation completes.
+    /// - Parameter operation: The async operation to execute
+    /// - Returns: The result of the operation
+    public func execute(_ operation: @escaping @Sendable () async -> T) async -> T {
+        if let existing = currentTask {
+            return await existing.value
+        }
+        let task = Task<T, Never> { await operation() }
+        currentTask = task
+        defer { currentTask = nil }
+        return await task.value
     }
 }

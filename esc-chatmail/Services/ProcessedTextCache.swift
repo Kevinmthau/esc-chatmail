@@ -104,6 +104,10 @@ actor ProcessedTextCache: MemoryWarningHandler {
                 guard !Task.isCancelled else { break }
 
                 let result = ProcessedTextCache.processMessage(messageId: messageId, handler: handler)
+
+                // Check again before cache write to prevent cancelled tasks from writing stale data
+                guard !Task.isCancelled else { break }
+
                 await self?.set(messageId: messageId, plainText: result.plainText, hasRichContent: result.hasRichContent, quotedParts: result.quotedParts)
             }
 

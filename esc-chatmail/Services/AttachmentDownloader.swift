@@ -85,18 +85,14 @@ final class AttachmentDownloader: ObservableObject {
     }
 
     private func downloadAttachmentWithRetry(_ attachment: Attachment, messageId: String, attachmentId: String, in context: NSManagedObjectContext) async {
-        await MainActor.run {
-            activeDownloads.insert(attachmentId)
-            downloadProgress[attachmentId] = 0.0
-        }
+        activeDownloads.insert(attachmentId)
+        downloadProgress[attachmentId] = 0.0
 
         do {
             // Download attachment data from Gmail with automatic retry
             let data = try await downloadWithRetry(messageId: messageId, attachmentId: attachmentId)
-            
-            await MainActor.run {
-                downloadProgress[attachmentId] = 0.5
-            }
+
+            downloadProgress[attachmentId] = 0.5
             
             // Generate file extension and paths
             // Prefer extension from original filename, fall back to MIME type mapping
@@ -149,10 +145,8 @@ final class AttachmentDownloader: ObservableObject {
                 attachment.state = .failed
                 coreDataStack.saveIfNeeded(context: context)
 
-                await MainActor.run {
-                    activeDownloads.remove(attachmentId)
-                    downloadProgress.removeValue(forKey: attachmentId)
-                }
+                activeDownloads.remove(attachmentId)
+                downloadProgress.removeValue(forKey: attachmentId)
                 return
             }
 
@@ -171,11 +165,9 @@ final class AttachmentDownloader: ObservableObject {
 
             // Update state to downloaded
             attachment.state = .downloaded
-            
-            await MainActor.run {
-                downloadProgress[attachmentId] = 1.0
-            }
-            
+
+            downloadProgress[attachmentId] = 1.0
+
             // Save context
             coreDataStack.saveIfNeeded(context: context)
             
@@ -211,11 +203,9 @@ final class AttachmentDownloader: ObservableObject {
                 retryAttempts.removeValue(forKey: attachmentId)
             }
         }
-        
-        await MainActor.run {
-            activeDownloads.remove(attachmentId)
-            downloadProgress.removeValue(forKey: attachmentId)
-        }
+
+        activeDownloads.remove(attachmentId)
+        downloadProgress.removeValue(forKey: attachmentId)
     }
     
     func retryFailedDownload(for attachment: Attachment) async {
