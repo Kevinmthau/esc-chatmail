@@ -105,11 +105,21 @@ struct SyncTimeCalculator {
 
         // Try install timestamp
         if install > 0 {
-            return install - config.installBuffer
+            var startTime = install - config.installBuffer
+            if let maxWindow = config.maxWindow {
+                let minAllowedTime = now - maxWindow
+                startTime = max(startTime, minAllowedTime)
+            }
+            return startTime
         }
 
         // Fallback
-        return now - config.fallbackWindow
+        var startTime = now - config.fallbackWindow
+        if let maxWindow = config.maxWindow {
+            let minAllowedTime = now - maxWindow
+            startTime = max(startTime, minAllowedTime)
+        }
+        return startTime
     }
 
     /// Calculates the start time as a Date

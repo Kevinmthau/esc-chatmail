@@ -7,6 +7,35 @@ import CoreData
 /// status updates, and cleanup of completed actions.
 extension PendingActionsManager {
 
+    /// Resets stuck processing actions to failed so they can be retried.
+    func recoverStuckProcessingActions() async {
+        let context = coreDataStack.newBackgroundContext()
+        let cutoffDate = Date().addingTimeInterval(-processingStaleInterval)
+
+        await context.perform {
+            let request = NSFetchRequest<PendingAction>(entityName: "PendingAction")
+            let statusPredicate = NSPredicate(format: "status == %@", "processing")
+            let stalePredicate = NSCompoundPredicate(orPredicateWithSubpredicates: [
+                NSPredicate(format: "lastAttempt == nil"),
+                NSPredicate(format: "lastAttempt < %@", cutoffDate as NSDate)
+            ])
+            request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [statusPredicate, stalePredicate])
+
+            do {
+                let stuckActions = try context.fetch(request)
+                guard !stuckActions.isEmpty else { return }
+
+                for action in stuckActions {
+                    action.setValue("failed", forKey: "status")
+                }
+                try context.save()
+                Log.warning("Recovered \(stuckActions.count) stuck pending actions", category: .sync)
+            } catch {
+                Log.error("Failed to recover stuck pending actions", category: .sync, error: error)
+            }
+        }
+    }
+
     /// Fetches the next pending action to process.
     func fetchNextPendingAction(context: NSManagedObjectContext) async -> PendingAction? {
         await context.perform {

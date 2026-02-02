@@ -61,34 +61,65 @@ final class AttachmentDownloader: ObservableObject {
         }
 
         for data in attachmentData {
-            // Re-fetch the attachment inside context.perform for thread-safe access
-            let attachment: Attachment? = await context.perform {
-                try? context.existingObject(with: data.objectID) as? Attachment
-            }
-            guard let attachment = attachment else { continue }
-            await downloadAttachment(attachment, messageId: data.messageId, in: context)
+            await downloadAttachment(attachmentObjectID: data.objectID, messageId: data.messageId, in: context)
         }
     }
     
-    func downloadAttachment(_ attachment: Attachment, messageId: String, in context: NSManagedObjectContext) async {
-        guard let attachmentId = attachment.id else { return }
+    func downloadAttachment(attachmentObjectID: NSManagedObjectID, messageId: String, in context: NSManagedObjectContext) async {
+        let attachmentId = await context.perform {
+            (try? context.existingObject(with: attachmentObjectID) as? Attachment)?.id
+        }
+        guard let attachmentId = attachmentId else { return }
 
         // Skip downloading attachments with local IDs - these are from sent messages and don't exist on Gmail
-        if attachment.isLocalAttachment {
-            Log.debug("Skipping download for local attachment: \(attachmentId)", category: .attachment)
-            attachment.state = .downloaded
-            coreDataStack.saveIfNeeded(context: context)
+        let didSkipLocal = await context.perform {
+            guard let attachmentInContext = try? context.existingObject(with: attachmentObjectID) as? Attachment else {
+                return false
+            }
+            if attachmentInContext.isLocalAttachment {
+                Log.debug("Skipping download for local attachment: \(attachmentId)", category: .attachment)
+                attachmentInContext.state = .downloaded
+                do {
+                    try context.save()
+                } catch {
+                    Log.error("Failed to save local attachment state for \(attachmentId)", category: .attachment, error: error)
+                }
+                return true
+            }
+            return false
+        }
+        if didSkipLocal { return }
+
+        await downloadAttachmentWithRetry(
+            attachmentId: attachmentId,
+            attachmentObjectID: attachmentObjectID,
+            messageId: messageId,
+            in: context
+        )
+    }
+
+    private func downloadAttachmentWithRetry(
+        attachmentId: String,
+        attachmentObjectID: NSManagedObjectID,
+        messageId: String,
+        in context: NSManagedObjectContext
+    ) async {
+        if activeDownloads.contains(attachmentId) {
+            Log.debug("Download already in progress for attachment: \(attachmentId)", category: .attachment)
             return
         }
 
-        await downloadAttachmentWithRetry(attachment, messageId: messageId, attachmentId: attachmentId, in: context)
-    }
-
-    private func downloadAttachmentWithRetry(_ attachment: Attachment, messageId: String, attachmentId: String, in context: NSManagedObjectContext) async {
         activeDownloads.insert(attachmentId)
         downloadProgress[attachmentId] = 0.0
 
         do {
+            let attachmentInfo = await context.perform {
+                guard let attachmentInContext = try? context.existingObject(with: attachmentObjectID) as? Attachment else {
+                    return (mimeType: "application/octet-stream", filename: "")
+                }
+                return (mimeType: attachmentInContext.mimeType, filename: attachmentInContext.filename)
+            }
+
             // Download attachment data from Gmail with automatic retry
             let data = try await downloadWithRetry(messageId: messageId, attachmentId: attachmentId)
 
@@ -96,8 +127,8 @@ final class AttachmentDownloader: ObservableObject {
             
             // Generate file extension and paths
             // Prefer extension from original filename, fall back to MIME type mapping
-            let mimeType = attachment.mimeType
-            let filenameExt = (attachment.filename as NSString).pathExtension.lowercased()
+            let mimeType = attachmentInfo.mimeType
+            let filenameExt = (attachmentInfo.filename as NSString).pathExtension.lowercased()
             let ext = filenameExt.isEmpty ? AttachmentPaths.fileExtension(for: mimeType) : filenameExt
             let originalPath = AttachmentPaths.originalPath(idOrUUID: attachmentId, ext: ext)
             let previewPath = AttachmentPaths.previewPath(idOrUUID: attachmentId)
@@ -136,40 +167,51 @@ final class AttachmentDownloader: ObservableObject {
                 return (savedOriginal, width, height, pageCount, savedPreview)
             }.value
 
-            // Update Core Data properties on MainActor
-            if processedResult.savedOriginal {
-                attachment.localURL = originalPath
-            } else {
-                Log.warning("Failed to save original attachment file for ID: \(attachmentId)", category: .attachment)
-                // Mark as failed so retry can work
-                attachment.state = .failed
-                coreDataStack.saveIfNeeded(context: context)
+            let saveSucceeded = await context.perform {
+                guard let attachmentInContext = try? context.existingObject(with: attachmentObjectID) as? Attachment else {
+                    return false
+                }
 
+                if processedResult.savedOriginal {
+                    attachmentInContext.localURL = originalPath
+                } else {
+                    Log.warning("Failed to save original attachment file for ID: \(attachmentId)", category: .attachment)
+                    attachmentInContext.state = .failed
+                }
+
+                if let width = processedResult.width {
+                    attachmentInContext.width = width
+                }
+                if let height = processedResult.height {
+                    attachmentInContext.height = height
+                }
+                if let pageCount = processedResult.pageCount {
+                    attachmentInContext.pageCount = pageCount
+                }
+                if processedResult.savedPreview {
+                    attachmentInContext.previewURL = previewPath
+                }
+
+                if processedResult.savedOriginal {
+                    attachmentInContext.state = .downloaded
+                }
+
+                do {
+                    try context.save()
+                    return true
+                } catch {
+                    Log.error("Failed to save attachment updates for \(attachmentId)", category: .attachment, error: error)
+                    return false
+                }
+            }
+
+            if !saveSucceeded || !processedResult.savedOriginal {
                 activeDownloads.remove(attachmentId)
                 downloadProgress.removeValue(forKey: attachmentId)
                 return
             }
 
-            if let width = processedResult.width {
-                attachment.width = width
-            }
-            if let height = processedResult.height {
-                attachment.height = height
-            }
-            if let pageCount = processedResult.pageCount {
-                attachment.pageCount = pageCount
-            }
-            if processedResult.savedPreview {
-                attachment.previewURL = previewPath
-            }
-
-            // Update state to downloaded
-            attachment.state = .downloaded
-
             downloadProgress[attachmentId] = 1.0
-
-            // Save context
-            coreDataStack.saveIfNeeded(context: context)
             
             // Clear retry attempts on success
             retryAttempts.removeValue(forKey: attachmentId)
@@ -193,13 +235,26 @@ final class AttachmentDownloader: ObservableObject {
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
 
                 // Retry the download
-                await downloadAttachmentWithRetry(attachment, messageId: messageId, attachmentId: attachmentId, in: context)
+                await downloadAttachmentWithRetry(
+                    attachmentId: attachmentId,
+                    attachmentObjectID: attachmentObjectID,
+                    messageId: messageId,
+                    in: context
+                )
                 return
             } else {
                 // Max retries reached, mark as permanently failed
                 Log.warning("Attachment \(attachmentId) permanently failed after \(maxRetryAttempts) attempts", category: .attachment)
-                attachment.state = .failed
-                coreDataStack.saveIfNeeded(context: context)
+                await context.perform {
+                    if let attachmentInContext = try? context.existingObject(with: attachmentObjectID) as? Attachment {
+                        attachmentInContext.state = .failed
+                        do {
+                            try context.save()
+                        } catch {
+                            Log.error("Failed to save failed attachment state for \(attachmentId)", category: .attachment, error: error)
+                        }
+                    }
+                }
                 retryAttempts.removeValue(forKey: attachmentId)
             }
         }
@@ -211,24 +266,27 @@ final class AttachmentDownloader: ObservableObject {
     func retryFailedDownload(for attachment: Attachment) async {
         guard let message = attachment.message,
               let attachmentId = attachment.id else { return }
+        let attachmentObjectID = attachment.objectID
 
         // Reset retry counter for manual retry
         retryAttempts.removeValue(forKey: attachmentId)
 
         let context = coreDataStack.newBackgroundContext()
-        let attachmentInContext: Attachment
-        do {
-            guard let att = try context.existingObject(with: attachment.objectID) as? Attachment else { return }
-            attachmentInContext = att
-        } catch {
-            Log.warning("Failed to fetch attachment for retry", category: .attachment)
-            return
+        let saveSucceeded = await context.perform {
+            guard let attachmentInContext = try? context.existingObject(with: attachmentObjectID) as? Attachment else {
+                return false
+            }
+            attachmentInContext.state = .queued
+            do {
+                try context.save()
+                return true
+            } catch {
+                Log.warning("Failed to save attachment for retry", category: .attachment)
+                return false
+            }
         }
-
-        attachmentInContext.state = .queued
-        coreDataStack.saveIfNeeded(context: context)
-
-        await downloadAttachment(attachmentInContext, messageId: message.id, in: context)
+        if !saveSucceeded { return }
+        await downloadAttachment(attachmentObjectID: attachmentObjectID, messageId: message.id, in: context)
     }
     
     func downloadAttachmentIfNeeded(for attachment: Attachment) async {
@@ -244,21 +302,26 @@ final class AttachmentDownloader: ObservableObject {
         }
 
         let context = coreDataStack.newBackgroundContext()
-        let attachmentInContext: Attachment
-        do {
-            guard let att = try context.existingObject(with: attachment.objectID) as? Attachment else { return }
-            attachmentInContext = att
-        } catch {
-            Log.warning("Failed to fetch attachment for download check", category: .attachment)
-            return
-        }
+        let attachmentObjectID = attachment.objectID
+        let shouldProceed = await context.perform {
+            guard let attachmentInContext = try? context.existingObject(with: attachmentObjectID) as? Attachment else {
+                return false
+            }
 
-        // Reset state to queued if re-downloading
-        if attachmentInContext.state == .downloaded || attachmentInContext.state == .uploaded {
-            attachmentInContext.state = .queued
-        }
+            if attachmentInContext.state == .downloaded || attachmentInContext.state == .uploaded {
+                attachmentInContext.state = .queued
+            }
 
-        await downloadAttachment(attachmentInContext, messageId: message.id, in: context)
+            do {
+                try context.save()
+                return true
+            } catch {
+                Log.warning("Failed to save attachment state for download check", category: .attachment)
+                return false
+            }
+        }
+        if !shouldProceed { return }
+        await downloadAttachment(attachmentObjectID: attachmentObjectID, messageId: message.id, in: context)
     }
     
     private func downloadWithRetry(messageId: String, attachmentId: String) async throws -> Data {

@@ -28,6 +28,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
 
     let maxRetries = 5
     let baseRetryDelay: TimeInterval = 2.0
+    let processingStaleInterval: TimeInterval = 10 * 60
 
     // MARK: - State
 
@@ -59,6 +60,10 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
     private func ensureInitialized() {
         guard !isInitialized else { return }
         isInitialized = true
+
+        Task { [weak self] in
+            await self?.recoverStuckProcessingActions()
+        }
 
         networkMonitor.onConnectivityChange = { [weak self] isConnected in
             guard isConnected else { return }
@@ -175,6 +180,8 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
 
     public func processAllPendingActions() async {
         ensureInitialized()
+
+        await recoverStuckProcessingActions()
 
         guard !isProcessing else { return }
         guard networkMonitor.isConnected else { return }
