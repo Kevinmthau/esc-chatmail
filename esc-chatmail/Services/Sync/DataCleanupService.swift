@@ -39,6 +39,7 @@ struct DataCleanupService: Sendable {
     /// Runs incremental cleanup (no duplicate message check).
     /// - Parameter context: The Core Data context
     func runIncrementalCleanup(in context: NSManagedObjectContext) async {
+        await removeDuplicateMessages(in: context)
         await removeDuplicateConversations(in: context)
         await mergeActiveConversationDuplicates(in: context)
         await fixAndMergeIncorrectParticipantHashes(in: context)

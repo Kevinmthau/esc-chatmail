@@ -287,7 +287,23 @@ final class SyncReconciliation: Sendable {
                 return (stats, modifiedConversationIDs)
             }
 
-            let localMessageDict = Dictionary(uniqueKeysWithValues: localMessages.map { ($0.id, $0) })
+            let groupedMessages = Dictionary(grouping: localMessages, by: { $0.id })
+            var localMessageDict: [String: Message] = [:]
+            localMessageDict.reserveCapacity(groupedMessages.count)
+
+            for (id, messages) in groupedMessages {
+                if messages.count > 1 {
+                    log.error("Duplicate Message id \(id) in local DB during reconciliation; keeping most recent")
+                }
+
+                let preferred = messages.max { lhs, rhs in
+                    let lhsDate = lhs.localModifiedAt ?? lhs.internalDate
+                    let rhsDate = rhs.localModifiedAt ?? rhs.internalDate
+                    return lhsDate < rhsDate
+                } ?? messages[0]
+
+                localMessageDict[id] = preferred
+            }
 
             // Pre-fetch INBOX label once for all messages that might need it
             let labelRequest = Label.fetchRequest()

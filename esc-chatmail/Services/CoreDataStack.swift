@@ -67,6 +67,7 @@ final class CoreDataStack: @unchecked Sendable {
 
     lazy var persistentContainer: NSPersistentContainer = {
         let container = NSPersistentContainer(name: "ESCChatmail")
+        enforceUniquenessConstraints(in: container)
 
         // Configure for automatic migration
         let description = container.persistentStoreDescriptions.first
@@ -83,6 +84,21 @@ final class CoreDataStack: @unchecked Sendable {
         container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
         return container
     }()
+
+    private func enforceUniquenessConstraints(in container: NSPersistentContainer) {
+        guard let messageEntity = container.managedObjectModel.entitiesByName["Message"] else {
+            Log.error("Missing Message entity for uniqueness constraints", category: .coreData)
+            return
+        }
+
+        let constraint: [String] = ["id"]
+        if messageEntity.uniquenessConstraints.contains(where: { $0 == constraint }) {
+            return
+        }
+
+        messageEntity.uniquenessConstraints.append(constraint)
+        Log.info("Applied uniqueness constraint on Message.id", category: .coreData)
+    }
 
     private func loadPersistentStores(for container: NSPersistentContainer) {
         container.loadPersistentStores { [weak self] storeDescription, error in
