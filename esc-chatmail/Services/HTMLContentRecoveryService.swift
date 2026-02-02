@@ -45,10 +45,10 @@ actor HTMLContentRecoveryService {
         // Check this part for text/html
         if part.mimeType == "text/html" {
             if let data = part.body?.data {
-                return decodeBase64(data)
+                return decodeBody(data, headers: part.headers)
             } else if let attachmentId = part.body?.attachmentId {
                 // Large HTML body - fetch via attachment API
-                return await fetchLargeBodyContent(attachmentId: attachmentId, messageId: messageId)
+                return await fetchLargeBodyContent(attachmentId: attachmentId, messageId: messageId, headers: part.headers)
             }
         }
 
@@ -66,11 +66,12 @@ actor HTMLContentRecoveryService {
 
     /// Fetches large body content via the attachment API
     /// Gmail returns body parts larger than ~25KB with attachmentId instead of inline data
-    private func fetchLargeBodyContent(attachmentId: String, messageId: String) async -> String? {
+    private func fetchLargeBodyContent(attachmentId: String, messageId: String, headers: [MessageHeader]?) async -> String? {
         do {
             let apiClient = await MainActor.run { GmailAPIClient.shared }
             let attachmentData = try await apiClient.getAttachment(messageId: messageId, attachmentId: attachmentId)
-            return String(data: attachmentData, encoding: .utf8)
+            let text = String(decoding: attachmentData, as: UTF8.self)
+            return decodeTransferEncoding(text, headers: headers)
         } catch {
             Log.warning("Failed to fetch large body \(attachmentId) for message \(messageId): \(error)", category: .ui)
             return nil
@@ -78,7 +79,15 @@ actor HTMLContentRecoveryService {
     }
 
     /// Decodes Gmail's URL-safe Base64 encoding
-    private func decodeBase64(_ data: String) -> String? {
+    private func decodeBody(_ data: String, headers: [MessageHeader]?) -> String? {
+        guard let decodedData = decodeBase64Data(data) else {
+            return nil
+        }
+        let text = String(decoding: decodedData, as: UTF8.self)
+        return decodeTransferEncoding(text, headers: headers)
+    }
+
+    private func decodeBase64Data(_ data: String) -> Data? {
         let base64String = data
             .replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
@@ -93,6 +102,28 @@ actor HTMLContentRecoveryService {
             return nil
         }
 
-        return String(data: decodedData, encoding: .utf8)
+        return decodedData
+    }
+
+    private func decodeTransferEncoding(_ text: String, headers: [MessageHeader]?) -> String {
+        let encoding = headers?.first { $0.name.lowercased() == "content-transfer-encoding" }?.value.lowercased()
+        if encoding?.contains("quoted-printable") == true {
+            return QuotedPrintableDecoder.decode(text)
+        }
+        if encoding == nil, looksQuotedPrintable(text) {
+            return QuotedPrintableDecoder.decode(text)
+        }
+        return text
+    }
+
+    private func looksQuotedPrintable(_ text: String) -> Bool {
+        if text.contains("=\r\n") || text.contains("=\n") {
+            return true
+        }
+        let lower = text.lowercased()
+        if lower.contains("=3d") || lower.contains("=3c") || lower.contains("=3e") {
+            return true
+        }
+        return false
     }
 }

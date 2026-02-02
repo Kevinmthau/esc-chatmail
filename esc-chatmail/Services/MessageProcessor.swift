@@ -302,17 +302,17 @@ class MessageProcessor {
         func traverse(_ part: MessagePart) async {
             if part.mimeType == "text/html" {
                 if let data = part.body?.data {
-                    await box.setHTML(decodeBase64(data))
+                    await box.setHTML(decodeBody(data, headers: part.headers))
                 } else if let attachmentId = part.body?.attachmentId {
                     // Large HTML body - fetch via attachment API
-                    await box.setHTML(await fetchLargeBodyContent(attachmentId: attachmentId, messageId: messageId))
+                    await box.setHTML(await fetchLargeBodyContent(attachmentId: attachmentId, messageId: messageId, headers: part.headers))
                 }
             } else if part.mimeType == "text/plain" {
                 if let data = part.body?.data {
-                    await box.setPlainText(decodeBase64(data))
+                    await box.setPlainText(decodeBody(data, headers: part.headers))
                 } else if let attachmentId = part.body?.attachmentId {
                     // Large plain text body - fetch via attachment API
-                    await box.setPlainText(await fetchLargeBodyContent(attachmentId: attachmentId, messageId: messageId))
+                    await box.setPlainText(await fetchLargeBodyContent(attachmentId: attachmentId, messageId: messageId, headers: part.headers))
                 }
             }
 
@@ -339,33 +339,65 @@ class MessageProcessor {
 
     /// Fetches large body content via the attachment API
     /// Gmail returns body parts larger than ~25KB with attachmentId instead of inline data
-    private func fetchLargeBodyContent(attachmentId: String, messageId: String) async -> String? {
+    private func fetchLargeBodyContent(attachmentId: String, messageId: String, headers: [MessageHeader]?) async -> String? {
         do {
             let apiClient = await MainActor.run { GmailAPIClient.shared }
             let attachmentData = try await apiClient.getAttachment(messageId: messageId, attachmentId: attachmentId)
-            return String(data: attachmentData, encoding: .utf8)
+            let text = String(decoding: attachmentData, as: UTF8.self)
+            return decodeTransferEncoding(text, headers: headers)
         } catch {
             Log.warning("Failed to fetch large body \(attachmentId) for message \(messageId): \(error)", category: .sync)
             return nil
         }
     }
     
-    private func decodeBase64(_ data: String) -> String? {
-        let base64String = data.replacingOccurrences(of: "-", with: "+")
-                              .replacingOccurrences(of: "_", with: "/")
-        
+    private func decodeBody(_ data: String, headers: [MessageHeader]?) -> String? {
+        guard let decodedData = decodeBase64Data(data) else {
+            return nil
+        }
+        let text = String(decoding: decodedData, as: UTF8.self)
+        return decodeTransferEncoding(text, headers: headers)
+    }
+
+    private func decodeBase64Data(_ data: String) -> Data? {
+        let base64String = data
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+
         var paddedBase64 = base64String
         let remainder = base64String.count % 4
         if remainder > 0 {
             paddedBase64 = base64String + String(repeating: "=", count: 4 - remainder)
         }
-        
+
         guard let decodedData = Data(base64Encoded: paddedBase64) else {
             Log.debug("Failed to decode Base64", category: .sync)
             return nil
         }
-        
-        return String(data: decodedData, encoding: .utf8)
+
+        return decodedData
+    }
+
+    private func decodeTransferEncoding(_ text: String, headers: [MessageHeader]?) -> String {
+        let encoding = headers?.first { $0.name.lowercased() == "content-transfer-encoding" }?.value.lowercased()
+        if encoding?.contains("quoted-printable") == true {
+            return QuotedPrintableDecoder.decode(text)
+        }
+        if encoding == nil, looksQuotedPrintable(text) {
+            return QuotedPrintableDecoder.decode(text)
+        }
+        return text
+    }
+
+    private func looksQuotedPrintable(_ text: String) -> Bool {
+        if text.contains("=\r\n") || text.contains("=\n") {
+            return true
+        }
+        let lower = text.lowercased()
+        if lower.contains("=3d") || lower.contains("=3c") || lower.contains("=3e") {
+            return true
+        }
+        return false
     }
     
     private func createCleanedSnippet(html: String?, plainText: String?, snippet: String?, isFromMe: Bool) -> String? {
