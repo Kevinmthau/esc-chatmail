@@ -32,7 +32,7 @@ struct ComposeView: View {
     }
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack(alignment: .top) {
                 // Main content
                 VStack(spacing: 0) {

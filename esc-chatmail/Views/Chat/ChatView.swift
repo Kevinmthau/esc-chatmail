@@ -58,7 +58,6 @@ struct ChatView: View {
                 }
                 .padding(.horizontal)
                 .padding(.top, 8)
-                .padding(.bottom, 80)
                 .contentShape(Rectangle())
                 .onTapGesture {
                     isTextFieldFocused = false

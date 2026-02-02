@@ -21,10 +21,10 @@ struct ConversationListView: View {
     }
 
     var body: some View {
-        ZStack {
-            conversationList
-            bottomBar
-        }
+        conversationList
+            .safeAreaInset(edge: .bottom) {
+                bottomBar
+            }
     }
 
     // MARK: - Conversation List
@@ -107,9 +107,6 @@ struct ConversationListView: View {
         .onChange(of: viewModel.currentFilter) { _, _ in
             updateFilteredConversations()
         }
-        .safeAreaInset(edge: .bottom) {
-            Color.clear.frame(height: 80)
-        }
     }
 
     private func selectionButton(for conversation: Conversation) -> some View {
@@ -152,8 +149,7 @@ struct ConversationListView: View {
     // MARK: - Bottom Bar
 
     private var bottomBar: some View {
-        VStack {
-            Spacer()
+        Group {
             if viewModel.isSelecting && !viewModel.selectedConversationIDs.isEmpty {
                 selectionActionBar
             } else {
