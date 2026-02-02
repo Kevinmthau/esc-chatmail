@@ -105,6 +105,25 @@ final class ProcessedTextCacheTests: XCTestCase {
         // Should detect as rich due to high link count
     }
 
+    func testHasRichContent_transactionalTableLayout_returnsTrue() {
+        let messageId = "test-transactional-\(UUID().uuidString)"
+        let handler = HTMLContentHandler.shared
+        let substantialText = String(repeating: "Security alert details. ", count: 20)
+        let html = """
+        <html><body>
+        <table><tr><td>Header</td></tr></table>
+        <table><tr><td>\(substantialText)</td></tr></table>
+        </body></html>
+        """
+
+        _ = handler.saveHTML(html, for: messageId)
+        let result = ProcessedTextCache.processMessage(messageId: messageId, handler: handler)
+
+        XCTAssertTrue(result.hasRichContent)
+
+        handler.deleteHTML(for: messageId)
+    }
+
     // MARK: - List Item Detection Tests
 
     func testIsListItem_numberedList_singleDigit() {
