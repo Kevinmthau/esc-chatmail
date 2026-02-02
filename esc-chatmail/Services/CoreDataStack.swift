@@ -92,11 +92,11 @@ final class CoreDataStack: @unchecked Sendable {
         }
 
         let constraint: [String] = ["id"]
-        if messageEntity.uniquenessConstraints.contains(where: { $0 == constraint }) {
+        if messageEntity.uniquenessConstraints.contains(where: { ($0 as? [String]) == constraint }) {
             return
         }
 
-        messageEntity.uniquenessConstraints.append(constraint)
+        messageEntity.uniquenessConstraints.append(constraint as [Any])
         Log.info("Applied uniqueness constraint on Message.id", category: .coreData)
     }
 

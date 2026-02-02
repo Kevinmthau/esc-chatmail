@@ -293,7 +293,7 @@ final class SyncReconciliation: Sendable {
 
             for (id, messages) in groupedMessages {
                 if messages.count > 1 {
-                    log.error("Duplicate Message id \(id) in local DB during reconciliation; keeping most recent")
+                    self.log.error("Duplicate Message id \(id) in local DB during reconciliation; keeping most recent")
                 }
 
                 let preferred = messages.max { lhs, rhs in
