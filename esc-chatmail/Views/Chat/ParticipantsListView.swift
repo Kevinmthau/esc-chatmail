@@ -2,7 +2,8 @@ import SwiftUI
 
 struct ParticipantsListView: View {
     let conversation: Conversation
-    let onAddContact: (Person) -> Void
+    let onCreateNewContact: (Person) -> Void
+    let onAddToExistingContact: (Person) -> Void
     let onEditContact: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     private let participantLoader = ParticipantLoader.shared
@@ -16,8 +17,11 @@ struct ParticipantsListView: View {
                 ForEach(cachedOtherParticipants, id: \.email) { person in
                     ParticipantRow(
                         person: person,
-                        onAddContact: {
-                            onAddContact(person)
+                        onCreateNewContact: {
+                            onCreateNewContact(person)
+                        },
+                        onAddToExistingContact: {
+                            onAddToExistingContact(person)
                         },
                         onEditContact: { identifier in
                             onEditContact(identifier)

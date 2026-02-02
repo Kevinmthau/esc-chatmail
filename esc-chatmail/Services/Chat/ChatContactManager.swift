@@ -10,10 +10,6 @@ final class ChatContactManager: ObservableObject {
     @Published var contactToAdd: ContactWrapper?
     @Published var showingParticipantsList = false
 
-    // Contact action sheet state
-    @Published var showingContactActionSheet = false
-    @Published var personForContactAction: Person?
-
     // Add to existing contact flow state
     @Published var showingContactPicker = false
     @Published var personForExistingContact: Person?
@@ -40,26 +36,15 @@ final class ChatContactManager: ObservableObject {
         contactToAdd = ContactWrapper(contact: contact)
     }
 
-    /// Called when tapping the add contact button - shows action sheet
-    func showContactActionSheet(for person: Person) {
-        personForContactAction = person
-        showingParticipantsList = false
-        showingContactActionSheet = true
-    }
-
     /// Called when user selects "Create New Contact"
-    func createNewContact() {
-        guard let person = personForContactAction else { return }
+    func createNewContact(for person: Person) {
         prepareContactToAdd(for: person)
-        personForContactAction = nil
-        showingContactActionSheet = false
     }
 
     /// Called when user selects "Add to Existing Contact"
-    func addToExistingContact() {
-        guard let person = personForContactAction else { return }
+    func addToExistingContact(for person: Person) {
+        showingParticipantsList = false
         personForExistingContact = person
-        showingContactActionSheet = false
         showingContactPicker = true
     }
 

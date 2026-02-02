@@ -2,7 +2,8 @@ import SwiftUI
 
 struct ParticipantRow: View {
     let person: Person
-    let onAddContact: () -> Void
+    let onCreateNewContact: () -> Void
+    let onAddToExistingContact: () -> Void
     let onEditContact: (String) -> Void
 
     @State private var isExistingContact = false
@@ -27,7 +28,14 @@ struct ParticipantRow: View {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(.green)
             } else {
-                Button(action: onAddContact) {
+                Menu {
+                    Button("Create New Contact") {
+                        onCreateNewContact()
+                    }
+                    Button("Add to Existing Contact") {
+                        onAddToExistingContact()
+                    }
+                } label: {
                     Image(systemName: "person.badge.plus")
                         .foregroundColor(.blue)
                 }

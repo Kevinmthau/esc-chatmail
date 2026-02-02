@@ -180,32 +180,16 @@ struct ChatView: View {
         .sheet(isPresented: $viewModel.contactManager.showingParticipantsList) {
             ParticipantsListView(
                 conversation: conversation,
-                onAddContact: { person in
-                    viewModel.contactManager.showContactActionSheet(for: person)
+                onCreateNewContact: { person in
+                    viewModel.contactManager.createNewContact(for: person)
+                },
+                onAddToExistingContact: { person in
+                    viewModel.contactManager.addToExistingContact(for: person)
                 },
                 onEditContact: { identifier in
                     viewModel.contactManager.editExistingContact(identifier: identifier)
                 }
             )
-        }
-        .confirmationDialog(
-            "Add Contact",
-            isPresented: $viewModel.contactManager.showingContactActionSheet,
-            titleVisibility: .visible
-        ) {
-            Button("Create New Contact") {
-                viewModel.contactManager.createNewContact()
-            }
-            Button("Add to Existing Contact") {
-                viewModel.contactManager.addToExistingContact()
-            }
-            Button("Cancel", role: .cancel) {
-                viewModel.contactManager.personForContactAction = nil
-            }
-        } message: {
-            if let person = viewModel.contactManager.personForContactAction {
-                Text("Add \(person.email) to your contacts")
-            }
         }
     }
 
