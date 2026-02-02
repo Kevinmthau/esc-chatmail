@@ -245,6 +245,17 @@ actor ProcessedTextCache: MemoryWarningHandler {
             if linkCount > 15 {
                 return true
             }
+
+            // Transactional emails (e.g., security alerts) often use a small number of tables
+            // with substantial text content. Treat these as rich to preserve formatting.
+            let textContent = html
+                .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if tableCount >= 2 && textContent.count > 200 {
+                return true
+            }
+
             return false
         }
 
