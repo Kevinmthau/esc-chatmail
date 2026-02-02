@@ -218,6 +218,12 @@ actor ProcessedTextCache: MemoryWarningHandler {
             return false
         }
 
+        // Extract approximate text content length (rough estimate without full parsing)
+        let textContent = html
+            .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
         // Check for CSS background images (often used in marketing emails)
         let hasBackgroundImages = lowercased.contains("background-image") ||
                                    lowercased.contains("background:url") ||
@@ -230,6 +236,14 @@ actor ProcessedTextCache: MemoryWarningHandler {
                                  lowercased.contains("class=\"btn") ||
                                  lowercased.contains("class=\"cta")
 
+        // Newsletter indicators that imply rich content even when there are few images/tables
+        let hasNewsletterIndicators = lowercased.contains("unsubscribe") ||
+                                       lowercased.contains("view in browser") ||
+                                       lowercased.contains("email preferences") ||
+                                       lowercased.contains("privacy policy") ||
+                                       lowercased.contains("manage preferences") ||
+                                       lowercased.contains("update your preferences")
+
         // Professional signatures (real estate agents, etc.) can have:
         // - 1 company logo + 1 headshot + 6-8 social icons = up to 10 images
         // - 3-4 layout tables for contact info formatting
@@ -240,6 +254,11 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
         // If it looks like just signature elements, don't flag as rich
         if isLikelySignatureOnly {
+            // Newsletters can be mostly text with a footer - treat as rich to preserve formatting
+            if hasNewsletterIndicators && textContent.count > 200 {
+                return true
+            }
+
             // But check link density - newsletters often have many links
             // If >15 links, it's likely a newsletter regardless of other indicators
             if linkCount > 15 {
@@ -263,12 +282,6 @@ actor ProcessedTextCache: MemoryWarningHandler {
         // or just an elaborate signature with little actual message text
         let totalElements = imgCount + tableCount + cidCount
 
-        // Extract approximate text content length (rough estimate without full parsing)
-        let textContent = html
-            .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
         // Newsletters have substantial text content relative to elements
         // Signatures have many elements but relatively little text
         // Use ratio: if less than 50 chars per element, likely signature-heavy
@@ -283,14 +296,6 @@ actor ProcessedTextCache: MemoryWarningHandler {
             return false
         }
 
-        // Check for newsletter-specific indicators
-        let hasNewsletterIndicators = lowercased.contains("unsubscribe") ||
-                                       lowercased.contains("view in browser") ||
-                                       lowercased.contains("email preferences") ||
-                                       lowercased.contains("privacy policy") ||
-                                       lowercased.contains("manage preferences") ||
-                                       lowercased.contains("update your preferences")
-
         // If it has newsletter indicators and many elements, it's rich content
         if hasNewsletterIndicators && totalElements > 5 {
             return true
@@ -301,8 +306,28 @@ actor ProcessedTextCache: MemoryWarningHandler {
             return true
         }
 
-        // Otherwise, if there are many tables/images with substantial text, it's rich content
-        return (tableCount > 5 || imgCount > 10) && textContent.count > 500
+        // Otherwise, use a lightweight weighted score to decide
+        var score = 0
+
+        // Structural complexity
+        score += min(imgCount * 2, 20)
+        score += min(tableCount * 3, 30)
+        score += min(linkCount, 20)
+        if cidCount > 0 { score += 5 }
+
+        // Marketing/newsletter signals
+        if hasBackgroundImages { score += 15 }
+        if hasButtonElements { score += 10 }
+        if hasNewsletterIndicators { score += 25 }
+
+        // Text presence (avoid image-only promos)
+        if textContent.count > 200 { score += 10 }
+        if textContent.count > 500 { score += 10 }
+
+        // Penalize signature-heavy layouts
+        if charsPerElement < 40 && textContent.count < 400 { score -= 10 }
+
+        return score >= 40
     }
 
     /// Counts HTML elements using efficient substring search
