@@ -35,3 +35,57 @@ Use `xcodebuild` with the `esc-chatmail` scheme:
 ## Security & Configuration Notes
 - OAuth/secret values live in xcconfig files under `esc-chatmail/Configuration/` and may be excluded from git.
 - Use `Configuration/SECURITY_SETUP.md` and the `Config.xcconfig.template` when setting up locally.
+
+## Architecture Overview
+ESC Chatmail is a SwiftUI iOS email client that syncs with Gmail via the Gmail API and presents a conversation-first UI.
+
+### Core Data Model
+Core entities in `ESCChatmail.xcdatamodel`:
+- **Account**: Gmail account with sync state (`historyId`).
+- **Conversation**: Groups messages by participants; tracks inbox/archive/muted state.
+- **Message**: Individual emails; body stored at `bodyStorageURI`.
+- **Person**: Unique by email; linked via join tables.
+- **Attachment**: File metadata with local caching state.
+- **PendingAction**: Queued Gmail API operations (archive, star, spam, etc.).
+
+### Dependency Injection
+`Dependencies.swift` is the service container (`Dependencies.shared`). Tests inject mocks via `TestDependencies`.
+
+### Concurrency Model
+- **@MainActor**: ViewModels and UI classes.
+- **Actors**: Thread-safe services such as `PendingActionsManager`, `PersonCache`, `AttachmentCacheActor`, `HistoryProcessor`, `TokenManager`.
+- **@unchecked Sendable**: Mixed main/background services like `CoreDataStack`, `AuthSession`.
+- Utilities in `Services/Concurrency/`: `ViewModelTaskManager`, `TaskCoordinator`, `BackgroundWork`.
+
+### Sync Engine
+Two orchestrators in `Services/Sync/`:
+- **InitialSyncOrchestrator**: Full mailbox sync.
+- **IncrementalSyncOrchestrator**: Delta sync via Gmail History API.
+Key components: `MessageFetcher`, `MessagePersister`, `HistoryProcessor`.
+
+### HTML Email Rendering
+Pipeline:
+1) `HTMLSanitizerService.sanitize()` removes scripts/forms/tracking pixels and preserves `<style>` tags.
+2) `HTMLDisplayWrapper.wrapHTMLForDisplay()` adds viewport meta and minimal CSS.
+3) `BaseEmailWebView` renders via `WKWebView`.
+
+### View Architecture
+ViewModels (`ChatViewModel`, `ConversationListViewModel`, `ComposeViewModel`) use `@Published`.
+Views rely on `@FetchRequest` for reactive Core Data queries.
+
+### Pending Actions System
+User actions are stored as `PendingAction` entities:
+1) `MessageActions` creates the record.
+2) `PendingActionsManager` executes via `GmailActionExecutor`.
+3) Success removes the record; failures retry with backoff.
+
+### Error Handling
+Error types: `APIError`, `CoreDataError`, `TokenManagerError`.
+Retry behavior via `RetryExecutor`, `GmailAPIClient` rate-limit circuit breaker, and `MessageFetcher` retry classification.
+
+### Logging
+```swift
+Log.info("Sync started", category: .sync)
+Log.error("Failed", category: .api, error: error)
+```
+Categories include `.sync`, `.api`, `.coreData`, `.auth`, `.ui`, `.attachment`, `.message`, `.conversation`, `.background`.
