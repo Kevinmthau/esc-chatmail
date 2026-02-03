@@ -28,16 +28,16 @@ struct AttachmentGridItem: View {
                             .fill(Color.gray.opacity(0.1))
                             .overlay(
                                 Group {
-                                    if thumbnailLoader.isLoading {
-                                        ProgressView()
-                                            .progressViewStyle(CircularProgressViewStyle())
-                                            .scaleEffect(0.6)
-                                    } else {
-                                        Image(systemName: attachment.isPDF ? "doc.fill" : "photo")
-                                            .foregroundColor(.gray)
-                                    }
+                                if thumbnailLoader.isLoading {
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle())
+                                        .scaleEffect(0.6)
+                                } else {
+                                    Image(systemName: placeholderIconName)
+                                        .foregroundColor(.gray)
                                 }
-                            )
+                            }
+                    )
                     }
 
                     if showOverlay {
@@ -91,5 +91,15 @@ struct AttachmentGridItem: View {
         .onDisappear {
             thumbnailLoader.cancel()
         }
+    }
+
+    private var placeholderIconName: String {
+        if attachment.isImage {
+            return "photo"
+        }
+        if attachment.isVideo {
+            return "video.fill"
+        }
+        return "doc.fill"
     }
 }

@@ -59,6 +59,10 @@ extension Attachment {
         mimeType.starts(with: "image/")
     }
 
+    var isVideo: Bool {
+        mimeType.starts(with: "video/")
+    }
+
     var isPDF: Bool {
         mimeType == "application/pdf"
     }

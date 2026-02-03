@@ -18,12 +18,33 @@ struct SingleAttachmentView: View {
                         }
                     }
                 )
+            } else if attachment.isVideo {
+                VideoAttachmentCard(
+                    attachment: attachment,
+                    downloader: downloader,
+                    onTap: {
+                        // Only allow tap if downloaded or uploaded
+                        if attachment.isReady {
+                            onTap()
+                        }
+                    }
+                )
             } else if attachment.isPDF {
                 PDFAttachmentCard(
                     attachment: attachment,
                     downloader: downloader,
                     onTap: {
                         // Only allow tap if downloaded or uploaded
+                        if attachment.isReady {
+                            onTap()
+                        }
+                    }
+                )
+            } else {
+                DocumentAttachmentCard(
+                    attachment: attachment,
+                    downloader: downloader,
+                    onTap: {
                         if attachment.isReady {
                             onTap()
                         }

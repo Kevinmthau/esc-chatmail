@@ -9,10 +9,10 @@
 ## Build, Test, and Development Commands
 Use `xcodebuild` with the `esc-chatmail` scheme:
 - Build (Debug, device): `xcodebuild build -scheme esc-chatmail -configuration Debug -sdk iphoneos`
-- Build (Debug, simulator): `xcodebuild build -scheme esc-chatmail -configuration Debug -destination 'platform=iOS Simulator,name=iPhone 16'`
+- Build (Debug, simulator): `xcodebuild build -scheme esc-chatmail -configuration Debug -destination 'platform=iOS Simulator'`
 - Build (Release): `xcodebuild build -scheme esc-chatmail -configuration Release -sdk iphoneos`
-- Run all tests: `xcodebuild test -scheme esc-chatmail -configuration Debug`
-- Run a specific test: `xcodebuild test -scheme esc-chatmail -only-testing 'esc-chatmailTests/ConversationMergerTests'`
+- Run all tests: `bash Scripts/run-tests.sh`
+- Run a specific test: `bash Scripts/run-tests.sh -only-testing 'esc-chatmailTests/ConversationMergerTests'`
 - Pre-submission checklist: `bash Scripts/testflight-checklist.sh`
 
 ## Coding Style & Naming Conventions

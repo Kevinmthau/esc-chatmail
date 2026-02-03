@@ -18,7 +18,7 @@ struct ComposeAttachmentThumbnail: View {
                     .fill(Color.gray.opacity(0.2))
                     .frame(width: 60, height: 60)
                     .overlay(
-                        Image(systemName: isPDF ? "doc.fill" : "photo")
+                        Image(systemName: placeholderIconName)
                             .foregroundColor(.gray)
                     )
             }
@@ -39,7 +39,13 @@ struct ComposeAttachmentThumbnail: View {
         }
     }
 
-    private var isPDF: Bool {
-        return attachment.mimeTypeValue == "application/pdf"
+    private var placeholderIconName: String {
+        if attachment.isImage {
+            return "photo"
+        }
+        if attachment.isVideo {
+            return "video.fill"
+        }
+        return "doc.fill"
     }
 }

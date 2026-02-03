@@ -111,6 +111,14 @@ struct AttachmentPaths {
         case "application/pdf":
             return "pdf"
 
+        // Video
+        case "video/mp4":
+            return "mp4"
+        case "video/quicktime":
+            return "mov"
+        case "video/x-m4v":
+            return "m4v"
+
         // Microsoft Word
         case "application/msword":
             return "doc"
@@ -180,6 +188,8 @@ struct AttachmentPaths {
             return "numbers"
         case let type where type.contains("keynote"):
             return "keynote"
+        case let type where type.contains("video"):
+            return "mp4"
 
         default:
             return "dat"

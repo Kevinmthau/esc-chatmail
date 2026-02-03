@@ -58,6 +58,12 @@ final class AttachmentBuilder {
         return self
     }
 
+    func asVideo(filename: String = "video.mp4", mimeType: String = "video/mp4") -> Self {
+        self.mimeType = mimeType
+        self.filename = filename
+        return self
+    }
+
     func queued() -> Self {
         self.state = .queued
         return self

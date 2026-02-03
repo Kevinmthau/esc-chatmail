@@ -229,6 +229,23 @@ final class AttachmentDownloaderTests: XCTestCase {
         XCTAssertFalse(imageAttachment.isPDF)
     }
 
+    func testAttachment_isVideo_returnsCorrectly() throws {
+        let mp4Attachment = AttachmentBuilder()
+            .withMimeType("video/mp4")
+            .build(in: context)
+        XCTAssertTrue(mp4Attachment.isVideo)
+
+        let movAttachment = AttachmentBuilder()
+            .withMimeType("video/quicktime")
+            .build(in: context)
+        XCTAssertTrue(movAttachment.isVideo)
+
+        let pdfAttachment = AttachmentBuilder()
+            .withMimeType("application/pdf")
+            .build(in: context)
+        XCTAssertFalse(pdfAttachment.isVideo)
+    }
+
     // MARK: - Signature Image Detection Tests
 
     func testAttachment_isLikelySignatureImage_smallByteSize() throws {
