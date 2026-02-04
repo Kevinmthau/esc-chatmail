@@ -139,6 +139,12 @@ final class HTMLContentLoader {
         }
     }
 
+    /// Invalidates cached HTML content for a message (both light/dark variants).
+    func invalidate(messageId: String) {
+        htmlCache.removeObject(forKey: "\(messageId)_false" as NSString)
+        htmlCache.removeObject(forKey: "\(messageId)_true" as NSString)
+    }
+
     private func convertPlainTextToHTML(_ text: String) -> String {
         let escaped = text
             .replacingOccurrences(of: "&", with: "&amp;")

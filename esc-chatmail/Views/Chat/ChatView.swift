@@ -12,6 +12,7 @@ struct ChatView: View {
     @State private var isReadyToShow = false
     @State private var initialScrollTask: Task<Void, Never>?
     @State private var scrollTask: Task<Void, Never>?
+    @State private var followUpScrollTask: Task<Void, Never>?
     @Environment(\.dismiss) private var dismiss
 
     init(conversation: Conversation) {
@@ -66,7 +67,8 @@ struct ChatView: View {
             .scrollDismissesKeyboard(.interactively)
             .opacity(isReadyToShow ? 1 : 0)
             .onAppear {
-                let unreadMessageIDs = messages.filter { $0.isUnread }.map { $0.objectID }
+                let unreadMessages = messages.filter { $0.isUnread }
+                let unreadMessageIDs = unreadMessages.map { $0.objectID }
                 viewModel.markConversationAsRead(messageObjectIDs: unreadMessageIDs)
                 viewModel.initializeReplyingTo(lastMessage: messages.last)
 
@@ -92,6 +94,7 @@ struct ChatView: View {
                 // Cancel all tasks to prevent memory leaks
                 initialScrollTask?.cancel()
                 scrollTask?.cancel()
+                followUpScrollTask?.cancel()
                 viewModel.cancelPrefetch()
             }
             .onChange(of: messages.count) { oldCount, newCount in
@@ -221,8 +224,8 @@ struct ChatView: View {
             guard !Task.isCancelled else { return }
             if let lastMessage = messages.last {
                 proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                await performFollowUpBottomScroll(proxy: proxy)
             }
-            isReadyToShow = true
         }
     }
 
@@ -240,6 +243,19 @@ struct ChatView: View {
                 }
             }
         }
+    }
+
+    private func performFollowUpBottomScroll(proxy: ScrollViewProxy) async {
+        followUpScrollTask?.cancel()
+        followUpScrollTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(UIConfig.contentChangeScrollDelay * 1_500_000_000))
+            guard !Task.isCancelled else { return }
+            if let lastMessage = messages.last {
+                proxy.scrollTo(lastMessage.id, anchor: .bottom)
+            }
+            isReadyToShow = true
+        }
+        await followUpScrollTask?.value
     }
 
 }

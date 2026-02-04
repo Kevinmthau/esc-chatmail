@@ -18,6 +18,7 @@ struct MessageBubble: View {
     @State private var hasRichContent: Bool
     @State private var fullTextContent: String?
     @State private var hasLoadedContent = false
+    @State private var lastContentSignature: String?
     /// Tracks the message ID we're currently loading to prevent stale updates during cell reuse
     @State private var loadingMessageId: String?
 
@@ -79,7 +80,7 @@ struct MessageBubble: View {
                 Spacer()
             }
         }
-        .task {
+        .task(id: contentSignature()) {
             await loadContentIfNeeded()
         }
         .sheet(isPresented: $showingHTMLView) {
@@ -152,9 +153,10 @@ struct MessageBubble: View {
 
     private func loadContentIfNeeded() async {
         let currentMessageId = message.id
+        let signature = contentSignature()
 
         // Early exit: content already loaded for this exact message
-        if hasLoadedContent && loadingMessageId == currentMessageId {
+        if hasLoadedContent && loadingMessageId == currentMessageId && lastContentSignature == signature {
             return
         }
 
@@ -163,6 +165,7 @@ struct MessageBubble: View {
         loadingMessageId = currentMessageId
         hasLoadedContent = false
         fullTextContent = nil
+        lastContentSignature = signature
 
         // Reset hasRichContent to the initial computed value for the NEW message
         // This prevents showing wrong UI type when cell is reused
@@ -196,6 +199,12 @@ struct MessageBubble: View {
             // Fallback: process on background thread and cache result
             await loadFullTextContentWithCache()
         }
+    }
+
+    private func contentSignature() -> String {
+        let bodyTextHash = message.bodyText?.hashValue ?? 0
+        let snippetHash = message.snippet?.hashValue ?? 0
+        return "\(message.bodyStorageURI ?? "")|\(bodyTextHash)|\(snippetHash)"
     }
 
     private func loadFullTextContentWithCache() async {

@@ -26,10 +26,23 @@ extension MessagePersister {
             return false
         }
 
+        let previousSnippet = existingMessage.snippet
+        let previousBodyText = existingMessage.bodyText
+        let previousBodyStorageURI = existingMessage.bodyStorageURI
+
         // Update existing message properties that might have changed
         existingMessage.isUnread = processedMessage.isUnread
         existingMessage.snippet = processedMessage.snippet
         existingMessage.cleanedSnippet = processedMessage.cleanedSnippet
+
+        if let plainText = processedMessage.plainTextBody, !plainText.isEmpty {
+            existingMessage.bodyText = plainText
+        }
+
+        if let htmlBody = processedMessage.htmlBody,
+           let fileURL = htmlContentHandler.saveHTML(htmlBody, for: processedMessage.id) {
+            existingMessage.bodyStorageURI = fileURL.absoluteString
+        }
 
         // Update labels - fetch all needed labels in a single batch query
         let messageLabelIds = Set(processedMessage.labelIds)
@@ -53,6 +66,14 @@ extension MessagePersister {
         // Track the conversation as modified for rollup updates
         if let conversation = existingMessage.conversation {
             await trackModifiedConversation(conversation)
+        }
+
+        let bodyStorageURIChanged = existingMessage.bodyStorageURI != previousBodyStorageURI
+        let bodyTextChanged = existingMessage.bodyText != previousBodyText
+        let snippetChanged = existingMessage.snippet != previousSnippet
+        if bodyStorageURIChanged || bodyTextChanged || snippetChanged {
+            await ProcessedTextCache.shared.invalidate(messageId: processedMessage.id)
+            HTMLContentLoader.shared.invalidate(messageId: processedMessage.id)
         }
 
         Log.debug("Updated existing message: \(processedMessage.id)", category: .sync)

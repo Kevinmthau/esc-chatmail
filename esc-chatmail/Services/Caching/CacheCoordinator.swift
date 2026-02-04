@@ -95,6 +95,7 @@ final class CacheCoordinator {
             Task {
                 for messageId in messageIds {
                     await ProcessedTextCache.shared.invalidate(messageId: messageId)
+                    HTMLContentLoader.shared.invalidate(messageId: messageId)
                 }
             }
             Log.debug("Queued invalidation for \(messageIdsToInvalidate.count) processed text cache entries", category: .coreData)

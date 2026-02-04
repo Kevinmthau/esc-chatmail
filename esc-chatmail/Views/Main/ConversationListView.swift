@@ -80,6 +80,7 @@ struct ConversationListView: View {
         .navigationTitle(viewModel.isSelecting ? "\(viewModel.selectedConversationIDs.count) Selected" : "Chats")
         .navigationDestination(item: $selectedConversation) { conversation in
             ChatView(conversation: conversation)
+                .id(conversation.objectID)
         }
         .toolbar { toolbarContent }
         .refreshable { await viewModel.performSync() }
