@@ -489,6 +489,8 @@ enum TextProcessing {
 
         // Remove all HTML tags
         text = text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression, range: nil)
+        // Remove truncated opening tags (e.g., snippet cut in middle of `<div style="...`).
+        text = text.replacingOccurrences(of: "<[a-zA-Z][^>\\n]*(?=\\n|$)", with: "", options: .regularExpression, range: nil)
 
         // Decode HTML entities (non-breaking space variants)
         text = text.replacingOccurrences(of: "&nbsp;", with: " ")

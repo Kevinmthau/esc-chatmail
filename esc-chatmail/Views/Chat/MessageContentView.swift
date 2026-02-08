@@ -6,7 +6,7 @@ struct MessageContentView: View {
     /// Pre-compiled regex to detect actual HTML tags (not math expressions like 5 < 10 > 3)
     private static let htmlTagPattern: NSRegularExpression? = {
         try? NSRegularExpression(
-            pattern: "<[a-zA-Z][a-zA-Z0-9]*(?:\\s[^>]*)?>|</[a-zA-Z][a-zA-Z0-9]*>",
+            pattern: "<[a-zA-Z][a-zA-Z0-9]*(?:\\s[^>]*)?>|</[a-zA-Z][a-zA-Z0-9]*>|<[a-zA-Z][a-zA-Z0-9]*(?:\\s[^>\\n]*)?$",
             options: []
         )
     }()
