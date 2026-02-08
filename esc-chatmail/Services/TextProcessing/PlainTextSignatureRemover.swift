@@ -133,6 +133,11 @@ enum PlainTextSignatureRemover {
         "suite", "ste", "ste.", "floor", "fl", "fl."
     ]
 
+    private static let organizationKeywords: [String] = [
+        " inc", " inc.", " llc", " ltd", " corp", " corp.", " corporation",
+        " company", " co.", " partners", " group"
+    ]
+
     // MARK: - Public API
 
     static func removeSignature(from text: String) -> String {
@@ -150,17 +155,26 @@ enum PlainTextSignatureRemover {
         guard lastNonEmpty >= 0 else { return "" }
 
         let scanStart = max(0, lastNonEmpty - 18)
+        let nonEmptyLineCount = lines.reduce(into: 0) { count, line in
+            if !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                count += 1
+            }
+        }
 
         // Pass 1: Look for definitive signature indicators near the end.
+        var earliestHardIndicator: Int?
         for index in stride(from: lastNonEmpty, through: scanStart, by: -1) {
             let line = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
             guard !line.isEmpty else { continue }
 
             let evaluation = evaluateLine(line)
             if evaluation.isHardIndicator {
-                let startLine = findSignatureStartLine(before: index, lines: lines)
-                return joinLines(lines, upTo: startLine)
+                earliestHardIndicator = index
             }
+        }
+        if let hardIndicatorIndex = earliestHardIndicator {
+            let startLine = findSignatureStartLine(before: hardIndicatorIndex, lines: lines)
+            return joinLines(lines, upTo: startLine)
         }
 
         // Pass 2: Heuristic trailing block detection (contact info or titles).
@@ -198,8 +212,7 @@ enum PlainTextSignatureRemover {
 
         if let startLine = signatureStartLine {
             let totalChars = trimmed.count
-            let totalLines = lines.count
-            if contactSignals == 0 && totalLines <= 4 && totalChars < 180 {
+            if contactSignals == 0 && nonEmptyLineCount <= 4 && totalChars < 180 {
                 return trimmed
             }
             let adjustedStart = adjustToSeparator(startLine, lines: lines)
@@ -226,7 +239,8 @@ enum PlainTextSignatureRemover {
 
         let hasContactInfo = hasContactPrefix || hasEmail || hasUrl || hasPhone
 
-        let isHardIndicator = isDelimiter || isCidLine || hasHardFragment || hasContactPrefix
+        // URLs and phone numbers on trailing lines are usually signature/footer markers.
+        let isHardIndicator = isDelimiter || isCidLine || hasHardFragment || hasContactPrefix || hasUrl || hasPhone
 
         var score = 0
         if isSignOffLine(lowercased) { score += 1 }
@@ -251,7 +265,7 @@ enum PlainTextSignatureRemover {
     private static func isSignOffLine(_ lowercased: String) -> Bool {
         let normalized = lowercased.trimmingCharacters(in: .whitespacesAndNewlines)
         for signOff in signOffWords {
-            if normalized == signOff || normalized == "\(signOff)," || normalized.hasPrefix("\(signOff) ") {
+            if normalized == signOff || normalized == "\(signOff)," {
                 return true
             }
         }
@@ -287,7 +301,8 @@ enum PlainTextSignatureRemover {
                 continue
             }
 
-            if looksLikeSignatureLine(line) {
+            let evaluation = evaluateLine(line)
+            if evaluation.isHardIndicator || looksLikeSignatureLine(line) {
                 foundShortLines = true
             } else {
                 break
@@ -319,8 +334,13 @@ enum PlainTextSignatureRemover {
         let hasEmail = matchesRegex(emailPattern, in: trimmed)
         let hasUrl = matchesRegex(urlPattern, in: trimmed)
         let hasPhone = matchesRegex(phonePattern, in: trimmed)
+        let lowercased = trimmed.lowercased()
 
         if hasContactPrefix || hasEmail || hasUrl || hasPhone {
+            return true
+        }
+
+        if containsKeyword(lowercased, in: organizationKeywords) {
             return true
         }
 
