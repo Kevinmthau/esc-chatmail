@@ -43,6 +43,9 @@ final class ComposeViewModel: ObservableObject {
     /// HTML body content from forwarded message (nil for non-forward modes)
     private var forwardedHTMLBody: String?
 
+    /// Plain text body of the forwarded message (used for MIME text part)
+    private var forwardedPlainTextBody: String = ""
+
     /// Inline attachments from forwarded message (images referenced by cid: URLs)
     private var forwardedInlineAttachments: [Attachment] = []
 
@@ -72,12 +75,23 @@ final class ComposeViewModel: ObservableObject {
     var attachments: [Attachment] { attachmentManager.attachments }
     var autocompleteContacts: [ContactsService.ContactMatch] { autocompleteService.autocompleteContacts }
     var showAutocomplete: Bool { autocompleteService.showAutocomplete }
+    var isForwardMode: Bool {
+        if case .forward = mode { return true }
+        return false
+    }
+    var forwardedPreviewHTML: String? { forwardedHTMLBody }
+    var forwardedPreviewText: String { forwardedPlainTextBody }
 
     var canSend: Bool {
-        !recipients.isEmpty &&
-        recipients.allSatisfy { $0.isValid } &&
-        !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !isSending
+        let hasValidRecipients = !recipients.isEmpty && recipients.allSatisfy { $0.isValid }
+        guard hasValidRecipients && !isSending else { return false }
+
+        switch mode {
+        case .forward:
+            return true
+        case .newMessage, .newEmail, .reply:
+            return !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
     }
 
     var showSubjectField: Bool {
@@ -118,11 +132,12 @@ final class ComposeViewModel: ObservableObject {
         switch mode {
         case .forward(let message):
             let result = messageFormatBuilder.formatForwardedMessage(message)
-            body = result.body
+            body = ""
             subject = result.subject ?? ""
 
             // Store HTML content for forwarding
             forwardedHTMLBody = result.htmlBody
+            forwardedPlainTextBody = result.body
 
             // Store inline attachments for forwarding (these will be included in multipart/related)
             forwardedInlineAttachments = result.inlineAttachments
@@ -195,15 +210,28 @@ final class ComposeViewModel: ObservableObject {
         error = nil
 
         let recipientEmails = recipients.map { $0.email }
-        let messageBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        let userMessageBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
         let messageSubject = subject.isEmpty ? nil : subject
+        let outboundBody: String
+
+        if case .forward = mode {
+            if userMessageBody.isEmpty {
+                outboundBody = forwardedPlainTextBody
+            } else if forwardedPlainTextBody.isEmpty {
+                outboundBody = userMessageBody
+            } else {
+                outboundBody = "\(userMessageBody)\n\n\(forwardedPlainTextBody)"
+            }
+        } else {
+            outboundBody = userMessageBody
+        }
 
         // Create optimistic message
         let optimisticMessage: Message
         do {
             optimisticMessage = try await sendService.createOptimisticMessage(
                 to: recipientEmails,
-                body: messageBody,
+                body: outboundBody,
                 subject: messageSubject,
                 attachments: attachments
             )
@@ -229,7 +257,7 @@ final class ComposeViewModel: ObservableObject {
             let replyData = replyMetadataBuilder.buildReplyData(
                 conversation: conversation,
                 replyingTo: replyingTo,
-                body: messageBody
+                body: userMessageBody
             )
             orchestratorReplyData = ComposeSendOrchestrator.SendInput.ReplyData(
                 recipients: replyData.recipients,
@@ -250,12 +278,12 @@ final class ComposeViewModel: ObservableObject {
             if let existingHTML = forwardedHTMLBody {
                 // Merge user's new content into the existing forwarded HTML
                 finalHTMLBody = messageFormatBuilder.buildFinalHTMLForForward(
-                    userContent: messageBody,
+                    userContent: userMessageBody,
                     forwardedHTML: existingHTML
                 )
             } else {
                 // No HTML exists - generate from plain text to preserve formatting and links
-                finalHTMLBody = messageFormatBuilder.generateHTMLFromPlainText(messageBody)
+                finalHTMLBody = messageFormatBuilder.generateHTMLFromPlainText(outboundBody)
             }
         } else {
             finalHTMLBody = forwardedHTMLBody
@@ -263,7 +291,7 @@ final class ComposeViewModel: ObservableObject {
 
         let input = ComposeSendOrchestrator.SendInput(
             recipientEmails: recipientEmails,
-            body: messageBody,
+            body: outboundBody,
             htmlBody: finalHTMLBody,
             subject: messageSubject,
             attachmentInfos: attachmentInfos,

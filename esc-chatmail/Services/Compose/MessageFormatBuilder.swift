@@ -71,12 +71,12 @@ struct MessageFormatBuilder {
         quotedText += "\n"
 
         // Use full body text if available, otherwise fall back to snippet
-        let messageContent = message.bodyTextValue ?? message.snippet ?? ""
+        let messageContent = HTMLEntityDecoder.decode(message.bodyTextValue ?? message.snippet ?? "")
         quotedText += messageContent
 
         // Load HTML content if available
         var htmlBody: String?
-        if let originalHTML = HTMLContentHandler.shared.loadHTML(for: message.id) {
+        if let originalHTML = loadOriginalHTML(for: message) {
             htmlBody = buildHTMLForward(
                 originalHTML: originalHTML,
                 from: fromLine,
@@ -104,6 +104,30 @@ struct MessageFormatBuilder {
             attachments: regularAttachments,
             inlineAttachments: inlineAttachments
         )
+    }
+
+    private func loadOriginalHTML(for message: Message) -> String? {
+        if let html = HTMLContentHandler.shared.loadHTML(for: message.id) {
+            return html
+        }
+
+        guard let uri = message.bodyStorageURI,
+              let resolved = resolveStorageURI(uri),
+              FileManager.default.fileExists(atPath: resolved.path) else {
+            return nil
+        }
+
+        return HTMLContentHandler.shared.loadHTML(from: resolved)
+    }
+
+    private func resolveStorageURI(_ urlString: String) -> URL? {
+        if urlString.starts(with: "/") {
+            return URL(fileURLWithPath: urlString)
+        } else if urlString.starts(with: "file://") {
+            return URL(string: urlString)
+        } else {
+            return URL(string: urlString)
+        }
     }
 
     /// Builds HTML content for forwarded message with proper header styling
@@ -241,8 +265,8 @@ struct MessageFormatBuilder {
             }
         }
 
-        // No forward marker found - this shouldn't happen for forwards
-        return ""
+        // No forward marker found (for example when only the user's note is passed)
+        return fullBody.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Converts plain text to HTML, preserving formatting and auto-linking URLs.

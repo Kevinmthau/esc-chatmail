@@ -20,6 +20,14 @@ struct OptimizedConversationRow: View {
         return formatter.localizedString(for: date, relativeTo: Date())
     }
 
+    private var previewText: String {
+        if let latestMessage = conversation.messages?.max(by: { $0.internalDate < $1.internalDate }),
+           let preview = latestMessage.conversationPreviewText {
+            return preview
+        }
+        return conversation.snippet ?? ""
+    }
+
     var body: some View {
         HStack(spacing: 16) {
             // Avatar stack with photo support
@@ -41,7 +49,7 @@ struct OptimizedConversationRow: View {
                 }
 
                 // Snippet
-                Text(conversation.snippet ?? "")
+                Text(previewText)
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .lineLimit(2)

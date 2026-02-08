@@ -160,12 +160,7 @@ struct ConversationRollupUpdater: Sendable {
         let sortedMessages = nonDraftMessages.sorted { $0.internalDate < $1.internalDate }
         if let latestMessage = sortedMessages.last {
             conversation.lastMessageDate = latestMessage.internalDate
-            // For newsletters, show subject. For personal emails or sent messages, show snippet.
-            if latestMessage.isNewsletter, let subject = latestMessage.subject, !subject.isEmpty {
-                conversation.snippet = subject
-            } else {
-                conversation.snippet = latestMessage.cleanedSnippet ?? latestMessage.snippet
-            }
+            conversation.snippet = latestMessage.conversationPreviewText
         }
     }
 

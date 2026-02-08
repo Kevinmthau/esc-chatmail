@@ -137,18 +137,62 @@ struct ComposeView: View {
     @ViewBuilder
     private var bodySection: some View {
         if viewModel.showSubjectField {
-            ZStack(alignment: .topLeading) {
-                TextEditor(text: $viewModel.body)
-                    .focused($focusedField, equals: .body)
-                    .padding(.horizontal, 8)
+            VStack(spacing: 10) {
+                ZStack(alignment: .topLeading) {
+                    TextEditor(text: $viewModel.body)
+                        .focused($focusedField, equals: .body)
+                        .padding(.horizontal, 8)
+                        .frame(minHeight: viewModel.isForwardMode ? 120 : nil)
 
-                if viewModel.body.isEmpty {
-                    Text("Message")
-                        .foregroundColor(.gray.opacity(0.5))
-                        .padding(.horizontal, 12)
-                        .padding(.top, 8)
-                        .allowsHitTesting(false)
+                    if viewModel.body.isEmpty {
+                        Text(viewModel.isForwardMode ? "Add a message (optional)" : "Message")
+                            .foregroundColor(.gray.opacity(0.5))
+                            .padding(.horizontal, 12)
+                            .padding(.top, 8)
+                            .allowsHitTesting(false)
+                    }
                 }
+
+                if viewModel.isForwardMode {
+                    forwardPreviewSection
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var forwardPreviewSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Forwarded message")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 12)
+
+            if let html = viewModel.forwardedPreviewHTML {
+                BaseEmailWebView(htmlContent: html, mode: .simplePreview)
+                    .frame(height: 240)
+                    .cornerRadius(10)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+                    )
+                    .padding(.horizontal, 12)
+            } else {
+                ScrollView {
+                    Text(viewModel.forwardedPreviewText)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                }
+                .frame(height: 160)
+                .background(Color(.secondarySystemBackground))
+                .cornerRadius(10)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+                )
+                .padding(.horizontal, 12)
             }
         }
     }

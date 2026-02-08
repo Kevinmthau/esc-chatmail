@@ -161,4 +161,33 @@ extension Message {
         // from quoted messages in reply threads, leading to false positives
         return subjectLower.hasPrefix("fwd:") || subjectLower.hasPrefix("fw:")
     }
+
+    /// Preferred one-line preview for conversation list rows.
+    /// Forwarded messages use subject-based preview for better readability.
+    var conversationPreviewText: String? {
+        if isForwardedEmail, let subject = subject?.trimmingCharacters(in: .whitespacesAndNewlines), !subject.isEmpty {
+            let originalSubject = normalizedForwardSubject(from: subject)
+            return "fwd: \"\(originalSubject)\""
+        }
+
+        if isNewsletter, let subject = subject, !subject.isEmpty {
+            return subject
+        }
+
+        return cleanedSnippet ?? snippet
+    }
+
+    private func normalizedForwardSubject(from subject: String) -> String {
+        var normalized = subject
+        while true {
+            guard let regex = try? NSRegularExpression(pattern: #"^(?i)\s*(?:fwd|fw)\s*:\s*"#),
+                  let match = regex.firstMatch(in: normalized, range: NSRange(normalized.startIndex..., in: normalized)),
+                  let range = Range(match.range, in: normalized) else {
+                break
+            }
+            normalized.removeSubrange(range)
+        }
+        let trimmed = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? subject : trimmed
+    }
 }

@@ -67,8 +67,7 @@ extension GmailSendService {
 
         // Update conversation to bump it to the top
         conversation.lastMessageDate = Date()
-        // For sent messages, always show the reply snippet
-        conversation.snippet = message.cleanedSnippet ?? message.snippet
+        conversation.snippet = message.conversationPreviewText
         // IMPORTANT: do NOT set conversation.hasInbox = true here for outgoing messages
 
         do {

@@ -100,19 +100,11 @@ extension MessagePersister {
         if let lastDate = conversation.lastMessageDate {
             if message.internalDate > lastDate {
                 conversation.lastMessageDate = message.internalDate
-                if message.isNewsletter, let subject = message.subject, !subject.isEmpty {
-                    conversation.snippet = subject
-                } else {
-                    conversation.snippet = message.cleanedSnippet ?? message.snippet
-                }
+                conversation.snippet = message.conversationPreviewText
             }
         } else {
             conversation.lastMessageDate = message.internalDate
-            if message.isNewsletter, let subject = message.subject, !subject.isEmpty {
-                conversation.snippet = subject
-            } else {
-                conversation.snippet = message.cleanedSnippet ?? message.snippet
-            }
+            conversation.snippet = message.conversationPreviewText
         }
 
         // Track the conversation as modified for rollup updates

@@ -248,6 +248,16 @@ final class MessageFormatBuilderTests: XCTestCase {
         XCTAssertTrue(result.contains("My note"))
     }
 
+    func testBuildFinalHTMLForForward_withoutForwardMarker_usesEntireUserContent() {
+        let userContent = "My standalone note"
+        let forwardedHTML = "<body><p>Forwarded HTML Content</p></body>"
+
+        let result = sut.buildFinalHTMLForForward(userContent: userContent, forwardedHTML: forwardedHTML)
+
+        XCTAssertTrue(result.contains("My standalone note"))
+        XCTAssertTrue(result.contains("Forwarded HTML Content"))
+    }
+
     func testGenerateHTMLFromPlainText_longURL_linked() {
         let plainText = "Check https://web.birley.com/webmail/1113152/1637919743/88287ae9aea15923442fea56e-f1055a388656f3c900f8d513b77b4a059863835"
 
