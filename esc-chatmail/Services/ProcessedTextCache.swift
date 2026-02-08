@@ -5,6 +5,8 @@ import Foundation
 /// Uses LRUCacheActor for automatic eviction management
 actor ProcessedTextCache: MemoryWarningHandler {
     static let shared = ProcessedTextCache()
+    // Bump to invalidate cached entries when processing logic changes.
+    private static let processingVersion = "2026-02-08-signature-v2"
 
     /// Cached text content with rich content indicator and extracted quotes
     struct CachedText: Sendable {
@@ -65,21 +67,29 @@ actor ProcessedTextCache: MemoryWarningHandler {
         return textSize + quotedSize + overheadSize
     }
 
+    private static func cacheKey(for messageId: String) -> String {
+        "\(processingVersion)|\(messageId)"
+    }
+
     func get(messageId: String) async -> (plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart])? {
-        guard let entry = await cache.get(messageId) else { return nil }
+        guard let entry = await cache.get(Self.cacheKey(for: messageId)) else { return nil }
         return (entry.plainText, entry.hasRichContent, entry.quotedParts)
     }
 
     func set(messageId: String, plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart] = []) async {
         let size = Self.estimateSize(plainText, hasRichContent, quotedParts)
-        await cache.set(messageId, value: CachedText(plainText: plainText, hasRichContent: hasRichContent, quotedParts: quotedParts), sizeBytes: size)
+        await cache.set(
+            Self.cacheKey(for: messageId),
+            value: CachedText(plainText: plainText, hasRichContent: hasRichContent, quotedParts: quotedParts),
+            sizeBytes: size
+        )
     }
 
     func prefetch(messageIds: [String]) async {
         // Filter out already cached messages
         var uncachedIds: [String] = []
         for messageId in messageIds {
-            if await !cache.contains(messageId) {
+            if await !cache.contains(Self.cacheKey(for: messageId)) {
                 uncachedIds.append(messageId)
             }
         }
@@ -431,7 +441,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
     /// Invalidates a specific cache entry by message ID.
     /// Use this when a Message entity is deleted.
     func invalidate(messageId: String) async {
-        await cache.remove(messageId)
+        await cache.remove(Self.cacheKey(for: messageId))
     }
 
     /// Returns cache statistics for monitoring
@@ -546,6 +556,10 @@ enum TextProcessing {
     static func stripQuotedText(from text: String) -> String {
         // Delegate to PlainTextQuoteRemover for unified quote and signature removal
         PlainTextQuoteRemover.removeQuotes(from: text) ?? text
+    }
+
+    static func stripSignatures(from text: String) -> String {
+        PlainTextSignatureRemover.removeSignature(from: text)
     }
 
     /// Common sign-off words that should have a line break before them

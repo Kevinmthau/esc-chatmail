@@ -292,6 +292,22 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(result, "Sounds great!")
     }
 
+    func testRemoveSignature_contactBlockWithAddressAndPhone_removes() {
+        let text = """
+        Let me know.
+
+        Thanks!
+
+        Katie McGee
+        S.R. Gambrel Inc.
+        15 Watts Street, 4th Floor
+        New York, NY 10013
+        212-925-3380
+        """
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        XCTAssertEqual(result, "Let me know.\n\nThanks!")
+    }
+
     func testRemoveSignature_sincerely_preservedWithoutStrongIndicator() {
         let text = """
         Please review at your earliest convenience.
@@ -367,6 +383,22 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         """
         let result = PlainTextQuoteRemover.removeSignature(from: text)
         XCTAssertEqual(result, "Attached is the document.")
+    }
+
+    func testRemoveSignature_underscoreDelimiter_removes() {
+        let text = """
+        Thank you! Have a great weekend.
+
+        ___________________________
+        Jasmine Abouzied Shapiro
+        Managing Director
+        J.P. Morgan Private Bank
+        270 Park Avenue, Floor 22
+        New York, NY 10017
+        212 464 1041
+        """
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        XCTAssertEqual(result, "Thank you! Have a great weekend.")
     }
 
     // MARK: - Signature Removal - Legal Disclaimers

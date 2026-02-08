@@ -141,8 +141,10 @@ struct MessageContentView: View {
 
         // Only strip plain text quotes if we haven't already stripped HTML quotes
         let quoteStripped = alreadyStrippedQuotes ? unwrapped : TextProcessing.stripQuotedText(from: unwrapped)
+        // Always strip signatures, even when HTML quotes were removed upstream
+        let signatureStripped = TextProcessing.stripSignatures(from: quoteStripped)
         // Format sign-off line breaks (handles "...help. Regards, Kevin" → proper line breaks)
-        let result = TextProcessing.formatSignOffLineBreaks(in: quoteStripped)
+        let result = TextProcessing.formatSignOffLineBreaks(in: signatureStripped)
         return result.isEmpty ? nil : result
     }
 
