@@ -15,8 +15,9 @@ struct MessageBubble: View {
     @State private var senderAvatarURL: String?
     @State private var senderImageData: Data?
     @State private var showingHTMLView = false
+    @State private var hasRichContent = false
     private var showHTMLPreview: Bool {
-        message.hasHTMLSource && (message.isForwardedEmail || message.isNewsletter)
+        message.hasHTMLSource && (message.isForwardedEmail || message.isNewsletter || hasRichContent)
     }
     @State private var fullTextContent: String?
     @State private var hasLoadedContent = false
@@ -60,6 +61,7 @@ struct MessageBubble: View {
                     style: style,
                     showHTMLPreview: showHTMLPreview,
                     fullTextContent: fullTextContent,
+                    hasLoadedContent: hasLoadedContent,
                     showingHTMLView: $showingHTMLView
                 )
 
@@ -160,6 +162,7 @@ struct MessageBubble: View {
         loadingMessageId = currentMessageId
         hasLoadedContent = false
         fullTextContent = nil
+        hasRichContent = false
         lastContentSignature = signature
 
         // Use prefetched sender name if available, otherwise load (needed for avatar)
@@ -179,6 +182,7 @@ struct MessageBubble: View {
             // Final check before updating state - ensure this is still the active message
             guard loadingMessageId == currentMessageId else { return }
             fullTextContent = cached.plainText
+            hasRichContent = cached.hasRichContent
 
             let hasHTMLFile = HTMLContentHandler.shared.htmlFileExists(for: message.id)
             let hasHTMLSource = message.hasHTMLSource
@@ -243,6 +247,7 @@ struct MessageBubble: View {
         guard loadingMessageId == messageId else { return }
 
         fullTextContent = result.plainText
+        hasRichContent = result.hasRichContent
         hasLoadedContent = true
     }
 

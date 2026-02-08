@@ -402,14 +402,15 @@ class MessageProcessor {
     
     private func createCleanedSnippet(html: String?, plainText: String?, snippet: String?, isFromMe: Bool) -> String? {
         if let html = html {
+            let snippetReadyHTML = prepareHTMLForSnippet(html)
             // First try to remove quoted content for snippets
-            let cleanedHTML = EmailTextProcessor.removeQuotedFromHTML(html) ?? html
+            let cleanedHTML = EmailTextProcessor.removeQuotedFromHTML(snippetReadyHTML) ?? snippetReadyHTML
             let plainFromHTML = EmailTextProcessor.extractPlainFromHTML(cleanedHTML)
             let result = EmailTextProcessor.createCleanSnippet(from: plainFromHTML, maxLength: Int.max, firstSentenceOnly: false)
 
             // If quote removal stripped everything, try without HTML quote removal
             if result.isEmpty {
-                let plainFromRawHTML = EmailTextProcessor.extractPlainFromHTML(html)
+                let plainFromRawHTML = EmailTextProcessor.extractPlainFromHTML(snippetReadyHTML)
                 let fallbackResult = EmailTextProcessor.createCleanSnippet(from: plainFromRawHTML, maxLength: Int.max, firstSentenceOnly: false)
                 if !fallbackResult.isEmpty {
                     return fallbackResult
@@ -436,6 +437,35 @@ class MessageProcessor {
         }
 
         return nil
+    }
+
+    /// Prepares HTML for snippet extraction by removing metadata and hidden preheaders
+    /// that frequently pollute conversation list previews (e.g., title tags, Outlook comments).
+    private func prepareHTMLForSnippet(_ html: String) -> String {
+        var cleaned = html
+
+        // Remove HTML head content (title, meta, style, mso settings, etc.)
+        cleaned = cleaned.replacingOccurrences(
+            of: "<head\\b[^>]*>[\\s\\S]*?</head>",
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+
+        // Remove HTML comments, including Outlook conditional blocks.
+        cleaned = cleaned.replacingOccurrences(
+            of: "<!--[\\s\\S]*?-->",
+            with: "",
+            options: [.regularExpression]
+        )
+
+        // Remove hidden preheader/style-hiding elements.
+        cleaned = cleaned.replacingOccurrences(
+            of: "<([a-zA-Z0-9]+)\\b[^>]*style\\s*=\\s*['\"][^'\"]*(?:display\\s*:\\s*none|visibility\\s*:\\s*hidden|mso-hide\\s*:\\s*all|max-height\\s*:\\s*0|opacity\\s*:\\s*0|font-size\\s*:\\s*0)[^'\"]*['\"][^>]*>[\\s\\S]*?</\\1>",
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+
+        return cleaned
     }
     
     /// Debug helper to dump MIME structure

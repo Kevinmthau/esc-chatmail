@@ -14,6 +14,7 @@ struct MessageContentView: View {
     let style: MessageBubbleStyle
     let showHTMLPreview: Bool
     let fullTextContent: String?
+    let hasLoadedContent: Bool
     @Binding var showingHTMLView: Bool
 
     private var htmlContentHandler: HTMLContentHandler { HTMLContentHandler.shared }
@@ -34,24 +35,42 @@ struct MessageContentView: View {
 
     @ViewBuilder
     private var textContent: some View {
-        // Fallback chain:
-        // 1. fullTextContent - Async-loaded processed text (best quality, but may not be ready on first render)
-        // 2. processedText(bodyText) - Full body text with processing (immediate, full content)
-        // 3. processedText(snippet) - Gmail API snippet with processing (truncated, rarely used)
-        // 4. message.snippet - Raw truncated snippet (last resort)
-        // Note: We skip message.cleanedSnippet because TextSnippetCreator destroys all newlines
-        if let text = fullTextContent ?? processedText(message.bodyText) ?? processedText(message.snippet) ?? message.snippet, !text.isEmpty {
-            textBubble(text: text)
-        } else if message.hasHTMLSource {
-            // No text content but HTML exists - show button to view it
-            ViewContentButton.viewEmail {
-                showingHTMLView = true
+        // Avoid flashing raw/partial HTML-derived text while async content detection is still running.
+        if message.hasHTMLSource && !hasLoadedContent {
+            loadingPlaceholder
+        } else {
+            // Fallback chain:
+            // 1. fullTextContent - Async-loaded processed text (best quality, but may not be ready on first render)
+            // 2. processedText(bodyText) - Full body text with processing (immediate, full content)
+            // 3. processedText(snippet) - Gmail API snippet with processing (truncated, rarely used)
+            // 4. message.snippet - Raw truncated snippet (last resort)
+            // Note: We skip message.cleanedSnippet because TextSnippetCreator destroys all newlines
+            if let text = fullTextContent ?? processedText(message.bodyText) ?? processedText(message.snippet) ?? message.snippet, !text.isEmpty {
+                textBubble(text: text)
+            } else if message.hasHTMLSource {
+                // No text content but HTML exists - show button to view it
+                ViewContentButton.viewEmail {
+                    showingHTMLView = true
+                }
+            } else if message.typedAttachments.isEmpty {
+                // No content and no attachments - show placeholder
+                noContentPlaceholder
             }
-        } else if message.typedAttachments.isEmpty {
-            // No content and no attachments - show placeholder
-            noContentPlaceholder
+            // If message has attachments but no text, show nothing (attachments are the content)
         }
-        // If message has attachments but no text, show nothing (attachments are the content)
+    }
+
+    private var loadingPlaceholder: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Loading...")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding(style.bubblePadding)
+        .background(style.bubbleBackground(isFromMe: message.isFromMe))
+        .cornerRadius(style.bubbleCornerRadius)
     }
 
     @ViewBuilder
