@@ -172,31 +172,18 @@ final class MessageActions: ObservableObject {
 
         // Update local state
         let context = coreDataStack.viewContext
-        let labelRequest = Label.fetchRequest()
-        labelRequest.predicate = LabelPredicates.id("INBOX")
-        let inboxLabel: Label?
-        do {
-            inboxLabel = try context.fetch(labelRequest).first
-        } catch {
-            Log.error("Failed to fetch INBOX label for archive", category: .coreData, error: error)
-            inboxLabel = nil
-        }
+        let inboxLabel = fetchLabel(id: "INBOX", in: context, operation: "archive")
         Log.debug("INBOX label found: \(inboxLabel != nil)", category: .message)
 
         // Collect message IDs for syncing and mark as locally modified
-        var messageIds: [String] = []
-        var removedCount = 0
         let modificationDate = Date()
-        for message in messages {
-            if let inboxLabel = inboxLabel {
-                message.removeFromLabels(inboxLabel)
-                message.localModifiedAt = modificationDate
-                removedCount += 1
-                if !message.id.isEmpty {
-                    messageIds.append(message.id)
-                }
-            }
-        }
+        let mutationResult = applyArchiveLocalChanges(
+            to: messages,
+            inboxLabel: inboxLabel,
+            modificationDate: modificationDate
+        )
+        let messageIds = mutationResult.messageIds
+        let removedCount = mutationResult.affectedMessageCount
 
         // CRITICAL: Set archivedAt to mark this conversation as archived
         // This ensures that future emails from these participants create a NEW conversation
@@ -214,7 +201,7 @@ final class MessageActions: ObservableObject {
         if !messageIds.isEmpty {
             await pendingActionsManager.queueConversationAction(
                 type: .archiveConversation,
-                conversationId: conversation.id,
+                sourceConversationId: conversation.id,
                 messageIds: messageIds
             )
         }
@@ -231,15 +218,7 @@ final class MessageActions: ObservableObject {
         let context = coreDataStack.viewContext
 
         // Fetch INBOX label once
-        let labelRequest = Label.fetchRequest()
-        labelRequest.predicate = LabelPredicates.id("INBOX")
-        let inboxLabel: Label?
-        do {
-            inboxLabel = try context.fetch(labelRequest).first
-        } catch {
-            Log.error("Failed to fetch INBOX label for batch archive", category: .coreData, error: error)
-            return
-        }
+        let inboxLabel = fetchLabel(id: "INBOX", in: context, operation: "batch archive")
         guard let inboxLabel = inboxLabel else {
             Log.warning("INBOX label not found, cannot archive", category: .message)
             return
@@ -252,19 +231,13 @@ final class MessageActions: ObservableObject {
         for conversation in conversations {
             guard let messages = conversation.messages else { continue }
 
-            for message in messages {
-                message.removeFromLabels(inboxLabel)
-                message.localModifiedAt = modificationDate
-                if !message.id.isEmpty {
-                    allMessageIds.append(message.id)
-                }
-            }
+            allMessageIds.append(contentsOf: applyArchiveLocalChanges(
+                to: messages,
+                inboxLabel: inboxLabel,
+                modificationDate: modificationDate
+            ).messageIds)
 
-            // Mark conversation as archived and update rollup fields directly
-            conversation.archivedAt = modificationDate
-            conversation.hasInbox = false
-            conversation.inboxUnreadCount = 0
-            conversation.latestInboxDate = nil
+            applyArchivedConversationRollup(to: conversation, at: modificationDate)
         }
 
         // Single Core Data save for all changes
@@ -276,7 +249,7 @@ final class MessageActions: ObservableObject {
         if !allMessageIds.isEmpty {
             await pendingActionsManager.queueConversationAction(
                 type: .archiveConversation,
-                conversationId: firstConversation.id,
+                sourceConversationId: firstConversation.id,
                 messageIds: allMessageIds
             )
         }
@@ -293,25 +266,8 @@ final class MessageActions: ObservableObject {
         let context = coreDataStack.viewContext
 
         // Fetch INBOX label for removal and SPAM label for addition
-        let labelRequest = Label.fetchRequest()
-        labelRequest.predicate = LabelPredicates.id("INBOX")
-        let inboxLabel: Label?
-        do {
-            inboxLabel = try context.fetch(labelRequest).first
-        } catch {
-            Log.error("Failed to fetch INBOX label for batch spam", category: .coreData, error: error)
-            inboxLabel = nil
-        }
-
-        let spamRequest = Label.fetchRequest()
-        spamRequest.predicate = LabelPredicates.id("SPAM")
-        let spamLabel: Label?
-        do {
-            spamLabel = try context.fetch(spamRequest).first
-        } catch {
-            Log.error("Failed to fetch SPAM label for batch spam", category: .coreData, error: error)
-            spamLabel = nil
-        }
+        let inboxLabel = fetchLabel(id: "INBOX", in: context, operation: "batch spam")
+        let spamLabel = fetchLabel(id: "SPAM", in: context, operation: "batch spam")
 
         // Collect all message IDs and update local state in memory
         var allMessageIds: [String] = []
@@ -320,26 +276,14 @@ final class MessageActions: ObservableObject {
         for conversation in conversations {
             guard let messages = conversation.messages else { continue }
 
-            for message in messages {
-                // Remove INBOX label locally (same as archive)
-                if let inboxLabel = inboxLabel {
-                    message.removeFromLabels(inboxLabel)
-                }
-                // Add SPAM label locally to prevent reconciliation from re-adding INBOX
-                if let spamLabel = spamLabel {
-                    message.addToLabels(spamLabel)
-                }
-                message.localModifiedAt = modificationDate
-                if !message.id.isEmpty {
-                    allMessageIds.append(message.id)
-                }
-            }
+            allMessageIds.append(contentsOf: applySpamLocalChanges(
+                to: messages,
+                inboxLabel: inboxLabel,
+                spamLabel: spamLabel,
+                modificationDate: modificationDate
+            ))
 
-            // Mark conversation as archived and update rollup fields to prevent un-archiving
-            conversation.archivedAt = modificationDate
-            conversation.hasInbox = false
-            conversation.inboxUnreadCount = 0
-            conversation.latestInboxDate = nil
+            applyArchivedConversationRollup(to: conversation, at: modificationDate)
         }
 
         // Single Core Data save for all changes
@@ -351,7 +295,7 @@ final class MessageActions: ObservableObject {
         if !allMessageIds.isEmpty {
             await pendingActionsManager.queueConversationAction(
                 type: .reportSpam,
-                conversationId: firstConversation.id,
+                sourceConversationId: firstConversation.id,
                 messageIds: allMessageIds
             )
         }
@@ -373,49 +317,20 @@ final class MessageActions: ObservableObject {
         let context = coreDataStack.viewContext
 
         // Fetch INBOX label for removal and SPAM label for addition
-        let labelRequest = Label.fetchRequest()
-        labelRequest.predicate = LabelPredicates.id("INBOX")
-        let inboxLabel: Label?
-        do {
-            inboxLabel = try context.fetch(labelRequest).first
-        } catch {
-            Log.error("Failed to fetch INBOX label for spam", category: .coreData, error: error)
-            inboxLabel = nil
-        }
-
-        let spamRequest = Label.fetchRequest()
-        spamRequest.predicate = LabelPredicates.id("SPAM")
-        let spamLabel: Label?
-        do {
-            spamLabel = try context.fetch(spamRequest).first
-        } catch {
-            Log.error("Failed to fetch SPAM label for spam", category: .coreData, error: error)
-            spamLabel = nil
-        }
+        let inboxLabel = fetchLabel(id: "INBOX", in: context, operation: "spam")
+        let spamLabel = fetchLabel(id: "SPAM", in: context, operation: "spam")
 
         // Collect message IDs, remove INBOX label locally, add SPAM label, and mark as locally modified
-        var messageIds: [String] = []
         let modificationDate = Date()
-        for message in messages {
-            // Remove INBOX label locally (same as archive)
-            if let inboxLabel = inboxLabel {
-                message.removeFromLabels(inboxLabel)
-            }
-            // Add SPAM label locally to prevent reconciliation from re-adding INBOX
-            if let spamLabel = spamLabel {
-                message.addToLabels(spamLabel)
-            }
-            message.localModifiedAt = modificationDate
-            if !message.id.isEmpty {
-                messageIds.append(message.id)
-            }
-        }
+        let messageIds = applySpamLocalChanges(
+            to: messages,
+            inboxLabel: inboxLabel,
+            spamLabel: spamLabel,
+            modificationDate: modificationDate
+        )
 
         // Archive the conversation locally and update rollup fields to prevent un-archiving
-        conversation.archivedAt = modificationDate
-        conversation.hasInbox = false
-        conversation.inboxUnreadCount = 0
-        conversation.latestInboxDate = nil
+        applyArchivedConversationRollup(to: conversation, at: modificationDate)
 
         coreDataStack.saveIfNeeded(context: context)
         Log.debug("Marked \(messageIds.count) messages for spam, removed INBOX labels, archived conversation", category: .message)
@@ -424,7 +339,7 @@ final class MessageActions: ObservableObject {
         if !messageIds.isEmpty {
             await pendingActionsManager.queueConversationAction(
                 type: .reportSpam,
-                conversationId: conversation.id,
+                sourceConversationId: conversation.id,
                 messageIds: messageIds
             )
         }
@@ -486,5 +401,67 @@ final class MessageActions: ObservableObject {
         conversation.latestInboxDate = inboxMessages.first?.internalDate // Already sorted descending
 
         coreDataStack.saveIfNeeded(context: context)
+    }
+
+    private func fetchLabel(id: String, in context: NSManagedObjectContext, operation: String) -> Label? {
+        let request = Label.fetchRequest()
+        request.predicate = LabelPredicates.id(id)
+        do {
+            return try context.fetch(request).first
+        } catch {
+            Log.error("Failed to fetch \(id) label for \(operation)", category: .coreData, error: error)
+            return nil
+        }
+    }
+
+    private func applyArchivedConversationRollup(to conversation: Conversation, at date: Date) {
+        conversation.archivedAt = date
+        conversation.hasInbox = false
+        conversation.inboxUnreadCount = 0
+        conversation.latestInboxDate = nil
+    }
+
+    private func applyArchiveLocalChanges(
+        to messages: Set<Message>,
+        inboxLabel: Label?,
+        modificationDate: Date
+    ) -> (messageIds: [String], affectedMessageCount: Int) {
+        guard let inboxLabel = inboxLabel else {
+            return ([], 0)
+        }
+
+        var messageIds: [String] = []
+        var affected = 0
+        for message in messages {
+            message.removeFromLabels(inboxLabel)
+            message.localModifiedAt = modificationDate
+            affected += 1
+            if !message.id.isEmpty {
+                messageIds.append(message.id)
+            }
+        }
+        return (messageIds, affected)
+    }
+
+    private func applySpamLocalChanges(
+        to messages: Set<Message>,
+        inboxLabel: Label?,
+        spamLabel: Label?,
+        modificationDate: Date
+    ) -> [String] {
+        var messageIds: [String] = []
+        for message in messages {
+            if let inboxLabel = inboxLabel {
+                message.removeFromLabels(inboxLabel)
+            }
+            if let spamLabel = spamLabel {
+                message.addToLabels(spamLabel)
+            }
+            message.localModifiedAt = modificationDate
+            if !message.id.isEmpty {
+                messageIds.append(message.id)
+            }
+        }
+        return messageIds
     }
 }

@@ -16,9 +16,10 @@ protocol PendingActionsManagerProtocol: Actor {
     /// Queues an action for an entire conversation (multiple messages).
     /// - Parameters:
     ///   - type: The type of action to perform
-    ///   - conversationId: The local conversation ID
+    ///   - sourceConversationId: Local conversation metadata for tracing/debugging only.
+    ///     Execution for batch actions is driven by `messageIds`.
     ///   - messageIds: The Gmail message IDs in the conversation
-    func queueConversationAction(type: PendingAction.ActionType, conversationId: UUID, messageIds: [String]) async
+    func queueConversationAction(type: PendingAction.ActionType, sourceConversationId: UUID, messageIds: [String]) async
 
     /// Processes all pending actions that are ready to be synced.
     /// Called automatically when network becomes available.

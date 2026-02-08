@@ -61,7 +61,7 @@ extension PendingActionsManager {
         let objectID = action.objectID
         let actionType = action.actionTypeEnum
         let messageId = action.messageIdValue
-        let conversationId = action.conversationIdValue
+        let sourceConversationId = action.conversationIdValue
         let payloadString = action.payloadValue
         let retryCount = action.retryCountValue
 
@@ -78,7 +78,7 @@ extension PendingActionsManager {
             try await actionExecutor.execute(
                 type: type,
                 messageId: messageId,
-                conversationId: conversationId,
+                sourceConversationId: sourceConversationId,
                 payload: payload
             )
 

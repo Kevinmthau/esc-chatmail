@@ -126,11 +126,13 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
 
     public func queueConversationAction(
         type: PendingAction.ActionType,
-        conversationId: UUID,
+        sourceConversationId: UUID,
         messageIds: [String]
     ) async {
         ensureInitialized()
 
+        // sourceConversationId is metadata-only and stored for tracing/UI context.
+        // Execution uses the payload message IDs.
         Log.info("Queueing \(type.rawValue) for \(messageIds.count) messages", category: .sync)
 
         let context = coreDataStack.viewContext
@@ -139,7 +141,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
             self.createPendingAction(
                 in: context,
                 type: type,
-                conversationId: conversationId,
+                sourceConversationId: sourceConversationId,
                 payload: payload
             )
             return context.saveOrLog(operation: "queue conversation action: \(type.rawValue)")
@@ -149,7 +151,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         if saveSucceeded && networkMonitor.isConnected {
             await processAllPendingActions()
         } else if !saveSucceeded {
-            Log.error("Failed to save conversation action \(type.rawValue) for conversation \(conversationId) - action will not be queued", category: .sync)
+            Log.error("Failed to save conversation action \(type.rawValue) for conversation \(sourceConversationId) - action will not be queued", category: .sync)
         }
     }
 
@@ -157,14 +159,14 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         in context: NSManagedObjectContext,
         type: PendingAction.ActionType,
         messageId: String? = nil,
-        conversationId: UUID? = nil,
+        sourceConversationId: UUID? = nil,
         payload: [String: Any]? = nil
     ) {
         let action = PendingAction(context: context)
         action.setValue(UUID(), forKey: "id")
         action.setValue(type.rawValue, forKey: "actionType")
         action.setValue(messageId, forKey: "messageId")
-        action.setValue(conversationId, forKey: "conversationId")
+        action.setValue(sourceConversationId, forKey: "conversationId")
         action.setValue(Date(), forKey: "createdAt")
         action.setValue("pending", forKey: "status")
         action.setValue(Int16(0), forKey: "retryCount")

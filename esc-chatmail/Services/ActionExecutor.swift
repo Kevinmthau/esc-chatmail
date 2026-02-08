@@ -3,10 +3,17 @@ import Foundation
 // MARK: - Action Executor Protocol
 
 protocol ActionExecutorProtocol: Sendable {
+    /// Executes a pending action.
+    /// - Parameters:
+    ///   - type: Action type to execute.
+    ///   - messageId: Single-message target when applicable.
+    ///   - sourceConversationId: Optional local conversation metadata for tracing/debugging only.
+    ///     Batch action execution is driven by `payload["messageIds"]`.
+    ///   - payload: Additional action data.
     func execute(
         type: PendingAction.ActionType,
         messageId: String?,
-        conversationId: UUID?,
+        sourceConversationId: UUID?,
         payload: [String: Any]?
     ) async throws
 }
@@ -27,9 +34,11 @@ actor GmailActionExecutor: ActionExecutorProtocol {
     func execute(
         type: PendingAction.ActionType,
         messageId: String?,
-        conversationId: UUID?,
+        sourceConversationId: UUID?,
         payload: [String: Any]?
     ) async throws {
+        // Metadata-only parameter used for traceability.
+        _ = sourceConversationId
         let apiClient = await apiClientProvider()
 
         switch type {
@@ -112,19 +121,20 @@ enum PendingActionError: LocalizedError {
 
 #if DEBUG
 actor MockActionExecutor: ActionExecutorProtocol {
-    var executedActions: [(type: PendingAction.ActionType, messageId: String?, payload: [String: Any]?)] = []
+    var executedActions: [(type: PendingAction.ActionType, messageId: String?, sourceConversationId: UUID?, payload: [String: Any]?)] = []
     var shouldFail = false
 
     func execute(
         type: PendingAction.ActionType,
         messageId: String?,
-        conversationId: UUID?,
+        sourceConversationId: UUID?,
         payload: [String: Any]?
     ) async throws {
+        _ = sourceConversationId
         if shouldFail {
             throw PendingActionError.invalidActionType
         }
-        executedActions.append((type, messageId, payload))
+        executedActions.append((type, messageId, sourceConversationId, payload))
     }
 }
 #endif

@@ -148,39 +148,19 @@ actor ProcessedTextCache: MemoryWarningHandler {
         bodyStorageURI: String? = nil,
         handler: HTMLContentHandler
     ) -> (plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart]) {
-        var plainText: String?
+        var plainTextAndQuotes: (plainText: String?, quotedParts: [QuotedPart])?
         var hasRichContent = false
-        var quotedParts: [QuotedPart] = []
 
         let html = loadHTML(messageId: messageId, bodyStorageURI: bodyStorageURI, handler: handler)
         if let html {
             // Strip quoted content from HTML first
             let cleanedHTML = HTMLQuoteRemover.removeQuotes(from: html) ?? html
 
-            let extracted = TextProcessing.extractPlainText(from: cleanedHTML)
-            if !extracted.isEmpty {
-                let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: extracted)
-                // Extract quotes separately instead of just stripping
-                let extractionResult = PlainTextQuoteRemover.extractQuotes(from: unwrapped)
-                // Format sign-off line breaks (handles "...help. Regards, Kevin" → proper line breaks)
-                let formatted = TextProcessing.formatSignOffLineBreaks(in: extractionResult.mainContent)
-                plainText = formatted.isEmpty ? nil : formatted
-                quotedParts = extractionResult.quotedParts
-            }
+            plainTextAndQuotes = extractPlainTextAndQuotes(from: cleanedHTML)
 
             // If quote removal stripped everything, try without HTML quote removal
-            if plainText == nil {
-                let rawExtracted = TextProcessing.extractPlainText(from: html)
-                if !rawExtracted.isEmpty {
-                    let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: rawExtracted)
-                    let extractionResult = PlainTextQuoteRemover.extractQuotes(from: unwrapped)
-                    // Format sign-off line breaks (handles "...help. Regards, Kevin" → proper line breaks)
-                    let formatted = TextProcessing.formatSignOffLineBreaks(in: extractionResult.mainContent)
-                    plainText = formatted.isEmpty ? nil : formatted
-                    // Always update quotedParts to match the mainContent we're using
-                    // This ensures consistency between plainText and quotedParts
-                    quotedParts = extractionResult.quotedParts
-                }
+            if plainTextAndQuotes?.plainText == nil {
+                plainTextAndQuotes = extractPlainTextAndQuotes(from: html)
             }
 
             // Check for rich content in cleaned HTML only (not quoted sections)
@@ -188,7 +168,11 @@ actor ProcessedTextCache: MemoryWarningHandler {
             hasRichContent = hasGenuineRichContent(cleanedHTML)
         }
 
-        return (plainText, hasRichContent, quotedParts)
+        return (
+            plainTextAndQuotes?.plainText,
+            hasRichContent,
+            plainTextAndQuotes?.quotedParts ?? []
+        )
     }
 
     nonisolated private static func loadHTML(
@@ -249,10 +233,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
         // in simple divs and should still show as HTML to preserve formatting
         if imgCount == 0 && tableCount == 0 && cidCount == 0 && isSimpleDivWrappedText(html, lowercased: lowercased) {
             // Check if there's substantial text content before downgrading to plain text
-            let textContent = html
-                .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
-                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let textContent = approximateTextContent(from: html)
 
             // If substantial text content, keep as HTML to preserve formatting
             if textContent.count > 200 {
@@ -262,10 +243,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
         }
 
         // Extract approximate text content length (rough estimate without full parsing)
-        let textContent = html
-            .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let textContent = approximateTextContent(from: html)
 
         // Check for CSS background images (often used in marketing emails)
         let hasBackgroundImages = lowercased.contains("background-image") ||
@@ -310,10 +288,6 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
             // Transactional emails (e.g., security alerts) often use a small number of tables
             // with substantial text content. Treat these as rich to preserve formatting.
-            let textContent = html
-                .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
-                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
             if tableCount >= 2 && textContent.count > 200 {
                 return true
             }
@@ -371,6 +345,25 @@ actor ProcessedTextCache: MemoryWarningHandler {
         if charsPerElement < 40 && textContent.count < 400 { score -= 10 }
 
         return score >= 40
+    }
+
+    nonisolated private static func extractPlainTextAndQuotes(
+        from html: String
+    ) -> (plainText: String?, quotedParts: [QuotedPart]) {
+        let extracted = TextProcessing.extractPlainText(from: html)
+        guard !extracted.isEmpty else { return (nil, []) }
+
+        let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: extracted)
+        let extractionResult = PlainTextQuoteRemover.extractQuotes(from: unwrapped)
+        let formatted = TextProcessing.formatSignOffLineBreaks(in: extractionResult.mainContent)
+        return (formatted.isEmpty ? nil : formatted, extractionResult.quotedParts)
+    }
+
+    nonisolated private static func approximateTextContent(from html: String) -> String {
+        html
+            .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Counts HTML elements using efficient substring search
