@@ -53,6 +53,7 @@ extension GmailSendService {
         message.internalDate = Date()
         message.snippet = snippet
         message.cleanedSnippet = cleanedSnippet
+        message.bodyText = body
         message.gmThreadId = gmThreadId
         message.subject = subject
         message.hasAttachments = hasAttachments

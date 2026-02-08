@@ -67,12 +67,20 @@ struct MimeBuilder {
         originalMessage: QuotedMessage? = nil,
         attachments: [AttachmentData] = []
     ) -> Data {
-        let bodyWithQuote = formatReplyBody(body: body, originalMessage: originalMessage)
-        if attachments.isEmpty {
-            return buildSimpleMessage(to: to, from: from, fromName: fromName, body: bodyWithQuote, subject: subject, inReplyTo: inReplyTo, references: references)
-        } else {
-            return buildMultipartMessage(to: to, from: from, fromName: fromName, body: bodyWithQuote, subject: subject, inReplyTo: inReplyTo, references: references, attachments: attachments)
-        }
+        let plainBodyWithQuote = formatReplyBody(body: body, originalMessage: originalMessage)
+        let htmlBodyWithQuote = formatReplyHTMLBody(body: body, originalMessage: originalMessage)
+        return buildAlternativeMessage(
+            to: to,
+            from: from,
+            fromName: fromName,
+            body: plainBodyWithQuote,
+            htmlBody: htmlBodyWithQuote,
+            subject: subject,
+            inReplyTo: inReplyTo,
+            references: references,
+            attachments: attachments,
+            inlineAttachments: []
+        )
     }
 
     // MARK: - Convenience Overloads
