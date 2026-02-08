@@ -34,6 +34,11 @@ struct ImageProcessor {
         }
 
         let newSize = CGSize(width: size.width * scale, height: size.height * scale)
+        guard newSize.width > 0, newSize.height > 0,
+              newSize.width.isFinite, newSize.height.isFinite else {
+            Log.debug("ImageProcessor: Skipping image resize with invalid target size \(newSize)", category: .attachment)
+            return (nil, nil)
+        }
 
         // Use newer rendering API if available
         if #available(iOS 10.0, *) {
@@ -75,8 +80,19 @@ struct ImageProcessor {
         }
         
         let pageRect = firstPage.bounds(for: .mediaBox)
+        guard pageRect.width > 0, pageRect.height > 0,
+              pageRect.width.isFinite, pageRect.height.isFinite else {
+            Log.debug("ImageProcessor: Invalid PDF page bounds \(pageRect)", category: .attachment)
+            return nil
+        }
+
         let scale = min(maxThumbnailDimension / max(pageRect.width, pageRect.height), 1.0)
         let thumbnailSize = CGSize(width: pageRect.width * scale, height: pageRect.height * scale)
+        guard thumbnailSize.width > 0, thumbnailSize.height > 0,
+              thumbnailSize.width.isFinite, thumbnailSize.height.isFinite else {
+            Log.debug("ImageProcessor: Skipping PDF thumbnail with invalid target size \(thumbnailSize)", category: .attachment)
+            return nil
+        }
         
         UIGraphicsBeginImageContextWithOptions(thumbnailSize, true, 1.0)
         defer { UIGraphicsEndImageContext() }

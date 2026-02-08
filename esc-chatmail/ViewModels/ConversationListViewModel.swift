@@ -44,8 +44,11 @@ final class ConversationListViewModel: ObservableObject {
     private let personCache: PersonCache
     private var syncTimer: Timer?
     private var hasPerformedInitialSync = false
+    private var lastSyncTriggerAt: Date?
     private var cancellables = Set<AnyCancellable>()
     private let taskManager = ViewModelTaskManager()
+    private let periodicSyncInterval: TimeInterval = 120
+    private let minimumPeriodicSyncGap: TimeInterval = 90
 
     // MARK: - Initialization
 
@@ -123,6 +126,7 @@ final class ConversationListViewModel: ObservableObject {
 
         taskManager.run("initialSync", priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
+            markSyncTriggered()
             do {
                 try await syncEngine.performIncrementalSync()
             } catch {
@@ -132,6 +136,7 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     func performSync() async {
+        markSyncTriggered()
         do {
             try await syncEngine.performIncrementalSync()
         } catch {
@@ -142,10 +147,15 @@ final class ConversationListViewModel: ObservableObject {
     func startPeriodicSync() {
         stopPeriodicSync()
 
-        syncTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+        syncTimer = Timer.scheduledTimer(withTimeInterval: periodicSyncInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.taskManager.run("periodicSync") { [weak self] in
                     guard let self = self, !self.syncEngine.isSyncing else { return }
+                    guard self.shouldTriggerSync(minInterval: self.minimumPeriodicSyncGap) else {
+                        Log.debug("Skipping periodic sync (throttled)", category: .sync)
+                        return
+                    }
+                    self.markSyncTriggered()
                     Log.debug("Performing periodic sync", category: .sync)
                     do {
                         try await self.syncEngine.performIncrementalSync()
@@ -155,6 +165,7 @@ final class ConversationListViewModel: ObservableObject {
                 }
             }
         }
+        syncTimer?.tolerance = 15
     }
 
     func stopPeriodicSync() {
@@ -294,5 +305,14 @@ final class ConversationListViewModel: ObservableObject {
         stopPeriodicSync()
         searchService.cleanup()
         taskManager.cancelAll()
+    }
+
+    private func shouldTriggerSync(minInterval: TimeInterval) -> Bool {
+        guard let lastSyncTriggerAt else { return true }
+        return Date().timeIntervalSince(lastSyncTriggerAt) >= minInterval
+    }
+
+    private func markSyncTriggered() {
+        lastSyncTriggerAt = Date()
     }
 }

@@ -21,12 +21,19 @@ struct MessageContentView: View {
 
     var body: some View {
         if showHTMLPreview {
-            // Show HTML preview only for newsletters and forwarded emails.
-            EmailContentSection(
-                message: message,
-                showingHTMLView: $showingHTMLView
-            )
-            .frame(maxWidth: style.maxBubbleWidth)
+            // Show HTML preview for newsletters/forwarded emails.
+            // For forwards, also show the user's lead-in text as a normal chat bubble.
+            VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 8) {
+                if let intro = forwardedIntroText, !intro.isEmpty {
+                    textBubble(text: intro, includeViewMore: false)
+                }
+
+                EmailContentSection(
+                    message: message,
+                    showingHTMLView: $showingHTMLView
+                )
+            }
+            .frame(maxWidth: style.maxBubbleWidth, alignment: message.isFromMe ? .trailing : .leading)
         } else {
             // Personal emails: Show as chat bubbles with text
             textContent
@@ -74,9 +81,9 @@ struct MessageContentView: View {
     }
 
     @ViewBuilder
-    private func textBubble(text: String) -> some View {
+    private func textBubble(text: String, includeViewMore: Bool = true) -> some View {
         let (displayText, wasTruncated) = truncatedText(text, lineLimit: style.textLineLimit)
-        let showViewMore = showHTMLPreview || wasTruncated
+        let showViewMore = includeViewMore && (showHTMLPreview || wasTruncated)
 
         VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 6) {
             Text(displayText)
@@ -126,6 +133,52 @@ struct MessageContentView: View {
             .padding(10)
             .background(Color.gray.opacity(0.1))
             .cornerRadius(12)
+    }
+
+    /// Returns user-written lead-in text for forwarded emails, excluding forwarded content.
+    private var forwardedIntroText: String? {
+        guard message.isForwardedEmail else { return nil }
+
+        // Prefer raw plain-text body for forwards so we can split exactly at the forward marker.
+        if let bodyText = message.bodyText,
+           let intro = extractForwardIntro(from: bodyText) {
+            return intro
+        }
+
+        // Fallback: only use a short snippet-like value; avoid showing large forwarded content.
+        let fallback = (message.snippet ?? fullTextContent)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let fallback, !fallback.isEmpty, fallback.count <= 280 else {
+            return nil
+        }
+        return fallback
+    }
+
+    private func extractForwardIntro(from text: String) -> String? {
+        let normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+
+        let markers = [
+            "---------- Forwarded message ---------",
+            "---------- Forwarded message ----------",
+            "----- Forwarded message -----",
+            "Begin forwarded message:",
+            "-----Original Message-----",
+            "------ Original Message ------"
+        ]
+
+        var intro = normalized
+        for marker in markers {
+            if let range = normalized.range(of: marker, options: [.caseInsensitive]) {
+                intro = String(normalized[..<range.lowerBound])
+                break
+            }
+        }
+
+        let trimmed = intro.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// Processes text while preserving paragraph structure and decoding HTML entities

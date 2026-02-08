@@ -105,6 +105,12 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         targetSize: CGSize,
         contentMode: UIView.ContentMode = .scaleAspectFill
     ) async -> UIImage? {
+        guard targetSize.width > 0, targetSize.height > 0,
+              targetSize.width.isFinite, targetSize.height.isFinite else {
+            Log.debug("Skipping downsample for \(attachmentId): invalid target size \(targetSize)", category: .attachment)
+            return nil
+        }
+
         let cacheKey = "downsampled_\(attachmentId)_\(Int(targetSize.width))x\(Int(targetSize.height))"
 
         // Check memory cache
@@ -140,12 +146,22 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         contentMode: UIView.ContentMode,
         scale: CGFloat
     ) -> UIImage? {
+        guard targetSize.width > 0, targetSize.height > 0,
+              targetSize.width.isFinite, targetSize.height.isFinite,
+              scale > 0, scale.isFinite else {
+            return nil
+        }
+
         let imageSourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, imageSourceOptions) else {
             return nil
         }
 
         let maxDimensionInPixels = max(targetSize.width, targetSize.height) * scale
+        guard maxDimensionInPixels > 0, maxDimensionInPixels.isFinite else {
+            return nil
+        }
+
         let downsampleOptions = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceShouldCacheImmediately: true,
