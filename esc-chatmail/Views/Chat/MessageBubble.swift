@@ -15,7 +15,9 @@ struct MessageBubble: View {
     @State private var senderAvatarURL: String?
     @State private var senderImageData: Data?
     @State private var showingHTMLView = false
-    @State private var hasRichContent: Bool
+    private var showHTMLPreview: Bool {
+        message.hasHTMLSource && (message.isForwardedEmail || message.isNewsletter)
+    }
     @State private var fullTextContent: String?
     @State private var hasLoadedContent = false
     @State private var lastContentSignature: String?
@@ -35,14 +37,7 @@ struct MessageBubble: View {
         self.isLastFromSender = isLastFromSender
         self.style = style
 
-        // Compute initial hasRichContent synchronously to avoid flash of raw HTML
-        // For forwarded emails or received messages with stored HTML, assume rich content
-        let initialRich = message.isForwardedEmail ||
-            (!message.isFromMe && (
-                message.bodyStorageURI != nil ||
-                HTMLContentHandler.shared.htmlFileExists(for: message.id)
-            ))
-        _hasRichContent = State(initialValue: initialRich)
+        // No stateful HTML preview flag needed; derived from message metadata.
     }
 
     var body: some View {
@@ -63,7 +58,7 @@ struct MessageBubble: View {
                 MessageContentView(
                     message: message,
                     style: style,
-                    hasRichContent: hasRichContent,
+                    showHTMLPreview: showHTMLPreview,
                     fullTextContent: fullTextContent,
                     showingHTMLView: $showingHTMLView
                 )
@@ -129,7 +124,7 @@ struct MessageBubble: View {
         let _ = {
             if message.hasAttachments {
                 let attachmentDetails = message.attachmentsArray.map { "[\($0.filename), cid:\($0.contentId ?? "nil")]" }.joined(separator: ", ")
-                Log.warning("UI_DEBUG msg=\(message.id) hasAttachments=\(message.hasAttachments) attachmentsArray=\(message.attachmentsArray.count) displayable=\(displayable.count) hasRichContent=\(hasRichContent) attachments=\(attachmentDetails)", category: .ui)
+                Log.warning("UI_DEBUG msg=\(message.id) hasAttachments=\(message.hasAttachments) attachmentsArray=\(message.attachmentsArray.count) displayable=\(displayable.count) showHTMLPreview=\(showHTMLPreview) attachments=\(attachmentDetails)", category: .ui)
             }
         }()
         #endif
@@ -167,15 +162,6 @@ struct MessageBubble: View {
         fullTextContent = nil
         lastContentSignature = signature
 
-        // Reset hasRichContent to the initial computed value for the NEW message
-        // This prevents showing wrong UI type when cell is reused
-        let initialRich = message.isForwardedEmail ||
-            (!message.isFromMe && (
-                message.bodyStorageURI != nil ||
-                HTMLContentHandler.shared.htmlFileExists(for: message.id)
-            ))
-        hasRichContent = initialRich
-
         // Use prefetched sender name if available, otherwise load (needed for avatar)
         if !message.isFromMe {
             if let prefetched = prefetchedSenderName {
@@ -193,7 +179,18 @@ struct MessageBubble: View {
             // Final check before updating state - ensure this is still the active message
             guard loadingMessageId == currentMessageId else { return }
             fullTextContent = cached.plainText
-            hasRichContent = message.isForwardedEmail || (!message.isFromMe && cached.hasRichContent)
+
+            let hasHTMLFile = HTMLContentHandler.shared.htmlFileExists(for: message.id)
+            let hasHTMLSource = message.hasHTMLSource
+
+            // Prefetch may have cached a result without considering bodyStorageURI.
+            // If we have an HTML source but the cache lacks plain text and the file isn't
+            // in the messageId location, recompute using the URI for correctness.
+            if hasHTMLSource && cached.plainText == nil && message.bodyStorageURI != nil && !hasHTMLFile {
+                await loadFullTextContentWithCache()
+                return
+            }
+
             hasLoadedContent = true
         } else {
             // Fallback: process on background thread and cache result
@@ -204,18 +201,20 @@ struct MessageBubble: View {
     private func contentSignature() -> String {
         let bodyTextHash = message.bodyText?.hashValue ?? 0
         let snippetHash = message.snippet?.hashValue ?? 0
-        return "\(message.bodyStorageURI ?? "")|\(bodyTextHash)|\(snippetHash)"
+        return "\(message.bodyStorageURI ?? "")|\(bodyTextHash)|\(snippetHash)|\(message.hasHTMLSource)"
     }
 
     private func loadFullTextContentWithCache() async {
         let messageId = message.id
         let bodyText = message.bodyTextValue
-        let isFromMe = message.isFromMe
-        let isForwarded = message.isForwardedEmail
-
+        let bodyStorageURI = message.bodyStorageURI
         let result: (plainText: String?, hasRichContent: Bool) = await Task.detached(priority: .userInitiated) {
             let handler = HTMLContentHandler.shared
-            var processedResult = ProcessedTextCache.processMessage(messageId: messageId, handler: handler)
+            var processedResult = ProcessedTextCache.processMessage(
+                messageId: messageId,
+                bodyStorageURI: bodyStorageURI,
+                handler: handler
+            )
 
             // If no HTML content, try bodyText
             if processedResult.plainText == nil, let text = bodyText {
@@ -244,7 +243,6 @@ struct MessageBubble: View {
         guard loadingMessageId == messageId else { return }
 
         fullTextContent = result.plainText
-        hasRichContent = isForwarded || (!isFromMe && result.hasRichContent)
         hasLoadedContent = true
     }
 

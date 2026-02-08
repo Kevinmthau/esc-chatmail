@@ -38,6 +38,11 @@ extension Message {
         attachments ?? []
     }
 
+    /// True when the message has local HTML content available via storage URI or message-id file.
+    var hasHTMLSource: Bool {
+        bodyStorageURI != nil || HTMLContentHandler.shared.htmlFileExists(for: id)
+    }
+
     /// Array of attachments for convenient iteration
     var attachmentsArray: [Attachment] {
         Array(typedAttachments)

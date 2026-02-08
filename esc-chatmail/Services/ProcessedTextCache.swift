@@ -133,13 +133,17 @@ actor ProcessedTextCache: MemoryWarningHandler {
     }
 
     /// Process a single message - can be called from background thread
-    nonisolated static func processMessage(messageId: String, handler: HTMLContentHandler) -> (plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart]) {
+    nonisolated static func processMessage(
+        messageId: String,
+        bodyStorageURI: String? = nil,
+        handler: HTMLContentHandler
+    ) -> (plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart]) {
         var plainText: String?
         var hasRichContent = false
         var quotedParts: [QuotedPart] = []
 
-        if handler.htmlFileExists(for: messageId),
-           let html = handler.loadHTML(for: messageId) {
+        let html = loadHTML(messageId: messageId, bodyStorageURI: bodyStorageURI, handler: handler)
+        if let html {
             // Strip quoted content from HTML first
             let cleanedHTML = HTMLQuoteRemover.removeQuotes(from: html) ?? html
 
@@ -175,6 +179,35 @@ actor ProcessedTextCache: MemoryWarningHandler {
         }
 
         return (plainText, hasRichContent, quotedParts)
+    }
+
+    nonisolated private static func loadHTML(
+        messageId: String,
+        bodyStorageURI: String?,
+        handler: HTMLContentHandler
+    ) -> String? {
+        if handler.htmlFileExists(for: messageId),
+           let html = handler.loadHTML(for: messageId) {
+            return html
+        }
+
+        guard let urlString = bodyStorageURI,
+              let url = resolveStorageURI(urlString),
+              FileManager.default.fileExists(atPath: url.path) else {
+            return nil
+        }
+
+        return handler.loadHTML(from: url)
+    }
+
+    nonisolated private static func resolveStorageURI(_ urlString: String) -> URL? {
+        if urlString.starts(with: "/") {
+            return URL(fileURLWithPath: urlString)
+        } else if urlString.starts(with: "file://") {
+            return URL(string: urlString)
+        } else {
+            return URL(string: urlString)
+        }
     }
 
     /// Determines if HTML contains genuine rich content (newsletters, receipts) vs personal email signature cruft

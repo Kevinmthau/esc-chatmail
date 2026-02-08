@@ -12,17 +12,15 @@ struct MessageContentView: View {
     }()
     let message: Message
     let style: MessageBubbleStyle
-    let hasRichContent: Bool
+    let showHTMLPreview: Bool
     let fullTextContent: String?
     @Binding var showingHTMLView: Bool
 
     private var htmlContentHandler: HTMLContentHandler { HTMLContentHandler.shared }
 
     var body: some View {
-        if hasRichContent {
-            // Rich HTML emails (newsletters, bank statements, etc.): Show HTML preview
-            // Note: hasRichContent is the primary determinant - even emails flagged as newsletters
-            // should display as plain text if their content is simple (e.g., mailing list replies)
+        if showHTMLPreview {
+            // Show HTML preview only for newsletters and forwarded emails.
             EmailContentSection(
                 message: message,
                 showingHTMLView: $showingHTMLView
@@ -44,7 +42,7 @@ struct MessageContentView: View {
         // Note: We skip message.cleanedSnippet because TextSnippetCreator destroys all newlines
         if let text = fullTextContent ?? processedText(message.bodyText) ?? processedText(message.snippet) ?? message.snippet, !text.isEmpty {
             textBubble(text: text)
-        } else if message.bodyStorageURI != nil || htmlContentHandler.htmlFileExists(for: message.id) {
+        } else if message.hasHTMLSource {
             // No text content but HTML exists - show button to view it
             ViewContentButton.viewEmail {
                 showingHTMLView = true
@@ -59,7 +57,7 @@ struct MessageContentView: View {
     @ViewBuilder
     private func textBubble(text: String) -> some View {
         let (displayText, wasTruncated) = truncatedText(text, lineLimit: style.textLineLimit)
-        let showViewMore = hasRichContent || wasTruncated
+        let showViewMore = showHTMLPreview || wasTruncated
 
         VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 6) {
             Text(displayText)
