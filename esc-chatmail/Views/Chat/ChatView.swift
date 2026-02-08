@@ -15,6 +15,7 @@ struct ChatView: View {
     @State private var followUpScrollTask: Task<Void, Never>?
     @State private var stabilizationScrollTask: Task<Void, Never>?
     @Environment(\.dismiss) private var dismiss
+    private var shouldUseBottomAnchoring: Bool { messages.count > 1 }
 
     init(conversation: Conversation) {
         self.conversation = conversation
@@ -62,7 +63,7 @@ struct ChatView: View {
                     isTextFieldFocused = false
                 }
             }
-            .defaultScrollAnchor(.bottom)
+            .defaultScrollAnchor(shouldUseBottomAnchoring ? .bottom : .top)
             .scrollDismissesKeyboard(.interactively)
             .onAppear {
 #if DEBUG
@@ -231,6 +232,10 @@ struct ChatView: View {
     /// Performs the initial scroll to bottom with task tracking to prevent race conditions
     /// when both onAppear and onChange fire for cached data
     private func performInitialScroll(proxy: ScrollViewProxy) {
+        guard shouldUseBottomAnchoring else {
+            isReadyToShow = true
+            return
+        }
         // Cancel any existing initial scroll task to prevent race conditions
         initialScrollTask?.cancel()
         initialScrollTask = Task { @MainActor in
@@ -246,6 +251,7 @@ struct ChatView: View {
     }
 
     private func scrollToBottom(proxy: ScrollViewProxy, delay: TimeInterval) {
+        guard shouldUseBottomAnchoring else { return }
         // Cancel any existing scroll task to prevent accumulation from multiple onChange handlers
         scrollTask?.cancel()
         scrollTask = Task { @MainActor in
@@ -261,6 +267,10 @@ struct ChatView: View {
     }
 
     private func performFollowUpBottomScroll(proxy: ScrollViewProxy) async {
+        guard shouldUseBottomAnchoring else {
+            isReadyToShow = true
+            return
+        }
         followUpScrollTask?.cancel()
         followUpScrollTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(UIConfig.initialScrollDelay * 1_000_000_000))
@@ -279,6 +289,7 @@ struct ChatView: View {
     /// which can leave the viewport below content on some devices.
     /// Re-assert bottom anchoring briefly after initial load.
     private func scheduleStabilizationBottomScrolls(proxy: ScrollViewProxy) {
+        guard shouldUseBottomAnchoring else { return }
         stabilizationScrollTask?.cancel()
         stabilizationScrollTask = Task { @MainActor in
             let delays: [TimeInterval] = [0.25, 0.75, 1.5]
