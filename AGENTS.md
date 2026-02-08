@@ -28,7 +28,12 @@ Use `xcodebuild` with the `esc-chatmail` scheme:
 - Add tests for behavior changes; keep unit tests fast and deterministic.
 
 ## Commit & Pull Request Guidelines
-- Commit messages are short, imperative, and action-led (e.g., “Fix: Large HTML emails not showing thumbnail”, “Decode quoted-printable HTML bodies”).
+- Commit messages must be detailed and action-led, and should include:
+  - what changed,
+  - why it changed,
+  - behavior impact/scope,
+  - tests run (when applicable).
+- Preferred format: concise subject line + explanatory body covering the items above.
 - PRs should include: a concise summary, tests run, and screenshots for UI changes.
 - Link related issues when applicable.
 
