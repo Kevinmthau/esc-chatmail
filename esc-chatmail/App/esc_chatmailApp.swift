@@ -63,6 +63,9 @@ struct esc_chatmailApp: App {
                     .onChange(of: scenePhase) { oldPhase, newPhase in
                         handleScenePhaseChange(newPhase)
                     }
+                    .onChange(of: dependencies.authSession.isAuthenticated) { _, isAuthenticated in
+                        handleAuthStateChange(isAuthenticated)
+                    }
             } else {
                 AppLoadingView()
                     .task {
@@ -96,6 +99,15 @@ struct esc_chatmailApp: App {
         // 4. Restore auth session (after cleanup complete)
         await AuthSession.shared.restorePreviousSignIn()
         logStartupTiming("Auth restored")
+
+        // Start app-scoped foreground sync as soon as auth is available.
+        // Scene callbacks may not fire during cold-start when already active.
+        if dependencies.authSession.isAuthenticated {
+            dependencies.foregroundSyncCoordinator.start(
+                reason: "appInitialized",
+                triggerImmediateSync: true
+            )
+        }
 
         // 5. Ready to show main UI
         isInitialized = true
@@ -134,14 +146,19 @@ struct esc_chatmailApp: App {
     private func handleScenePhaseChange(_ newPhase: ScenePhase) {
         switch newPhase {
         case .background:
+            dependencies.foregroundSyncCoordinator.stop(reason: "sceneBackground")
             if dependencies.authSession.isAuthenticated {
                 dependencies.backgroundSyncManager.scheduleAppRefresh()
                 dependencies.backgroundSyncManager.scheduleProcessingTask()
             }
         case .active:
-            // Note: Sync is handled by ConversationListView.onAppear to avoid duplicate syncs
-            // Only process pending actions here (lightweight operation)
+            // Foreground sync is now app-scoped (independent of the conversation list lifecycle).
+            // Also process pending actions and duplicate cleanup.
             if dependencies.authSession.isAuthenticated {
+                dependencies.foregroundSyncCoordinator.start(
+                    reason: "sceneActive",
+                    triggerImmediateSync: true
+                )
                 Task {
                     await dependencies.pendingActionsManager.processAllPendingActions()
                     // Run lightweight duplicate cleanup on app activation
@@ -149,9 +166,21 @@ struct esc_chatmailApp: App {
                 }
             }
         case .inactive:
+            dependencies.foregroundSyncCoordinator.stop(reason: "sceneInactive")
             break
         @unknown default:
             break
+        }
+    }
+
+    private func handleAuthStateChange(_ isAuthenticated: Bool) {
+        if isAuthenticated && scenePhase == .active {
+            dependencies.foregroundSyncCoordinator.start(
+                reason: "authBecameAuthenticated",
+                triggerImmediateSync: true
+            )
+        } else if !isAuthenticated {
+            dependencies.foregroundSyncCoordinator.stop(reason: "authBecameUnauthenticated")
         }
     }
 }

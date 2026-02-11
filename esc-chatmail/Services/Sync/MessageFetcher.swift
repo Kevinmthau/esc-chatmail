@@ -15,7 +15,7 @@ private struct BoundedFetchResult {
 
 /// Handles fetching messages from the Gmail API with retry logic and timeout handling
 final class MessageFetcher: @unchecked Sendable {
-    private let apiClient: GmailAPIClient
+    private let apiClient: any GmailAPIClientProtocol
 
     /// Maximum number of retry attempts for failed messages
     private let maxRetryAttempts = 3
@@ -25,6 +25,10 @@ final class MessageFetcher: @unchecked Sendable {
 
     @MainActor init() {
         self.apiClient = GmailAPIClient.shared
+    }
+
+    init(apiClient: any GmailAPIClientProtocol) {
+        self.apiClient = apiClient
     }
 
     /// Checks if an error is retriable (transient network/server issues)
@@ -177,7 +181,7 @@ final class MessageFetcher: @unchecked Sendable {
     /// - Parameters:
     ///   - ids: Array of Gmail message IDs to fetch
     ///   - onSuccess: Callback for each successfully fetched message
-    /// - Returns: Array of message IDs that permanently failed to fetch (non-retriable errors only)
+    /// - Returns: Array of message IDs that failed to fetch after retries
     func fetchBatch(
         _ ids: [String],
         onSuccess: @escaping @Sendable (GmailMessage) async -> Void
@@ -244,13 +248,19 @@ final class MessageFetcher: @unchecked Sendable {
             Log.info("Messages with transient failures after \(maxRetryAttempts) retries (may succeed on next sync): \(exhaustedRetries.count)", category: .sync)
         }
 
-        // Only return truly permanently failed messages (non-retriable errors)
-        // Exhausted retries are NOT included - they may succeed on next sync attempt
+        // Return permanent failures PLUS exhausted transient failures.
+        // Exhausted transient IDs must be surfaced as failures so upstream sync logic
+        // does not incorrectly treat them as success and advance historyId.
+        let allFailedIds = permanentlyFailed + exhaustedRetries
+
         if !permanentlyFailed.isEmpty {
             Log.warning("Total permanently failed messages (non-retriable errors): \(permanentlyFailed.count)", category: .sync)
         }
+        if !exhaustedRetries.isEmpty {
+            Log.warning("Total transient failures exhausted retries: \(exhaustedRetries.count)", category: .sync)
+        }
 
-        return permanentlyFailed
+        return allFailedIds
     }
 
     /// Fetches messages from Gmail API using pagination

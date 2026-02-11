@@ -42,13 +42,9 @@ final class ConversationListViewModel: ObservableObject {
     private let coreDataStack: CoreDataStack
     private let authSession: AuthSession
     private let personCache: PersonCache
-    private var syncTimer: Timer?
     private var hasPerformedInitialSync = false
-    private var lastSyncTriggerAt: Date?
     private var cancellables = Set<AnyCancellable>()
     private let taskManager = ViewModelTaskManager()
-    private let periodicSyncInterval: TimeInterval = 120
-    private let minimumPeriodicSyncGap: TimeInterval = 90
 
     // MARK: - Initialization
 
@@ -76,10 +72,6 @@ final class ConversationListViewModel: ObservableObject {
         forwardChanges(from: searchService, storing: &cancellables)
         forwardChanges(from: selectionService, storing: &cancellables)
         forwardChanges(from: filterService, storing: &cancellables)
-    }
-
-    deinit {
-        syncTimer?.invalidate()
     }
 
     // MARK: - Convenience Accessors (View Compatibility)
@@ -126,7 +118,6 @@ final class ConversationListViewModel: ObservableObject {
 
         taskManager.run("initialSync", priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
-            markSyncTriggered()
             do {
                 try await syncEngine.performIncrementalSync()
             } catch {
@@ -136,41 +127,11 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     func performSync() async {
-        markSyncTriggered()
         do {
             try await syncEngine.performIncrementalSync()
         } catch {
             Log.error("Sync error", category: .sync, error: error)
         }
-    }
-
-    func startPeriodicSync() {
-        stopPeriodicSync()
-
-        syncTimer = Timer.scheduledTimer(withTimeInterval: periodicSyncInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.taskManager.run("periodicSync") { [weak self] in
-                    guard let self = self, !self.syncEngine.isSyncing else { return }
-                    guard self.shouldTriggerSync(minInterval: self.minimumPeriodicSyncGap) else {
-                        Log.debug("Skipping periodic sync (throttled)", category: .sync)
-                        return
-                    }
-                    self.markSyncTriggered()
-                    Log.debug("Performing periodic sync", category: .sync)
-                    do {
-                        try await self.syncEngine.performIncrementalSync()
-                    } catch {
-                        Log.error("Periodic sync error", category: .sync, error: error)
-                    }
-                }
-            }
-        }
-        syncTimer?.tolerance = 15
-    }
-
-    func stopPeriodicSync() {
-        syncTimer?.invalidate()
-        syncTimer = nil
     }
 
     // MARK: - Selection Operations (Delegate to Service)
@@ -283,7 +244,6 @@ final class ConversationListViewModel: ObservableObject {
     /// Called when view appears - performs initial setup
     func onAppear(conversations: [Conversation]) {
         performInitialSync()
-        startPeriodicSync()
 
         // Prefetch photos immediately to avoid slow avatar loading in rows
         // This needs to run before rows' .task blocks fire
@@ -302,17 +262,7 @@ final class ConversationListViewModel: ObservableObject {
 
     /// Called when view disappears
     func onDisappear() {
-        stopPeriodicSync()
         searchService.cleanup()
         taskManager.cancelAll()
-    }
-
-    private func shouldTriggerSync(minInterval: TimeInterval) -> Bool {
-        guard let lastSyncTriggerAt else { return true }
-        return Date().timeIntervalSince(lastSyncTriggerAt) >= minInterval
-    }
-
-    private func markSyncTriggered() {
-        lastSyncTriggerAt = Date()
     }
 }

@@ -4,11 +4,16 @@ import Foundation
 /// Mock implementation of GmailAPIClientProtocol for testing.
 /// Allows controlling API responses and simulating errors without network calls.
 final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
+    private let stateLock = NSLock()
+    private static let firstPageTokenKey = "__first_page__"
 
     // MARK: - Configurable Responses
 
     /// Response for listMessages() calls
     var listMessagesResponse: MessagesListResponse = MessagesListResponse(messages: [], nextPageToken: nil, resultSizeEstimate: 0)
+    /// Optional page-token keyed responses for pagination tests
+    /// Key uses "__first_page__" for nil pageToken.
+    var paginatedListMessagesResponses: [String: MessagesListResponse] = [:]
 
     /// Responses for getMessage() calls, keyed by message ID
     var getMessageResponses: [String: GmailMessage] = [:]
@@ -35,6 +40,9 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
     /// Response for listHistory() calls
     var historyResponse: HistoryResponse = HistoryResponse(history: nil, nextPageToken: nil, historyId: "12345")
+    /// Optional page-token keyed responses for pagination tests
+    /// Key uses "__first_page__" for nil pageToken.
+    var paginatedHistoryResponses: [String: HistoryResponse] = [:]
 
     /// Response for getAttachment() calls, keyed by "messageId:attachmentId"
     var attachmentResponses: [String: Data] = [:]
@@ -96,6 +104,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
     private(set) var listHistoryCallCount = 0
     private(set) var listHistoryLastStartId: String?
+    private(set) var listHistoryLastPageToken: String?
 
     private(set) var getAttachmentCallCount = 0
     private(set) var getAttachmentCalls: [(messageId: String, attachmentId: String)] = []
@@ -105,99 +114,128 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// Delay to simulate network latency (in seconds)
     var artificialDelay: TimeInterval = 0
 
+    @inline(__always)
+    private func withStateLock<T>(_ body: () throws -> T) rethrows -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return try body()
+    }
+
+    private func pageTokenKey(_ pageToken: String?) -> String {
+        pageToken ?? Self.firstPageTokenKey
+    }
+
     // MARK: - Reset
 
     /// Resets all state to defaults
     func reset() {
-        // Responses
-        listMessagesResponse = MessagesListResponse(messages: [], nextPageToken: nil, resultSizeEstimate: 0)
-        getMessageResponses = [:]
-        defaultGetMessageResponse = nil
-        modifyMessageResponse = nil
-        profileResponse = GmailProfile(emailAddress: "test@example.com", messagesTotal: 100, threadsTotal: 50, historyId: "12345")
-        labelsResponse = []
-        sendAsResponse = []
-        historyResponse = HistoryResponse(history: nil, nextPageToken: nil, historyId: "12345")
-        attachmentResponses = [:]
+        withStateLock {
+            // Responses
+            listMessagesResponse = MessagesListResponse(messages: [], nextPageToken: nil, resultSizeEstimate: 0)
+            paginatedListMessagesResponses = [:]
+            getMessageResponses = [:]
+            defaultGetMessageResponse = nil
+            modifyMessageResponse = nil
+            profileResponse = GmailProfile(emailAddress: "test@example.com", messagesTotal: 100, threadsTotal: 50, historyId: "12345")
+            labelsResponse = []
+            sendAsResponse = []
+            historyResponse = HistoryResponse(history: nil, nextPageToken: nil, historyId: "12345")
+            paginatedHistoryResponses = [:]
+            attachmentResponses = [:]
 
-        // Errors
-        listMessagesError = nil
-        getMessageError = nil
-        getMessageErrors = [:]
-        modifyMessageError = nil
-        batchModifyError = nil
-        getProfileError = nil
-        listLabelsError = nil
-        listSendAsError = nil
-        listHistoryError = nil
-        getAttachmentError = nil
+            // Errors
+            listMessagesError = nil
+            getMessageError = nil
+            getMessageErrors = [:]
+            modifyMessageError = nil
+            batchModifyError = nil
+            getProfileError = nil
+            listLabelsError = nil
+            listSendAsError = nil
+            listHistoryError = nil
+            getAttachmentError = nil
 
-        // Call tracking
-        listMessagesCallCount = 0
-        listMessagesLastQuery = nil
-        listMessagesLastMaxResults = nil
-        listMessagesLastPageToken = nil
-        getMessageCallCount = 0
-        getMessageCalledIds = []
-        modifyMessageCallCount = 0
-        modifyMessageCalls = []
-        batchModifyCallCount = 0
-        batchModifyCalls = []
-        archiveMessagesCallCount = 0
-        archiveMessagesCalledIds = []
-        getProfileCallCount = 0
-        listLabelsCallCount = 0
-        listSendAsCallCount = 0
-        listHistoryCallCount = 0
-        listHistoryLastStartId = nil
-        getAttachmentCallCount = 0
-        getAttachmentCalls = []
+            // Call tracking
+            listMessagesCallCount = 0
+            listMessagesLastQuery = nil
+            listMessagesLastMaxResults = nil
+            listMessagesLastPageToken = nil
+            getMessageCallCount = 0
+            getMessageCalledIds = []
+            modifyMessageCallCount = 0
+            modifyMessageCalls = []
+            batchModifyCallCount = 0
+            batchModifyCalls = []
+            archiveMessagesCallCount = 0
+            archiveMessagesCalledIds = []
+            getProfileCallCount = 0
+            listLabelsCallCount = 0
+            listSendAsCallCount = 0
+            listHistoryCallCount = 0
+            listHistoryLastStartId = nil
+            listHistoryLastPageToken = nil
+            getAttachmentCallCount = 0
+            getAttachmentCalls = []
 
-        artificialDelay = 0
+            artificialDelay = 0
+        }
     }
 
     // MARK: - GmailAPIClientProtocol Implementation
 
     func listMessages(pageToken: String?, maxResults: Int, query: String?) async throws -> MessagesListResponse {
-        listMessagesCallCount += 1
-        listMessagesLastQuery = query
-        listMessagesLastMaxResults = maxResults
-        listMessagesLastPageToken = pageToken
-
-        if artificialDelay > 0 {
-            try await Task.sleep(nanoseconds: UInt64(artificialDelay * 1_000_000_000))
+        let delay = withStateLock {
+            listMessagesCallCount += 1
+            listMessagesLastQuery = query
+            listMessagesLastMaxResults = maxResults
+            listMessagesLastPageToken = pageToken
+            return artificialDelay
         }
 
-        if let error = listMessagesError {
-            listMessagesError = nil
-            throw error
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
 
-        return listMessagesResponse
+        return try withStateLock {
+            if let error = listMessagesError {
+                listMessagesError = nil
+                throw error
+            }
+            if let paginated = paginatedListMessagesResponses[pageTokenKey(pageToken)] {
+                return paginated
+            }
+            return listMessagesResponse
+        }
     }
 
     func getMessage(id: String, format: String) async throws -> GmailMessage {
-        getMessageCallCount += 1
-        getMessageCalledIds.append(id)
-
-        if artificialDelay > 0 {
-            try await Task.sleep(nanoseconds: UInt64(artificialDelay * 1_000_000_000))
+        let delay = withStateLock {
+            getMessageCallCount += 1
+            getMessageCalledIds.append(id)
+            return artificialDelay
         }
 
-        if let error = getMessageErrors[id] {
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
+
+        if let error = withStateLock({ getMessageErrors[id] }) {
             throw error
         }
 
-        if let error = getMessageError {
-            getMessageError = nil
-            throw error
-        }
+        if let response = try withStateLock({
+            if let error = getMessageError {
+                getMessageError = nil
+                throw error
+            }
 
-        if let response = getMessageResponses[id] {
-            return response
-        }
+            if let response = getMessageResponses[id] {
+                return response
+            }
 
-        if let defaultResponse = defaultGetMessageResponse {
+            guard let defaultResponse = defaultGetMessageResponse else {
+                return nil
+            }
             return GmailMessage(
                 id: id,
                 threadId: defaultResponse.threadId,
@@ -208,30 +246,38 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                 payload: defaultResponse.payload,
                 sizeEstimate: defaultResponse.sizeEstimate
             )
+        }) {
+            return response
         }
 
         throw APIError.notFound("Message \(id)")
     }
 
     func modifyMessage(id: String, addLabelIds: [String]?, removeLabelIds: [String]?) async throws -> GmailMessage {
-        modifyMessageCallCount += 1
-        modifyMessageCalls.append((id: id, add: addLabelIds, remove: removeLabelIds))
-
-        if artificialDelay > 0 {
-            try await Task.sleep(nanoseconds: UInt64(artificialDelay * 1_000_000_000))
+        let delay = withStateLock {
+            modifyMessageCallCount += 1
+            modifyMessageCalls.append((id: id, add: addLabelIds, remove: removeLabelIds))
+            return artificialDelay
         }
 
-        if let error = modifyMessageError {
-            modifyMessageError = nil
-            throw error
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
 
-        if let response = modifyMessageResponse {
+        let (configuredResponse, existingMessage) = try withStateLock {
+            if let error = modifyMessageError {
+                modifyMessageError = nil
+                throw error
+            }
+            return (modifyMessageResponse, getMessageResponses[id])
+        }
+
+        if let response = configuredResponse {
             return response
         }
 
         // Return a message with updated labels
-        let existingLabels = getMessageResponses[id]?.labelIds ?? []
+        let existingLabels = existingMessage?.labelIds ?? []
         var newLabels = existingLabels
         if let remove = removeLabelIds {
             newLabels = newLabels.filter { !remove.contains($0) }
@@ -242,9 +288,9 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
         return GmailMessage(
             id: id,
-            threadId: getMessageResponses[id]?.threadId,
+            threadId: existingMessage?.threadId,
             labelIds: newLabels,
-            snippet: getMessageResponses[id]?.snippet,
+            snippet: existingMessage?.snippet,
             historyId: nil,
             internalDate: nil,
             payload: nil,
@@ -253,105 +299,137 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     }
 
     func batchModify(ids: [String], addLabelIds: [String]?, removeLabelIds: [String]?) async throws {
-        batchModifyCallCount += 1
-        batchModifyCalls.append((ids: ids, add: addLabelIds, remove: removeLabelIds))
-
-        if artificialDelay > 0 {
-            try await Task.sleep(nanoseconds: UInt64(artificialDelay * 1_000_000_000))
+        let delay = withStateLock {
+            batchModifyCallCount += 1
+            batchModifyCalls.append((ids: ids, add: addLabelIds, remove: removeLabelIds))
+            return artificialDelay
         }
 
-        if let error = batchModifyError {
-            batchModifyError = nil
-            throw error
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
+
+        try withStateLock {
+            if let error = batchModifyError {
+                batchModifyError = nil
+                throw error
+            }
         }
     }
 
     func archiveMessages(ids: [String]) async throws {
-        archiveMessagesCallCount += 1
-        archiveMessagesCalledIds.append(ids)
+        withStateLock {
+            archiveMessagesCallCount += 1
+            archiveMessagesCalledIds.append(ids)
+        }
         try await batchModify(ids: ids, addLabelIds: nil, removeLabelIds: ["INBOX"])
     }
 
     func getProfile() async throws -> GmailProfile {
-        getProfileCallCount += 1
-
-        if artificialDelay > 0 {
-            try await Task.sleep(nanoseconds: UInt64(artificialDelay * 1_000_000_000))
+        let delay = withStateLock {
+            getProfileCallCount += 1
+            return artificialDelay
         }
 
-        if let error = getProfileError {
-            getProfileError = nil
-            throw error
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
 
-        return profileResponse
+        return try withStateLock {
+            if let error = getProfileError {
+                getProfileError = nil
+                throw error
+            }
+            return profileResponse
+        }
     }
 
     func listLabels() async throws -> [GmailLabel] {
-        listLabelsCallCount += 1
-
-        if artificialDelay > 0 {
-            try await Task.sleep(nanoseconds: UInt64(artificialDelay * 1_000_000_000))
+        let delay = withStateLock {
+            listLabelsCallCount += 1
+            return artificialDelay
         }
 
-        if let error = listLabelsError {
-            listLabelsError = nil
-            throw error
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
 
-        return labelsResponse
+        return try withStateLock {
+            if let error = listLabelsError {
+                listLabelsError = nil
+                throw error
+            }
+            return labelsResponse
+        }
     }
 
     func listSendAs() async throws -> [SendAs] {
-        listSendAsCallCount += 1
-
-        if artificialDelay > 0 {
-            try await Task.sleep(nanoseconds: UInt64(artificialDelay * 1_000_000_000))
+        let delay = withStateLock {
+            listSendAsCallCount += 1
+            return artificialDelay
         }
 
-        if let error = listSendAsError {
-            listSendAsError = nil
-            throw error
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
 
-        return sendAsResponse
+        return try withStateLock {
+            if let error = listSendAsError {
+                listSendAsError = nil
+                throw error
+            }
+            return sendAsResponse
+        }
     }
 
     func listHistory(startHistoryId: String, pageToken: String?) async throws -> HistoryResponse {
-        listHistoryCallCount += 1
-        listHistoryLastStartId = startHistoryId
-
-        if artificialDelay > 0 {
-            try await Task.sleep(nanoseconds: UInt64(artificialDelay * 1_000_000_000))
+        let delay = withStateLock {
+            listHistoryCallCount += 1
+            listHistoryLastStartId = startHistoryId
+            listHistoryLastPageToken = pageToken
+            return artificialDelay
         }
 
-        if let error = listHistoryError {
-            listHistoryError = nil
-            throw error
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
 
-        return historyResponse
+        return try withStateLock {
+            if let error = listHistoryError {
+                listHistoryError = nil
+                throw error
+            }
+            if let paginated = paginatedHistoryResponses[pageTokenKey(pageToken)] {
+                return paginated
+            }
+            return historyResponse
+        }
     }
 
     func getAttachment(messageId: String, attachmentId: String) async throws -> Data {
-        getAttachmentCallCount += 1
-        getAttachmentCalls.append((messageId: messageId, attachmentId: attachmentId))
-
-        if artificialDelay > 0 {
-            try await Task.sleep(nanoseconds: UInt64(artificialDelay * 1_000_000_000))
+        let delay = withStateLock {
+            getAttachmentCallCount += 1
+            getAttachmentCalls.append((messageId: messageId, attachmentId: attachmentId))
+            return artificialDelay
         }
 
-        if let error = getAttachmentError {
-            getAttachmentError = nil
-            throw error
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
 
-        let key = "\(messageId):\(attachmentId)"
-        if let data = attachmentResponses[key] {
-            return data
-        }
+        return try withStateLock {
+            if let error = getAttachmentError {
+                getAttachmentError = nil
+                throw error
+            }
 
-        throw APIError.notFound("Attachment \(attachmentId)")
+            let key = "\(messageId):\(attachmentId)"
+            if let data = attachmentResponses[key] {
+                return data
+            }
+
+            throw APIError.notFound("Attachment \(attachmentId)")
+        }
     }
 }
 
@@ -360,43 +438,57 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 extension MockGmailAPIClient {
     /// Configures the mock to simulate rate limiting
     func simulateRateLimited() {
-        listMessagesError = APIError.rateLimited
-        getMessageError = APIError.rateLimited
+        withStateLock {
+            listMessagesError = APIError.rateLimited
+            getMessageError = APIError.rateLimited
+        }
     }
 
     /// Configures the mock to simulate authentication failure
     func simulateAuthFailure() {
-        listMessagesError = APIError.authenticationError
-        getMessageError = APIError.authenticationError
-        getProfileError = APIError.authenticationError
+        withStateLock {
+            listMessagesError = APIError.authenticationError
+            getMessageError = APIError.authenticationError
+            getProfileError = APIError.authenticationError
+        }
     }
 
     /// Configures the mock to simulate server errors
     func simulateServerError(code: Int = 500) {
-        listMessagesError = APIError.serverError(code)
-        getMessageError = APIError.serverError(code)
+        withStateLock {
+            listMessagesError = APIError.serverError(code)
+            getMessageError = APIError.serverError(code)
+        }
     }
 
     /// Configures the mock to simulate expired history ID
     func simulateHistoryExpired() {
-        listHistoryError = APIError.historyIdExpired
+        withStateLock {
+            listHistoryError = APIError.historyIdExpired
+        }
     }
 
     /// Configures the mock to simulate network timeout
     func simulateTimeout() {
-        listMessagesError = APIError.timeout
-        getMessageError = APIError.timeout
+        withStateLock {
+            listMessagesError = APIError.timeout
+            getMessageError = APIError.timeout
+        }
     }
 
     /// Adds a message response for a specific ID
     func addMessage(_ message: GmailMessage) {
-        getMessageResponses[message.id] = message
+        withStateLock {
+            getMessageResponses[message.id] = message
+        }
     }
 
     /// Adds multiple message responses
     func addMessages(_ messages: [GmailMessage]) {
-        for message in messages {
-            getMessageResponses[message.id] = message
+        withStateLock {
+            for message in messages {
+                getMessageResponses[message.id] = message
+            }
         }
     }
 
@@ -405,34 +497,68 @@ extension MockGmailAPIClient {
         let items = ids.enumerated().map { index, id in
             MessageListItem(id: id, threadId: threadIds?[safe: index])
         }
-        listMessagesResponse = MessagesListResponse(messages: items, nextPageToken: nil, resultSizeEstimate: items.count)
+        withStateLock {
+            listMessagesResponse = MessagesListResponse(messages: items, nextPageToken: nil, resultSizeEstimate: items.count)
+        }
     }
 
     /// Configures listMessages with pagination
     func setMessageListWithPagination(_ pages: [[String]], pageTokens: [String?]) {
-        // This would need to be more sophisticated for real pagination testing
-        // For now, just set the first page
-        if let firstPage = pages.first {
-            setMessageList(firstPage)
-            listMessagesResponse = MessagesListResponse(
-                messages: firstPage.map { MessageListItem(id: $0, threadId: nil) },
-                nextPageToken: pageTokens.first ?? nil,
-                resultSizeEstimate: firstPage.count
+        guard !pages.isEmpty else { return }
+        guard pageTokens.count == pages.count else {
+            assertionFailure("pageTokens count must match pages count")
+            return
+        }
+
+        var responses: [String: MessagesListResponse] = [:]
+        var requestToken: String? = nil
+        for (index, page) in pages.enumerated() {
+            let items = page.map { MessageListItem(id: $0, threadId: nil) }
+            let response = MessagesListResponse(
+                messages: items,
+                nextPageToken: pageTokens[index],
+                resultSizeEstimate: page.count
             )
+            responses[pageTokenKey(requestToken)] = response
+            requestToken = pageTokens[index]
+        }
+
+        withStateLock {
+            paginatedListMessagesResponses = responses
+            if let first = responses[pageTokenKey(nil)] {
+                listMessagesResponse = first
+            }
+        }
+    }
+
+    /// Configures listHistory with page-token keyed responses.
+    /// Use nil token for the first page.
+    func setHistoryResponsesByPageToken(_ responses: [(pageToken: String?, response: HistoryResponse)]) {
+        var mapped: [String: HistoryResponse] = [:]
+        for entry in responses {
+            mapped[pageTokenKey(entry.pageToken)] = entry.response
+        }
+        withStateLock {
+            paginatedHistoryResponses = mapped
+            if let first = mapped[pageTokenKey(nil)] {
+                historyResponse = first
+            }
         }
     }
 
     /// Configures standard Gmail labels
     func setStandardLabels() {
-        labelsResponse = [
-            GmailLabel(id: "INBOX", name: "INBOX", messageListVisibility: "show", labelListVisibility: "labelShow", type: "system"),
-            GmailLabel(id: "SENT", name: "SENT", messageListVisibility: "show", labelListVisibility: "labelShow", type: "system"),
-            GmailLabel(id: "DRAFT", name: "DRAFT", messageListVisibility: "show", labelListVisibility: "labelShow", type: "system"),
-            GmailLabel(id: "TRASH", name: "TRASH", messageListVisibility: "show", labelListVisibility: "labelShow", type: "system"),
-            GmailLabel(id: "SPAM", name: "SPAM", messageListVisibility: "hide", labelListVisibility: "labelHide", type: "system"),
-            GmailLabel(id: "UNREAD", name: "UNREAD", messageListVisibility: "hide", labelListVisibility: "labelHide", type: "system"),
-            GmailLabel(id: "STARRED", name: "STARRED", messageListVisibility: "show", labelListVisibility: "labelShow", type: "system")
-        ]
+        withStateLock {
+            labelsResponse = [
+                GmailLabel(id: "INBOX", name: "INBOX", messageListVisibility: "show", labelListVisibility: "labelShow", type: "system"),
+                GmailLabel(id: "SENT", name: "SENT", messageListVisibility: "show", labelListVisibility: "labelShow", type: "system"),
+                GmailLabel(id: "DRAFT", name: "DRAFT", messageListVisibility: "show", labelListVisibility: "labelShow", type: "system"),
+                GmailLabel(id: "TRASH", name: "TRASH", messageListVisibility: "show", labelListVisibility: "labelShow", type: "system"),
+                GmailLabel(id: "SPAM", name: "SPAM", messageListVisibility: "hide", labelListVisibility: "labelHide", type: "system"),
+                GmailLabel(id: "UNREAD", name: "UNREAD", messageListVisibility: "hide", labelListVisibility: "labelHide", type: "system"),
+                GmailLabel(id: "STARRED", name: "STARRED", messageListVisibility: "show", labelListVisibility: "labelShow", type: "system")
+            ]
+        }
     }
 }
 

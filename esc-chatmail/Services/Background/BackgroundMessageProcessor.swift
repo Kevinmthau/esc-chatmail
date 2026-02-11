@@ -1,6 +1,12 @@
 import Foundation
 import CoreData
 
+/// Categorized history changes for background sync processing.
+struct BackgroundHistoryChangeSet {
+    let messageIdsToFetch: Set<String>
+    let messageIdsToDelete: Set<String>
+}
+
 /// Handles message fetching, storing, and deletion for background sync
 final class BackgroundMessageProcessor {
     private let coreDataStack: CoreDataStack
@@ -15,9 +21,22 @@ final class BackgroundMessageProcessor {
     func processHistoryChanges(histories: [HistoryRecord]) async {
         let context = coreDataStack.newBackgroundContext()
 
+        let changeSet = Self.buildChangeSet(from: histories)
+
+        await deleteMessages(messageIds: Array(changeSet.messageIdsToDelete), in: context)
+
+        if !changeSet.messageIdsToFetch.isEmpty {
+            await fetchAndStoreMessages(messageIds: Array(changeSet.messageIdsToFetch))
+        }
+
+        coreDataStack.saveIfNeeded(context: context)
+    }
+
+    /// Builds fetch/delete sets from history records.
+    /// Deleted messages take precedence over fetches to avoid reintroducing removed data.
+    static func buildChangeSet(from histories: [HistoryRecord]) -> BackgroundHistoryChangeSet {
         var messagesToFetch: Set<String> = []
         var messagesToDelete: Set<String> = []
-        var messageLabelsToUpdate: [String: [String]] = [:]
 
         for history in histories {
             if let messagesAdded = history.messagesAdded {
@@ -39,10 +58,7 @@ final class BackgroundMessageProcessor {
 
             if let labelsAdded = history.labelsAdded {
                 for labelAdded in labelsAdded {
-                    let messageId = labelAdded.message.id
-                    var labels = messageLabelsToUpdate[messageId] ?? []
-                    labels.append(contentsOf: labelAdded.labelIds)
-                    messageLabelsToUpdate[messageId] = labels
+                    messagesToFetch.insert(labelAdded.message.id)
                 }
             }
 
@@ -53,13 +69,11 @@ final class BackgroundMessageProcessor {
             }
         }
 
-        await deleteMessages(messageIds: Array(messagesToDelete), in: context)
-
-        if !messagesToFetch.isEmpty {
-            await fetchAndStoreMessages(messageIds: Array(messagesToFetch))
-        }
-
-        coreDataStack.saveIfNeeded(context: context)
+        messagesToFetch.subtract(messagesToDelete)
+        return BackgroundHistoryChangeSet(
+            messageIdsToFetch: messagesToFetch,
+            messageIdsToDelete: messagesToDelete
+        )
     }
 
     /// Fetches messages from the API and stores them in Core Data

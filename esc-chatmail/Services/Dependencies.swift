@@ -67,6 +67,7 @@ final class Dependencies: ObservableObject {
     // MARK: - Service Layer
 
     let syncEngine: SyncEngine
+    let foregroundSyncCoordinator: ForegroundSyncCoordinator
     let attachmentDownloader: AttachmentDownloader
     let backgroundSyncManager: BackgroundSyncManager
 
@@ -121,6 +122,7 @@ final class Dependencies: ObservableObject {
         self._attachmentCache = AttachmentCacheActor.shared
         self._pendingActionsManager = PendingActionsManager.shared
         self.syncEngine = SyncEngine.shared
+        self.foregroundSyncCoordinator = ForegroundSyncCoordinator.shared
         self.attachmentDownloader = AttachmentDownloader.shared
         self.backgroundSyncManager = BackgroundSyncManager.shared
     }
@@ -148,6 +150,7 @@ final class Dependencies: ObservableObject {
         attachmentCache: AttachmentCacheActor,
         pendingActionsManager: PendingActionsManager,
         syncEngine: SyncEngine,
+        foregroundSyncCoordinator: ForegroundSyncCoordinator,
         attachmentDownloader: AttachmentDownloader,
         backgroundSyncManager: BackgroundSyncManager
     ) {
@@ -161,6 +164,7 @@ final class Dependencies: ObservableObject {
         self._attachmentCache = attachmentCache
         self._pendingActionsManager = pendingActionsManager
         self.syncEngine = syncEngine
+        self.foregroundSyncCoordinator = foregroundSyncCoordinator
         self.attachmentDownloader = attachmentDownloader
         self.backgroundSyncManager = backgroundSyncManager
     }

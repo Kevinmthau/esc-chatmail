@@ -51,10 +51,13 @@ struct HTMLPreviewView: View {
     }
 
     private func loadHTMLContent() async {
+        let shouldStripQuotedContent = !message.isNewsletter
+
         let result = await htmlContentLoader.loadContent(
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
-            isDarkMode: colorScheme == .dark
+            isDarkMode: colorScheme == .dark,
+            stripQuotedContent: shouldStripQuotedContent
         )
 
         await MainActor.run {
@@ -110,11 +113,14 @@ struct HTMLMessageView: View {
     }
 
     private func loadHTMLContent() async {
+        let shouldStripQuotedContent = !message.isNewsletter
+
         let result = await htmlContentLoader.loadContentWithTimeout(
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
             bodyText: message.bodyText,
             isDarkMode: colorScheme == .dark,
+            stripQuotedContent: shouldStripQuotedContent,
             timeout: 5.0
         )
 

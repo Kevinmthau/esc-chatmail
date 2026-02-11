@@ -53,15 +53,17 @@ final class HTMLContentLoader {
     ///   - bodyStorageURI: Optional stored URI path
     ///   - bodyText: Optional plain text fallback
     ///   - isDarkMode: Whether to apply dark mode styling
+    ///   - stripQuotedContent: Whether to remove quoted reply/signature blocks before wrapping
     /// - Returns: HTMLLoadResult with wrapped HTML and source indicator
     func loadContent(
         messageId: String,
         bodyStorageURI: String?,
         bodyText: String? = nil,
-        isDarkMode: Bool
+        isDarkMode: Bool,
+        stripQuotedContent: Bool = false
     ) async -> HTMLLoadResult {
         // Check memory cache first
-        let cacheKey = "\(messageId)_\(isDarkMode)" as NSString
+        let cacheKey = "\(messageId)_\(isDarkMode)_\(stripQuotedContent)" as NSString
         if let cachedHTML = htmlCache.object(forKey: cacheKey) {
             return HTMLLoadResult(html: cachedHTML as String, source: .messageId)
         }
@@ -69,7 +71,8 @@ final class HTMLContentLoader {
         // Method 1: Try loading from message ID
         if contentHandler.htmlFileExists(for: messageId),
            let html = contentHandler.loadHTML(for: messageId) {
-            let wrapped = sanitizer.wrapHTMLForDisplay(html, isDarkMode: isDarkMode)
+            let preparedHTML = prepareHTMLForDisplay(html, stripQuotedContent: stripQuotedContent)
+            let wrapped = sanitizer.wrapHTMLForDisplay(preparedHTML, isDarkMode: isDarkMode)
             let cost = wrapped.utf8.count
             htmlCache.setObject(wrapped as NSString, forKey: cacheKey, cost: cost)
             return HTMLLoadResult(html: wrapped, source: .messageId)
@@ -80,7 +83,8 @@ final class HTMLContentLoader {
            let url = resolveStorageURI(urlString),
            FileManager.default.fileExists(atPath: url.path),
            let html = contentHandler.loadHTML(from: url) {
-            let wrapped = sanitizer.wrapHTMLForDisplay(html, isDarkMode: isDarkMode)
+            let preparedHTML = prepareHTMLForDisplay(html, stripQuotedContent: stripQuotedContent)
+            let wrapped = sanitizer.wrapHTMLForDisplay(preparedHTML, isDarkMode: isDarkMode)
             let cost = wrapped.utf8.count
             htmlCache.setObject(wrapped as NSString, forKey: cacheKey, cost: cost)
             return HTMLLoadResult(html: wrapped, source: .storageURI)
@@ -88,7 +92,8 @@ final class HTMLContentLoader {
 
         // Method 3: Recovery - fetch from Gmail API if local content missing
         if let html = await HTMLContentRecoveryService.shared.recoverHTMLContent(messageId: messageId) {
-            let wrapped = sanitizer.wrapHTMLForDisplay(html, isDarkMode: isDarkMode)
+            let preparedHTML = prepareHTMLForDisplay(html, stripQuotedContent: stripQuotedContent)
+            let wrapped = sanitizer.wrapHTMLForDisplay(preparedHTML, isDarkMode: isDarkMode)
             let cost = wrapped.utf8.count
             htmlCache.setObject(wrapped as NSString, forKey: cacheKey, cost: cost)
             return HTMLLoadResult(html: wrapped, source: .recovered)
@@ -110,6 +115,7 @@ final class HTMLContentLoader {
         bodyStorageURI: String?,
         bodyText: String? = nil,
         isDarkMode: Bool,
+        stripQuotedContent: Bool = false,
         timeout: TimeInterval = 5.0
     ) async -> HTMLLoadResult {
         return await withTaskGroup(of: HTMLLoadResult?.self) { group in
@@ -119,7 +125,8 @@ final class HTMLContentLoader {
                     messageId: messageId,
                     bodyStorageURI: bodyStorageURI,
                     bodyText: bodyText,
-                    isDarkMode: isDarkMode
+                    isDarkMode: isDarkMode,
+                    stripQuotedContent: stripQuotedContent
                 )
             }
 
@@ -141,8 +148,15 @@ final class HTMLContentLoader {
 
     /// Invalidates cached HTML content for a message (both light/dark variants).
     func invalidate(messageId: String) {
-        htmlCache.removeObject(forKey: "\(messageId)_false" as NSString)
-        htmlCache.removeObject(forKey: "\(messageId)_true" as NSString)
+        htmlCache.removeObject(forKey: "\(messageId)_false_false" as NSString)
+        htmlCache.removeObject(forKey: "\(messageId)_false_true" as NSString)
+        htmlCache.removeObject(forKey: "\(messageId)_true_false" as NSString)
+        htmlCache.removeObject(forKey: "\(messageId)_true_true" as NSString)
+    }
+
+    private func prepareHTMLForDisplay(_ html: String, stripQuotedContent: Bool) -> String {
+        guard stripQuotedContent else { return html }
+        return HTMLQuoteRemover.removeQuotes(from: html) ?? html
     }
 
     private func convertPlainTextToHTML(_ text: String) -> String {

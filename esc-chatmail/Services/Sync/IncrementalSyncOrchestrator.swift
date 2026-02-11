@@ -238,7 +238,13 @@ final class IncrementalSyncOrchestrator {
             )
         }
 
-        log.info("Recovery: processed=\(result.totalProcessed), success=\(result.successfulCount)")
+        log.info(
+            "Recovery: processed=\(result.totalProcessed), success=\(result.successfulCount), failed=\(result.failedIds.count)"
+        )
+
+        if result.hasFailures {
+            await failureTracker.recordFailure(failedIds: result.failedIds)
+        }
 
         // Update rollups only for modified conversations (more efficient than updating all)
         let modifiedConversations = await ModificationTracker.shared.getAndClearModifiedConversations()
@@ -249,17 +255,27 @@ final class IncrementalSyncOrchestrator {
             )
         }
 
-        // Get new historyId
+        // Get current historyId from Gmail profile and only advance when failure policy allows it.
+        // This prevents data loss when recovery fetched only a partial set of messages.
         let profile = try await messageFetcher.getProfile()
-        await messagePersister.setAccountHistoryId(profile.historyId, in: context)
+        let shouldAdvanceHistoryId = await failureTracker.shouldAdvanceHistoryId(
+            hadFailures: result.hasFailures,
+            latestHistoryId: profile.historyId
+        )
+        if shouldAdvanceHistoryId {
+            await messagePersister.setAccountHistoryId(profile.historyId, in: context)
+        } else {
+            log.warning("Recovery had fetch failures - keeping previous historyId to retry safely")
+        }
 
         // Save
         try await coreDataStack.saveAsync(context: context)
 
-        // Reset tracking
-        await failureTracker.recordSuccess()
-
-        log.info("History recovery complete, new historyId: \(profile.historyId)")
+        if shouldAdvanceHistoryId {
+            log.info("History recovery complete, new historyId: \(profile.historyId)")
+        } else {
+            log.info("History recovery complete with warnings; historyId not advanced")
+        }
     }
 
     /// Checks if forced label reconciliation is needed based on time since last reconciliation

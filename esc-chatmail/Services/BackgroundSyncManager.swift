@@ -132,11 +132,18 @@ final class BackgroundSyncManager {
                 }
             } while pageToken != nil && pageCount < maxPages
 
+            let didTruncateHistoryPagination = pageToken != nil
+
             if !allHistories.isEmpty {
                 await messageProcessor.processHistoryChanges(histories: allHistories)
             }
 
-            if let latestHistoryId = latestHistoryId {
+            if didTruncateHistoryPagination {
+                Log.warning(
+                    "Background history sync reached page limit (\(maxPages)); keeping stored historyId to avoid data loss",
+                    category: .background
+                )
+            } else if let latestHistoryId = latestHistoryId {
                 stateManager.storeHistoryId(latestHistoryId)
             }
 
@@ -201,11 +208,18 @@ final class BackgroundSyncManager {
                 }
             } while pageToken != nil && pageCount < maxPages
 
+            let didTruncateHistoryPagination = pageToken != nil
+
             if !allHistories.isEmpty {
                 await messageProcessor.processHistoryChanges(histories: allHistories)
             }
 
-            if let latestHistoryId = latestHistoryId {
+            if didTruncateHistoryPagination {
+                Log.warning(
+                    "Background history retry reached page limit (\(maxPages)); keeping stored historyId to avoid data loss",
+                    category: .background
+                )
+            } else if let latestHistoryId = latestHistoryId {
                 stateManager.storeHistoryId(latestHistoryId)
             }
 
@@ -222,6 +236,7 @@ final class BackgroundSyncManager {
     private func performPartialSync(isProcessingTask: Bool) async -> Bool {
         do {
             let maxResults = isProcessingTask ? 100 : 50
+            let maxPages = isProcessingTask ? 10 : 3
 
             // Use install timestamp to only fetch messages from install time forward
             let installTimestamp = UserDefaults.standard.double(forKey: "installTimestamp")
@@ -235,14 +250,37 @@ final class BackgroundSyncManager {
                 query = "after:\(oneDayAgo) -label:spam -label:drafts"
             }
 
-            let response = try await apiClient.listMessages(maxResults: maxResults, query: query)
+            var allMessageIds: Set<String> = []
+            var pageToken: String? = nil
+            var pageCount = 0
 
-            if let messages = response.messages {
-                await messageProcessor.fetchAndStoreMessages(messageIds: messages.map { $0.id })
+            repeat {
+                let response = try await apiClient.listMessages(
+                    pageToken: pageToken,
+                    maxResults: maxResults,
+                    query: query
+                )
+                if let messages = response.messages {
+                    allMessageIds.formUnion(messages.map { $0.id })
+                }
+                pageToken = response.nextPageToken
+                pageCount += 1
+            } while pageToken != nil && pageCount < maxPages
+
+            if !allMessageIds.isEmpty {
+                await messageProcessor.fetchAndStoreMessages(messageIds: Array(allMessageIds))
             }
 
-            let profile = try await apiClient.getProfile()
-            stateManager.storeHistoryId(profile.historyId)
+            let didTruncateMessagePagination = pageToken != nil
+            if didTruncateMessagePagination {
+                Log.warning(
+                    "Background partial sync reached page limit (\(maxPages)); skipping historyId advance to avoid missing messages",
+                    category: .background
+                )
+            } else {
+                let profile = try await apiClient.getProfile()
+                stateManager.storeHistoryId(profile.historyId)
+            }
 
             stateManager.resetRetryCount()
             return true
