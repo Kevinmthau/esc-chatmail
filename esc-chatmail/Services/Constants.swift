@@ -67,12 +67,21 @@ struct GoogleConfig {
     static let projectId: String = requiredConfig("GOOGLE_PROJECT_ID")
     static let redirectURI: String = requiredConfig("GOOGLE_REDIRECT_URI")
 
-    static let scopes = [
+    /// Base OIDC scopes granted during sign-in.
+    static let baseScopes = [
         "openid",
         "email",
-        "profile",
-        "https://www.googleapis.com/auth/gmail.modify"
+        "profile"
     ]
+
+    /// Gmail API scope required for sync and message actions.
+    static let gmailModifyScope = "https://www.googleapis.com/auth/gmail.modify"
+
+    /// Scopes requested in addition to base profile scopes.
+    static let additionalScopes = [gmailModifyScope]
+
+    /// Full scope set tracked in token metadata.
+    static let scopes = baseScopes + additionalScopes
 }
 
 // MARK: - Sync Configuration

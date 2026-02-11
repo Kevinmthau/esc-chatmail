@@ -188,6 +188,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                 let (data, response) = try await session.data(for: currentRequest)
 
                 if let httpResponse = response as? HTTPURLResponse {
+                    let statusCode = httpResponse.statusCode
                     switch httpResponse.statusCode {
                     case 429:
                         // Respect Retry-After header if present, but cap it
@@ -219,6 +220,10 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                             throw APIError.rateLimited
                         }
 
+                        if attempt >= retries - 1 {
+                            throw APIError.rateLimited
+                        }
+
                         try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                         retryDelay = min(delay * 2, retryStrategy.maxDelay)
                         continue
@@ -236,6 +241,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                             retryDelay = min(retryDelay * 2, retryStrategy.maxDelay)
                             continue
                         }
+                        throw APIError.serverError(statusCode)
 
                     case 401:
                         // Attempt reactive token refresh on 401
@@ -257,9 +263,25 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                         }
                         throw APIError.authenticationError
 
+                    case 403:
+                        let errorMessage = gmailErrorMessage(from: data) ?? "Missing required OAuth permissions"
+                        throw APIError.invalidData("Gmail API 403: \(errorMessage)")
+
+                    case 404:
+                        throw APIError.notFound(gmailErrorMessage(from: data) ?? "resource")
+
+                    case 400...499:
+                        let errorMessage = gmailErrorMessage(from: data) ?? HTTPURLResponse.localizedString(forStatusCode: statusCode)
+                        throw APIError.invalidData("Gmail API \(statusCode): \(errorMessage)")
+
                     case 200...299 where data.isEmpty:
                         if let empty = EmptyResponse() as? T {
                             return empty
+                        }
+
+                    case 200...299:
+                        if let detail = gmailErrorDetail(from: data) {
+                            throw APIError.invalidData("Gmail API error \(detail.code): \(detail.message)")
                         }
 
                     default:
@@ -297,5 +319,28 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         }
 
         throw lastError ?? URLError(.unknown)
+    }
+
+    private nonisolated func gmailErrorDetail(from data: Data) -> GmailErrorResponse.GmailErrorDetail? {
+        guard !data.isEmpty else { return nil }
+        return (try? JSONDecoder().decode(GmailErrorResponse.self, from: data))?.error
+    }
+
+    private nonisolated func gmailErrorMessage(from data: Data) -> String? {
+        if let detail = gmailErrorDetail(from: data) {
+            if let status = detail.status, !status.isEmpty {
+                return "\(detail.message) (\(status))"
+            }
+            return detail.message
+        }
+
+        guard let body = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !body.isEmpty else {
+            return nil
+        }
+
+        // Keep fallback bodies short to avoid log/UI spam.
+        return String(body.prefix(300))
     }
 }

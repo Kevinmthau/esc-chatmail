@@ -33,7 +33,16 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         await withCheckedContinuation { continuation in
             GIDSignIn.sharedInstance.restorePreviousSignIn { [weak self] user, error in
                 DispatchQueue.main.async {
+                    if let error {
+                        Log.warning("Failed to restore previous sign-in: \(error.localizedDescription)", category: .auth)
+                    }
                     if let user = user {
+                        guard self?.hasRequiredGmailScope(user) == true else {
+                            Log.warning("Restored session missing Gmail scope; user must sign in again to grant Gmail access", category: .auth)
+                            self?.clearAuthState()
+                            continuation.resume()
+                            return
+                        }
                         self?.currentUser = user
                         self?.userEmail = user.profile?.email
                         self?.userName = user.profile?.name
@@ -51,7 +60,11 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         GIDSignIn.sharedInstance.configuration = GIDConfiguration(clientID: GoogleConfig.clientId)
 
         return try await withCheckedThrowingContinuation { continuation in
-            GIDSignIn.sharedInstance.signIn(withPresenting: viewController) { [weak self] result, error in
+            GIDSignIn.sharedInstance.signIn(
+                withPresenting: viewController,
+                hint: nil,
+                additionalScopes: GoogleConfig.additionalScopes
+            ) { [weak self] result, error in
                 if let error = error {
                     continuation.resume(throwing: error)
                     return
@@ -65,6 +78,12 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self else {
                         continuation.resume(throwing: AuthError.noUser)
+                        return
+                    }
+
+                    guard self.hasRequiredGmailScope(result.user) else {
+                        self.clearAuthState()
+                        continuation.resume(throwing: AuthError.missingRequiredScopes)
                         return
                     }
 
@@ -97,11 +116,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                     } catch {
                         Log.error("Failed to save tokens - clearing auth state", category: .auth, error: error)
                         // Clear auth state since tokens weren't persisted
-                        self.currentUser = nil
-                        self.userEmail = nil
-                        self.userName = nil
-                        self.accessToken = nil
-                        self.isAuthenticated = false
+                        self.clearAuthState()
                         continuation.resume(throwing: AuthError.tokenPersistenceFailed(error))
                     }
                 }
@@ -261,11 +276,25 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         // Delegate to TokenManager for centralized token management
         return try await TokenManager.shared.getCurrentToken()
     }
+
+    private func hasRequiredGmailScope(_ user: GIDGoogleUser) -> Bool {
+        let grantedScopes = Set(user.grantedScopes ?? [])
+        return grantedScopes.contains(GoogleConfig.gmailModifyScope)
+    }
+
+    private func clearAuthState() {
+        currentUser = nil
+        userEmail = nil
+        userName = nil
+        isAuthenticated = false
+        accessToken = nil
+    }
 }
 
 enum AuthError: LocalizedError {
     case noUser
     case noAccessToken
+    case missingRequiredScopes
     case tokenPersistenceFailed(Error)
 
     var errorDescription: String? {
@@ -274,6 +303,8 @@ enum AuthError: LocalizedError {
             return "No authenticated user"
         case .noAccessToken:
             return "Failed to get access token"
+        case .missingRequiredScopes:
+            return "Google sign-in did not grant required Gmail permissions. Please try signing in again."
         case .tokenPersistenceFailed(let underlyingError):
             return "Failed to save authentication tokens: \(underlyingError.localizedDescription)"
         }
