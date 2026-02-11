@@ -33,6 +33,7 @@ enum PlainTextQuoteRemover {
 
         // Header-based quotes - Outlook style (uses "Sent:")
         "From: .+\nSent: .+\nTo: .+\nSubject: .+",
+        "From: .+\nSent: .+\nTo: .+\nCc: .+\nSubject: .+",
         // Header-based quotes - Apple Mail style (uses "Date:")
         "From: .+\nDate: .+\nTo: .+\nSubject: .+",
         "From: .+\nDate: .+\nTo: .+\nCc: .+\nSubject: .+",

@@ -15,7 +15,6 @@ enum HTMLQuoteRemover {
 
         // Outlook/Office 365
         "<div class=\"OutlookMessageHeader\">.*?</div>",
-        "<div style=\"border:none;border-top:solid #E1E1E1[^>]*>.*?</div>",
 
         // Apple Mail
         "<br><div><br><blockquote type=\"cite\">.*?</blockquote></div>",
@@ -67,6 +66,10 @@ enum HTMLQuoteRemover {
     private static let structuralTruncationPatternStrings = [
         // Outlook reference container (ID-based, handles prefixed IDs like "x_mail-editor-reference-message-container")
         "<div[^>]*id=\"[^\"]*mail-editor-reference-message-container[^\"]*\"[^>]*>",
+        // Outlook desktop often marks quoted sections with a gray top border block that
+        // contains From/Sent/To/Subject headers followed by the quoted thread.
+        // Truncate at this boundary instead of removing only the header block.
+        "<div[^>]*style=\"[^\"]*border-top\\s*:\\s*solid\\s*#E1E1E1[^\"]*\"[^>]*>(?=[\\s\\S]{0,3000}\\bFrom:)(?=[\\s\\S]{0,3000}\\b(?:Sent:|Date:))(?=[\\s\\S]{0,3000}\\bTo:)(?=[\\s\\S]{0,3000}\\bSubject:)",
     ]
 
     /// Text-based patterns that indicate quoted content.

@@ -223,6 +223,29 @@ final class HTMLQuoteRemoverTests: XCTestCase {
         XCTAssertFalse(result?.contains("sender@example.com") ?? true)
     }
 
+    func testRemoveQuotes_outlookGrayDividerHeaderWithoutContainer_truncatesQuotedThread() {
+        // Real-world Outlook structure: no mail-editor-reference-message-container ID.
+        // Quoted thread starts after a gray top-border header with From/Sent/To/Cc/Subject.
+        let html = """
+        <div class="WordSection1">
+            <p>I have a wake to attend tomorrow evening unfortunately</p>
+            <div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
+                <p><b>From:</b> Dominic Cozzetto</p>
+                <p><b>Sent:</b> Wednesday, February 11, 2026 12:18 PM</p>
+                <p><b>To:</b> Flock, Kathleen; Rory Gildea</p>
+                <p><b>Cc:</b> Brynn Putnam; Kevin Thau</p>
+                <p><b>Subject:</b> BofA Intro &amp; Next Steps</p>
+            </div>
+            <p>Hello Kathy &amp; Rory,</p>
+            <p>Kevin and Brynn would like to move forward with a call.</p>
+        </div>
+        """
+        let result = HTMLQuoteRemover.removeQuotes(from: html)
+        XCTAssertTrue(result?.contains("I have a wake to attend tomorrow evening unfortunately") ?? false)
+        XCTAssertFalse(result?.contains("Hello Kathy &amp; Rory,") ?? true)
+        XCTAssertFalse(result?.contains("Kevin and Brynn would like to move forward with a call.") ?? true)
+    }
+
     // MARK: - Blockquote Patterns
 
     func testRemoveQuotes_blockquote_removesQuote() {

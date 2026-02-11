@@ -634,6 +634,24 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(result, "Approved.")
     }
 
+    func testRemoveQuotes_outlookStyle_withCc_cleansCorrectly() {
+        let text = """
+        I have a wake to attend tomorrow evening unfortunately
+
+        From: Dominic Cozzetto <dominic.cozzetto@adviceperiod.com>
+        Sent: Wednesday, February 11, 2026 12:18 PM
+        To: Flock, Kathleen <kathleen.flock@bofa.com>; Rory Gildea <rgildea@gi-cpas.com>
+        Cc: Brynn Putnam <brynn.putnam@gmail.com>; Kevin Thau <kmthau@gmail.com>
+        Subject: BofA Intro & Next Steps
+
+        Hello Kathy & Rory,
+
+        Kevin and Brynn would like to move forward with a call to meet Kathy and discuss next steps.
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, "I have a wake to attend tomorrow evening unfortunately")
+    }
+
     // MARK: - Apple Mail Style Quotes
 
     func testRemoveQuotes_appleMailStyle_withDate_cleansCorrectly() {
