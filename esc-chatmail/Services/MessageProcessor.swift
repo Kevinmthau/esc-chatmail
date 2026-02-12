@@ -421,19 +421,21 @@ class MessageProcessor {
         }
 
         if let plainText = plainText {
-            let result = EmailTextProcessor.createCleanSnippet(from: plainText, maxLength: Int.max, firstSentenceOnly: false)
+            let sanitizedPlainText = RawEmailSourceSanitizer.extractDisplayText(from: plainText)
+            let result = EmailTextProcessor.createCleanSnippet(from: sanitizedPlainText, maxLength: Int.max, firstSentenceOnly: false)
             if !result.isEmpty {
                 return result
             }
         }
 
         if let snippet = snippet {
-            let result = EmailTextProcessor.createCleanSnippet(from: snippet, maxLength: Int.max, firstSentenceOnly: false)
+            let sanitizedSnippet = RawEmailSourceSanitizer.extractDisplayText(from: snippet)
+            let result = EmailTextProcessor.createCleanSnippet(from: sanitizedSnippet, maxLength: Int.max, firstSentenceOnly: false)
             if !result.isEmpty {
                 return result
             }
             // Ultimate fallback: return raw snippet if all cleaning strips it
-            return snippet.trimmingCharacters(in: .whitespacesAndNewlines)
+            return sanitizedSnippet.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
         return nil

@@ -187,7 +187,7 @@ struct MessageContentView: View {
     private func processedText(_ text: String?) -> String? {
         guard let text = text else { return nil }
 
-        var processed = text
+        var processed = RawEmailSourceSanitizer.extractDisplayText(from: text)
         var alreadyStrippedQuotes = false
 
         // If text contains actual HTML tags, strip HTML quotes first

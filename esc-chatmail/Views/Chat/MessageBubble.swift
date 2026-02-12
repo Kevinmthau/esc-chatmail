@@ -15,9 +15,12 @@ struct MessageBubble: View {
     @State private var senderAvatarURL: String?
     @State private var senderImageData: Data?
     @State private var showingHTMLView = false
-    @State private var hasRichContent = false
     private var showHTMLPreview: Bool {
-        message.hasHTMLSource && (message.isForwardedEmail || message.isNewsletter || hasRichContent)
+        MessageDisplayPolicy.shouldShowHTMLPreview(
+            hasHTMLSource: message.hasHTMLSource,
+            isForwardedEmail: message.isForwardedEmail,
+            isNewsletter: message.isNewsletter
+        )
     }
     @State private var fullTextContent: String?
     @State private var hasLoadedContent = false
@@ -162,7 +165,6 @@ struct MessageBubble: View {
         loadingMessageId = currentMessageId
         hasLoadedContent = false
         fullTextContent = nil
-        hasRichContent = false
         lastContentSignature = signature
 
         // Use prefetched sender name if available, otherwise load (needed for avatar)
@@ -182,7 +184,6 @@ struct MessageBubble: View {
             // Final check before updating state - ensure this is still the active message
             guard loadingMessageId == currentMessageId else { return }
             fullTextContent = cached.plainText
-            hasRichContent = cached.hasRichContent
 
             let hasHTMLFile = HTMLContentHandler.shared.htmlFileExists(for: message.id)
             let hasHTMLSource = message.hasHTMLSource
@@ -212,7 +213,7 @@ struct MessageBubble: View {
         let messageId = message.id
         let bodyText = message.bodyTextValue
         let bodyStorageURI = message.bodyStorageURI
-        let result: (plainText: String?, hasRichContent: Bool) = await Task.detached(priority: .userInitiated) {
+        let result: String? = await Task.detached(priority: .userInitiated) {
             let handler = HTMLContentHandler.shared
             var processedResult = ProcessedTextCache.processMessage(
                 messageId: messageId,
@@ -222,7 +223,8 @@ struct MessageBubble: View {
 
             // If no HTML content, try bodyText
             if processedResult.plainText == nil, let text = bodyText {
-                let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: text)
+                let extractedBody = RawEmailSourceSanitizer.extractDisplayText(from: text)
+                let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: extractedBody)
                 let extractionResult = PlainTextQuoteRemover.extractQuotes(from: unwrapped)
                 // Only use if we actually have content after stripping
                 processedResult = (
@@ -240,14 +242,13 @@ struct MessageBubble: View {
                 quotedParts: processedResult.quotedParts
             )
 
-            return (processedResult.plainText, processedResult.hasRichContent)
+            return processedResult.plainText
         }.value
 
         // Verify message ID hasn't changed during async processing (cell reuse protection)
         guard loadingMessageId == messageId else { return }
 
-        fullTextContent = result.plainText
-        hasRichContent = result.hasRichContent
+        fullTextContent = result
         hasLoadedContent = true
     }
 
