@@ -4,6 +4,9 @@ import Foundation
 /// Designed to be conservative for short messages while reliably stripping
 /// trailing contact blocks, mobile footers, and legal boilerplate.
 enum PlainTextSignatureRemover {
+    /// Number of trailing lines to inspect when looking for signature/disclaimer starts.
+    /// Corporate signatures can include long compliance footers that exceed 18 lines.
+    private static let trailingScanLineLimit = 80
 
     private struct LineEvaluation {
         let isHardIndicator: Bool
@@ -95,6 +98,7 @@ enum PlainTextSignatureRemover {
         "sincerely",
         "yours truly",
         "best wishes",
+        "best regards",
         "kind regards",
         "warm regards",
         "take care",
@@ -138,6 +142,10 @@ enum PlainTextSignatureRemover {
         " company", " co.", " partners", " group"
     ]
 
+    private static let singleNamePattern: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: "^[A-Z][A-Za-z'\\-]{1,31}$", options: [])
+    }()
+
     // MARK: - Public API
 
     static func removeSignature(from text: String) -> String {
@@ -154,7 +162,7 @@ enum PlainTextSignatureRemover {
         }
         guard lastNonEmpty >= 0 else { return "" }
 
-        let scanStart = max(0, lastNonEmpty - 18)
+        let scanStart = max(0, lastNonEmpty - trailingScanLineLimit)
         let nonEmptyLineCount = lines.reduce(into: 0) { count, line in
             if !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 count += 1
@@ -248,7 +256,7 @@ enum PlainTextSignatureRemover {
         if containsKeyword(lowercased, in: titleKeywords) { score += 1 }
         if containsKeyword(lowercased, in: addressKeywords) { score += 1 }
         if trimmed.count <= 72 { score += 1 }
-        if trimmed.contains("|") { score += 1 }
+        if containsSignatureSeparator(trimmed) { score += 1 }
 
         if looksLikeSentence(trimmed) { score -= 1 }
         if TextProcessing.isListItem(trimmed) { score -= 2 }
@@ -281,6 +289,10 @@ enum PlainTextSignatureRemover {
         return keywords.contains { text.contains($0) }
     }
 
+    private static func containsSignatureSeparator(_ text: String) -> Bool {
+        text.contains("|") || text.contains("│") || text.contains("┃") || text.contains("¦")
+    }
+
     // MARK: - Signature Range Helpers
 
     private static func findSignatureStartLine(before indicatorIndex: Int, lines: [String]) -> Int {
@@ -302,6 +314,15 @@ enum PlainTextSignatureRemover {
             }
 
             let evaluation = evaluateLine(line)
+            if !foundShortLines,
+               shouldPreserveSingleNameSignOff(line, at: index, in: lines) {
+                break
+            }
+            if foundShortLines,
+               shouldPreserveSingleNameSignOff(line, at: index, in: lines) {
+                break
+            }
+
             if evaluation.isHardIndicator || looksLikeSignatureLine(line) {
                 foundShortLines = true
             } else {
@@ -345,6 +366,26 @@ enum PlainTextSignatureRemover {
         }
 
         return shortEnough && (noSentenceEnding || trimmed.hasSuffix(","))
+    }
+
+    /// Preserve single first-name sign-offs ("Jasmine") when they are part of body content
+    /// and not attached to explicit sign-off markers like "Thanks,".
+    private static func shouldPreserveSingleNameSignOff(_ line: String, at index: Int, in lines: [String]) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard matchesRegex(singleNamePattern, in: trimmed) else { return false }
+
+        var previousIndex = index - 1
+        while previousIndex >= 0 {
+            let previous = lines[previousIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+            if previous.isEmpty {
+                previousIndex -= 1
+                continue
+            }
+
+            return !isSignOffLine(previous.lowercased())
+        }
+
+        return true
     }
 
     // MARK: - Utilities

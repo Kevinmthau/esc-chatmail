@@ -401,6 +401,94 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(result, "Thank you! Have a great weekend.")
     }
 
+    func testRemoveSignature_longCorporateDisclaimerTail_removesSignatureBlock() {
+        let text = """
+        Hi Kevin,
+
+        Do you have some time to connect on lending solutions before 1pm tomorrow? Let us know what would work best for you.
+
+        Jasmine
+
+        Jasmine Abouzied Shapiro (she/her/hers) | Managing Director | J.P. Morgan Private Bank | 270 Park Avenue, Floor 22 | New York, NY 10017 | T: 212 464 1041
+        M: +1 917-279-0105 | NMLS ID 093744 | jasmine.c.abouzied@jpmorgan.com | privatebank.jpmorgan.com
+
+        J.P. Morgan Securities LLC | JPMorgan Chase Bank, N.A.
+
+        Our Form CRS and Guide to Investment Services contain important information about the ways we can serve you and the products we offer.
+        This communication is provided for informational purposes and is not an account statement.
+        Please refer to your monthly statements for the official record of account activity.
+        Questions should be directed to your J.P. Morgan representative.
+        You should consult your own tax, legal, and accounting advisors before engaging in financial transactions.
+        Please submit personal information through secure channels available to clients.
+        Investment products involve risk and may lose value.
+        No bank guarantee is provided for investment products discussed in this message.
+        This material is intended solely for the recipient and related authorized parties.
+        Distribution to unintended recipients is restricted by policy.
+        Any forwarding should comply with firm communication standards.
+        Payment details should always be confirmed by phone using a known number.
+        If funds were sent to an unintended account, contact your team immediately.
+        Additional disclosures may apply based on account type and jurisdiction.
+        Product availability depends on review and approval requirements.
+        Services described may vary by location and client eligibility.
+        Historical references do not guarantee future performance.
+        Terms may be updated periodically without prior notice.
+        Use of electronic communication is subject to monitoring and retention rules.
+        This message may include privileged information under applicable law.
+        If you are not the intended recipient, please delete and notify the sender.
+        """
+
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        XCTAssertEqual(result, """
+        Hi Kevin,
+
+        Do you have some time to connect on lending solutions before 1pm tomorrow? Let us know what would work best for you.
+
+        Jasmine
+        """)
+    }
+
+    func testRemoveSignature_truncatedCorporateSnippet_removesVisibleSignatureLines() {
+        let text = """
+        Hi Kevin,
+
+        Do you have some time to connect on lending solutions before 1pm tomorrow? Let us know what would work best for you.
+
+        Jasmine
+
+        Jasmine Abouzied Shapiro (she/her/hers) | Managing
+        """
+
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        XCTAssertEqual(result, """
+        Hi Kevin,
+
+        Do you have some time to connect on lending solutions before 1pm tomorrow? Let us know what would work best for you.
+
+        Jasmine
+        """)
+    }
+
+    func testRemoveSignature_truncatedCorporateSnippet_withUnicodeSeparators_removesVisibleSignatureLines() {
+        let text = """
+        Hi Kevin,
+
+        Do you have some time to connect on lending solutions before 1pm tomorrow? Let us know what would work best for you.
+
+        Jasmine
+
+        Jasmine Abouzied Shapiro (she/her/hers) │ Managing
+        """
+
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        XCTAssertEqual(result, """
+        Hi Kevin,
+
+        Do you have some time to connect on lending solutions before 1pm tomorrow? Let us know what would work best for you.
+
+        Jasmine
+        """)
+    }
+
     // MARK: - Signature Removal - Legal Disclaimers
 
     func testRemoveSignature_legalDisclaimer_removes() {
