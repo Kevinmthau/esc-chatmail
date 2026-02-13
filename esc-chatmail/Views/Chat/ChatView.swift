@@ -63,7 +63,9 @@ struct ChatView: View {
                     isTextFieldFocused = false
                 }
             }
-            .defaultScrollAnchor(shouldUseBottomAnchoring ? .bottom : .top)
+            // Keep short conversations top-aligned; explicit scrollTo calls still
+            // move longer threads to the newest message when needed.
+            .defaultScrollAnchor(.top)
             .scrollDismissesKeyboard(.interactively)
             .onAppear {
 #if DEBUG
