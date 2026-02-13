@@ -67,6 +67,10 @@ struct MessageBubble: View {
                     hasLoadedContent: hasLoadedContent,
                     showingHTMLView: $showingHTMLView
                 )
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    showingHTMLView = true
+                }
 
                 MessageMetadata(
                     date: message.internalDate,

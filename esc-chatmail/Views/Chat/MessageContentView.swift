@@ -17,15 +17,13 @@ struct MessageContentView: View {
     let hasLoadedContent: Bool
     @Binding var showingHTMLView: Bool
 
-    private var htmlContentHandler: HTMLContentHandler { HTMLContentHandler.shared }
-
     var body: some View {
         if showHTMLPreview {
             // Show HTML preview for newsletters/forwarded emails.
             // For forwards, also show the user's lead-in text as a normal chat bubble.
             VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 8) {
                 if let intro = forwardedIntroText, !intro.isEmpty {
-                    textBubble(text: intro, includeViewMore: false)
+                    textBubble(text: intro)
                 }
 
                 EmailContentSection(
@@ -55,10 +53,8 @@ struct MessageContentView: View {
             if let text = fullTextContent ?? processedText(message.bodyText) ?? processedText(message.snippet) ?? message.snippet, !text.isEmpty {
                 textBubble(text: text)
             } else if message.hasHTMLSource {
-                // No text content but HTML exists - show button to view it
-                ViewContentButton.viewEmail {
-                    showingHTMLView = true
-                }
+                // No text content but HTML exists - show a tappable bubble to open full email
+                openEmailBubble
             } else if message.typedAttachments.isEmpty {
                 // No content and no attachments - show placeholder
                 noContentPlaceholder
@@ -68,36 +64,35 @@ struct MessageContentView: View {
     }
 
     private var loadingPlaceholder: some View {
-        HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.small)
-            Text("Loading...")
-                .font(.caption)
-                .foregroundColor(.secondary)
+        Button(action: openOriginalEmail) {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Loading...")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(style.bubblePadding)
+            .background(style.bubbleBackground(isFromMe: message.isFromMe))
+            .cornerRadius(style.bubbleCornerRadius)
         }
-        .padding(style.bubblePadding)
-        .background(style.bubbleBackground(isFromMe: message.isFromMe))
-        .cornerRadius(style.bubbleCornerRadius)
+        .buttonStyle(.plain)
+        .accessibilityHint("Opens the full original email")
     }
 
     @ViewBuilder
-    private func textBubble(text: String, includeViewMore: Bool = true) -> some View {
-        let (displayText, wasTruncated) = truncatedText(text, lineLimit: style.textLineLimit)
-        let showViewMore = includeViewMore && (showHTMLPreview || wasTruncated)
+    private func textBubble(text: String) -> some View {
+        let (displayText, _) = truncatedText(text, lineLimit: style.textLineLimit)
 
-        VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 6) {
+        Button(action: openOriginalEmail) {
             Text(displayText)
                 .padding(style.bubblePadding)
                 .background(style.bubbleBackground(isFromMe: message.isFromMe))
                 .foregroundColor(style.textColor(isFromMe: message.isFromMe))
                 .cornerRadius(style.bubbleCornerRadius)
-
-            if showViewMore {
-                ViewContentButton.viewMore {
-                    showingHTMLView = true
-                }
-            }
         }
+        .buttonStyle(.plain)
+        .accessibilityHint("Opens the full original email")
     }
 
     /// Truncates text at the specified limits and adds ellipsis if truncated
@@ -126,13 +121,39 @@ struct MessageContentView: View {
     }
 
     private var noContentPlaceholder: some View {
-        Text("No preview available")
-            .font(.caption)
-            .foregroundColor(.secondary)
-            .italic()
-            .padding(10)
-            .background(Color.gray.opacity(0.1))
-            .cornerRadius(12)
+        Button(action: openOriginalEmail) {
+            Text("No preview available")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .italic()
+                .padding(10)
+                .background(Color.gray.opacity(0.1))
+                .cornerRadius(12)
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Opens the full original email")
+    }
+
+    private var openEmailBubble: some View {
+        Button(action: openOriginalEmail) {
+            HStack(spacing: 6) {
+                Image(systemName: "doc.richtext")
+                    .font(.caption)
+                Text("Open original email")
+                    .font(.caption)
+                    .fontWeight(.medium)
+            }
+            .foregroundColor(.blue)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.blue.opacity(0.1))
+            .cornerRadius(8)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func openOriginalEmail() {
+        showingHTMLView = true
     }
 
     /// Returns user-written lead-in text for forwarded emails, excluding forwarded content.

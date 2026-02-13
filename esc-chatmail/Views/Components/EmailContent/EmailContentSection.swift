@@ -14,36 +14,26 @@ struct EmailContentSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let html = htmlContent {
-                // Tappable mini WebView preview
+                // Use an overlay tap target to ensure taps are captured even with embedded WKWebView
+                MiniEmailWebView(htmlContent: html, message: message)
+                    .frame(height: 200)
+                    .cornerRadius(12)
+                    .clipped()
+                    .overlay {
+                        Rectangle()
+                            .fill(Color.clear)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                showingHTMLView = true
+                            }
+                    }
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityHint("Opens the full original email")
+            } else if isLoading {
                 Button(action: { showingHTMLView = true }) {
-                    MiniEmailWebView(htmlContent: html, message: message)
-                        .frame(height: 200)
-                        .cornerRadius(12)
-                        .clipped()
+                    EmailContentPlaceholder()
                 }
                 .buttonStyle(PlainButtonStyle())
-
-                // View Full Email button - only shown with thumbnail
-                Button(action: {
-                    showingHTMLView = true
-                }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "doc.richtext")
-                            .font(.caption)
-                        Text("View Full Email")
-                            .font(.caption)
-                            .fontWeight(.medium)
-                        Image(systemName: "arrow.up.forward")
-                            .font(.caption2)
-                    }
-                    .foregroundColor(.blue)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Color.blue.opacity(0.1))
-                    .cornerRadius(8)
-                }
-            } else if isLoading {
-                EmailContentPlaceholder()
             } else {
                 // Fallback when no HTML content available
                 // (EmailContentFallback is already tappable, no extra button needed)
