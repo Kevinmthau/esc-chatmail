@@ -266,6 +266,15 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(result, "Let me know if you need anything else.")
     }
 
+    func testRemoveSignature_singleTrailingURLWithoutSignatureContext_preserved() {
+        let text = """
+        Here is the link you asked for:
+        www.example.com
+        """
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        XCTAssertEqual(result, "Here is the link you asked for:\nwww.example.com")
+    }
+
     func testRemoveSignature_cheers_preservedWithoutStrongIndicator() {
         let text = """
         Sounds great!

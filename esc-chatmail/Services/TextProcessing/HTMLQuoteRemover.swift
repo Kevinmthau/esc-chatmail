@@ -4,10 +4,15 @@ import Foundation
 /// Handles Gmail, Outlook, Apple Mail, and generic quote patterns
 enum HTMLQuoteRemover {
 
+    enum RemovalMode {
+        case quotedOnly
+        case quotedAndSignatures
+    }
+
     // MARK: - Quote Patterns
 
     /// HTML quote block patterns to remove entirely (string form for reference)
-    private static let quoteBlockPatternStrings = [
+    private static let quotedBlockPatternStrings = [
         // Gmail quote blocks (flexible class matching for multiple classes like "gmail_quote gmail_quote_container")
         "<div[^>]*class=\"[^\"]*gmail_quote[^\"]*\"[^>]*>.*?</div>",
         "<div[^>]*class=\"[^\"]*gmail_attr[^\"]*\"[^>]*>.*?</div>",
@@ -24,7 +29,11 @@ enum HTMLQuoteRemover {
         "<div style=\"[^\"]*border-left:[^\"]*\">.*?</div>",
         "<!-- originalMessage -->.*?<!-- /originalMessage -->",
         "<div class=\"moz-cite-prefix\">.*?</div>",
+    ]
 
+    /// Signature/footer specific block patterns. These are removed only in
+    /// `.quotedAndSignatures` mode.
+    private static let signatureBlockPatternStrings = [
         // Email footers and boilerplate
         "<div[^>]*class=\"[^\"]*footer[^\"]*\"[^>]*>.*?</div>",
         "<table[^>]*class=\"[^\"]*footer[^\"]*\"[^>]*>.*?</table>",
@@ -83,6 +92,11 @@ enum HTMLQuoteRemover {
         "(?:^|<br>|<p>|>)\\s*On [A-Z][a-z]+ \\d{1,2}, \\d{4} at \\d{1,2}:\\d{2}\\s*[AP]M,",
         "From:</strong>.*?Subject:</strong>",
         "-----Original Message-----",
+    ]
+
+    /// Signature/footer text patterns. These are applied only in
+    /// `.quotedAndSignatures` mode.
+    private static let signatureTextTruncationPatternStrings = [
         // Signature delimiters (plain text within HTML)
         "<br>\\s*--\\s*<br>",
         "<br>\\s*--\\s*</div>",
@@ -130,8 +144,15 @@ enum HTMLQuoteRemover {
     ]
 
     /// Pre-compiled regex patterns for quote block removal (compiled once at class load)
-    private static let compiledQuoteBlockPatterns: [NSRegularExpression] = {
-        quoteBlockPatternStrings.compactMap {
+    private static let compiledQuotedBlockPatterns: [NSRegularExpression] = {
+        quotedBlockPatternStrings.compactMap {
+            try? NSRegularExpression(pattern: $0, options: [.caseInsensitive, .dotMatchesLineSeparators])
+        }
+    }()
+
+    /// Pre-compiled regex patterns for signature block removal.
+    private static let compiledSignatureBlockPatterns: [NSRegularExpression] = {
+        signatureBlockPatternStrings.compactMap {
             try? NSRegularExpression(pattern: $0, options: [.caseInsensitive, .dotMatchesLineSeparators])
         }
     }()
@@ -150,18 +171,31 @@ enum HTMLQuoteRemover {
         }
     }()
 
+    /// Pre-compiled signature/footer truncation patterns.
+    private static let compiledSignatureTextTruncationPatterns: [NSRegularExpression] = {
+        signatureTextTruncationPatternStrings.compactMap {
+            try? NSRegularExpression(pattern: $0, options: [.caseInsensitive, .dotMatchesLineSeparators])
+        }
+    }()
+
     // MARK: - Public API
 
     /// Removes quoted text from HTML email content
     /// - Parameter html: The HTML content to clean
+    /// - Parameter mode: Whether to remove only quoted history or quoted history + signatures
     /// - Returns: HTML with quote blocks removed, or nil if input was nil
-    static func removeQuotes(from html: String?) -> String? {
+    static func removeQuotes(from html: String?, mode: RemovalMode = .quotedAndSignatures) -> String? {
         guard let html = html else { return nil }
 
         var cleanedHTML = html
 
-        // Remove quote block patterns using pre-compiled regex
-        cleanedHTML = removePatterns(compiledQuoteBlockPatterns, from: cleanedHTML)
+        // Remove quote block patterns using pre-compiled regex.
+        cleanedHTML = removePatterns(compiledQuotedBlockPatterns, from: cleanedHTML)
+
+        // Optionally remove signature/footer block patterns.
+        if mode == .quotedAndSignatures {
+            cleanedHTML = removePatterns(compiledSignatureBlockPatterns, from: cleanedHTML)
+        }
 
         // Two-pass truncation approach:
         // 1. First check structural patterns (definitive quote boundaries like Outlook containers)
@@ -174,6 +208,10 @@ enum HTMLQuoteRemover {
         } else {
             // No structural boundary - fall back to text-based patterns
             cleanedHTML = truncateAtPatterns(compiledTextBasedTruncationPatterns, in: cleanedHTML)
+        }
+
+        if mode == .quotedAndSignatures {
+            cleanedHTML = truncateAtPatterns(compiledSignatureTextTruncationPatterns, in: cleanedHTML)
         }
 
         return cleanedHTML

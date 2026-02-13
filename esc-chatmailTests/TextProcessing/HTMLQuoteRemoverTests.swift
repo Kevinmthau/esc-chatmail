@@ -485,4 +485,30 @@ final class HTMLQuoteRemoverTests: XCTestCase {
         XCTAssertFalse(result?.contains("First level quote") ?? true)
         XCTAssertFalse(result?.contains("Nested quote") ?? true)
     }
+
+    // MARK: - Removal Modes
+
+    func testRemoveQuotes_quotedOnlyMode_preservesSignatureBlocks() {
+        let html = """
+        <p>Main content.</p>
+        <div class="signature">Signature details</div>
+        """
+
+        let result = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedOnly)
+
+        XCTAssertTrue(result?.contains("Main content.") ?? false)
+        XCTAssertTrue(result?.contains("Signature details") ?? false)
+    }
+
+    func testRemoveQuotes_quotedAndSignaturesMode_removesSignatureBlocks() {
+        let html = """
+        <p>Main content.</p>
+        <div class="signature">Signature details</div>
+        """
+
+        let result = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures)
+
+        XCTAssertTrue(result?.contains("Main content.") ?? false)
+        XCTAssertFalse(result?.contains("Signature details") ?? true)
+    }
 }

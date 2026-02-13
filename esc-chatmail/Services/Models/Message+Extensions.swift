@@ -162,6 +162,15 @@ extension Message {
         return subjectLower.hasPrefix("fwd:") || subjectLower.hasPrefix("fw:")
     }
 
+    /// Chooses how aggressively to clean HTML before rendering in previews/full views.
+    /// Forwarded/newsletter messages keep original structure by default.
+    var htmlDisplayCleanupMode: HTMLContentCleanupMode {
+        if isForwardedEmail || isNewsletter {
+            return .none
+        }
+        return .quotedAndSignature
+    }
+
     /// Preferred one-line preview for conversation list rows.
     /// Forwarded messages use subject-based preview for better readability.
     var conversationPreviewText: String? {

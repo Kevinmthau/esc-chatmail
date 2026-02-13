@@ -162,15 +162,18 @@ struct MessageContentView: View {
 
         // Prefer raw plain-text body for forwards so we can split exactly at the forward marker.
         if let bodyText = message.bodyText,
-           let intro = extractForwardIntro(from: bodyText) {
-            return intro
+           let intro = extractForwardIntro(from: bodyText),
+           let cleanedIntro = cleanForwardedIntro(intro) {
+            return cleanedIntro
         }
 
         // Fallback: only use a short snippet-like value; avoid showing large forwarded content.
-        let fallback = (message.snippet ?? fullTextContent)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let rawFallback = message.snippet ?? fullTextContent,
+              let fallback = cleanForwardedIntro(rawFallback) else {
+            return nil
+        }
 
-        guard let fallback, !fallback.isEmpty, fallback.count <= 280 else {
+        guard fallback.count <= 280 else {
             return nil
         }
         return fallback
@@ -199,6 +202,16 @@ struct MessageContentView: View {
         }
 
         let trimmed = intro.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func cleanForwardedIntro(_ text: String) -> String? {
+        let sanitized = RawEmailSourceSanitizer.extractDisplayText(from: text)
+        let decoded = HTMLEntityDecoder.decode(sanitized)
+        let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: decoded)
+        let signatureStripped = TextProcessing.stripSignatures(from: unwrapped)
+        let formatted = TextProcessing.formatSignOffLineBreaks(in: signatureStripped)
+        let trimmed = formatted.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
 

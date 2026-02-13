@@ -17,7 +17,7 @@ final class HTMLContentLoaderTests: XCTestCase {
         super.tearDown()
     }
 
-    func testLoadContent_stripQuotedContentRemovesGmailQuoteBlocks() async {
+    func testLoadContent_cleanupModeQuotedOnlyRemovesGmailQuoteBlocks() async {
         let messageId = "html-loader-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }
 
@@ -31,14 +31,14 @@ final class HTMLContentLoaderTests: XCTestCase {
             messageId: messageId,
             bodyStorageURI: nil,
             isDarkMode: false,
-            stripQuotedContent: false
+            cleanupMode: .none
         )
 
         let stripped = await loader.loadContent(
             messageId: messageId,
             bodyStorageURI: nil,
             isDarkMode: false,
-            stripQuotedContent: true
+            cleanupMode: .quotedOnly
         )
 
         XCTAssertNotNil(unstripped.html)
@@ -48,7 +48,7 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertTrue(stripped.html?.contains("MAIN_BODY_TOKEN") == true)
     }
 
-    func testLoadContent_cacheSeparatesStripQuotedContentVariants() async {
+    func testLoadContent_cacheSeparatesCleanupModeVariants() async {
         let messageId = "html-loader-cache-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }
 
@@ -62,16 +62,44 @@ final class HTMLContentLoaderTests: XCTestCase {
             messageId: messageId,
             bodyStorageURI: nil,
             isDarkMode: false,
-            stripQuotedContent: false
+            cleanupMode: .none
         )
         let second = await loader.loadContent(
             messageId: messageId,
             bodyStorageURI: nil,
             isDarkMode: false,
-            stripQuotedContent: true
+            cleanupMode: .quotedOnly
         )
 
         XCTAssertTrue(first.html?.contains("BODY_QUOTE") == true)
         XCTAssertFalse(second.html?.contains("BODY_QUOTE") == true)
+    }
+
+    func testLoadContent_cleanupModeQuotedOnlyPreservesSignatureBlock() async {
+        let messageId = "html-loader-signature-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let html = """
+        <p>Hello there</p>
+        <div class="signature">SIGNATURE_TOKEN</div>
+        """
+        _ = contentHandler.saveHTML(html, for: messageId)
+
+        let quotedOnly = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            isDarkMode: false,
+            cleanupMode: .quotedOnly
+        )
+
+        let quotedAndSignature = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            isDarkMode: false,
+            cleanupMode: .quotedAndSignature
+        )
+
+        XCTAssertTrue(quotedOnly.html?.contains("SIGNATURE_TOKEN") == true)
+        XCTAssertFalse(quotedAndSignature.html?.contains("SIGNATURE_TOKEN") == true)
     }
 }

@@ -8,8 +8,12 @@ struct EmailContentSection: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var htmlContent: String?
     @State private var isLoading = true
-    @State private var hasLoaded = false
     private let htmlContentLoader = HTMLContentLoader.shared
+
+    private var loadKey: String {
+        let bodyTextHash = message.bodyText?.hashValue ?? 0
+        return "\(message.id)|\(message.bodyStorageURI ?? "")|\(bodyTextHash)|\(colorScheme == .dark)|\(message.htmlDisplayCleanupMode.rawValue)"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -42,22 +46,24 @@ struct EmailContentSection: View {
                 }
             }
         }
-        .task {
-            guard !hasLoaded else { return }
-            hasLoaded = true
+        .task(id: loadKey) {
             await loadHTML()
         }
     }
 
     private func loadHTML() async {
-        let shouldStripQuotedContent = !message.isNewsletter
+        if htmlContent == nil {
+            await MainActor.run {
+                isLoading = true
+            }
+        }
 
         let result = await htmlContentLoader.loadContentWithTimeout(
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
             bodyText: message.bodyText,
             isDarkMode: colorScheme == .dark,
-            stripQuotedContent: shouldStripQuotedContent,
+            cleanupMode: message.htmlDisplayCleanupMode,
             timeout: 5.0
         )
 

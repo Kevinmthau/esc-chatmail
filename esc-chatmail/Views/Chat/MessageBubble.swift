@@ -15,11 +15,13 @@ struct MessageBubble: View {
     @State private var senderAvatarURL: String?
     @State private var senderImageData: Data?
     @State private var showingHTMLView = false
+    @State private var hasRichHTMLContent = false
     private var showHTMLPreview: Bool {
         MessageDisplayPolicy.shouldShowHTMLPreview(
             hasHTMLSource: message.hasHTMLSource,
             isForwardedEmail: message.isForwardedEmail,
-            isNewsletter: message.isNewsletter
+            isNewsletter: message.isNewsletter,
+            hasRichHTMLContent: hasRichHTMLContent
         )
     }
     @State private var fullTextContent: String?
@@ -169,6 +171,7 @@ struct MessageBubble: View {
         loadingMessageId = currentMessageId
         hasLoadedContent = false
         fullTextContent = nil
+        hasRichHTMLContent = false
         lastContentSignature = signature
 
         // Use prefetched sender name if available, otherwise load (needed for avatar)
@@ -188,6 +191,7 @@ struct MessageBubble: View {
             // Final check before updating state - ensure this is still the active message
             guard loadingMessageId == currentMessageId else { return }
             fullTextContent = cached.plainText
+            hasRichHTMLContent = cached.hasRichContent
 
             let hasHTMLFile = HTMLContentHandler.shared.htmlFileExists(for: message.id)
             let hasHTMLSource = message.hasHTMLSource
@@ -217,7 +221,7 @@ struct MessageBubble: View {
         let messageId = message.id
         let bodyText = message.bodyTextValue
         let bodyStorageURI = message.bodyStorageURI
-        let result: String? = await Task.detached(priority: .userInitiated) {
+        let result: (plainText: String?, hasRichContent: Bool) = await Task.detached(priority: .userInitiated) {
             let handler = HTMLContentHandler.shared
             var processedResult = ProcessedTextCache.processMessage(
                 messageId: messageId,
@@ -246,13 +250,14 @@ struct MessageBubble: View {
                 quotedParts: processedResult.quotedParts
             )
 
-            return processedResult.plainText
+            return (processedResult.plainText, processedResult.hasRichContent)
         }.value
 
         // Verify message ID hasn't changed during async processing (cell reuse protection)
         guard loadingMessageId == messageId else { return }
 
-        fullTextContent = result
+        fullTextContent = result.plainText
+        hasRichHTMLContent = result.hasRichContent
         hasLoadedContent = true
     }
 

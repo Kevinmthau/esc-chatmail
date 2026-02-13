@@ -32,6 +32,7 @@ extension MessagePersister {
 
         // Update existing message properties that might have changed
         existingMessage.isUnread = processedMessage.isUnread
+        existingMessage.isNewsletter = processedMessage.isNewsletter
         existingMessage.snippet = processedMessage.snippet
         existingMessage.cleanedSnippet = processedMessage.cleanedSnippet
 

@@ -54,4 +54,29 @@ final class MessageExtensionsTests: XCTestCase {
 
         XCTAssertEqual(message.conversationPreviewText, "Clean snippet")
     }
+
+    func testHTMLDisplayCleanupMode_forwardedMessage_defaultsToNone() {
+        let message = MessageBuilder()
+            .withSubject("Fwd: Proposal")
+            .build(in: context)
+
+        XCTAssertEqual(message.htmlDisplayCleanupMode, .none)
+    }
+
+    func testHTMLDisplayCleanupMode_newsletter_defaultsToNone() {
+        let message = MessageBuilder()
+            .asNewsletter()
+            .withSubject("Weekly digest")
+            .build(in: context)
+
+        XCTAssertEqual(message.htmlDisplayCleanupMode, .none)
+    }
+
+    func testHTMLDisplayCleanupMode_regularMessage_usesQuotedAndSignature() {
+        let message = MessageBuilder()
+            .withSubject("Re: Plans")
+            .build(in: context)
+
+        XCTAssertEqual(message.htmlDisplayCleanupMode, .quotedAndSignature)
+    }
 }

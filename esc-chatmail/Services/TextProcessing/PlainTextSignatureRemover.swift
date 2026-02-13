@@ -223,6 +223,10 @@ enum PlainTextSignatureRemover {
             if contactSignals == 0 && nonEmptyLineCount <= 4 && totalChars < 180 {
                 return trimmed
             }
+            if contactSignals == 1 && signatureLineCount <= 1 &&
+                !hasSupportingSignatureContext(startingAt: startLine, lines: lines, lastNonEmpty: lastNonEmpty) {
+                return trimmed
+            }
             let adjustedStart = adjustToSeparator(startLine, lines: lines)
             return joinLines(lines, upTo: adjustedStart)
         }
@@ -247,8 +251,8 @@ enum PlainTextSignatureRemover {
 
         let hasContactInfo = hasContactPrefix || hasEmail || hasUrl || hasPhone
 
-        // URLs and phone numbers on trailing lines are usually signature/footer markers.
-        let isHardIndicator = isDelimiter || isCidLine || hasHardFragment || hasContactPrefix || hasUrl || hasPhone
+        // Keep hard indicators conservative. URL/phone lines need surrounding context.
+        let isHardIndicator = isDelimiter || isCidLine || hasHardFragment || hasContactPrefix
 
         var score = 0
         if isSignOffLine(lowercased) { score += 1 }
@@ -386,6 +390,45 @@ enum PlainTextSignatureRemover {
         }
 
         return true
+    }
+
+    private static func hasSupportingSignatureContext(
+        startingAt startLine: Int,
+        lines: [String],
+        lastNonEmpty: Int
+    ) -> Bool {
+        let lookbackStart = max(0, startLine - 4)
+        for index in stride(from: startLine - 1, through: lookbackStart, by: -1) {
+            let line = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty else { continue }
+
+            let lowercased = line.lowercased()
+            let evaluation = evaluateLine(line)
+            if isSignOffLine(lowercased) ||
+                evaluation.hasContactInfo ||
+                evaluation.isHardIndicator ||
+                containsKeyword(lowercased, in: titleKeywords) ||
+                containsKeyword(lowercased, in: organizationKeywords) ||
+                containsKeyword(lowercased, in: addressKeywords) {
+                return true
+            }
+        }
+
+        var contactLineCount = 0
+        for index in startLine...lastNonEmpty {
+            let line = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty else { continue }
+
+            let evaluation = evaluateLine(line)
+            if evaluation.hasContactInfo {
+                contactLineCount += 1
+                if contactLineCount >= 2 {
+                    return true
+                }
+            }
+        }
+
+        return false
     }
 
     // MARK: - Utilities

@@ -6,7 +6,8 @@ final class MessageDisplayPolicyTests: XCTestCase {
         let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
             hasHTMLSource: true,
             isForwardedEmail: false,
-            isNewsletter: false
+            isNewsletter: false,
+            hasRichHTMLContent: false
         )
 
         XCTAssertFalse(shouldShow)
@@ -16,7 +17,8 @@ final class MessageDisplayPolicyTests: XCTestCase {
         let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
             hasHTMLSource: true,
             isForwardedEmail: true,
-            isNewsletter: false
+            isNewsletter: false,
+            hasRichHTMLContent: false
         )
 
         XCTAssertTrue(shouldShow)
@@ -26,7 +28,19 @@ final class MessageDisplayPolicyTests: XCTestCase {
         let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
             hasHTMLSource: true,
             isForwardedEmail: false,
-            isNewsletter: true
+            isNewsletter: true,
+            hasRichHTMLContent: false
+        )
+
+        XCTAssertTrue(shouldShow)
+    }
+
+    func testShouldShowHTMLPreview_richTransactionalHTML_returnsTrue() {
+        let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
+            hasHTMLSource: true,
+            isForwardedEmail: false,
+            isNewsletter: false,
+            hasRichHTMLContent: true
         )
 
         XCTAssertTrue(shouldShow)
@@ -36,7 +50,8 @@ final class MessageDisplayPolicyTests: XCTestCase {
         let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
             hasHTMLSource: false,
             isForwardedEmail: true,
-            isNewsletter: true
+            isNewsletter: true,
+            hasRichHTMLContent: true
         )
 
         XCTAssertFalse(shouldShow)
