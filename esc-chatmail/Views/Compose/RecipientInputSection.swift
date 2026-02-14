@@ -142,9 +142,9 @@ struct RecipientInputSection: View {
             onContactButtonTapped?()
         } label: {
             Image(systemName: "plus")
-                .font(.system(size: 26, weight: .regular))
+                .font(.system(size: 18, weight: .regular))
                 .foregroundColor(.primary)
-                .frame(width: 42, height: 42)
+                .frame(width: 36, height: 36)
                 .background(
                     Circle()
                         .fill(Color(uiColor: UIColor(red: 226/255, green: 226/255, blue: 232/255, alpha: 1)))

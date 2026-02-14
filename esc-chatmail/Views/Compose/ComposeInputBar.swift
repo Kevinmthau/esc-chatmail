@@ -161,9 +161,9 @@ struct ComposeInputBar: View {
             showAttachmentOptions = true
         } label: {
             Image(systemName: "plus")
-                .font(.system(size: 26, weight: .regular))
+                .font(.system(size: 18, weight: .regular))
                 .foregroundColor(.primary)
-                .frame(width: 44, height: 44)
+                .frame(width: 38, height: 38)
                 .background(
                     Circle()
                         .fill(iMessageButtonBackground)

@@ -177,9 +177,9 @@ struct ComposeView: View {
                     dismiss()
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 22, weight: .regular))
+                        .font(.system(size: 16, weight: .regular))
                         .foregroundColor(.primary)
-                        .frame(width: 54, height: 54)
+                        .frame(width: 50, height: 50)
                         .background(
                             Circle()
                                 .fill(Color(uiColor: UIColor(red: 226/255, green: 226/255, blue: 232/255, alpha: 1))
