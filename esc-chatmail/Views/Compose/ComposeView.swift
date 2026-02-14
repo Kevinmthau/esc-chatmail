@@ -16,6 +16,7 @@ struct ComposeView: View {
 
     private let presentationStyle: PresentationStyle
     private let onOpenConversation: ((Conversation) -> Void)?
+    private let onSendConversation: ((NSManagedObjectID) -> Void)?
 
     private var iMessageCanvasColor: Color {
         Color(uiColor: UIColor(red: 239/255, green: 239/255, blue: 244/255, alpha: 1))
@@ -36,6 +37,10 @@ struct ComposeView: View {
         presentationStyle == .iMessage && viewModel.mode == .newMessage
     }
 
+    private var isRunningUITests: Bool {
+        ProcessInfo.processInfo.arguments.contains("UI_TEST_MODE")
+    }
+
     private var shouldOpenExistingConversationOnSelection: Bool {
         usesIMessagePresentation && onOpenConversation != nil
     }
@@ -43,10 +48,12 @@ struct ComposeView: View {
     init(
         mode: ComposeViewModel.Mode = .newMessage,
         presentationStyle: PresentationStyle = .standard,
-        onOpenConversation: ((Conversation) -> Void)? = nil
+        onOpenConversation: ((Conversation) -> Void)? = nil,
+        onSendConversation: ((NSManagedObjectID) -> Void)? = nil
     ) {
         self.presentationStyle = presentationStyle
         self.onOpenConversation = onOpenConversation
+        self.onSendConversation = onSendConversation
         _viewModel = StateObject(wrappedValue: ComposeViewModel(mode: mode))
     }
 
@@ -96,7 +103,7 @@ struct ComposeView: View {
                         ComposeInputBar(
                             viewModel: viewModel,
                             focusedField: $focusedField,
-                            onSendSuccess: { dismiss() },
+                            onSendSuccess: { handleSendSuccess() },
                             style: usesIMessagePresentation ? .iMessage : .standard
                         )
                     }
@@ -108,6 +115,7 @@ struct ComposeView: View {
                 // Autocomplete overlay - positioned below recipient row
                 recipientSection.autocompleteOverlay
             }
+            .accessibilityIdentifier("ComposeViewRoot")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if !usesIMessagePresentation {
@@ -126,7 +134,7 @@ struct ComposeView: View {
                         Button("Send") {
                             Task {
                                 if await viewModel.send() {
-                                    dismiss()
+                                    handleSendSuccess()
                                 }
                             }
                         }
@@ -150,6 +158,7 @@ struct ComposeView: View {
             )
         }
         .task {
+            guard !isRunningUITests else { return }
             await viewModel.requestContactsAccess()
         }
         .onAppear {
@@ -170,6 +179,7 @@ struct ComposeView: View {
         ZStack {
             Text("New Message")
                 .font(.system(size: 18, weight: .semibold))
+                .accessibilityIdentifier("ComposeTitleText")
 
             HStack {
                 Spacer()
@@ -188,6 +198,7 @@ struct ComposeView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close")
+                .accessibilityIdentifier("ComposeCloseButton")
             }
         }
         .padding(.horizontal, 16)
@@ -210,6 +221,13 @@ struct ComposeView: View {
         guard let email = contact.emailAddresses.first?.value as String? else { return }
         let displayName = formattedName(for: contact)
         handleSelectedRecipient(email: email, displayName: displayName)
+    }
+
+    private func handleSendSuccess() {
+        if let conversationObjectID = viewModel.lastSentConversationObjectID {
+            onSendConversation?(conversationObjectID)
+        }
+        dismiss()
     }
 
     private func formattedName(for contact: CNContact) -> String? {

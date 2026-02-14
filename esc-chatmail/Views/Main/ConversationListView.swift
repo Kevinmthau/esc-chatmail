@@ -3,6 +3,7 @@ import CoreData
 
 struct ConversationListView: View {
     @FetchRequest private var conversations: FetchedResults<Conversation>
+    @Environment(\.managedObjectContext) private var viewContext
     @StateObject private var viewModel = ConversationListViewModel()
     @State private var cachedFilteredConversations: [Conversation] = []
 
@@ -89,8 +90,8 @@ struct ConversationListView: View {
             ComposeView(
                 mode: .newMessage,
                 presentationStyle: .iMessage,
-                onOpenConversation: { conversation in
-                    pendingConversationObjectID = conversation.objectID
+                onSendConversation: { conversationObjectID in
+                    openConversationIfAvailable(objectID: conversationObjectID)
                 }
             )
         }
@@ -283,6 +284,7 @@ struct ConversationListView: View {
             circleButton(icon: "square.and.pencil")
         }
         .accessibilityLabel("Compose new message")
+        .accessibilityIdentifier("ComposeNewMessageButton")
     }
 
     // MARK: - Filtering
@@ -295,11 +297,26 @@ struct ConversationListView: View {
 
     private func handleComposerDismiss() {
         guard let objectID = pendingConversationObjectID else { return }
-        pendingConversationObjectID = nil
+        openConversationIfAvailable(objectID: objectID)
+    }
 
+    /// Attempts immediate navigation to a conversation by objectID.
+    /// If the conversation is not resolvable yet, defers navigation until next sheet dismissal.
+    private func openConversationIfAvailable(objectID: NSManagedObjectID) {
         if let conversation = conversations.first(where: { $0.objectID == objectID }) {
             selectedConversation = conversation
+            pendingConversationObjectID = nil
+            return
         }
+
+        if let conversation = try? viewContext.existingObject(with: objectID) as? Conversation,
+           conversation.archivedAt == nil {
+            selectedConversation = conversation
+            pendingConversationObjectID = nil
+            return
+        }
+
+        pendingConversationObjectID = objectID
     }
 
     private func circleButton(icon: String) -> some View {

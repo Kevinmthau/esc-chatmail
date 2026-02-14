@@ -35,6 +35,7 @@ final class ComposeViewModel: ObservableObject {
     @Published var isSending = false
     @Published var error: Error?
     @Published var showError = false
+    private(set) var lastSentConversationObjectID: NSManagedObjectID?
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -209,6 +210,7 @@ final class ComposeViewModel: ObservableObject {
     // MARK: - Send Message
 
     func send() async -> Bool {
+        lastSentConversationObjectID = nil
         guard canSend else { return false }
 
         isSending = true
@@ -248,6 +250,7 @@ final class ComposeViewModel: ObservableObject {
             return false
         }
         let optimisticMessageID = optimisticMessage.id
+        lastSentConversationObjectID = optimisticMessage.conversation?.objectID
 
         // Prepare attachment infos for background send
         let attachmentInfos = attachments.map { sendService.attachmentToInfo($0) }

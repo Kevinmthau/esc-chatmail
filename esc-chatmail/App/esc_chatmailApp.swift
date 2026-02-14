@@ -28,6 +28,14 @@ struct esc_chatmailApp: App {
 
     @State private var isInitialized = false
 
+    private var isRunningUITests: Bool {
+        ProcessInfo.processInfo.arguments.contains("UI_TEST_MODE")
+    }
+
+    private var shouldForceAuthenticatedUITestState: Bool {
+        ProcessInfo.processInfo.arguments.contains("UI_TEST_AUTHENTICATED")
+    }
+
     init() {
         logStartupTiming("App init started")
 
@@ -98,11 +106,12 @@ struct esc_chatmailApp: App {
 
         // 4. Restore auth session (after cleanup complete)
         await AuthSession.shared.restorePreviousSignIn()
+        applyUITestLaunchStateIfNeeded()
         logStartupTiming("Auth restored")
 
         // Start app-scoped foreground sync as soon as auth is available.
         // Scene callbacks may not fire during cold-start when already active.
-        if dependencies.authSession.isAuthenticated {
+        if dependencies.authSession.isAuthenticated && !isRunningUITests {
             dependencies.foregroundSyncCoordinator.start(
                 reason: "appInitialized",
                 triggerImmediateSync: true
@@ -144,6 +153,8 @@ struct esc_chatmailApp: App {
     }
 
     private func handleScenePhaseChange(_ newPhase: ScenePhase) {
+        if isRunningUITests { return }
+
         switch newPhase {
         case .background:
             dependencies.foregroundSyncCoordinator.stop(reason: "sceneBackground")
@@ -174,6 +185,8 @@ struct esc_chatmailApp: App {
     }
 
     private func handleAuthStateChange(_ isAuthenticated: Bool) {
+        if isRunningUITests { return }
+
         if isAuthenticated && scenePhase == .active {
             dependencies.foregroundSyncCoordinator.start(
                 reason: "authBecameAuthenticated",
@@ -181,6 +194,17 @@ struct esc_chatmailApp: App {
             )
         } else if !isAuthenticated {
             dependencies.foregroundSyncCoordinator.stop(reason: "authBecameUnauthenticated")
+        }
+    }
+
+    private func applyUITestLaunchStateIfNeeded() {
+        guard isRunningUITests, shouldForceAuthenticatedUITestState else { return }
+        dependencies.authSession.isAuthenticated = true
+        if dependencies.authSession.userEmail == nil {
+            dependencies.authSession.userEmail = "uitest@example.com"
+        }
+        if dependencies.authSession.userName == nil {
+            dependencies.authSession.userName = "UI Test"
         }
     }
 }

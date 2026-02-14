@@ -145,6 +145,9 @@ enum PlainTextSignatureRemover {
     private static let singleNamePattern: NSRegularExpression? = {
         try? NSRegularExpression(pattern: "^[A-Z][A-Za-z'\\-]{1,31}$", options: [])
     }()
+    private static let multiWordNamePattern: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: "^[A-Z][A-Za-z'.\\-]{1,31}(?:\\s+[A-Z][A-Za-z'.\\-]{1,31}){1,3}$", options: [])
+    }()
 
     // MARK: - Public API
 
@@ -189,6 +192,7 @@ enum PlainTextSignatureRemover {
         var signatureStartLine: Int?
         var signatureLineCount = 0
         var contactSignals = 0
+        var signatureSupportSignals = 0
         var sawSeparator = false
 
         for index in stride(from: lastNonEmpty, through: scanStart, by: -1) {
@@ -208,10 +212,22 @@ enum PlainTextSignatureRemover {
                 contactSignals += 1
             }
 
-            if evaluation.isLikelySignatureLine {
+            // Preserve a standalone first-name sign-off above a separated signature block:
+            // "Jasmine" + blank line + "Jasmine Lastname | Title".
+            if signatureLineCount > 0 &&
+                sawSeparator &&
+                signatureSupportSignals > 0 &&
+                shouldPreserveSingleNameSignOff(line, at: index, in: lines) {
+                break
+            }
+
+            let isContinuationLine = signatureLineCount > 0 && isLikelySignatureContinuation(line)
+            if evaluation.isLikelySignatureLine || isContinuationLine {
                 signatureLineCount += 1
-                if signatureStartLine == nil {
-                    signatureStartLine = index
+                // We scan backwards, so each matched line becomes the new earliest start.
+                signatureStartLine = index
+                if hasStrongSignatureSignal(line, evaluation: evaluation) {
+                    signatureSupportSignals += 1
                 }
             } else if signatureLineCount > 0 {
                 break
@@ -426,6 +442,63 @@ enum PlainTextSignatureRemover {
                     return true
                 }
             }
+        }
+
+        return false
+    }
+
+    private static func isLikelySignatureContinuation(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if TextProcessing.isListItem(trimmed) { return false }
+
+        let lowercased = trimmed.lowercased()
+        if isSignOffLine(lowercased) { return true }
+        if matchesRegex(singleNamePattern, in: trimmed) || matchesRegex(multiWordNamePattern, in: trimmed) {
+            return true
+        }
+        if containsKeyword(lowercased, in: titleKeywords) ||
+            containsKeyword(lowercased, in: organizationKeywords) ||
+            containsKeyword(lowercased, in: addressKeywords) {
+            return true
+        }
+        if containsSignatureSeparator(trimmed) {
+            return true
+        }
+
+        let hasContactPrefix = matchesRegex(contactPrefixPattern, in: trimmed)
+        let hasEmail = matchesRegex(emailPattern, in: trimmed)
+        let hasUrl = matchesRegex(urlPattern, in: trimmed)
+        let hasPhone = matchesRegex(phonePattern, in: trimmed)
+        if hasContactPrefix || hasEmail || hasUrl || hasPhone {
+            return true
+        }
+
+        // Address-style continuation line (e.g., "New York, NY 10013")
+        if trimmed.count <= 72,
+           trimmed.contains(","),
+           trimmed.range(of: "\\d", options: .regularExpression) != nil {
+            return true
+        }
+
+        return false
+    }
+
+    private static func hasStrongSignatureSignal(_ line: String, evaluation: LineEvaluation) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        let lowercased = trimmed.lowercased()
+        if evaluation.hasContactInfo || evaluation.isHardIndicator {
+            return true
+        }
+        if containsSignatureSeparator(trimmed) {
+            return true
+        }
+        if containsKeyword(lowercased, in: titleKeywords) ||
+            containsKeyword(lowercased, in: organizationKeywords) ||
+            containsKeyword(lowercased, in: addressKeywords) {
+            return true
         }
 
         return false
