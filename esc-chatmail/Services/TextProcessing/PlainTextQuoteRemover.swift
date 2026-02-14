@@ -102,6 +102,14 @@ enum PlainTextQuoteRemover {
             quoteAttribution = consecutiveAttribution
         }
 
+        // Outlook/Apple-style header blocks can include blank lines and wrapped address lines.
+        // Detect these structurally to avoid relying only on strict contiguous regex patterns.
+        let (headerBlockIndex, headerBlockAttribution) = findHeaderBlockQuoteBoundaryWithAttribution(in: cleanText)
+        if headerBlockIndex < earliestQuoteIndex {
+            earliestQuoteIndex = headerBlockIndex
+            quoteAttribution = headerBlockAttribution
+        }
+
         // Extract quoted content before truncating
         if earliestQuoteIndex < cleanText.count {
             let endIndex = cleanText.index(cleanText.startIndex, offsetBy: earliestQuoteIndex)
@@ -207,6 +215,23 @@ enum PlainTextQuoteRemover {
         "assunto:",
         // Dutch
         "van:", "verzonden:", "aan:", "onderwerp:"
+    ]
+
+    // Header groups used for structural quote boundary detection.
+    private static let fromHeaderPrefixesLowercased: [String] = [
+        "from:", "von:", "de:", "de :", "da:", "van:"
+    ]
+
+    private static let toHeaderPrefixesLowercased: [String] = [
+        "to:", "an:", "à:", "à :", "para:", "aan:"
+    ]
+
+    private static let sentOrDateHeaderPrefixesLowercased: [String] = [
+        "sent:", "date:", "gesendet:", "datum:", "envoyé:", "envoyé :", "enviado:", "inviato:", "verzonden:"
+    ]
+
+    private static let subjectHeaderPrefixesLowercased: [String] = [
+        "subject:", "betreff:", "objet:", "objet :", "asunto:", "oggetto:", "assunto:", "onderwerp:"
     ]
 
     // Pre-computed lowercased forward markers for efficient matching
@@ -365,6 +390,78 @@ enum PlainTextQuoteRemover {
                 }
             } else {
                 consecutiveQuoteLines = 0
+            }
+        }
+
+        return (text.count, nil)
+    }
+
+    /// Detects header-style quoted blocks with optional blank/wrapped lines, such as:
+    /// From: Name
+    /// <email@x.com>
+    ///
+    /// Sent: Saturday...
+    /// To: Person...
+    private static func findHeaderBlockQuoteBoundaryWithAttribution(in text: String) -> (Int, String?) {
+        let lines = text.components(separatedBy: .newlines)
+        guard !lines.isEmpty else { return (text.count, nil) }
+
+        // Track absolute character offset for each line start.
+        var lineStartOffsets: [Int] = []
+        lineStartOffsets.reserveCapacity(lines.count)
+        var runningOffset = 0
+        for (index, line) in lines.enumerated() {
+            lineStartOffsets.append(runningOffset)
+            runningOffset += line.count
+            if index < lines.count - 1 {
+                runningOffset += 1 // newline separator
+            }
+        }
+
+        let lookaheadLimit = 24
+
+        for index in lines.indices {
+            let trimmed = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+
+            let lowercased = trimmed.lowercased()
+            guard fromHeaderPrefixesLowercased.contains(where: { lowercased.hasPrefix($0) }) else {
+                continue
+            }
+
+            // Quote headers usually start after a blank line; skip mid-paragraph "From:" mentions.
+            if index > 0 {
+                let previousLine = lines[index - 1].trimmingCharacters(in: .whitespacesAndNewlines)
+                if !previousLine.isEmpty {
+                    continue
+                }
+            }
+
+            var sawTo = false
+            var sawSentOrDate = false
+            var sawSubject = false
+            let upperBound = min(lines.count, index + lookaheadLimit)
+
+            if index + 1 < upperBound {
+                for candidateIndex in (index + 1)..<upperBound {
+                    let candidate = lines[candidateIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !candidate.isEmpty else { continue }
+
+                    let candidateLower = candidate.lowercased()
+                    if toHeaderPrefixesLowercased.contains(where: { candidateLower.hasPrefix($0) }) {
+                        sawTo = true
+                    }
+                    if sentOrDateHeaderPrefixesLowercased.contains(where: { candidateLower.hasPrefix($0) }) {
+                        sawSentOrDate = true
+                    }
+                    if subjectHeaderPrefixesLowercased.contains(where: { candidateLower.hasPrefix($0) }) {
+                        sawSubject = true
+                    }
+
+                    if sawTo && (sawSentOrDate || sawSubject) {
+                        return (lineStartOffsets[index], trimmed)
+                    }
+                }
             }
         }
 

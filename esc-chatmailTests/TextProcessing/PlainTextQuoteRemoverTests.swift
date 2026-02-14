@@ -749,6 +749,23 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(result, "I have a wake to attend tomorrow evening unfortunately")
     }
 
+    func testRemoveQuotes_outlookStyle_headersWithBlankLinesAndNoSubject_truncates() {
+        let text = """
+        Great. Will do! Have a nice weekend!
+
+        From: Kevin Thau
+        <kmthau@gmail.com>
+
+        Sent: Saturday, February 14, 2026 3:17:13 PM
+
+        To: Abouzied, Jasmine C (WM, USA)
+        <jasmine.c.abouzied@jpmorgan.com>
+        """
+
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, "Great. Will do! Have a nice weekend!")
+    }
+
     // MARK: - Apple Mail Style Quotes
 
     func testRemoveQuotes_appleMailStyle_withDate_cleansCorrectly() {

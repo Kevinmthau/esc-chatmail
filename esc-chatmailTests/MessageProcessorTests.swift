@@ -487,3 +487,220 @@ final class MessageProcessorTests: XCTestCase {
         XCTAssertEqual(result.score, 45)
     }
 }
+
+final class GoldenCorpusReplayTests: XCTestCase {
+    private var processor: MessageProcessor!
+
+    override func setUp() {
+        super.setUp()
+        processor = MessageProcessor()
+    }
+
+    override func tearDown() {
+        processor = nil
+        super.tearDown()
+    }
+
+    func testGoldenCorpusReplay() throws {
+        let corpus = try loadCorpus()
+
+        for scenario in corpus.plainTextQuoteCleanupCases {
+            XCTContext.runActivity(named: "plainText:\(scenario.id)") { _ in
+                let actual = PlainTextQuoteRemover.removeQuotes(from: scenario.input) ?? ""
+                XCTAssertEqual(
+                    normalize(actual),
+                    normalize(scenario.expected),
+                    scenario.notes ?? "Plain-text quote cleanup mismatch for scenario \(scenario.id)"
+                )
+            }
+        }
+
+        for scenario in corpus.htmlToBubbleTextCases {
+            XCTContext.runActivity(named: "htmlToText:\(scenario.id)") { _ in
+                let strippedHTML = HTMLQuoteRemover.removeQuotes(from: scenario.inputHTML) ?? scenario.inputHTML
+                let extracted = TextProcessing.extractPlainText(from: strippedHTML)
+                let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: extracted)
+                let main = PlainTextQuoteRemover.extractQuotes(from: unwrapped).mainContent
+                let formatted = TextProcessing.formatSignOffLineBreaks(in: main)
+
+                XCTAssertEqual(
+                    normalize(formatted),
+                    normalize(scenario.expected),
+                    scenario.notes ?? "HTML-to-bubble text mismatch for scenario \(scenario.id)"
+                )
+            }
+        }
+
+        for scenario in corpus.displayPolicyCases {
+            XCTContext.runActivity(named: "displayPolicy:\(scenario.id)") { _ in
+                let shouldShowPreview = MessageDisplayPolicy.shouldShowHTMLPreview(
+                    hasHTMLSource: scenario.hasHTMLSource,
+                    isForwardedEmail: scenario.isForwardedEmail,
+                    isNewsletter: scenario.isNewsletter,
+                    hasRichHTMLContent: scenario.hasRichHTMLContent,
+                    isFromMe: scenario.isFromMe,
+                    isOneToOneConversation: scenario.isOneToOneConversation,
+                    subject: scenario.subject
+                )
+
+                XCTAssertEqual(
+                    shouldShowPreview,
+                    scenario.expectedShowHTMLPreview,
+                    scenario.notes ?? "Display policy mismatch for scenario \(scenario.id)"
+                )
+            }
+        }
+
+        for scenario in corpus.newsletterDetectionCases {
+            XCTContext.runActivity(named: "newsletter:\(scenario.id)") { _ in
+                var headers = ProcessedHeaders()
+                headers.from = scenario.from
+                headers.replyTo = scenario.replyTo
+                headers.subject = scenario.subject
+                headers.listUnsubscribe = scenario.listUnsubscribe
+                headers.listId = scenario.listId
+                headers.precedence = scenario.precedence
+                headers.to = (0..<scenario.toCount).map { EmailAddress(email: "to\($0)@example.com", displayName: nil) }
+                headers.cc = (0..<scenario.ccCount).map { EmailAddress(email: "cc\($0)@example.com", displayName: nil) }
+
+                let result = processor.calculateNewsletterScore(
+                    labelIds: scenario.labelIds,
+                    headers: headers
+                )
+
+                XCTAssertEqual(
+                    result.isNewsletter,
+                    scenario.expectedIsNewsletter,
+                    scenario.notes ?? "Newsletter classification mismatch for scenario \(scenario.id)"
+                )
+
+                if let expectedScore = scenario.expectedScore {
+                    XCTAssertEqual(
+                        result.score,
+                        expectedScore,
+                        scenario.notes ?? "Newsletter score mismatch for scenario \(scenario.id)"
+                    )
+                }
+            }
+        }
+    }
+
+    // MARK: - Corpus Loading
+
+    private func loadCorpus() throws -> GoldenCorpus {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("TestSupport")
+            .appendingPathComponent("Fixtures")
+            .appendingPathComponent("golden_message_corpus.json")
+
+        let data = try Data(contentsOf: fixtureURL)
+        let decoder = JSONDecoder()
+        return try decoder.decode(GoldenCorpus.self, from: data)
+    }
+
+    private func normalize(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private struct GoldenCorpus: Decodable {
+    let plainTextQuoteCleanupCases: [PlainTextQuoteCleanupCase]
+    let htmlToBubbleTextCases: [HTMLToBubbleTextCase]
+    let displayPolicyCases: [DisplayPolicyCase]
+    let newsletterDetectionCases: [NewsletterDetectionCase]
+
+    enum CodingKeys: String, CodingKey {
+        case plainTextQuoteCleanupCases
+        case htmlToBubbleTextCases
+        case displayPolicyCases
+        case newsletterDetectionCases
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        plainTextQuoteCleanupCases = try container.decodeIfPresent([PlainTextQuoteCleanupCase].self, forKey: .plainTextQuoteCleanupCases) ?? []
+        htmlToBubbleTextCases = try container.decodeIfPresent([HTMLToBubbleTextCase].self, forKey: .htmlToBubbleTextCases) ?? []
+        displayPolicyCases = try container.decodeIfPresent([DisplayPolicyCase].self, forKey: .displayPolicyCases) ?? []
+        newsletterDetectionCases = try container.decodeIfPresent([NewsletterDetectionCase].self, forKey: .newsletterDetectionCases) ?? []
+    }
+}
+
+private struct PlainTextQuoteCleanupCase: Decodable {
+    let id: String
+    let input: String
+    let expected: String
+    let notes: String?
+}
+
+private struct HTMLToBubbleTextCase: Decodable {
+    let id: String
+    let inputHTML: String
+    let expected: String
+    let notes: String?
+}
+
+private struct DisplayPolicyCase: Decodable {
+    let id: String
+    let hasHTMLSource: Bool
+    let isForwardedEmail: Bool
+    let isNewsletter: Bool
+    let hasRichHTMLContent: Bool
+    let isFromMe: Bool
+    let isOneToOneConversation: Bool
+    let subject: String?
+    let expectedShowHTMLPreview: Bool
+    let notes: String?
+}
+
+private struct NewsletterDetectionCase: Decodable {
+    let id: String
+    let labelIds: [String]
+    let from: String?
+    let replyTo: String?
+    let subject: String?
+    let listUnsubscribe: String?
+    let listId: String?
+    let precedence: String?
+    let toCount: Int
+    let ccCount: Int
+    let expectedIsNewsletter: Bool
+    let expectedScore: Int?
+    let notes: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case labelIds
+        case from
+        case replyTo
+        case subject
+        case listUnsubscribe
+        case listId
+        case precedence
+        case toCount
+        case ccCount
+        case expectedIsNewsletter
+        case expectedScore
+        case notes
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        labelIds = try container.decodeIfPresent([String].self, forKey: .labelIds) ?? []
+        from = try container.decodeIfPresent(String.self, forKey: .from)
+        replyTo = try container.decodeIfPresent(String.self, forKey: .replyTo)
+        subject = try container.decodeIfPresent(String.self, forKey: .subject)
+        listUnsubscribe = try container.decodeIfPresent(String.self, forKey: .listUnsubscribe)
+        listId = try container.decodeIfPresent(String.self, forKey: .listId)
+        precedence = try container.decodeIfPresent(String.self, forKey: .precedence)
+        toCount = try container.decodeIfPresent(Int.self, forKey: .toCount) ?? 0
+        ccCount = try container.decodeIfPresent(Int.self, forKey: .ccCount) ?? 0
+        expectedIsNewsletter = try container.decode(Bool.self, forKey: .expectedIsNewsletter)
+        expectedScore = try container.decodeIfPresent(Int.self, forKey: .expectedScore)
+        notes = try container.decodeIfPresent(String.self, forKey: .notes)
+    }
+}

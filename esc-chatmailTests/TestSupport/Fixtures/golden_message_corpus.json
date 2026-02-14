@@ -1,0 +1,92 @@
+{
+  "plainTextQuoteCleanupCases": [
+    {
+      "id": "outlook_wrapped_headers_blank_lines",
+      "notes": "Quoted Outlook headers with wrapped addresses and blank lines should be removed from bubble text.",
+      "input": "Great. Will do! Have a nice weekend!\n\nFrom: Kevin Thau\n<kmthau@gmail.com>\n\nSent: Saturday, February 14, 2026 3:17:13 PM\n\nTo: Abouzied, Jasmine C (WM, USA)\n<jasmine.c.abouzied@jpmorgan.com>",
+      "expected": "Great. Will do! Have a nice weekend!"
+    },
+    {
+      "id": "personal_reply_preserves_full_body",
+      "notes": "Personal message body should remain untouched when there is no quote boundary.",
+      "input": "James\n\nThanks for the note. I'm playing Brambles on 5/22 with the McNeil bros. Really looking forward to it.\n\nThanks for the heads up on NB. No plans as of now but we should rectify that.",
+      "expected": "James\n\nThanks for the note. I'm playing Brambles on 5/22 with the McNeil bros. Really looking forward to it.\n\nThanks for the heads up on NB. No plans as of now but we should rectify that."
+    }
+  ],
+  "htmlToBubbleTextCases": [
+    {
+      "id": "gmail_quote_removed_from_html",
+      "notes": "HTML quote containers should not leak into the bubble text.",
+      "inputHTML": "<div>Great. Will do! Have a nice weekend!</div><div class=\"gmail_quote\"><div>On Feb 14, Kevin wrote:</div><blockquote><div>Hi,</div></blockquote></div>",
+      "expected": "Great. Will do! Have a nice weekend!"
+    }
+  ],
+  "displayPolicyCases": [
+    {
+      "id": "one_to_one_reply_subject_stays_bubble",
+      "notes": "One-to-one reply threads should stay in chat bubbles even if newsletter/rich flags are noisy.",
+      "hasHTMLSource": true,
+      "isForwardedEmail": false,
+      "isNewsletter": true,
+      "hasRichHTMLContent": true,
+      "isFromMe": false,
+      "isOneToOneConversation": true,
+      "subject": "Re: [EXTERNAL]Re: Lending Follow up",
+      "expectedShowHTMLPreview": false
+    },
+    {
+      "id": "one_to_one_from_me_stays_bubble",
+      "notes": "Outgoing one-to-one messages should not route to HTML preview cards.",
+      "hasHTMLSource": true,
+      "isForwardedEmail": false,
+      "isNewsletter": true,
+      "hasRichHTMLContent": true,
+      "isFromMe": true,
+      "isOneToOneConversation": true,
+      "subject": "Re: Anything",
+      "expectedShowHTMLPreview": false
+    },
+    {
+      "id": "group_newsletter_uses_preview",
+      "notes": "List/group newsletters with HTML should still show preview mode.",
+      "hasHTMLSource": true,
+      "isForwardedEmail": false,
+      "isNewsletter": true,
+      "hasRichHTMLContent": false,
+      "isFromMe": false,
+      "isOneToOneConversation": false,
+      "subject": "Weekly Update",
+      "expectedShowHTMLPreview": true
+    }
+  ],
+  "newsletterDetectionCases": [
+    {
+      "id": "support_reply_not_newsletter",
+      "notes": "Typical support reply should not classify as newsletter.",
+      "labelIds": ["INBOX"],
+      "from": "Support Team <support@company.com>",
+      "subject": "Re: Your ticket #12345",
+      "toCount": 1,
+      "expectedIsNewsletter": false,
+      "expectedScore": 5
+    },
+    {
+      "id": "promotions_plus_support_still_not_newsletter",
+      "notes": "CATEGORY_PROMOTIONS + support@ should stay below threshold.",
+      "labelIds": ["CATEGORY_PROMOTIONS"],
+      "from": "support@company.com",
+      "expectedIsNewsletter": false,
+      "expectedScore": 45
+    },
+    {
+      "id": "strong_marketing_newsletter",
+      "notes": "Strong corroborating newsletter signals should classify as newsletter.",
+      "labelIds": ["CATEGORY_PROMOTIONS"],
+      "from": "newsletter@store.com",
+      "listUnsubscribe": "<mailto:unsub@store.com>",
+      "subject": "Limited time 50% off sale",
+      "expectedIsNewsletter": true,
+      "expectedScore": 145
+    }
+  ]
+}

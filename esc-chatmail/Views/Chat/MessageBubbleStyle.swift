@@ -39,7 +39,7 @@ enum MessageBubbleStyle {
 
     var textLineLimit: Int? {
         switch self {
-        case .standard: return 15
+        case .standard: return nil
         case .compact: return 3
         }
     }

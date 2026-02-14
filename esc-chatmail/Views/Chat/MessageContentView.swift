@@ -82,7 +82,8 @@ struct MessageContentView: View {
 
     @ViewBuilder
     private func textBubble(text: String) -> some View {
-        let (displayText, _) = truncatedText(text, lineLimit: style.textLineLimit)
+        let compactCharLimit = style.textLineLimit == nil ? nil : 800
+        let (displayText, _) = truncatedText(text, lineLimit: style.textLineLimit, charLimit: compactCharLimit)
 
         Button(action: openOriginalEmail) {
             Text(displayText)
@@ -96,18 +97,17 @@ struct MessageContentView: View {
     }
 
     /// Truncates text at the specified limits and adds ellipsis if truncated
-    private func truncatedText(_ text: String, lineLimit: Int?, charLimit: Int = 800) -> (text: String, wasTruncated: Bool) {
-        let maxLines = lineLimit ?? 15
-        let lines = text.components(separatedBy: .newlines)
-
-        // Check line limit first
-        if lines.count > maxLines {
-            let truncated = lines.prefix(maxLines).joined(separator: "\n")
-            return (truncated + "...", true)
+    private func truncatedText(_ text: String, lineLimit: Int?, charLimit: Int? = nil) -> (text: String, wasTruncated: Bool) {
+        if let maxLines = lineLimit {
+            let lines = text.components(separatedBy: .newlines)
+            if lines.count > maxLines {
+                let truncated = lines.prefix(maxLines).joined(separator: "\n")
+                return (truncated + "...", true)
+            }
         }
 
         // Check character limit
-        if text.count > charLimit {
+        if let charLimit, text.count > charLimit {
             let truncated = String(text.prefix(charLimit))
             // Try to break at word boundary
             if let lastSpace = truncated.lastIndex(of: " "),
@@ -222,7 +222,6 @@ struct MessageContentView: View {
         guard let text = text else { return nil }
 
         var processed = RawEmailSourceSanitizer.extractDisplayText(from: text)
-        var alreadyStrippedQuotes = false
 
         // If text contains actual HTML tags, strip HTML quotes first
         // This ensures consistency with ProcessedTextCache which also uses HTMLQuoteRemover
@@ -231,26 +230,20 @@ struct MessageContentView: View {
             // Always extract plain text from HTML content
             if let strippedHTML = HTMLQuoteRemover.removeQuotes(from: text) {
                 processed = TextProcessing.extractPlainText(from: strippedHTML)
-                alreadyStrippedQuotes = true
             } else {
                 // HTMLQuoteRemover returned nil (empty result) - the HTML was entirely quotes
                 // Extract plain text and let plain text quote stripping handle it
                 processed = TextProcessing.extractPlainText(from: text)
-                // Note: alreadyStrippedQuotes stays false so we still strip plain text quotes
-                // This handles the case where HTML quote removal failed but there may still
-                // be plain text quote markers in the extracted content
             }
         }
 
         let decoded = HTMLEntityDecoder.decode(processed)
         let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: decoded)
-
-        // Only strip plain text quotes if we haven't already stripped HTML quotes
-        let quoteStripped = alreadyStrippedQuotes ? unwrapped : TextProcessing.stripQuotedText(from: unwrapped)
-        // Always strip signatures, even when HTML quotes were removed upstream
-        let signatureStripped = TextProcessing.stripSignatures(from: quoteStripped)
+        // Use a single quote/signature extraction path to avoid double-cleaning mismatches
+        // between immediate fallback rendering and cached/background rendering.
+        let extractionResult = PlainTextQuoteRemover.extractQuotes(from: unwrapped)
         // Format sign-off line breaks (handles "...help. Regards, Kevin" → proper line breaks)
-        let result = TextProcessing.formatSignOffLineBreaks(in: signatureStripped)
+        let result = TextProcessing.formatSignOffLineBreaks(in: extractionResult.mainContent)
         return result.isEmpty ? nil : result
     }
 

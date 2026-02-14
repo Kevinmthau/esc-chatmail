@@ -6,7 +6,7 @@ import Foundation
 actor ProcessedTextCache: MemoryWarningHandler {
     static let shared = ProcessedTextCache()
     // Bump to invalidate cached entries when processing logic changes.
-    private static let processingVersion = "2026-02-11-quote-v5-signature-unicode-separators"
+    private static let processingVersion = "2026-02-14-quote-v6-display-consistency"
 
     /// Cached text content with rich content indicator and extracted quotes
     struct CachedText: Sendable {

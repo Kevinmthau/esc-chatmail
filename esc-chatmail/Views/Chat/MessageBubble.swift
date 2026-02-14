@@ -21,7 +21,10 @@ struct MessageBubble: View {
             hasHTMLSource: message.hasHTMLSource,
             isForwardedEmail: message.isForwardedEmail,
             isNewsletter: message.isNewsletter,
-            hasRichHTMLContent: hasRichHTMLContent
+            hasRichHTMLContent: hasRichHTMLContent,
+            isFromMe: message.isFromMe,
+            isOneToOneConversation: conversation.conversationType == .oneToOne,
+            subject: message.subject
         )
     }
     @State private var fullTextContent: String?
