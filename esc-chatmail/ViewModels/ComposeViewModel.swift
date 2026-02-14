@@ -193,6 +193,11 @@ final class ComposeViewModel: ObservableObject {
         autocompleteService.clearAutocomplete()
     }
 
+    func findActiveConversation(forRecipients recipients: [String]) -> Conversation? {
+        ConversationLookupService(context: dependencies.coreDataStack.viewContext)
+            .findActiveConversation(forRecipients: recipients)
+    }
+
     func addAttachment(_ attachment: Attachment) {
         attachmentManager.addAttachment(attachment)
     }

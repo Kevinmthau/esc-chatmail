@@ -1,16 +1,25 @@
 import SwiftUI
 import CoreData
+import Contacts
 
 /// Unified message composition view
 /// Consolidates NewMessageComposerView and NewMessageView
 struct ComposeView: View {
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.managedObjectContext) private var viewContext
 
     @StateObject private var viewModel: ComposeViewModel
     @FocusState private var focusedField: FocusField?
 
     @State private var recipientRowHeight: CGFloat = 44
+    @State private var showingContactPicker = false
+    @State private var iMessageHeaderHeight: CGFloat = 0
+
+    private let presentationStyle: PresentationStyle
+    private let onOpenConversation: ((Conversation) -> Void)?
+
+    private var iMessageCanvasColor: Color {
+        Color(uiColor: UIColor(red: 239/255, green: 239/255, blue: 244/255, alpha: 1))
+    }
 
     enum FocusField {
         case recipient
@@ -18,7 +27,26 @@ struct ComposeView: View {
         case body
     }
 
-    init(mode: ComposeViewModel.Mode = .newMessage) {
+    enum PresentationStyle {
+        case standard
+        case iMessage
+    }
+
+    private var usesIMessagePresentation: Bool {
+        presentationStyle == .iMessage && viewModel.mode == .newMessage
+    }
+
+    private var shouldOpenExistingConversationOnSelection: Bool {
+        usesIMessagePresentation && onOpenConversation != nil
+    }
+
+    init(
+        mode: ComposeViewModel.Mode = .newMessage,
+        presentationStyle: PresentationStyle = .standard,
+        onOpenConversation: ((Conversation) -> Void)? = nil
+    ) {
+        self.presentationStyle = presentationStyle
+        self.onOpenConversation = onOpenConversation
         _viewModel = StateObject(wrappedValue: ComposeViewModel(mode: mode))
     }
 
@@ -27,7 +55,16 @@ struct ComposeView: View {
             viewModel: viewModel,
             focusedField: $focusedField,
             recipientRowHeight: $recipientRowHeight,
-            showSubjectField: viewModel.showSubjectField
+            showSubjectField: viewModel.showSubjectField,
+            style: usesIMessagePresentation ? .iMessage : .standard,
+            autocompleteTopInset: usesIMessagePresentation ? iMessageHeaderHeight : 0,
+            onSelectContact: { contact, selectedEmail in
+                let email = selectedEmail ?? contact.primaryEmail
+                handleSelectedRecipient(email: email, displayName: contact.displayName)
+            },
+            onContactButtonTapped: usesIMessagePresentation ? {
+                showingContactPicker = true
+            } : nil
         )
     }
 
@@ -36,9 +73,16 @@ struct ComposeView: View {
             ZStack(alignment: .top) {
                 // Main content
                 VStack(spacing: 0) {
+                    if usesIMessagePresentation {
+                        iMessageHeader
+                        Divider()
+                    }
+
                     recipientSection.body
 
-                    Divider()
+                    if !usesIMessagePresentation {
+                        Divider()
+                    }
 
                     if viewModel.showSubjectField {
                         subjectSection
@@ -53,37 +97,43 @@ struct ComposeView: View {
                         ComposeInputBar(
                             viewModel: viewModel,
                             focusedField: $focusedField,
-                            onSendSuccess: { dismiss() }
+                            onSendSuccess: { dismiss() },
+                            style: usesIMessagePresentation ? .iMessage : .standard
                         )
                     }
                 }
+                .background(
+                    usesIMessagePresentation ? iMessageCanvasColor : Color(.systemBackground)
+                )
 
                 // Autocomplete overlay - positioned below recipient row
                 recipientSection.autocompleteOverlay
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .principal) {
-                    Text(viewModel.navigationTitle)
-                        .font(.headline)
-                }
-
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Cancel") {
-                        dismiss()
+                if !usesIMessagePresentation {
+                    ToolbarItem(placement: .principal) {
+                        Text(viewModel.navigationTitle)
+                            .font(.headline)
                     }
-                }
 
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Send") {
-                        Task {
-                            if await viewModel.send() {
-                                dismiss()
-                            }
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button("Cancel") {
+                            dismiss()
                         }
                     }
-                    .fontWeight(.semibold)
-                    .disabled(!viewModel.canSend)
+
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button("Send") {
+                            Task {
+                                if await viewModel.send() {
+                                    dismiss()
+                                }
+                            }
+                        }
+                        .fontWeight(.semibold)
+                        .disabled(!viewModel.canSend)
+                    }
                 }
             }
         }
@@ -91,6 +141,14 @@ struct ComposeView: View {
             Button("OK") { }
         } message: {
             Text(viewModel.error?.localizedDescription ?? "Failed to send message")
+        }
+        .sheet(isPresented: $showingContactPicker) {
+            ContactPickerView(
+                onContactSelected: { contact in
+                    handleContactPickerSelection(contact)
+                },
+                onCancel: { }
+            )
         }
         .task {
             await viewModel.requestContactsAccess()
@@ -106,6 +164,75 @@ struct ComposeView: View {
                 focusedField = .recipient
             }
         }
+    }
+
+    @ViewBuilder
+    private var iMessageHeader: some View {
+        ZStack {
+            Text("New Message")
+                .font(.system(size: 26, weight: .semibold))
+
+            HStack {
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 22, weight: .regular))
+                        .foregroundColor(.primary)
+                        .frame(width: 54, height: 54)
+                        .background(
+                            Circle()
+                                .fill(Color(uiColor: UIColor(red: 226/255, green: 226/255, blue: 232/255, alpha: 1))
+                                )
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close")
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 16)
+        .padding(.bottom, 12)
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear {
+                        iMessageHeaderHeight = geo.size.height
+                    }
+                    .onChange(of: geo.size.height) { _, newValue in
+                        iMessageHeaderHeight = newValue
+                    }
+            }
+        )
+    }
+
+    private func handleContactPickerSelection(_ contact: CNContact) {
+        guard let email = contact.emailAddresses.first?.value as String? else { return }
+        let displayName = formattedName(for: contact)
+        handleSelectedRecipient(email: email, displayName: displayName)
+    }
+
+    private func formattedName(for contact: CNContact) -> String? {
+        let displayName = "\(contact.givenName) \(contact.familyName)".trimmingCharacters(in: .whitespacesAndNewlines)
+        return displayName.isEmpty ? nil : displayName
+    }
+
+    private func handleSelectedRecipient(email: String, displayName: String?) {
+        let prospectiveRecipients = viewModel.recipients.map(\.email) + [email]
+
+        if shouldOpenExistingConversationOnSelection,
+           let existingConversation = viewModel.findActiveConversation(forRecipients: prospectiveRecipients) {
+            viewModel.clearAutocomplete()
+            viewModel.recipientInput = ""
+            onOpenConversation?(existingConversation)
+            dismiss()
+            return
+        }
+
+        viewModel.addRecipient(email: email, displayName: displayName)
+        viewModel.recipientInput = ""
+        viewModel.clearAutocomplete()
     }
 
     // MARK: - Subject Section

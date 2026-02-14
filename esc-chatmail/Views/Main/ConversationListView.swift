@@ -30,6 +30,7 @@ struct ConversationListView: View {
     // MARK: - Conversation List
 
     @State private var selectedConversation: Conversation?
+    @State private var pendingConversationObjectID: NSManagedObjectID?
 
     private var conversationList: some View {
         List {
@@ -84,7 +85,15 @@ struct ConversationListView: View {
         }
         .toolbar { toolbarContent }
         .refreshable { await viewModel.performSync() }
-        .sheet(isPresented: $viewModel.showingComposer) { ComposeView(mode: .newMessage) }
+        .sheet(isPresented: $viewModel.showingComposer, onDismiss: handleComposerDismiss) {
+            ComposeView(
+                mode: .newMessage,
+                presentationStyle: .iMessage,
+                onOpenConversation: { conversation in
+                    pendingConversationObjectID = conversation.objectID
+                }
+            )
+        }
         .sheet(isPresented: $viewModel.showingSettings) {
             NavigationStack { SettingsView() }
         }
@@ -282,6 +291,15 @@ struct ConversationListView: View {
     /// Caching prevents recalculation on every view body evaluation.
     private func updateFilteredConversations() {
         cachedFilteredConversations = viewModel.filteredConversations(from: Array(conversations))
+    }
+
+    private func handleComposerDismiss() {
+        guard let objectID = pendingConversationObjectID else { return }
+        pendingConversationObjectID = nil
+
+        if let conversation = conversations.first(where: { $0.objectID == objectID }) {
+            selectedConversation = conversation
+        }
     }
 
     private func circleButton(icon: String) -> some View {

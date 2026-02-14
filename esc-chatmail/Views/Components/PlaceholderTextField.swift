@@ -7,23 +7,31 @@ struct PlaceholderTextField: View {
     let placeholder: String
     var lineLimit: ClosedRange<Int> = 1...5
     var cornerRadius: CGFloat = 18
+    var backgroundColor: Color = Color(.systemGray6)
+    var textFont: Font = .body
+    var horizontalPadding: CGFloat = 12
+    var verticalPadding: CGFloat = 8
+    var minHeight: CGFloat? = nil
 
     var body: some View {
         ZStack(alignment: .leading) {
             if text.isEmpty {
                 Text(placeholder)
                     .foregroundColor(Color(.placeholderText))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
+                    .font(textFont)
+                    .padding(.horizontal, horizontalPadding)
+                    .padding(.vertical, verticalPadding)
             }
 
             TextField("", text: $text, axis: .vertical)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .font(textFont)
+                .padding(.horizontal, horizontalPadding)
+                .padding(.vertical, verticalPadding)
                 .lineLimit(lineLimit)
         }
-        .background(Color(.systemGray6))
+        .background(backgroundColor)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+        .frame(minHeight: minHeight)
     }
 }
 
