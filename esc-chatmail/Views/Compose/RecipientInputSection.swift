@@ -82,11 +82,7 @@ struct RecipientInputSection: View {
         .padding(.trailing, 8)
         .background(
             Capsule()
-                .fill(Color(uiColor: UIColor(red: 241/255, green: 241/255, blue: 246/255, alpha: 1)))
-                .overlay(
-                    Capsule()
-                        .strokeBorder(Color.gray.opacity(0.2), lineWidth: 0.75)
-                )
+                .fill(Color(uiColor: UIColor(red: 244/255, green: 244/255, blue: 248/255, alpha: 1)))
         )
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

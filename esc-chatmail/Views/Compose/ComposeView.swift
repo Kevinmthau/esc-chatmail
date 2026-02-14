@@ -75,7 +75,6 @@ struct ComposeView: View {
                 VStack(spacing: 0) {
                     if usesIMessagePresentation {
                         iMessageHeader
-                        Divider()
                     }
 
                     recipientSection.body
@@ -170,7 +169,7 @@ struct ComposeView: View {
     private var iMessageHeader: some View {
         ZStack {
             Text("New Message")
-                .font(.system(size: 26, weight: .semibold))
+                .font(.system(size: 18, weight: .semibold))
 
             HStack {
                 Spacer()
