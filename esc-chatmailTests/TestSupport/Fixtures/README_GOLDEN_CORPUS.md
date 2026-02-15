@@ -13,6 +13,7 @@ preview routing, or newsletter scoring fails in production.
 
 - `plainTextQuoteCleanupCases`: raw plain text -> expected bubble text
 - `htmlToBubbleTextCases`: raw HTML -> expected bubble text
+- `richHTMLDetectionCases`: raw HTML -> expected hasRichHTMLContent (used for preview routing)
 - `displayPolicyCases`: preview routing decisions
 - `newsletterDetectionCases`: newsletter score/classification expectations
 

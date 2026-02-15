@@ -133,7 +133,7 @@ struct MessageBubble: View {
 
     @ViewBuilder
     private var attachmentsView: some View {
-        let displayable = message.displayableAttachments
+        let displayable = message.displayableAttachments(hidingInlineReferencedInHTML: showHTMLPreview)
         #if DEBUG
         let _ = {
             if message.hasAttachments {

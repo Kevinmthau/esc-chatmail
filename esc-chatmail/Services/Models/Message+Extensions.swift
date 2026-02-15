@@ -50,16 +50,29 @@ extension Message {
 
     /// Attachments suitable for display (excludes signature images and inline images already shown in HTML)
     var displayableAttachments: [Attachment] {
+        displayableAttachments(hidingInlineReferencedInHTML: true)
+    }
+
+    /// Attachments suitable for display in the chat UI.
+    /// - Parameters:
+    ///   - hidingInlineReferencedInHTML: When true, hides inline `cid:` images that are referenced by the message HTML
+    ///     (to avoid duplicating what the HTML renderer already shows). When false, shows all non-signature attachments,
+    ///     which is the desired behavior for plain-text bubble rendering.
+    func displayableAttachments(hidingInlineReferencedInHTML: Bool) -> [Attachment] {
         let allAttachments = attachmentsArray.filter { !$0.isLikelySignatureImage }
 
-        // Only filter inline images for received messages that will display HTML
+        guard hidingInlineReferencedInHTML else {
+            return allAttachments
+        }
+
+        // Only filter inline images for received messages that will display HTML.
         // Messages from the user (isFromMe) display as plain text, so their inline images
-        // need to show in the attachment grid
+        // need to show in the attachment grid.
         guard !isFromMe else {
             return allAttachments
         }
 
-        // If message has HTML content, filter out attachments that are displayed inline via cid: URLs
+        // If message has HTML content, filter out attachments that are displayed inline via cid: URLs.
         let referencedCIDs = extractReferencedContentIDs()
         guard !referencedCIDs.isEmpty else {
             return allAttachments
@@ -69,7 +82,7 @@ extension Message {
             guard let contentId = attachment.contentId, !contentId.isEmpty else {
                 return true // No Content-ID, always show
             }
-            // Hide if this Content-ID is referenced in the HTML body
+            // Hide if this Content-ID is referenced in the HTML body.
             return !referencedCIDs.contains(contentId)
         }
     }

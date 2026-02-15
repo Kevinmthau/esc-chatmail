@@ -33,6 +33,14 @@
       "expected": "Great. Will do! Have a nice weekend!"
     }
   ],
+  "richHTMLDetectionCases": [
+    {
+      "id": "apple_mail_rich_link_preview_not_rich",
+      "notes": "Apple Mail link preview blocks (apple-rich-link/lp-rich-link) should not force HTML preview routing for personal messages.",
+      "inputHTML": "<html><body><div>Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text.</div><div class=\"apple-rich-link\" role=\"link\"><a href=\"https://www.pointgarry.uk/\" role=\"button\"><table><tr><td><img src=\"cid:IMG1\" alt=\"preview.jpg\"></td></tr></table></a></div><div><img src=\"cid:IMG2\" alt=\"attachment.png\" width=\"403\"></div></body></html>",
+      "expectedHasRichHTMLContent": false
+    }
+  ],
   "displayPolicyCases": [
     {
       "id": "one_to_one_reply_subject_stays_bubble",

@@ -531,6 +531,23 @@ final class GoldenCorpusReplayTests: XCTestCase {
             }
         }
 
+        for scenario in corpus.richHTMLDetectionCases {
+            XCTContext.runActivity(named: "richHTML:\(scenario.id)") { _ in
+                let handler = HTMLContentHandler.shared
+                let messageId = "golden-rich-\(scenario.id)-\(UUID().uuidString)"
+                _ = handler.saveHTML(scenario.inputHTML, for: messageId)
+                defer { handler.deleteHTML(for: messageId) }
+
+                let result = ProcessedTextCache.processMessage(messageId: messageId, handler: handler)
+
+                XCTAssertEqual(
+                    result.hasRichContent,
+                    scenario.expectedHasRichHTMLContent,
+                    scenario.notes ?? "Rich HTML detection mismatch for scenario \(scenario.id)"
+                )
+            }
+        }
+
         for scenario in corpus.displayPolicyCases {
             XCTContext.runActivity(named: "displayPolicy:\(scenario.id)") { _ in
                 let shouldShowPreview = MessageDisplayPolicy.shouldShowHTMLPreview(
@@ -610,12 +627,14 @@ final class GoldenCorpusReplayTests: XCTestCase {
 private struct GoldenCorpus: Decodable {
     let plainTextQuoteCleanupCases: [PlainTextQuoteCleanupCase]
     let htmlToBubbleTextCases: [HTMLToBubbleTextCase]
+    let richHTMLDetectionCases: [RichHTMLDetectionCase]
     let displayPolicyCases: [DisplayPolicyCase]
     let newsletterDetectionCases: [NewsletterDetectionCase]
 
     enum CodingKeys: String, CodingKey {
         case plainTextQuoteCleanupCases
         case htmlToBubbleTextCases
+        case richHTMLDetectionCases
         case displayPolicyCases
         case newsletterDetectionCases
     }
@@ -624,6 +643,7 @@ private struct GoldenCorpus: Decodable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         plainTextQuoteCleanupCases = try container.decodeIfPresent([PlainTextQuoteCleanupCase].self, forKey: .plainTextQuoteCleanupCases) ?? []
         htmlToBubbleTextCases = try container.decodeIfPresent([HTMLToBubbleTextCase].self, forKey: .htmlToBubbleTextCases) ?? []
+        richHTMLDetectionCases = try container.decodeIfPresent([RichHTMLDetectionCase].self, forKey: .richHTMLDetectionCases) ?? []
         displayPolicyCases = try container.decodeIfPresent([DisplayPolicyCase].self, forKey: .displayPolicyCases) ?? []
         newsletterDetectionCases = try container.decodeIfPresent([NewsletterDetectionCase].self, forKey: .newsletterDetectionCases) ?? []
     }
@@ -640,6 +660,13 @@ private struct HTMLToBubbleTextCase: Decodable {
     let id: String
     let inputHTML: String
     let expected: String
+    let notes: String?
+}
+
+private struct RichHTMLDetectionCase: Decodable {
+    let id: String
+    let inputHTML: String
+    let expectedHasRichHTMLContent: Bool
     let notes: String?
 }
 

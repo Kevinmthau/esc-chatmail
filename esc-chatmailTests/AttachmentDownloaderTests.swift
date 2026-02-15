@@ -324,6 +324,48 @@ final class AttachmentDownloaderTests: XCTestCase {
         XCTAssertEqual(displayable.first?.id, "att-normal")
     }
 
+    func testMessage_displayableAttachments_hidingInlineReferencedInHTML_filtersCIDReferencedInlineImages() throws {
+        let messageId = "msg-inline-filter-\(UUID().uuidString)"
+        let message = MessageBuilder()
+            .withId(messageId)
+            .withAttachments()
+            .build(in: context)
+
+        // Attachment referenced by cid: in HTML should be hidden when `hidingInlineReferencedInHTML` is true.
+        let _ = AttachmentBuilder()
+            .withId("att-inline")
+            .withFilename("inline.jpg")
+            .withContentId("CID_INLINE")
+            .asImage(width: 800, height: 600)
+            .withByteSize(100000)
+            .forMessage(message)
+            .build(in: context)
+
+        // Attachment not referenced by cid: should remain visible.
+        let _ = AttachmentBuilder()
+            .withId("att-regular")
+            .withFilename("regular.jpg")
+            .withContentId("CID_OTHER")
+            .asImage(width: 800, height: 600)
+            .withByteSize(100000)
+            .forMessage(message)
+            .build(in: context)
+
+        let handler = HTMLContentHandler.shared
+        _ = handler.saveHTML("<html><body><img src=\"cid:CID_INLINE\"></body></html>", for: messageId)
+
+        try testStack.saveViewContext()
+
+        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
+        let hiddenInline = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: true) ?? []
+        XCTAssertEqual(hiddenInline.compactMap { $0.id }.sorted(), ["att-regular"])
+
+        let showAll = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: false) ?? []
+        XCTAssertEqual(showAll.compactMap { $0.id }.sorted(), ["att-inline", "att-regular"])
+
+        handler.deleteHTML(for: messageId)
+    }
+
     // MARK: - Local Attachment Tests
 
     func testAttachment_isLocalAttachment_detectsLocalIds() throws {

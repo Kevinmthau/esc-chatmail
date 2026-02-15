@@ -124,6 +124,35 @@ final class ProcessedTextCacheTests: XCTestCase {
         handler.deleteHTML(for: messageId)
     }
 
+    func testProcessMessage_appleRichLinkPreview_doesNotCountAsRichContent() {
+        let messageId = "test-apple-rich-link-\(UUID().uuidString)"
+        let handler = HTMLContentHandler.shared
+        let substantialText = String(repeating: "Personal message text. ", count: 30)
+        let html = """
+        <html><body>
+        <div>\(substantialText)</div>
+        <div class="apple-rich-link" role="link">
+            <div>outer</div>
+            <div>
+                <div>nested</div>
+                <table>
+                    <tr><td><img src="cid:IMG1"></td></tr>
+                </table>
+                <a href="https://example.com" role="button">Preview</a>
+            </div>
+        </div>
+        <div>&nbsp;<img src="cid:IMG2" alt="attachment.png" width="403"></div>
+        </body></html>
+        """
+
+        _ = handler.saveHTML(html, for: messageId)
+        let result = ProcessedTextCache.processMessage(messageId: messageId, handler: handler)
+
+        XCTAssertFalse(result.hasRichContent)
+
+        handler.deleteHTML(for: messageId)
+    }
+
     func testProcessMessage_outlookGrayDividerQuoteBoundary_removesQuotedThread() {
         let messageId = "test-outlook-divider-\(UUID().uuidString)"
         let handler = HTMLContentHandler.shared

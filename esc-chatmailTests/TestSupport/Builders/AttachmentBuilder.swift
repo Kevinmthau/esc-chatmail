@@ -15,6 +15,7 @@ import CoreData
 /// ```
 final class AttachmentBuilder {
     private var id: String = UUID().uuidString
+    private var contentId: String?
     private var filename: String = "test-file.txt"
     private var mimeType: String = "text/plain"
     private var state: Attachment.State = .queued
@@ -35,6 +36,11 @@ final class AttachmentBuilder {
 
     func withFilename(_ filename: String) -> Self {
         self.filename = filename
+        return self
+    }
+
+    func withContentId(_ contentId: String?) -> Self {
+        self.contentId = contentId
         return self
     }
 
@@ -112,6 +118,7 @@ final class AttachmentBuilder {
     func build(in context: NSManagedObjectContext) -> Attachment {
         let attachment = Attachment(context: context)
         attachment.id = id
+        attachment.contentId = contentId
         attachment.filename = filename
         attachment.mimeType = mimeType
         attachment.state = state

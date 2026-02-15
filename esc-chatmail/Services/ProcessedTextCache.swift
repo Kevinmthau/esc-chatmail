@@ -6,7 +6,7 @@ import Foundation
 actor ProcessedTextCache: MemoryWarningHandler {
     static let shared = ProcessedTextCache()
     // Bump to invalidate cached entries when processing logic changes.
-    private static let processingVersion = "2026-02-14-quote-v6-display-consistency"
+    private static let processingVersion = "2026-02-15-rich-v1-apple-link-preview"
 
     /// Cached text content with rich content indicator and extracted quotes
     struct CachedText: Sendable {
@@ -208,7 +208,11 @@ actor ProcessedTextCache: MemoryWarningHandler {
     /// Personal emails can have elaborate signatures (logo + headshot + 6-8 social icons + layout tables)
     /// Newsletters and marketing emails have many elements AND substantial text content
     nonisolated private static func hasGenuineRichContent(_ html: String) -> Bool {
-        let lowercased = html.lowercased()
+        // Apple Mail injects "apple-rich-link" previews (tables, role="button", inline images) for regular
+        // person-to-person emails that contain a URL. Treat those blocks as non-rich to avoid routing
+        // personal messages into the HTML preview path.
+        let htmlForAnalysis = stripAppleRichLinkPreviews(from: html)
+        let lowercased = htmlForAnalysis.lowercased()
 
         // Always rich: video/iframe/embed/object (inline PDFs, videos, embedded content)
         if lowercased.contains("<video") || lowercased.contains("<iframe") ||
@@ -225,15 +229,15 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
         // Count elements to distinguish signature cruft from actual rich content
         // Single-pass counting for better performance
-        let (imgCount, tableCount, cidCount, linkCount) = countHTMLElements(html)
+        let (imgCount, tableCount, cidCount, linkCount) = countHTMLElements(htmlForAnalysis)
 
         // Early exit for simple div-wrapped text (common Gmail mobile format)
         // Must check AFTER element counts since we want to catch cases with 0 images/tables
         // BUT: transactional emails (Google security alerts, etc.) have substantial text
         // in simple divs and should still show as HTML to preserve formatting
-        if imgCount == 0 && tableCount == 0 && cidCount == 0 && isSimpleDivWrappedText(html, lowercased: lowercased) {
+        if imgCount == 0 && tableCount == 0 && cidCount == 0 && isSimpleDivWrappedText(htmlForAnalysis, lowercased: lowercased) {
             // Check if there's substantial text content before downgrading to plain text
-            let textContent = approximateTextContent(from: html)
+            let textContent = approximateTextContent(from: htmlForAnalysis)
 
             // If substantial text content, keep as HTML to preserve formatting
             if textContent.count > 200 {
@@ -243,7 +247,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
         }
 
         // Extract approximate text content length (rough estimate without full parsing)
-        let textContent = approximateTextContent(from: html)
+        let textContent = approximateTextContent(from: htmlForAnalysis)
 
         // Check for CSS background images (often used in marketing emails)
         let hasBackgroundImages = lowercased.contains("background-image") ||
@@ -345,6 +349,73 @@ actor ProcessedTextCache: MemoryWarningHandler {
         if charsPerElement < 40 && textContent.count < 400 { score -= 10 }
 
         return score >= 40
+    }
+
+    /// Strips Apple Mail "rich link" preview blocks from HTML so we don't treat them as newsletter/marketing content.
+    ///
+    /// Apple Mail inserts a `<div class="apple-rich-link" ...>` container with nested tables/links and `role="button"`.
+    /// This is common in personal messages that include a URL and should not trigger HTML preview cards.
+    nonisolated private static func stripAppleRichLinkPreviews(from html: String) -> String {
+        var result = html
+
+        // Remove every `<div ... class="apple-rich-link" ...>...</div>` block (including nested divs).
+        while let markerRange = result.range(of: "apple-rich-link", options: .caseInsensitive) {
+            // Find the opening `<div` tag that contains the marker (class attribute is inside the tag).
+            guard let divStart = result[..<markerRange.lowerBound]
+                .range(of: "<div", options: [.caseInsensitive, .backwards])?
+                .lowerBound else {
+                break
+            }
+            guard let endIndex = findMatchingClosingDiv(in: result, from: divStart) else {
+                break
+            }
+            result.removeSubrange(divStart..<endIndex)
+        }
+
+        return result
+    }
+
+    /// Finds the end index (exclusive) of the closing `</div>` that matches the opening `<div` at `start`.
+    /// Uses a lightweight depth counter so nested `<div>` elements inside the block are handled correctly.
+    nonisolated private static func findMatchingClosingDiv(in html: String, from start: String.Index) -> String.Index? {
+        var depth = 0
+        var searchIndex = start
+
+        while searchIndex < html.endIndex {
+            let nextOpen = html.range(of: "<div", options: .caseInsensitive, range: searchIndex..<html.endIndex)
+            let nextClose = html.range(of: "</div", options: .caseInsensitive, range: searchIndex..<html.endIndex)
+
+            switch (nextOpen, nextClose) {
+            case let (open?, close?):
+                if open.lowerBound < close.lowerBound {
+                    depth += 1
+                    searchIndex = open.upperBound
+                } else {
+                    depth -= 1
+                    guard let closeTagEnd = html[close.lowerBound...].firstIndex(of: ">") else { return nil }
+                    let afterClose = html.index(after: closeTagEnd)
+                    searchIndex = afterClose
+                    if depth == 0 {
+                        return afterClose
+                    }
+                }
+            case let (open?, nil):
+                depth += 1
+                searchIndex = open.upperBound
+            case let (nil, close?):
+                depth -= 1
+                guard let closeTagEnd = html[close.lowerBound...].firstIndex(of: ">") else { return nil }
+                let afterClose = html.index(after: closeTagEnd)
+                searchIndex = afterClose
+                if depth == 0 {
+                    return afterClose
+                }
+            case (nil, nil):
+                return nil
+            }
+        }
+
+        return nil
     }
 
     nonisolated private static func extractPlainTextAndQuotes(
