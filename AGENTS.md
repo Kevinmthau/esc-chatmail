@@ -92,6 +92,7 @@ Notes:
 ### Newsletter Detection & Preview Routing
 - Newsletter classification is scored in `Services/MessageProcessor.swift` (`calculateNewsletterScore(...)`) and stored as `Message.isNewsletter`.
 - Chat rendering decisions (HTML preview vs chat bubble) live in `Views/Chat/MessageDisplayPolicy.swift`.
+- Rich transactional/marketing HTML can show preview cards even in one-to-one conversations; outgoing messages and `Re:` reply threads stay as plain chat bubbles.
 - For false positives (personal mail treated as newsletter), adjust scoring/signals and add a golden corpus `newsletterDetectionCases` fixture.
 
 ### Golden Message Corpus (Regression Fixtures)
