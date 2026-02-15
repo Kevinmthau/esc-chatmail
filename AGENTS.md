@@ -74,6 +74,37 @@ Pipeline:
 2) `HTMLDisplayWrapper.wrapHTMLForDisplay()` adds viewport meta and minimal CSS.
 3) `BaseEmailWebView` renders via `WKWebView`.
 
+### Message Cleanup & Chat Bubbles
+Chat bubble text should be conservative: prefer leaving extra quoted/footer content over deleting user-authored text.
+
+Bubble/plain-text processing pipeline (see `Views/Chat/MessageContentView.swift` and `Services/TextProcessing/`):
+1) `RawEmailSourceSanitizer.extractDisplayText(...)` (strip RFC822/MIME scaffolding when needed)
+2) `HTMLEntityDecoder.decode(...)`
+3) `TextProcessing.unwrapEmailLineBreaks(...)`
+4) `PlainTextQuoteRemover.extractQuotes(...)` (quote boundary detection + `PlainTextSignatureRemover`)
+5) `TextProcessing.formatSignOffLineBreaks(...)`
+
+Notes:
+- Keep the "immediate fallback" and "background cached" processing paths unified. If you change quote/signature removal, make sure both paths use the same APIs (typically `PlainTextQuoteRemover.extractQuotes`).
+- Do not use `TextSnippetCreator` for chat bubbles; it condenses whitespace/newlines and is intended for preview snippets.
+- Signature stripping must not treat phone numbers inside body sentences (e.g. "call me at 415-...") as standalone contact blocks. Only treat phone numbers as signature contact info when the line is primarily a phone line or has explicit prefixes (`T:`, `M:`, etc).
+
+### Newsletter Detection & Preview Routing
+- Newsletter classification is scored in `Services/MessageProcessor.swift` (`calculateNewsletterScore(...)`) and stored as `Message.isNewsletter`.
+- Chat rendering decisions (HTML preview vs chat bubble) live in `Views/Chat/MessageDisplayPolicy.swift`.
+- For false positives (personal mail treated as newsletter), adjust scoring/signals and add a golden corpus `newsletterDetectionCases` fixture.
+
+### Golden Message Corpus (Regression Fixtures)
+- Fixture: `esc-chatmailTests/TestSupport/Fixtures/golden_message_corpus.json`
+- Harness: `GoldenCorpusReplayTests` in `esc-chatmailTests/MessageProcessorTests.swift`
+- Run: `bash Scripts/run-tests.sh -only-testing 'esc-chatmailTests/GoldenCorpusReplayTests'`
+
+Workflow for cleanup/policy regressions:
+1) Add a failing real-world sample to the corpus (and a focused unit test if the bug is in a helper).
+2) Confirm the corpus test fails.
+3) Fix the parser/policy logic.
+4) Re-run and keep the fixture permanently.
+
 ### View Architecture
 ViewModels (`ChatViewModel`, `ConversationListViewModel`, `ComposeViewModel`) use `@Published`.
 Views rely on `@FetchRequest` for reactive Core Data queries.
