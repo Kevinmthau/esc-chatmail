@@ -104,6 +104,13 @@ final class ConversationManager: Sendable {
         await merger.mergeActiveConversationDuplicates(in: context)
     }
 
+    /// Merges conversations when messages from the same Gmail thread (`gmThreadId`) have been split across
+    /// multiple conversations.
+    @discardableResult
+    func mergeConversationsByGmThreadId(in context: NSManagedObjectContext) async -> Int {
+        await merger.mergeConversationsByGmThreadId(in: context)
+    }
+
     // MARK: - Conversation Identity
 
     /// Creates a conversation identity using Gmail threadId as the primary key.

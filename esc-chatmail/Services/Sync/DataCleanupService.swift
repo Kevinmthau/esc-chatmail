@@ -43,6 +43,7 @@ struct DataCleanupService: Sendable {
         await removeDuplicateConversations(in: context)
         await mergeActiveConversationDuplicates(in: context)
         await fixAndMergeIncorrectParticipantHashes(in: context)
+        await mergeConversationsSplitByGmThreadIdIfNeeded(in: context)
         await removeEmptyConversations(in: context)
         await removeDraftMessages(in: context)
         await cleanupOrphanedData(in: context)
