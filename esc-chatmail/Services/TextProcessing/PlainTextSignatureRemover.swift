@@ -137,6 +137,15 @@ enum PlainTextSignatureRemover {
         "suite", "ste", "ste.", "floor", "fl", "fl."
     ]
 
+    /// Address keywords must be matched on word boundaries.
+    /// Avoid substring false positives like matching "ave" inside "have".
+    private static let addressKeywordPattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"(?i)\b(?:street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|suite|ste|floor|fl)\b\.?"#,
+            options: []
+        )
+    }()
+
     private static let organizationKeywords: [String] = [
         " inc", " inc.", " llc", " ltd", " corp", " corp.", " corporation",
         " company", " co.", " partners", " group"
@@ -278,7 +287,7 @@ enum PlainTextSignatureRemover {
         if isSignOffLine(lowercased) { score += 1 }
         if hasContactInfo { score += 3 }
         if containsKeyword(lowercased, in: titleKeywords) { score += 1 }
-        if containsKeyword(lowercased, in: addressKeywords) { score += 1 }
+        if containsAddressKeyword(lowercased) { score += 1 }
         if trimmed.count <= 72 { score += 1 }
         if containsSignatureSeparator(trimmed) { score += 1 }
 
@@ -345,6 +354,15 @@ enum PlainTextSignatureRemover {
 
     private static func containsKeyword(_ text: String, in keywords: [String]) -> Bool {
         return keywords.contains { text.contains($0) }
+    }
+
+    private static func containsAddressKeyword(_ lowercased: String) -> Bool {
+        guard let regex = addressKeywordPattern else {
+            // Fallback to previous substring behavior if regex compilation fails.
+            return containsKeyword(lowercased, in: addressKeywords)
+        }
+        let range = NSRange(location: 0, length: lowercased.utf16.count)
+        return regex.firstMatch(in: lowercased, options: [], range: range) != nil
     }
 
     private static func containsSignatureSeparator(_ text: String) -> Bool {
@@ -468,7 +486,7 @@ enum PlainTextSignatureRemover {
                 evaluation.isHardIndicator ||
                 containsKeyword(lowercased, in: titleKeywords) ||
                 containsKeyword(lowercased, in: organizationKeywords) ||
-                containsKeyword(lowercased, in: addressKeywords) {
+                containsAddressKeyword(lowercased) {
                 return true
             }
         }
@@ -502,7 +520,7 @@ enum PlainTextSignatureRemover {
         }
         if containsKeyword(lowercased, in: titleKeywords) ||
             containsKeyword(lowercased, in: organizationKeywords) ||
-            containsKeyword(lowercased, in: addressKeywords) {
+            containsAddressKeyword(lowercased) {
             return true
         }
         if containsSignatureSeparator(trimmed) {
@@ -541,7 +559,7 @@ enum PlainTextSignatureRemover {
         }
         if containsKeyword(lowercased, in: titleKeywords) ||
             containsKeyword(lowercased, in: organizationKeywords) ||
-            containsKeyword(lowercased, in: addressKeywords) {
+            containsAddressKeyword(lowercased) {
             return true
         }
 

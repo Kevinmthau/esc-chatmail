@@ -19,6 +19,12 @@
       "expected": "Hi,\n\nMonday at 10am is great. Feel free to call me on my mobile 415-314-9804.\n\nThank you,\n\nKevin"
     },
     {
+      "id": "address_keyword_word_boundary_does_not_match_inside_words",
+      "notes": "Address keywords like 'ave' must not match inside words like 'have' (which can cause legitimate body sentences to be stripped as signatures).",
+      "input": "Hi Alex,\n\nWe can check and get back to you tomorrow.\n\nHi Sam,\n\nHow many miles does the car have now? Where is it located?\n\nThanks,\nJordan\n\n> On Feb 15, 2026, at 4:36 PM, Alex wrote:\n> Can we turn the car in early?\n> Thank you!",
+      "expected": "Hi Alex,\n\nWe can check and get back to you tomorrow.\n\nHi Sam,\n\nHow many miles does the car have now? Where is it located?"
+    },
+    {
       "id": "corporate_signature_long_inline_separators_removed",
       "notes": "Long corporate signature lines (with inline separators) should be removed when a trailing contact block is detected, while preserving the standalone first-name sign-off above the signature.",
       "input": "Hi Alex,\n\nDo you have some time to connect on lending solutions before 1pm tomorrow? Let me know what works best.\n\nJordan\n\nJordan Smith | Managing Director | Example Private Bank | 123 Main Street, Floor 4 | New York, NY 10017 | T: 212 555 0100\nM: +1 917-555-0101 | NMLS ID 012345 | jordan.smith@example.com | examplebank.com\n\nExample Securities LLC | Example Bank, N.A.\n\nThis communication is provided for informational purposes and is not an account statement.\nIf you are not the intended recipient, please delete and notify the sender.",

@@ -34,6 +34,31 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         XCTAssertTrue(result?.contains("Looking forward to hearing from you") ?? false)
     }
 
+    func testRemoveQuotes_appleMailReplyWithSecondGreeting_preservesQuestions() {
+        let text = """
+        Hi Kevin,
+
+        We can check and get back to you tomorrow.
+
+        Hi Mallory,
+
+        How many miles does the car have now? Where is it located?
+
+        Thanks,
+        David
+
+        > On Feb 15, 2026, at 4:36 PM, Kevin wrote:
+        > Hi David,
+        > Would it be possible to turn in Mallory's 2023 Bronco early?
+        > Thank you!
+        """
+
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertTrue(result?.contains("Hi Mallory,") ?? false, "Unexpected result: \(result ?? "nil")")
+        XCTAssertTrue(result?.contains("How many miles does the car have now?") ?? false, "Unexpected result: \(result ?? "nil")")
+        XCTAssertFalse(result?.contains("On Feb 15, 2026") ?? true, "Unexpected result: \(result ?? "nil")")
+    }
+
     // MARK: - Quote Removal - "On X wrote" Pattern
 
     func testRemoveQuotes_onWrotePattern_truncatesAtQuote() {
@@ -239,6 +264,25 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         let result = PlainTextQuoteRemover.removeSignature(from: text)
         // Should truncate because "Mobile:" is a strong signature indicator
         XCTAssertEqual(result, "I'll send that over now.")
+    }
+
+    func testRemoveSignature_multiParagraphBodyWithThanksAndName_stripsClosingButPreservesBody() {
+        let text = """
+        Hi Kevin,
+
+        We can check and get back to you tomorrow.
+
+        Hi Mallory,
+
+        How many miles does the car have now? Where is it located?
+
+        Thanks,
+        David
+        """
+
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        XCTAssertTrue(result.contains("Hi Mallory,"), "Unexpected result: \(result)")
+        XCTAssertTrue(result.contains("How many miles does the car have now?"), "Unexpected result: \(result)")
     }
 
     func testRemoveSignature_bestRegards_preservedWithoutStrongIndicator() {
