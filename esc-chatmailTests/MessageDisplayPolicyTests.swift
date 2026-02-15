@@ -44,7 +44,7 @@ final class MessageDisplayPolicyTests: XCTestCase {
         XCTAssertTrue(shouldShow)
     }
 
-    func testShouldShowHTMLPreview_richTransactionalHTML_oneToOne_returnsFalse() {
+    func testShouldShowHTMLPreview_richTransactionalHTML_oneToOne_returnsTrue() {
         let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
             hasHTMLSource: true,
             isForwardedEmail: false,
@@ -55,7 +55,7 @@ final class MessageDisplayPolicyTests: XCTestCase {
             subject: "Thanks"
         )
 
-        XCTAssertFalse(shouldShow)
+        XCTAssertTrue(shouldShow)
     }
 
     func testShouldShowHTMLPreview_richTransactionalHTML_groupConversation_returnsTrue() {

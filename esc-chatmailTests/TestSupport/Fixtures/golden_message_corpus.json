@@ -63,6 +63,18 @@
       "isOneToOneConversation": false,
       "subject": "Weekly Update",
       "expectedShowHTMLPreview": true
+    },
+    {
+      "id": "one_to_one_rich_transactional_uses_preview",
+      "notes": "Rich transactional/marketing HTML should still show a preview card in one-to-one conversations (not just group/list threads).",
+      "hasHTMLSource": true,
+      "isForwardedEmail": false,
+      "isNewsletter": false,
+      "hasRichHTMLContent": true,
+      "isFromMe": false,
+      "isOneToOneConversation": true,
+      "subject": "New message: Anything wrong with the phone?",
+      "expectedShowHTMLPreview": true
     }
   ],
   "newsletterDetectionCases": [
