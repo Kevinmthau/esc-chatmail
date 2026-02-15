@@ -25,6 +25,12 @@
       "notes": "HTML quote containers should not leak into the bubble text.",
       "inputHTML": "<div>Great. Will do! Have a nice weekend!</div><div class=\"gmail_quote\"><div>On Feb 14, Kevin wrote:</div><blockquote><div>Hi,</div></blockquote></div>",
       "expected": "Great. Will do! Have a nice weekend!"
+    },
+    {
+      "id": "table_based_quote_headers_removed_from_html",
+      "notes": "Outlook/Apple reply headers often render in tables; quote headers should not leak into snippets/bubbles when extracted to plain text.",
+      "inputHTML": "<div>Great. Will do! Have a nice weekend!</div><div><br></div><table><tr><td>From:</td><td>Kevin Thau &lt;kmthau@gmail.com&gt;</td></tr><tr><td>Sent:</td><td>Saturday, February 14, 2026 3:17:13 PM</td></tr><tr><td>To:</td><td>Abouzied, Jasmine C (WM, USA) &lt;jasmine.c.abouzied@jpmorgan.com&gt;</td></tr><tr><td>Subject:</td><td>Weekend</td></tr></table><div>Older content...</div>",
+      "expected": "Great. Will do! Have a nice weekend!"
     }
   ],
   "displayPolicyCases": [
