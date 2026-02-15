@@ -74,9 +74,11 @@ final class HTMLContentLoader {
             return HTMLLoadResult(html: cachedHTML as String, source: .messageId)
         }
 
-        // Method 1: Try loading from message ID
+        // Method 1: Try loading from message ID.
+        // Treat empty HTML as missing so we can fall back to storage URI / recovery / plain text.
         if contentHandler.htmlFileExists(for: messageId),
-           let html = contentHandler.loadHTML(for: messageId) {
+           let html = contentHandler.loadHTML(for: messageId),
+           !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let preparedHTML = prepareHTMLForDisplay(html, cleanupMode: cleanupMode)
             let wrapped = sanitizer.wrapHTMLForDisplay(preparedHTML, isDarkMode: isDarkMode)
             let cost = wrapped.utf8.count
@@ -88,7 +90,8 @@ final class HTMLContentLoader {
         if let urlString = bodyStorageURI,
            let url = resolveStorageURI(urlString),
            FileManager.default.fileExists(atPath: url.path),
-           let html = contentHandler.loadHTML(from: url) {
+           let html = contentHandler.loadHTML(from: url),
+           !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let preparedHTML = prepareHTMLForDisplay(html, cleanupMode: cleanupMode)
             let wrapped = sanitizer.wrapHTMLForDisplay(preparedHTML, isDarkMode: isDarkMode)
             let cost = wrapped.utf8.count
@@ -167,10 +170,40 @@ final class HTMLContentLoader {
         case .none:
             return html
         case .quotedOnly:
-            return HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedOnly) ?? html
+            let cleaned = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedOnly) ?? html
+            return fallbackToOriginalIfCleanedEmpty(cleaned: cleaned, original: html)
         case .quotedAndSignature:
-            return HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+            let cleaned = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+            if !hasMeaningfulHTMLContent(cleaned) {
+                // If signature removal was too aggressive, fall back to quote-only cleanup.
+                let quotedOnly = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedOnly) ?? html
+                return fallbackToOriginalIfCleanedEmpty(cleaned: quotedOnly, original: html)
+            }
+            return cleaned
         }
+    }
+
+    private func fallbackToOriginalIfCleanedEmpty(cleaned: String, original: String) -> String {
+        if hasMeaningfulHTMLContent(cleaned) {
+            return cleaned
+        }
+        return original
+    }
+
+    private func hasMeaningfulHTMLContent(_ html: String) -> Bool {
+        let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        // If it has obvious renderable media, treat it as meaningful even if text extraction is empty.
+        if html.range(of: "<img", options: .caseInsensitive) != nil ||
+            html.range(of: "<svg", options: .caseInsensitive) != nil ||
+            html.range(of: "background-image", options: .caseInsensitive) != nil {
+            return true
+        }
+
+        let extracted = TextProcessing.extractPlainText(from: html)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return !extracted.isEmpty
     }
 
     private func convertPlainTextToHTML(_ text: String) -> String {

@@ -88,9 +88,15 @@ actor HTMLContentRecoveryService {
     }
 
     private func decodeBase64Data(_ data: String) -> Data? {
+        // Gmail uses URL-safe base64 (RFC 4648) and may include incidental whitespace/newlines.
+        // Be permissive here; decode failures would prevent HTML recovery and leave emails blank.
         let base64String = data
             .replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
+            .replacingOccurrences(of: "\r", with: "")
+            .replacingOccurrences(of: "\n", with: "")
+            .replacingOccurrences(of: "\t", with: "")
+            .replacingOccurrences(of: " ", with: "")
 
         var paddedBase64 = base64String
         let remainder = base64String.count % 4
@@ -98,7 +104,7 @@ actor HTMLContentRecoveryService {
             paddedBase64 = base64String + String(repeating: "=", count: 4 - remainder)
         }
 
-        guard let decodedData = Data(base64Encoded: paddedBase64) else {
+        guard let decodedData = Data(base64Encoded: paddedBase64, options: [.ignoreUnknownCharacters]) else {
             return nil
         }
 

@@ -31,6 +31,12 @@
       "notes": "Outlook/Apple reply headers often render in tables; quote headers should not leak into snippets/bubbles when extracted to plain text.",
       "inputHTML": "<div>Great. Will do! Have a nice weekend!</div><div><br></div><table><tr><td>From:</td><td>Kevin Thau &lt;kmthau@gmail.com&gt;</td></tr><tr><td>Sent:</td><td>Saturday, February 14, 2026 3:17:13 PM</td></tr><tr><td>To:</td><td>Abouzied, Jasmine C (WM, USA) &lt;jasmine.c.abouzied@jpmorgan.com&gt;</td></tr><tr><td>Subject:</td><td>Weekend</td></tr></table><div>Older content...</div>",
       "expected": "Great. Will do! Have a nice weekend!"
+    },
+    {
+      "id": "html_head_and_comments_do_not_pollute_bubble_text",
+      "notes": "Head metadata (title tags) and Outlook conditional comment XML should not show up in extracted bubble text.",
+      "inputHTML": "<!DOCTYPE html><html><head><!--[if gte mso 9]><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml><![endif]--><title>SPS SBL Statement Ready Notification (PB)</title><style type=\"text/css\">body{background:#fff;}</style></head><body><table><tr><td>Your credit facility statement is ready</td></tr></table><div>To review your statement, please log on to example.com.</div><table><tr><td><strong>Details</strong></td><td></td></tr><tr><td>Account ending in:</td><td>...1234</td></tr></table></body></html>",
+      "expected": "Your credit facility statement is ready\n\nTo review your statement, please log on to example.com.\n\nDetails\n\nAccount ending in: ...1234"
     }
   ],
   "richHTMLDetectionCases": [
@@ -39,6 +45,12 @@
       "notes": "Apple Mail link preview blocks (apple-rich-link/lp-rich-link) should not force HTML preview routing for personal messages.",
       "inputHTML": "<html><body><div>Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text. Personal message text.</div><div class=\"apple-rich-link\" role=\"link\"><a href=\"https://www.pointgarry.uk/\" role=\"button\"><table><tr><td><img src=\"cid:IMG1\" alt=\"preview.jpg\"></td></tr></table></a></div><div><img src=\"cid:IMG2\" alt=\"attachment.png\" width=\"403\"></div></body></html>",
       "expectedHasRichHTMLContent": false
+    },
+    {
+      "id": "transactional_table_template_is_rich_even_if_signature_cleanup_false_positives",
+      "notes": "Transactional HTML templates (e.g., statement-ready alerts) should be treated as rich content; signature cleanup must not wipe the body and force plain-text routing.",
+      "inputHTML": "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}table{border-collapse:collapse}</style></head><body><table width=\"100%\"><tr><td><img src=\"https://example.com/logo.png\" alt=\"logo\" width=\"140\"></td></tr></table><table><tr><td><strong>Your credit facility statement is ready</strong></td></tr></table><table><tr><td>To review your statement, please log on to jpmorganonline.com or the J.P. Morgan Mobile app.</td></tr></table><table><tr><td><a class=\"button\" href=\"https://example.com/review\">Review Statement</a></td></tr></table><table><tr><td>Privacy Policy</td></tr></table><table><tr><td>Security Center</td></tr></table><table><tr><td>Important disclaimers and conditions</td></tr></table><div>This is a service message with information related to your account. It may include details about transactions, products, or online services. Please do not reply directly to this message. Your privacy is important to us. See our Privacy Policy and Security Center to learn how to protect your information. Investment products are not FDIC insured, are not bank guaranteed, and may lose value. If you recently canceled your account, please disregard this message.</div></body></html>",
+      "expectedHasRichHTMLContent": true
     }
   ],
   "displayPolicyCases": [

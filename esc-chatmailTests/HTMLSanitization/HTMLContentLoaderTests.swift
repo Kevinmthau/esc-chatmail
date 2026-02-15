@@ -102,4 +102,48 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertTrue(quotedOnly.html?.contains("SIGNATURE_TOKEN") == true)
         XCTAssertFalse(quotedAndSignature.html?.contains("SIGNATURE_TOKEN") == true)
     }
+
+    func testLoadContent_cleanupModeQuotedAndSignatureDoesNotReturnBlankForTransactionalTemplate() async {
+        // Minimized, anonymized transactional-template style email. Some templates can trigger
+        // overly aggressive signature cleanup heuristics; we should never return a blank HTML
+        // document to the WebView as a result.
+        let messageId = "html-loader-transactional-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let transactionalHTML = """
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <title>Statement Ready</title>
+            <style>
+              body { margin: 0; padding: 0; background: #ffffff; }
+              table { border-collapse: collapse; }
+            </style>
+          </head>
+          <body>
+            <table width="100%"><tr><td><img src="https://example.com/logo.png" alt="logo" width="140"></td></tr></table>
+            <table><tr><td><strong>Your credit facility statement is ready</strong></td></tr></table>
+            <table><tr><td>To review your statement, please log on to example.com or the Mobile app.</td></tr></table>
+            <table><tr><td><a href="https://example.com/review">Review Statement</a></td></tr></table>
+            <div>
+              This is a service message with information related to your account. It may include details about
+              transactions, products, or online services. Please do not reply directly to this message.
+              Your privacy is important to us. See our Privacy Policy and Security Center to learn how to protect
+              your information.
+            </div>
+          </body>
+        </html>
+        """
+        _ = contentHandler.saveHTML(transactionalHTML, for: messageId)
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            isDarkMode: false,
+            cleanupMode: .quotedAndSignature
+        )
+
+        XCTAssertNotNil(result.html)
+        XCTAssertTrue((result.html ?? "").contains("Your credit facility statement is ready"))
+    }
 }
