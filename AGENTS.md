@@ -40,6 +40,31 @@ Use `xcodebuild` with the `esc-chatmail` scheme:
 ## Security & Configuration Notes
 - OAuth/secret values live in xcconfig files under `esc-chatmail/Configuration/` and may be excluded from git.
 - Use `Configuration/SECURITY_SETUP.md` and the `Config.xcconfig.template` when setting up locally.
+- Git worktrees (including Codex worktrees under `~/.codex/worktrees/...`) do not share gitignored files. Before building/running in a new worktree, ensure `esc-chatmail/Configuration/Debug.xcconfig` and `esc-chatmail/Configuration/Release.xcconfig` exist; if they are missing, sync them from any worktree that already has them:
+
+```bash
+# Copy Debug.xcconfig + Release.xcconfig from the first worktree that has them into all worktrees.
+set -euo pipefail
+
+SRC=""
+for wt in $(git worktree list --porcelain | awk '$1=="worktree"{print $2}'); do
+  if [ -f "$wt/esc-chatmail/Configuration/Debug.xcconfig" ] && [ -f "$wt/esc-chatmail/Configuration/Release.xcconfig" ]; then
+    SRC="$wt/esc-chatmail/Configuration"
+    break
+  fi
+done
+
+if [ -z "$SRC" ]; then
+  echo "No worktree has Debug.xcconfig/Release.xcconfig. Create them from esc-chatmail/Configuration/Config.xcconfig.template first."
+  exit 1
+fi
+
+for wt in $(git worktree list --porcelain | awk '$1=="worktree"{print $2}'); do
+  mkdir -p "$wt/esc-chatmail/Configuration"
+  cp -f "$SRC/Debug.xcconfig" "$wt/esc-chatmail/Configuration/Debug.xcconfig"
+  cp -f "$SRC/Release.xcconfig" "$wt/esc-chatmail/Configuration/Release.xcconfig"
+done
+```
 
 ## Architecture Overview
 ESC Chatmail is a SwiftUI iOS email client that syncs with Gmail via the Gmail API and presents a conversation-first UI.
