@@ -141,7 +141,68 @@ struct BaseEmailWebView: UIViewRepresentable {
             let isDarkMode = UITraitCollection.current.userInterfaceStyle == .dark
             let bgColor = isDarkMode ? "#1c1c1e" : "#f2f2f7"
 
-            // For previews, we wrap in a scale container but preserve the email's original styles
+            // Avoid nesting full HTML documents inside another <html> wrapper; that can produce blank
+            // previews or render only partial/head content. Instead, inject a tiny stylesheet that scales
+            // the existing document when the input already contains <html>/<doctype>.
+            if html.range(of: "<!doctype", options: .caseInsensitive) != nil ||
+                html.range(of: "<html", options: .caseInsensitive) != nil {
+                return injectScaleStyles(into: html, scale: scale)
+            }
+
+            // Partial fragments (no document structure): wrap in our own container.
+            return wrapPartialHTMLWithScale(html, scale: scale, backgroundColor: bgColor)
+        }
+
+        private func injectScaleStyles(into html: String, scale: CGFloat) -> String {
+            // Scale the rendered page without touching the email's DOM structure.
+            // Keep rules minimal to avoid overriding the email's own layout/CSS.
+            let injected = """
+            <style id="esc-preview-scale">
+                html, body { overflow: hidden; }
+                body {
+                    -webkit-text-size-adjust: 100%;
+                    transform: scale(\(scale));
+                    transform-origin: top left;
+                    width: \(100.0 / scale)%;
+                }
+                img { max-width: 100%; height: auto; }
+                table { max-width: 100%; }
+            </style>
+            """
+
+            // Don't double-inject if the HTML already contains our scale styles.
+            if html.range(of: "id=\"esc-preview-scale\"", options: .caseInsensitive) != nil {
+                return ensureDoctype(html)
+            }
+
+            var result = html
+
+            if let headRange = result.range(of: "<head>", options: .caseInsensitive) {
+                result.insert(contentsOf: "\n" + injected + "\n", at: headRange.upperBound)
+                return ensureDoctype(result)
+            }
+
+            if let headStart = result.range(of: "<head", options: .caseInsensitive),
+               let closing = result[headStart.lowerBound...].firstIndex(of: ">") {
+                let insertIndex = result.index(after: closing)
+                result.insert(contentsOf: "\n" + injected + "\n", at: insertIndex)
+                return ensureDoctype(result)
+            }
+
+            // No <head>: inject one immediately after the opening <html ...> tag.
+            if let htmlStart = result.range(of: "<html", options: .caseInsensitive),
+               let closing = result[htmlStart.lowerBound...].firstIndex(of: ">") {
+                let insertIndex = result.index(after: closing)
+                result.insert(contentsOf: "\n<head>\n" + injected + "\n</head>\n", at: insertIndex)
+                return ensureDoctype(result)
+            }
+
+            // Worst-case fallback: wrap as a fragment.
+            let bgColor = UITraitCollection.current.userInterfaceStyle == .dark ? "#1c1c1e" : "#f2f2f7"
+            return wrapPartialHTMLWithScale(result, scale: scale, backgroundColor: bgColor)
+        }
+
+        private func wrapPartialHTMLWithScale(_ html: String, scale: CGFloat, backgroundColor: String) -> String {
             return """
             <!DOCTYPE html>
             <html>
@@ -153,7 +214,7 @@ struct BaseEmailWebView: UIViewRepresentable {
                     html, body {
                         margin: 0;
                         padding: 0;
-                        background-color: \(bgColor);
+                        background-color: \(backgroundColor);
                         overflow: hidden;
                         -webkit-text-size-adjust: 100%;
                     }
@@ -174,6 +235,13 @@ struct BaseEmailWebView: UIViewRepresentable {
             </body>
             </html>
             """
+        }
+
+        private func ensureDoctype(_ html: String) -> String {
+            if html.range(of: "<!doctype", options: .caseInsensitive) != nil {
+                return html
+            }
+            return "<!DOCTYPE html>\n" + html
         }
 
         // MARK: - WKNavigationDelegate

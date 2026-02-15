@@ -120,8 +120,11 @@ struct HTMLMessageView: View {
             timeout: 5.0
         )
 
-        // Handle URI migration if loaded from messageId but URI was stale
-        if result.source == .messageId,
+        // If we loaded HTML from the per-message file location (or recovered it and saved it there),
+        // ensure Core Data points at the canonical file URL so the rest of the UI can treat it as
+        // having a stable HTML source.
+        if (result.source == .messageId || result.source == .recovered),
+           result.html != nil,
            let context = message.managedObjectContext {
             let messageId = message.id
             Task {

@@ -153,8 +153,10 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
         let html = loadHTML(messageId: messageId, bodyStorageURI: bodyStorageURI, handler: handler)
         if let html {
-            // Strip quoted content from HTML first
-            let cleanedHTML = HTMLQuoteRemover.removeQuotes(from: html) ?? html
+            // Strip quoted/signature content from HTML first. If that pass removes too much (e.g., a
+            // transactional template where our signature heuristics false-positive), fall back to
+            // quote-only cleanup or ultimately the original HTML.
+            let cleanedHTML = cleanedHTMLForProcessing(html)
 
             plainTextAndQuotes = extractPlainTextAndQuotes(from: cleanedHTML)
 
@@ -430,6 +432,37 @@ actor ProcessedTextCache: MemoryWarningHandler {
         return (formatted.isEmpty ? nil : formatted, extractionResult.quotedParts)
     }
 
+    nonisolated private static func cleanedHTMLForProcessing(_ html: String) -> String {
+        let quotedAndSignature = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+        if hasMeaningfulHTMLContent(quotedAndSignature) {
+            return quotedAndSignature
+        }
+
+        // Signature cleanup false-positive; try quote-only cleanup.
+        let quotedOnly = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedOnly) ?? html
+        if hasMeaningfulHTMLContent(quotedOnly) {
+            return quotedOnly
+        }
+
+        return html
+    }
+
+    nonisolated private static func hasMeaningfulHTMLContent(_ html: String) -> Bool {
+        let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        // Image-only templates are still meaningful content.
+        if html.range(of: "<img", options: .caseInsensitive) != nil ||
+            html.range(of: "<svg", options: .caseInsensitive) != nil ||
+            html.range(of: "background-image", options: .caseInsensitive) != nil {
+            return true
+        }
+
+        let extracted = TextProcessing.extractPlainText(from: html)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return !extracted.isEmpty
+    }
+
     nonisolated private static func approximateTextContent(from html: String) -> String {
         html
             .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
@@ -536,6 +569,22 @@ enum TextProcessing {
     }
     static func extractPlainText(from html: String) -> String {
         var text = html
+
+        // Avoid leaking <head> metadata (title tags, MSO conditionals) into bubble text.
+        // Also strip HTML comments entirely; conditional comments often contain Outlook-only XML
+        // that can show up as garbage like "96" in extracted plain text.
+        text = text.replacingOccurrences(
+            of: "<head\\b[^>]*>[\\s\\S]*?</head>",
+            with: "",
+            options: [.regularExpression, .caseInsensitive],
+            range: nil
+        )
+        text = text.replacingOccurrences(
+            of: "<!--[\\s\\S]*?-->",
+            with: "",
+            options: [.regularExpression, .caseInsensitive],
+            range: nil
+        )
 
         // Remove script and style tags and their content
         text = text.replacingOccurrences(of: "<script[^>]*>[\\s\\S]*?</script>", with: "", options: .regularExpression, range: nil)
