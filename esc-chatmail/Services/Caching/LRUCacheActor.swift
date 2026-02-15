@@ -9,18 +9,20 @@ actor LRUCacheActor<Key: Hashable & Sendable, Value: Sendable>: CacheProtocol {
     private struct CacheEntry {
         let value: Value
         let createdAt: Date
-        var lastAccessedAt: Date
+        /// Monotonic access order used for LRU eviction.
+        /// Using a sequence avoids `Date()` tie flakiness (multiple accesses within the same clock tick).
+        var lastAccessSequence: UInt64
         let sizeBytes: Int?
 
         var age: TimeInterval {
             Date().timeIntervalSince(createdAt)
         }
 
-        init(value: Value, sizeBytes: Int? = nil) {
+        init(value: Value, accessSequence: UInt64, sizeBytes: Int? = nil) {
             let now = Date()
             self.value = value
             self.createdAt = now
-            self.lastAccessedAt = now
+            self.lastAccessSequence = accessSequence
             self.sizeBytes = sizeBytes
         }
     }
@@ -30,9 +32,10 @@ actor LRUCacheActor<Key: Hashable & Sendable, Value: Sendable>: CacheProtocol {
     private var storage: [Key: CacheEntry] = [:]
     private let config: CacheConfiguration
     private var stats = LRUCacheStatistics()
+    private var accessSequenceCounter: UInt64 = 0
 
-    // Note: LRU ordering is determined by lastAccessedAt timestamps in CacheEntry,
-    // eliminating the O(n) array operations that were previously required for every access.
+    // Note: LRU ordering is determined by a monotonic sequence number in CacheEntry,
+    // avoiding `Date()` tie ambiguity while keeping O(1) access updates.
 
     // MARK: - Initialization
 
@@ -56,8 +59,9 @@ actor LRUCacheActor<Key: Hashable & Sendable, Value: Sendable>: CacheProtocol {
             return nil
         }
 
-        // Update access time (O(1) - timestamp determines LRU order)
-        entry.lastAccessedAt = Date()
+        // Update access order (O(1))
+        accessSequenceCounter &+= 1
+        entry.lastAccessSequence = accessSequenceCounter
         storage[key] = entry
 
         stats.recordHit()
@@ -87,7 +91,8 @@ actor LRUCacheActor<Key: Hashable & Sendable, Value: Sendable>: CacheProtocol {
 
     /// Sets a value with optional size tracking for memory-based eviction
     func set(_ key: Key, value: Value, sizeBytes: Int?) {
-        let entry = CacheEntry(value: value, sizeBytes: sizeBytes)
+        accessSequenceCounter &+= 1
+        let entry = CacheEntry(value: value, accessSequence: accessSequenceCounter, sizeBytes: sizeBytes)
         let isUpdate = storage[key] != nil
 
         if !isUpdate {
@@ -173,13 +178,13 @@ actor LRUCacheActor<Key: Hashable & Sendable, Value: Sendable>: CacheProtocol {
     private func evictLeastRecentlyUsed() {
         guard !storage.isEmpty else { return }
 
-        // Find the key with the oldest lastAccessedAt timestamp
+        // Find the key with the oldest access sequence (deterministic).
         var lruKey: Key?
-        var oldestTime = Date.distantFuture
+        var oldestSequence = UInt64.max
 
         for (key, entry) in storage {
-            if entry.lastAccessedAt < oldestTime {
-                oldestTime = entry.lastAccessedAt
+            if entry.lastAccessSequence < oldestSequence {
+                oldestSequence = entry.lastAccessSequence
                 lruKey = key
             }
         }
