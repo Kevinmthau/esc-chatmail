@@ -227,5 +227,40 @@ final class ConversationMergerTests: XCTestCase {
         let beforeCount = try context.count(for: beforeRequest)
         XCTAssertEqual(beforeCount, 4)
     }
-}
 
+    func testMergeConversationsByGmThreadId_mergesConversationsSharingThread() async throws {
+        let threadId = "gm-thread-merge-123"
+
+        let loser = ConversationBuilder()
+            .withKeyHash("thread-loser")
+            .withLastMessageDate(Date(timeIntervalSince1970: 1))
+            .build(in: context)
+
+        let winner = ConversationBuilder()
+            .withKeyHash("thread-winner")
+            .withLastMessageDate(Date())
+            .build(in: context)
+
+        let msg1 = MessageBuilder()
+            .withId("msg-thread-1")
+            .withThreadId(threadId)
+            .inConversation(loser)
+            .build(in: context)
+
+        let msg2 = MessageBuilder()
+            .withId("msg-thread-2")
+            .withThreadId(threadId)
+            .inConversation(winner)
+            .build(in: context)
+
+        try testStack.saveViewContext()
+
+        let mergedCount = await merger.mergeConversationsByGmThreadId(in: context, mergeChangesInto: [])
+        XCTAssertEqual(mergedCount, 1, "Should merge exactly one loser conversation into the winner")
+
+        let conversationCount = try context.count(for: Conversation.fetchRequest())
+        XCTAssertEqual(conversationCount, 1, "After merge there should be a single conversation for the thread")
+
+        XCTAssertEqual(msg1.conversation?.objectID, msg2.conversation?.objectID, "Messages in the same thread should share a conversation after merge")
+    }
+}

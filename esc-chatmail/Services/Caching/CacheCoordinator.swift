@@ -58,7 +58,16 @@ final class CacheCoordinator {
         // Process updated and deleted objects
         for object in updated.union(deleted) {
             if let conversation = object as? Conversation {
-                conversationIdsToInvalidate.insert(conversation.id.uuidString)
+                // Deleted objects can fault/lose property values; accessing non-optional Core Data
+                // properties directly may trap. Use KVC to safely extract the UUID string.
+                if let id = conversation.value(forKey: "id") as? NSUUID {
+                    conversationIdsToInvalidate.insert(id.uuidString)
+                } else if let id = conversation.value(forKey: "id") as? UUID {
+                    conversationIdsToInvalidate.insert(id.uuidString)
+                } else {
+                    Log.warning("Conversation missing id during cache invalidation; clearing ConversationCache", category: .coreData)
+                    ConversationCache.shared.clear()
+                }
             } else if let person = object as? Person {
                 personEmailsToInvalidate.insert(person.email)
             } else if deleted.contains(object), let message = object as? Message {

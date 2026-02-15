@@ -136,4 +136,23 @@ extension DataCleanupService {
             }
         }
     }
+
+    /// One-time cleanup: merge conversations that were incorrectly split across a single Gmail threadId.
+    ///
+    /// This most commonly happens when the `Reply-To` address differs from the `From` address, causing
+    /// participant-based grouping to create multiple conversations for one Gmail thread.
+    func mergeConversationsSplitByGmThreadIdIfNeeded(in context: NSManagedObjectContext) async {
+        let hasDoneMerge = UserDefaults.standard.bool(forKey: "hasDoneGmThreadConversationMergeV1")
+        guard !hasDoneMerge else { return }
+
+        Log.info("Starting gmThreadId conversation merge...", category: .coreData)
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        let mergedCount = await conversationManager.mergeConversationsByGmThreadId(in: context)
+
+        let duration = CFAbsoluteTimeGetCurrent() - startTime
+        Log.info("gmThreadId conversation merge complete in \(String(format: "%.3f", duration))s (merged=\(mergedCount))", category: .coreData)
+
+        UserDefaults.standard.set(true, forKey: "hasDoneGmThreadConversationMergeV1")
+    }
 }

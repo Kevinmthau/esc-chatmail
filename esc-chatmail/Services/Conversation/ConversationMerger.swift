@@ -160,6 +160,98 @@ struct ConversationMerger: Sendable {
         }
     }
 
+    // MARK: - Thread-Based Merge (Gmail)
+
+    /// Merges conversations when messages from the same Gmail thread (`gmThreadId`) have been split
+    /// across multiple Conversation rows.
+    ///
+    /// This can happen when participant-based identity differs between messages in the same thread
+    /// (common when `Reply-To` uses a different address than `From`).
+    func mergeConversationsByGmThreadId(
+        in context: NSManagedObjectContext,
+        mergeChangesInto contextsToMerge: [NSManagedObjectContext]
+    ) async -> Int {
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        return await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "gmThreadId != '' AND conversation != nil")
+            request.fetchBatchSize = 500
+            request.returnsObjectsAsFaults = true
+            request.relationshipKeyPathsForPrefetching = ["conversation"]
+
+            let messages: [Message]
+            do {
+                messages = try context.fetch(request)
+            } catch {
+                Log.error("Failed to fetch messages for gmThreadId conversation merge", category: .coreData, error: error)
+                return 0
+            }
+
+            // Build a map of gmThreadId -> distinct conversation objectIDs.
+            var threadToConversationIDs: [String: Set<NSManagedObjectID>] = [:]
+            threadToConversationIDs.reserveCapacity(256)
+
+            for message in messages {
+                let threadId = message.gmThreadId
+                guard !threadId.isEmpty, let conversation = message.conversation else { continue }
+                threadToConversationIDs[threadId, default: []].insert(conversation.objectID)
+            }
+
+            let duplicateThreads = threadToConversationIDs.filter { $0.value.count > 1 }
+            guard !duplicateThreads.isEmpty else {
+                return 0
+            }
+
+            var mergedCount = 0
+            var deletedObjectIDs: [NSManagedObjectID] = []
+
+            for (threadId, conversationIDs) in duplicateThreads {
+                let conversations: [Conversation] = conversationIDs.compactMap { objectID in
+                    context.object(with: objectID) as? Conversation
+                }
+                guard conversations.count > 1 else { continue }
+
+                guard let winner = self.selectWinner(from: conversations) else {
+                    continue
+                }
+                let losers = conversations.filter { $0 != winner }
+
+                Log.debug("Merging \(losers.count) conversation(s) for gmThreadId: \(threadId.prefix(16))...", category: .conversation)
+
+                for loser in losers {
+                    self.merge(from: loser, into: winner)
+                    deletedObjectIDs.append(loser.objectID)
+                    context.delete(loser)
+                    mergedCount += 1
+                }
+            }
+
+            if mergedCount > 0 {
+                self.coreDataStack.saveIfNeeded(context: context)
+
+                if !deletedObjectIDs.isEmpty, !contextsToMerge.isEmpty {
+                    let changes = [NSDeletedObjectsKey: deletedObjectIDs]
+                    NSManagedObjectContext.mergeChanges(
+                        fromRemoteContextSave: changes,
+                        into: contextsToMerge
+                    )
+                }
+
+                let duration = CFAbsoluteTimeGetCurrent() - startTime
+                Log.info("Merged \(mergedCount) conversation(s) by gmThreadId in \(String(format: "%.3f", duration))s", category: .conversation)
+            }
+
+            return mergedCount
+        }
+    }
+
+    /// Convenience wrapper that merges changes into the app's `viewContext`.
+    @discardableResult
+    func mergeConversationsByGmThreadId(in context: NSManagedObjectContext) async -> Int {
+        await mergeConversationsByGmThreadId(in: context, mergeChangesInto: [coreDataStack.viewContext])
+    }
+
     // MARK: - Winner Selection
 
     /// Selects the winner conversation from a group of duplicates.
