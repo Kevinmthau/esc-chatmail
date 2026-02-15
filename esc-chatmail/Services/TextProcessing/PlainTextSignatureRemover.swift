@@ -381,7 +381,11 @@ enum PlainTextSignatureRemover {
                 break
             }
 
-            if evaluation.isHardIndicator || looksLikeSignatureLine(line) {
+            // When we find a hard indicator (like "M:"), we want to walk upward and include
+            // adjacent signature lines. Some corporate signature lines can be very long, so
+            // prefer the scoring-based heuristic (`isLikelySignatureLine`) over the older
+            // short-line heuristic.
+            if evaluation.isHardIndicator || evaluation.isLikelySignatureLine || looksLikeSignatureLine(line) {
                 foundShortLines = true
             } else {
                 break
