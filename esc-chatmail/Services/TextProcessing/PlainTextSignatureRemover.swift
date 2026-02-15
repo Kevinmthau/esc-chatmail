@@ -263,9 +263,13 @@ enum PlainTextSignatureRemover {
 
         let hasEmail = matchesRegex(emailPattern, in: trimmed)
         let hasUrl = matchesRegex(urlPattern, in: trimmed)
-        let hasPhone = matchesRegex(phonePattern, in: trimmed)
+        let hasPhoneCandidate = matchesRegex(phonePattern, in: trimmed)
+        // Phone numbers are common in the BODY of short emails ("call me at ...").
+        // Only treat a phone number as signature contact info if the line itself is
+        // primarily a phone line (or uses an explicit prefix like "T:", handled above).
+        let hasStandalonePhone = hasPhoneCandidate && looksLikeStandalonePhoneLine(trimmed, lowercased: lowercased)
 
-        let hasContactInfo = hasContactPrefix || hasEmail || hasUrl || hasPhone
+        let hasContactInfo = hasContactPrefix || hasEmail || hasUrl || hasStandalonePhone
 
         // Keep hard indicators conservative. URL/phone lines need surrounding context.
         let isHardIndicator = isDelimiter || isCidLine || hasHardFragment || hasContactPrefix
@@ -288,6 +292,40 @@ enum PlainTextSignatureRemover {
             isLikelySignatureLine: isLikelySignatureLine,
             hasContactInfo: hasContactInfo
         )
+    }
+
+    private static func looksLikeStandalonePhoneLine(_ trimmed: String, lowercased: String) -> Bool {
+        // Be conservative: only match lines that are basically a phone number.
+        // Examples:
+        // - "415-314-9804"
+        // - "+1 (415) 314-9804"
+        // Avoid treating sentences like "Feel free to call me at 415-314-9804." as signature lines.
+        let letters = trimmed.unicodeScalars.reduce(into: 0) { count, scalar in
+            if CharacterSet.letters.contains(scalar) {
+                count += 1
+            }
+        }
+        let digits = trimmed.unicodeScalars.reduce(into: 0) { count, scalar in
+            if CharacterSet.decimalDigits.contains(scalar) {
+                count += 1
+            }
+        }
+
+        guard digits >= 7 else { return false }
+        guard trimmed.count <= 40 else { return false }
+
+        if letters == 0 {
+            return true
+        }
+
+        // Allow a tiny amount of letters for extension markers (e.g., "ext", "x").
+        if letters <= 3 {
+            if lowercased.contains("ext") || lowercased.contains(" x") || lowercased.hasSuffix("x") {
+                return true
+            }
+        }
+
+        return false
     }
 
     private static func isSignOffLine(_ lowercased: String) -> Bool {
@@ -371,13 +409,14 @@ enum PlainTextSignatureRemover {
 
         let shortEnough = trimmed.count <= 80
         let noSentenceEnding = !(trimmed.hasSuffix(".") || trimmed.hasSuffix("!") || trimmed.hasSuffix("?"))
+        let lowercased = trimmed.lowercased()
         let hasContactPrefix = matchesRegex(contactPrefixPattern, in: trimmed)
         let hasEmail = matchesRegex(emailPattern, in: trimmed)
         let hasUrl = matchesRegex(urlPattern, in: trimmed)
-        let hasPhone = matchesRegex(phonePattern, in: trimmed)
-        let lowercased = trimmed.lowercased()
+        let hasPhoneCandidate = matchesRegex(phonePattern, in: trimmed)
+        let hasStandalonePhone = hasPhoneCandidate && looksLikeStandalonePhoneLine(trimmed, lowercased: lowercased)
 
-        if hasContactPrefix || hasEmail || hasUrl || hasPhone {
+        if hasContactPrefix || hasEmail || hasUrl || hasStandalonePhone {
             return true
         }
 
@@ -469,8 +508,9 @@ enum PlainTextSignatureRemover {
         let hasContactPrefix = matchesRegex(contactPrefixPattern, in: trimmed)
         let hasEmail = matchesRegex(emailPattern, in: trimmed)
         let hasUrl = matchesRegex(urlPattern, in: trimmed)
-        let hasPhone = matchesRegex(phonePattern, in: trimmed)
-        if hasContactPrefix || hasEmail || hasUrl || hasPhone {
+        let hasPhoneCandidate = matchesRegex(phonePattern, in: trimmed)
+        let hasStandalonePhone = hasPhoneCandidate && looksLikeStandalonePhoneLine(trimmed, lowercased: lowercased)
+        if hasContactPrefix || hasEmail || hasUrl || hasStandalonePhone {
             return true
         }
 

@@ -275,6 +275,29 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(result, "Here is the link you asked for:\nwww.example.com")
     }
 
+    func testRemoveSignature_phoneNumberInBodySentence_preserved() {
+        let text = """
+        Hi,
+
+        Monday at 10am is great. Feel free to call me on my mobile 415-314-9804.
+
+        Thank you,
+
+        Kevin
+        """
+
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        XCTAssertEqual(result, """
+        Hi,
+
+        Monday at 10am is great. Feel free to call me on my mobile 415-314-9804.
+
+        Thank you,
+
+        Kevin
+        """)
+    }
+
     func testRemoveSignature_cheers_preservedWithoutStrongIndicator() {
         let text = """
         Sounds great!

@@ -11,6 +11,12 @@
       "notes": "Personal message body should remain untouched when there is no quote boundary.",
       "input": "James\n\nThanks for the note. I'm playing Brambles on 5/22 with the McNeil bros. Really looking forward to it.\n\nThanks for the heads up on NB. No plans as of now but we should rectify that.",
       "expected": "James\n\nThanks for the note. I'm playing Brambles on 5/22 with the McNeil bros. Really looking forward to it.\n\nThanks for the heads up on NB. No plans as of now but we should rectify that."
+    },
+    {
+      "id": "body_sentence_with_phone_number_preserved",
+      "notes": "Phone numbers embedded in a body sentence should not cause signature stripping.",
+      "input": "Hi,\n\nMonday at 10am is great. Feel free to call me on my mobile 415-314-9804.\n\nThank you,\n\nKevin",
+      "expected": "Hi,\n\nMonday at 10am is great. Feel free to call me on my mobile 415-314-9804.\n\nThank you,\n\nKevin"
     }
   ],
   "htmlToBubbleTextCases": [
