@@ -38,29 +38,45 @@ actor ContactsResolver: ContactsResolving {
         let status = CNContactStore.authorizationStatus(for: .contacts)
         authorizationStatus = status
 
-        if #available(iOS 18.0, *) {
-            if status == .limited {
-                // Limited access is treated as authorized for our purposes
-                return
-            }
+        if status == .authorized {
+            return
         }
 
-        switch status {
-        case .authorized:
+        if #available(iOS 18.0, *), status == .limited {
+            // Limited access is treated as authorized for our purposes.
             return
-        case .notDetermined:
-            let granted = try await contactStore.requestAccess(for: .contacts)
-            authorizationStatus = granted ? .authorized : .denied
-            if !granted {
-                throw ContactsError.accessDenied
+        }
+
+        if status == .notDetermined {
+            _ = try await contactStore.requestAccess(for: .contacts)
+
+            let updatedStatus = CNContactStore.authorizationStatus(for: .contacts)
+            authorizationStatus = updatedStatus
+
+            if updatedStatus == .authorized {
+                return
             }
-        case .denied:
-            throw ContactsError.accessDenied
-        case .restricted:
-            throw ContactsError.accessRestricted
-        @unknown default:
+            if #available(iOS 18.0, *), updatedStatus == .limited {
+                // Limited access is treated as authorized for our purposes.
+                return
+            }
+            if updatedStatus == .restricted {
+                throw ContactsError.accessRestricted
+            }
+
             throw ContactsError.accessDenied
         }
+
+        if status == .denied {
+            throw ContactsError.accessDenied
+        }
+
+        if status == .restricted {
+            throw ContactsError.accessRestricted
+        }
+
+        // Fail closed for any future/unknown status values.
+        throw ContactsError.accessDenied
     }
 
     public func lookup(email: String) async -> ContactMatch? {

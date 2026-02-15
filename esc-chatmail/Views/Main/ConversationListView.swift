@@ -118,6 +118,10 @@ struct ConversationListView: View {
         .onChange(of: viewModel.currentFilter) { _, _ in
             updateFilteredConversations()
         }
+        .onChange(of: viewModel.contactEmailsCache) { _, _ in
+            // Contact cache changes affect the Contacts/Other filters.
+            updateFilteredConversations()
+        }
     }
 
     private func selectionButton(for conversation: Conversation) -> some View {

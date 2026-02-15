@@ -47,6 +47,16 @@ final class ContactsService: ObservableObject {
     init() {
         checkAuthorizationStatus()
     }
+
+    private var hasReadAccess: Bool {
+        if authorizationStatus == .authorized {
+            return true
+        }
+        if #available(iOS 18.0, *), authorizationStatus == .limited {
+            return true
+        }
+        return false
+    }
     
     func checkAuthorizationStatus() {
         authorizationStatus = CNContactStore.authorizationStatus(for: .contacts)
@@ -56,7 +66,8 @@ final class ContactsService: ObservableObject {
         do {
             let granted = try await contactStore.requestAccess(for: .contacts)
             await MainActor.run {
-                self.authorizationStatus = granted ? .authorized : .denied
+                // On iOS 18+, the user may grant limited access; reflect the true status.
+                self.authorizationStatus = CNContactStore.authorizationStatus(for: .contacts)
             }
             return granted
         } catch {
@@ -66,7 +77,7 @@ final class ContactsService: ObservableObject {
     }
     
     func searchContacts(query: String) async -> [ContactMatch] {
-        guard authorizationStatus == .authorized else { return [] }
+        guard hasReadAccess else { return [] }
         guard !query.isEmpty else { return [] }
 
         await MainActor.run {
@@ -143,7 +154,7 @@ final class ContactsService: ObservableObject {
     }
     
     func getContactByEmail(_ email: String) async -> ContactMatch? {
-        guard authorizationStatus == .authorized else { return nil }
+        guard hasReadAccess else { return nil }
 
         // Move blocking CNContactStore operation to background thread
         return await Task.detached(priority: .userInitiated) { [keysToFetch, contactStore] in

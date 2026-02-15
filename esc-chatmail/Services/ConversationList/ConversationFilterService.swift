@@ -19,11 +19,31 @@ final class ConversationFilterService: ObservableObject {
 
     private var filteredCache: FilteredConversationsCache?
     private var contactsLoadTask: Task<Void, Never>?
+    private var contactStoreDidChangeObserver: NSObjectProtocol?
 
     // MARK: - Initialization
 
     init(contactsService: ContactsService) {
         self.contactsService = contactsService
+
+        // Keep contact-based filtering fresh when the user edits contacts (in-app or via system UI).
+        contactStoreDidChangeObserver = NotificationCenter.default.addObserver(
+            forName: .CNContactStoreDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.invalidateFilterCache()
+                self.loadContactsCache()
+            }
+        }
+    }
+
+    deinit {
+        if let observer = contactStoreDidChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     // MARK: - Filtering
@@ -97,7 +117,13 @@ final class ConversationFilterService: ObservableObject {
         contactsLoadTask?.cancel()
         contactsLoadTask = Task.detached { [contactsService, weak self] in
             let authStatus = await MainActor.run { contactsService.authorizationStatus }
-            if authStatus != .authorized {
+            let hasAccess: Bool = {
+                if authStatus == .authorized { return true }
+                if #available(iOS 18.0, *), authStatus == .limited { return true }
+                return false
+            }()
+
+            if !hasAccess {
                 let granted = await contactsService.requestAccess()
                 if !granted { return }
             }
@@ -115,7 +141,9 @@ final class ConversationFilterService: ObservableObject {
                 }
                 let finalEmails = emails
                 await MainActor.run { [weak self] in
-                    self?.contactEmailsCache = finalEmails
+                    guard let self else { return }
+                    self.filteredCache = nil
+                    self.contactEmailsCache = finalEmails
                 }
             } catch {
                 Log.error("Failed to load contacts", category: .general, error: error)

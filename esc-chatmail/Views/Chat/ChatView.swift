@@ -1,5 +1,7 @@
 import SwiftUI
 import CoreData
+import ContactsUI
+import UIKit
 
 struct ChatView: View {
     @ObservedObject var conversation: Conversation
@@ -15,6 +17,7 @@ struct ChatView: View {
     @State private var followUpScrollTask: Task<Void, Never>?
     @State private var stabilizationScrollTask: Task<Void, Never>?
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
     private var shouldUseBottomAnchoring: Bool { messages.count > 1 }
 
     init(conversation: Conversation) {
@@ -30,6 +33,17 @@ struct ChatView: View {
     }
 
     var body: some View {
+        if #available(iOS 18.0, *) {
+            content
+                .contactAccessPicker(isPresented: $viewModel.contactManager.showingContactAccessPicker) { identifiers in
+                    viewModel.contactManager.handleContactAccessPickerCompletion(identifiers)
+                }
+        } else {
+            content
+        }
+    }
+
+    private var content: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(spacing: 8) {
@@ -211,6 +225,42 @@ struct ChatView: View {
                     viewModel.contactManager.editExistingContact(identifier: identifier)
                 }
             )
+        }
+        .alert(item: $viewModel.contactManager.contactActionAlert) { alert in
+            switch alert.kind {
+            case .contactsDenied:
+                Alert(
+                    title: Text("Contacts Access Needed"),
+                    message: Text("Allow Contacts access in Settings to add this email to an existing contact."),
+                    primaryButton: .default(Text("Open Settings")) {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            openURL(url)
+                        }
+                    },
+                    secondaryButton: .cancel()
+                )
+            case .contactsRestricted:
+                Alert(
+                    title: Text("Contacts Access Restricted"),
+                    message: Text("Contacts access is restricted on this device."),
+                    dismissButton: .default(Text("OK"))
+                )
+            case .limitedAccessNeedsPermission(let contactName):
+                Alert(
+                    title: Text("Allow Access to Contact"),
+                    message: Text("ESC Chatmail has limited Contacts access. To edit \(contactName), allow access to it in the next sheet."),
+                    primaryButton: .default(Text("Continue")) {
+                        viewModel.contactManager.presentContactAccessPickerForSelectedContact()
+                    },
+                    secondaryButton: .cancel()
+                )
+            case .error(let message):
+                Alert(
+                    title: Text("Couldn’t Add Email"),
+                    message: Text(message),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
         }
     }
 

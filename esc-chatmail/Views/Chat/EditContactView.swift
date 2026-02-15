@@ -108,44 +108,68 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
                     await PersonCache.shared.invalidateEntry(for: emailToAdd)
                 }
 
-                let contactVC = CNContactViewController(for: updatedContact)
-                contactVC.contactStore = CNContactStore()
-                contactVC.delegate = self
-                contactVC.allowsEditing = true
-                // Ensure the Edit/Done control exists even when presented modally.
-                contactVC.navigationItem.rightBarButtonItem = contactVC.editButtonItem
-                contactVC.navigationItem.leftBarButtonItem = UIBarButtonItem(
-                    barButtonSystemItem: .close,
-                    target: self,
-                    action: #selector(self.dismissTapped)
+                // Confirm to the user that the email was saved. "Save"/checkmark controls are not shown
+                // because we commit the change programmatically.
+                let alert = UIAlertController(
+                    title: "Saved",
+                    message: "Added \(emailToAdd) to this contact.",
+                    preferredStyle: .alert
                 )
 
-                let navController = UINavigationController(rootViewController: contactVC)
-                navController.modalPresentationStyle = .pageSheet
-                self.presentedNavController = navController
-                topVC.present(navController, animated: true)
+                alert.addAction(UIAlertAction(title: "View Contact", style: .default) { [weak self] _ in
+                    guard let self else { return }
+
+                    let contactVC = CNContactViewController(for: updatedContact)
+                    contactVC.contactStore = CNContactStore()
+                    contactVC.delegate = self
+                    contactVC.allowsEditing = true
+                    // Ensure the Edit/Done control exists even when presented modally.
+                    contactVC.navigationItem.rightBarButtonItem = contactVC.editButtonItem
+                    contactVC.navigationItem.leftBarButtonItem = UIBarButtonItem(
+                        barButtonSystemItem: .close,
+                        target: self,
+                        action: #selector(self.dismissTapped)
+                    )
+
+                    let navController = UINavigationController(rootViewController: contactVC)
+                    navController.modalPresentationStyle = .pageSheet
+                    self.presentedNavController = navController
+                    topVC.present(navController, animated: true)
+                })
+
+                alert.addAction(UIAlertAction(title: "Done", style: .cancel))
+                topVC.present(alert, animated: true)
 
             case .failure(let error):
                 Log.error("Failed to add email to contact", category: .ui, error: error)
 
                 let status = CNContactStore.authorizationStatus(for: .contacts)
-                let isLimitedAccess: Bool
-                if #available(iOS 18.0, *) {
-                    isLimitedAccess = status == .limited
-                } else {
-                    isLimitedAccess = false
+                var message = error.localizedDescription
+                var showSettingsButton = false
+
+                switch status {
+                case .denied:
+                    message = "ESC Chatmail doesn’t have permission to edit contacts. Allow Contacts access in Settings, then try again."
+                    showSettingsButton = true
+                case .restricted:
+                    message = "Contacts access is restricted on this device."
+                case .notDetermined:
+                    message = "Contacts access hasn’t been granted yet. Allow access in Settings, then try again."
+                    showSettingsButton = true
+                default:
+                    if #available(iOS 18.0, *), status == .limited {
+                        message = "ESC Chatmail has limited Contacts access and can only edit contacts you’ve shared with it. Allow access to this contact (or full access) in Settings, then try again."
+                        showSettingsButton = true
+                    }
                 }
-                let needsFullAccess = isLimitedAccess || status == .denied
 
                 let alert = UIAlertController(
                     title: "Couldn’t Save Contact",
-                    message: needsFullAccess
-                        ? "ESC Chatmail doesn’t have permission to edit contacts. Allow full Contacts access in Settings, then try again."
-                        : error.localizedDescription,
+                    message: message,
                     preferredStyle: .alert
                 )
 
-                if needsFullAccess, let settingsURL = URL(string: UIApplication.openSettingsURLString) {
+                if showSettingsButton, let settingsURL = URL(string: UIApplication.openSettingsURLString) {
                     alert.addAction(UIAlertAction(title: "Open Settings", style: .default) { _ in
                         UIApplication.shared.open(settingsURL)
                     })
