@@ -7,9 +7,11 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
 
     private weak var presentedNavController: UINavigationController?
     private var emailToInvalidate: String?
+    private var isObservingContactStoreDidChange = false
 
     func presentContact(identifier: String) {
         emailToInvalidate = nil
+        removeContactStoreDidChangeObserver()
 
         Task { @MainActor [weak self] in
             guard let self = self else { return }
@@ -34,6 +36,8 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
             contactVC.contactStore = contactStore
             contactVC.delegate = self
             contactVC.allowsEditing = true
+            // Ensure the Edit/Done control exists even when presented modally.
+            contactVC.navigationItem.rightBarButtonItem = contactVC.editButtonItem
             contactVC.navigationItem.leftBarButtonItem = UIBarButtonItem(
                 barButtonSystemItem: .close,
                 target: self,
@@ -49,6 +53,7 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
 
     func addEmailToContact(existingContact: CNContact, emailToAdd: String) {
         emailToInvalidate = emailToAdd
+        removeContactStoreDidChangeObserver()
 
         Task { @MainActor [weak self] in
             guard let self = self else { return }
@@ -56,51 +61,98 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
             try? await Task.sleep(nanoseconds: 300_000_000)
             guard let topVC = self.getTopViewController() else { return }
 
-            guard let mutableContact = existingContact.mutableCopy() as? CNMutableContact else {
-                Log.error("Failed to create mutable copy of contact", category: .ui)
-                return
-            }
-            mutableContact.emailAddresses.append(
-                CNLabeledValue(label: CNLabelOther, value: emailToAdd as NSString)
-            )
-
-            let saveRequest = CNSaveRequest()
-            saveRequest.update(mutableContact)
-            let contactStore = CNContactStore()
-            let keysToFetch: [CNKeyDescriptor] = [CNContactViewController.descriptorForRequiredKeys()]
             let contactIdentifier = existingContact.identifier
+            let normalizedEmailToAdd = emailToAdd.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-            // Background thread for CNContactStore save + fetch
-            let updatedContact: CNContact? = await Task.detached(priority: .userInitiated) {
+            // Ensure we have enough data to update + re-display.
+            let keysToFetch: [CNKeyDescriptor] = [CNContactViewController.descriptorForRequiredKeys()]
+
+            // Always write the update ourselves so the user doesn't need to find a "Save" button in the
+            // contact UI (which may not be present for some contact sources / permission modes).
+            let updateResult: Result<CNContact, Error> = await Task.detached(priority: .userInitiated) {
+                let contactStore = CNContactStore()
                 do {
-                    try contactStore.execute(saveRequest)
-                    return try contactStore.unifiedContact(withIdentifier: contactIdentifier, keysToFetch: keysToFetch)
+                    let contact = try contactStore.unifiedContact(withIdentifier: contactIdentifier, keysToFetch: keysToFetch)
+                    guard let mutableContact = contact.mutableCopy() as? CNMutableContact else {
+                        return .failure(NSError(domain: "esc-chatmail", code: 1, userInfo: [
+                            NSLocalizedDescriptionKey: "Failed to create editable contact copy."
+                        ]))
+                    }
+
+                    let hasEmailAlready = contact.emailAddresses.contains { labeledValue in
+                        let existing = (labeledValue.value as String).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                        return existing == normalizedEmailToAdd
+                    }
+
+                    if !hasEmailAlready {
+                        mutableContact.emailAddresses.append(
+                            CNLabeledValue(label: CNLabelOther, value: emailToAdd as NSString)
+                        )
+
+                        let saveRequest = CNSaveRequest()
+                        saveRequest.update(mutableContact)
+                        try contactStore.execute(saveRequest)
+                    }
+
+                    let updated = try contactStore.unifiedContact(withIdentifier: contactIdentifier, keysToFetch: keysToFetch)
+                    return .success(updated)
                 } catch {
-                    Log.error("Failed to save email to contact", category: .ui, error: error)
-                    return nil
+                    return .failure(error)
                 }
             }.value
 
-            guard let contact = updatedContact else { return }
+            switch updateResult {
+            case .success(let updatedContact):
+                Task {
+                    await ContactsResolver.shared.invalidateCache(for: emailToAdd)
+                    await PersonCache.shared.invalidateEntry(for: emailToAdd)
+                }
 
-            let contactVC = CNContactViewController(for: contact)
-            contactVC.contactStore = contactStore
-            contactVC.delegate = self
-            contactVC.allowsEditing = true
-            contactVC.navigationItem.leftBarButtonItem = UIBarButtonItem(
-                barButtonSystemItem: .close,
-                target: self,
-                action: #selector(self.dismissTapped)
-            )
+                let contactVC = CNContactViewController(for: updatedContact)
+                contactVC.contactStore = CNContactStore()
+                contactVC.delegate = self
+                contactVC.allowsEditing = true
+                // Ensure the Edit/Done control exists even when presented modally.
+                contactVC.navigationItem.rightBarButtonItem = contactVC.editButtonItem
+                contactVC.navigationItem.leftBarButtonItem = UIBarButtonItem(
+                    barButtonSystemItem: .close,
+                    target: self,
+                    action: #selector(self.dismissTapped)
+                )
 
-            let navController = UINavigationController(rootViewController: contactVC)
-            navController.modalPresentationStyle = .pageSheet
-            self.presentedNavController = navController
-            topVC.present(navController, animated: true)
+                let navController = UINavigationController(rootViewController: contactVC)
+                navController.modalPresentationStyle = .pageSheet
+                self.presentedNavController = navController
+                topVC.present(navController, animated: true)
 
-            Task {
-                await ContactsResolver.shared.invalidateCache(for: emailToAdd)
-                await PersonCache.shared.invalidateEntry(for: emailToAdd)
+            case .failure(let error):
+                Log.error("Failed to add email to contact", category: .ui, error: error)
+
+                let status = CNContactStore.authorizationStatus(for: .contacts)
+                let isLimitedAccess: Bool
+                if #available(iOS 18.0, *) {
+                    isLimitedAccess = status == .limited
+                } else {
+                    isLimitedAccess = false
+                }
+                let needsFullAccess = isLimitedAccess || status == .denied
+
+                let alert = UIAlertController(
+                    title: "Couldn’t Save Contact",
+                    message: needsFullAccess
+                        ? "ESC Chatmail doesn’t have permission to edit contacts. Allow full Contacts access in Settings, then try again."
+                        : error.localizedDescription,
+                    preferredStyle: .alert
+                )
+
+                if needsFullAccess, let settingsURL = URL(string: UIApplication.openSettingsURLString) {
+                    alert.addAction(UIAlertAction(title: "Open Settings", style: .default) { _ in
+                        UIApplication.shared.open(settingsURL)
+                    })
+                }
+
+                alert.addAction(UIAlertAction(title: "OK", style: .cancel))
+                topVC.present(alert, animated: true)
             }
         }
     }
@@ -123,6 +175,7 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
                 await PersonCache.shared.invalidateEntry(for: email)
             }
         }
+        removeContactStoreDidChangeObserver()
         presentedNavController?.dismiss(animated: true)
     }
 
@@ -142,6 +195,33 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
                 await PersonCache.shared.invalidateEntry(for: email)
             }
         }
+        removeContactStoreDidChangeObserver()
         presentedNavController?.dismiss(animated: true)
+    }
+
+    @objc private func contactStoreDidChange(_ notification: Notification) {
+        guard let email = emailToInvalidate else { return }
+        removeContactStoreDidChangeObserver()
+        Task {
+            await ContactsResolver.shared.invalidateCache(for: email)
+            await PersonCache.shared.invalidateEntry(for: email)
+        }
+    }
+
+    private func startObservingContactStoreDidChange() {
+        guard !isObservingContactStoreDidChange else { return }
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(contactStoreDidChange(_:)),
+            name: .CNContactStoreDidChange,
+            object: nil
+        )
+        isObservingContactStoreDidChange = true
+    }
+
+    private func removeContactStoreDidChangeObserver() {
+        guard isObservingContactStoreDidChange else { return }
+        NotificationCenter.default.removeObserver(self, name: .CNContactStoreDidChange, object: nil)
+        isObservingContactStoreDidChange = false
     }
 }

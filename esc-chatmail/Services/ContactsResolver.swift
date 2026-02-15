@@ -38,6 +38,13 @@ actor ContactsResolver: ContactsResolving {
         let status = CNContactStore.authorizationStatus(for: .contacts)
         authorizationStatus = status
 
+        if #available(iOS 18.0, *) {
+            if status == .limited {
+                // Limited access is treated as authorized for our purposes
+                return
+            }
+        }
+
         switch status {
         case .authorized:
             return
@@ -51,9 +58,6 @@ actor ContactsResolver: ContactsResolving {
             throw ContactsError.accessDenied
         case .restricted:
             throw ContactsError.accessRestricted
-        case .limited:
-            // Limited access is treated as authorized for our purposes
-            return
         @unknown default:
             throw ContactsError.accessDenied
         }
