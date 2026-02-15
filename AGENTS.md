@@ -100,6 +100,15 @@ Notes:
 - Harness: `GoldenCorpusReplayTests` in `esc-chatmailTests/MessageProcessorTests.swift`
 - Run: `bash Scripts/run-tests.sh -only-testing 'esc-chatmailTests/GoldenCorpusReplayTests'`
 
+Agent requirement:
+- If you fix or change behavior in any of these areas, you MUST add (or update) a minimally-scoped, anonymized regression case in the golden corpus and run `GoldenCorpusReplayTests`:
+  - HTML/plain-text extraction (`TextProcessing.extractPlainText`, `unwrapEmailLineBreaks`)
+  - Quote/signature removal (`PlainTextQuoteRemover`, `PlainTextSignatureRemover`, `HTMLQuoteRemover`)
+  - Snippet/preview generation (`TextSnippetCreator`, `Message.conversationPreviewText`, conversation list snippet behavior)
+  - Display routing/policy (`MessageDisplayPolicy`)
+  - Newsletter detection (`MessageProcessor.calculateNewsletterScore`)
+- Prefer adding to an existing section (`plainTextQuoteCleanupCases`, `htmlToBubbleTextCases`, `displayPolicyCases`, `newsletterDetectionCases`). If the regression does not fit, extend the corpus schema + `GoldenCorpusReplayTests` rather than skipping the corpus.
+
 Workflow for cleanup/policy regressions:
 1) Add a failing real-world sample to the corpus (and a focused unit test if the bug is in a helper).
 2) Confirm the corpus test fails.

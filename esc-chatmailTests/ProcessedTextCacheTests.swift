@@ -306,6 +306,45 @@ final class ProcessedTextCacheTests: XCTestCase {
         XCTAssertEqual(lines.count, 3)
     }
 
+    func testExtractPlainText_preservesTableRowBoundaries() {
+        let html = """
+        <table>
+            <tr><td>From:</td><td>Kevin Thau &lt;kmthau@gmail.com&gt;</td></tr>
+            <tr><td>Sent:</td><td>Saturday, Feb 15, 2026 4:53 PM</td></tr>
+            <tr><td>To:</td><td>Jasmine &lt;jasmine@example.com&gt;</td></tr>
+            <tr><td>Subject:</td><td>Weekend</td></tr>
+        </table>
+        """
+
+        let result = TextProcessing.extractPlainText(from: html)
+
+        // Each table row should become its own line (so quote detection can match header blocks).
+        let lines = result.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        XCTAssertTrue(lines.contains(where: { $0.contains("From: Kevin Thau <kmthau@gmail.com>") }))
+        XCTAssertTrue(lines.contains(where: { $0.contains("Sent: Saturday, Feb 15, 2026 4:53 PM") }))
+        XCTAssertTrue(lines.contains(where: { $0.contains("To: Jasmine <jasmine@example.com>") }))
+        XCTAssertTrue(lines.contains(where: { $0.contains("Subject: Weekend") }))
+    }
+
+    func testTextSnippetCreator_removesHeaderQuoteBlockExtractedFromTableHTML() {
+        let html = """
+        <div>Great. Will do! Have a nice weekend!</div>
+        <div><br></div>
+        <table>
+            <tr><td>From:</td><td>Kevin Thau &lt;kmthau@gmail.com&gt;</td></tr>
+            <tr><td>Sent:</td><td>Saturday, Feb 15, 2026 4:53 PM</td></tr>
+            <tr><td>To:</td><td>Jasmine &lt;jasmine@example.com&gt;</td></tr>
+            <tr><td>Subject:</td><td>Weekend</td></tr>
+        </table>
+        <div>Quoted body starts here...</div>
+        """
+
+        let extracted = TextProcessing.extractPlainText(from: html)
+        let snippet = TextSnippetCreator.createSnippet(from: extracted, maxLength: Int.max, firstSentenceOnly: false)
+
+        XCTAssertEqual(snippet, "Great. Will do! Have a nice weekend!")
+    }
+
     func testExtractPlainText_decodesNumericEntities() {
         // &#160; is non-breaking space - the main entity we need to decode
         let html = "<p>Hello&#160;World&#160;Test&#160;2024</p>"

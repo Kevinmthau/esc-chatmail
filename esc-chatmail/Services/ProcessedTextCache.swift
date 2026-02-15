@@ -487,6 +487,17 @@ enum TextProcessing {
         // List items should each appear on their own line
         text = text.replacingOccurrences(of: "</li>", with: "\n", options: .caseInsensitive, range: nil)
 
+        // Tables: preserve row boundaries and add spacing between cells so text doesn't run together.
+        // This is important for quote removal: Outlook/Apple "From/Sent/To/Subject" quote headers are often rendered in tables.
+        text = text.replacingOccurrences(
+            of: "</t[dh]>",
+            with: " ",
+            options: [.regularExpression, .caseInsensitive],
+            range: nil
+        )
+        text = text.replacingOccurrences(of: "</tr>", with: "\n", options: .caseInsensitive, range: nil)
+        text = text.replacingOccurrences(of: "</table>", with: "\n\n", options: .caseInsensitive, range: nil)
+
         // Remove all HTML tags
         text = text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression, range: nil)
         // Remove truncated opening tags (e.g., snippet cut in middle of `<div style="...`).
