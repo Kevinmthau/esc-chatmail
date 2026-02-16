@@ -21,18 +21,26 @@ enum MessageDisplayPolicy {
             return true
         }
 
+        let normalizedSubject = subject?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        let isReplySubject = normalizedSubject.hasPrefix("re:")
+
         // Keep one-to-one replies in chat bubbles, even if upstream heuristics are noisy.
         if isOneToOneConversation {
             if isFromMe {
                 return false
             }
 
-            let normalizedSubject = subject?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased() ?? ""
-            if normalizedSubject.hasPrefix("re:") {
+            if isReplySubject {
                 return false
             }
+        }
+
+        // Keep personal reply chains in group threads as bubbles unless we have
+        // strong newsletter classification.
+        if isReplySubject && !isNewsletter {
+            return false
         }
 
         if isNewsletter {

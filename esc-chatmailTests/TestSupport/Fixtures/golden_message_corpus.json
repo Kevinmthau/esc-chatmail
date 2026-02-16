@@ -109,6 +109,18 @@
       "expectedShowHTMLPreview": true
     },
     {
+      "id": "group_reply_subject_personal_stays_bubble",
+      "notes": "Personal group-thread replies should stay in chat bubbles when not classified as newsletter.",
+      "hasHTMLSource": true,
+      "isForwardedEmail": false,
+      "isNewsletter": false,
+      "hasRichHTMLContent": true,
+      "isFromMe": false,
+      "isOneToOneConversation": false,
+      "subject": "Re: Next steps",
+      "expectedShowHTMLPreview": false
+    },
+    {
       "id": "one_to_one_rich_transactional_uses_preview",
       "notes": "Rich transactional/marketing HTML should still show a preview card in one-to-one conversations (not just group/list threads).",
       "hasHTMLSource": true,

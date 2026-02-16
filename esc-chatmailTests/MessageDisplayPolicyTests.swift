@@ -72,6 +72,20 @@ final class MessageDisplayPolicyTests: XCTestCase {
         XCTAssertTrue(shouldShow)
     }
 
+    func testShouldShowHTMLPreview_groupReplySubject_notNewsletter_returnsFalse() {
+        let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
+            hasHTMLSource: true,
+            isForwardedEmail: false,
+            isNewsletter: false,
+            hasRichHTMLContent: true,
+            isFromMe: false,
+            isOneToOneConversation: false,
+            subject: "Re: Next steps"
+        )
+
+        XCTAssertFalse(shouldShow)
+    }
+
     func testShouldShowHTMLPreview_oneToOneReplySubject_overridesNewsletterFalsePositive() {
         let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
             hasHTMLSource: true,
