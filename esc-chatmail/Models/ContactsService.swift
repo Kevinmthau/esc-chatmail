@@ -24,8 +24,16 @@ final class ContactsService: ObservableObject {
         let imageDataAvailable: Bool
         
         init(from cnContact: CNContact) {
-            let givenName = cnContact.givenName
-            let familyName = cnContact.familyName
+            func normalizeSingleLine(_ value: String) -> String {
+                // Contacts can contain unexpected newlines/whitespace; keep display strings single-line.
+                value
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+                    .joined(separator: " ")
+            }
+
+            let givenName = normalizeSingleLine(cnContact.givenName)
+            let familyName = normalizeSingleLine(cnContact.familyName)
             
             if !givenName.isEmpty && !familyName.isEmpty {
                 self.displayName = "\(givenName) \(familyName)"
@@ -34,10 +42,12 @@ final class ContactsService: ObservableObject {
             } else if !familyName.isEmpty {
                 self.displayName = familyName
             } else {
-                self.displayName = cnContact.emailAddresses.first?.value as String? ?? "Unknown"
+                self.displayName = normalizeSingleLine(cnContact.emailAddresses.first?.value as String? ?? "Unknown")
             }
             
-            self.emails = cnContact.emailAddresses.map { $0.value as String }
+            self.emails = cnContact.emailAddresses
+                .map { normalizeSingleLine($0.value as String) }
+                .filter { !$0.isEmpty }
             self.primaryEmail = self.emails.first ?? ""
             self.imageData = cnContact.thumbnailImageData
             self.imageDataAvailable = cnContact.thumbnailImageData != nil

@@ -5,11 +5,25 @@ import ContactsUI
 struct ContactPickerView: UIViewControllerRepresentable {
     let onContactSelected: (CNContact) -> Void
     let onCancel: () -> Void
+    /// Controls which contact properties (if any) are shown as subtitle text in the picker list.
+    /// Use an empty array (`[]`) to show name only.
+    let displayedPropertyKeys: [String]?
     @Environment(\.dismiss) private var dismiss
+
+    init(
+        onContactSelected: @escaping (CNContact) -> Void,
+        onCancel: @escaping () -> Void,
+        displayedPropertyKeys: [String]? = nil
+    ) {
+        self.onContactSelected = onContactSelected
+        self.onCancel = onCancel
+        self.displayedPropertyKeys = displayedPropertyKeys
+    }
 
     func makeUIViewController(context: Context) -> CNContactPickerViewController {
         let picker = CNContactPickerViewController()
         picker.delegate = context.coordinator
+        picker.displayedPropertyKeys = displayedPropertyKeys
         return picker
     }
 

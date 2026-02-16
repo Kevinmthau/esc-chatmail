@@ -13,12 +13,22 @@ struct ParticipantRow: View {
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text(person.displayName ?? person.email)
+                let trimmedDisplayName = person.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let displayName = (trimmedDisplayName?.isEmpty == false) ? trimmedDisplayName : nil
+                let trimmedEmail = person.email.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                Text(displayName ?? trimmedEmail)
                     .font(.body)
-                if person.displayName != nil {
-                    Text(person.email)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                if let displayName,
+                   !displayName.localizedCaseInsensitiveContains(trimmedEmail) {
+                    Text(trimmedEmail)
                         .font(.caption)
                         .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
             }
 

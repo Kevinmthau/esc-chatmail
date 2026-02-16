@@ -193,9 +193,13 @@ struct RecipientInputSection: View {
                                     Text(contact.displayName)
                                         .font(.system(size: 16))
                                         .foregroundColor(.primary)
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
                                     Text(contact.primaryEmail)
                                         .font(.system(size: 13))
                                         .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
                                 }
 
                                 Spacer()
