@@ -3,13 +3,6 @@ import SwiftUI
 /// Displays the content portion of a message bubble.
 /// Handles rich HTML, plain text, attachments, and empty states.
 struct MessageContentView: View {
-    /// Pre-compiled regex to detect actual HTML tags (not math expressions like 5 < 10 > 3)
-    private static let htmlTagPattern: NSRegularExpression? = {
-        try? NSRegularExpression(
-            pattern: "<[a-zA-Z][a-zA-Z0-9]*(?:\\s[^>]*)?>|</[a-zA-Z][a-zA-Z0-9]*>|<[a-zA-Z][a-zA-Z0-9]*(?:\\s[^>\\n]*)?$",
-            options: []
-        )
-    }()
     let message: Message
     let style: MessageBubbleStyle
     let showHTMLPreview: Bool
@@ -219,41 +212,16 @@ struct MessageContentView: View {
     /// Uses the same processing as ProcessedTextCache but preserves line breaks
     /// (unlike cleanedSnippet which destroyed all newlines for conversation list previews)
     private func processedText(_ text: String?) -> String? {
-        guard let text = text else { return nil }
-
-        var processed = RawEmailSourceSanitizer.extractDisplayText(from: text)
-
-        // If text contains actual HTML tags, strip HTML quotes first
-        // This ensures consistency with ProcessedTextCache which also uses HTMLQuoteRemover
-        // Uses proper regex to avoid false positives on math like "5 < 10 > 3"
-        if Self.containsHTMLTags(text) {
-            // Always extract plain text from HTML content
-            if let strippedHTML = HTMLQuoteRemover.removeQuotes(from: text) {
-                processed = TextProcessing.extractPlainText(from: strippedHTML)
-            } else {
-                // HTMLQuoteRemover returned nil (empty result) - the HTML was entirely quotes
-                // Extract plain text and let plain text quote stripping handle it
-                processed = TextProcessing.extractPlainText(from: text)
-            }
-        }
-
-        let decoded = HTMLEntityDecoder.decode(processed)
-        let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: decoded)
-        // Use a single quote/signature extraction path to avoid double-cleaning mismatches
-        // between immediate fallback rendering and cached/background rendering.
-        let extractionResult = PlainTextQuoteRemover.extractQuotes(from: unwrapped)
-        // Format sign-off line breaks (handles "...help. Regards, Kevin" → proper line breaks)
-        let result = TextProcessing.formatSignOffLineBreaks(in: extractionResult.mainContent)
-        return result.isEmpty ? nil : result
-    }
-
-    /// Checks if text contains actual HTML tags (not math expressions)
-    private static func containsHTMLTags(_ text: String) -> Bool {
-        guard let regex = htmlTagPattern else {
-            // Fallback to simple check if regex compilation failed
-            return text.contains("<") && text.contains(">")
-        }
-        let range = NSRange(location: 0, length: text.utf16.count)
-        return regex.firstMatch(in: text, options: [], range: range) != nil
+        let result = ChatBubbleTextProcessor.process(
+            content: text,
+            options: ChatBubbleTextProcessorOptions(
+                inputKind: .autoDetectHTML,
+                sanitizeRawEmailSource: true,
+                decodeHTMLEntities: true,
+                formatSignOffLineBreaks: true,
+                classifyRichContent: false
+            )
+        )
+        return result.mainText
     }
 }

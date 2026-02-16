@@ -234,14 +234,20 @@ struct MessageBubble: View {
 
             // If no HTML content, try bodyText
             if processedResult.plainText == nil, let text = bodyText {
-                let extractedBody = RawEmailSourceSanitizer.extractDisplayText(from: text)
-                let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: extractedBody)
-                let extractionResult = PlainTextQuoteRemover.extractQuotes(from: unwrapped)
-                // Only use if we actually have content after stripping
+                let fallbackResult = ChatBubbleTextProcessor.process(
+                    content: text,
+                    options: ChatBubbleTextProcessorOptions(
+                        inputKind: .plainText,
+                        sanitizeRawEmailSource: true,
+                        decodeHTMLEntities: true,
+                        formatSignOffLineBreaks: true,
+                        classifyRichContent: false
+                    )
+                )
                 processedResult = (
-                    extractionResult.mainContent.isEmpty ? nil : extractionResult.mainContent,
+                    fallbackResult.mainText,
                     false,
-                    extractionResult.quotedParts
+                    fallbackResult.quotedParts
                 )
             }
 

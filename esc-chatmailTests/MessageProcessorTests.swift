@@ -506,7 +506,17 @@ final class GoldenCorpusReplayTests: XCTestCase {
 
         for scenario in corpus.plainTextQuoteCleanupCases {
             XCTContext.runActivity(named: "plainText:\(scenario.id)") { _ in
-                let actual = PlainTextQuoteRemover.removeQuotes(from: scenario.input) ?? ""
+                let result = ChatBubbleTextProcessor.process(
+                    content: scenario.input,
+                    options: ChatBubbleTextProcessorOptions(
+                        inputKind: .plainText,
+                        sanitizeRawEmailSource: true,
+                        decodeHTMLEntities: true,
+                        formatSignOffLineBreaks: true,
+                        classifyRichContent: false
+                    )
+                )
+                let actual = result.mainText ?? ""
                 XCTAssertEqual(
                     normalize(actual),
                     normalize(scenario.expected),
@@ -517,11 +527,17 @@ final class GoldenCorpusReplayTests: XCTestCase {
 
         for scenario in corpus.htmlToBubbleTextCases {
             XCTContext.runActivity(named: "htmlToText:\(scenario.id)") { _ in
-                let strippedHTML = HTMLQuoteRemover.removeQuotes(from: scenario.inputHTML) ?? scenario.inputHTML
-                let extracted = TextProcessing.extractPlainText(from: strippedHTML)
-                let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: extracted)
-                let main = PlainTextQuoteRemover.extractQuotes(from: unwrapped).mainContent
-                let formatted = TextProcessing.formatSignOffLineBreaks(in: main)
+                let result = ChatBubbleTextProcessor.process(
+                    content: scenario.inputHTML,
+                    options: ChatBubbleTextProcessorOptions(
+                        inputKind: .html,
+                        sanitizeRawEmailSource: false,
+                        decodeHTMLEntities: true,
+                        formatSignOffLineBreaks: true,
+                        classifyRichContent: false
+                    )
+                )
+                let formatted = result.mainText ?? ""
 
                 XCTAssertEqual(
                     normalize(formatted),

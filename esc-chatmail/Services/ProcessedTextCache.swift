@@ -1,12 +1,169 @@
 import Foundation
 
+enum ChatBubbleTextInputKind: Sendable {
+    case html
+    case plainText
+    case autoDetectHTML
+}
+
+struct ChatBubbleTextProcessorOptions: Sendable {
+    let inputKind: ChatBubbleTextInputKind
+    let sanitizeRawEmailSource: Bool
+    let decodeHTMLEntities: Bool
+    let formatSignOffLineBreaks: Bool
+    let classifyRichContent: Bool
+
+    init(
+        inputKind: ChatBubbleTextInputKind,
+        sanitizeRawEmailSource: Bool = true,
+        decodeHTMLEntities: Bool = true,
+        formatSignOffLineBreaks: Bool = true,
+        classifyRichContent: Bool = false
+    ) {
+        self.inputKind = inputKind
+        self.sanitizeRawEmailSource = sanitizeRawEmailSource
+        self.decodeHTMLEntities = decodeHTMLEntities
+        self.formatSignOffLineBreaks = formatSignOffLineBreaks
+        self.classifyRichContent = classifyRichContent
+    }
+}
+
+struct ChatBubbleTextProcessingResult: Sendable {
+    let mainText: String?
+    let quotedParts: [QuotedPart]
+    let hasRichContent: Bool
+
+    init(mainText: String?, quotedParts: [QuotedPart] = [], hasRichContent: Bool = false) {
+        self.mainText = mainText
+        self.quotedParts = quotedParts
+        self.hasRichContent = hasRichContent
+    }
+}
+
+enum ChatBubbleTextProcessor {
+    // Detects genuine HTML tags while avoiding false positives on expressions like `5 < 10 > 3`.
+    private static let htmlTagPattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: "<[a-zA-Z][a-zA-Z0-9]*(?:\\s[^>]*)?>|</[a-zA-Z][a-zA-Z0-9]*>|<[a-zA-Z][a-zA-Z0-9]*(?:\\s[^>\\n]*)?$",
+            options: []
+        )
+    }()
+
+    static func process(
+        content: String?,
+        options: ChatBubbleTextProcessorOptions
+    ) -> ChatBubbleTextProcessingResult {
+        guard let content, !content.isEmpty else {
+            return ChatBubbleTextProcessingResult(mainText: nil, quotedParts: [], hasRichContent: false)
+        }
+
+        let inputKind = resolvedInputKind(for: content, requestedKind: options.inputKind)
+        if inputKind == .html {
+            return processHTML(
+                content,
+                decodeHTMLEntities: options.decodeHTMLEntities,
+                formatSignOffLineBreaks: options.formatSignOffLineBreaks,
+                classifyRichContent: options.classifyRichContent
+            )
+        }
+
+        return processPlainText(
+            content,
+            sanitizeRawEmailSource: options.sanitizeRawEmailSource,
+            decodeHTMLEntities: options.decodeHTMLEntities,
+            formatSignOffLineBreaks: options.formatSignOffLineBreaks
+        )
+    }
+
+    private static func resolvedInputKind(
+        for content: String,
+        requestedKind: ChatBubbleTextInputKind
+    ) -> ChatBubbleTextInputKind {
+        switch requestedKind {
+        case .autoDetectHTML:
+            containsHTMLTags(content) ? .html : .plainText
+        case .html, .plainText:
+            requestedKind
+        }
+    }
+
+    private static func processHTML(
+        _ html: String,
+        decodeHTMLEntities: Bool,
+        formatSignOffLineBreaks: Bool,
+        classifyRichContent: Bool
+    ) -> ChatBubbleTextProcessingResult {
+        // Strip quoted/signature content from HTML first. If that pass removes too much
+        // (e.g., transactional templates), fall back to quote-only cleanup or original HTML.
+        let cleanedHTML = ProcessedTextCache.cleanedHTMLForProcessing(html)
+
+        var plainTextAndQuotes = ProcessedTextCache.extractPlainTextAndQuotes(
+            from: cleanedHTML,
+            decodeHTMLEntities: decodeHTMLEntities,
+            formatSignOffLineBreaks: formatSignOffLineBreaks
+        )
+
+        if plainTextAndQuotes.plainText == nil {
+            plainTextAndQuotes = ProcessedTextCache.extractPlainTextAndQuotes(
+                from: html,
+                decodeHTMLEntities: decodeHTMLEntities,
+                formatSignOffLineBreaks: formatSignOffLineBreaks
+            )
+        }
+
+        let hasRichContent = classifyRichContent ? ProcessedTextCache.hasGenuineRichContent(cleanedHTML) : false
+        return ChatBubbleTextProcessingResult(
+            mainText: plainTextAndQuotes.plainText,
+            quotedParts: plainTextAndQuotes.quotedParts,
+            hasRichContent: hasRichContent
+        )
+    }
+
+    private static func processPlainText(
+        _ text: String,
+        sanitizeRawEmailSource: Bool,
+        decodeHTMLEntities: Bool,
+        formatSignOffLineBreaks: Bool
+    ) -> ChatBubbleTextProcessingResult {
+        var processed = text
+        if sanitizeRawEmailSource {
+            processed = RawEmailSourceSanitizer.extractDisplayText(from: processed)
+        }
+
+        if decodeHTMLEntities {
+            processed = HTMLEntityDecoder.decode(processed)
+        }
+
+        let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: processed)
+        let extractionResult = PlainTextQuoteRemover.extractQuotes(from: unwrapped)
+        let mainContent = formatSignOffLineBreaks
+            ? TextProcessing.formatSignOffLineBreaks(in: extractionResult.mainContent)
+            : extractionResult.mainContent
+        let trimmed = mainContent.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return ChatBubbleTextProcessingResult(
+            mainText: trimmed.isEmpty ? nil : trimmed,
+            quotedParts: extractionResult.quotedParts,
+            hasRichContent: false
+        )
+    }
+
+    private static func containsHTMLTags(_ text: String) -> Bool {
+        guard let regex = htmlTagPattern else {
+            return text.contains("<") && text.contains(">")
+        }
+        let range = NSRange(location: 0, length: text.utf16.count)
+        return regex.firstMatch(in: text, options: [], range: range) != nil
+    }
+}
+
 /// Thread-safe cache for processed message text content
 /// Eliminates redundant HTML parsing and regex operations during scroll
 /// Uses LRUCacheActor for automatic eviction management
 actor ProcessedTextCache: MemoryWarningHandler {
     static let shared = ProcessedTextCache()
     // Bump to invalidate cached entries when processing logic changes.
-    private static let processingVersion = "2026-02-15-rich-v1-apple-link-preview"
+    private static let processingVersion = "2026-02-16-chat-bubble-unified-v1"
 
     /// Cached text content with rich content indicator and extracted quotes
     struct CachedText: Sendable {
@@ -148,33 +305,22 @@ actor ProcessedTextCache: MemoryWarningHandler {
         bodyStorageURI: String? = nil,
         handler: HTMLContentHandler
     ) -> (plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart]) {
-        var plainTextAndQuotes: (plainText: String?, quotedParts: [QuotedPart])?
-        var hasRichContent = false
-
         let html = loadHTML(messageId: messageId, bodyStorageURI: bodyStorageURI, handler: handler)
         if let html {
-            // Strip quoted/signature content from HTML first. If that pass removes too much (e.g., a
-            // transactional template where our signature heuristics false-positive), fall back to
-            // quote-only cleanup or ultimately the original HTML.
-            let cleanedHTML = cleanedHTMLForProcessing(html)
-
-            plainTextAndQuotes = extractPlainTextAndQuotes(from: cleanedHTML)
-
-            // If quote removal stripped everything, try without HTML quote removal
-            if plainTextAndQuotes?.plainText == nil {
-                plainTextAndQuotes = extractPlainTextAndQuotes(from: html)
-            }
-
-            // Check for rich content in cleaned HTML only (not quoted sections)
-            // Uses heuristic to distinguish newsletters from personal emails with signature cruft
-            hasRichContent = hasGenuineRichContent(cleanedHTML)
+            let result = ChatBubbleTextProcessor.process(
+                content: html,
+                options: ChatBubbleTextProcessorOptions(
+                    inputKind: .html,
+                    sanitizeRawEmailSource: false,
+                    decodeHTMLEntities: true,
+                    formatSignOffLineBreaks: true,
+                    classifyRichContent: true
+                )
+            )
+            return (result.mainText, result.hasRichContent, result.quotedParts)
         }
 
-        return (
-            plainTextAndQuotes?.plainText,
-            hasRichContent,
-            plainTextAndQuotes?.quotedParts ?? []
-        )
+        return (nil, false, [])
     }
 
     nonisolated private static func loadHTML(
@@ -199,7 +345,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
     /// Determines if HTML contains genuine rich content (newsletters, receipts) vs personal email signature cruft
     /// Personal emails can have elaborate signatures (logo + headshot + 6-8 social icons + layout tables)
     /// Newsletters and marketing emails have many elements AND substantial text content
-    nonisolated private static func hasGenuineRichContent(_ html: String) -> Bool {
+    nonisolated fileprivate static func hasGenuineRichContent(_ html: String) -> Bool {
         // Apple Mail injects "apple-rich-link" previews (tables, role="button", inline images) for regular
         // person-to-person emails that contain a URL. Treat those blocks as non-rich to avoid routing
         // personal messages into the HTML preview path.
@@ -410,19 +556,24 @@ actor ProcessedTextCache: MemoryWarningHandler {
         return nil
     }
 
-    nonisolated private static func extractPlainTextAndQuotes(
-        from html: String
+    nonisolated fileprivate static func extractPlainTextAndQuotes(
+        from html: String,
+        decodeHTMLEntities: Bool = false,
+        formatSignOffLineBreaks: Bool = true
     ) -> (plainText: String?, quotedParts: [QuotedPart]) {
         let extracted = TextProcessing.extractPlainText(from: html)
         guard !extracted.isEmpty else { return (nil, []) }
 
-        let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: extracted)
+        let decoded = decodeHTMLEntities ? HTMLEntityDecoder.decode(extracted) : extracted
+        let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: decoded)
         let extractionResult = PlainTextQuoteRemover.extractQuotes(from: unwrapped)
-        let formatted = TextProcessing.formatSignOffLineBreaks(in: extractionResult.mainContent)
+        let formatted = formatSignOffLineBreaks
+            ? TextProcessing.formatSignOffLineBreaks(in: extractionResult.mainContent)
+            : extractionResult.mainContent
         return (formatted.isEmpty ? nil : formatted, extractionResult.quotedParts)
     }
 
-    nonisolated private static func cleanedHTMLForProcessing(_ html: String) -> String {
+    nonisolated fileprivate static func cleanedHTMLForProcessing(_ html: String) -> String {
         let quotedAndSignature = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
         if HTMLMeaningfulContentChecker.hasMeaningfulContent(quotedAndSignature) {
             return quotedAndSignature
