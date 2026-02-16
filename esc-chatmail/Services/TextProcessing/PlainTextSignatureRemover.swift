@@ -203,6 +203,10 @@ enum PlainTextSignatureRemover {
             }
         }
         if let hardIndicatorIndex = earliestHardIndicator {
+            let hardIndicatorLine = lines[hardIndicatorIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+            if isDelimiterLine(hardIndicatorLine) {
+                return joinLines(lines, upTo: hardIndicatorIndex)
+            }
             let startLine = findSignatureStartLine(before: hardIndicatorIndex, lines: lines)
             return joinLines(lines, upTo: startLine)
         }
@@ -738,5 +742,9 @@ enum PlainTextSignatureRemover {
         guard let regex else { return false }
         let range = NSRange(location: 0, length: text.utf16.count)
         return regex.firstMatch(in: text, options: [], range: range) != nil
+    }
+
+    private static func isDelimiterLine(_ line: String) -> Bool {
+        matchesRegex(delimiterLinePattern, in: line)
     }
 }

@@ -41,6 +41,12 @@
       "notes": "Signature blocks where the phone row degrades to a bare 'T' label should still be fully removed before Outlook-style quoted headers.",
       "input": "Hi Kevin,\n\nThe estimated payout figure was changed to $30 million-please see attached.\n\nExample LLP\nMonica Example\nPartner | Certified Family Law Specialist\nT\n\nmonica@examplelaw.com<mailto:monica@examplelaw.com>\n425 Market Street, Suite 2900\nSan Francisco, CA 94105\nwww.examplelaw.com<http://www.examplelaw.com>\n\nFrom: Kevin Example <kevin@example.com>\nSent: Thursday, February 12, 2026 12:45 PM\nTo: Monica Example <monica@examplelaw.com>\nSubject: Re: Draft Settlement Letter\n\nThanks for sending this over.",
       "expected": "Hi Kevin,\n\nThe estimated payout figure was changed to $30 million-please see attached."
+    },
+    {
+      "id": "autoresponder_signature_delimiter_and_image_block_removed",
+      "notes": "Auto-reply signatures that start at '--' and include image/link placeholders should be removed while preserving the explicit sign-off name above the delimiter.",
+      "input": "Hello,\n\nSorry to miss your message.  I am away from the office returning on\nTuesday (2/17)\n\nIf this matter is urgent, please contact:\n- Shane Cumings at shane.cumings@adviceperiod.com or (424) 394-1922\n- Victoria Hannon at victoria.hannon@adviceperiod.com or (312) 348-5477\n\nThank you,\n\nDominic\n\n-- \n\n\n[image: Company logo] <http://adviceperiod.com>\nDominic Cozzetto, CFA\nPartner Advisor\ndominic.cozzetto@adviceperiod.com\nDirect: (949) 407-8746\nMobile: (206) 965-0877\nadviceperiod.com\n\n120 Newport Center Drive\nNewport Beach, CA 92660\n\n\n*Click here to upload documents\n<https://marinerholdingsllc.app.box.com/f/f25737f1a4c6487cbd5344d017275e60>*\n\n [image: -] <https://twitter.com/adviceperiod> [image: -]\n<https://www.linkedin.com/company/adviceperiod> [image: -]\n<https://www.instagram.com/adviceperiod_llc/>",
+      "expected": "Hello,\n\nSorry to miss your message.  I am away from the office returning on\n\nTuesday (2/17)\n\nIf this matter is urgent, please contact:\n\n- Shane Cumings at shane.cumings@adviceperiod.com or (424) 394-1922\n\n- Victoria Hannon at victoria.hannon@adviceperiod.com or (312) 348-5477\n\nThank you,\n\nDominic"
     }
   ],
   "htmlToBubbleTextCases": [

@@ -281,6 +281,23 @@ final class ProcessedTextCacheTests: XCTestCase {
         XCTAssertTrue(result.contains("c) Third option"))
     }
 
+    func testUnwrapEmailLineBreaks_keepsSignatureDelimiterSeparated() {
+        let text = """
+        Thank you,
+
+        Dominic
+
+        -- 
+
+        [image: Company logo] <http://adviceperiod.com>
+        """
+
+        let result = TextProcessing.unwrapEmailLineBreaks(from: text)
+
+        XCTAssertTrue(result.contains("Dominic\n\n--\n\n[image: Company logo]"))
+        XCTAssertFalse(result.contains("Dominic --"))
+    }
+
     // MARK: - extractPlainText Tests
 
     func testExtractPlainText_removesScriptTags() {

@@ -384,6 +384,48 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(result, "Let me know.\n\nThanks!")
     }
 
+    func testRemoveSignature_delimiterAfterThankYouPreservesSignOffAndBody() {
+        let text = """
+        Hello,
+
+        Sorry to miss your message. I am away from the office returning on
+        Tuesday (2/17)
+
+        If this matter is urgent, please contact:
+        - Shane Cumings at shane.cumings@adviceperiod.com or (424) 394-1922
+        - Victoria Hannon at victoria.hannon@adviceperiod.com or (312) 348-5477
+
+        Thank you,
+
+        Dominic
+
+        --
+
+        [image: Company logo] <http://adviceperiod.com>
+        Dominic Cozzetto, CFA
+        Partner Advisor
+        dominic.cozzetto@adviceperiod.com
+        Direct: (949) 407-8746
+        Mobile: (206) 965-0877
+        """
+
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        XCTAssertEqual(result, """
+        Hello,
+
+        Sorry to miss your message. I am away from the office returning on
+        Tuesday (2/17)
+
+        If this matter is urgent, please contact:
+        - Shane Cumings at shane.cumings@adviceperiod.com or (424) 394-1922
+        - Victoria Hannon at victoria.hannon@adviceperiod.com or (312) 348-5477
+
+        Thank you,
+
+        Dominic
+        """)
+    }
+
     func testRemoveSignature_multiPartLawFirmBlockWithInternalBlankLine_removesEntireBlock() {
         let text = """
         Hi Kevin,

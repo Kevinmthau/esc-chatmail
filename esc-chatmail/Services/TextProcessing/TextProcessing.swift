@@ -10,6 +10,13 @@ enum TextProcessing {
         )
     }()
 
+    private static let signatureDelimiterPattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: "^(--|--\\s|---|___|—|–|-)$|^[-_]{2,}$",
+            options: [.caseInsensitive]
+        )
+    }()
+
     /// Checks if a line starts with a list item marker
     static func isListItem(_ line: String) -> Bool {
         guard let regex = listItemPattern else {
@@ -247,6 +254,8 @@ enum TextProcessing {
                 // Check if we should join across the blank line(s)
                 if nextNonEmptyIndex < lines.count {
                     let nextLine = lines[nextNonEmptyIndex].trimmingCharacters(in: .whitespaces)
+                    let currentIsSignatureDelimiter = isSignatureDelimiterLine(currentParagraph)
+                    let nextIsSignatureDelimiter = isSignatureDelimiterLine(nextLine)
                     let lastChar = currentParagraph.last
                     let firstChar = nextLine.first
 
@@ -254,7 +263,10 @@ enum TextProcessing {
                     // Join unless next line starts with uppercase (new sentence)
                     let startsWithUppercase = firstChar?.isUppercase ?? false
 
-                    if !endsWithPunctuation && !startsWithUppercase {
+                    if !endsWithPunctuation &&
+                        !startsWithUppercase &&
+                        !currentIsSignatureDelimiter &&
+                        !nextIsSignatureDelimiter {
                         // This is a soft wrap across blank lines - skip the blanks and continue joining
                         continue
                     }
@@ -284,8 +296,15 @@ enum TextProcessing {
                 // Don't join if next line looks like a list item
                 // Handles: 1. 10. 100. a) A. - * • · (a) (1)
                 let isListItem = TextProcessing.isListItem(trimmedLine)
+                let currentIsSignatureDelimiter = isSignatureDelimiterLine(currentParagraph)
+                let nextIsSignatureDelimiter = isSignatureDelimiterLine(trimmedLine)
 
-                if !endsWithPunctuation && !endsWithColon && !startsWithUppercase && !isListItem {
+                if !endsWithPunctuation &&
+                    !endsWithColon &&
+                    !startsWithUppercase &&
+                    !isListItem &&
+                    !currentIsSignatureDelimiter &&
+                    !nextIsSignatureDelimiter {
                     // Join with space (unwrap soft line break)
                     currentParagraph += " " + trimmedLine
                 } else {
@@ -303,5 +322,12 @@ enum TextProcessing {
         // Filter out empty strings and join with double newlines for paragraph breaks
         let paragraphs = result.filter { !$0.isEmpty }
         return paragraphs.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func isSignatureDelimiterLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let pattern = signatureDelimiterPattern else { return false }
+        let range = NSRange(location: 0, length: trimmed.utf16.count)
+        return pattern.firstMatch(in: trimmed, options: [], range: range) != nil
     }
 }
