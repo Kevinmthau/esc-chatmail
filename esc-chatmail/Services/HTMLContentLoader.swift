@@ -207,20 +207,132 @@ final class HTMLContentLoader {
     }
 
     private func convertPlainTextToHTML(_ text: String) -> String {
-        let escaped = text
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\n", with: "<br>")
+        let normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+
+        // Match Apple Mail's default behavior: display the main content and collapse
+        // quoted history behind a "See More" affordance.
+        // Keep the sender's sign-off visible (signature removal is a chat-bubble concern).
+        let extraction = PlainTextQuoteRemover.extractQuotes(from: normalized, removingSignature: false)
+
+        func escapeHTML(_ input: String) -> String {
+            input
+                .replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "<", with: "&lt;")
+                .replacingOccurrences(of: ">", with: "&gt;")
+        }
+
+        let main = escapeHTML(extraction.mainContent)
+
+        let quotedHTML: String = extraction.quotedParts.map { part in
+            let quote = escapeHTML(part.text)
+            let attribution = part.attribution.map { escapeHTML($0) }
+
+            // Keep nesting conservative; this is a display hint, not a full quote formatter.
+            let level = max(0, min(part.nestingLevel, 3))
+            let extraIndent = level > 0 ? "margin-left: \(level * 10)px;" : ""
+
+            var block = ""
+            if let attribution, !attribution.isEmpty {
+                block += "<div class=\"esc-plain-quote-attr\">\(attribution)</div>"
+            }
+            block += "<blockquote class=\"esc-plain-quote\" style=\"\(extraIndent)\">\(quote)</blockquote>"
+            return block
+        }.joined(separator: "\n")
+
+        // If there's no main content, don't hide everything behind "See More".
+        let detailsSection: String
+        if !quotedHTML.isEmpty && !main.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            detailsSection = """
+            <details class="esc-plain-details">
+              <summary>See More</summary>
+              <div class="esc-plain-quotes">
+                \(quotedHTML)
+              </div>
+            </details>
+            """
+        } else if !quotedHTML.isEmpty {
+            detailsSection = """
+            <div class="esc-plain-quotes">
+              \(quotedHTML)
+            </div>
+            """
+        } else {
+            detailsSection = ""
+        }
+
+        // Style block lives in the fragment so we can keep the wrapper logic generic.
+        // (This fragment is sanitized and then wrapped into a full document by HTMLDisplayWrapper.)
+        let styles = """
+        <style id="esc-plain-text-styles">
+          .esc-plain-main {
+            white-space: pre-wrap;
+            overflow-wrap: break-word;
+            word-break: break-word;
+            font-size: 17px;
+            line-height: 1.45;
+          }
+
+          .esc-plain-details {
+            margin-top: 14px;
+          }
+
+          .esc-plain-details > summary {
+            list-style: none;
+            color: #007AFF;
+            font-size: 15px;
+            font-weight: 500;
+            user-select: none;
+            -webkit-user-select: none;
+          }
+
+          .esc-plain-details > summary::-webkit-details-marker {
+            display: none;
+          }
+
+          .esc-plain-quotes {
+            margin-top: 10px;
+          }
+
+          .esc-plain-quote-attr {
+            white-space: pre-wrap;
+            overflow-wrap: break-word;
+            word-break: break-word;
+            font-size: 15px;
+            line-height: 1.35;
+            color: rgba(0, 0, 0, 0.6);
+            margin: 0 0 6px 0;
+          }
+
+          .esc-plain-quote {
+            white-space: pre-wrap;
+            overflow-wrap: break-word;
+            word-break: break-word;
+            font-size: 15px;
+            line-height: 1.35;
+            margin: 0 0 10px 0;
+            padding-left: 12px;
+            border-left: 2px solid rgba(0, 0, 0, 0.18);
+            color: rgba(0, 0, 0, 0.65);
+          }
+
+          @media (prefers-color-scheme: dark) {
+            .esc-plain-quote-attr {
+              color: rgba(255, 255, 255, 0.65);
+            }
+            .esc-plain-quote {
+              border-left-color: rgba(255, 255, 255, 0.22);
+              color: rgba(255, 255, 255, 0.70);
+            }
+          }
+        </style>
+        """
 
         return """
-        <html>
-        <body>
-        <pre style="white-space: pre-wrap; word-wrap: break-word; font-family: -apple-system, system-ui;">
-        \(escaped)
-        </pre>
-        </body>
-        </html>
+        \(styles)
+        <div class="esc-plain-main">\(main)</div>
+        \(detailsSection)
         """
     }
 }

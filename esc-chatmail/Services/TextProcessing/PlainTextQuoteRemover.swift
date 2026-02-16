@@ -81,8 +81,9 @@ enum PlainTextQuoteRemover {
 
     /// Extracts quotes from plain text email content, returning both main content and quoted parts
     /// - Parameter text: The plain text content to process
+    /// - Parameter removingSignature: Whether to remove trailing signature blocks from the main content
     /// - Returns: QuoteExtractionResult with main content and extracted quotes
-    static func extractQuotes(from text: String) -> QuoteExtractionResult {
+    static func extractQuotes(from text: String, removingSignature: Bool = true) -> QuoteExtractionResult {
         var cleanText = text
         var quotedParts: [QuotedPart] = []
         var earliestQuoteIndex = cleanText.count
@@ -128,8 +129,10 @@ enum PlainTextQuoteRemover {
             cleanText = String(cleanText[..<endIndex])
         }
 
-        // Remove signatures
-        cleanText = removeSignature(from: cleanText)
+        // Remove signatures (optional).
+        if removingSignature {
+            cleanText = removeSignature(from: cleanText)
+        }
 
         let mainContent = cleanText.trimmingCharacters(in: .whitespacesAndNewlines)
         return QuoteExtractionResult(mainContent: mainContent, quotedParts: quotedParts)
