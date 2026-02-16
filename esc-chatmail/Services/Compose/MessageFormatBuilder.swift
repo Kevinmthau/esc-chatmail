@@ -112,22 +112,12 @@ struct MessageFormatBuilder {
         }
 
         guard let uri = message.bodyStorageURI,
-              let resolved = resolveStorageURI(uri),
+              let resolved = StorageURIResolver.resolve(uri),
               FileManager.default.fileExists(atPath: resolved.path) else {
             return nil
         }
 
         return HTMLContentHandler.shared.loadHTML(from: resolved)
-    }
-
-    private func resolveStorageURI(_ urlString: String) -> URL? {
-        if urlString.starts(with: "/") {
-            return URL(fileURLWithPath: urlString)
-        } else if urlString.starts(with: "file://") {
-            return URL(string: urlString)
-        } else {
-            return URL(string: urlString)
-        }
     }
 
     /// Builds HTML content for forwarded message with proper header styling

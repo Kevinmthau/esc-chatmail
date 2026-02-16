@@ -42,17 +42,6 @@ final class HTMLContentLoader {
         htmlCache.totalCostLimit = 50 * 1024 * 1024 // 50 MB
     }
 
-    /// Resolves a storage URI string to a valid file URL
-    func resolveStorageURI(_ urlString: String) -> URL? {
-        if urlString.starts(with: "/") {
-            return URL(fileURLWithPath: urlString)
-        } else if urlString.starts(with: "file://") {
-            return URL(string: urlString)
-        } else {
-            return URL(string: urlString)
-        }
-    }
-
     /// Loads HTML content for a message, trying multiple sources
     /// - Parameters:
     ///   - messageId: The message ID to load content for
@@ -88,7 +77,7 @@ final class HTMLContentLoader {
 
         // Method 2: Try loading from stored URI
         if let urlString = bodyStorageURI,
-           let url = resolveStorageURI(urlString),
+           let url = StorageURIResolver.resolve(urlString),
            FileManager.default.fileExists(atPath: url.path),
            let html = contentHandler.loadHTML(from: url),
            !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -174,7 +163,7 @@ final class HTMLContentLoader {
             return fallbackToOriginalIfCleanedEmpty(cleaned: cleaned, original: html)
         case .quotedAndSignature:
             let cleaned = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
-            if !hasMeaningfulHTMLContent(cleaned) {
+            if !HTMLMeaningfulContentChecker.hasMeaningfulContent(cleaned) {
                 // If signature removal was too aggressive, fall back to quote-only cleanup.
                 let quotedOnly = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedOnly) ?? html
                 return fallbackToOriginalIfCleanedEmpty(cleaned: quotedOnly, original: html)
@@ -184,26 +173,10 @@ final class HTMLContentLoader {
     }
 
     private func fallbackToOriginalIfCleanedEmpty(cleaned: String, original: String) -> String {
-        if hasMeaningfulHTMLContent(cleaned) {
+        if HTMLMeaningfulContentChecker.hasMeaningfulContent(cleaned) {
             return cleaned
         }
         return original
-    }
-
-    private func hasMeaningfulHTMLContent(_ html: String) -> Bool {
-        let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
-
-        // If it has obvious renderable media, treat it as meaningful even if text extraction is empty.
-        if html.range(of: "<img", options: .caseInsensitive) != nil ||
-            html.range(of: "<svg", options: .caseInsensitive) != nil ||
-            html.range(of: "background-image", options: .caseInsensitive) != nil {
-            return true
-        }
-
-        let extracted = TextProcessing.extractPlainText(from: html)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return !extracted.isEmpty
     }
 
     private func convertPlainTextToHTML(_ text: String) -> String {
