@@ -110,7 +110,17 @@ enum PlainTextSignatureRemover {
     }()
 
     private static let contactPrefixPattern: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "^(m|c|o|f|d|t|p|tel|phone|mobile|office|direct|fax)\\s*[:.-]\\s*\\S+", options: [.caseInsensitive])
+        try? NSRegularExpression(
+            pattern: "^(m|c|o|f|d|t|p|tel|phone|mobile|office|direct|fax)\\s*(?:[:.-]\\s*\\S+|\\(?\\+?\\d[\\d\\s().-]{5,}\\b)",
+            options: [.caseInsensitive]
+        )
+    }()
+
+    private static let standaloneContactLabelPattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: "^(m|c|o|f|d|t|p)[:.]?$",
+            options: [.caseInsensitive]
+        )
     }()
 
     private static let emailPattern: NSRegularExpression? = {
@@ -208,6 +218,17 @@ enum PlainTextSignatureRemover {
             let line = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
 
             if line.isEmpty {
+                if shouldContinueAcrossBlankLine(
+                    at: index,
+                    scanStart: scanStart,
+                    lines: lines,
+                    signatureLineCount: signatureLineCount,
+                    signatureSupportSignals: signatureSupportSignals
+                ) {
+                    signatureStartLine = index
+                    sawSeparator = true
+                    continue
+                }
                 if signatureLineCount >= 2 && (contactSignals > 0 || sawSeparator) {
                     signatureStartLine = index
                     break
@@ -269,6 +290,7 @@ enum PlainTextSignatureRemover {
         let isCidLine = lowercased.hasPrefix("[cid:")
         let hasHardFragment = hardIndicatorFragments.contains { lowercased.contains($0) }
         let hasContactPrefix = matchesRegex(contactPrefixPattern, in: trimmed)
+        let hasStandaloneContactLabel = matchesRegex(standaloneContactLabelPattern, in: trimmed)
 
         let hasEmail = matchesRegex(emailPattern, in: trimmed)
         let hasUrl = matchesRegex(urlPattern, in: trimmed)
@@ -278,7 +300,7 @@ enum PlainTextSignatureRemover {
         // primarily a phone line (or uses an explicit prefix like "T:", handled above).
         let hasStandalonePhone = hasPhoneCandidate && looksLikeStandalonePhoneLine(trimmed, lowercased: lowercased)
 
-        let hasContactInfo = hasContactPrefix || hasEmail || hasUrl || hasStandalonePhone
+        let hasContactInfo = hasContactPrefix || hasEmail || hasUrl || hasStandalonePhone || hasStandaloneContactLabel
 
         // Keep hard indicators conservative. URL/phone lines need surrounding context.
         let isHardIndicator = isDelimiter || isCidLine || hasHardFragment || hasContactPrefix
@@ -383,6 +405,10 @@ enum PlainTextSignatureRemover {
 
             if line.isEmpty {
                 if foundShortLines {
+                    if shouldContinueAcrossBlankLineInHardIndicatorScan(at: index, lines: lines) {
+                        signatureStartLine = index
+                        continue
+                    }
                     signatureStartLine = index
                     break
                 }
@@ -413,6 +439,42 @@ enum PlainTextSignatureRemover {
         return signatureStartLine ?? indicatorIndex
     }
 
+    private static func shouldContinueAcrossBlankLineInHardIndicatorScan(
+        at index: Int,
+        lines: [String]
+    ) -> Bool {
+        var probe = index - 1
+        var blankLinesSeen = 0
+
+        while probe >= 0 {
+            let candidate = lines[probe].trimmingCharacters(in: .whitespacesAndNewlines)
+            if candidate.isEmpty {
+                blankLinesSeen += 1
+                if blankLinesSeen > 1 {
+                    return false
+                }
+                probe -= 1
+                continue
+            }
+
+            if shouldPreserveSingleNameSignOff(candidate, at: probe, in: lines) {
+                return true
+            }
+
+            let evaluation = evaluateLine(candidate)
+            if evaluation.isHardIndicator ||
+                evaluation.hasContactInfo ||
+                evaluation.isLikelySignatureLine ||
+                isLikelySignatureContinuation(candidate) {
+                return true
+            }
+
+            return false
+        }
+
+        return false
+    }
+
     private static func adjustToSeparator(_ startLine: Int, lines: [String]) -> Int {
         let previousIndex = startLine - 1
         if previousIndex >= 0 {
@@ -433,12 +495,13 @@ enum PlainTextSignatureRemover {
         let noSentenceEnding = !(trimmed.hasSuffix(".") || trimmed.hasSuffix("!") || trimmed.hasSuffix("?"))
         let lowercased = trimmed.lowercased()
         let hasContactPrefix = matchesRegex(contactPrefixPattern, in: trimmed)
+        let hasStandaloneContactLabel = matchesRegex(standaloneContactLabelPattern, in: trimmed)
         let hasEmail = matchesRegex(emailPattern, in: trimmed)
         let hasUrl = matchesRegex(urlPattern, in: trimmed)
         let hasPhoneCandidate = matchesRegex(phonePattern, in: trimmed)
         let hasStandalonePhone = hasPhoneCandidate && looksLikeStandalonePhoneLine(trimmed, lowercased: lowercased)
 
-        if hasContactPrefix || hasEmail || hasUrl || hasStandalonePhone {
+        if hasContactPrefix || hasStandaloneContactLabel || hasEmail || hasUrl || hasStandalonePhone {
             return true
         }
 
@@ -455,6 +518,29 @@ enum PlainTextSignatureRemover {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard matchesRegex(singleNamePattern, in: trimmed) else { return false }
 
+        // If the line below already looks like signature content, only preserve this single
+        // name when the next signature line expands the same name (e.g., "Jasmine" followed
+        // by "Jasmine Lastname | Title").
+        let lowercasedTrimmed = trimmed.lowercased()
+        if let nextNonEmptyLine = nextNonEmptyLine(after: index, in: lines) {
+            let nextEvaluation = evaluateLine(nextNonEmptyLine)
+            let hasSignatureContextBelow =
+                nextEvaluation.hasContactInfo ||
+                nextEvaluation.isHardIndicator ||
+                nextEvaluation.isLikelySignatureLine ||
+                isLikelySignatureContinuation(nextNonEmptyLine)
+
+            if hasSignatureContextBelow {
+                let normalizedNext = nextNonEmptyLine
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                let expandsSameName = normalizedNext.hasPrefix("\(lowercasedTrimmed) ")
+                if !expandsSameName {
+                    return false
+                }
+            }
+        }
+
         var previousIndex = index - 1
         while previousIndex >= 0 {
             let previous = lines[previousIndex].trimmingCharacters(in: .whitespacesAndNewlines)
@@ -463,10 +549,38 @@ enum PlainTextSignatureRemover {
                 continue
             }
 
-            return !isSignOffLine(previous.lowercased())
+            let previousLowercased = previous.lowercased()
+            if isSignOffLine(previousLowercased) {
+                return false
+            }
+
+            // If the line above the candidate already looks like signature content
+            // (name/contact/title/org/address), treat this as part of the signature
+            // rather than preserving it as a standalone first-name sign-off.
+            let previousEvaluation = evaluateLine(previous)
+            if previousEvaluation.hasContactInfo ||
+                previousEvaluation.isHardIndicator ||
+                previousEvaluation.isLikelySignatureLine ||
+                isLikelySignatureContinuation(previous) {
+                return false
+            }
+
+            return true
         }
 
         return true
+    }
+
+    private static func nextNonEmptyLine(after index: Int, in lines: [String]) -> String? {
+        var probe = index + 1
+        while probe < lines.count {
+            let candidate = lines[probe].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !candidate.isEmpty {
+                return candidate
+            }
+            probe += 1
+        }
+        return nil
     }
 
     private static func hasSupportingSignatureContext(
@@ -503,6 +617,47 @@ enum PlainTextSignatureRemover {
                     return true
                 }
             }
+        }
+
+        return false
+    }
+
+    private static func shouldContinueAcrossBlankLine(
+        at index: Int,
+        scanStart: Int,
+        lines: [String],
+        signatureLineCount: Int,
+        signatureSupportSignals: Int
+    ) -> Bool {
+        guard signatureLineCount > 0 else { return false }
+
+        var probe = index - 1
+        var blankLinesSeen = 0
+        while probe >= scanStart {
+            let candidate = lines[probe].trimmingCharacters(in: .whitespacesAndNewlines)
+            if candidate.isEmpty {
+                blankLinesSeen += 1
+                if blankLinesSeen > 1 {
+                    return false
+                }
+                probe -= 1
+                continue
+            }
+
+            if signatureSupportSignals > 0 &&
+                shouldPreserveSingleNameSignOff(candidate, at: probe, in: lines) {
+                return true
+            }
+
+            let evaluation = evaluateLine(candidate)
+            if evaluation.isLikelySignatureLine ||
+                evaluation.hasContactInfo ||
+                hasStrongSignatureSignal(candidate, evaluation: evaluation) ||
+                isLikelySignatureContinuation(candidate) {
+                return true
+            }
+
+            return false
         }
 
         return false

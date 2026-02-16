@@ -29,6 +29,18 @@
       "notes": "Long corporate signature lines (with inline separators) should be removed when a trailing contact block is detected, while preserving the standalone first-name sign-off above the signature.",
       "input": "Hi Alex,\n\nDo you have some time to connect on lending solutions before 1pm tomorrow? Let me know what works best.\n\nJordan\n\nJordan Smith | Managing Director | Example Private Bank | 123 Main Street, Floor 4 | New York, NY 10017 | T: 212 555 0100\nM: +1 917-555-0101 | NMLS ID 012345 | jordan.smith@example.com | examplebank.com\n\nExample Securities LLC | Example Bank, N.A.\n\nThis communication is provided for informational purposes and is not an account statement.\nIf you are not the intended recipient, please delete and notify the sender.",
       "expected": "Hi Alex,\n\nDo you have some time to connect on lending solutions before 1pm tomorrow? Let me know what works best.\n\nJordan"
+    },
+    {
+      "id": "signature_with_internal_blank_line_and_t_phone_prefix_removed",
+      "notes": "Signature blocks that include an internal blank line (between phone/title and email/address lines) should still be removed before an Outlook-style quoted header.",
+      "input": "Hi Kevin,\n\nThe estimated payout figure was changed to $30 million-please see attached.\n\nExample LLP\nMonica Example\nPartner | Certified Family Law Specialist\nT (415) 227-3629\n\nmonica@examplelaw.com<mailto:monica@examplelaw.com>\n425 Market Street, Suite 2900\nSan Francisco, CA 94105\nwww.examplelaw.com<http://www.examplelaw.com>\n\nFrom: Kevin Example <kevin@example.com>\nSent: Thursday, February 12, 2026 12:45 PM\nTo: Monica Example <monica@examplelaw.com>\nSubject: Re: Draft Settlement Letter\n\nThanks for sending this over.",
+      "expected": "Hi Kevin,\n\nThe estimated payout figure was changed to $30 million-please see attached."
+    },
+    {
+      "id": "signature_with_internal_blank_line_and_bare_t_phone_label_removed",
+      "notes": "Signature blocks where the phone row degrades to a bare 'T' label should still be fully removed before Outlook-style quoted headers.",
+      "input": "Hi Kevin,\n\nThe estimated payout figure was changed to $30 million-please see attached.\n\nExample LLP\nMonica Example\nPartner | Certified Family Law Specialist\nT\n\nmonica@examplelaw.com<mailto:monica@examplelaw.com>\n425 Market Street, Suite 2900\nSan Francisco, CA 94105\nwww.examplelaw.com<http://www.examplelaw.com>\n\nFrom: Kevin Example <kevin@example.com>\nSent: Thursday, February 12, 2026 12:45 PM\nTo: Monica Example <monica@examplelaw.com>\nSubject: Re: Draft Settlement Letter\n\nThanks for sending this over.",
+      "expected": "Hi Kevin,\n\nThe estimated payout figure was changed to $30 million-please see attached."
     }
   ],
   "htmlToBubbleTextCases": [
@@ -55,6 +67,12 @@
       "notes": "Hex nbsp entities like &#x00A0; should normalize to plain spaces in bubble text.",
       "inputHTML": "<div>Price&#x00A0;$100</div><div>Thank&nbsp;you</div>",
       "expected": "Price $100\n\nThank you"
+    },
+    {
+      "id": "html_signature_with_bare_t_phone_label_removed_before_outlook_headers",
+      "notes": "HTML-to-bubble extraction should remove law-firm style signatures even if the phone line collapses to a bare 'T' label.",
+      "inputHTML": "<div>Hi Kevin,</div><div><br></div><div>The estimated payout figure was changed to $30 million-please see attached.</div><div><br></div><div>Buchalter</div><div>Monica</div><div>Mazzei</div><div>Partner | Certified Family Law Specialist</div><div>T</div><div><br></div><div>mmazzei@buchalter.com&lt;mailto:mmazzei@buchalter.com&gt;</div><div>425 Market Street, Suite 2900</div><div>San Francisco, CA 94105</div><div>www.buchalter.com&lt;http://www.buchalter.com&gt;</div><div><br></div><div>From: Kevin Thau &lt;kmthau@gmail.com&gt;</div><div>Sent: Thursday, February 12, 2026 12:45 PM</div><div>To: Mazzei, Monica &lt;mmazzei@buchalter.com&gt;</div><div>Subject: Re: Thau Draft Settlement Letter</div><div><br></div><div>Thanks for sending this over.</div>",
+      "expected": "Hi Kevin,\n\nThe estimated payout figure was changed to $30 million-please see attached."
     }
   ],
   "richHTMLDetectionCases": [

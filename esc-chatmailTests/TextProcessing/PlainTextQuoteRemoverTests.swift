@@ -384,6 +384,56 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(result, "Let me know.\n\nThanks!")
     }
 
+    func testRemoveSignature_multiPartLawFirmBlockWithInternalBlankLine_removesEntireBlock() {
+        let text = """
+        Hi Kevin,
+
+        The estimated payout figure was changed to $30 million-please see attached.
+
+        Example LLP
+        Monica Example
+        Partner | Certified Family Law Specialist
+        T (415) 227-3629
+
+        monica@examplelaw.com<mailto:monica@examplelaw.com>
+        425 Market Street, Suite 2900
+        San Francisco, CA 94105
+        www.examplelaw.com<http://www.examplelaw.com>
+        """
+
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        XCTAssertEqual(result, """
+        Hi Kevin,
+
+        The estimated payout figure was changed to $30 million-please see attached.
+        """)
+    }
+
+    func testRemoveSignature_multiPartLawFirmBlockWithBarePhoneLabelLine_removesEntireBlock() {
+        let text = """
+        Hi Kevin,
+
+        The estimated payout figure was changed to $30 million-please see attached.
+
+        Example LLP
+        Monica Example
+        Partner | Certified Family Law Specialist
+        T
+
+        monica@examplelaw.com<mailto:monica@examplelaw.com>
+        425 Market Street, Suite 2900
+        San Francisco, CA 94105
+        www.examplelaw.com<http://www.examplelaw.com>
+        """
+
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        XCTAssertEqual(result, """
+        Hi Kevin,
+
+        The estimated payout figure was changed to $30 million-please see attached.
+        """)
+    }
+
     func testRemoveSignature_sincerely_preservedWithoutStrongIndicator() {
         let text = """
         Please review at your earliest convenience.
@@ -831,6 +881,70 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
 
         let result = PlainTextQuoteRemover.removeQuotes(from: text)
         XCTAssertEqual(result, "Great. Will do! Have a nice weekend!")
+    }
+
+    func testRemoveQuotes_signatureWithInternalBlankLineBeforeOutlookHeaders_removesSignatureAndQuote() {
+        let text = """
+        Hi Kevin,
+
+        The estimated payout figure was changed to $30 million-please see attached.
+
+        Example LLP
+        Monica Example
+        Partner | Certified Family Law Specialist
+        T (415) 227-3629
+
+        monica@examplelaw.com<mailto:monica@examplelaw.com>
+        425 Market Street, Suite 2900
+        San Francisco, CA 94105
+        www.examplelaw.com<http://www.examplelaw.com>
+
+        From: Kevin Example <kevin@example.com>
+        Sent: Thursday, February 12, 2026 12:45 PM
+        To: Monica Example <monica@examplelaw.com>
+        Subject: Re: Draft Settlement Letter
+
+        Thanks for sending this over.
+        """
+
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, """
+        Hi Kevin,
+
+        The estimated payout figure was changed to $30 million-please see attached.
+        """)
+    }
+
+    func testRemoveQuotes_signatureWithBarePhoneLabelBeforeOutlookHeaders_removesSignatureAndQuote() {
+        let text = """
+        Hi Kevin,
+
+        The estimated payout figure was changed to $30 million-please see attached.
+
+        Example LLP
+        Monica Example
+        Partner | Certified Family Law Specialist
+        T
+
+        monica@examplelaw.com<mailto:monica@examplelaw.com>
+        425 Market Street, Suite 2900
+        San Francisco, CA 94105
+        www.examplelaw.com<http://www.examplelaw.com>
+
+        From: Kevin Example <kevin@example.com>
+        Sent: Thursday, February 12, 2026 12:45 PM
+        To: Monica Example <monica@examplelaw.com>
+        Subject: Re: Draft Settlement Letter
+
+        Thanks for sending this over.
+        """
+
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, """
+        Hi Kevin,
+
+        The estimated payout figure was changed to $30 million-please see attached.
+        """)
     }
 
     // MARK: - Apple Mail Style Quotes

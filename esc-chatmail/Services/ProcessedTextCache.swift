@@ -163,7 +163,7 @@ enum ChatBubbleTextProcessor {
 actor ProcessedTextCache: MemoryWarningHandler {
     static let shared = ProcessedTextCache()
     // Bump to invalidate cached entries when processing logic changes.
-    private static let processingVersion = "2026-02-16-chat-bubble-unified-v1"
+    private static let processingVersion = "2026-02-16-chat-bubble-unified-v2"
 
     /// Cached text content with rich content indicator and extracted quotes
     struct CachedText: Sendable {
