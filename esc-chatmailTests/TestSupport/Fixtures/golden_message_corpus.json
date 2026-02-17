@@ -7,6 +7,12 @@
       "expected": "Great. Will do! Have a nice weekend!"
     },
     {
+      "id": "forwarded_marker_without_trailing_dashes_removed",
+      "notes": "Forward markers without trailing dashes should still truncate quoted forwarded headers from bubble text.",
+      "input": "FYI\n\n---------- Forwarded message\n-------- From: The River Club of NY, Inc <events@example.com>\nDate: Mon, Feb 16, 2026 at 5:56 PM\nSubject: Member Event Confirmation\nTo: jess@example.com",
+      "expected": "FYI"
+    },
+    {
       "id": "personal_reply_preserves_full_body",
       "notes": "Personal message body should remain untouched when there is no quote boundary.",
       "input": "James\n\nThanks for the note. I'm playing Brambles on 5/22 with the McNeil bros. Really looking forward to it.\n\nThanks for the heads up on NB. No plans as of now but we should rectify that.",

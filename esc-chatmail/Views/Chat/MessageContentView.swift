@@ -202,8 +202,8 @@ struct MessageContentView: View {
         let sanitized = RawEmailSourceSanitizer.extractDisplayText(from: text)
         let decoded = HTMLEntityDecoder.decode(sanitized)
         let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: decoded)
-        let signatureStripped = TextProcessing.stripSignatures(from: unwrapped)
-        let formatted = TextProcessing.formatSignOffLineBreaks(in: signatureStripped)
+        let extractionResult = PlainTextQuoteRemover.extractQuotes(from: unwrapped)
+        let formatted = TextProcessing.formatSignOffLineBreaks(in: extractionResult.mainContent)
         let trimmed = formatted.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }

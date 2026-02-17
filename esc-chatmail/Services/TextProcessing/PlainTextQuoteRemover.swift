@@ -50,8 +50,16 @@ enum PlainTextQuoteRemover {
 
         // Forward indicators - English
         "Begin forwarded message:",
+        // Handles common dashed variants like:
+        // "---------- Forwarded message ---------"
+        // "---------- Forwarded message"
+        // "----- Forwarded message -----"
+        "(?:^|\\n)\\s*-{2,}\\s*Forwarded message\\b.*",
+        // Handles soft-wrapped variants where the marker appears inline after intro text.
+        "\\s-{2,}\\s*Forwarded message\\b.*",
         "---------- Forwarded message ---------",
         "------ Original Message ------",
+        "(?:^|\\n)\\s*-{2,}\\s*Original Message\\b.*",
 
         // Forward indicators - International
         "Weitergeleitete Nachricht",   // German
@@ -241,6 +249,7 @@ enum PlainTextQuoteRemover {
     private static let forwardMarkersLowercased: [String] = [
         "-----original message-----",
         "begin forwarded message",
+        "forwarded message",
         "________________________________",
         "weitergeleitete nachricht",
         "message transféré",

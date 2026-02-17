@@ -157,6 +157,20 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(result, "Check this out!")
     }
 
+    func testRemoveQuotes_forwardedMessageWithoutTrailingDashes_truncates() {
+        let text = """
+        FYI
+
+        ---------- Forwarded message
+        -------- From: The River Club of NY, Inc <events@example.com>
+        Date: Mon, Feb 16, 2026 at 5:56 PM
+        Subject: Member Event Confirmation
+        To: jess@example.com
+        """
+        let result = PlainTextQuoteRemover.removeQuotes(from: text)
+        XCTAssertEqual(result, "FYI")
+    }
+
     // MARK: - Quote Removal - Consecutive Angle Bracket Quotes
 
     func testRemoveQuotes_consecutiveAngleBracketQuotes_truncates() {
