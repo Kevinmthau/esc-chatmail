@@ -93,6 +93,18 @@
       "notes": "Transactional HTML templates (e.g., statement-ready alerts) should be treated as rich content; signature cleanup must not wipe the body and force plain-text routing.",
       "inputHTML": "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}table{border-collapse:collapse}</style></head><body><table width=\"100%\"><tr><td><img src=\"https://example.com/logo.png\" alt=\"logo\" width=\"140\"></td></tr></table><table><tr><td><strong>Your credit facility statement is ready</strong></td></tr></table><table><tr><td>To review your statement, please log on to jpmorganonline.com or the J.P. Morgan Mobile app.</td></tr></table><table><tr><td><a class=\"button\" href=\"https://example.com/review\">Review Statement</a></td></tr></table><table><tr><td>Privacy Policy</td></tr></table><table><tr><td>Security Center</td></tr></table><table><tr><td>Important disclaimers and conditions</td></tr></table><div>This is a service message with information related to your account. It may include details about transactions, products, or online services. Please do not reply directly to this message. Your privacy is important to us. See our Privacy Policy and Security Center to learn how to protect your information. Investment products are not FDIC insured, are not bank guaranteed, and may lose value. If you recently canceled your account, please disregard this message.</div></body></html>",
       "expectedHasRichHTMLContent": true
+    },
+    {
+      "id": "gmail_personal_long_div_message_not_rich",
+      "notes": "Long Gmail one-to-one messages wrapped in plain div/br markup should stay in chat bubbles.",
+      "inputHTML": "<div dir=\"ltr\">Hey Kevin!<div><br></div><div>Now that I've wrapped up this project in Seattle, and it seems like Ian is a little more clear on his role/timing, I figured it'd be good to touch base again. After talking with him a bunch (and my wife) I'm interested in exploring what a remote full time role would look like if you're still open to it.</div><div><br></div><div>You available tomorrow to jump on a call? I'm free between 9am and 11:30am PST if there's any window there?</div><div><br></div><div>Ian and I discussed the potential of being in NYC the first week of March to kick this all off together, and it sounds like we can potentially both swing it, so I'm down to move quick to get going if you are!</div><div><br></div><div>Excited! Jeremy</div></div>",
+      "expectedHasRichHTMLContent": false
+    },
+    {
+      "id": "simple_div_transactional_alert_with_links_is_rich",
+      "notes": "Simple div-wrapped account alerts should still route to HTML preview when they include explicit transactional cues and CTA links.",
+      "inputHTML": "<div dir=\"ltr\">Security alert for your account<div><br></div><div>We detected a new sign-in to your account from Chrome on macOS. If this wasn't you, secure your account immediately.</div><div><br></div><div><a href=\"https://example.com/review\">Review activity</a> | <a href=\"https://example.com/help\">Get help</a></div><div><br></div><div>This is a service message about your account security. Please do not reply to this message.</div></div>",
+      "expectedHasRichHTMLContent": true
     }
   ],
   "displayPolicyCases": [

@@ -369,19 +369,26 @@ actor ProcessedTextCache: MemoryWarningHandler {
         // Single-pass counting for better performance
         let (imgCount, tableCount, cidCount, linkCount) = countHTMLElements(htmlForAnalysis)
 
-        // Early exit for simple div-wrapped text (common Gmail mobile format)
-        // Must check AFTER element counts since we want to catch cases with 0 images/tables
-        // BUT: transactional emails (Google security alerts, etc.) have substantial text
-        // in simple divs and should still show as HTML to preserve formatting
-        if imgCount == 0 && tableCount == 0 && cidCount == 0 && isSimpleDivWrappedText(htmlForAnalysis, lowercased: lowercased) {
-            // Check if there's substantial text content before downgrading to plain text
-            let textContent = approximateTextContent(from: htmlForAnalysis)
+        // Newsletter indicators that imply rich content even when there are few images/tables.
+        // Computed early so simple div-wrapped content can still detect transactional/newsletter patterns.
+        let hasNewsletterIndicators = lowercased.contains("unsubscribe") ||
+                                       lowercased.contains("view in browser") ||
+                                       lowercased.contains("email preferences") ||
+                                       lowercased.contains("privacy policy") ||
+                                       lowercased.contains("manage preferences") ||
+                                       lowercased.contains("update your preferences")
 
-            // If substantial text content, keep as HTML to preserve formatting
-            if textContent.count > 200 {
-                return true
-            }
-            return false
+        // Early exit for simple div-wrapped text (common Gmail mobile format).
+        // Most one-to-one personal emails should stay as chat bubbles even when long.
+        // Only treat simple div content as rich when we detect explicit transactional/marketing signals.
+        if imgCount == 0 && tableCount == 0 && cidCount == 0 && isSimpleDivWrappedText(htmlForAnalysis, lowercased: lowercased) {
+            let textContent = approximateTextContent(from: htmlForAnalysis)
+            return isLikelySimpleDivTransactionalOrMarketing(
+                lowercasedHTML: lowercased,
+                textContent: textContent,
+                linkCount: linkCount,
+                hasNewsletterIndicators: hasNewsletterIndicators
+            )
         }
 
         // Extract approximate text content length (rough estimate without full parsing)
@@ -398,14 +405,6 @@ actor ProcessedTextCache: MemoryWarningHandler {
                                  lowercased.contains("role=\"button") ||
                                  lowercased.contains("class=\"btn") ||
                                  lowercased.contains("class=\"cta")
-
-        // Newsletter indicators that imply rich content even when there are few images/tables
-        let hasNewsletterIndicators = lowercased.contains("unsubscribe") ||
-                                       lowercased.contains("view in browser") ||
-                                       lowercased.contains("email preferences") ||
-                                       lowercased.contains("privacy policy") ||
-                                       lowercased.contains("manage preferences") ||
-                                       lowercased.contains("update your preferences")
 
         // Professional signatures (real estate agents, etc.) can have:
         // - 1 company logo + 1 headshot + 6-8 social icons = up to 10 images
@@ -487,6 +486,74 @@ actor ProcessedTextCache: MemoryWarningHandler {
         if charsPerElement < 40 && textContent.count < 400 { score -= 10 }
 
         return score >= 40
+    }
+
+    /// Heuristic for simple div-wrapped emails (Gmail/Apple Mail style).
+    /// Personal long-form messages should remain bubbles unless we see explicit transactional/newsletter cues.
+    nonisolated private static func isLikelySimpleDivTransactionalOrMarketing(
+        lowercasedHTML: String,
+        textContent: String,
+        linkCount: Int,
+        hasNewsletterIndicators: Bool
+    ) -> Bool {
+        guard textContent.count > 200 else { return false }
+
+        if hasNewsletterIndicators {
+            return true
+        }
+
+        let lowercasedText = textContent.lowercased()
+        let transactionalPatterns = [
+            "security alert",
+            "new sign-in",
+            "new signin",
+            "if this wasn't you",
+            "if this was not you",
+            "review activity",
+            "verify your",
+            "confirm your",
+            "password reset",
+            "reset your password",
+            "one-time passcode",
+            "one time passcode",
+            "statement is ready",
+            "account activity",
+            "service message",
+            "invoice",
+            "receipt",
+            "order confirmation",
+            "tracking number",
+            "payment receipt"
+        ]
+
+        var transactionalHitCount = 0
+        for pattern in transactionalPatterns where lowercasedText.contains(pattern) || lowercasedHTML.contains(pattern) {
+            transactionalHitCount += 1
+        }
+
+        let hasNoReplyLanguage = lowercasedText.contains("do not reply") ||
+                                 lowercasedText.contains("don't reply") ||
+                                 lowercasedText.contains("noreply") ||
+                                 lowercasedText.contains("no-reply")
+        if hasNoReplyLanguage {
+            transactionalHitCount += 1
+        }
+
+        // High link density in simple wrappers is usually promotional/newsletter content.
+        if linkCount >= 6 {
+            return true
+        }
+
+        if linkCount >= 2 && transactionalHitCount >= 1 {
+            return true
+        }
+
+        if transactionalHitCount >= 2 {
+            return true
+        }
+
+        // Very long account-notification style emails with at least one strong signal.
+        return transactionalHitCount >= 1 && textContent.count > 700
     }
 
     /// Strips Apple Mail "rich link" preview blocks from HTML so we don't treat them as newsletter/marketing content.
