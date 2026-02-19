@@ -24,7 +24,7 @@ final class CacheCoordinator {
     private var cancellables = Set<AnyCancellable>()
     private var isStarted = false
 
-    private struct CacheInvalidationPlan {
+    private struct CacheInvalidationPlan: Sendable {
         var conversationIdsToInvalidate: Set<String> = []
         var personEmailsToInvalidate: Set<String> = []
         var messageIdsToInvalidate: Set<String> = []
@@ -67,7 +67,7 @@ final class CacheCoordinator {
 
         guard !updatedObjectIDs.isEmpty || !deletedObjectIDs.isEmpty else { return }
 
-        let plan = sourceContext.performAndWait { () -> CacheInvalidationPlan in
+        sourceContext.perform { [weak self] in
             var localPlan = CacheInvalidationPlan()
 
             // Access managed object values on the source context's queue to avoid cross-queue reads.
@@ -102,10 +102,10 @@ final class CacheCoordinator {
                 }
             }
 
-            return localPlan
+            Task { @MainActor [weak self] in
+                self?.applyInvalidationPlan(localPlan)
+            }
         }
-
-        applyInvalidationPlan(plan)
     }
 
     private func applyInvalidationPlan(_ plan: CacheInvalidationPlan) {
