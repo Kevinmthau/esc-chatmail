@@ -18,7 +18,6 @@ actor SyncStateActor {
     /// - Returns: The created task if sync began successfully, nil if sync was already in progress
     func beginSyncWithTask(_ taskBuilder: () -> Task<Void, Error>) -> Task<Void, Error>? {
         guard !isCurrentlySyncing else {
-            Log.debug("Sync already in progress, skipping", category: .sync)
             return nil
         }
         isCurrentlySyncing = true
@@ -30,7 +29,6 @@ actor SyncStateActor {
     /// Legacy method - prefer beginSyncWithTask for atomic sync+task creation
     func beginSync() async -> Bool {
         guard !isCurrentlySyncing else {
-            Log.debug("Sync already in progress, skipping", category: .sync)
             return false
         }
         isCurrentlySyncing = true

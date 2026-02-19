@@ -13,6 +13,10 @@ struct LoggerConfiguration {
     /// Whether to include timestamps in console output
     var includeTimestamp: Bool
 
+    /// Whether to mirror logs to stdout in debug builds.
+    /// Keep disabled by default to avoid duplicate lines when OSLog is visible in Xcode.
+    var mirrorToStdout: Bool
+
     /// Categories to enable (nil means all categories)
     var enabledCategories: Set<LogCategory>?
 
@@ -21,6 +25,7 @@ struct LoggerConfiguration {
         minimumLevel: .debug,
         includeLocation: true,
         includeTimestamp: true,
+        mirrorToStdout: ProcessInfo.processInfo.environment["ESC_MIRROR_LOGS_TO_STDOUT"] == "1",
         enabledCategories: nil
     )
 
@@ -29,6 +34,7 @@ struct LoggerConfiguration {
         minimumLevel: .warning,
         includeLocation: false,
         includeTimestamp: false,
+        mirrorToStdout: false,
         enabledCategories: nil
     )
 

@@ -99,7 +99,7 @@ struct ConversationListView: View {
             NavigationStack { SettingsView() }
         }
         .onAppear {
-            AppPrewarmer.prewarmAll()  // WebKit already prewarmed in initializeApp; this handles API + Contacts
+            AppPrewarmer.prewarmAll()  // Safe to call repeatedly; each prewarm runs only once per launch.
             viewModel.onAppear(conversations: Array(conversations))
             updateFilteredConversations()
         }

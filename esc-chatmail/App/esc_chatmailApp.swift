@@ -87,11 +87,6 @@ struct esc_chatmailApp: App {
     private func initializeApp() async {
         logStartupTiming("initializeApp() started")
 
-        // Start WebKit prewarm FIRST - 12s GPU launch runs in background
-        // This overlaps the GPU process launch with auth restoration and initial UI rendering
-        AppPrewarmer.prewarmWebKitIfNeeded()
-        logStartupTiming("WebKit prewarm triggered")
-
         // 1. Fresh install check (awaited - completes before continuing)
         await FreshInstallHandler().checkAndHandleFreshInstall()
         logStartupTiming("FreshInstallHandler complete")
@@ -121,6 +116,15 @@ struct esc_chatmailApp: App {
         // 5. Ready to show main UI
         isInitialized = true
         logStartupTiming("initializeApp() complete")
+
+        // 6. Prewarm WebKit after UI becomes available to avoid launch-path contention.
+        if !isRunningUITests {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                AppPrewarmer.prewarmWebKitIfNeeded()
+                logStartupTiming("WebKit prewarm triggered (post-init)")
+            }
+        }
     }
 
     private func waitForCoreData() async {

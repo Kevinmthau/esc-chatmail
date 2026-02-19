@@ -177,9 +177,12 @@ enum Log {
         let osLog = logger(for: category)
         os_log("%{public}@", log: osLog, type: level.osLogType, fullMessage)
 
-        // Also print to stdout for Xcode console with formatting
+        // Optionally mirror to stdout for local debugging.
+        // Disabled by default to avoid duplicate lines in Xcode when OSLog is also visible.
         #if DEBUG
-        printToConsole(level: level, category: category, message: fullMessage, config: config)
+        if config.mirrorToStdout {
+            printToConsole(level: level, category: category, message: fullMessage, config: config)
+        }
         #endif
     }
 

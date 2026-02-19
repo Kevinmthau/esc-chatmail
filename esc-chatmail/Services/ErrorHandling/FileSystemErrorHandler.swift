@@ -14,6 +14,21 @@ import Foundation
 enum FileSystemErrorHandler {
 
     private static let fileManager = FileManager.default
+    private static var loggedExpectedMisses = Set<String>()
+    private static let expectedMissesLock = NSLock()
+
+    /// Logs expected misses only once per key per launch to avoid debug-log spam.
+    private static func logExpectedMissOnce(key: String, message: @autoclosure () -> String, category: LogCategory) {
+        expectedMissesLock.lock()
+        if loggedExpectedMisses.count > 2_000 {
+            loggedExpectedMisses.removeAll(keepingCapacity: true)
+        }
+        let shouldLog = loggedExpectedMisses.insert(key).inserted
+        expectedMissesLock.unlock()
+
+        guard shouldLog else { return }
+        Log.debug(message(), category: category)
+    }
 
     // MARK: - Directory Operations
 
@@ -66,8 +81,12 @@ enum FileSystemErrorHandler {
         do {
             try fileManager.removeItem(at: url)
         } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
-            // File doesn't exist - this is often expected, so just debug log
-            Log.debug("Item to remove does not exist: \(url.lastPathComponent)", category: category)
+            // File doesn't exist - this is often expected.
+            logExpectedMissOnce(
+                key: "remove-url:\(url.path)",
+                message: "Item to remove does not exist: \(url.lastPathComponent)",
+                category: category
+            )
         } catch {
             Log.warning(
                 "Failed to remove item at \(url.lastPathComponent)",
@@ -84,7 +103,11 @@ enum FileSystemErrorHandler {
         do {
             try fileManager.removeItem(atPath: path)
         } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
-            Log.debug("Item to remove does not exist: \(path)", category: category)
+            logExpectedMissOnce(
+                key: "remove-path:\(path)",
+                message: "Item to remove does not exist: \(path)",
+                category: category
+            )
         } catch {
             Log.warning(
                 "Failed to remove item at \(path)",
@@ -104,8 +127,12 @@ enum FileSystemErrorHandler {
         do {
             return try Data(contentsOf: url)
         } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError {
-            // File not found is often expected (cache miss), use debug level
-            Log.debug("File not found: \(url.lastPathComponent)", category: category)
+            // File not found is often expected (cache miss).
+            logExpectedMissOnce(
+                key: "load:\(url.path)",
+                message: "File not found: \(url.lastPathComponent)",
+                category: category
+            )
             return nil
         } catch {
             Log.warning(

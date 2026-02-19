@@ -40,9 +40,7 @@ final class ConversationListViewModel: ObservableObject {
     let contactsService: ContactsService
 
     private let coreDataStack: CoreDataStack
-    private let authSession: AuthSession
     private let personCache: PersonCache
-    private var hasPerformedInitialSync = false
     private var cancellables = Set<AnyCancellable>()
     private let taskManager = ViewModelTaskManager()
 
@@ -53,7 +51,6 @@ final class ConversationListViewModel: ObservableObject {
         let dependencies = deps ?? .shared
         self.coreDataStack = dependencies.coreDataStack
         self.syncEngine = dependencies.syncEngine
-        self.authSession = dependencies.authSession
         self.personCache = dependencies.personCache
         self.messageActions = dependencies.makeMessageActions()
         self.contactsService = dependencies.makeContactsService()
@@ -106,25 +103,6 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     // MARK: - Sync Operations
-
-    func performInitialSync() {
-        guard !hasPerformedInitialSync else { return }
-        guard authSession.isAuthenticated else {
-            Log.info("Skipping initial sync - not authenticated", category: .sync)
-            return
-        }
-
-        hasPerformedInitialSync = true
-
-        taskManager.run("initialSync", priority: .userInitiated) { [weak self] in
-            guard let self = self else { return }
-            do {
-                try await syncEngine.performIncrementalSync()
-            } catch {
-                Log.error("Initial sync error", category: .sync, error: error)
-            }
-        }
-    }
 
     func performSync() async {
         do {
@@ -243,8 +221,6 @@ final class ConversationListViewModel: ObservableObject {
 
     /// Called when view appears - performs initial setup
     func onAppear(conversations: [Conversation]) {
-        performInitialSync()
-
         // Prefetch photos immediately to avoid slow avatar loading in rows
         // This needs to run before rows' .task blocks fire
         prefetchPersonData(from: conversations)
