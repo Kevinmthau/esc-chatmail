@@ -263,4 +263,103 @@ final class ConversationMergerTests: XCTestCase {
 
         XCTAssertEqual(msg1.conversation?.objectID, msg2.conversation?.objectID, "Messages in the same thread should share a conversation after merge")
     }
+
+    func testMergeConversationsByGmThreadId_preservesForwardedConversationSplit() async throws {
+        let threadId = "gm-thread-forward-preserve"
+
+        let regularConversation = ConversationBuilder()
+            .withKeyHash("regular-conversation")
+            .build(in: context)
+
+        let forwardedConversation = ConversationBuilder()
+            .withKeyHash("forwarded-conversation")
+            .build(in: context)
+
+        let regularMessage = MessageBuilder()
+            .withId("regular-message")
+            .withThreadId(threadId)
+            .withSubject("Re: Design review")
+            .inConversation(regularConversation)
+            .build(in: context)
+
+        let forwardedMessage = MessageBuilder()
+            .withId("forwarded-message")
+            .withThreadId(threadId)
+            .withSubject("Fwd: Design review")
+            .inConversation(forwardedConversation)
+            .build(in: context)
+
+        try testStack.saveViewContext()
+
+        let mergedCount = await merger.mergeConversationsByGmThreadId(in: context, mergeChangesInto: [])
+        XCTAssertEqual(mergedCount, 0, "Forwarded conversation split should be preserved")
+
+        let conversationCount = try context.count(for: Conversation.fetchRequest())
+        XCTAssertEqual(conversationCount, 2, "Cleanup merge should not collapse forwarded conversations")
+
+        XCTAssertNotEqual(
+            regularMessage.conversation?.objectID,
+            forwardedMessage.conversation?.objectID,
+            "Forwarded and non-forwarded messages in the same Gmail thread should remain split"
+        )
+    }
+
+    func testMergeConversationsByGmThreadId_mergesOnlyNonForwardedConversationsWhenForwardedExists() async throws {
+        let threadId = "gm-thread-mixed-forwarded"
+
+        let nonForwardedConversationA = ConversationBuilder()
+            .withKeyHash("non-forwarded-a")
+            .withLastMessageDate(Date(timeIntervalSince1970: 1))
+            .build(in: context)
+
+        let nonForwardedConversationB = ConversationBuilder()
+            .withKeyHash("non-forwarded-b")
+            .withLastMessageDate(Date(timeIntervalSince1970: 2))
+            .build(in: context)
+
+        let forwardedConversation = ConversationBuilder()
+            .withKeyHash("forwarded")
+            .withLastMessageDate(Date(timeIntervalSince1970: 3))
+            .build(in: context)
+
+        let nonForwardedMessageA = MessageBuilder()
+            .withId("non-forwarded-message-a")
+            .withThreadId(threadId)
+            .withSubject("Re: Team dinner")
+            .inConversation(nonForwardedConversationA)
+            .build(in: context)
+
+        let nonForwardedMessageB = MessageBuilder()
+            .withId("non-forwarded-message-b")
+            .withThreadId(threadId)
+            .withSubject("Re: Team dinner")
+            .inConversation(nonForwardedConversationB)
+            .build(in: context)
+
+        let forwardedMessage = MessageBuilder()
+            .withId("forwarded-message-in-mixed-thread")
+            .withThreadId(threadId)
+            .withSubject("Fw: Team dinner")
+            .inConversation(forwardedConversation)
+            .build(in: context)
+
+        try testStack.saveViewContext()
+
+        let mergedCount = await merger.mergeConversationsByGmThreadId(in: context, mergeChangesInto: [])
+        XCTAssertEqual(mergedCount, 1, "Should still merge duplicate non-forwarded conversations")
+
+        let conversationCount = try context.count(for: Conversation.fetchRequest())
+        XCTAssertEqual(conversationCount, 2, "Forwarded conversation should remain separate from merged non-forwarded conversation")
+
+        XCTAssertEqual(
+            nonForwardedMessageA.conversation?.objectID,
+            nonForwardedMessageB.conversation?.objectID,
+            "Non-forwarded messages should be merged together"
+        )
+        XCTAssertNotEqual(
+            nonForwardedMessageA.conversation?.objectID,
+            forwardedMessage.conversation?.objectID,
+            "Forwarded message should stay in its own conversation"
+        )
+    }
 }

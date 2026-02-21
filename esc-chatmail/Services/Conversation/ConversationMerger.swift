@@ -167,6 +167,9 @@ struct ConversationMerger: Sendable {
     ///
     /// This can happen when participant-based identity differs between messages in the same thread
     /// (common when `Reply-To` uses a different address than `From`).
+    ///
+    /// Forwarded-message splits are preserved: conversations containing messages whose subject starts
+    /// with `Fwd:`/`Fw:` are intentionally kept separate from thread-wide merges.
     func mergeConversationsByGmThreadId(
         in context: NSManagedObjectContext,
         mergeChangesInto contextsToMerge: [NSManagedObjectContext]
@@ -190,12 +193,18 @@ struct ConversationMerger: Sendable {
 
             // Build a map of gmThreadId -> distinct conversation objectIDs.
             var threadToConversationIDs: [String: Set<NSManagedObjectID>] = [:]
+            var threadToForwardedConversationIDs: [String: Set<NSManagedObjectID>] = [:]
             threadToConversationIDs.reserveCapacity(256)
+            threadToForwardedConversationIDs.reserveCapacity(64)
 
             for message in messages {
                 let threadId = message.gmThreadId
                 guard !threadId.isEmpty, let conversation = message.conversation else { continue }
                 threadToConversationIDs[threadId, default: []].insert(conversation.objectID)
+
+                if isForwardedSubject(message.subject) {
+                    threadToForwardedConversationIDs[threadId, default: []].insert(conversation.objectID)
+                }
             }
 
             let duplicateThreads = threadToConversationIDs.filter { $0.value.count > 1 }
@@ -207,7 +216,15 @@ struct ConversationMerger: Sendable {
             var deletedObjectIDs: [NSManagedObjectID] = []
 
             for (threadId, conversationIDs) in duplicateThreads {
-                let conversations: [Conversation] = conversationIDs.compactMap { objectID in
+                let forwardedConversationIDs = threadToForwardedConversationIDs[threadId] ?? []
+                let mergeableConversationIDs = conversationIDs.subtracting(forwardedConversationIDs)
+
+                if !forwardedConversationIDs.isEmpty && mergeableConversationIDs.count <= 1 {
+                    Log.debug("Skipping gmThreadId merge for \(threadId.prefix(16))... to preserve forwarded conversation split", category: .conversation)
+                    continue
+                }
+
+                let conversations: [Conversation] = mergeableConversationIDs.compactMap { objectID in
                     context.object(with: objectID) as? Conversation
                 }
                 guard conversations.count > 1 else { continue }
@@ -244,6 +261,16 @@ struct ConversationMerger: Sendable {
 
             return mergedCount
         }
+    }
+
+    private func isForwardedSubject(_ subject: String?) -> Bool {
+        guard let subject = subject?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+            !subject.isEmpty else {
+            return false
+        }
+        return subject.hasPrefix("fwd:") || subject.hasPrefix("fw:")
     }
 
     /// Convenience wrapper that merges changes into the app's `viewContext`.
