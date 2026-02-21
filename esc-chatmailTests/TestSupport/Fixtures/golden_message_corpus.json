@@ -173,6 +173,32 @@
       "isOneToOneConversation": true,
       "subject": "New message: Anything wrong with the phone?",
       "expectedShowHTMLPreview": true
+    },
+    {
+      "id": "one_to_one_reply_trusted_ebay_sender_uses_preview",
+      "notes": "System-generated eBay buyer/seller relays can carry Re: subjects but should still use HTML preview when rich.",
+      "hasHTMLSource": true,
+      "isForwardedEmail": false,
+      "isNewsletter": false,
+      "hasRichHTMLContent": true,
+      "isFromMe": false,
+      "isOneToOneConversation": true,
+      "subject": "Re: ryfa-7369 sent a message about Item #1234",
+      "senderEmail": "ryfa73_izw3749pf@members.ebay.com",
+      "expectedShowHTMLPreview": true
+    },
+    {
+      "id": "one_to_one_reply_trusted_amazon_subdomain_uses_preview",
+      "notes": "Marketplace relay subdomains should be treated as trusted transactional senders for rich Re: messages.",
+      "hasHTMLSource": true,
+      "isForwardedEmail": false,
+      "isNewsletter": false,
+      "hasRichHTMLContent": true,
+      "isFromMe": false,
+      "isOneToOneConversation": true,
+      "subject": "Re: New message about your listing",
+      "senderEmail": "xyz123@marketplace.amazon.com",
+      "expectedShowHTMLPreview": true
     }
   ],
   "newsletterDetectionCases": [

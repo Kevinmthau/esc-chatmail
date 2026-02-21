@@ -13,7 +13,8 @@ enum MessageDisplayPolicy {
         hasRichHTMLContent: Bool,
         isFromMe: Bool,
         isOneToOneConversation: Bool,
-        subject: String?
+        subject: String?,
+        senderEmail: String?
     ) -> Bool {
         guard hasHTMLSource else { return false }
 
@@ -25,6 +26,9 @@ enum MessageDisplayPolicy {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() ?? ""
         let isReplySubject = normalizedSubject.hasPrefix("re:")
+        let allowsOneToOneReplyPreview =
+            isOneToOneConversation &&
+            shouldAllowRichReplyPreview(senderEmail: senderEmail, hasRichHTMLContent: hasRichHTMLContent)
 
         // Keep one-to-one replies in chat bubbles, even if upstream heuristics are noisy.
         if isOneToOneConversation {
@@ -32,14 +36,14 @@ enum MessageDisplayPolicy {
                 return false
             }
 
-            if isReplySubject {
+            if isReplySubject && !allowsOneToOneReplyPreview {
                 return false
             }
         }
 
         // Keep personal reply chains in group threads as bubbles unless we have
         // strong newsletter classification.
-        if isReplySubject && !isNewsletter {
+        if isReplySubject && !isNewsletter && !allowsOneToOneReplyPreview {
             return false
         }
 
@@ -50,5 +54,39 @@ enum MessageDisplayPolicy {
         // Transactional/marketing HTML can be genuinely rich even in one-to-one conversations.
         // Trust `hasRichHTMLContent` to filter out signature cruft.
         return hasRichHTMLContent
+    }
+
+    private static let trustedTransactionalReplyDomainSuffixes: Set<String> = [
+        // eBay buyer/seller relay senders
+        "members.ebay.com",
+        // Marketplace relay/system senders
+        "amazon.com",
+        "etsy.com",
+        "mercari.com",
+        "offerup.com",
+        "poshmark.com"
+    ]
+
+    private static func shouldAllowRichReplyPreview(senderEmail: String?, hasRichHTMLContent: Bool) -> Bool {
+        guard hasRichHTMLContent,
+              let domain = senderDomain(from: senderEmail) else {
+            return false
+        }
+
+        return trustedTransactionalReplyDomainSuffixes.contains { suffix in
+            domain == suffix || domain.hasSuffix(".\(suffix)")
+        }
+    }
+
+    private static func senderDomain(from senderEmail: String?) -> String? {
+        guard let senderEmail = senderEmail?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+            let atIndex = senderEmail.lastIndex(of: "@"),
+            atIndex < senderEmail.index(before: senderEmail.endIndex) else {
+            return nil
+        }
+
+        return String(senderEmail[senderEmail.index(after: atIndex)...])
     }
 }

@@ -10,7 +10,8 @@ final class MessageDisplayPolicyTests: XCTestCase {
             hasRichHTMLContent: false,
             isFromMe: false,
             isOneToOneConversation: true,
-            subject: "Lunch?"
+            subject: "Lunch?",
+            senderEmail: nil
         )
 
         XCTAssertFalse(shouldShow)
@@ -24,7 +25,8 @@ final class MessageDisplayPolicyTests: XCTestCase {
             hasRichHTMLContent: false,
             isFromMe: false,
             isOneToOneConversation: true,
-            subject: "Fwd: Details"
+            subject: "Fwd: Details",
+            senderEmail: nil
         )
 
         XCTAssertTrue(shouldShow)
@@ -38,7 +40,8 @@ final class MessageDisplayPolicyTests: XCTestCase {
             hasRichHTMLContent: false,
             isFromMe: false,
             isOneToOneConversation: false,
-            subject: "Weekly update"
+            subject: "Weekly update",
+            senderEmail: nil
         )
 
         XCTAssertTrue(shouldShow)
@@ -52,7 +55,8 @@ final class MessageDisplayPolicyTests: XCTestCase {
             hasRichHTMLContent: true,
             isFromMe: false,
             isOneToOneConversation: true,
-            subject: "Thanks"
+            subject: "Thanks",
+            senderEmail: nil
         )
 
         XCTAssertTrue(shouldShow)
@@ -66,7 +70,8 @@ final class MessageDisplayPolicyTests: XCTestCase {
             hasRichHTMLContent: true,
             isFromMe: false,
             isOneToOneConversation: false,
-            subject: "Agenda"
+            subject: "Agenda",
+            senderEmail: nil
         )
 
         XCTAssertTrue(shouldShow)
@@ -80,7 +85,8 @@ final class MessageDisplayPolicyTests: XCTestCase {
             hasRichHTMLContent: true,
             isFromMe: false,
             isOneToOneConversation: false,
-            subject: "Re: Next steps"
+            subject: "Re: Next steps",
+            senderEmail: nil
         )
 
         XCTAssertFalse(shouldShow)
@@ -94,10 +100,41 @@ final class MessageDisplayPolicyTests: XCTestCase {
             hasRichHTMLContent: true,
             isFromMe: false,
             isOneToOneConversation: true,
-            subject: "Re: Lending Follow up"
+            subject: "Re: Lending Follow up",
+            senderEmail: "friend@example.com"
         )
 
         XCTAssertFalse(shouldShow)
+    }
+
+    func testShouldShowHTMLPreview_oneToOneReplyFromTrustedTransactionalSender_returnsTrue() {
+        let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
+            hasHTMLSource: true,
+            isForwardedEmail: false,
+            isNewsletter: false,
+            hasRichHTMLContent: true,
+            isFromMe: false,
+            isOneToOneConversation: true,
+            subject: "Re: ryfa-7369 sent a message about Item #1234",
+            senderEmail: "ryfa73_izw3749pf@members.ebay.com"
+        )
+
+        XCTAssertTrue(shouldShow)
+    }
+
+    func testShouldShowHTMLPreview_oneToOneReplyFromTrustedTransactionalSubdomain_returnsTrue() {
+        let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
+            hasHTMLSource: true,
+            isForwardedEmail: false,
+            isNewsletter: false,
+            hasRichHTMLContent: true,
+            isFromMe: false,
+            isOneToOneConversation: true,
+            subject: "Re: New message about your listing",
+            senderEmail: "xyz123@marketplace.amazon.com"
+        )
+
+        XCTAssertTrue(shouldShow)
     }
 
     func testShouldShowHTMLPreview_fromMeInOneToOne_returnsFalse() {
@@ -108,7 +145,8 @@ final class MessageDisplayPolicyTests: XCTestCase {
             hasRichHTMLContent: true,
             isFromMe: true,
             isOneToOneConversation: true,
-            subject: "Status"
+            subject: "Status",
+            senderEmail: nil
         )
 
         XCTAssertFalse(shouldShow)
@@ -122,7 +160,8 @@ final class MessageDisplayPolicyTests: XCTestCase {
             hasRichHTMLContent: true,
             isFromMe: false,
             isOneToOneConversation: false,
-            subject: "Anything"
+            subject: "Anything",
+            senderEmail: nil
         )
 
         XCTAssertFalse(shouldShow)

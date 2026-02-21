@@ -573,7 +573,8 @@ final class GoldenCorpusReplayTests: XCTestCase {
                     hasRichHTMLContent: scenario.hasRichHTMLContent,
                     isFromMe: scenario.isFromMe,
                     isOneToOneConversation: scenario.isOneToOneConversation,
-                    subject: scenario.subject
+                    subject: scenario.subject,
+                    senderEmail: scenario.senderEmail
                 )
 
                 XCTAssertEqual(
@@ -695,6 +696,7 @@ private struct DisplayPolicyCase: Decodable {
     let isFromMe: Bool
     let isOneToOneConversation: Bool
     let subject: String?
+    let senderEmail: String?
     let expectedShowHTMLPreview: Bool
     let notes: String?
 }

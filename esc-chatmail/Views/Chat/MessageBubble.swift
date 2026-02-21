@@ -24,7 +24,8 @@ struct MessageBubble: View {
             hasRichHTMLContent: hasRichHTMLContent,
             isFromMe: message.isFromMe,
             isOneToOneConversation: conversation.conversationType == .oneToOne,
-            subject: message.subject
+            subject: message.subject,
+            senderEmail: message.senderEmail
         )
     }
     @State private var fullTextContent: String?
