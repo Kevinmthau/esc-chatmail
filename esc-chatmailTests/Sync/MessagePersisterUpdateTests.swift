@@ -105,4 +105,63 @@ final class MessagePersisterUpdateTests: XCTestCase {
 
         XCTAssertEqual(saved?.conversation?.objectID, existingConversation.objectID)
     }
+
+    func testCreateNewMessage_forwardedSubject_createsNewConversationEvenWhenThreadMatches() async throws {
+        let threadId = "thread-forward-123"
+        let existingConversation = ConversationBuilder.simple(in: context)
+        _ = MessageBuilder()
+            .withId("existing-forward-message")
+            .withThreadId(threadId)
+            .inConversation(existingConversation)
+            .build(in: context)
+
+        try testStack.saveViewContext()
+
+        var headers = ProcessedHeaders()
+        headers.subject = "Fwd: Mario Spina"
+        headers.from = "Brynn Putnam <brynn@example.com>"
+        headers.to = [
+            EmailAddress(email: "kristine@example.com", displayName: "Kristine"),
+            EmailAddress(email: "kmthau@gmail.com", displayName: "Kevin Thau")
+        ]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: "forwarded-message",
+            gmThreadId: threadId,
+            snippet: "Hi Kristine, can you take a look?",
+            cleanedSnippet: "Hi Kristine, can you take a look?",
+            internalDate: Date(),
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: "Hi Kristine, can you take a look?",
+            labelIds: [],
+            isUnread: true,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        try await persister.createNewMessage(
+            processedMessage,
+            labelIds: nil,
+            myAliases: [normalizedEmail("kmthau@gmail.com")],
+            in: context
+        )
+
+        let conversationCount = try context.count(for: Conversation.fetchRequest())
+        XCTAssertEqual(conversationCount, 2, "Forwarded messages should create a new participant-based conversation")
+
+        let fetch = Message.fetchRequest()
+        fetch.predicate = NSPredicate(format: "id == %@", "forwarded-message")
+        fetch.fetchLimit = 1
+        let saved = try context.fetch(fetch).first
+
+        XCTAssertNotEqual(saved?.conversation?.objectID, existingConversation.objectID)
+        XCTAssertEqual(
+            saved?.conversation?.participantHash,
+            calculateParticipantHash(from: ["brynn@example.com", "kristine@example.com"]),
+            "Forwarded conversation should use the forward recipient/sender participant set"
+        )
+    }
 }
