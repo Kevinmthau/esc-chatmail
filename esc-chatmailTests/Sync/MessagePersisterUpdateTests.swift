@@ -164,4 +164,62 @@ final class MessagePersisterUpdateTests: XCTestCase {
             "Forwarded conversation should use the forward recipient/sender participant set"
         )
     }
+
+    func testCreateNewMessage_inlineDataAttachment_isPersistedAsDownloaded() async throws {
+        let inlineImageData = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2foAAAAASUVORK5CYII="))
+
+        var headers = ProcessedHeaders()
+        headers.subject = "Inline attachment"
+        headers.from = "Sender <sender@example.com>"
+        headers.to = [EmailAddress(email: "recipient@example.com", displayName: nil)]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: "inline-data-message",
+            gmThreadId: "inline-data-thread",
+            snippet: "See image",
+            cleanedSnippet: "See image",
+            internalDate: Date(),
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: "See image",
+            labelIds: ["INBOX"],
+            isUnread: true,
+            isNewsletter: false,
+            hasAttachments: true,
+            attachmentInfo: [
+                AttachmentInfo(
+                    id: "local_inline_test_attachment",
+                    filename: "inline.png",
+                    mimeType: "image/png",
+                    size: inlineImageData.count,
+                    contentId: "inline-test",
+                    inlineData: inlineImageData
+                )
+            ]
+        )
+
+        try await persister.createNewMessage(
+            processedMessage,
+            labelIds: nil,
+            myAliases: [normalizedEmail("recipient@example.com")],
+            in: context
+        )
+
+        let request = Message.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", "inline-data-message")
+        request.fetchLimit = 1
+        let savedMessage = try XCTUnwrap(context.fetch(request).first)
+        let savedAttachment = try XCTUnwrap(savedMessage.attachmentsArray.first)
+
+        XCTAssertEqual(savedMessage.attachmentsArray.count, 1)
+        XCTAssertEqual(savedAttachment.state, .downloaded)
+        XCTAssertNotNil(savedAttachment.localURL)
+        XCTAssertNotNil(savedAttachment.previewURL)
+        XCTAssertEqual(savedAttachment.contentId, "inline-test")
+        XCTAssertEqual(AttachmentPaths.loadData(from: savedAttachment.localURL), inlineImageData)
+
+        AttachmentPaths.deleteFile(at: savedAttachment.localURL)
+        AttachmentPaths.deleteFile(at: savedAttachment.previewURL)
+    }
 }

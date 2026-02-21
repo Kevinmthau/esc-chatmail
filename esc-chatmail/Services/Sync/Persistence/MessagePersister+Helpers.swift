@@ -12,10 +12,66 @@ extension MessagePersister {
         in context: NSManagedObjectContext
     ) {
         do {
-            _ = try AttachmentFactory.create(from: info, for: message, in: context)
+            let attachment = try AttachmentFactory.create(from: info, for: message, in: context)
+
+            if let inlineData = info.inlineData {
+                let didPersistInlineData = persistInlineAttachmentData(
+                    inlineData,
+                    info: info,
+                    attachment: attachment
+                )
+                if !didPersistInlineData {
+                    context.delete(attachment)
+                    Log.warning("Dropping inline attachment for message \(message.id) due to local persistence failure", category: .attachment)
+                }
+            }
         } catch {
             Log.error("Failed to create attachment for message \(message.id): \(error)", category: .coreData)
         }
+    }
+
+    private func persistInlineAttachmentData(
+        _ inlineData: Data,
+        info: AttachmentInfo,
+        attachment: Attachment
+    ) -> Bool {
+        AttachmentPaths.setupDirectories()
+
+        guard let attachmentId = attachment.id, !attachmentId.isEmpty else {
+            return false
+        }
+
+        let filenameExt = (info.filename as NSString).pathExtension.lowercased()
+        let ext = filenameExt.isEmpty ? AttachmentPaths.fileExtension(for: info.mimeType) : filenameExt
+        let originalPath = AttachmentPaths.originalPath(idOrUUID: attachmentId, ext: ext)
+
+        guard AttachmentPaths.saveData(inlineData, to: originalPath) else {
+            return false
+        }
+
+        attachment.localURL = originalPath
+        attachment.byteSize = Int64(max(info.size, inlineData.count))
+
+        if info.mimeType.hasPrefix("image/"),
+           let dimensions = ImageProcessor.getImageDimensions(from: inlineData) {
+            attachment.width = Int16(clamping: Int(dimensions.width.rounded()))
+            attachment.height = Int16(clamping: Int(dimensions.height.rounded()))
+        }
+
+        if info.mimeType == "application/pdf",
+           let pageCount = ImageProcessor.getPDFPageCount(from: inlineData) {
+            attachment.pageCount = Int16(clamping: pageCount)
+        }
+
+        if let thumbnailData = ImageProcessor.generateThumbnail(from: inlineData, mimeType: info.mimeType) {
+            let previewPath = AttachmentPaths.previewPath(idOrUUID: attachmentId)
+            if AttachmentPaths.saveData(thumbnailData, to: previewPath) {
+                attachment.previewURL = previewPath
+            }
+        }
+
+        attachment.state = .downloaded
+        return true
     }
 
     /// Finds an existing conversation for a Gmail thread by looking up any already-persisted message

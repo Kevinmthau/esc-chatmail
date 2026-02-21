@@ -49,6 +49,9 @@ class MessageProcessor {
         // Check for attachments (exclude body parts that we fetched as content)
         processedMessage.hasAttachments = checkForAttachments(in: payload)
         processedMessage.attachmentInfo = extractAttachments(from: payload)
+        if !processedMessage.attachmentInfo.isEmpty {
+            processedMessage.hasAttachments = true
+        }
 
         return processedMessage
     }
@@ -511,6 +514,7 @@ class MessageProcessor {
     private func extractAttachments(from part: MessagePart) -> [AttachmentInfo] {
         var attachments: [AttachmentInfo] = []
         var seenIds: Set<String> = []
+        var seenInlineFingerprints: Set<String> = []
 
         func traverse(_ part: MessagePart) {
             #if DEBUG
@@ -522,27 +526,50 @@ class MessageProcessor {
             }
             #endif
 
-            // Only process actual file parts, not multipart containers
-            // Also skip duplicate attachment IDs
+            let trimmedFilename = part.filename?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let mimeType = part.mimeType ?? "application/octet-stream"
+
+            // Extract Content-ID header for inline attachments (cid: URLs)
+            // Content-ID format is typically: <unique-id@domain.com>
+            // We strip the angle brackets for matching against cid: URLs
+            let contentId = part.headers?.first(where: { $0.name.lowercased() == "content-id" })?.value
+                .trimmingCharacters(in: CharacterSet(charactersIn: "<>"))
+
+            // Only process actual file parts, not multipart containers.
+            // Also skip duplicate attachment IDs.
             if let attachmentId = part.body?.attachmentId,
                !(part.mimeType?.hasPrefix("multipart/") ?? false),
                !seenIds.contains(attachmentId) {
                 seenIds.insert(attachmentId)
 
-                // Extract Content-ID header for inline attachments (cid: URLs)
-                // Content-ID format is typically: <unique-id@domain.com>
-                // We strip the angle brackets for matching against cid: URLs
-                let contentId = part.headers?.first(where: { $0.name.lowercased() == "content-id" })?.value
-                    .trimmingCharacters(in: CharacterSet(charactersIn: "<>"))
-
                 let attachment = AttachmentInfo(
                     id: attachmentId,
-                    filename: part.filename ?? "attachment",
-                    mimeType: part.mimeType ?? "application/octet-stream",
+                    filename: resolvedAttachmentFilename(from: trimmedFilename, mimeType: mimeType),
+                    mimeType: mimeType,
                     size: part.body?.size ?? 0,
-                    contentId: contentId
+                    contentId: contentId,
+                    inlineData: nil
                 )
                 attachments.append(attachment)
+            } else if !(part.mimeType?.hasPrefix("multipart/") ?? false),
+                      let encodedData = part.body?.data,
+                      shouldTreatInlineDataPartAsAttachment(part, trimmedFilename: trimmedFilename, contentId: contentId),
+                      let decodedData = decodeBase64Data(encodedData) {
+                let size = part.body?.size ?? decodedData.count
+                let inlineFingerprint = "\(part.partId ?? "")|\(trimmedFilename)|\(mimeType)|\(contentId ?? "")|\(size)"
+                if !seenInlineFingerprints.contains(inlineFingerprint) {
+                    seenInlineFingerprints.insert(inlineFingerprint)
+
+                    let attachment = AttachmentInfo(
+                        id: "local_inline_\(UUID().uuidString)",
+                        filename: resolvedAttachmentFilename(from: trimmedFilename, mimeType: mimeType),
+                        mimeType: mimeType,
+                        size: size,
+                        contentId: contentId,
+                        inlineData: decodedData
+                    )
+                    attachments.append(attachment)
+                }
             }
 
             if let parts = part.parts {
@@ -562,6 +589,43 @@ class MessageProcessor {
         #endif
 
         return attachments
+    }
+
+    private func shouldTreatInlineDataPartAsAttachment(
+        _ part: MessagePart,
+        trimmedFilename: String,
+        contentId: String?
+    ) -> Bool {
+        let contentDisposition = part.headers?
+            .first(where: { $0.name.lowercased() == "content-disposition" })?
+            .value
+            .lowercased() ?? ""
+
+        let hasAttachmentDisposition = contentDisposition.contains("attachment")
+        let hasInlineDisposition = contentDisposition.contains("inline")
+        let isInlineCIDImage = (part.mimeType?.lowercased().hasPrefix("image/") ?? false) && (contentId?.isEmpty == false)
+
+        if hasAttachmentDisposition {
+            return true
+        }
+
+        if !trimmedFilename.isEmpty {
+            return true
+        }
+
+        if hasInlineDisposition && contentId?.isEmpty == false {
+            return true
+        }
+
+        return isInlineCIDImage
+    }
+
+    private func resolvedAttachmentFilename(from trimmedFilename: String, mimeType: String) -> String {
+        guard !trimmedFilename.isEmpty else {
+            let ext = AttachmentPaths.fileExtension(for: mimeType)
+            return "attachment.\(ext)"
+        }
+        return trimmedFilename
     }
 }
 
@@ -610,4 +674,21 @@ struct AttachmentInfo: Sendable {
     let mimeType: String
     let size: Int
     let contentId: String?
+    let inlineData: Data?
+
+    init(
+        id: String,
+        filename: String,
+        mimeType: String,
+        size: Int,
+        contentId: String?,
+        inlineData: Data? = nil
+    ) {
+        self.id = id
+        self.filename = filename
+        self.mimeType = mimeType
+        self.size = size
+        self.contentId = contentId
+        self.inlineData = inlineData
+    }
 }

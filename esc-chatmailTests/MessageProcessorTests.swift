@@ -486,6 +486,180 @@ final class MessageProcessorTests: XCTestCase {
         XCTAssertFalse(result.isNewsletter, "Score of 45 should not flag as newsletter")
         XCTAssertEqual(result.score, 45)
     }
+
+    // MARK: - Attachment Extraction
+
+    func testProcessGmailMessage_extractsInlineDataAttachmentWithoutAttachmentId() async throws {
+        let testStack = TestCoreDataStack()
+        let context = testStack.viewContext
+
+        let inlineImageData = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2foAAAAASUVORK5CYII="))
+        let message = makeMultipartMessage(
+            id: "inline-data-attachment-message",
+            parts: [
+                MessagePart(
+                    partId: "0",
+                    mimeType: "text/plain",
+                    filename: nil,
+                    headers: nil,
+                    body: MessageBody(
+                        size: 12,
+                        data: Data("Hello world!".utf8).base64EncodedString(),
+                        attachmentId: nil
+                    ),
+                    parts: nil
+                ),
+                MessagePart(
+                    partId: "1",
+                    mimeType: "image/png",
+                    filename: "preview.png",
+                    headers: [
+                        MessageHeader(name: "Content-Disposition", value: "attachment; filename=\"preview.png\""),
+                        MessageHeader(name: "Content-ID", value: "<inline-preview>")
+                    ],
+                    body: MessageBody(
+                        size: inlineImageData.count,
+                        data: inlineImageData.base64EncodedString(),
+                        attachmentId: nil
+                    ),
+                    parts: nil
+                )
+            ]
+        )
+
+        let processed = await processor.processGmailMessage(
+            message,
+            myAliases: [],
+            in: context
+        )
+
+        let attachment = try XCTUnwrap(processed?.attachmentInfo.first)
+        XCTAssertEqual(processed?.attachmentInfo.count, 1)
+        XCTAssertTrue(processed?.hasAttachments == true)
+        XCTAssertTrue(attachment.id.hasPrefix("local_inline_"))
+        XCTAssertEqual(attachment.filename, "preview.png")
+        XCTAssertEqual(attachment.mimeType, "image/png")
+        XCTAssertEqual(attachment.contentId, "inline-preview")
+        XCTAssertEqual(attachment.inlineData, inlineImageData)
+    }
+
+    func testProcessGmailMessage_extractsInlineCIDImageWithoutFilename() async throws {
+        let testStack = TestCoreDataStack()
+        let context = testStack.viewContext
+
+        let inlineImageData = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2foAAAAASUVORK5CYII="))
+        let message = makeMultipartMessage(
+            id: "inline-cid-no-filename-message",
+            parts: [
+                MessagePart(
+                    partId: "0",
+                    mimeType: "text/plain",
+                    filename: nil,
+                    headers: nil,
+                    body: MessageBody(
+                        size: 2,
+                        data: Data("Hi".utf8).base64EncodedString(),
+                        attachmentId: nil
+                    ),
+                    parts: nil
+                ),
+                MessagePart(
+                    partId: "1",
+                    mimeType: "image/png",
+                    filename: "",
+                    headers: [
+                        MessageHeader(name: "Content-Disposition", value: "inline"),
+                        MessageHeader(name: "Content-ID", value: "<cid-without-filename>")
+                    ],
+                    body: MessageBody(
+                        size: inlineImageData.count,
+                        data: inlineImageData.base64EncodedString(),
+                        attachmentId: nil
+                    ),
+                    parts: nil
+                )
+            ]
+        )
+
+        let processed = await processor.processGmailMessage(
+            message,
+            myAliases: [],
+            in: context
+        )
+
+        let attachment = try XCTUnwrap(processed?.attachmentInfo.first)
+        XCTAssertEqual(processed?.attachmentInfo.count, 1)
+        XCTAssertTrue(processed?.hasAttachments == true)
+        XCTAssertEqual(attachment.filename, "attachment.png")
+        XCTAssertEqual(attachment.contentId, "cid-without-filename")
+        XCTAssertEqual(attachment.inlineData, inlineImageData)
+    }
+
+    func testProcessGmailMessage_doesNotTreatHTMLBodyAsAttachment() async {
+        let testStack = TestCoreDataStack()
+        let context = testStack.viewContext
+
+        let htmlBody = "<div>Body only</div>"
+        let message = GmailMessage(
+            id: "html-body-only-message",
+            threadId: "html-body-only-thread",
+            labelIds: ["INBOX"],
+            snippet: "Body only",
+            historyId: "123",
+            internalDate: "1704067200000",
+            payload: MessagePart(
+                partId: "0",
+                mimeType: "text/html",
+                filename: nil,
+                headers: baseHeaders(id: "html-body-only-message"),
+                body: MessageBody(
+                    size: htmlBody.count,
+                    data: htmlBody.data(using: .utf8)?.base64EncodedString(),
+                    attachmentId: nil
+                ),
+                parts: nil
+            ),
+            sizeEstimate: htmlBody.count
+        )
+
+        let processed = await processor.processGmailMessage(
+            message,
+            myAliases: [],
+            in: context
+        )
+
+        XCTAssertEqual(processed?.attachmentInfo.count, 0)
+        XCTAssertFalse(processed?.hasAttachments ?? true)
+    }
+
+    private func makeMultipartMessage(id: String, parts: [MessagePart]) -> GmailMessage {
+        GmailMessage(
+            id: id,
+            threadId: "\(id)-thread",
+            labelIds: ["INBOX"],
+            snippet: "snippet",
+            historyId: "123",
+            internalDate: "1704067200000",
+            payload: MessagePart(
+                partId: "",
+                mimeType: "multipart/mixed",
+                filename: nil,
+                headers: baseHeaders(id: id),
+                body: nil,
+                parts: parts
+            ),
+            sizeEstimate: 1024
+        )
+    }
+
+    private func baseHeaders(id: String) -> [MessageHeader] {
+        [
+            MessageHeader(name: "Subject", value: "Attachment test"),
+            MessageHeader(name: "From", value: "Sender <sender@example.com>"),
+            MessageHeader(name: "To", value: "recipient@example.com"),
+            MessageHeader(name: "Message-ID", value: "<\(id)@test.example.com>")
+        ]
+    }
 }
 
 final class GoldenCorpusReplayTests: XCTestCase {
