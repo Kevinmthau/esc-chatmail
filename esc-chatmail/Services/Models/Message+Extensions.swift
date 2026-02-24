@@ -56,10 +56,21 @@ extension Message {
     /// Attachments suitable for display in the chat UI.
     /// - Parameters:
     ///   - hidingInlineReferencedInHTML: When true, hides inline `cid:` images that are referenced by the message HTML
-    ///     (to avoid duplicating what the HTML renderer already shows). When false, shows all non-signature attachments,
-    ///     which is the desired behavior for plain-text bubble rendering.
+    ///     (to avoid duplicating what the HTML renderer already shows). When false, keeps plain-text bubble behavior
+    ///     but still hides signature/quoted-history inline images removed by HTML cleanup.
     func displayableAttachments(hidingInlineReferencedInHTML: Bool) -> [Attachment] {
-        let allAttachments = attachmentsArray.filter { !$0.isLikelySignatureImage }
+        let html = loadHTMLSource()
+        let nonDisplayableInlineContentIDs = extractNonDisplayableInlineContentIDs(from: html)
+        let allAttachments = attachmentsArray.filter { attachment in
+            guard !attachment.isLikelySignatureImage else { return false }
+
+            guard let contentId = normalizedContentID(from: attachment.contentId) else {
+                return true
+            }
+
+            // Hide inline images that only appear in signature/quoted sections removed by cleanup.
+            return !nonDisplayableInlineContentIDs.contains(contentId)
+        }
 
         guard hidingInlineReferencedInHTML else {
             return allAttachments
@@ -73,13 +84,13 @@ extension Message {
         }
 
         // If message has HTML content, filter out attachments that are displayed inline via cid: URLs.
-        let referencedCIDs = extractReferencedContentIDs()
+        let referencedCIDs = extractReferencedContentIDs(from: html)
         guard !referencedCIDs.isEmpty else {
             return allAttachments
         }
 
         return allAttachments.filter { attachment in
-            guard let contentId = attachment.contentId, !contentId.isEmpty else {
+            guard let contentId = normalizedContentID(from: attachment.contentId) else {
                 return true // No Content-ID, always show
             }
             // Hide if this Content-ID is referenced in the HTML body.
@@ -87,12 +98,41 @@ extension Message {
         }
     }
 
-    /// Extracts Content-IDs referenced via cid: URLs in the message's HTML body
-    private func extractReferencedContentIDs() -> Set<String> {
-        // Try to load HTML content for this message
-        guard let html = HTMLContentHandler.shared.loadHTML(for: id) else {
-            return []
+    /// Hides inline images that appear only in sections removed by quote/signature cleanup.
+    /// This keeps signature logos out of plain-text chat bubbles while preserving genuine inline content.
+    private func extractNonDisplayableInlineContentIDs(from html: String?) -> Set<String> {
+        guard let html else { return [] }
+
+        let originalReferenced = extractReferencedContentIDs(from: html)
+        guard !originalReferenced.isEmpty else { return [] }
+
+        let cleaned = cleanedHTMLForAttachmentFiltering(from: html)
+        let cleanedReferenced = extractReferencedContentIDs(from: cleaned)
+        return originalReferenced.subtracting(cleanedReferenced)
+    }
+
+    private func loadHTMLSource() -> String? {
+        HTMLContentHandler.shared.loadHTML(for: id)
+    }
+
+    private func cleanedHTMLForAttachmentFiltering(from html: String) -> String {
+        let quotedAndSignature = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+        if HTMLMeaningfulContentChecker.hasMeaningfulContent(quotedAndSignature) {
+            return quotedAndSignature
         }
+
+        // Signature cleanup can be over-aggressive for some templates; keep quote-only cleanup as fallback.
+        let quotedOnly = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedOnly) ?? html
+        if HTMLMeaningfulContentChecker.hasMeaningfulContent(quotedOnly) {
+            return quotedOnly
+        }
+
+        return html
+    }
+
+    /// Extracts Content-IDs referenced via cid: URLs in HTML.
+    private func extractReferencedContentIDs(from html: String?) -> Set<String> {
+        guard let html else { return [] }
 
         // Match cid: references in src attributes (e.g., src="cid:ii_ml1i6p6v0")
         // Pattern matches: cid: followed by the Content-ID (which may contain letters, numbers, underscores, dots, @)
@@ -116,8 +156,8 @@ extension Message {
 
             if startOfCID < endOfCID {
                 let contentId = String(html[startOfCID..<endOfCID])
-                if !contentId.isEmpty {
-                    referencedCIDs.insert(contentId)
+                if let normalizedContentId = normalizedContentID(from: contentId) {
+                    referencedCIDs.insert(normalizedContentId)
                 }
             }
 
@@ -125,6 +165,23 @@ extension Message {
         }
 
         return referencedCIDs
+    }
+
+    private func normalizedContentID(from rawValue: String?) -> String? {
+        guard let rawValue else { return nil }
+
+        var normalized = rawValue
+            .trimmingCharacters(in: CharacterSet(charactersIn: "<> \t\r\n"))
+
+        while normalized.hasPrefix("/") {
+            normalized.removeFirst()
+        }
+
+        normalized = normalized.removingPercentEncoding ?? normalized
+        normalized = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !normalized.isEmpty else { return nil }
+        return normalized.lowercased()
     }
 
     /// Type-safe accessor for bodyText (alias for consistency)

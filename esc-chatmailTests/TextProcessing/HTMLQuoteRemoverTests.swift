@@ -511,4 +511,23 @@ final class HTMLQuoteRemoverTests: XCTestCase {
         XCTAssertTrue(result?.contains("Main content.") ?? false)
         XCTAssertFalse(result?.contains("Signature details") ?? true)
     }
+
+    func testRemoveQuotes_quotedAndSignaturesMode_removesOutlookMobileSignatureBlock() {
+        let html = """
+        <div>Hope everyone had a good week!</div>
+        <div id="ms-outlook-mobile-signature">
+            <p>Ally Varady</p>
+            <p><img src="cid:image001.png@01DC96AF.8C2488C0"></p>
+        </div>
+        """
+
+        let quotedOnly = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedOnly)
+        let quotedAndSignatures = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures)
+
+        XCTAssertTrue(quotedOnly?.contains("Ally Varady") ?? false)
+        XCTAssertTrue(quotedOnly?.contains("cid:image001.png@01DC96AF.8C2488C0") ?? false)
+        XCTAssertFalse(quotedAndSignatures?.contains("Ally Varady") ?? true)
+        XCTAssertFalse(quotedAndSignatures?.contains("cid:image001.png@01DC96AF.8C2488C0") ?? true)
+        XCTAssertTrue(quotedAndSignatures?.contains("Hope everyone had a good week!") ?? false)
+    }
 }

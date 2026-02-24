@@ -54,6 +54,7 @@ enum HTMLQuoteRemover {
         "<div class=\"signature\">.*?</div>",
         "<div[^>]*class=\"[^\"]*moz-signature[^\"]*\"[^>]*>.*?</div>",
         "<div[^>]*class=\"[^\"]*ms-outlook-signature[^\"]*\"[^>]*>.*?</div>",
+        "<div[^>]*(?:id|class)=\"[^\"]*ms-outlook-mobile-signature[^\"]*\"[^>]*>.*?</div>",
 
         // Generic signature wrappers
         "<div[^>]*class=\"[^\"]*sig[^\"]*\"[^>]*>.*?</div>",

@@ -366,6 +366,67 @@ final class AttachmentDownloaderTests: XCTestCase {
         handler.deleteHTML(for: messageId)
     }
 
+    func testMessage_displayableAttachments_plainBubble_hidesSignatureOnlyCIDInlineImages() throws {
+        let messageId = "msg-inline-signature-\(UUID().uuidString)"
+        let message = MessageBuilder()
+            .withId(messageId)
+            .withAttachments()
+            .build(in: context)
+
+        // Signature/logo CID image should be hidden even in plain bubble mode.
+        let _ = AttachmentBuilder()
+            .withId("att-signature-inline")
+            .withFilename("image001.png")
+            .withContentId("image001.png@01DC96AF.8C2488C0")
+            .asImage(width: 512, height: 512) // Not caught by size/dimension signature heuristic alone
+            .withByteSize(31_639)
+            .forMessage(message)
+            .build(in: context)
+
+        // Real inline body image should still be shown in plain bubble mode.
+        let _ = AttachmentBuilder()
+            .withId("att-body-inline")
+            .withFilename("site-photo.png")
+            .withContentId("body-inline-image")
+            .asImage(width: 1200, height: 900)
+            .withByteSize(350_000)
+            .forMessage(message)
+            .build(in: context)
+
+        // Regular non-inline attachment should always remain visible.
+        let _ = AttachmentBuilder()
+            .withId("att-regular-file")
+            .withFilename("notes.pdf")
+            .asPDF()
+            .withByteSize(45_000)
+            .forMessage(message)
+            .build(in: context)
+
+        let handler = HTMLContentHandler.shared
+        _ = handler.saveHTML(
+            """
+            <html><body>
+            <div>Hope everyone had a good week!</div>
+            <div><img src="cid:body-inline-image"></div>
+            <div id="ms-outlook-mobile-signature">
+                <p>Ally Varady</p>
+                <p><img src="cid:image001.png@01DC96AF.8C2488C0"></p>
+            </div>
+            </body></html>
+            """,
+            for: messageId
+        )
+
+        try testStack.saveViewContext()
+
+        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
+        let displayable = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: false) ?? []
+
+        XCTAssertEqual(displayable.compactMap { $0.id }.sorted(), ["att-body-inline", "att-regular-file"])
+
+        handler.deleteHTML(for: messageId)
+    }
+
     // MARK: - Local Attachment Tests
 
     func testAttachment_isLocalAttachment_detectsLocalIds() throws {

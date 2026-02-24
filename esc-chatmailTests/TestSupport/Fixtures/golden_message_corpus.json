@@ -85,6 +85,12 @@
       "notes": "HTML-to-bubble extraction should remove law-firm style signatures even if the phone line collapses to a bare 'T' label.",
       "inputHTML": "<div>Hi Kevin,</div><div><br></div><div>The estimated payout figure was changed to $30 million-please see attached.</div><div><br></div><div>Buchalter</div><div>Monica</div><div>Mazzei</div><div>Partner | Certified Family Law Specialist</div><div>T</div><div><br></div><div>mmazzei@buchalter.com&lt;mailto:mmazzei@buchalter.com&gt;</div><div>425 Market Street, Suite 2900</div><div>San Francisco, CA 94105</div><div>www.buchalter.com&lt;http://www.buchalter.com&gt;</div><div><br></div><div>From: Kevin Thau &lt;kmthau@gmail.com&gt;</div><div>Sent: Thursday, February 12, 2026 12:45 PM</div><div>To: Mazzei, Monica &lt;mmazzei@buchalter.com&gt;</div><div>Subject: Re: Thau Draft Settlement Letter</div><div><br></div><div>Thanks for sending this over.</div>",
       "expected": "Hi Kevin,\n\nThe estimated payout figure was changed to $30 million-please see attached."
+    },
+    {
+      "id": "outlook_mobile_signature_block_with_cid_logo_removed",
+      "notes": "Outlook mobile signature wrappers should be stripped from bubble text so signature logo CID references do not leak into chat.",
+      "inputHTML": "<div>Hope everyone had a good week! Can you please let me know on the below or if we need to discuss?</div><div id=\"ms-outlook-mobile-signature\"><p>Ally Varady</p><p><img src=\"cid:image001.png@01DC96AF.8C2488C0\" alt=\"A close up of a logo\"></p></div>",
+      "expected": "Hope everyone had a good week! Can you please let me know on the below or if we need to discuss?"
     }
   ],
   "richHTMLDetectionCases": [
