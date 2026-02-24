@@ -13,6 +13,18 @@
       "expected": "FYI"
     },
     {
+      "id": "raw_source_nested_multipart_extracts_only_plain_part",
+      "notes": "Raw RFC822 source with nested multipart boundaries should stop at the inner plain-text boundary and avoid leaking HTML/attachment payload into bubble text.",
+      "input": "Delivered-To: kmthau@gmail.com\nReceived: by 2002:a05:6e04:108f:b0:3ac:63b9:5e27 with SMTP id u15csp476934imc;\n        Tue, 24 Feb 2026 14:02:53 -0800 (PST)\nX-Received: by 2002:a05:7022:6899:b0:123:35c4:f39c with SMTP id a92af1059eb24;\n        Tue, 24 Feb 2026 14:02:53 -0800 (PST)\nReturn-Path: <sender@example.com>\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=\"_006_outer_boundary\"\n\n--_006_outer_boundary\nContent-Type: multipart/related; boundary=\"_005_related_boundary\"; type=\"multipart/alternative\"\n\n--_005_related_boundary\nContent-Type: multipart/alternative; boundary=\"_000_alternative_boundary\"\n\n--_000_alternative_boundary\nContent-Type: text/plain; charset=\"Windows-1252\"\nContent-Transfer-Encoding: quoted-printable\n\nHi Brynn and Kevin,\n\nWe are delighted to invite you to opening night.\nPlease let me know if you=27ll be able to make it.\n\n--_000_alternative_boundary\nContent-Type: text/html; charset=\"Windows-1252\"\nContent-Transfer-Encoding: quoted-printable\n\n<html><body><div>Hi Brynn and Kevin,</div></body></html>\n\n--_000_alternative_boundary--\n--_005_related_boundary\nContent-Type: image/png; name=\"image001.png\"\nContent-Disposition: inline; filename=\"image001.png\"\nContent-ID: <image001.png@01DCA5AF.35846080>\nContent-Transfer-Encoding: base64\n\niVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2foAAAAASUVORK5CYII=\n\n--_005_related_boundary--\n--_006_outer_boundary\nContent-Type: image/png; name=\"invite.png\"\nContent-Disposition: attachment; filename=\"invite.png\"\nContent-Transfer-Encoding: base64\n\niVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2foAAAAASUVORK5CYII=\n\n--_006_outer_boundary--",
+      "expected": "Hi Brynn and Kevin,\n\nWe are delighted to invite you to opening night.\n\nPlease let me know if you'll be able to make it."
+    },
+    {
+      "id": "raw_source_boundary_like_body_line_preserved",
+      "notes": "Lines in the plain-text body that start with '--' but are not declared MIME boundaries must not truncate extraction.",
+      "input": "Delivered-To: kmthau@gmail.com\nReceived: by 2002:a05:6e04:108f:b0:3ac:63b9:5e27 with SMTP id u15csp476934imc;\n        Tue, 24 Feb 2026 14:02:53 -0800 (PST)\nX-Received: by 2002:a05:7022:6899:b0:123:35c4:f39c with SMTP id a92af1059eb24;\n        Tue, 24 Feb 2026 14:02:53 -0800 (PST)\nReturn-Path: <sender@example.com>\nMIME-Version: 1.0\nContent-Type: multipart/alternative; boundary=\"mixed-boundary-12345\"\n\n--mixed-boundary-12345\nContent-Type: text/plain; charset=\"UTF-8\"\nContent-Transfer-Encoding: quoted-printable\n\nHi team,\n\nPlease keep this separator in the body:\n--1234567890ABCDEF1234567890\nThis line should remain visible.\n\n--mixed-boundary-12345\nContent-Type: text/html; charset=\"UTF-8\"\n\n<html><body><div>Hi team</div></body></html>\n\n--mixed-boundary-12345--",
+      "expected": "Hi team,\n\nPlease keep this separator in the body:\n\n--1234567890ABCDEF1234567890\n\nThis line should remain visible."
+    },
+    {
       "id": "personal_reply_preserves_full_body",
       "notes": "Personal message body should remain untouched when there is no quote boundary.",
       "input": "James\n\nThanks for the note. I'm playing Brambles on 5/22 with the McNeil bros. Really looking forward to it.\n\nThanks for the heads up on NB. No plans as of now but we should rectify that.",

@@ -225,7 +225,7 @@ struct MessageBubble: View {
         let messageId = message.id
         let bodyText = message.bodyTextValue
         let bodyStorageURI = message.bodyStorageURI
-        let result: (plainText: String?, hasRichContent: Bool) = await Task.detached(priority: .userInitiated) {
+        let initialResult: (plainText: String?, hasRichContent: Bool) = await Task.detached(priority: .userInitiated) {
             let handler = HTMLContentHandler.shared
             var processedResult = ProcessedTextCache.processMessage(
                 messageId: messageId,
@@ -262,6 +262,44 @@ struct MessageBubble: View {
 
             return (processedResult.plainText, processedResult.hasRichContent)
         }.value
+
+        var result = initialResult
+
+        let missingBodyText = bodyText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+        let shouldAttemptHTMLRecovery =
+            result.plainText == nil &&
+            missingBodyText &&
+            !message.isFromMe &&
+            (message.bodyStorageURI != nil || message.hasAttachments || message.hasHTMLSource)
+
+        if shouldAttemptHTMLRecovery,
+           let recoveredHTML = await HTMLContentRecoveryService.shared.recoverHTMLContent(messageId: messageId) {
+            let recoveredResult: (plainText: String?, hasRichContent: Bool) = await Task.detached(priority: .userInitiated) {
+                let processed = ChatBubbleTextProcessor.process(
+                    content: recoveredHTML,
+                    options: ChatBubbleTextProcessorOptions(
+                        inputKind: .html,
+                        sanitizeRawEmailSource: false,
+                        decodeHTMLEntities: true,
+                        formatSignOffLineBreaks: true,
+                        classifyRichContent: true
+                    )
+                )
+
+                await ProcessedTextCache.shared.set(
+                    messageId: messageId,
+                    plainText: processed.mainText,
+                    hasRichContent: processed.hasRichContent,
+                    quotedParts: processed.quotedParts
+                )
+
+                return (processed.mainText, processed.hasRichContent)
+            }.value
+
+            if recoveredResult.plainText != nil {
+                result = recoveredResult
+            }
+        }
 
         // Verify message ID hasn't changed during async processing (cell reuse protection)
         guard loadingMessageId == messageId else { return }

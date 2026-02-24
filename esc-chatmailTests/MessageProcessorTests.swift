@@ -632,6 +632,53 @@ final class MessageProcessorTests: XCTestCase {
         XCTAssertFalse(processed?.hasAttachments ?? true)
     }
 
+    func testProcessGmailMessage_htmlOnlyMessage_derivesPlainTextBodyFromHTML() async {
+        let testStack = TestCoreDataStack()
+        let context = testStack.viewContext
+
+        let htmlBody = """
+        <html><body>
+        <div>Hi Brynn and Kevin,</div>
+        <div><br></div>
+        <div>We are delighted to invite you to opening night.</div>
+        <div>Please let me know if you'll be able to make it.</div>
+        </body></html>
+        """
+
+        let message = GmailMessage(
+            id: "html-only-derived-plain-text-message",
+            threadId: "html-only-derived-plain-text-thread",
+            labelIds: ["INBOX"],
+            snippet: "Hi Brynn and Kevin, We are delighted to invite you...",
+            historyId: "123",
+            internalDate: "1704067200000",
+            payload: MessagePart(
+                partId: "0",
+                mimeType: "text/html",
+                filename: nil,
+                headers: baseHeaders(id: "html-only-derived-plain-text-message"),
+                body: MessageBody(
+                    size: htmlBody.count,
+                    data: htmlBody.data(using: .utf8)?.base64EncodedString(),
+                    attachmentId: nil
+                ),
+                parts: nil
+            ),
+            sizeEstimate: htmlBody.count
+        )
+
+        let processed = await processor.processGmailMessage(
+            message,
+            myAliases: [],
+            in: context
+        )
+
+        let plainTextBody = processed?.plainTextBody ?? ""
+        XCTAssertTrue(plainTextBody.contains("Hi Brynn and Kevin,"))
+        XCTAssertTrue(plainTextBody.contains("We are delighted to invite you to opening night."))
+        XCTAssertTrue(plainTextBody.contains("Please let me know if you'll be able to make it."))
+    }
+
     private func makeMultipartMessage(id: String, parts: [MessagePart]) -> GmailMessage {
         GmailMessage(
             id: id,

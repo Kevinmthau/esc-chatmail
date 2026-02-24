@@ -5,12 +5,16 @@ actor HTMLContentRecoveryService {
     static let shared = HTMLContentRecoveryService()
 
     private var recoveringMessageIds: Set<String> = []
+    private var messagesKnownWithoutHTML: Set<String> = []
 
     private init() {}
 
     /// Recovers HTML content for a message by fetching from Gmail API
     /// Returns the HTML content if successful, nil otherwise
     func recoverHTMLContent(messageId: String) async -> String? {
+        // Avoid repeated API calls for messages we already confirmed have no HTML part.
+        guard !messagesKnownWithoutHTML.contains(messageId) else { return nil }
+
         // Prevent duplicate recovery attempts
         guard !recoveringMessageIds.contains(messageId) else { return nil }
         recoveringMessageIds.insert(messageId)
@@ -24,6 +28,9 @@ actor HTMLContentRecoveryService {
             // 2. Extract HTML body from MIME structure (may fetch large body parts via API)
             guard let payload = gmailMessage.payload,
                   let html = await extractHTMLBody(from: payload, messageId: messageId) else {
+                if gmailMessage.payload != nil {
+                    messagesKnownWithoutHTML.insert(messageId)
+                }
                 Log.debug("No HTML body found for message \(messageId)", category: .ui)
                 return nil
             }
@@ -32,6 +39,7 @@ actor HTMLContentRecoveryService {
             let handler = HTMLContentHandler.shared
             _ = handler.saveHTML(html, for: messageId)
 
+            messagesKnownWithoutHTML.remove(messageId)
             Log.info("Recovered HTML content for message \(messageId)", category: .ui)
             return html
         } catch {

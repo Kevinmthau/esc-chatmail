@@ -427,6 +427,150 @@ final class AttachmentDownloaderTests: XCTestCase {
         handler.deleteHTML(for: messageId)
     }
 
+    func testMessage_displayableAttachments_plainBubble_hidesOutlookWordSignatureLogoWithoutWrapper() throws {
+        let messageId = "msg-inline-outlook-word-signature-\(UUID().uuidString)"
+        let message = MessageBuilder()
+            .withId(messageId)
+            .withAttachments()
+            .build(in: context)
+
+        // Outlook/Word signature logo (generic image001 filename + CID) should not show as attachment.
+        let _ = AttachmentBuilder()
+            .withId("att-signature-word-inline")
+            .withFilename("image001.png")
+            .withContentId("image001.png@01DCA5AF.35846080")
+            .asImage(width: 134, height: 53)
+            .withByteSize(192_520)
+            .forMessage(message)
+            .build(in: context)
+
+        // Real file attachment should remain visible.
+        let _ = AttachmentBuilder()
+            .withId("att-real-file")
+            .withFilename("ABT x Casa Tua Invitation.png")
+            .asImage(width: 1024, height: 1536)
+            .withByteSize(3_467_325)
+            .forMessage(message)
+            .build(in: context)
+
+        let handler = HTMLContentHandler.shared
+        _ = handler.saveHTML(
+            """
+            <html><body>
+            <div>Hi Brynn and Kevin,</div>
+            <div>I hope that you are staying warm and doing well!</div>
+            <div>Warmly,</div>
+            <div>Katherine</div>
+            <div><strong>Katherine Merwin</strong></div>
+            <div>Global Membership Manager</div>
+            <div><img src="cid:image001.png@01DCA5AF.35846080" alt="logo"></div>
+            </body></html>
+            """,
+            for: messageId
+        )
+
+        try testStack.saveViewContext()
+
+        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
+        let displayable = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: false) ?? []
+
+        XCTAssertEqual(displayable.compactMap { $0.id }.sorted(), ["att-real-file"])
+
+        handler.deleteHTML(for: messageId)
+    }
+
+    func testMessage_displayableAttachments_plainBubble_usesBodyStorageURIHTMLFallback() throws {
+        let messageId = "msg-inline-body-storage-uri-fallback-\(UUID().uuidString)"
+        let message = MessageBuilder()
+            .withId(messageId)
+            .withAttachments()
+            .build(in: context)
+
+        let _ = AttachmentBuilder()
+            .withId("att-signature-uri-inline")
+            .asImage(width: 134, height: 53)
+            .withFilename("image001.png")
+            .withContentId("image001.png@01DCA5AF.35846080")
+            .withByteSize(192_520)
+            .forMessage(message)
+            .build(in: context)
+
+        let _ = AttachmentBuilder()
+            .withId("att-real-uri-file")
+            .asImage(width: 1024, height: 1536)
+            .withFilename("ABT x Casa Tua Invitation.png")
+            .withByteSize(3_467_325)
+            .forMessage(message)
+            .build(in: context)
+
+        let html = """
+        <html><body>
+        <div>Hi Brynn and Kevin,</div>
+        <div>I hope that you are staying warm and doing well!</div>
+        <div>Warmly,</div>
+        <div>Katherine</div>
+        <div><strong>Katherine Merwin</strong></div>
+        <div>Global Membership Manager</div>
+        <div><img src="cid:image001.png@01DCA5AF.35846080" alt="logo"></div>
+        </body></html>
+        """
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("body-storage-fallback-\(UUID().uuidString).html")
+        try html.write(to: tempURL, atomically: true, encoding: .utf8)
+
+        let handler = HTMLContentHandler.shared
+        handler.deleteHTML(for: messageId)
+        message.bodyStorageURI = tempURL.absoluteString
+
+        try testStack.saveViewContext()
+
+        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
+        let displayable = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: false) ?? []
+
+        XCTAssertEqual(displayable.compactMap { $0.id }.sorted(), ["att-real-uri-file"])
+
+        try? FileManager.default.removeItem(at: tempURL)
+    }
+
+    func testMessage_displayableAttachments_plainBubble_doesNotHideInlineForGenericDomainMention() throws {
+        let messageId = "msg-inline-generic-domain-mention-\(UUID().uuidString)"
+        let message = MessageBuilder()
+            .withId(messageId)
+            .withAttachments()
+            .build(in: context)
+
+        let _ = AttachmentBuilder()
+            .withId("att-inline-body-image")
+            .withFilename("image001.png")
+            .withContentId("image001.png@01DCA5AF.35846080")
+            .asImage(width: 220, height: 90)
+            .withByteSize(192_520)
+            .forMessage(message)
+            .build(in: context)
+
+        let handler = HTMLContentHandler.shared
+        _ = handler.saveHTML(
+            """
+            <html><body>
+            <div><img src="cid:image001.png@01DCA5AF.35846080" alt="hero"></div>
+            <div>Warmly,</div>
+            <div>Please see details at casatualife.com/events</div>
+            </body></html>
+            """,
+            for: messageId
+        )
+
+        try testStack.saveViewContext()
+
+        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
+        let displayable = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: false) ?? []
+
+        XCTAssertEqual(displayable.compactMap { $0.id }.sorted(), ["att-inline-body-image"])
+
+        handler.deleteHTML(for: messageId)
+    }
+
     // MARK: - Local Attachment Tests
 
     func testAttachment_isLocalAttachment_detectsLocalIds() throws {

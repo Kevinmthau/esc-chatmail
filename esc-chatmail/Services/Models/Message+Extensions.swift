@@ -108,11 +108,35 @@ extension Message {
 
         let cleaned = cleanedHTMLForAttachmentFiltering(from: html)
         let cleanedReferenced = extractReferencedContentIDs(from: cleaned)
-        return originalReferenced.subtracting(cleanedReferenced)
+        let removedByHTMLCleanup = originalReferenced.subtracting(cleanedReferenced)
+        let likelySignatureInline = extractLikelySignatureInlineContentIDs(from: html)
+
+        return removedByHTMLCleanup.union(likelySignatureInline)
     }
 
     private func loadHTMLSource() -> String? {
-        HTMLContentHandler.shared.loadHTML(for: id)
+        let handler = HTMLContentHandler.shared
+        if let html = handler.loadHTML(for: id) {
+            return html
+        }
+
+        guard let bodyStorageURI else {
+            return nil
+        }
+
+        // Migrate legacy absolute file URLs (e.g. older app container paths) into
+        // the canonical Messages/<messageId>.html location when possible.
+        if handler.migrateIfNeeded(from: bodyStorageURI),
+           let migratedHTML = handler.loadHTML(for: id) {
+            return migratedHTML
+        }
+
+        guard let resolvedURL = StorageURIResolver.resolve(bodyStorageURI),
+              FileManager.default.fileExists(atPath: resolvedURL.path) else {
+            return nil
+        }
+
+        return handler.loadHTML(from: resolvedURL)
     }
 
     private func cleanedHTMLForAttachmentFiltering(from html: String) -> String {
@@ -166,6 +190,137 @@ extension Message {
 
         return referencedCIDs
     }
+
+    /// Extra fallback for Outlook/Word signatures where HTML signature wrappers are inconsistent.
+    /// We only hide CIDs when the nearby HTML looks like a trailing sign-off/contact block
+    /// and the attachment itself looks like a logo-style inline signature asset.
+    private func extractLikelySignatureInlineContentIDs(from html: String) -> Set<String> {
+        let lowercasedHTML = html.lowercased()
+        guard lowercasedHTML.contains("cid:") else {
+            return []
+        }
+
+        // Restrict detection to trailing markup where signatures normally live to avoid
+        // global false positives from sender text that mentions role/contact words.
+        let trailingWindow = String(lowercasedHTML.suffix(6_000))
+        let hasSignatureSectionSignals =
+            Self.signatureSignOffMarkers.contains { trailingWindow.contains($0) } &&
+            (
+                Self.signatureContactMarkers.contains { trailingWindow.contains($0) } ||
+                Self.signatureRoleMarkers.contains { trailingWindow.contains($0) }
+            )
+
+        guard hasSignatureSectionSignals else {
+            return []
+        }
+
+        let cidPrefix = "cid:"
+        var nonDisplayable = Set<String>()
+        var searchRange = html.startIndex..<html.endIndex
+
+        while let cidRange = html.range(of: cidPrefix, options: .caseInsensitive, range: searchRange) {
+            let startOfCID = cidRange.upperBound
+            var endOfCID = startOfCID
+
+            while endOfCID < html.endIndex {
+                let char = html[endOfCID]
+                if char == "\"" || char == "'" || char == " " || char == ">" || char == "<" {
+                    break
+                }
+                endOfCID = html.index(after: endOfCID)
+            }
+
+            defer {
+                searchRange = endOfCID..<html.endIndex
+            }
+
+            guard startOfCID < endOfCID else { continue }
+            guard let normalizedCID = normalizedContentID(from: String(html[startOfCID..<endOfCID])) else {
+                continue
+            }
+
+            // Heuristic-only fallback: only treat trailing CIDs as likely signature assets.
+            let cidOffset = html.distance(from: html.startIndex, to: startOfCID)
+            let trailingThreshold = Int(Double(html.count) * 0.45)
+            guard cidOffset >= trailingThreshold else {
+                continue
+            }
+
+            guard isLikelySignatureInlineAttachment(contentID: normalizedCID) else {
+                continue
+            }
+            nonDisplayable.insert(normalizedCID)
+        }
+
+        return nonDisplayable
+    }
+
+    private func isLikelySignatureInlineAttachment(contentID: String) -> Bool {
+        guard let attachment = attachmentsArray.first(where: { normalizedContentID(from: $0.contentId) == contentID }) else {
+            return false
+        }
+
+        guard attachment.mimeType.hasPrefix("image/") else {
+            return false
+        }
+
+        let filename = attachment.filename.lowercased()
+        let hasSignatureKeyword = filename.contains("logo") || filename.contains("signature") || filename.contains("footer")
+
+        let isGeneratedInlineName = filename.range(
+            of: #"^(?:image|img)\d{2,}(?:[_-]\d+)?\.[a-z0-9]{2,5}$"#,
+            options: .regularExpression
+        ) != nil
+
+        let contentIDLocalPart = contentID.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? contentID
+        let isGeneratedInlineContentID = contentIDLocalPart.range(
+            of: #"^(?:image|img)\d{2,}(?:[_-]\d+)?(?:\.[a-z0-9]{2,5})?$"#,
+            options: .regularExpression
+        ) != nil
+
+        let hasLogoLikeDimensions =
+            attachment.width > 0 &&
+            attachment.height > 0 &&
+            attachment.width >= attachment.height &&
+            attachment.width <= 320 &&
+            attachment.height <= 120
+
+        let looksLikeGeneratedInlineAsset = isGeneratedInlineName || isGeneratedInlineContentID
+        return hasSignatureKeyword || (looksLikeGeneratedInlineAsset && hasLogoLikeDimensions)
+    }
+
+    private static let signatureSignOffMarkers = [
+        "warmly",
+        "best regards",
+        "kind regards",
+        "regards,",
+        "sincerely",
+        "thanks,",
+        "thank you,",
+        "cheers,"
+    ]
+
+    private static let signatureContactMarkers = [
+        "mailto:",
+        "tel:",
+        "mobile",
+        "phone",
+        "www.",
+        "linkedin",
+        "instagram",
+        "twitter"
+    ]
+
+    private static let signatureRoleMarkers = [
+        "manager",
+        "director",
+        "president",
+        "founder",
+        "advisor",
+        "broker",
+        "realtor",
+        "membership"
+    ]
 
     private func normalizedContentID(from rawValue: String?) -> String? {
         guard let rawValue else { return nil }

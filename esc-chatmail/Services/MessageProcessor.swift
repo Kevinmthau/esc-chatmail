@@ -31,7 +31,10 @@ class MessageProcessor {
         // Process content (may fetch large body parts via API)
         let content = await extractContent(from: payload, messageId: gmailMessage.id)
         processedMessage.htmlBody = content.html
-        processedMessage.plainTextBody = content.plainText
+        processedMessage.plainTextBody = resolvedPlainTextBody(
+            plainText: content.plainText,
+            html: content.html
+        )
         processedMessage.cleanedSnippet = createCleanedSnippet(html: content.html, plainText: content.plainText, snippet: gmailMessage.snippet, isFromMe: processedMessage.headers.isFromMe)
 
         // Process labels
@@ -54,6 +57,20 @@ class MessageProcessor {
         }
 
         return processedMessage
+    }
+
+    private func resolvedPlainTextBody(plainText: String?, html: String?) -> String? {
+        if let plainText {
+            let trimmed = plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return plainText
+            }
+        }
+
+        guard let html else { return nil }
+        let extracted = TextProcessing.extractPlainText(from: html)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return extracted.isEmpty ? nil : extracted
     }
 
     // MARK: - Newsletter Detection

@@ -38,6 +38,38 @@ final class RawEmailSourceSanitizerTests: XCTestCase {
         XCTAssertEqual(extracted, text)
     }
 
+    func testExtractDisplayText_nestedMultipartBoundaries_doNotBleedIntoPlainPart() {
+        let extracted = RawEmailSourceSanitizer.extractDisplayText(from: nestedRawMultipartEmail)
+
+        XCTAssertEqual(
+            extracted,
+            """
+            Hi Brynn and Kevin,
+
+            We are delighted to invite you to opening night.
+            Please let me know if you'll be able to make it.
+            """
+        )
+        XCTAssertFalse(extracted.contains("<html"))
+        XCTAssertFalse(extracted.contains("Content-Type: text/html"))
+        XCTAssertFalse(extracted.contains("iVBORw0KGgo"))
+    }
+
+    func testExtractDisplayText_boundaryLikeBodyLine_isPreserved() {
+        let extracted = RawEmailSourceSanitizer.extractDisplayText(from: rawMultipartEmailWithBoundaryLikeBodyLine)
+
+        XCTAssertEqual(
+            extracted,
+            """
+            Hi team,
+
+            Please keep this separator in the body:
+            --1234567890ABCDEF1234567890
+            This line should remain visible.
+            """
+        )
+    }
+
     private var rawMultipartEmail: String {
         """
         Delivered-To: kmthau@gmail.com
@@ -76,6 +108,89 @@ final class RawEmailSourceSanitizerTests: XCTestCase {
 
         JVBERi0xLjcK
         --000000000000da2939--
+        """
+    }
+
+    private var nestedRawMultipartEmail: String {
+        """
+        Delivered-To: kmthau@gmail.com
+        Received: by 2002:a05:6e04:108f:b0:3ac:63b9:5e27 with SMTP id u15csp476934imc;
+                Tue, 24 Feb 2026 14:02:53 -0800 (PST)
+        X-Received: by 2002:a05:7022:6899:b0:123:35c4:f39c with SMTP id a92af1059eb24;
+                Tue, 24 Feb 2026 14:02:53 -0800 (PST)
+        Return-Path: <sender@example.com>
+        MIME-Version: 1.0
+        Content-Type: multipart/mixed; boundary="_006_outer_boundary"
+
+        --_006_outer_boundary
+        Content-Type: multipart/related; boundary="_005_related_boundary"; type="multipart/alternative"
+
+        --_005_related_boundary
+        Content-Type: multipart/alternative; boundary="_000_alternative_boundary"
+
+        --_000_alternative_boundary
+        Content-Type: text/plain; charset="Windows-1252"
+        Content-Transfer-Encoding: quoted-printable
+
+        Hi Brynn and Kevin,
+
+        We are delighted to invite you to opening night.
+        Please let me know if you=27ll be able to make it.
+
+        --_000_alternative_boundary
+        Content-Type: text/html; charset="Windows-1252"
+        Content-Transfer-Encoding: quoted-printable
+
+        <html><body><div>Hi Brynn and Kevin,</div></body></html>
+
+        --_000_alternative_boundary--
+        --_005_related_boundary
+        Content-Type: image/png; name="image001.png"
+        Content-Disposition: inline; filename="image001.png"
+        Content-ID: <image001.png@01DCA5AF.35846080>
+        Content-Transfer-Encoding: base64
+
+        iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2foAAAAASUVORK5CYII=
+
+        --_005_related_boundary--
+        --_006_outer_boundary
+        Content-Type: image/png; name="invite.png"
+        Content-Disposition: attachment; filename="invite.png"
+        Content-Transfer-Encoding: base64
+
+        iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2foAAAAASUVORK5CYII=
+
+        --_006_outer_boundary--
+        """
+    }
+
+    private var rawMultipartEmailWithBoundaryLikeBodyLine: String {
+        """
+        Delivered-To: kmthau@gmail.com
+        Received: by 2002:a05:6e04:108f:b0:3ac:63b9:5e27 with SMTP id u15csp476934imc;
+                Tue, 24 Feb 2026 14:02:53 -0800 (PST)
+        X-Received: by 2002:a05:7022:6899:b0:123:35c4:f39c with SMTP id a92af1059eb24;
+                Tue, 24 Feb 2026 14:02:53 -0800 (PST)
+        Return-Path: <sender@example.com>
+        MIME-Version: 1.0
+        Content-Type: multipart/alternative; boundary="mixed-boundary-12345"
+
+        --mixed-boundary-12345
+        Content-Type: text/plain; charset="UTF-8"
+        Content-Transfer-Encoding: quoted-printable
+
+        Hi team,
+
+        Please keep this separator in the body:
+        --1234567890ABCDEF1234567890
+        This line should remain visible.
+
+        --mixed-boundary-12345
+        Content-Type: text/html; charset="UTF-8"
+
+        <html><body><div>Hi team</div></body></html>
+
+        --mixed-boundary-12345--
         """
     }
 }

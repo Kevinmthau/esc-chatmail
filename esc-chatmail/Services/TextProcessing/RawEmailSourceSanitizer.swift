@@ -125,6 +125,7 @@ enum RawEmailSourceSanitizer {
     private static func extractPlainTextPart(from text: String) -> String? {
         let lines = text.components(separatedBy: .newlines)
         let boundary = extractBoundary(from: text)
+        let knownBoundaries = extractKnownBoundaries(from: text)
 
         var index = 0
         while index < lines.count {
@@ -161,7 +162,7 @@ enum RawEmailSourceSanitizer {
 
             while cursor < lines.count {
                 let bodyLine = lines[cursor]
-                if isBoundaryLine(bodyLine, boundary: boundary) {
+                if isAnyBoundaryLine(bodyLine, preferredBoundary: boundary, knownBoundaries: knownBoundaries) {
                     break
                 }
                 bodyLines.append(bodyLine)
@@ -215,6 +216,7 @@ enum RawEmailSourceSanitizer {
     private static func stripMimeScaffolding(from text: String) -> String {
         let lines = text.components(separatedBy: .newlines)
         let boundary = extractBoundary(from: text)
+        let knownBoundaries = extractKnownBoundaries(from: text)
 
         var cleanedLines: [String] = []
         var skipContinuationLine = false
@@ -230,7 +232,7 @@ enum RawEmailSourceSanitizer {
                 skipContinuationLine = false
             }
 
-            if isBoundaryLine(trimmed, boundary: boundary) {
+            if isAnyBoundaryLine(trimmed, preferredBoundary: boundary, knownBoundaries: knownBoundaries) {
                 continue
             }
 
@@ -271,6 +273,46 @@ enum RawEmailSourceSanitizer {
         return nil
     }
 
+    private static func extractKnownBoundaries(from text: String) -> Set<String> {
+        guard let regex = boundaryPattern else { return [] }
+        let lines = text.components(separatedBy: .newlines)
+        let headerRegion = lines.prefix(240).joined(separator: "\n")
+        let range = NSRange(location: 0, length: headerRegion.utf16.count)
+        let matches = regex.matches(in: headerRegion, options: [], range: range)
+
+        var boundaries: Set<String> = []
+        for match in matches {
+            if match.numberOfRanges > 1,
+               let quotedRange = Range(match.range(at: 1), in: headerRegion),
+               !quotedRange.isEmpty {
+                boundaries.insert(String(headerRegion[quotedRange]))
+                continue
+            }
+
+            if match.numberOfRanges > 2,
+               let unquotedRange = Range(match.range(at: 2), in: headerRegion),
+               !unquotedRange.isEmpty {
+                boundaries.insert(String(headerRegion[unquotedRange]))
+            }
+        }
+
+        // Fallback for raw-source blobs where top-level Content-Type headers were stripped.
+        // Real MIME boundaries repeat multiple times; body separators usually do not.
+        var boundaryCounts: [String: Int] = [:]
+        for line in lines.prefix(320) {
+            guard let token = boundaryToken(from: line.trimmingCharacters(in: .whitespaces)) else {
+                continue
+            }
+            boundaryCounts[token, default: 0] += 1
+        }
+
+        for (token, count) in boundaryCounts where count >= 2 {
+            boundaries.insert(token)
+        }
+
+        return boundaries
+    }
+
     private static func isBoundaryLine(_ line: String, boundary: String?) -> Bool {
         guard line.hasPrefix("--") else { return false }
 
@@ -289,6 +331,43 @@ enum RawEmailSourceSanitizer {
             character.isLetter || character.isNumber || character == "_" || character == "-" ||
             character == "." || character == ":" || character == "="
         }
+    }
+
+    private static func boundaryToken(from line: String) -> String? {
+        guard line.hasPrefix("--") else { return nil }
+
+        var token = String(line.dropFirst(2))
+        if token.hasSuffix("--") {
+            token = String(token.dropLast(2))
+        }
+
+        guard token.count >= 6 else { return nil }
+        guard token.allSatisfy({ character in
+            character.isLetter || character.isNumber || character == "_" || character == "-" ||
+            character == "." || character == ":" || character == "="
+        }) else {
+            return nil
+        }
+
+        return token
+    }
+
+    private static func isAnyBoundaryLine(
+        _ line: String,
+        preferredBoundary: String?,
+        knownBoundaries: Set<String>
+    ) -> Bool {
+        if let preferredBoundary, isBoundaryLine(line, boundary: preferredBoundary) {
+            return true
+        }
+
+        for boundary in knownBoundaries where boundary != preferredBoundary {
+            if isBoundaryLine(line, boundary: boundary) {
+                return true
+            }
+        }
+
+        return false
     }
 
     private static func isHeaderLine(_ line: String) -> Bool {
