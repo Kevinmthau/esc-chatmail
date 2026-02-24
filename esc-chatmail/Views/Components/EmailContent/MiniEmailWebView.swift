@@ -9,10 +9,18 @@ struct MiniEmailWebView: View {
     var message: Message?
 
     var body: some View {
-        BaseEmailWebView(
-            htmlContent: htmlContent,
-            mode: .scaledPreview(scale: scale),
-            message: message
-        )
+        GeometryReader { geometry in
+            let adaptiveScale = HTMLPreviewScaleCalculator.previewScale(
+                defaultScale: scale,
+                containerWidth: geometry.size.width,
+                html: htmlContent
+            )
+
+            BaseEmailWebView(
+                htmlContent: htmlContent,
+                mode: .scaledPreview(scale: adaptiveScale),
+                message: message
+            )
+        }
     }
 }

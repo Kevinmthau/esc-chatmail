@@ -77,7 +77,8 @@ struct BaseEmailWebView: UIViewRepresentable {
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
-        if context.coordinator.lastLoadedContent != htmlContent {
+        context.coordinator.parent = self
+        if context.coordinator.needsReload {
             context.coordinator.loadContent(in: webView)
         }
     }
@@ -91,6 +92,7 @@ struct BaseEmailWebView: UIViewRepresentable {
     class Coordinator: NSObject, WKNavigationDelegate {
         var parent: BaseEmailWebView
         var lastLoadedContent: String = ""
+        var lastLoadedModeSignature: String = ""
         private var isLoading = false
         /// Holds strong reference to the cid: scheme handler
         var cidHandler: CIDSchemeHandler?
@@ -99,15 +101,25 @@ struct BaseEmailWebView: UIViewRepresentable {
             self.parent = parent
         }
 
+        var needsReload: Bool {
+            lastLoadedContent != parent.htmlContent || lastLoadedModeSignature != modeSignature(for: parent.mode)
+        }
+
         func loadContent(in webView: WKWebView) {
             guard !isLoading else { return }
             isLoading = true
             lastLoadedContent = parent.htmlContent
+            lastLoadedModeSignature = modeSignature(for: parent.mode)
 
             let htmlToLoad: String
             switch parent.mode {
             case .scaledPreview(let scale):
                 htmlToLoad = wrapWithScale(parent.htmlContent, scale: scale)
+#if DEBUG
+                let estimatedWidth = Int((HTMLPreviewScaleCalculator.estimatedLayoutWidth(from: parent.htmlContent) ?? 0).rounded())
+                let scaleMilli = Int((scale * 1000).rounded())
+                Log.debug("HTML_PREVIEW scale_milli=\(scaleMilli) estimated_width=\(estimatedWidth)", category: .ui)
+#endif
             case .fullInteractive, .simplePreview:
                 htmlToLoad = parent.htmlContent
             }
@@ -117,6 +129,19 @@ struct BaseEmailWebView: UIViewRepresentable {
             // Falls back to about:blank if no sender information available
             let baseURL = deriveBaseURL(from: parent.message) ?? URL(string: "about:blank")
             webView.loadHTMLString(htmlToLoad, baseURL: baseURL)
+        }
+
+        private func modeSignature(for mode: EmailWebViewMode) -> String {
+            switch mode {
+            case .fullInteractive:
+                return "fullInteractive"
+            case .simplePreview:
+                return "simplePreview"
+            case .scaledPreview(let scale):
+                // Quantize to prevent unnecessary reloads from insignificant layout jitter.
+                let quantized = Int((scale * 1000.0).rounded())
+                return "scaledPreview:\(quantized)"
+            }
         }
 
         /// Derives a baseURL from the sender's email domain for proper Referer headers
@@ -158,12 +183,14 @@ struct BaseEmailWebView: UIViewRepresentable {
             // Keep rules minimal to avoid overriding the email's own layout/CSS.
             let injected = """
             <style id="esc-preview-scale">
-                html, body { overflow: hidden; }
-                body {
-                    -webkit-text-size-adjust: 100%;
-                    transform: scale(\(scale));
-                    transform-origin: top left;
-                    width: \(100.0 / scale)%;
+                html, body { overflow: hidden !important; }
+                /* Use higher specificity + !important so template body rules don't override preview scaling. */
+                html body {
+                    -webkit-text-size-adjust: 100% !important;
+                    transform: scale(\(scale)) !important;
+                    transform-origin: top left !important;
+                    width: \(100.0 / scale)% !important;
+                    min-width: 0 !important;
                 }
                 img { max-width: 100%; height: auto; }
                 table { max-width: 100%; }
