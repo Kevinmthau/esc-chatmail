@@ -12,10 +12,19 @@ extension MessagePersister {
         myAliases: Set<String>,
         in context: NSManagedObjectContext
     ) async throws {
-        let isForwardedMessage = isForwardedEmailSubject(processedMessage.headers.subject)
+        let isForwardedMessage = ForwardingHeuristics.indicatesForwarding(
+            subject: processedMessage.headers.subject,
+            contentCandidates: [
+                processedMessage.plainTextBody,
+                processedMessage.htmlBody,
+                processedMessage.cleanedSnippet,
+                processedMessage.snippet
+            ]
+        )
 
         // Prefer grouping by Gmail threadId to avoid splitting a single Gmail thread into
         // multiple chats when participant sets differ across messages (e.g. Reply-To aliases).
+        // But if the message looks like a forwarded branch, use participant-based routing.
         let conversation: Conversation
         if !isForwardedMessage,
            let existingConversation = findExistingConversation(forGmThreadId: processedMessage.gmThreadId, in: context) {
@@ -123,17 +132,5 @@ extension MessagePersister {
 
         // Track the conversation as modified for rollup updates
         await trackModifiedConversation(conversation)
-    }
-
-    /// Forwarded emails should start a participant-based conversation instead of inheriting
-    /// an existing `gmThreadId` conversation that may contain different people.
-    private func isForwardedEmailSubject(_ subject: String?) -> Bool {
-        guard let subject = subject?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased(),
-            !subject.isEmpty else {
-            return false
-        }
-        return subject.hasPrefix("fwd:") || subject.hasPrefix("fw:")
     }
 }

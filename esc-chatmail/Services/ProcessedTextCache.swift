@@ -383,7 +383,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
         // Only treat simple div content as rich when we detect explicit transactional/marketing signals.
         if imgCount == 0 && tableCount == 0 && cidCount == 0 && isSimpleDivWrappedText(htmlForAnalysis, lowercased: lowercased) {
             let textContent = approximateTextContent(from: htmlForAnalysis)
-            return isLikelySimpleDivTransactionalOrMarketing(
+            return isLikelyTransactionalOrMarketingContent(
                 lowercasedHTML: lowercased,
                 textContent: textContent,
                 linkCount: linkCount,
@@ -430,6 +430,17 @@ actor ProcessedTextCache: MemoryWarningHandler {
             // Transactional emails (e.g., security alerts) often use a small number of tables
             // with substantial text content. Treat these as rich to preserve formatting.
             if tableCount >= 2 && textContent.count > 200 {
+                return true
+            }
+
+            // Some bank/financial notifications use a single dense table template.
+            // Classify these as rich when transactional cues are explicit.
+            if tableCount >= 1 && isLikelyTransactionalOrMarketingContent(
+                lowercasedHTML: lowercased,
+                textContent: textContent,
+                linkCount: linkCount,
+                hasNewsletterIndicators: hasNewsletterIndicators
+            ) {
                 return true
             }
 
@@ -488,9 +499,9 @@ actor ProcessedTextCache: MemoryWarningHandler {
         return score >= 40
     }
 
-    /// Heuristic for simple div-wrapped emails (Gmail/Apple Mail style).
-    /// Personal long-form messages should remain bubbles unless we see explicit transactional/newsletter cues.
-    nonisolated private static func isLikelySimpleDivTransactionalOrMarketing(
+    /// Heuristic for transactional/marketing content that should stay in HTML preview mode.
+    /// Personal long-form messages should remain bubbles unless we see explicit cues.
+    nonisolated private static func isLikelyTransactionalOrMarketingContent(
         lowercasedHTML: String,
         textContent: String,
         linkCount: Int,
@@ -518,12 +529,17 @@ actor ProcessedTextCache: MemoryWarningHandler {
             "one time passcode",
             "statement is ready",
             "account activity",
+            "account number ending",
+            "account ending in",
             "service message",
             "invoice",
             "receipt",
             "order confirmation",
             "tracking number",
-            "payment receipt"
+            "payment receipt",
+            "deposit declined",
+            "daily deposit limit",
+            "mobile check deposit"
         ]
 
         var transactionalHitCount = 0
@@ -533,6 +549,8 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
         let hasNoReplyLanguage = lowercasedText.contains("do not reply") ||
                                  lowercasedText.contains("don't reply") ||
+                                 lowercasedText.contains("do not respond") ||
+                                 lowercasedText.contains("don't respond") ||
                                  lowercasedText.contains("noreply") ||
                                  lowercasedText.contains("no-reply")
         if hasNoReplyLanguage {

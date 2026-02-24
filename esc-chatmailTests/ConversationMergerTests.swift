@@ -304,6 +304,53 @@ final class ConversationMergerTests: XCTestCase {
         )
     }
 
+    func testMergeConversationsByGmThreadId_preservesForwardedSplitDetectedFromBodyMarkers() async throws {
+        let threadId = "gm-thread-forward-body-marker-preserve"
+
+        let regularConversation = ConversationBuilder()
+            .withKeyHash("regular-conversation-body-marker")
+            .build(in: context)
+
+        let forwardedConversation = ConversationBuilder()
+            .withKeyHash("forwarded-conversation-body-marker")
+            .build(in: context)
+
+        let regularMessage = MessageBuilder()
+            .withId("regular-message-body-marker")
+            .withThreadId(threadId)
+            .withSubject("Re: Deposit Notification (Deposit Declined)")
+            .withBody("Can you help with this deposit?")
+            .inConversation(regularConversation)
+            .build(in: context)
+
+        let forwardedMarkerMessage = MessageBuilder()
+            .withId("forwarded-marker-message")
+            .withThreadId(threadId)
+            .withSubject("Re: Deposit Notification (Deposit Declined)")
+            .withBody("""
+                Hi Kevin,
+
+                --- original message ---
+                On February 23, 2026, 8:21 PM PST kmthau@gmail.com wrote:
+                ---------- Forwarded message ---------
+                """)
+            .inConversation(forwardedConversation)
+            .build(in: context)
+
+        try testStack.saveViewContext()
+
+        let mergedCount = await merger.mergeConversationsByGmThreadId(in: context, mergeChangesInto: [])
+        XCTAssertEqual(mergedCount, 0, "Forwarded markers in body should preserve conversation split")
+
+        let conversationCount = try context.count(for: Conversation.fetchRequest())
+        XCTAssertEqual(conversationCount, 2, "Cleanup merge should not collapse forwarded-body-marker conversations")
+
+        XCTAssertNotEqual(
+            regularMessage.conversation?.objectID,
+            forwardedMarkerMessage.conversation?.objectID
+        )
+    }
+
     func testMergeConversationsByGmThreadId_mergesOnlyNonForwardedConversationsWhenForwardedExists() async throws {
         let threadId = "gm-thread-mixed-forwarded"
 

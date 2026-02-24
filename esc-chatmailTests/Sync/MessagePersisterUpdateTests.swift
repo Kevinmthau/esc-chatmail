@@ -165,6 +165,71 @@ final class MessagePersisterUpdateTests: XCTestCase {
         )
     }
 
+    func testCreateNewMessage_forwardedMarkerInBody_createsNewConversationEvenWhenThreadMatches() async throws {
+        let threadId = "thread-forward-body-marker-123"
+        let existingConversation = ConversationBuilder.simple(in: context)
+        _ = MessageBuilder()
+            .withId("existing-thread-message")
+            .withThreadId(threadId)
+            .inConversation(existingConversation)
+            .build(in: context)
+
+        try testStack.saveViewContext()
+
+        var headers = ProcessedHeaders()
+        headers.subject = "Re: Deposit Notification (Deposit Declined)"
+        headers.from = "Erin Hardy <erin.hardy@adviceperiod.com>"
+        headers.to = [EmailAddress(email: "kmthau@gmail.com", displayName: "Kevin Thau")]
+        headers.isFromMe = false
+
+        let plainText = """
+        Hi Kevin,
+
+        Yes, I'll reach out to them about this. Will circle back.
+
+        --- original message ---
+        On February 23, 2026, 8:21 PM PST kmthau@gmail.com wrote:
+        ---------- Forwarded message ---------
+        """
+
+        let processedMessage = ProcessedMessage(
+            id: "forwarded-marker-reply-message",
+            gmThreadId: threadId,
+            snippet: "Yes, I'll reach out to them about this. Will circle back.",
+            cleanedSnippet: "Yes, I'll reach out to them about this. Will circle back.",
+            internalDate: Date(),
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: plainText,
+            labelIds: [],
+            isUnread: true,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        try await persister.createNewMessage(
+            processedMessage,
+            labelIds: nil,
+            myAliases: [normalizedEmail("kmthau@gmail.com")],
+            in: context
+        )
+
+        let conversationCount = try context.count(for: Conversation.fetchRequest())
+        XCTAssertEqual(conversationCount, 2, "Forward markers in body should create a new participant-based conversation")
+
+        let fetch = Message.fetchRequest()
+        fetch.predicate = NSPredicate(format: "id == %@", "forwarded-marker-reply-message")
+        fetch.fetchLimit = 1
+        let saved = try context.fetch(fetch).first
+
+        XCTAssertNotEqual(saved?.conversation?.objectID, existingConversation.objectID)
+        XCTAssertEqual(
+            saved?.conversation?.participantHash,
+            calculateParticipantHash(from: ["erin.hardy@adviceperiod.com"])
+        )
+    }
+
     func testCreateNewMessage_inlineDataAttachment_isPersistedAsDownloaded() async throws {
         let inlineImageData = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2foAAAAASUVORK5CYII="))
 

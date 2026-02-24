@@ -124,6 +124,27 @@ final class ProcessedTextCacheTests: XCTestCase {
         handler.deleteHTML(for: messageId)
     }
 
+    func testHasRichContent_singleTableBankNotification_returnsTrue() {
+        let messageId = "test-bank-single-table-\(UUID().uuidString)"
+        let handler = HTMLContentHandler.shared
+        let html = """
+        <table border="0" cellpadding="0" cellspacing="0">
+          <tr><td><strong>Deposit Declined</strong></td></tr>
+          <tr><td>Account Number Ending: 0039</td></tr>
+          <tr><td>Your deposit was declined because your daily deposit limit amount was exceeded.</td></tr>
+          <tr><td>Please do not respond to this message.</td></tr>
+          <tr><td>Example National Mobile Check Deposit</td></tr>
+        </table>
+        """
+
+        _ = handler.saveHTML(html, for: messageId)
+        let result = ProcessedTextCache.processMessage(messageId: messageId, handler: handler)
+
+        XCTAssertTrue(result.hasRichContent)
+
+        handler.deleteHTML(for: messageId)
+    }
+
     func testProcessMessage_appleRichLinkPreview_doesNotCountAsRichContent() {
         let messageId = "test-apple-rich-link-\(UUID().uuidString)"
         let handler = HTMLContentHandler.shared

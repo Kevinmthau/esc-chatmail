@@ -168,8 +168,8 @@ struct ConversationMerger: Sendable {
     /// This can happen when participant-based identity differs between messages in the same thread
     /// (common when `Reply-To` uses a different address than `From`).
     ///
-    /// Forwarded-message splits are preserved: conversations containing messages whose subject starts
-    /// with `Fwd:`/`Fw:` are intentionally kept separate from thread-wide merges.
+    /// Forwarded-message splits are preserved: conversations containing explicit forwarding markers
+    /// (subject prefixes or body quote markers) are intentionally kept separate from thread-wide merges.
     func mergeConversationsByGmThreadId(
         in context: NSManagedObjectContext,
         mergeChangesInto contextsToMerge: [NSManagedObjectContext]
@@ -202,7 +202,10 @@ struct ConversationMerger: Sendable {
                 guard !threadId.isEmpty, let conversation = message.conversation else { continue }
                 threadToConversationIDs[threadId, default: []].insert(conversation.objectID)
 
-                if isForwardedSubject(message.subject) {
+                if ForwardingHeuristics.indicatesForwarding(
+                    subject: message.subject,
+                    contentCandidates: [message.bodyText, message.cleanedSnippet, message.snippet]
+                ) {
                     threadToForwardedConversationIDs[threadId, default: []].insert(conversation.objectID)
                 }
             }
@@ -261,16 +264,6 @@ struct ConversationMerger: Sendable {
 
             return mergedCount
         }
-    }
-
-    private func isForwardedSubject(_ subject: String?) -> Bool {
-        guard let subject = subject?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased(),
-            !subject.isEmpty else {
-            return false
-        }
-        return subject.hasPrefix("fwd:") || subject.hasPrefix("fw:")
     }
 
     /// Convenience wrapper that merges changes into the app's `viewContext`.

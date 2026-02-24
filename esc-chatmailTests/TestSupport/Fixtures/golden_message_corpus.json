@@ -111,6 +111,12 @@
       "notes": "Simple div-wrapped account alerts should still route to HTML preview when they include explicit transactional cues and CTA links.",
       "inputHTML": "<div dir=\"ltr\">Security alert for your account<div><br></div><div>We detected a new sign-in to your account from Chrome on macOS. If this wasn't you, secure your account immediately.</div><div><br></div><div><a href=\"https://example.com/review\">Review activity</a> | <a href=\"https://example.com/help\">Get help</a></div><div><br></div><div>This is a service message about your account security. Please do not reply to this message.</div></div>",
       "expectedHasRichHTMLContent": true
+    },
+    {
+      "id": "single_table_bank_deposit_declined_notification_is_rich",
+      "notes": "Single-table bank notification templates should still be treated as rich HTML so transactional alerts can render preview cards.",
+      "inputHTML": "<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" id=\"tblHeader\"><tr><td>&nbsp;</td><td bgcolor=\"003C71\"><font color=\"FFFFFF\"><strong>Example National Bank</strong></font></td></tr><tr><td>&nbsp;</td><td bgcolor=\"E3EDFF\"><font color=\"000000\"><strong>Deposit Declined</strong></font></td></tr><tr><td>&nbsp;</td><td><strong>Account Number Ending: 0039</strong></td></tr><tr><td>&nbsp;</td><td><strong>Example National Mobile Check Deposit</strong></td></tr><tr><td>&nbsp;</td><td><p>Your deposit of $10,181.90 was declined due to \"Your daily deposit limit amount was exceeded\".</p><p>We are sorry that we are not able to accept your deposit through Example National mobile banking. If this deposit is urgent, please visit your closest branch office.</p><p>Please do not respond to this message or send email to this address. This message is for information purposes only.</p><p>Thank you,<br><br>Example National Bank</p></td></tr></table>",
+      "expectedHasRichHTMLContent": true
     }
   ],
   "displayPolicyCases": [
