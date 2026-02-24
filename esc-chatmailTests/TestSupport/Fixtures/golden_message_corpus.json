@@ -213,6 +213,16 @@
       "expectedShowHTMLPreview": true
     }
   ],
+  "conversationListSnippetCases": [
+    {
+      "id": "conversation_rollup_snippet_preferred",
+      "notes": "Conversation rows should use precomputed conversation.snippet so new-message previews render immediately without per-row message scans.",
+      "conversationSnippet": "Rollup snippet wins",
+      "latestMessageSnippet": "Latest message snippet",
+      "latestMessageCleanedSnippet": "Latest cleaned snippet",
+      "expected": "Rollup snippet wins"
+    }
+  ],
   "newsletterDetectionCases": [
     {
       "id": "support_reply_not_newsletter",

@@ -117,6 +117,137 @@ extension MessagePersister {
         }
     }
 
+    /// Applies list-critical rollup fields immediately when a new message is created.
+    /// This allows the conversation row (blue dot + preview text) to update before the
+    /// full rollup phase runs later in sync.
+    func applyFastConversationListUpdateForNewMessage(
+        _ message: Message,
+        in conversation: Conversation,
+        hasInboxLabel: Bool
+    ) {
+        // Keep latest message preview/date current so row text updates immediately.
+        if let existingLastDate = conversation.lastMessageDate {
+            if message.internalDate >= existingLastDate {
+                conversation.lastMessageDate = message.internalDate
+                conversation.snippet = message.conversationPreviewText
+            }
+        } else {
+            conversation.lastMessageDate = message.internalDate
+            conversation.snippet = message.conversationPreviewText
+        }
+
+        guard hasInboxLabel else { return }
+
+        conversation.hasInbox = true
+        if message.isUnread {
+            conversation.inboxUnreadCount = min(Int32.max, conversation.inboxUnreadCount + 1)
+        }
+
+        if let existingLatestInboxDate = conversation.latestInboxDate {
+            if message.internalDate > existingLatestInboxDate {
+                conversation.latestInboxDate = message.internalDate
+            }
+        } else {
+            conversation.latestInboxDate = message.internalDate
+        }
+
+        // New inbox mail should immediately reactivate hidden/archived threads.
+        if conversation.archivedAt != nil {
+            conversation.archivedAt = nil
+        }
+        if conversation.hidden {
+            conversation.hidden = false
+        }
+    }
+
+    /// Applies list-critical rollup fields immediately when an existing message is updated.
+    /// Falls back to a scoped inbox recomputation when INBOX membership changes.
+    func applyFastConversationListUpdateForExistingMessage(
+        _ message: Message,
+        in conversation: Conversation,
+        previousHadInboxLabel: Bool,
+        previousWasUnread: Bool,
+        currentHasInboxLabel: Bool,
+        currentIsUnread: Bool
+    ) {
+        let previousUnreadInInbox = previousHadInboxLabel && previousWasUnread
+        let currentUnreadInInbox = currentHasInboxLabel && currentIsUnread
+
+        if previousUnreadInInbox != currentUnreadInInbox {
+            if currentUnreadInInbox {
+                conversation.inboxUnreadCount = min(Int32.max, conversation.inboxUnreadCount + 1)
+            } else {
+                conversation.inboxUnreadCount = max(0, conversation.inboxUnreadCount - 1)
+            }
+        }
+
+        if currentHasInboxLabel {
+            conversation.hasInbox = true
+            if let existingLatestInboxDate = conversation.latestInboxDate {
+                if message.internalDate > existingLatestInboxDate {
+                    conversation.latestInboxDate = message.internalDate
+                }
+            } else {
+                conversation.latestInboxDate = message.internalDate
+            }
+
+            if conversation.archivedAt != nil {
+                conversation.archivedAt = nil
+            }
+            if conversation.hidden {
+                conversation.hidden = false
+            }
+        } else if previousHadInboxLabel {
+            // This message left INBOX; recompute inbox-only indicators for correctness.
+            refreshConversationInboxIndicators(conversation)
+        }
+
+        if let existingLastDate = conversation.lastMessageDate {
+            if message.internalDate >= existingLastDate {
+                conversation.lastMessageDate = message.internalDate
+                conversation.snippet = message.conversationPreviewText
+            }
+        } else {
+            conversation.lastMessageDate = message.internalDate
+            conversation.snippet = message.conversationPreviewText
+        }
+    }
+
+    /// Recomputes inbox-specific conversation indicators from the conversation's message set.
+    private func refreshConversationInboxIndicators(_ conversation: Conversation) {
+        guard let messages = conversation.messages else {
+            conversation.hasInbox = false
+            conversation.inboxUnreadCount = 0
+            conversation.latestInboxDate = nil
+            return
+        }
+
+        var hasInbox = false
+        var unreadCount: Int32 = 0
+        var latestInboxDate: Date?
+
+        for message in messages {
+            let isInbox = message.labels?.contains(where: { $0.id == "INBOX" }) ?? false
+            guard isInbox else { continue }
+
+            hasInbox = true
+            if message.isUnread {
+                unreadCount = min(Int32.max, unreadCount + 1)
+            }
+            if let currentLatestInboxDate = latestInboxDate {
+                if message.internalDate > currentLatestInboxDate {
+                    latestInboxDate = message.internalDate
+                }
+            } else {
+                latestInboxDate = message.internalDate
+            }
+        }
+
+        conversation.hasInbox = hasInbox
+        conversation.inboxUnreadCount = unreadCount
+        conversation.latestInboxDate = latestInboxDate
+    }
+
     /// Tracks a conversation as modified for rollup updates.
     /// Delegates to the shared ModificationTracker for consolidated tracking.
     func trackModifiedConversation(_ conversation: Conversation) async {

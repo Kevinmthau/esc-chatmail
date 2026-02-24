@@ -230,6 +230,166 @@ final class MessagePersisterUpdateTests: XCTestCase {
         )
     }
 
+    func testCreateNewMessage_updatesConversationListIndicatorsImmediately() async throws {
+        _ = LabelBuilder.inboxLabel(in: context)
+        _ = LabelBuilder.unreadLabel(in: context)
+
+        let threadId = "thread-fast-list-update"
+        let oldDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let newDate = oldDate.addingTimeInterval(120)
+
+        let existingConversation = ConversationBuilder()
+            .withSnippet("Old snippet")
+            .withLastMessageDate(oldDate)
+            .withUnreadCount(0)
+            .hasInboxMessages(false)
+            .archived()
+            .setHidden()
+            .build(in: context)
+
+        _ = MessageBuilder()
+            .withId("existing-seed-message")
+            .withThreadId(threadId)
+            .withDate(oldDate)
+            .inConversation(existingConversation)
+            .build(in: context)
+
+        var headers = ProcessedHeaders()
+        headers.subject = "Re: Fast list update"
+        headers.from = "Sender <sender@example.com>"
+        headers.to = [EmailAddress(email: "recipient@example.com", displayName: nil)]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: "incoming-fast-list-message",
+            gmThreadId: threadId,
+            snippet: "Raw incoming snippet",
+            cleanedSnippet: "Clean incoming snippet",
+            internalDate: newDate,
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: "Body",
+            labelIds: ["INBOX", "UNREAD"],
+            isUnread: true,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        try await persister.createNewMessage(
+            processedMessage,
+            labelIds: nil,
+            myAliases: [normalizedEmail("recipient@example.com")],
+            in: context
+        )
+
+        XCTAssertEqual(existingConversation.inboxUnreadCount, 1)
+        XCTAssertTrue(existingConversation.hasInbox)
+        XCTAssertEqual(existingConversation.latestInboxDate, newDate)
+        XCTAssertEqual(existingConversation.lastMessageDate, newDate)
+        XCTAssertEqual(existingConversation.snippet, "Clean incoming snippet")
+        XCTAssertNil(existingConversation.archivedAt)
+        XCTAssertFalse(existingConversation.hidden)
+    }
+
+    func testUpdateExistingMessage_updatesConversationUnreadIndicatorsImmediately() async {
+        let inboxLabel = LabelBuilder.inboxLabel(in: context)
+        let unreadLabel = LabelBuilder.unreadLabel(in: context)
+        let messageDate = Date(timeIntervalSince1970: 1_700_001_000)
+
+        let conversation = ConversationBuilder()
+            .withSnippet("Old snippet")
+            .withLastMessageDate(messageDate)
+            .hasInboxMessages(true)
+            .withUnreadCount(1)
+            .build(in: context)
+
+        let existingMessage = MessageBuilder()
+            .withId("existing-label-update-message")
+            .withDate(messageDate)
+            .withSnippet("Old message snippet")
+            .inConversation(conversation)
+            .build(in: context)
+        existingMessage.isUnread = true
+        existingMessage.addToLabels(inboxLabel)
+        existingMessage.addToLabels(unreadLabel)
+
+        let processedMessage = ProcessedMessage(
+            id: existingMessage.id,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: "Updated raw snippet",
+            cleanedSnippet: "Updated clean snippet",
+            internalDate: messageDate,
+            headers: ProcessedHeaders(),
+            htmlBody: nil,
+            plainTextBody: existingMessage.bodyText,
+            labelIds: ["INBOX"],
+            isUnread: false,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertEqual(conversation.inboxUnreadCount, 0)
+        XCTAssertTrue(conversation.hasInbox)
+        XCTAssertEqual(conversation.latestInboxDate, messageDate)
+        XCTAssertEqual(conversation.snippet, "Updated clean snippet")
+    }
+
+    func testUpdateExistingMessage_removingInboxLabelRecomputesConversationInboxIndicators() async {
+        let inboxLabel = LabelBuilder.inboxLabel(in: context)
+        let messageDate = Date(timeIntervalSince1970: 1_700_002_000)
+
+        let conversation = ConversationBuilder()
+            .withSnippet("Old snippet")
+            .withLastMessageDate(messageDate)
+            .hasInboxMessages(true)
+            .withUnreadCount(0)
+            .build(in: context)
+
+        let existingMessage = MessageBuilder()
+            .withId("existing-remove-inbox-message")
+            .withDate(messageDate)
+            .inConversation(conversation)
+            .build(in: context)
+        existingMessage.isUnread = false
+        existingMessage.addToLabels(inboxLabel)
+
+        let processedMessage = ProcessedMessage(
+            id: existingMessage.id,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: existingMessage.snippet,
+            cleanedSnippet: existingMessage.cleanedSnippet,
+            internalDate: messageDate,
+            headers: ProcessedHeaders(),
+            htmlBody: nil,
+            plainTextBody: existingMessage.bodyText,
+            labelIds: [],
+            isUnread: false,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertFalse(conversation.hasInbox)
+        XCTAssertEqual(conversation.inboxUnreadCount, 0)
+        XCTAssertNil(conversation.latestInboxDate)
+    }
+
     func testCreateNewMessage_inlineDataAttachment_isPersistedAsDownloaded() async throws {
         let inlineImageData = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2foAAAAASUVORK5CYII="))
 

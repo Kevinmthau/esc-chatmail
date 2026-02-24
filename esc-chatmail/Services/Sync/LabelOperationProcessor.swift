@@ -107,6 +107,9 @@ struct LabelOperationProcessor {
                     continue
                 }
 
+                let previousHasInboxLabel = message.labels?.contains(where: { $0.id == "INBOX" }) ?? false
+                let previousUnread = message.isUnread
+
                 // Apply label changes using pre-fetched label objects
                 var foundLabels = 0
                 for labelId in labelIds {
@@ -133,6 +136,16 @@ struct LabelOperationProcessor {
                 }
 
                 if let conversation = message.conversation {
+                    let currentHasInboxLabel = message.labels?.contains(where: { $0.id == "INBOX" }) ?? false
+                    applyFastInboxIndicators(
+                        for: conversation,
+                        message: message,
+                        previousHasInboxLabel: previousHasInboxLabel,
+                        previousUnread: previousUnread,
+                        currentHasInboxLabel: currentHasInboxLabel,
+                        currentUnread: message.isUnread
+                    )
+
                     if operation == .remove {
                         Log.debug("Tracked conversation \(conversation.id.uuidString) for rollup update", category: .sync)
                     }
@@ -142,6 +155,82 @@ struct LabelOperationProcessor {
 
             return modifiedIDs
         }
+    }
+
+    // MARK: - Fast Conversation Indicators
+
+    private static func applyFastInboxIndicators(
+        for conversation: Conversation,
+        message: Message,
+        previousHasInboxLabel: Bool,
+        previousUnread: Bool,
+        currentHasInboxLabel: Bool,
+        currentUnread: Bool
+    ) {
+        let previousUnreadInInbox = previousHasInboxLabel && previousUnread
+        let currentUnreadInInbox = currentHasInboxLabel && currentUnread
+
+        if previousUnreadInInbox != currentUnreadInInbox {
+            if currentUnreadInInbox {
+                conversation.inboxUnreadCount = min(Int32.max, conversation.inboxUnreadCount + 1)
+            } else {
+                conversation.inboxUnreadCount = max(0, conversation.inboxUnreadCount - 1)
+            }
+        }
+
+        if currentHasInboxLabel {
+            conversation.hasInbox = true
+            if let latestInboxDate = conversation.latestInboxDate {
+                if message.internalDate > latestInboxDate {
+                    conversation.latestInboxDate = message.internalDate
+                }
+            } else {
+                conversation.latestInboxDate = message.internalDate
+            }
+
+            if conversation.archivedAt != nil {
+                conversation.archivedAt = nil
+            }
+            if conversation.hidden {
+                conversation.hidden = false
+            }
+        } else if previousHasInboxLabel {
+            refreshInboxIndicators(for: conversation)
+        }
+    }
+
+    private static func refreshInboxIndicators(for conversation: Conversation) {
+        guard let messages = conversation.messages else {
+            conversation.hasInbox = false
+            conversation.inboxUnreadCount = 0
+            conversation.latestInboxDate = nil
+            return
+        }
+
+        var hasInbox = false
+        var unreadCount: Int32 = 0
+        var latestInboxDate: Date?
+
+        for message in messages {
+            let isInbox = message.labels?.contains(where: { $0.id == "INBOX" }) ?? false
+            guard isInbox else { continue }
+
+            hasInbox = true
+            if message.isUnread {
+                unreadCount = min(Int32.max, unreadCount + 1)
+            }
+            if let currentLatestDate = latestInboxDate {
+                if message.internalDate > currentLatestDate {
+                    latestInboxDate = message.internalDate
+                }
+            } else {
+                latestInboxDate = message.internalDate
+            }
+        }
+
+        conversation.hasInbox = hasInbox
+        conversation.inboxUnreadCount = unreadCount
+        conversation.latestInboxDate = latestInboxDate
     }
 
 }

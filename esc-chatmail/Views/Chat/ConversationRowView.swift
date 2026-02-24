@@ -16,17 +16,9 @@ struct ConversationSnapshot: Equatable {
         self.objectID = conversation.objectID
         self.inboxUnreadCount = conversation.inboxUnreadCount
         self.pinned = conversation.pinned
-        self.snippet = ConversationSnapshot.resolveSnippet(for: conversation)
+        self.snippet = conversation.snippet
         self.lastMessageDate = conversation.lastMessageDate
         self.displayNameHint = conversation.displayName
-    }
-
-    private static func resolveSnippet(for conversation: Conversation) -> String? {
-        guard let latestMessage = conversation.messages?.max(by: { $0.internalDate < $1.internalDate }) else {
-            return conversation.snippet
-        }
-
-        return latestMessage.conversationPreviewText ?? conversation.snippet
     }
 }
 

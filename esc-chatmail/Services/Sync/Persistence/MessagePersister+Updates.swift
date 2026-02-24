@@ -26,6 +26,8 @@ extension MessagePersister {
             return false
         }
 
+        let previousWasUnread = existingMessage.isUnread
+        let previousHadInboxLabel = existingMessage.labels?.contains { $0.id == "INBOX" } ?? false
         let previousSnippet = existingMessage.snippet
         let previousBodyText = existingMessage.bodyText
         let previousBodyStorageURI = existingMessage.bodyStorageURI
@@ -47,6 +49,7 @@ extension MessagePersister {
 
         // Update labels - fetch all needed labels in a single batch query
         let messageLabelIds = Set(processedMessage.labelIds)
+        let currentHasInboxLabel = messageLabelIds.contains("INBOX")
         existingMessage.labels = nil
         // Batch fetch labels (nonisolated function, safe to call directly)
         let labelCache = fetchLabelsByIds(messageLabelIds, in: context)
@@ -66,6 +69,14 @@ extension MessagePersister {
 
         // Track the conversation as modified for rollup updates
         if let conversation = existingMessage.conversation {
+            applyFastConversationListUpdateForExistingMessage(
+                existingMessage,
+                in: conversation,
+                previousHadInboxLabel: previousHadInboxLabel,
+                previousWasUnread: previousWasUnread,
+                currentHasInboxLabel: currentHasInboxLabel,
+                currentIsUnread: processedMessage.isUnread
+            )
             await trackModifiedConversation(conversation)
         }
 

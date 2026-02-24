@@ -119,16 +119,12 @@ extension MessagePersister {
             createAttachment(attachmentInfo, for: message, in: context)
         }
 
-        // Update conversation's lastMessageDate to bump it to the top
-        if let lastDate = conversation.lastMessageDate {
-            if message.internalDate > lastDate {
-                conversation.lastMessageDate = message.internalDate
-                conversation.snippet = message.conversationPreviewText
-            }
-        } else {
-            conversation.lastMessageDate = message.internalDate
-            conversation.snippet = message.conversationPreviewText
-        }
+        // Update list-critical fields immediately (unread dot + preview text).
+        applyFastConversationListUpdateForNewMessage(
+            message,
+            in: conversation,
+            hasInboxLabel: hasInboxLabel
+        )
 
         // Track the conversation as modified for rollup updates
         await trackModifiedConversation(conversation)

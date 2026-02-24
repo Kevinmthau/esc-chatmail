@@ -26,7 +26,8 @@ struct BatchProcessor {
         batchSize: Int,
         messageFetcher: MessageFetcher,
         progressHandler: @escaping (Int, Int) async -> Void,
-        messageHandler: @escaping (GmailMessage) async -> Void
+        messageHandler: @escaping (GmailMessage) async -> Void,
+        batchCompletion: (() async throws -> Void)? = nil
     ) async throws -> BatchProcessingResult {
         var totalProcessed = 0
         var totalSuccessful = 0
@@ -45,6 +46,9 @@ struct BatchProcessor {
             totalProcessed += batch.count
 
             await progressHandler(totalProcessed, messageIds.count)
+            if let batchCompletion {
+                try await batchCompletion()
+            }
         }
 
         return BatchProcessingResult(

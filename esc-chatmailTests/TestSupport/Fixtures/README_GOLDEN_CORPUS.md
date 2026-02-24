@@ -15,6 +15,7 @@ preview routing, or newsletter scoring fails in production.
 - `htmlToBubbleTextCases`: raw HTML -> expected bubble text
 - `richHTMLDetectionCases`: raw HTML -> expected hasRichHTMLContent (used for preview routing)
 - `displayPolicyCases`: preview routing decisions
+- `conversationListSnippetCases`: conversation rollup snippet -> expected list-row snippet
 - `newsletterDetectionCases`: newsletter score/classification expectations
 
 ## Run

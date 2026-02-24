@@ -45,6 +45,11 @@ struct MessageFetchPhase: SyncPhase {
                 myAliases: context.myAliases,
                 in: context.coreDataContext
             )
+        } batchCompletion: {
+            try await context.coreDataContext.perform {
+                guard context.coreDataContext.hasChanges else { return }
+                try context.coreDataContext.save()
+            }
         }
 
         if result.hasFailures {

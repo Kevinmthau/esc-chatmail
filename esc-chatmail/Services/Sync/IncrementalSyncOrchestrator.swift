@@ -136,6 +136,10 @@ final class IncrementalSyncOrchestrator {
                 input: historyResult.records,
                 context: phaseContext
             )
+            try await flushUIVisibleChangesIfNeeded(
+                in: context,
+                stageDescription: "label processing"
+            )
 
             // Phase 4: Reconciliation
             // Skip label reconciliation when history reported no changes (saves ~2.5s per sync)
@@ -293,5 +297,18 @@ final class IncrementalSyncOrchestrator {
     /// Records the current time as the last reconciliation time
     private func recordReconciliationTime() {
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastReconciliationTimeKey)
+    }
+
+    /// Saves the sync context mid-run so conversation list updates (preview/unread) merge
+    /// into the view context immediately instead of waiting for final historyId persistence.
+    private func flushUIVisibleChangesIfNeeded(
+        in context: NSManagedObjectContext,
+        stageDescription: String
+    ) async throws {
+        try await context.perform {
+            guard context.hasChanges else { return }
+            try context.save()
+        }
+        log.debug("Flushed sync changes after \(stageDescription)")
     }
 }

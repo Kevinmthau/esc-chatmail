@@ -759,6 +759,37 @@ final class GoldenCorpusReplayTests: XCTestCase {
             }
         }
 
+        for scenario in corpus.conversationListSnippetCases {
+            XCTContext.runActivity(named: "conversationListSnippet:\(scenario.id)") { _ in
+                let testStack = TestCoreDataStack()
+                let context = testStack.viewContext
+
+                let conversationBuilder = ConversationBuilder()
+                    .withLastMessageDate(Date())
+                let conversation = scenario.conversationSnippet.map {
+                    conversationBuilder.withSnippet($0).build(in: context)
+                } ?? conversationBuilder.build(in: context)
+
+                if scenario.latestMessageSnippet != nil || scenario.latestMessageCleanedSnippet != nil {
+                    let message = MessageBuilder()
+                        .withId("golden-conversation-snippet-\(scenario.id)")
+                        .withDate(Date())
+                        .inConversation(conversation)
+                        .build(in: context)
+                    message.snippet = scenario.latestMessageSnippet
+                    message.cleanedSnippet = scenario.latestMessageCleanedSnippet
+                }
+
+                let snapshot = ConversationSnapshot(from: conversation)
+
+                XCTAssertEqual(
+                    snapshot.snippet,
+                    scenario.expected,
+                    scenario.notes ?? "Conversation list snippet mismatch for scenario \(scenario.id)"
+                )
+            }
+        }
+
         for scenario in corpus.newsletterDetectionCases {
             XCTContext.runActivity(named: "newsletter:\(scenario.id)") { _ in
                 var headers = ProcessedHeaders()
@@ -820,6 +851,7 @@ private struct GoldenCorpus: Decodable {
     let htmlToBubbleTextCases: [HTMLToBubbleTextCase]
     let richHTMLDetectionCases: [RichHTMLDetectionCase]
     let displayPolicyCases: [DisplayPolicyCase]
+    let conversationListSnippetCases: [ConversationListSnippetCase]
     let newsletterDetectionCases: [NewsletterDetectionCase]
 
     enum CodingKeys: String, CodingKey {
@@ -827,6 +859,7 @@ private struct GoldenCorpus: Decodable {
         case htmlToBubbleTextCases
         case richHTMLDetectionCases
         case displayPolicyCases
+        case conversationListSnippetCases
         case newsletterDetectionCases
     }
 
@@ -836,6 +869,7 @@ private struct GoldenCorpus: Decodable {
         htmlToBubbleTextCases = try container.decodeIfPresent([HTMLToBubbleTextCase].self, forKey: .htmlToBubbleTextCases) ?? []
         richHTMLDetectionCases = try container.decodeIfPresent([RichHTMLDetectionCase].self, forKey: .richHTMLDetectionCases) ?? []
         displayPolicyCases = try container.decodeIfPresent([DisplayPolicyCase].self, forKey: .displayPolicyCases) ?? []
+        conversationListSnippetCases = try container.decodeIfPresent([ConversationListSnippetCase].self, forKey: .conversationListSnippetCases) ?? []
         newsletterDetectionCases = try container.decodeIfPresent([NewsletterDetectionCase].self, forKey: .newsletterDetectionCases) ?? []
     }
 }
@@ -872,6 +906,15 @@ private struct DisplayPolicyCase: Decodable {
     let subject: String?
     let senderEmail: String?
     let expectedShowHTMLPreview: Bool
+    let notes: String?
+}
+
+private struct ConversationListSnippetCase: Decodable {
+    let id: String
+    let conversationSnippet: String?
+    let latestMessageSnippet: String?
+    let latestMessageCleanedSnippet: String?
+    let expected: String?
     let notes: String?
 }
 
