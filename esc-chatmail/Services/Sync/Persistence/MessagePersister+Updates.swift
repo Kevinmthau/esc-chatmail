@@ -59,11 +59,26 @@ extension MessagePersister {
             }
         }
 
-        // Only add attachments if the message doesn't already have them
-        let existingAttachments = existingMessage.typedAttachments
-        if existingAttachments.isEmpty {
-            for attachmentInfo in processedMessage.attachmentInfo {
-                createAttachment(attachmentInfo, for: existingMessage, in: context)
+        // Merge attachments from server payload even when optimistic local attachments already exist.
+        // This prevents missing inline CID images after sent-message reconciliation.
+        var existingAttachmentIds = Set(existingMessage.attachmentsArray.compactMap(\.id))
+        var existingContentIds = Set(existingMessage.attachmentsArray.compactMap { normalizedContentID($0.contentId) })
+
+        for attachmentInfo in processedMessage.attachmentInfo {
+            if existingAttachmentIds.contains(attachmentInfo.id) {
+                continue
+            }
+
+            if let normalizedIncomingCID = normalizedContentID(attachmentInfo.contentId),
+               existingContentIds.contains(normalizedIncomingCID) {
+                continue
+            }
+
+            createAttachment(attachmentInfo, for: existingMessage, in: context)
+
+            existingAttachmentIds.insert(attachmentInfo.id)
+            if let normalizedIncomingCID = normalizedContentID(attachmentInfo.contentId) {
+                existingContentIds.insert(normalizedIncomingCID)
             }
         }
 
@@ -90,5 +105,22 @@ extension MessagePersister {
 
         Log.debug("Updated existing message: \(processedMessage.id)", category: .sync)
         return true
+    }
+
+    private func normalizedContentID(_ rawValue: String?) -> String? {
+        guard let rawValue else { return nil }
+
+        var normalized = rawValue
+            .trimmingCharacters(in: CharacterSet(charactersIn: "<> \t\r\n"))
+
+        while normalized.hasPrefix("/") {
+            normalized.removeFirst()
+        }
+
+        normalized = normalized.removingPercentEncoding ?? normalized
+        normalized = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !normalized.isEmpty else { return nil }
+        return normalized.lowercased()
     }
 }

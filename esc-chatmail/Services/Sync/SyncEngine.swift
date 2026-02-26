@@ -38,6 +38,7 @@ final class SyncEngine: ObservableObject {
     private let historyProcessor: HistoryProcessor
     private let conversationManager: ConversationManager
     private let coreDataStack: CoreDataStack
+    private let attachmentDownloader: AttachmentDownloader
     private let networkMonitor: NetworkMonitorService
     private let syncStateActor: SyncStateActor
 
@@ -63,6 +64,7 @@ final class SyncEngine: ObservableObject {
         self.historyProcessor = historyProcessor
         self.conversationManager = conversationManager
         self.coreDataStack = coreDataStack
+        self.attachmentDownloader = attachmentDownloader
         self.networkMonitor = NetworkMonitorService()
         self.syncStateActor = SyncStateActor()
 
@@ -241,6 +243,10 @@ final class SyncEngine: ObservableObject {
         uiState.update(isSyncing: false, progress: 1.0, status: finalStatus)
 
         log.info("Incremental sync completed: \(result.newMessagesCount) new messages, \(result.labelChangesProcessed) label changes")
+
+        Task {
+            await attachmentDownloader.enqueueAllPendingAttachments()
+        }
     }
 
     // MARK: - Error Formatting

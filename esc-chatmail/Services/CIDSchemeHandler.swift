@@ -1,4 +1,5 @@
 import Foundation
+import CoreData
 import WebKit
 
 /// Handles cid: (Content-ID) URL scheme for inline email attachments.
@@ -14,10 +15,16 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
 
     /// Core Data stack for fetching attachment data
     private let coreDataStack: CoreDataStack
+    private let apiClientOverride: (any GmailAPIClientProtocol)?
 
-    init(message: Message?, coreDataStack: CoreDataStack = .shared) {
+    init(
+        message: Message?,
+        coreDataStack: CoreDataStack = .shared,
+        apiClient: (any GmailAPIClientProtocol)? = nil
+    ) {
         self.message = message
         self.coreDataStack = coreDataStack
+        self.apiClientOverride = apiClient
         super.init()
     }
 
@@ -48,31 +55,40 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
             return
         }
 
-        // Load attachment data from disk
-        guard let localPath = attachment.localURL,
-              let data = AttachmentPaths.loadData(from: localPath) else {
-            // Attachment exists but not downloaded yet - return transparent pixel
-            Log.debug("CIDSchemeHandler: Attachment not downloaded for Content-ID: \(contentId)", category: .ui)
-            respondWithTransparentPixel(urlSchemeTask)
+        // Load attachment data from disk first.
+        if let localPath = attachment.localURL,
+           let data = AttachmentPaths.loadData(from: localPath) {
+            respond(urlSchemeTask, with: data, mimeType: attachment.mimeType)
             return
         }
 
-        // Create response with correct MIME type
-        let mimeType = attachment.mimeType.isEmpty ? "application/octet-stream" : attachment.mimeType
-        let response = URLResponse(
-            url: url,
-            mimeType: mimeType,
-            expectedContentLength: data.count,
-            textEncodingName: nil
-        )
+        // On-demand fallback: fetch missing inline attachment bytes immediately so full email
+        // view can render all cid: images without waiting for a background download sweep.
+        let messageId = message.id
+        let attachmentId = attachment.id
+        let mimeType = attachment.mimeType
+        let filename = attachment.filename
+        let attachmentObjectID = attachment.objectID
 
-        urlSchemeTask.didReceive(response)
-        urlSchemeTask.didReceive(data)
-        urlSchemeTask.didFinish()
+        Task { [weak self] in
+            guard let self else { return }
+            if let data = await self.fetchAndPersistMissingAttachmentData(
+                messageId: messageId,
+                attachmentId: attachmentId,
+                mimeType: mimeType,
+                filename: filename,
+                attachmentObjectID: attachmentObjectID
+            ) {
+                self.respond(urlSchemeTask, with: data, mimeType: mimeType)
+            } else {
+                Log.debug("CIDSchemeHandler: Attachment not downloaded for Content-ID: \(contentId)", category: .ui)
+                self.respondWithTransparentPixel(urlSchemeTask)
+            }
+        }
     }
 
     func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
-        // No cleanup needed - we complete synchronously
+        // No per-task cleanup required.
     }
 
     // MARK: - Private Helpers
@@ -134,6 +150,76 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         }
 
         return nil
+    }
+
+    private func fetchAndPersistMissingAttachmentData(
+        messageId: String,
+        attachmentId: String?,
+        mimeType: String,
+        filename: String,
+        attachmentObjectID: NSManagedObjectID
+    ) async -> Data? {
+        guard let attachmentId,
+              !attachmentId.isEmpty,
+              !attachmentId.hasPrefix("local_") else {
+            return nil
+        }
+
+        do {
+            let apiClient: any GmailAPIClientProtocol
+            if let apiClientOverride {
+                apiClient = apiClientOverride
+            } else {
+                apiClient = await MainActor.run { GmailAPIClient.shared }
+            }
+
+            let data = try await apiClient.getAttachment(messageId: messageId, attachmentId: attachmentId)
+            AttachmentPaths.setupDirectories()
+
+            let filenameExt = (filename as NSString).pathExtension.lowercased()
+            let ext = filenameExt.isEmpty ? AttachmentPaths.fileExtension(for: mimeType) : filenameExt
+            let originalPath = AttachmentPaths.originalPath(idOrUUID: attachmentId, ext: ext)
+
+            guard AttachmentPaths.saveData(data, to: originalPath) else {
+                return data
+            }
+
+            let backgroundContext = coreDataStack.newBackgroundContext()
+            await backgroundContext.perform {
+                guard let attachment = try? backgroundContext.existingObject(with: attachmentObjectID) as? Attachment else {
+                    return
+                }
+
+                attachment.localURL = originalPath
+                attachment.byteSize = Int64(max(Int(attachment.byteSize), data.count))
+                attachment.state = .downloaded
+                backgroundContext.saveOrLog(operation: "persist inline cid attachment")
+            }
+
+            return data
+        } catch {
+            Log.debug("CIDSchemeHandler: On-demand fetch failed for attachment \(attachmentId): \(error.localizedDescription)", category: .ui)
+            return nil
+        }
+    }
+
+    private func respond(_ urlSchemeTask: WKURLSchemeTask, with data: Data, mimeType: String) {
+        guard let url = urlSchemeTask.request.url else {
+            urlSchemeTask.didFailWithError(URLError(.badURL))
+            return
+        }
+
+        let resolvedMimeType = mimeType.isEmpty ? "application/octet-stream" : mimeType
+        let response = URLResponse(
+            url: url,
+            mimeType: resolvedMimeType,
+            expectedContentLength: data.count,
+            textEncodingName: nil
+        )
+
+        urlSchemeTask.didReceive(response)
+        urlSchemeTask.didReceive(data)
+        urlSchemeTask.didFinish()
     }
 
     /// Responds with a transparent 1x1 GIF pixel for missing attachments

@@ -79,4 +79,13 @@ final class MessageExtensionsTests: XCTestCase {
 
         XCTAssertEqual(message.htmlDisplayCleanupMode, .quotedAndSignature)
     }
+
+    func testHTMLDisplayCleanupMode_sentMessage_defaultsToNone() {
+        let message = MessageBuilder()
+            .fromMe()
+            .withSubject("Re: Plans")
+            .build(in: context)
+
+        XCTAssertEqual(message.htmlDisplayCleanupMode, .none)
+    }
 }

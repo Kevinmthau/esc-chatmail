@@ -388,9 +388,9 @@ extension Message {
     }
 
     /// Chooses how aggressively to clean HTML before rendering in previews/full views.
-    /// Forwarded/newsletter messages keep original structure by default.
+    /// Sent, forwarded, and newsletter messages keep original structure by default.
     var htmlDisplayCleanupMode: HTMLContentCleanupMode {
-        if isForwardedEmail || isNewsletter {
+        if isFromMe || isForwardedEmail || isNewsletter {
             return .none
         }
         return .quotedAndSignature

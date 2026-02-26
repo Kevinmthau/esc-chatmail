@@ -390,6 +390,85 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertNil(conversation.latestInboxDate)
     }
 
+    func testUpdateExistingMessage_mergesMissingServerAttachmentsForOptimisticSentMessage() async {
+        let conversation = ConversationBuilder.simple(in: context)
+        let existingMessage = MessageBuilder()
+            .withId("message-attachment-merge")
+            .inConversation(conversation)
+            .build(in: context)
+        existingMessage.hasAttachments = true
+
+        _ = AttachmentBuilder()
+            .withId("local_inline_existing")
+            .withFilename("optimistic-inline.png")
+            .withMimeType("image/png")
+            .withContentId("ii_mm3y7cq08")
+            .downloaded()
+            .forMessage(existingMessage)
+            .build(in: context)
+
+        let processedMessage = ProcessedMessage(
+            id: existingMessage.id,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: existingMessage.snippet,
+            cleanedSnippet: existingMessage.cleanedSnippet,
+            internalDate: existingMessage.internalDate,
+            headers: ProcessedHeaders(),
+            htmlBody: nil,
+            plainTextBody: existingMessage.bodyText,
+            labelIds: [],
+            isUnread: existingMessage.isUnread,
+            isNewsletter: existingMessage.isNewsletter,
+            hasAttachments: true,
+            attachmentInfo: [
+                // Same CID as optimistic local attachment; should dedupe.
+                AttachmentInfo(
+                    id: "real_attachment_1",
+                    filename: "inline-existing.png",
+                    mimeType: "image/png",
+                    size: 120,
+                    contentId: "<ii_mm3y7cq08>"
+                ),
+                AttachmentInfo(
+                    id: "real_attachment_2",
+                    filename: "inline-2.png",
+                    mimeType: "image/png",
+                    size: 121,
+                    contentId: "ii_19c9bbffa4da5b773191"
+                ),
+                AttachmentInfo(
+                    id: "real_attachment_3",
+                    filename: "inline-3.png",
+                    mimeType: "image/png",
+                    size: 122,
+                    contentId: "ii_19c9bbffa4d86c910832"
+                )
+            ]
+        )
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+
+        let attachments = existingMessage.attachmentsArray
+        XCTAssertEqual(attachments.count, 3)
+
+        let normalizedCIDs = attachments.compactMap { attachment -> String? in
+            guard let contentId = attachment.contentId else { return nil }
+            return contentId
+                .trimmingCharacters(in: CharacterSet(charactersIn: "<> \t\r\n"))
+                .lowercased()
+        }
+
+        XCTAssertEqual(normalizedCIDs.filter { $0 == "ii_mm3y7cq08" }.count, 1)
+        XCTAssertTrue(normalizedCIDs.contains("ii_19c9bbffa4da5b773191"))
+        XCTAssertTrue(normalizedCIDs.contains("ii_19c9bbffa4d86c910832"))
+    }
+
     func testCreateNewMessage_inlineDataAttachment_isPersistedAsDownloaded() async throws {
         let inlineImageData = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2foAAAAASUVORK5CYII="))
 
