@@ -694,6 +694,16 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(result, "Meeting is confirmed for 3pm.")
     }
 
+    func testRemoveSignature_outlookElectronicMailTransmissionDisclaimer_removes() {
+        let text = """
+        Thank you!
+
+        This electronic mail transmission may contain confidential or privileged information. If you believe you have received this message in error, please notify the sender by reply transmission and delete the message without copying or disclosing it.
+        """
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        XCTAssertEqual(result, "Thank you!")
+    }
+
     // MARK: - Signature Removal - Unsubscribe Links
 
     func testRemoveSignature_unsubscribeLink_removes() {

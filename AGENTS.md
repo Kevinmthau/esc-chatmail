@@ -113,6 +113,7 @@ Notes:
 - Keep the "immediate fallback" and "background cached" processing paths unified. If you change quote/signature removal, make sure both paths use the same APIs (typically `PlainTextQuoteRemover.extractQuotes`).
 - Do not use `TextSnippetCreator` for chat bubbles; it condenses whitespace/newlines and is intended for preview snippets.
 - Signature stripping must not treat phone numbers inside body sentences (e.g. "call me at 415-...") as standalone contact blocks. Only treat phone numbers as signature contact info when the line is primarily a phone line or has explicit prefixes (`T:`, `M:`, etc).
+- Outlook legal footer variants should be removed from bubble text when they appear as trailing disclaimers (e.g., "This electronic mail transmission may contain confidential or privileged information...").
 
 ### Newsletter Detection & Preview Routing
 - Newsletter classification is scored in `Services/MessageProcessor.swift` (`calculateNewsletterScore(...)`) and stored as `Message.isNewsletter`.

@@ -65,6 +65,12 @@
       "notes": "Auto-reply signatures that start at '--' and include image/link placeholders should be removed while preserving the explicit sign-off name above the delimiter.",
       "input": "Hello,\n\nSorry to miss your message.  I am away from the office returning on\nTuesday (2/17)\n\nIf this matter is urgent, please contact:\n- Shane Cumings at shane.cumings@adviceperiod.com or (424) 394-1922\n- Victoria Hannon at victoria.hannon@adviceperiod.com or (312) 348-5477\n\nThank you,\n\nDominic\n\n-- \n\n\n[image: Company logo] <http://adviceperiod.com>\nDominic Cozzetto, CFA\nPartner Advisor\ndominic.cozzetto@adviceperiod.com\nDirect: (949) 407-8746\nMobile: (206) 965-0877\nadviceperiod.com\n\n120 Newport Center Drive\nNewport Beach, CA 92660\n\n\n*Click here to upload documents\n<https://marinerholdingsllc.app.box.com/f/f25737f1a4c6487cbd5344d017275e60>*\n\n [image: -] <https://twitter.com/adviceperiod> [image: -]\n<https://www.linkedin.com/company/adviceperiod> [image: -]\n<https://www.instagram.com/adviceperiod_llc/>",
       "expected": "Hello,\n\nSorry to miss your message.  I am away from the office returning on\n\nTuesday (2/17)\n\nIf this matter is urgent, please contact:\n\n- Shane Cumings at shane.cumings@adviceperiod.com or (424) 394-1922\n\n- Victoria Hannon at victoria.hannon@adviceperiod.com or (312) 348-5477\n\nThank you,\n\nDominic"
+    },
+    {
+      "id": "outlook_electronic_mail_disclaimer_removed_after_quote_cleanup",
+      "notes": "Outlook confidentiality footers using 'This electronic mail transmission may contain confidential or privileged information' should be removed from bubble text after quote truncation.",
+      "input": "Thank you!\n\nThis electronic mail transmission may contain confidential or privileged information. If you believe you have received this message in error, please notify the sender by reply transmission and delete the message without copying or disclosing it.\n\nFrom: Alex Example <alex@example.com>\nSent: Tuesday, February 24, 2026 6:01 PM\nTo: Casey Example <casey@example.com>\nSubject: Re: Scheduling",
+      "expected": "Thank you!"
     }
   ],
   "htmlToBubbleTextCases": [
