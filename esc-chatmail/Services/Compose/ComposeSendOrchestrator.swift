@@ -1,10 +1,44 @@
 import Foundation
 import CoreData
 
+@MainActor
+protocol IncrementalSyncPerforming: AnyObject {
+    func performIncrementalSync() async throws
+}
+
+extension SyncEngine: IncrementalSyncPerforming {}
+
+protocol ComposeSendServicing: AnyObject {
+    @MainActor func markAttachmentsAsUploaded(_ attachments: [Attachment])
+    func sendReply(
+        to recipients: [String],
+        body: String,
+        subject: String,
+        threadId: String,
+        inReplyTo: String?,
+        references: [String],
+        originalMessage: QuotedMessage?,
+        attachmentInfos: [GmailSendService.AttachmentInfo]
+    ) async throws -> GmailSendService.SendResult
+    func sendNew(
+        to recipients: [String],
+        body: String,
+        htmlBody: String?,
+        subject: String?,
+        attachmentInfos: [GmailSendService.AttachmentInfo],
+        inlineAttachmentInfos: [GmailSendService.AttachmentInfo]
+    ) async throws -> GmailSendService.SendResult
+    @MainActor func fetchMessageSync(byID messageID: String) -> Message?
+    @MainActor func updateOptimisticMessage(_ message: Message, with result: GmailSendService.SendResult)
+    @MainActor func markAttachmentsAsFailed(_ attachments: [Attachment])
+}
+
+extension GmailSendService: ComposeSendServicing {}
+
 /// Orchestrates the message sending flow, handling optimistic updates and background execution
 struct ComposeSendOrchestrator {
-    let sendService: GmailSendService
-    let syncEngine: SyncEngine
+    let sendService: ComposeSendServicing
+    let syncPerformer: IncrementalSyncPerforming
 
     /// Input data for sending a message
     struct SendInput: Sendable {
@@ -34,21 +68,23 @@ struct ComposeSendOrchestrator {
     ///   - attachments: Original attachment entities for marking as uploaded
     ///   - optimisticMessageID: ID of the pre-created optimistic message
     @MainActor
+    @discardableResult
     func executeInBackground(
         input: SendInput,
         attachments: [Attachment],
         optimisticMessageID: String
-    ) {
+    ) -> Task<Void, Never> {
         // Mark attachments as uploaded immediately so they display non-dimmed
         sendService.markAttachmentsAsUploaded(attachments)
 
         // Capture services for background task
         let sendService = self.sendService
-        let syncEngine = self.syncEngine
+        let syncPerformer = self.syncPerformer
 
         // Send in background - don't wait for completion
-        Task.detached {
+        return Task.detached(priority: .userInitiated) {
             do {
+                try Task.checkCancellation()
                 let result: GmailSendService.SendResult
 
                 if let replyData = input.replyData {
@@ -72,6 +108,7 @@ struct ComposeSendOrchestrator {
                         inlineAttachmentInfos: input.inlineAttachmentInfos
                     )
                 }
+                try Task.checkCancellation()
 
                 // Update optimistic message with real IDs (on MainActor to avoid Sendable issues)
                 await MainActor.run {
@@ -84,11 +121,12 @@ struct ComposeSendOrchestrator {
                 // Sync failure is non-critical - message was sent successfully, user will
                 // see it on next sync. Log warning for debugging but don't surface to user.
                 do {
-                    try await syncEngine.performIncrementalSync()
+                    try await syncPerformer.performIncrementalSync()
                 } catch {
                     Log.warning("Post-send sync failed - sent message will appear on next sync: \(error.localizedDescription)", category: .sync)
                 }
-
+            } catch is CancellationError {
+                Log.info("Background send cancelled for optimistic message \(optimisticMessageID)", category: .message)
             } catch {
                 // Mark attachments as failed so they show error indicator (on MainActor to avoid Sendable issues)
                 await MainActor.run {

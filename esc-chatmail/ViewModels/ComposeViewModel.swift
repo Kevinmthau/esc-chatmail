@@ -36,6 +36,7 @@ final class ComposeViewModel: ObservableObject {
     @Published var error: Error?
     @Published var showError = false
     private(set) var lastSentConversationObjectID: NSManagedObjectID?
+    private var backgroundSendTasks: [String: Task<Void, Never>] = [:]
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -85,7 +86,7 @@ final class ComposeViewModel: ObservableObject {
 
     var canSend: Bool {
         let hasValidRecipients = !recipients.isEmpty && recipients.allSatisfy { $0.isValid }
-        guard hasValidRecipients && !isSending else { return false }
+        guard hasValidRecipients && !isSending && backgroundSendTasks.isEmpty else { return false }
 
         switch mode {
         case .forward:
@@ -307,12 +308,19 @@ final class ComposeViewModel: ObservableObject {
             replyData: orchestratorReplyData
         )
 
-        let orchestrator = ComposeSendOrchestrator(sendService: sendService, syncEngine: syncEngine)
-        orchestrator.executeInBackground(
+        let orchestrator = ComposeSendOrchestrator(sendService: sendService, syncPerformer: syncEngine)
+        let backgroundTask = orchestrator.executeInBackground(
             input: input,
             attachments: Array(attachments),
             optimisticMessageID: optimisticMessageID
         )
+        backgroundSendTasks[optimisticMessageID] = backgroundTask
+        Task { [weak self] in
+            _ = await backgroundTask.result
+            await MainActor.run {
+                _ = self?.backgroundSendTasks.removeValue(forKey: optimisticMessageID)
+            }
+        }
 
         isSending = false
         return true

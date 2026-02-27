@@ -40,6 +40,8 @@
 		F9CAD6772E68ADEE00AE9CDF /* Exceptions for "esc-chatmail" folder in "esc-chatmail" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				Configuration/Debug.xcconfig,
+				Configuration/Release.xcconfig,
 				Resources/Info.plist,
 			);
 			target = F9399FE02E66521800A7578D /* esc-chatmail */;
@@ -195,7 +197,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 1640;
-				LastUpgradeCheck = 2620;
+				LastUpgradeCheck = 2630;
 				TargetAttributes = {
 					F9399FE02E66521800A7578D = {
 						CreatedOnToolsVersion = 16.4;
@@ -502,7 +504,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = PCTX8P2X4J;
+				DEVELOPMENT_TEAM = 3JXY2MS2Y3;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				MARKETING_VERSION = 1.0;
@@ -543,7 +545,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = PCTX8P2X4J;
+				DEVELOPMENT_TEAM = 3JXY2MS2Y3;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.mushpot.esc-chatmailUITests";

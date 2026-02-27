@@ -67,6 +67,7 @@ extension GmailSendService {
     }
 
     /// Marks attachments as successfully uploaded.
+    @MainActor
     func markAttachmentsAsUploaded(_ attachments: [Attachment]) {
         for attachment in attachments {
             attachment.state = .uploaded
@@ -79,6 +80,7 @@ extension GmailSendService {
     }
 
     /// Marks attachments as failed to upload.
+    @MainActor
     func markAttachmentsAsFailed(_ attachments: [Attachment]) {
         for attachment in attachments {
             attachment.state = .failed

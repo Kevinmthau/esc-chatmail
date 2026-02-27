@@ -62,34 +62,17 @@ final class ProcessedTextCacheTests: XCTestCase {
     // MARK: - hasGenuineRichContent Tests
 
     func testHasRichContent_simpleText_returnsFalse() {
-        // Simple HTML without rich elements
-        let html = "<html><body><p>Hello, this is a simple email.</p></body></html>"
-
         // We can't directly test hasGenuineRichContent as it's private,
         // but we can test through processMessage behavior
         // For now, we verify the method exists and cache handles rich content flag
     }
 
     func testHasRichContent_withVideo_returnsTrue() {
-        // HTML with video element should always be rich
-        let html = """
-        <html><body>
-        <p>Check out this video:</p>
-        <video src="video.mp4" controls></video>
-        </body></html>
-        """
-
         // Verify through cache set/get that rich content flag is preserved
         // The actual detection is tested implicitly
     }
 
     func testHasRichContent_withIframe_returnsTrue() {
-        // HTML with iframe should always be rich
-        let html = """
-        <html><body>
-        <iframe src="https://youtube.com/embed/xyz"></iframe>
-        </body></html>
-        """
         // Detection tested implicitly through cache
     }
 

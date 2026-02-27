@@ -35,7 +35,7 @@ final class PendingActionsManagerTests: XCTestCase {
 
     func testTestCoreDataStack_canSaveEntities() throws {
         // Create a pending action
-        let action = PendingActionBuilder()
+        _ = PendingActionBuilder()
             .markAsRead()
             .forMessage("test-123")
             .pending()

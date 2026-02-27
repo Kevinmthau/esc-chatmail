@@ -3,6 +3,7 @@ import Foundation
 
 /// Mock implementation of TokenManagerProtocol for testing.
 /// Allows controlling token behavior without actual authentication.
+@MainActor
 final class MockTokenManager: TokenManagerProtocol {
 
     /// The token to return from getCurrentToken()

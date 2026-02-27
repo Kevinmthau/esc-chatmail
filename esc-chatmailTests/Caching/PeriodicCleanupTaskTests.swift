@@ -24,7 +24,7 @@ final class PeriodicCleanupTaskTests: XCTestCase {
         let task = PeriodicCleanupTask()
 
         // Start with runImmediately = true
-        await task.start(handler: handler, interval: .hours(1), runImmediately: true)
+        task.start(handler: handler, interval: .hours(1), runImmediately: true)
 
         // Give a tiny bit of time for the immediate cleanup to run
         try await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
@@ -40,7 +40,7 @@ final class PeriodicCleanupTaskTests: XCTestCase {
         let task = PeriodicCleanupTask()
 
         // Start with runImmediately = false
-        await task.start(handler: handler, interval: .hours(1), runImmediately: false)
+        task.start(handler: handler, interval: .hours(1), runImmediately: false)
 
         // Give a tiny bit of time
         try await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
@@ -55,7 +55,7 @@ final class PeriodicCleanupTaskTests: XCTestCase {
         let handler = MockCleanupHandler()
         let task = PeriodicCleanupTask()
 
-        await task.start(handler: handler, interval: .minutes(1), runImmediately: false)
+        task.start(handler: handler, interval: .minutes(1), runImmediately: false)
 
         // Cancel immediately
         task.cancel()
