@@ -251,4 +251,21 @@ final class EmailNormalizerTests: XCTestCase {
         let result = EmailNormalizer.isBetterDisplayName(nil, than: nil)
         XCTAssertFalse(result)
     }
+
+    // MARK: - Hide My Email Detection
+
+    func testIsHideMyEmailDisplayName_exactMatch_returnsTrue() {
+        XCTAssertTrue(EmailNormalizer.isHideMyEmailDisplayName("Hide My Email"))
+    }
+
+    func testIsHideMyEmailDisplayName_caseAndWhitespaceVariants_returnsTrue() {
+        XCTAssertTrue(EmailNormalizer.isHideMyEmailDisplayName("  hide   my   email  "))
+        XCTAssertTrue(EmailNormalizer.isHideMyEmailDisplayName("Hide-My-Email"))
+    }
+
+    func testIsHideMyEmailDisplayName_otherNames_returnFalse() {
+        XCTAssertFalse(EmailNormalizer.isHideMyEmailDisplayName(nil))
+        XCTAssertFalse(EmailNormalizer.isHideMyEmailDisplayName(""))
+        XCTAssertFalse(EmailNormalizer.isHideMyEmailDisplayName("San Francisco Ballet"))
+    }
 }

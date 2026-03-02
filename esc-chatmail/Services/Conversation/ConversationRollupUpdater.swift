@@ -259,6 +259,10 @@ struct ConversationRollupUpdater: Sendable {
 
         for participant in participants {
             guard let person = participant.person else { continue }
+            if EmailNormalizer.isHideMyEmailDisplayName(person.displayName) {
+                Log.debug("Excluding Hide My Email relay participant: \(person.email)", category: .conversation)
+                continue
+            }
             let email = person.email
             let normalizedEmail = EmailNormalizer.normalize(email)
 

@@ -36,7 +36,9 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
     // swiftlint:disable:next force_try
     private static let eventHandlerRegex: NSRegularExpression = {
         try! NSRegularExpression(
-            pattern: "\\s*on\\w+\\s*=\\s*[\"'][^\"']*[\"']|\\s*on\\w+\\s*=\\s*[^\\s>]+",
+            // Require leading whitespace so we only strip HTML attributes (e.g. ` onload=...`)
+            // and do not corrupt URL path segments like `/cdn-cgi/image/onerror=redirect,...`.
+            pattern: "\\s+on\\w+\\s*=\\s*[\"'][^\"']*[\"']|\\s+on\\w+\\s*=\\s*[^\\s>]+",
             options: .caseInsensitive
         )
     }()

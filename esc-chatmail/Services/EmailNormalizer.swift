@@ -123,4 +123,20 @@ class EmailNormalizer {
         // Same number of parts: longer is better (handles middle names, titles)
         return new.count > existing.count
     }
+
+    /// Returns true for Apple's "Hide My Email" placeholder contact labels.
+    ///
+    /// These labels represent relay routing aliases rather than real participants
+    /// and should be excluded from conversation participant displays.
+    static func isHideMyEmailDisplayName(_ displayName: String?) -> Bool {
+        guard let displayName else { return false }
+        let normalized = displayName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+
+        return normalized == "hide my email"
+    }
 }

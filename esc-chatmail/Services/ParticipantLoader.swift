@@ -77,7 +77,12 @@ final class ParticipantLoader {
         var result: [String] = []
 
         for participant in participants {
-            guard let email = participant.person?.email else { continue }
+            guard let person = participant.person else { continue }
+            if EmailNormalizer.isHideMyEmailDisplayName(person.displayName) {
+                continue
+            }
+
+            let email = person.email
             let normalized = EmailNormalizer.normalize(email)
 
             guard normalized != normalizedMyEmail,

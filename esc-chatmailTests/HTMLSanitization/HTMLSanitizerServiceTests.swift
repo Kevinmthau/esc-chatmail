@@ -119,6 +119,21 @@ final class HTMLSanitizerServiceTests: XCTestCase {
         XCTAssertFalse(result.contains("alert"))
     }
 
+    func testSanitize_cloudflareImageDirectiveInSrc_preservesDirectiveAndRewritesFormat() {
+        let html = """
+        <img src="https://content.app-us1.com/cdn-cgi/image/onerror=redirect,width=650,dpr=2,fit=scale-down,format=auto/NvzAv/2026/02/24/73b955fe-1bf1-4daa-b38c-fc1d230937e2.jpeg" alt="">
+        """
+        let result = sut.sanitize(html)
+
+        XCTAssertTrue(
+            result.contains(
+                "src=\"https://content.app-us1.com/cdn-cgi/image/onerror=redirect,width=650,dpr=2,fit=scale-down,format=jpeg/NvzAv/2026/02/24/73b955fe-1bf1-4daa-b38c-fc1d230937e2.jpeg\""
+            ),
+            "Cloudflare image URL directives in src path should not be stripped"
+        )
+        XCTAssertFalse(result.contains("format=auto"), "Cloudflare image format should be rewritten to jpeg")
+    }
+
     func testSanitize_multipleEventHandlers_removesAll() {
         let html = """
         <div onclick="steal()" onmouseover="track()" onmouseout="log()">

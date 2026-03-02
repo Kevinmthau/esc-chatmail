@@ -75,13 +75,18 @@ func makeConversationIdentity(from headers: [MessageHeader],
             let normalized = normalizedEmail(email)
             guard !normalized.isEmpty else { continue }
 
-            allEmails.insert(normalized)
-
             // Extract display name if it's better than what we have
-            if let displayName = EmailNormalizer.extractDisplayName(from: headerValue),
-               EmailNormalizer.isBetterDisplayName(displayName, than: displayNames[normalized]) {
-                displayNames[normalized] = displayName
+            if let displayName = EmailNormalizer.extractDisplayName(from: headerValue) {
+                // "Hide My Email" is an Apple relay placeholder, not a real participant.
+                if EmailNormalizer.isHideMyEmailDisplayName(displayName) {
+                    continue
+                }
+                if EmailNormalizer.isBetterDisplayName(displayName, than: displayNames[normalized]) {
+                    displayNames[normalized] = displayName
+                }
             }
+
+            allEmails.insert(normalized)
         }
 
         // Remove current user's aliases from participants
