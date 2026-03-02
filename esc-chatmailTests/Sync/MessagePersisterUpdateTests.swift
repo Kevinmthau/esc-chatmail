@@ -230,6 +230,105 @@ final class MessagePersisterUpdateTests: XCTestCase {
         )
     }
 
+    func testCreateNewMessage_sentOnlyMessageInArchivedThread_doesNotReactivateConversation() async throws {
+        let threadId = "thread-archived-sent-only"
+        let archivedConversation = ConversationBuilder()
+            .withSnippet("Old archived snippet")
+            .withLastMessageDate(Date(timeIntervalSince1970: 1_700_100_000))
+            .archived()
+            .setHidden()
+            .build(in: context)
+
+        _ = MessageBuilder()
+            .withId("seed-archived-message")
+            .withThreadId(threadId)
+            .inConversation(archivedConversation)
+            .build(in: context)
+
+        var headers = ProcessedHeaders()
+        headers.subject = "Re: Archived thread"
+        headers.from = "Me <me@example.com>"
+        headers.to = [EmailAddress(email: "friend@example.com", displayName: nil)]
+        headers.isFromMe = true
+
+        let processedMessage = ProcessedMessage(
+            id: "sent-only-archived-thread-message",
+            gmThreadId: threadId,
+            snippet: "Sent from another client",
+            cleanedSnippet: "Sent from another client",
+            internalDate: Date(timeIntervalSince1970: 1_700_100_120),
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: "Sent from another client",
+            labelIds: ["SENT"],
+            isUnread: false,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        try await persister.createNewMessage(
+            processedMessage,
+            labelIds: nil,
+            myAliases: [normalizedEmail("me@example.com")],
+            in: context
+        )
+
+        XCTAssertNotNil(archivedConversation.archivedAt)
+        XCTAssertTrue(archivedConversation.hidden)
+    }
+
+    func testCreateNewMessage_sentOnlyMessageInParticipantFallback_doesNotReactivateConversation() async throws {
+        let participantHash = calculateParticipantHash(from: [normalizedEmail("friend@example.com")])
+        let archivedConversation = ConversationBuilder()
+            .withParticipantHash(participantHash)
+            .withSnippet("Old archived snippet")
+            .withLastMessageDate(Date(timeIntervalSince1970: 1_700_200_000))
+            .archived()
+            .setHidden()
+            .build(in: context)
+
+        try testStack.saveViewContext()
+
+        var headers = ProcessedHeaders()
+        headers.subject = "New outbound"
+        headers.from = "Me <me@example.com>"
+        headers.to = [EmailAddress(email: "friend@example.com", displayName: nil)]
+        headers.isFromMe = true
+
+        let processedMessage = ProcessedMessage(
+            id: "sent-only-fallback-message",
+            gmThreadId: "thread-without-local-match",
+            snippet: "Outbound from another client",
+            cleanedSnippet: "Outbound from another client",
+            internalDate: Date(timeIntervalSince1970: 1_700_200_120),
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: "Outbound from another client",
+            labelIds: ["SENT"],
+            isUnread: false,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        try await persister.createNewMessage(
+            processedMessage,
+            labelIds: nil,
+            myAliases: [normalizedEmail("me@example.com")],
+            in: context
+        )
+
+        XCTAssertNotNil(archivedConversation.archivedAt)
+        XCTAssertTrue(archivedConversation.hidden)
+
+        let fetch = Message.fetchRequest()
+        fetch.predicate = NSPredicate(format: "id == %@", "sent-only-fallback-message")
+        fetch.fetchLimit = 1
+        let savedMessage = try XCTUnwrap(context.fetch(fetch).first)
+        XCTAssertEqual(savedMessage.conversation?.objectID, archivedConversation.objectID)
+    }
+
     func testCreateNewMessage_updatesConversationListIndicatorsImmediately() async throws {
         _ = LabelBuilder.inboxLabel(in: context)
         _ = LabelBuilder.unreadLabel(in: context)

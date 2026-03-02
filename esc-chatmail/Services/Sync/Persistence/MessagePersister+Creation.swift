@@ -12,6 +12,8 @@ extension MessagePersister {
         myAliases: Set<String>,
         in context: NSManagedObjectContext
     ) async throws {
+        let shouldReactivateConversation = processedMessage.labelIds.contains("INBOX")
+
         let isForwardedMessage = ForwardingHeuristics.indicatesForwarding(
             subject: processedMessage.headers.subject,
             contentCandidates: [
@@ -29,7 +31,7 @@ extension MessagePersister {
         if !isForwardedMessage,
            let existingConversation = findExistingConversation(forGmThreadId: processedMessage.gmThreadId, in: context) {
             // Reactivate archived conversation when new messages arrive in the same thread.
-            if existingConversation.archivedAt != nil {
+            if shouldReactivateConversation, existingConversation.archivedAt != nil {
                 existingConversation.archivedAt = nil
                 existingConversation.hidden = false
             }
@@ -46,6 +48,7 @@ extension MessagePersister {
             conversation = try await conversationManager.findOrCreateConversation(
                 for: identity,
                 initialLastMessageDate: processedMessage.internalDate,
+                reactivateArchivedIfNeeded: shouldReactivateConversation,
                 in: context
             )
         }

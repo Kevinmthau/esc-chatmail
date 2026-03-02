@@ -25,6 +25,7 @@ actor ConversationCreationSerializer {
     func findOrCreateConversation(
         for identity: ConversationIdentity,
         initialLastMessageDate: Date? = nil,
+        reactivateArchivedIfNeeded: Bool = true,
         in context: NSManagedObjectContext
     ) async throws -> Conversation {
         let participantHash = identity.participantHash
@@ -58,7 +59,7 @@ actor ConversationCreationSerializer {
 
             if let existing = existing {
                 // If the conversation was archived, un-archive it (new message reactivates it)
-                if existing.archivedAt != nil {
+                if reactivateArchivedIfNeeded, existing.archivedAt != nil {
                     existing.archivedAt = nil
                     existing.hidden = false
                     Log.debug("Un-archived conversation \(existing.id) due to new message", category: .conversation)

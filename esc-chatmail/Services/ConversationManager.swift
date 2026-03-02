@@ -35,9 +35,15 @@ final class ConversationManager: Sendable {
     func findOrCreateConversation(
         for identity: ConversationIdentity,
         initialLastMessageDate: Date? = nil,
+        reactivateArchivedIfNeeded: Bool = true,
         in context: NSManagedObjectContext
     ) async throws -> Conversation {
-        try await ConversationCreationSerializer.shared.findOrCreateConversation(for: identity, initialLastMessageDate: initialLastMessageDate, in: context)
+        try await ConversationCreationSerializer.shared.findOrCreateConversation(
+            for: identity,
+            initialLastMessageDate: initialLastMessageDate,
+            reactivateArchivedIfNeeded: reactivateArchivedIfNeeded,
+            in: context
+        )
     }
 
     /// Delegates to PersonFactory for consistent person creation.
