@@ -31,6 +31,7 @@ struct MessageBubble: View {
     @State private var fullTextContent: String?
     @State private var hasLoadedContent = false
     @State private var lastContentSignature: String?
+    @State private var sharedDocumentLinks: [SharedDocumentLink] = []
     /// Tracks the message ID we're currently loading to prevent stale updates during cell reuse
     @State private var loadingMessageId: String?
 
@@ -151,6 +152,15 @@ struct MessageBubble: View {
                 AttachmentIndicator(count: displayable.count)
             }
         }
+
+        if !sharedDocumentLinks.isEmpty {
+            VStack(spacing: 8) {
+                ForEach(sharedDocumentLinks) { link in
+                    SharedDocumentLinkCard(link: link)
+                }
+            }
+            .frame(maxWidth: UIScreen.main.bounds.width * 0.65)
+        }
     }
 
     // MARK: - Helpers
@@ -177,6 +187,7 @@ struct MessageBubble: View {
         fullTextContent = nil
         hasRichHTMLContent = false
         lastContentSignature = signature
+        refreshSharedDocumentLinks(using: nil)
 
         // Use prefetched sender name if available, otherwise load (needed for avatar)
         if !message.isFromMe {
@@ -196,6 +207,7 @@ struct MessageBubble: View {
             guard loadingMessageId == currentMessageId else { return }
             fullTextContent = cached.plainText
             hasRichHTMLContent = cached.hasRichContent
+            refreshSharedDocumentLinks(using: cached.plainText)
 
             let hasHTMLFile = HTMLContentHandler.shared.htmlFileExists(for: message.id)
             let hasHTMLSource = message.hasHTMLSource
@@ -306,7 +318,16 @@ struct MessageBubble: View {
 
         fullTextContent = result.plainText
         hasRichHTMLContent = result.hasRichContent
+        refreshSharedDocumentLinks(using: result.plainText)
         hasLoadedContent = true
+    }
+
+    private func refreshSharedDocumentLinks(using preferredText: String?) {
+        let candidates = [preferredText, message.bodyText, message.snippet]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        sharedDocumentLinks = SharedDocumentLinkExtractor.extract(from: candidates, maxCount: 4)
     }
 
     private func loadSenderName() async {

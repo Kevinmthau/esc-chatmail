@@ -26,6 +26,9 @@ final class HTMLContentLoader {
 
     private let contentHandler: HTMLContentHandler
     private let sanitizer: HTMLSanitizerService
+    private static let linkDetector: NSDataDetector? = {
+        try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+    }()
 
     /// In-memory cache for wrapped HTML content to avoid repeated disk I/O
     /// Key format: "\(messageId)_\(isDarkMode)" to cache both light and dark variants
@@ -188,19 +191,11 @@ final class HTMLContentLoader {
         // quoted history behind a "See More" affordance.
         // Keep the sender's sign-off visible (signature removal is a chat-bubble concern).
         let extraction = PlainTextQuoteRemover.extractQuotes(from: normalized, removingSignature: false)
-
-        func escapeHTML(_ input: String) -> String {
-            input
-                .replacingOccurrences(of: "&", with: "&amp;")
-                .replacingOccurrences(of: "<", with: "&lt;")
-                .replacingOccurrences(of: ">", with: "&gt;")
-        }
-
-        let main = escapeHTML(extraction.mainContent)
+        let main = linkifyPlainTextForHTML(extraction.mainContent)
 
         let quotedHTML: String = extraction.quotedParts.map { part in
-            let quote = escapeHTML(part.text)
-            let attribution = part.attribution.map { escapeHTML($0) }
+            let quote = linkifyPlainTextForHTML(part.text)
+            let attribution = part.attribution.map { linkifyPlainTextForHTML($0) }
 
             // Keep nesting conservative; this is a display hint, not a full quote formatter.
             let level = max(0, min(part.nestingLevel, 3))
@@ -215,8 +210,9 @@ final class HTMLContentLoader {
         }.joined(separator: "\n")
 
         // If there's no main content, don't hide everything behind "See More".
+        let hasMainContent = !extraction.mainContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let detailsSection: String
-        if !quotedHTML.isEmpty && !main.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if !quotedHTML.isEmpty && hasMainContent {
             detailsSection = """
             <details class="esc-plain-details">
               <summary>See More</summary>
@@ -307,5 +303,79 @@ final class HTMLContentLoader {
         <div class="esc-plain-main">\(main)</div>
         \(detailsSection)
         """
+    }
+
+    private func linkifyPlainTextForHTML(_ text: String) -> String {
+        guard let detector = Self.linkDetector else {
+            return escapeHTML(text)
+        }
+
+        let nsText = text as NSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        let matches = detector.matches(in: text, options: [], range: fullRange)
+        guard !matches.isEmpty else {
+            return escapeHTML(text)
+        }
+
+        var result = ""
+        var currentLocation = 0
+
+        for match in matches {
+            let range = match.range
+            guard range.location != NSNotFound, range.length > 0 else { continue }
+
+            if range.location > currentLocation {
+                let plainSegment = nsText.substring(with: NSRange(location: currentLocation, length: range.location - currentLocation))
+                result += escapeHTML(plainSegment)
+            }
+
+            let matchedText = nsText.substring(with: range)
+            if let detectedURL = match.url,
+               let safeURL = normalizedLinkURL(detectedURL: detectedURL, originalText: matchedText) {
+                result += "<a href=\"\(escapeHTMLAttribute(safeURL.absoluteString))\">\(escapeHTML(matchedText))</a>"
+            } else {
+                result += escapeHTML(matchedText)
+            }
+
+            currentLocation = range.location + range.length
+        }
+
+        if currentLocation < nsText.length {
+            result += escapeHTML(nsText.substring(from: currentLocation))
+        }
+
+        return result
+    }
+
+    private func normalizedLinkURL(detectedURL: URL, originalText: String) -> URL? {
+        if let scheme = detectedURL.scheme?.lowercased() {
+            guard scheme == "http" || scheme == "https" else {
+                return nil
+            }
+            return detectedURL
+        }
+
+        let trimmed = originalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.lowercased().hasPrefix("www."),
+              let url = URL(string: "https://\(trimmed)") else {
+            return nil
+        }
+        return url
+    }
+
+    private func escapeHTML(_ input: String) -> String {
+        input
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+    }
+
+    private func escapeHTMLAttribute(_ input: String) -> String {
+        input
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
     }
 }

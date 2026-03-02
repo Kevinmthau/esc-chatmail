@@ -146,4 +146,51 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertNotNil(result.html)
         XCTAssertTrue((result.html ?? "").contains("Your credit facility statement is ready"))
     }
+
+    func testLoadContent_plainTextFallbackAutoLinksGoogleSheetsURLs() async {
+        let messageId = "html-loader-plain-link-\(UUID().uuidString)"
+        let bodyText = """
+        Here are the spreadsheets:
+        https://docs.google.com/spreadsheets/d/1abcDEF234xyz/edit?usp=sharing&gid=42
+        """
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: bodyText,
+            isDarkMode: false,
+            cleanupMode: .none
+        )
+
+        guard case .plainTextFallback = result.source else {
+            XCTFail("Expected plainTextFallback source")
+            return
+        }
+
+        let html = result.html ?? ""
+        XCTAssertTrue(html.contains("href=\"https://docs.google.com/spreadsheets/d/1abcDEF234xyz/edit?usp=sharing&amp;gid=42\""))
+        XCTAssertTrue(html.contains(">https://docs.google.com/spreadsheets/d/1abcDEF234xyz/edit?usp=sharing&amp;gid=42</a>"))
+    }
+
+    func testLoadContent_plainTextFallbackDoesNotAutoLinkUnsupportedSchemes() async {
+        let messageId = "html-loader-plain-unsupported-\(UUID().uuidString)"
+        let bodyText = "Internal file server: ftp://files.example.com/shared/report.csv"
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: bodyText,
+            isDarkMode: false,
+            cleanupMode: .none
+        )
+
+        guard case .plainTextFallback = result.source else {
+            XCTFail("Expected plainTextFallback source")
+            return
+        }
+
+        let html = result.html ?? ""
+        XCTAssertTrue(html.contains("ftp://files.example.com/shared/report.csv"))
+        XCTAssertFalse(html.contains("href=\"ftp://files.example.com/shared/report.csv\""))
+    }
 }
