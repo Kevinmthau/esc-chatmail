@@ -121,10 +121,14 @@ enum HTMLQuoteRemover {
         "Sent from Yahoo Mail",
 
         // Confidentiality notices
+        "Notice To Recipient:",
         "This email is confidential",
+        "This e-mail is meant for only the intended recipient",
         "This message is confidential",
         "The information contained in this",
         "If you are not the intended recipient",
+        "If you received this e-mail in error",
+        "For additional policies governing this e-mail",
 
         // Professional contact patterns (often start signature blocks)
         "<br[^>]*>\\s*M:\\s*\\d",    // Mobile: followed by number

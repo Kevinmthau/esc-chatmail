@@ -71,6 +71,12 @@
       "notes": "Outlook confidentiality footers using 'This electronic mail transmission may contain confidential or privileged information' should be removed from bubble text after quote truncation.",
       "input": "Thank you!\n\nThis electronic mail transmission may contain confidential or privileged information. If you believe you have received this message in error, please notify the sender by reply transmission and delete the message without copying or disclosing it.\n\nFrom: Alex Example <alex@example.com>\nSent: Tuesday, February 24, 2026 6:01 PM\nTo: Casey Example <casey@example.com>\nSubject: Re: Scheduling",
       "expected": "Thank you!"
+    },
+    {
+      "id": "recipient_notice_disclaimer_removed_after_quote_cleanup",
+      "notes": "Law-firm style 'Notice To Recipient' legal footers should be removed when they survive quote extraction as trailing disclaimer text.",
+      "input": "Any word?\n\nNotice To Recipient: This e-mail is meant for only the intended recipient of the transmission, and may be a communication privileged by law. If you received this e-mail in error, any review, use, dissemination, distribution, or copying of this e-mail is strictly prohibited. Please notify us immediately of the error by return e-mail and please delete this message and any and all duplicates of this message from your system. Thank you in advance for your cooperation. For additional policies governing this e-mail, please see http://www.examplelaw.com/about/firm-policies/.",
+      "expected": "Any word?"
     }
   ],
   "htmlToBubbleTextCases": [
@@ -109,6 +115,12 @@
       "notes": "Outlook mobile signature wrappers should be stripped from bubble text so signature logo CID references do not leak into chat.",
       "inputHTML": "<div>Hope everyone had a good week! Can you please let me know on the below or if we need to discuss?</div><div id=\"ms-outlook-mobile-signature\"><p>Ally Varady</p><p><img src=\"cid:image001.png@01DC96AF.8C2488C0\" alt=\"A close up of a logo\"></p></div>",
       "expected": "Hope everyone had a good week! Can you please let me know on the below or if we need to discuss?"
+    },
+    {
+      "id": "gmail_nested_quote_orphaned_notice_to_recipient_removed",
+      "notes": "When Gmail quote cleanup removes nested blockquotes but leaves a trailing 'Notice To Recipient' paragraph, bubble text should keep only the new user content.",
+      "inputHTML": "<div dir=\"ltr\">Any word?</div><br><div class=\"gmail_quote gmail_quote_container\"><div dir=\"ltr\" class=\"gmail_attr\">On Tue, Feb 24, 2026 at 11:27 AM Kevin Thau &lt;kmthau@gmail.com&gt; wrote:<br></div><blockquote class=\"gmail_quote\" style=\"margin:0 0 0 0.8ex;border-left:1px solid #ccc;padding-left:1ex\"><div dir=\"ltr\">Makes sense. Thank you.</div></blockquote><p style=\"font-size:8pt;margin-top:0\">Notice To Recipient: This e-mail is meant for only the intended recipient of the transmission, and may be a communication privileged by law. If you received this e-mail in error, any review, use, dissemination, distribution, or copying of this e-mail is strictly prohibited. Please notify us immediately of the error by return e-mail and please delete this message and any and all duplicates of this message from your system. Thank you in advance for your cooperation. For additional policies governing this e-mail, please see <a href=\"http://www.examplelaw.com/about/firm-policies/\">http://www.examplelaw.com/about/firm-policies/</a>.</p></div>",
+      "expected": "Any word?"
     }
   ],
   "richHTMLDetectionCases": [
@@ -122,6 +134,12 @@
       "id": "transactional_table_template_is_rich_even_if_signature_cleanup_false_positives",
       "notes": "Transactional HTML templates (e.g., statement-ready alerts) should be treated as rich content; signature cleanup must not wipe the body and force plain-text routing.",
       "inputHTML": "<!DOCTYPE html><html><head><style>body{margin:0;padding:0}table{border-collapse:collapse}</style></head><body><table width=\"100%\"><tr><td><img src=\"https://example.com/logo.png\" alt=\"logo\" width=\"140\"></td></tr></table><table><tr><td><strong>Your credit facility statement is ready</strong></td></tr></table><table><tr><td>To review your statement, please log on to jpmorganonline.com or the J.P. Morgan Mobile app.</td></tr></table><table><tr><td><a class=\"button\" href=\"https://example.com/review\">Review Statement</a></td></tr></table><table><tr><td>Privacy Policy</td></tr></table><table><tr><td>Security Center</td></tr></table><table><tr><td>Important disclaimers and conditions</td></tr></table><div>This is a service message with information related to your account. It may include details about transactions, products, or online services. Please do not reply directly to this message. Your privacy is important to us. See our Privacy Policy and Security Center to learn how to protect your information. Investment products are not FDIC insured, are not bank guaranteed, and may lose value. If you recently canceled your account, please disregard this message.</div></body></html>",
+      "expectedHasRichHTMLContent": true
+    },
+    {
+      "id": "bill_approval_table_template_is_rich",
+      "notes": "Table-heavy bill approval templates with CTA links should remain in HTML preview mode instead of collapsing to plain chat bubbles.",
+      "inputHTML": "<!DOCTYPE html><html><body><table><tr><td><img src=\"https://example.com/logo.png\" alt=\"logo\" width=\"56\"></td></tr></table><table><tr><td><strong>A bill for Example Vendor LLC needs your approval</strong></td></tr></table><table><tr><td>Cristine assigned you a bill to approve.</td></tr></table><table><tr><td bgcolor=\"#F7F7F8\"><table><tr><td>Vendor</td><td><strong>Example Vendor LLC</strong></td></tr><tr><td>Bill</td><td><strong>00201</strong></td></tr><tr><td>Invoice number</td><td><strong>00201</strong></td></tr><tr><td>Amount</td><td><strong>$3,844.50</strong></td></tr><tr><td>Due date</td><td><strong>03/01/26</strong> Past due</td></tr><tr><td>Approved</td><td><strong>Erin Hardy</strong> + 1 other</td></tr><tr><td>Last paid</td><td><strong>$238.00</strong> on Nov 04, 2025</td></tr></table></td></tr></table><table><tr><td><a class=\"button\" href=\"https://example.com/approve\">Approve bill</a></td><td><a class=\"button\" href=\"https://example.com/details\">View bill details</a></td></tr></table><table><tr><td>Privacy</td><td>Security</td><td>Help Center</td></tr></table><table><tr><td>This is a service message about bill approvals and account activity. Please do not reply to this message.</td></tr></table></body></html>",
       "expectedHasRichHTMLContent": true
     },
     {
@@ -228,6 +246,32 @@
       "isOneToOneConversation": true,
       "subject": "Re: New message about your listing",
       "senderEmail": "xyz123@marketplace.amazon.com",
+      "expectedShowHTMLPreview": true
+    },
+    {
+      "id": "one_to_one_reply_trusted_bill_sender_uses_preview",
+      "notes": "BILL approval senders can use Re: subjects in one-to-one threads and should still render rich preview cards.",
+      "hasHTMLSource": true,
+      "isForwardedEmail": false,
+      "isNewsletter": false,
+      "hasRichHTMLContent": true,
+      "isFromMe": false,
+      "isOneToOneConversation": true,
+      "subject": "Re: Bill approval required",
+      "senderEmail": "account-services@inform.bill.com",
+      "expectedShowHTMLPreview": true
+    },
+    {
+      "id": "one_to_one_reply_trusted_bill_sender_without_html_metadata_uses_preview",
+      "notes": "BILL senders should still route to preview mode when HTML metadata is missing and sender is a formatted From header value.",
+      "hasHTMLSource": false,
+      "isForwardedEmail": false,
+      "isNewsletter": false,
+      "hasRichHTMLContent": false,
+      "isFromMe": false,
+      "isOneToOneConversation": true,
+      "subject": "Re: Bill approval required",
+      "senderEmail": "BILL <account-services@inform.bill.com>",
       "expectedShowHTMLPreview": true
     }
   ],
