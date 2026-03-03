@@ -152,16 +152,29 @@ struct DocumentPicker: UIViewControllerRepresentable {
             for url in urls {
                 guard url.startAccessingSecurityScopedResource() else { continue }
                 defer { url.stopAccessingSecurityScopedResource() }
-                
-                guard let data = try? Data(contentsOf: url) else { continue }
-                
+
                 let filename = url.lastPathComponent
                 let mimeType = mimeType(for: url.pathExtension)
                 let localId = "local_\(UUID().uuidString)"
                 let ext = url.pathExtension.isEmpty ? "dat" : url.pathExtension
                 let originalPath = AttachmentPaths.originalPath(idOrUUID: localId, ext: ext)
                 let previewPath = AttachmentPaths.previewPath(idOrUUID: localId)
-                
+
+                // Add placeholder immediately so all selected files appear right away.
+                await MainActor.run {
+                    let attachment = Attachment(context: parent.viewContext)
+                    attachment.id = localId
+                    attachment.filename = filename
+                    attachment.mimeType = mimeType
+                    attachment.stateRaw = Attachment.State.queued.rawValue
+                    parent.attachments.append(attachment)
+                }
+
+                guard let data = try? Data(contentsOf: url) else {
+                    removeAttachmentPlaceholder(localId: localId)
+                    continue
+                }
+
                 // Process based on type
                 var processedData = data
                 var width: Int16? = nil
@@ -184,34 +197,48 @@ struct DocumentPicker: UIViewControllerRepresentable {
                         pageCount = Int16(count)
                     }
                 }
-                
+
                 // Save files
-                guard AttachmentPaths.saveData(processedData, to: originalPath) else { continue }
-                
-                // Generate preview
-                if let thumbnailData = ImageProcessor.generateThumbnail(from: processedData, mimeType: mimeType) {
-                    _ = AttachmentPaths.saveData(thumbnailData, to: previewPath)
+                guard AttachmentPaths.saveData(processedData, to: originalPath) else {
+                    removeAttachmentPlaceholder(localId: localId)
+                    continue
                 }
-                
-                // Create attachment entity
+
+                // Generate preview
+                var savedPreviewPath: String?
+                if let thumbnailData = ImageProcessor.generateThumbnail(from: processedData, mimeType: mimeType) {
+                    if AttachmentPaths.saveData(thumbnailData, to: previewPath) {
+                        savedPreviewPath = previewPath
+                    }
+                }
+
+                // Fill in finalized metadata for the placeholder attachment.
                 await MainActor.run {
-                    let attachment = Attachment(context: parent.viewContext)
-                    attachment.setValue(localId, forKey: "id")
-                    attachment.setValue(filename, forKey: "filename")
-                    attachment.setValue(mimeType, forKey: "mimeType")
-                    attachment.setValue(Int64(processedData.count), forKey: "byteSize")
-                    attachment.setValue(originalPath, forKey: "localURL")
-                    attachment.setValue(previewPath, forKey: "previewURL")
-                    attachment.setValue("queued", forKey: "stateRaw")
-                    attachment.setValue(width ?? 0, forKey: "width")
-                    attachment.setValue(height ?? 0, forKey: "height")
-                    attachment.setValue(pageCount ?? 0, forKey: "pageCount")
-                    
-                    parent.attachments.append(attachment)
+                    guard let attachment = parent.attachments.first(where: { $0.id == localId }) else {
+                        return
+                    }
+
+                    attachment.byteSize = Int64(processedData.count)
+                    attachment.localURL = originalPath
+                    attachment.previewURL = savedPreviewPath
+                    attachment.width = width ?? 0
+                    attachment.height = height ?? 0
+                    attachment.pageCount = pageCount ?? 0
                 }
             }
         }
-        
+
+        @MainActor
+        private func removeAttachmentPlaceholder(localId: String) {
+            guard let attachment = parent.attachments.first(where: { $0.id == localId }),
+                  let index = parent.attachments.firstIndex(of: attachment) else {
+                return
+            }
+
+            parent.attachments.remove(at: index)
+            parent.viewContext.delete(attachment)
+        }
+
         private func mimeType(for pathExtension: String) -> String {
             switch pathExtension.lowercased() {
             case "pdf": return "application/pdf"

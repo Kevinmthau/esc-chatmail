@@ -128,6 +128,7 @@ final class ComposeViewModel: ObservableObject {
         // Forward child observable changes to trigger view updates
         forwardChanges(from: autocompleteService, storing: &cancellables)
         forwardChanges(from: recipientManager, storing: &cancellables)
+        forwardChanges(from: attachmentManager, storing: &cancellables)
     }
 
     func setupForMode() {

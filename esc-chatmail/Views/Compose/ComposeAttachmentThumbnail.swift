@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ComposeAttachmentThumbnail: View {
-    let attachment: Attachment
+    @ObservedObject var attachment: Attachment
     let onRemove: () -> Void
     @StateObject private var thumbnailLoader = AttachmentThumbnailLoader()
 
@@ -33,6 +33,12 @@ struct ComposeAttachmentThumbnail: View {
         }
         .onAppear {
             thumbnailLoader.load(attachmentId: attachment.attachmentId, previewPath: attachment.previewURLValue)
+        }
+        .onChange(of: attachment.previewURLValue) { _, newValue in
+            thumbnailLoader.load(attachmentId: attachment.attachmentId, previewPath: newValue)
+        }
+        .onChange(of: attachment.attachmentId) { _, newValue in
+            thumbnailLoader.load(attachmentId: newValue, previewPath: attachment.previewURLValue)
         }
         .onDisappear {
             thumbnailLoader.cancel()

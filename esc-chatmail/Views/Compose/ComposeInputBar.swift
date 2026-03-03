@@ -90,7 +90,7 @@ struct ComposeInputBar: View {
                         .foregroundColor(.secondary)
                         .frame(width: 34, height: 38)
                 } else {
-                    SendButton(isEnabled: viewModel.canSend, isSending: viewModel.isSending) {
+                    SendButton(isEnabled: viewModel.canSend && !isProcessing, isSending: viewModel.isSending) {
                         Task {
                             if await viewModel.send() {
                                 onSendSuccess()
@@ -178,55 +178,84 @@ struct ComposeInputBar: View {
     }
 
     private func processPhotoSelections(_ items: [PhotosPickerItem]) async {
+        guard !items.isEmpty else { return }
         isProcessing = true
         defer { isProcessing = false }
 
-        for item in items {
-            guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
+        let placeholderIds = await MainActor.run { () -> [String] in
+            items.enumerated().map { index, _ in
+                let localId = "local_\(UUID().uuidString)"
+                let attachment = Attachment(context: viewContext)
+                attachment.id = localId
+                attachment.filename = "photo_\(Int(Date().timeIntervalSince1970))_\(index).jpg"
+                attachment.mimeType = "image/jpeg"
+                attachment.stateRaw = Attachment.State.queued.rawValue
+                viewModel.addAttachment(attachment)
+                return localId
+            }
+        }
+
+        for (item, localId) in zip(items, placeholderIds) {
+            guard let data = try? await item.loadTransferable(type: Data.self) else {
+                removeAttachmentPlaceholder(localId: localId)
+                continue
+            }
 
             // Process image
             let (processedData, size) = ImageProcessor.processImage(data: data)
-            guard let finalData = processedData else { continue }
+            guard let finalData = processedData else {
+                removeAttachmentPlaceholder(localId: localId)
+                continue
+            }
 
             // Check size limit
             if finalData.count > maxAttachmentSize {
-                continue // Skip oversized attachments
+                removeAttachmentPlaceholder(localId: localId)
+                continue
             }
 
             // Generate IDs and paths
-            let localId = "local_\(UUID().uuidString)"
             let ext = AttachmentPaths.fileExtension(for: "image/jpeg")
             let originalPath = AttachmentPaths.originalPath(idOrUUID: localId, ext: ext)
             let previewPath = AttachmentPaths.previewPath(idOrUUID: localId)
 
             // Save files
-            guard AttachmentPaths.saveData(finalData, to: originalPath) else { continue }
-
-            // Generate preview
-            if let thumbnailData = ImageProcessor.generateThumbnail(from: finalData, mimeType: "image/jpeg") {
-                _ = AttachmentPaths.saveData(thumbnailData, to: previewPath)
+            guard AttachmentPaths.saveData(finalData, to: originalPath) else {
+                removeAttachmentPlaceholder(localId: localId)
+                continue
             }
 
-            // Create attachment entity
-            await MainActor.run {
-                let attachment = Attachment(context: viewContext)
-                attachment.setValue(localId, forKey: "id")
-                attachment.setValue("photo_\(Date().timeIntervalSince1970).jpg", forKey: "filename")
-                attachment.setValue("image/jpeg", forKey: "mimeType")
-                attachment.setValue(Int64(finalData.count), forKey: "byteSize")
-                attachment.setValue(originalPath, forKey: "localURL")
-                attachment.setValue(previewPath, forKey: "previewURL")
-                attachment.setValue("queued", forKey: "stateRaw")
+            // Generate preview
+            var savedPreviewPath: String?
+            if let thumbnailData = ImageProcessor.generateThumbnail(from: finalData, mimeType: "image/jpeg") {
+                if AttachmentPaths.saveData(thumbnailData, to: previewPath) {
+                    savedPreviewPath = previewPath
+                }
+            }
 
-                if let size = size {
-                    attachment.setValue(Int16(size.width), forKey: "width")
-                    attachment.setValue(Int16(size.height), forKey: "height")
+            // Update placeholder attachment with finalized metadata.
+            await MainActor.run {
+                guard let attachment = viewModel.attachments.first(where: { $0.id == localId }) else {
+                    return
                 }
 
-                viewModel.addAttachment(attachment)
+                attachment.byteSize = Int64(finalData.count)
+                attachment.localURL = originalPath
+                attachment.previewURL = savedPreviewPath
+
+                if let size {
+                    attachment.width = Int16(clamping: Int(size.width.rounded()))
+                    attachment.height = Int16(clamping: Int(size.height.rounded()))
+                }
             }
         }
 
         selectedPhotoItems = []
+    }
+
+    @MainActor
+    private func removeAttachmentPlaceholder(localId: String) {
+        guard let attachment = viewModel.attachments.first(where: { $0.id == localId }) else { return }
+        viewModel.removeAttachment(attachment)
     }
 }
