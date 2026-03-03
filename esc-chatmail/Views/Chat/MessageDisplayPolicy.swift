@@ -16,9 +16,17 @@ enum MessageDisplayPolicy {
         subject: String?,
         senderEmail: String?
     ) -> Bool {
-        guard hasHTMLSource else { return false }
+        let trustedTransactionalSender = isTrustedTransactionalSender(senderEmail)
+        // Allow rich-content fallback rendering even if the HTML file/URI metadata is missing.
+        guard hasHTMLSource || trustedTransactionalSender || hasRichHTMLContent else { return false }
 
         if isForwardedEmail {
+            return true
+        }
+
+        // Trusted transactional system senders should render as preview cards even when
+        // HTML metadata/rich-content classification is conservative.
+        if trustedTransactionalSender && !isFromMe {
             return true
         }
 
@@ -56,9 +64,21 @@ enum MessageDisplayPolicy {
         return hasRichHTMLContent
     }
 
+    static func isTrustedTransactionalSender(_ senderEmail: String?) -> Bool {
+        guard let domain = senderDomain(from: senderEmail) else {
+            return false
+        }
+
+        return trustedTransactionalReplyDomainSuffixes.contains { suffix in
+            domain == suffix || domain.hasSuffix(".\(suffix)")
+        }
+    }
+
     private static let trustedTransactionalReplyDomainSuffixes: Set<String> = [
         // eBay buyer/seller relay senders
         "members.ebay.com",
+        // BILL approval/transactional notifications
+        "bill.com",
         // Marketplace relay/system senders
         "amazon.com",
         "etsy.com",
@@ -69,24 +89,36 @@ enum MessageDisplayPolicy {
 
     private static func shouldAllowRichReplyPreview(senderEmail: String?, hasRichHTMLContent: Bool) -> Bool {
         guard hasRichHTMLContent,
-              let domain = senderDomain(from: senderEmail) else {
+              isTrustedTransactionalSender(senderEmail) else {
             return false
         }
 
-        return trustedTransactionalReplyDomainSuffixes.contains { suffix in
-            domain == suffix || domain.hasSuffix(".\(suffix)")
-        }
+        return true
     }
 
     private static func senderDomain(from senderEmail: String?) -> String? {
         guard let senderEmail = senderEmail?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased(),
-            let atIndex = senderEmail.lastIndex(of: "@"),
-            atIndex < senderEmail.index(before: senderEmail.endIndex) else {
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !senderEmail.isEmpty else {
             return nil
         }
 
-        return String(senderEmail[senderEmail.index(after: atIndex)...])
+        let extractedEmail = EmailNormalizer.extractEmail(from: senderEmail) ?? senderEmail
+        let normalizedEmail = extractedEmail
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "<>\"'()[]"))
+
+        guard let atIndex = normalizedEmail.lastIndex(of: "@"),
+              atIndex < normalizedEmail.index(before: normalizedEmail.endIndex) else {
+            return nil
+        }
+
+        let rawDomain = normalizedEmail[normalizedEmail.index(after: atIndex)...]
+        let domain = rawDomain
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "<>\"'()[],:;"))
+            .lowercased()
+
+        return domain.isEmpty ? nil : domain
     }
 }

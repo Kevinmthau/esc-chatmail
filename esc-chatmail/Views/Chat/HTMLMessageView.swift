@@ -87,6 +87,7 @@ struct HTMLMessageView: View {
                         isDarkMode: colorScheme == .dark,
                         message: message
                     )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ContentUnavailableView(
                         "No Content",

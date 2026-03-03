@@ -273,6 +273,18 @@
       "subject": "Re: Bill approval required",
       "senderEmail": "BILL <account-services@inform.bill.com>",
       "expectedShowHTMLPreview": true
+    },
+    {
+      "id": "one_to_one_rich_fallback_without_html_metadata_uses_preview",
+      "notes": "If rich content is detected from fallback body text, preview mode should still be allowed even when HTML file metadata is missing.",
+      "hasHTMLSource": false,
+      "isForwardedEmail": false,
+      "isNewsletter": false,
+      "hasRichHTMLContent": true,
+      "isFromMe": false,
+      "isOneToOneConversation": true,
+      "subject": "Your approval is needed",
+      "expectedShowHTMLPreview": true
     }
   ],
   "conversationListSnippetCases": [

@@ -137,6 +137,51 @@ final class MessageDisplayPolicyTests: XCTestCase {
         XCTAssertTrue(shouldShow)
     }
 
+    func testShouldShowHTMLPreview_oneToOneReplyFromBillSender_returnsTrue() {
+        let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
+            hasHTMLSource: true,
+            isForwardedEmail: false,
+            isNewsletter: false,
+            hasRichHTMLContent: true,
+            isFromMe: false,
+            isOneToOneConversation: true,
+            subject: "Re: Bill approval required",
+            senderEmail: "account-services@inform.bill.com"
+        )
+
+        XCTAssertTrue(shouldShow)
+    }
+
+    func testShouldShowHTMLPreview_oneToOneReplyFromBillSender_withoutHTMLMetadata_returnsTrue() {
+        let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
+            hasHTMLSource: false,
+            isForwardedEmail: false,
+            isNewsletter: false,
+            hasRichHTMLContent: false,
+            isFromMe: false,
+            isOneToOneConversation: true,
+            subject: "Re: Bill approval required",
+            senderEmail: "account-services@inform.bill.com"
+        )
+
+        XCTAssertTrue(shouldShow)
+    }
+
+    func testShouldShowHTMLPreview_formattedFromHeaderForBillSender_returnsTrue() {
+        let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
+            hasHTMLSource: false,
+            isForwardedEmail: false,
+            isNewsletter: false,
+            hasRichHTMLContent: false,
+            isFromMe: false,
+            isOneToOneConversation: true,
+            subject: "Your approval is needed",
+            senderEmail: "BILL <account-services@inform.bill.com>"
+        )
+
+        XCTAssertTrue(shouldShow)
+    }
+
     func testShouldShowHTMLPreview_fromMeInOneToOne_returnsFalse() {
         let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
             hasHTMLSource: true,
@@ -152,12 +197,12 @@ final class MessageDisplayPolicyTests: XCTestCase {
         XCTAssertFalse(shouldShow)
     }
 
-    func testShouldShowHTMLPreview_noHTMLSource_returnsFalse() {
+    func testShouldShowHTMLPreview_noHTMLSource_andNotRich_returnsFalse() {
         let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
             hasHTMLSource: false,
             isForwardedEmail: true,
             isNewsletter: true,
-            hasRichHTMLContent: true,
+            hasRichHTMLContent: false,
             isFromMe: false,
             isOneToOneConversation: false,
             subject: "Anything",
@@ -165,5 +210,20 @@ final class MessageDisplayPolicyTests: XCTestCase {
         )
 
         XCTAssertFalse(shouldShow)
+    }
+
+    func testShouldShowHTMLPreview_noHTMLSource_butRichContent_returnsTrue() {
+        let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
+            hasHTMLSource: false,
+            isForwardedEmail: false,
+            isNewsletter: false,
+            hasRichHTMLContent: true,
+            isFromMe: false,
+            isOneToOneConversation: true,
+            subject: "Your approval is needed",
+            senderEmail: nil
+        )
+
+        XCTAssertTrue(shouldShow)
     }
 }

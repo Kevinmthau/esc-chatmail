@@ -29,6 +29,14 @@ final class HTMLContentLoader {
     private static let linkDetector: NSDataDetector? = {
         try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
     }()
+    private static let previewPaddingRegex: NSRegularExpression? = {
+        // Some providers insert long runs of zero-width/nbsp padding to control inbox preview text.
+        // Collapse these runs so fallback plain-text rendering does not appear as a blank page.
+        try? NSRegularExpression(
+            pattern: "[\\u200B\\u200C\\u200D\\uFEFF\\u00A0\\s]{40,}",
+            options: []
+        )
+    }()
 
     /// In-memory cache for wrapped HTML content to avoid repeated disk I/O
     /// Key format: "\(messageId)_\(isDarkMode)" to cache both light and dark variants
@@ -71,11 +79,11 @@ final class HTMLContentLoader {
         if contentHandler.htmlFileExists(for: messageId),
            let html = contentHandler.loadHTML(for: messageId),
            !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            let preparedHTML = prepareHTMLForDisplay(html, cleanupMode: cleanupMode)
-            let wrapped = sanitizer.wrapHTMLForDisplay(preparedHTML, isDarkMode: isDarkMode)
-            let cost = wrapped.utf8.count
-            htmlCache.setObject(wrapped as NSString, forKey: cacheKey, cost: cost)
-            return HTMLLoadResult(html: wrapped, source: .messageId)
+            if let wrapped = wrappedHTMLIfMeaningful(html, isDarkMode: isDarkMode, cleanupMode: cleanupMode) {
+                let cost = wrapped.utf8.count
+                htmlCache.setObject(wrapped as NSString, forKey: cacheKey, cost: cost)
+                return HTMLLoadResult(html: wrapped, source: .messageId)
+            }
         }
 
         // Method 2: Try loading from stored URI
@@ -84,17 +92,16 @@ final class HTMLContentLoader {
            FileManager.default.fileExists(atPath: url.path),
            let html = contentHandler.loadHTML(from: url),
            !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            let preparedHTML = prepareHTMLForDisplay(html, cleanupMode: cleanupMode)
-            let wrapped = sanitizer.wrapHTMLForDisplay(preparedHTML, isDarkMode: isDarkMode)
-            let cost = wrapped.utf8.count
-            htmlCache.setObject(wrapped as NSString, forKey: cacheKey, cost: cost)
-            return HTMLLoadResult(html: wrapped, source: .storageURI)
+            if let wrapped = wrappedHTMLIfMeaningful(html, isDarkMode: isDarkMode, cleanupMode: cleanupMode) {
+                let cost = wrapped.utf8.count
+                htmlCache.setObject(wrapped as NSString, forKey: cacheKey, cost: cost)
+                return HTMLLoadResult(html: wrapped, source: .storageURI)
+            }
         }
 
         // Method 3: Recovery - fetch from Gmail API if local content missing
-        if let html = await HTMLContentRecoveryService.shared.recoverHTMLContent(messageId: messageId) {
-            let preparedHTML = prepareHTMLForDisplay(html, cleanupMode: cleanupMode)
-            let wrapped = sanitizer.wrapHTMLForDisplay(preparedHTML, isDarkMode: isDarkMode)
+        if let html = await HTMLContentRecoveryService.shared.recoverHTMLContent(messageId: messageId),
+           let wrapped = wrappedHTMLIfMeaningful(html, isDarkMode: isDarkMode, cleanupMode: cleanupMode) {
             let cost = wrapped.utf8.count
             htmlCache.setObject(wrapped as NSString, forKey: cacheKey, cost: cost)
             return HTMLLoadResult(html: wrapped, source: .recovered)
@@ -102,9 +109,14 @@ final class HTMLContentLoader {
 
         // Method 4: Plain text fallback (don't cache as it's trivial to generate)
         if let text = bodyText, !text.isEmpty {
-            let html = convertPlainTextToHTML(text)
-            let wrapped = sanitizer.wrapHTMLForDisplay(html, isDarkMode: isDarkMode)
-            return HTMLLoadResult(html: wrapped, source: .plainTextFallback)
+            let normalizedText = normalizedPlainTextFallback(from: text)
+            if hasMeaningfulPlainText(normalizedText) {
+                let html = convertPlainTextToHTML(normalizedText)
+                let wrapped = sanitizer.wrapHTMLForDisplay(html, isDarkMode: isDarkMode)
+                if HTMLMeaningfulContentChecker.hasMeaningfulContent(wrapped) {
+                    return HTMLLoadResult(html: wrapped, source: .plainTextFallback)
+                }
+            }
         }
 
         return HTMLLoadResult(html: nil, source: .notFound)
@@ -155,6 +167,69 @@ final class HTMLContentLoader {
                 htmlCache.removeObject(forKey: key)
             }
         }
+    }
+
+    private func wrappedHTMLIfMeaningful(
+        _ html: String,
+        isDarkMode: Bool,
+        cleanupMode: HTMLContentCleanupMode
+    ) -> String? {
+        let preparedHTML = prepareHTMLForDisplay(html, cleanupMode: cleanupMode)
+        guard HTMLMeaningfulContentChecker.hasMeaningfulContent(preparedHTML) else {
+            return nil
+        }
+
+        let wrapped = sanitizer.wrapHTMLForDisplay(preparedHTML, isDarkMode: isDarkMode)
+        guard HTMLMeaningfulContentChecker.hasMeaningfulContent(wrapped) else {
+            return nil
+        }
+
+        return wrapped
+    }
+
+    private func normalizedPlainTextFallback(from text: String) -> String {
+        var normalized = RawEmailSourceSanitizer.extractDisplayText(from: text)
+        normalized = HTMLEntityDecoder.decode(normalized)
+
+        if looksQuotedPrintable(normalized) {
+            normalized = QuotedPrintableDecoder.decode(normalized)
+            normalized = HTMLEntityDecoder.decode(normalized)
+        }
+
+        normalized = normalized
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+            .replacingOccurrences(of: "\u{200B}", with: "")
+            .replacingOccurrences(of: "\u{200C}", with: "")
+            .replacingOccurrences(of: "\u{200D}", with: "")
+            .replacingOccurrences(of: "\u{FEFF}", with: "")
+
+        if let regex = Self.previewPaddingRegex {
+            let range = NSRange(location: 0, length: normalized.utf16.count)
+            normalized = regex.stringByReplacingMatches(in: normalized, options: [], range: range, withTemplate: " ")
+        }
+
+        normalized = normalized
+            .replacingOccurrences(of: "[ \\t]{2,}", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\\n[ \\t]+", with: "\n", options: .regularExpression)
+            .replacingOccurrences(of: "[ \\t]+\\n", with: "\n", options: .regularExpression)
+            .replacingOccurrences(of: "\\n{3,}", with: "\n\n", options: .regularExpression)
+
+        return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func hasMeaningfulPlainText(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        let nonWhitespace = text.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+        return !nonWhitespace.isEmpty
+    }
+
+    private func looksQuotedPrintable(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return lower.contains("=\r\n") ||
+            lower.contains("=\n") ||
+            lower.contains("=3d") ||
+            lower.contains("=3c") ||
+            lower.contains("=3e")
     }
 
     private func prepareHTMLForDisplay(_ html: String, cleanupMode: HTMLContentCleanupMode) -> String {

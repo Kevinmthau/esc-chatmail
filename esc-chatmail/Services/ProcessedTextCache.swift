@@ -163,7 +163,7 @@ enum ChatBubbleTextProcessor {
 actor ProcessedTextCache: MemoryWarningHandler {
     static let shared = ProcessedTextCache()
     // Bump to invalidate cached entries when processing logic changes.
-    private static let processingVersion = "2026-02-16-chat-bubble-unified-v2"
+    private static let processingVersion = "2026-03-02-chat-bubble-unified-v3"
 
     /// Cached text content with rich content indicator and extracted quotes
     struct CachedText: Sendable {
@@ -406,6 +406,13 @@ actor ProcessedTextCache: MemoryWarningHandler {
                                  lowercased.contains("class=\"btn") ||
                                  lowercased.contains("class=\"cta")
 
+        let hasTransactionalSignals = isLikelyTransactionalOrMarketingContent(
+            lowercasedHTML: lowercased,
+            textContent: textContent,
+            linkCount: linkCount,
+            hasNewsletterIndicators: hasNewsletterIndicators
+        )
+
         // Professional signatures (real estate agents, etc.) can have:
         // - 1 company logo + 1 headshot + 6-8 social icons = up to 10 images
         // - 3-4 layout tables for contact info formatting
@@ -435,12 +442,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
             // Some bank/financial notifications use a single dense table template.
             // Classify these as rich when transactional cues are explicit.
-            if tableCount >= 1 && isLikelyTransactionalOrMarketingContent(
-                lowercasedHTML: lowercased,
-                textContent: textContent,
-                linkCount: linkCount,
-                hasNewsletterIndicators: hasNewsletterIndicators
-            ) {
+            if tableCount >= 1 && hasTransactionalSignals {
                 return true
             }
 
@@ -458,6 +460,13 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
         // If there's very little text relative to the number of elements, it's likely just signature
         if charsPerElement < 50 && textContent.count < 500 {
+            // Table-heavy transactional templates (bill approvals, account notices) often have
+            // dense structure and concise copy; keep them in HTML preview when explicit CTA
+            // or transactional/newsletter signals are present.
+            if tableCount >= 6 && (hasButtonElements || hasNewsletterIndicators || hasTransactionalSignals) {
+                return true
+            }
+
             // Exception: high link density with reasonable text suggests newsletter
             if linkCount > 15 && textContent.count > 300 {
                 return true

@@ -320,14 +320,16 @@ class MessageProcessor {
         let box = ContentBox()
 
         func traverse(_ part: MessagePart) async {
-            if part.mimeType == "text/html" {
+            let resolvedMimeType = resolvedMimeType(for: part)
+
+            if isHTMLMimeType(resolvedMimeType) {
                 if let data = part.body?.data {
                     await box.setHTML(decodeBody(data, headers: part.headers))
                 } else if let attachmentId = part.body?.attachmentId {
                     // Large HTML body - fetch via attachment API
                     await box.setHTML(await fetchLargeBodyContent(attachmentId: attachmentId, messageId: messageId, headers: part.headers))
                 }
-            } else if part.mimeType == "text/plain" {
+            } else if isPlainTextMimeType(resolvedMimeType) {
                 if let data = part.body?.data {
                     await box.setPlainText(decodeBody(data, headers: part.headers))
                 } else if let attachmentId = part.body?.attachmentId {
@@ -402,6 +404,46 @@ class MessageProcessor {
         }
 
         return decodedData
+    }
+
+    private func resolvedMimeType(for part: MessagePart) -> String? {
+        if let directMimeType = part.mimeType?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !directMimeType.isEmpty {
+            return directMimeType
+        }
+
+        guard let contentType = part.headers?
+            .first(where: { $0.name.lowercased() == "content-type" })?
+            .value
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !contentType.isEmpty else {
+            return nil
+        }
+
+        return contentType
+    }
+
+    private func isHTMLMimeType(_ mimeType: String?) -> Bool {
+        guard let mimeType = mimeType?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              !mimeType.isEmpty else {
+            return false
+        }
+
+        return mimeType.hasPrefix("text/html")
+    }
+
+    private func isPlainTextMimeType(_ mimeType: String?) -> Bool {
+        guard let mimeType = mimeType?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              !mimeType.isEmpty else {
+            return false
+        }
+
+        return mimeType.hasPrefix("text/plain")
     }
 
     private func decodeTransferEncoding(_ text: String, headers: [MessageHeader]?) -> String {

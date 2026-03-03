@@ -50,8 +50,10 @@ actor HTMLContentRecoveryService {
 
     /// Extracts HTML body from MIME structure
     private func extractHTMLBody(from part: MessagePart, messageId: String) async -> String? {
+        let resolvedMimeType = resolvedMimeType(for: part)
+
         // Check this part for text/html
-        if part.mimeType == "text/html" {
+        if isHTMLMimeType(resolvedMimeType) {
             if let data = part.body?.data {
                 return decodeBody(data, headers: part.headers)
             } else if let attachmentId = part.body?.attachmentId {
@@ -117,6 +119,35 @@ actor HTMLContentRecoveryService {
         }
 
         return decodedData
+    }
+
+    private func resolvedMimeType(for part: MessagePart) -> String? {
+        if let directMimeType = part.mimeType?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !directMimeType.isEmpty {
+            return directMimeType
+        }
+
+        guard let contentType = part.headers?
+            .first(where: { $0.name.lowercased() == "content-type" })?
+            .value
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !contentType.isEmpty else {
+            return nil
+        }
+
+        return contentType
+    }
+
+    private func isHTMLMimeType(_ mimeType: String?) -> Bool {
+        guard let mimeType = mimeType?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              !mimeType.isEmpty else {
+            return false
+        }
+
+        return mimeType.hasPrefix("text/html")
     }
 
     private func decodeTransferEncoding(_ text: String, headers: [MessageHeader]?) -> String {

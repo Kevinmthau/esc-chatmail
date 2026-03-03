@@ -679,6 +679,129 @@ final class MessageProcessorTests: XCTestCase {
         XCTAssertTrue(plainTextBody.contains("Please let me know if you'll be able to make it."))
     }
 
+    func testProcessGmailMessage_multipartAlternative_withParameterizedHTMLMime_extractsHTMLBody() async {
+        let testStack = TestCoreDataStack()
+        let context = testStack.viewContext
+
+        let plainBody = "Fallback plain text body"
+        let htmlBody = "<html><body><p>HTML_TOKEN_BILL_APPROVAL</p></body></html>"
+
+        let message = GmailMessage(
+            id: "multipart-parameterized-html-message",
+            threadId: "multipart-parameterized-html-thread",
+            labelIds: ["INBOX"],
+            snippet: "HTML token",
+            historyId: "123",
+            internalDate: "1704067200000",
+            payload: MessagePart(
+                partId: "0",
+                mimeType: "multipart/alternative",
+                filename: nil,
+                headers: baseHeaders(id: "multipart-parameterized-html-message"),
+                body: nil,
+                parts: [
+                    MessagePart(
+                        partId: "0.0",
+                        mimeType: "text/plain",
+                        filename: nil,
+                        headers: nil,
+                        body: MessageBody(
+                            size: plainBody.count,
+                            data: plainBody.data(using: .utf8)?.base64EncodedString(),
+                            attachmentId: nil
+                        ),
+                        parts: nil
+                    ),
+                    MessagePart(
+                        partId: "0.1",
+                        mimeType: "Text/HTML; charset=utf-8",
+                        filename: nil,
+                        headers: nil,
+                        body: MessageBody(
+                            size: htmlBody.count,
+                            data: htmlBody.data(using: .utf8)?.base64EncodedString(),
+                            attachmentId: nil
+                        ),
+                        parts: nil
+                    )
+                ]
+            ),
+            sizeEstimate: htmlBody.count + plainBody.count
+        )
+
+        let processed = await processor.processGmailMessage(
+            message,
+            myAliases: [],
+            in: context
+        )
+
+        XCTAssertEqual(processed?.plainTextBody, plainBody)
+        XCTAssertTrue(processed?.htmlBody?.contains("HTML_TOKEN_BILL_APPROVAL") == true)
+    }
+
+    func testProcessGmailMessage_multipartAlternative_htmlPartWithMissingMimeType_usesContentTypeHeader() async {
+        let testStack = TestCoreDataStack()
+        let context = testStack.viewContext
+
+        let plainBody = "Fallback plain text body"
+        let htmlBody = "<html><body><p>HTML_TOKEN_FROM_HEADER_ONLY</p></body></html>"
+
+        let message = GmailMessage(
+            id: "multipart-header-only-html-message",
+            threadId: "multipart-header-only-html-thread",
+            labelIds: ["INBOX"],
+            snippet: "HTML token",
+            historyId: "123",
+            internalDate: "1704067200000",
+            payload: MessagePart(
+                partId: "0",
+                mimeType: "multipart/alternative",
+                filename: nil,
+                headers: baseHeaders(id: "multipart-header-only-html-message"),
+                body: nil,
+                parts: [
+                    MessagePart(
+                        partId: "0.0",
+                        mimeType: "text/plain",
+                        filename: nil,
+                        headers: nil,
+                        body: MessageBody(
+                            size: plainBody.count,
+                            data: plainBody.data(using: .utf8)?.base64EncodedString(),
+                            attachmentId: nil
+                        ),
+                        parts: nil
+                    ),
+                    MessagePart(
+                        partId: "0.1",
+                        mimeType: nil,
+                        filename: nil,
+                        headers: [
+                            MessageHeader(name: "Content-Type", value: "text/html; charset=utf-8"),
+                            MessageHeader(name: "Content-Transfer-Encoding", value: "quoted-printable")
+                        ],
+                        body: MessageBody(
+                            size: htmlBody.count,
+                            data: htmlBody.data(using: .utf8)?.base64EncodedString(),
+                            attachmentId: nil
+                        ),
+                        parts: nil
+                    )
+                ]
+            ),
+            sizeEstimate: htmlBody.count + plainBody.count
+        )
+
+        let processed = await processor.processGmailMessage(
+            message,
+            myAliases: [],
+            in: context
+        )
+
+        XCTAssertEqual(processed?.plainTextBody, plainBody)
+        XCTAssertTrue(processed?.htmlBody?.contains("HTML_TOKEN_FROM_HEADER_ONLY") == true)
+    }
+
     private func makeMultipartMessage(id: String, parts: [MessagePart]) -> GmailMessage {
         GmailMessage(
             id: id,

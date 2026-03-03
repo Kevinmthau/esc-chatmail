@@ -25,7 +25,7 @@ struct MessageBubble: View {
             isFromMe: message.isFromMe,
             isOneToOneConversation: conversation.conversationType == .oneToOne,
             subject: message.subject,
-            senderEmail: message.senderEmail
+            senderEmail: effectiveSenderEmail
         )
     }
     @State private var fullTextContent: String?
@@ -169,6 +169,19 @@ struct MessageBubble: View {
         conversation.conversationType == .group || conversation.conversationType == .list
     }
 
+    private var effectiveSenderEmail: String? {
+        if let senderEmail = message.senderEmail?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !senderEmail.isEmpty {
+            return senderEmail
+        }
+
+        return message.participants?
+            .first(where: { $0.participantKind == .from })?
+            .person?
+            .email
+    }
+
     // MARK: - Content Loading
 
     private func loadContentIfNeeded() async {
@@ -250,16 +263,18 @@ struct MessageBubble: View {
                 let fallbackResult = ChatBubbleTextProcessor.process(
                     content: text,
                     options: ChatBubbleTextProcessorOptions(
-                        inputKind: .plainText,
+                        // Some providers leak HTML markup into text/plain fallbacks.
+                        // Auto-detect so rich transactional templates can still route to preview mode.
+                        inputKind: .autoDetectHTML,
                         sanitizeRawEmailSource: true,
                         decodeHTMLEntities: true,
                         formatSignOffLineBreaks: true,
-                        classifyRichContent: false
+                        classifyRichContent: true
                     )
                 )
                 processedResult = (
                     fallbackResult.mainText,
-                    false,
+                    fallbackResult.hasRichContent,
                     fallbackResult.quotedParts
                 )
             }
@@ -278,13 +293,19 @@ struct MessageBubble: View {
         var result = initialResult
 
         let missingBodyText = bodyText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+        let isTrustedTransactionalSender = MessageDisplayPolicy.isTrustedTransactionalSender(effectiveSenderEmail)
         let shouldAttemptHTMLRecovery =
             result.plainText == nil &&
             missingBodyText &&
             !message.isFromMe &&
             (message.bodyStorageURI != nil || message.hasAttachments || message.hasHTMLSource)
+        let shouldAttemptTrustedSenderRecovery =
+            !message.isFromMe &&
+            !message.hasHTMLSource &&
+            !result.hasRichContent &&
+            isTrustedTransactionalSender
 
-        if shouldAttemptHTMLRecovery,
+        if (shouldAttemptHTMLRecovery || shouldAttemptTrustedSenderRecovery),
            let recoveredHTML = await HTMLContentRecoveryService.shared.recoverHTMLContent(messageId: messageId) {
             let recoveredResult: (plainText: String?, hasRichContent: Bool) = await Task.detached(priority: .userInitiated) {
                 let processed = ChatBubbleTextProcessor.process(
@@ -308,7 +329,7 @@ struct MessageBubble: View {
                 return (processed.mainText, processed.hasRichContent)
             }.value
 
-            if recoveredResult.plainText != nil {
+            if recoveredResult.plainText != nil || recoveredResult.hasRichContent {
                 result = recoveredResult
             }
         }
