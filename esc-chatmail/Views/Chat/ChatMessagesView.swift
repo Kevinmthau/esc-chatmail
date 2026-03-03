@@ -103,7 +103,7 @@ struct ChatMessagesView: View {
                 viewModel.loadResolvedDisplayName()
             }
             .onDisappear {
-                // Cancel all tasks to prevent memory leaks
+                // Cancel view-scoped scroll/prefetch work when leaving chat.
                 initialScrollTask?.cancel()
                 scrollTask?.cancel()
                 followUpScrollTask?.cancel()

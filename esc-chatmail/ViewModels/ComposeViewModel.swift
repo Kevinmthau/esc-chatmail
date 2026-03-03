@@ -237,12 +237,19 @@ final class ComposeViewModel: ObservableObject {
 
         // Create optimistic message
         let optimisticMessage: Message
+        let targetConversation: Conversation?
+        if case .reply(let conversation, _) = mode {
+            targetConversation = conversation
+        } else {
+            targetConversation = nil
+        }
         do {
             optimisticMessage = try await sendService.createOptimisticMessage(
                 to: recipientEmails,
                 body: outboundBody,
                 subject: messageSubject,
-                attachments: attachments
+                attachments: attachments,
+                existingConversation: targetConversation
             )
         } catch {
             Log.error("Failed to create optimistic message", category: .message, error: error)

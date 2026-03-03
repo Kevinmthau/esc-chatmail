@@ -48,6 +48,23 @@ extension Message {
         Array(typedAttachments)
     }
 
+    /// True when this outgoing message still has local attachments being uploaded.
+    var isSendingLocalAttachments: Bool {
+        guard isFromMe else { return false }
+        return attachmentsArray.contains { attachment in
+            attachment.isLocalAttachment &&
+            (attachment.state == .queued || attachment.state == .uploading)
+        }
+    }
+
+    /// True when a local attachment upload failed for this outgoing message.
+    var hasFailedLocalAttachmentUploads: Bool {
+        guard isFromMe else { return false }
+        return attachmentsArray.contains { attachment in
+            attachment.isLocalAttachment && attachment.state == .failed
+        }
+    }
+
     /// Attachments suitable for display (excludes signature images and inline images already shown in HTML)
     var displayableAttachments: [Attachment] {
         displayableAttachments(hidingInlineReferencedInHTML: true)

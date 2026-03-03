@@ -74,9 +74,6 @@ struct ComposeSendOrchestrator {
         attachments: [Attachment],
         optimisticMessageID: String
     ) -> Task<Void, Never> {
-        // Mark attachments as uploaded immediately so they display non-dimmed
-        sendService.markAttachmentsAsUploaded(attachments)
-
         // Capture services for background task
         let sendService = self.sendService
         let syncPerformer = self.syncPerformer
@@ -115,6 +112,7 @@ struct ComposeSendOrchestrator {
                     if let message = sendService.fetchMessageSync(byID: optimisticMessageID) {
                         sendService.updateOptimisticMessage(message, with: result)
                     }
+                    sendService.markAttachmentsAsUploaded(attachments)
                 }
 
                 // Trigger sync to fetch the sent message from Gmail

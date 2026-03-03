@@ -79,6 +79,8 @@ struct MessageBubble: View {
                     showingHTMLView = true
                 }
 
+                sendStatusView
+
                 MessageMetadata(
                     date: message.internalDate,
                     isUnread: message.isUnread,
@@ -130,6 +132,17 @@ struct MessageBubble: View {
                 .fontWeight(.semibold)
                 .foregroundColor(message.isFromMe ? .secondary : .primary)
                 .lineLimit(2)
+        }
+    }
+
+    @ViewBuilder
+    private var sendStatusView: some View {
+        if message.isSendingLocalAttachments {
+            MessageSendingIndicator()
+        } else if message.hasFailedLocalAttachmentUploads {
+            Text("Send failed")
+                .font(.caption2)
+                .foregroundColor(.red)
         }
     }
 

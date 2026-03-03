@@ -13,7 +13,8 @@ extension GmailSendService {
         body: String,
         subject: String? = nil,
         threadId: String? = nil,
-        attachments: [Attachment] = []
+        attachments: [Attachment] = [],
+        existingConversation: Conversation? = nil
     ) async throws -> Message {
         // Pre-compute values that don't need Core Data
         let messageId = UUID().uuidString
@@ -22,29 +23,44 @@ extension GmailSendService {
         let gmThreadId = threadId ?? ""
         let hasAttachments = !attachments.isEmpty
 
-        // Get account info for myAliases (already on main thread via @MainActor)
-        let myAliases: Set<String> = {
-            let accountRequest = Account.fetchRequest()
-            accountRequest.fetchLimit = 1
-            accountRequest.fetchBatchSize = 1
-            do {
-                if let account = try viewContext.fetch(accountRequest).first {
-                    return Set(([account.email] + account.aliasesArray).map(normalizedEmail))
-                }
-            } catch {
-                Log.error("Failed to fetch account for aliases", category: .coreData, error: error)
+        let conversation: Conversation
+        if let existingConversation {
+            // Replies from an open chat should always attach to the currently visible
+            // conversation so the optimistic bubble appears immediately in-thread.
+            if existingConversation.managedObjectContext === viewContext {
+                conversation = existingConversation
+            } else if let fetched = try? viewContext.existingObject(with: existingConversation.objectID) as? Conversation {
+                conversation = fetched
+            } else {
+                Log.error("Failed to resolve existing conversation for optimistic message", category: .message)
+                throw SendError.conversationNotFound
             }
-            return []
-        }()
+        } else {
+            // Get account aliases only when participant-based lookup is needed.
+            let myAliases: Set<String> = {
+                let accountRequest = Account.fetchRequest()
+                accountRequest.fetchLimit = 1
+                accountRequest.fetchBatchSize = 1
+                do {
+                    if let account = try viewContext.fetch(accountRequest).first {
+                        return Set(([account.email] + account.aliasesArray).map(normalizedEmail))
+                    }
+                } catch {
+                    Log.error("Failed to fetch account for aliases", category: .coreData, error: error)
+                }
+                return []
+            }()
 
-        // Create the conversation using the serializer to prevent race conditions
-        // Get the objectID since Conversation isn't safe to pass across threads
-        let conversationID = try await findOrCreateConversation(recipients: recipients, myAliases: myAliases, in: viewContext).objectID
+            // Create the conversation using the serializer to prevent race conditions
+            // Get the objectID since Conversation isn't safe to pass across threads
+            let conversationID = try await findOrCreateConversation(recipients: recipients, myAliases: myAliases, in: viewContext).objectID
 
-        // Fetch conversation on main thread using the objectID
-        guard let conversation = try? viewContext.existingObject(with: conversationID) as? Conversation else {
-            Log.error("Failed to fetch conversation on main thread", category: .message)
-            throw SendError.conversationNotFound
+            // Fetch conversation on main thread using the objectID
+            guard let fetched = try? viewContext.existingObject(with: conversationID) as? Conversation else {
+                Log.error("Failed to fetch conversation on main thread", category: .message)
+                throw SendError.conversationNotFound
+            }
+            conversation = fetched
         }
 
         let message = Message(context: viewContext)
@@ -142,6 +158,21 @@ extension GmailSendService {
         } catch {
             Log.error("Failed to delete optimistic message", category: .message, error: error)
         }
+    }
+
+    /// Handles optimistic message cleanup after a send failure.
+    ///
+    /// Messages with local attachments are retained and marked failed so the bubble
+    /// can show an inline "Send failed" indicator. Messages without local attachments
+    /// are removed to avoid leaving an unsent bubble that appears delivered.
+    @MainActor
+    func handleFailedOptimisticMessage(_ message: Message) {
+        let localAttachments = message.attachmentsArray.filter(\.isLocalAttachment)
+        guard !localAttachments.isEmpty else {
+            deleteOptimisticMessage(message)
+            return
+        }
+        markAttachmentsAsFailed(localAttachments)
     }
 
     /// Finds or creates a conversation for the given recipients.
