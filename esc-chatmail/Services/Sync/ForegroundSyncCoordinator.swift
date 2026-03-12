@@ -1,13 +1,27 @@
 import Foundation
 
+@MainActor
+protocol ForegroundSyncPerforming: AnyObject {
+    var isSyncing: Bool { get }
+    func performIncrementalSync() async throws
+}
+
+@MainActor
+protocol ForegroundSyncAuthenticationProviding: AnyObject {
+    var isAuthenticated: Bool { get }
+}
+
+extension SyncEngine: ForegroundSyncPerforming {}
+extension AuthSession: ForegroundSyncAuthenticationProviding {}
+
 /// Coordinates foreground incremental sync independently of view lifecycle.
 /// Runs while the app is active and authenticated.
 @MainActor
 final class ForegroundSyncCoordinator {
     static let shared = ForegroundSyncCoordinator()
 
-    private let syncEngine: SyncEngine
-    private let authSession: AuthSession
+    private let syncEngine: any ForegroundSyncPerforming
+    private let authSession: any ForegroundSyncAuthenticationProviding
     private let periodicInterval: TimeInterval
     private let minimumSyncGap: TimeInterval
     private let log = LogCategory.sync.logger
@@ -16,13 +30,13 @@ final class ForegroundSyncCoordinator {
     private var lastSyncTriggerAt: Date?
 
     init(
-        syncEngine: SyncEngine? = nil,
-        authSession: AuthSession? = nil,
+        syncEngine: (any ForegroundSyncPerforming)? = nil,
+        authSession: (any ForegroundSyncAuthenticationProviding)? = nil,
         periodicInterval: TimeInterval = 120,
         minimumSyncGap: TimeInterval = 90
     ) {
-        self.syncEngine = syncEngine ?? .shared
-        self.authSession = authSession ?? .shared
+        self.syncEngine = syncEngine ?? SyncEngine.shared
+        self.authSession = authSession ?? AuthSession.shared
         self.periodicInterval = periodicInterval
         self.minimumSyncGap = minimumSyncGap
     }
@@ -34,10 +48,13 @@ final class ForegroundSyncCoordinator {
             return
         }
 
-        startPeriodicLoopIfNeeded()
+        let startedPeriodicLoop = startPeriodicLoopIfNeeded()
 
         if triggerImmediateSync {
-            triggerSyncIfNeeded(reason: reason, force: true)
+            // Only force when we are starting a fresh foreground loop (e.g. cold launch or
+            // returning from background). Repeated start() calls while already active should
+            // respect the minimum gap to avoid duplicate launch syncs.
+            triggerSyncIfNeeded(reason: reason, force: startedPeriodicLoop)
         }
     }
 
@@ -51,8 +68,8 @@ final class ForegroundSyncCoordinator {
         triggerSyncIfNeeded(reason: reason, force: force)
     }
 
-    private func startPeriodicLoopIfNeeded() {
-        guard periodicTask == nil else { return }
+    private func startPeriodicLoopIfNeeded() -> Bool {
+        guard periodicTask == nil else { return false }
 
         periodicTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -68,6 +85,7 @@ final class ForegroundSyncCoordinator {
         }
 
         log.debug("Foreground sync periodic loop started")
+        return true
     }
 
     private func triggerSyncIfNeeded(reason: String, force: Bool) {

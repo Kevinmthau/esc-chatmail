@@ -42,9 +42,16 @@ final class HTMLContentHandler {
     }
 
     func loadHTML(from url: URL) -> String? {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return nil
+        }
+
         do {
             return try String(contentsOf: url, encoding: .utf8)
         } catch {
+            if isMissingFileError(error) {
+                return nil
+            }
             Log.error("Failed to load HTML from \(url)", category: .general, error: error)
             return nil
         }
@@ -137,5 +144,14 @@ final class HTMLContentHandler {
         }
 
         return false
+    }
+
+    private func isMissingFileError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileReadNoSuchFileError {
+            return true
+        }
+
+        return nsError.domain == NSPOSIXErrorDomain && nsError.code == ENOENT
     }
 }
