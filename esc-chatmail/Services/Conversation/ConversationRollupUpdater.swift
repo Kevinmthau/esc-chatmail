@@ -45,9 +45,10 @@ struct ConversationRollupUpdater: Sendable {
     /// Updates rollups for ALL conversations - expensive O(n*m) operation.
     /// Prefer updateRollupsForModified when possible.
     @MainActor
-    func updateAllRollups(in context: NSManagedObjectContext) async {
-        let myEmail = AuthSession.shared.userEmail ?? ""
-
+    func updateAllRollups(
+        in context: NSManagedObjectContext,
+        myEmail: String
+    ) async {
         await context.perform {
             let request = Conversation.fetchRequest()
             request.fetchBatchSize = 50
@@ -78,10 +79,10 @@ struct ConversationRollupUpdater: Sendable {
     @MainActor
     func updateRollupsForModified(
         conversationIDs: Set<NSManagedObjectID>,
-        in context: NSManagedObjectContext
+        in context: NSManagedObjectContext,
+        myEmail: String
     ) async {
         guard !conversationIDs.isEmpty else { return }
-        let myEmail = AuthSession.shared.userEmail ?? ""
 
         await context.perform {
             // Use batch fetch with prefetching instead of individual existingObject calls
@@ -113,10 +114,10 @@ struct ConversationRollupUpdater: Sendable {
     @MainActor
     func updateRollupsForConversations(
         keyHashes: Set<String>,
-        in context: NSManagedObjectContext
+        in context: NSManagedObjectContext,
+        myEmail: String
     ) async {
         guard !keyHashes.isEmpty else { return }
-        let myEmail = AuthSession.shared.userEmail ?? ""
 
         await context.perform {
             let request = Conversation.fetchRequest()

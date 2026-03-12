@@ -1,7 +1,7 @@
 import Foundation
 
-struct SharedDocumentLink: Identifiable, Equatable {
-    enum Kind: Equatable {
+struct SharedDocumentLink: Identifiable, Equatable, Sendable {
+    enum Kind: Equatable, Sendable {
         case googleSheet
         case googleDoc
         case googleSlides

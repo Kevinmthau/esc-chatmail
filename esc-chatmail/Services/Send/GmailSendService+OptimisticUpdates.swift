@@ -175,6 +175,17 @@ extension GmailSendService {
         markAttachmentsAsFailed(localAttachments)
     }
 
+    @MainActor
+    func handleFailedOptimisticMessage(byID messageID: String, fallbackAttachments: [Attachment]) {
+        if let message = fetchMessageSync(byID: messageID) {
+            handleFailedOptimisticMessage(message)
+            return
+        }
+
+        guard !fallbackAttachments.isEmpty else { return }
+        markAttachmentsAsFailed(fallbackAttachments)
+    }
+
     /// Finds or creates a conversation for the given recipients.
     func findOrCreateConversation(recipients: [String], myAliases: Set<String>, in context: NSManagedObjectContext) async throws -> Conversation {
         // Build minimal headers for identity: From + To

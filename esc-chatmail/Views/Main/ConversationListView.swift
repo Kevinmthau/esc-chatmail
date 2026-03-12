@@ -4,10 +4,13 @@ import CoreData
 struct ConversationListView: View {
     @FetchRequest private var conversations: FetchedResults<Conversation>
     @Environment(\.managedObjectContext) private var viewContext
-    @StateObject private var viewModel = ConversationListViewModel()
-    @State private var cachedFilteredConversations: [Conversation] = []
+    @EnvironmentObject private var deps: Dependencies
+    @StateObject private var viewModel: ConversationListViewModel
 
-    init() {
+    @MainActor
+    init(deps: Dependencies? = nil) {
+        let resolvedDeps = deps ?? Dependencies.shared
+        _viewModel = StateObject(wrappedValue: ConversationListViewModel(deps: resolvedDeps))
         let request = NSFetchRequest<Conversation>(entityName: "Conversation")
         request.sortDescriptors = [
             NSSortDescriptor(keyPath: \Conversation.pinned, ascending: false),
@@ -35,18 +38,18 @@ struct ConversationListView: View {
 
     private var conversationList: some View {
         List {
-            ForEach(Array(cachedFilteredConversations.enumerated()), id: \.element.objectID) { index, conversation in
+            ForEach(Array(viewModel.filteredConversations.enumerated()), id: \.element.objectID) { index, conversation in
                 if viewModel.isSelecting {
                     HStack(spacing: 0) {
                         selectionButton(for: conversation)
-                        ConversationRowView(conversation: conversation)
+                        ConversationRowView(conversation: conversation, deps: deps)
                             .contentShape(Rectangle())
                             .onTapGesture { viewModel.toggleSelection(for: conversation) }
                     }
                     .listRowInsets(EdgeInsets())
                     .listRowSeparator(index == 0 ? .hidden : .visible, edges: .top)
                 } else {
-                    ConversationRowView(conversation: conversation)
+                    ConversationRowView(conversation: conversation, deps: deps)
                         .contentShape(Rectangle())
                         .onTapGesture {
                             selectedConversation = conversation
@@ -77,11 +80,11 @@ struct ConversationListView: View {
             }
         }
         .listStyle(.plain)
-        .animation(nil, value: cachedFilteredConversations.count)
+        .animation(nil, value: viewModel.filteredConversations.count)
         .scrollDismissesKeyboard(.interactively)
         .navigationTitle(viewModel.isSelecting ? "\(viewModel.selectedConversationIDs.count) Selected" : "Chats")
         .navigationDestination(item: $selectedConversation) { conversation in
-            ChatView(conversation: conversation)
+            ChatView(conversation: conversation, deps: deps)
                 .id(conversation.objectID)
         }
         .toolbar { toolbarContent }
@@ -90,6 +93,7 @@ struct ConversationListView: View {
             ComposeView(
                 mode: .newMessage,
                 presentationStyle: .iMessage,
+                deps: deps,
                 onSendConversation: { conversationObjectID in
                     openConversationIfAvailable(objectID: conversationObjectID)
                 }
@@ -101,26 +105,12 @@ struct ConversationListView: View {
         .onAppear {
             AppPrewarmer.prewarmAll()  // Safe to call repeatedly; each prewarm runs only once per launch.
             viewModel.onAppear(conversations: Array(conversations))
-            updateFilteredConversations()
         }
         .onDisappear {
             viewModel.onDisappear()
         }
-        .onChange(of: conversations.first?.objectID) { _, _ in
-            updateFilteredConversations()
-        }
-        .onChange(of: conversations.count) { _, _ in
-            updateFilteredConversations()
-        }
-        .onChange(of: viewModel.searchText) { _, _ in
-            updateFilteredConversations()
-        }
-        .onChange(of: viewModel.currentFilter) { _, _ in
-            updateFilteredConversations()
-        }
-        .onChange(of: viewModel.contactEmailsCache) { _, _ in
-            // Contact cache changes affect the Contacts/Other filters.
-            updateFilteredConversations()
+        .onChange(of: conversationSnapshots) { _, _ in
+            viewModel.refreshConversations(Array(conversations))
         }
     }
 
@@ -143,8 +133,8 @@ struct ConversationListView: View {
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .navigationBarLeading) {
             if viewModel.isSelecting {
-                Button(viewModel.selectedConversationIDs.count == cachedFilteredConversations.count ? "Deselect All" : "Select All") {
-                    viewModel.selectAll(from: cachedFilteredConversations)
+                Button(viewModel.selectedConversationIDs.count == viewModel.filteredConversations.count ? "Deselect All" : "Select All") {
+                    viewModel.selectAll(from: viewModel.filteredConversations)
                 }
             } else {
                 Button(action: { viewModel.showingSettings = true }) {
@@ -291,12 +281,8 @@ struct ConversationListView: View {
         .accessibilityIdentifier("ComposeNewMessageButton")
     }
 
-    // MARK: - Filtering
-
-    /// Updates the cached filtered conversations when dependencies change.
-    /// Caching prevents recalculation on every view body evaluation.
-    private func updateFilteredConversations() {
-        cachedFilteredConversations = viewModel.filteredConversations(from: Array(conversations))
+    private var conversationSnapshots: [ConversationSnapshot] {
+        conversations.map(ConversationSnapshot.init(from:))
     }
 
     private func handleComposerDismiss() {

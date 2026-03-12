@@ -8,8 +8,18 @@ import Combine
 final class ConversationFilterService: ObservableObject {
     // MARK: - Published State
 
-    @Published var currentFilter: ConversationFilter = .all
-    @Published private(set) var contactEmailsCache: Set<String> = []
+    @Published var currentFilter: ConversationFilter = .all {
+        didSet {
+            guard currentFilter != oldValue else { return }
+            onFilterStateChange?()
+        }
+    }
+    @Published private(set) var contactEmailsCache: Set<String> = [] {
+        didSet {
+            guard contactEmailsCache != oldValue else { return }
+            onFilterStateChange?()
+        }
+    }
 
     // MARK: - Dependencies
 
@@ -17,9 +27,9 @@ final class ConversationFilterService: ObservableObject {
 
     // MARK: - Private State
 
-    private var filteredCache: FilteredConversationsCache?
     private var contactsLoadTask: Task<Void, Never>?
     private var contactStoreDidChangeObserver: NSObjectProtocol?
+    var onFilterStateChange: (() -> Void)?
 
     // MARK: - Initialization
 
@@ -34,7 +44,6 @@ final class ConversationFilterService: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.invalidateFilterCache()
                 self.loadContactsCache()
             }
         }
@@ -53,12 +62,6 @@ final class ConversationFilterService: ObservableObject {
         from conversations: [Conversation],
         searchText: String
     ) -> [Conversation] {
-        // Check cache validity
-        if let cache = filteredCache,
-           cache.isValid(for: conversations, searchText: searchText, filter: currentFilter) {
-            return cache.results
-        }
-
         var result = conversations
 
         // Apply search filter
@@ -80,20 +83,7 @@ final class ConversationFilterService: ObservableObject {
             result = result.filter { !isConversationWithContact($0) }
         }
 
-        // Update cache
-        filteredCache = FilteredConversationsCache(
-            sourceObjectIDs: conversations.map(\.objectID),
-            searchText: searchText,
-            filter: currentFilter,
-            results: result
-        )
-
         return result
-    }
-
-    /// Invalidates the filtered cache - call when underlying data changes
-    func invalidateFilterCache() {
-        filteredCache = nil
     }
 
     /// Checks if a conversation includes a participant from the user's contacts
@@ -142,7 +132,6 @@ final class ConversationFilterService: ObservableObject {
                 let finalEmails = emails
                 await MainActor.run { [weak self] in
                     guard let self else { return }
-                    self.filteredCache = nil
                     self.contactEmailsCache = finalEmails
                 }
             } catch {
@@ -155,22 +144,5 @@ final class ConversationFilterService: ObservableObject {
     func cancelTasks() {
         contactsLoadTask?.cancel()
         contactsLoadTask = nil
-    }
-}
-
-// MARK: - Filtered Conversations Cache
-
-/// Caches filtered conversation results to avoid re-filtering on every render
-private struct FilteredConversationsCache {
-    let sourceObjectIDs: [NSManagedObjectID]
-    let searchText: String
-    let filter: ConversationFilter
-    let results: [Conversation]
-
-    /// Checks if cache is still valid for the given parameters
-    func isValid(for conversations: [Conversation], searchText: String, filter: ConversationFilter) -> Bool {
-        return self.sourceObjectIDs == conversations.map(\.objectID) &&
-               self.searchText == searchText &&
-               self.filter == filter
     }
 }

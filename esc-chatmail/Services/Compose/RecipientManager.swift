@@ -49,9 +49,9 @@ final class RecipientManager: ObservableObject {
             // Try to get display name from person
             if let participant = conversation.participants?.first(where: { $0.person?.email == email }),
                let person = participant.person {
-                recipients.append(Recipient(from: person))
+                addRecipient(Recipient(from: person))
             } else {
-                recipients.append(Recipient(email: email))
+                addRecipient(Recipient(email: email))
             }
         }
     }

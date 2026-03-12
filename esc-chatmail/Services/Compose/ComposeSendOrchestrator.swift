@@ -31,6 +31,7 @@ protocol ComposeSendServicing: AnyObject {
     @MainActor func fetchMessageSync(byID messageID: String) -> Message?
     @MainActor func updateOptimisticMessage(_ message: Message, with result: GmailSendService.SendResult)
     @MainActor func markAttachmentsAsFailed(_ attachments: [Attachment])
+    @MainActor func handleFailedOptimisticMessage(byID messageID: String, fallbackAttachments: [Attachment])
 }
 
 extension GmailSendService: ComposeSendServicing {}
@@ -126,11 +127,12 @@ struct ComposeSendOrchestrator {
             } catch is CancellationError {
                 Log.info("Background send cancelled for optimistic message \(optimisticMessageID)", category: .message)
             } catch {
-                // Mark attachments as failed so they show error indicator (on MainActor to avoid Sendable issues)
+                // Clean up optimistic state using the same failure policy as the chat reply path.
                 await MainActor.run {
-                    if let message = sendService.fetchMessageSync(byID: optimisticMessageID) {
-                        sendService.markAttachmentsAsFailed(message.attachmentsArray)
-                    }
+                    sendService.handleFailedOptimisticMessage(
+                        byID: optimisticMessageID,
+                        fallbackAttachments: attachments
+                    )
                 }
                 Log.error("Background send failed", category: .message, error: error)
             }

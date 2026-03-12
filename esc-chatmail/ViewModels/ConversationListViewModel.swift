@@ -32,43 +32,54 @@ final class ConversationListViewModel: ObservableObject {
 
     @Published var showingComposer = false
     @Published var showingSettings = false
+    @Published private(set) var filteredConversations: [Conversation] = []
 
     // MARK: - Dependencies
 
     let messageActions: MessageActions
     let syncEngine: SyncEngine
     let contactsService: ContactsService
+    let conversationManager: ConversationManager
 
     private let coreDataStack: CoreDataStack
     private let personCache: PersonCache
+    private let profilePhotoResolver: ProfilePhotoResolver
     private var cancellables = Set<AnyCancellable>()
     private let taskManager = ViewModelTaskManager()
+    private var sourceConversations: [Conversation] = []
 
     // MARK: - Initialization
 
     /// Primary initializer using Dependencies container
-    init(deps: Dependencies? = nil) {
+    init(
+        deps: Dependencies? = nil,
+        searchService: ConversationSearchService? = nil,
+        selectionService: ConversationSelectionService? = nil,
+        filterService: ConversationFilterService? = nil
+    ) {
         let dependencies = deps ?? .shared
         self.coreDataStack = dependencies.coreDataStack
         self.syncEngine = dependencies.syncEngine
         self.personCache = dependencies.personCache
+        self.profilePhotoResolver = dependencies.profilePhotoResolver
         self.messageActions = dependencies.makeMessageActions()
         self.contactsService = dependencies.makeContactsService()
+        self.conversationManager = dependencies.conversationManager
 
         // Initialize composed services
-        self.searchService = ConversationSearchService()
-        self.selectionService = ConversationSelectionService(
-            messageActions: dependencies.makeMessageActions(),
-            coreDataStack: dependencies.coreDataStack
-        )
-        self.filterService = ConversationFilterService(
-            contactsService: dependencies.makeContactsService()
-        )
+        let resolvedSearchService = searchService ?? dependencies.makeConversationSearchService()
+        let resolvedSelectionService = selectionService ?? dependencies.makeConversationSelectionService()
+        let resolvedFilterService = filterService ?? dependencies.makeConversationFilterService()
+        self.searchService = resolvedSearchService
+        self.selectionService = resolvedSelectionService
+        self.filterService = resolvedFilterService
 
         // Forward objectWillChange from child services
-        forwardChanges(from: searchService, storing: &cancellables)
-        forwardChanges(from: selectionService, storing: &cancellables)
-        forwardChanges(from: filterService, storing: &cancellables)
+        forwardChanges(from: resolvedSearchService, storing: &cancellables)
+        forwardChanges(from: resolvedSelectionService, storing: &cancellables)
+        forwardChanges(from: resolvedFilterService, storing: &cancellables)
+
+        bindFiltering()
     }
 
     // MARK: - Convenience Accessors (View Compatibility)
@@ -162,15 +173,9 @@ final class ConversationListViewModel: ObservableObject {
 
     // MARK: - Filtering (Delegate to Service)
 
-    func filteredConversations(from conversations: [Conversation]) -> [Conversation] {
-        filterService.filteredConversations(
-            from: conversations,
-            searchText: searchService.debouncedSearchText
-        )
-    }
-
-    func invalidateFilterCache() {
-        filterService.invalidateFilterCache()
+    func refreshConversations(_ conversations: [Conversation]) {
+        sourceConversations = conversations
+        recomputeFilteredConversations()
     }
 
     func isConversationWithContact(_ conversation: Conversation) -> Bool {
@@ -181,6 +186,7 @@ final class ConversationListViewModel: ObservableObject {
 
     func prefetchPersonData(from conversations: [Conversation]) {
         let personCache = self.personCache
+        let profilePhotoResolver = self.profilePhotoResolver
 
         // Extract emails on MainActor before entering detached task
         // (NSManagedObjects are not Sendable)
@@ -197,7 +203,7 @@ final class ConversationListViewModel: ObservableObject {
             await personCache.prefetch(emails: uniqueEmails)
 
             // Also prefetch profile photos to avoid thundering herd on first load
-            await ProfilePhotoResolver.shared.prefetchPhotos(for: uniqueEmails)
+            await profilePhotoResolver.prefetchPhotos(for: uniqueEmails)
         }
     }
 
@@ -212,7 +218,6 @@ final class ConversationListViewModel: ObservableObject {
 
         taskManager.run("refreshNames") { [weak self] in
             guard let self = self else { return }
-            let conversationManager = ConversationManager()
             await conversationManager.updateAllConversationRollups(in: coreDataStack.viewContext)
             UserDefaults.standard.set(true, forKey: hasRefreshedKey)
             Log.info("Refreshed all conversation names (V2: full names for single participants)", category: .conversation)
@@ -221,6 +226,8 @@ final class ConversationListViewModel: ObservableObject {
 
     /// Called when view appears - performs initial setup
     func onAppear(conversations: [Conversation]) {
+        refreshConversations(conversations)
+
         // Prefetch photos immediately to avoid slow avatar loading in rows
         // This needs to run before rows' .task blocks fire
         prefetchPersonData(from: conversations)
@@ -239,6 +246,25 @@ final class ConversationListViewModel: ObservableObject {
     /// Called when view disappears
     func onDisappear() {
         searchService.cleanup()
+        selectionService.cancelTasks()
+        filterService.cancelTasks()
         taskManager.cancelAll()
+    }
+
+    private func bindFiltering() {
+        searchService.onDebouncedSearchTextChange = { [weak self] in
+            self?.recomputeFilteredConversations()
+        }
+
+        filterService.onFilterStateChange = { [weak self] in
+            self?.recomputeFilteredConversations()
+        }
+    }
+
+    private func recomputeFilteredConversations() {
+        filteredConversations = filterService.filteredConversations(
+            from: sourceConversations,
+            searchText: searchService.debouncedSearchText
+        )
     }
 }

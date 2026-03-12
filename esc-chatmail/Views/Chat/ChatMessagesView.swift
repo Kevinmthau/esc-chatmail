@@ -8,6 +8,7 @@ struct ChatMessagesView: View {
     let messages: FetchedResults<Message>
 
     @ObservedObject var viewModel: ChatViewModel
+    let deps: Dependencies
     var isTextFieldFocused: FocusState<Bool>.Binding
 
     @ObservedObject private var keyboard = KeyboardResponder.shared
@@ -36,6 +37,7 @@ struct ChatMessagesView: View {
                         MessageBubble(
                             message: message,
                             conversation: conversation,
+                            deps: deps,
                             isLastFromSender: isLastFromSender
                         )
                         .id(message.id)

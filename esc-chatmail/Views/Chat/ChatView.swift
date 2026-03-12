@@ -6,15 +6,18 @@ import UIKit
 struct ChatView: View {
     @ObservedObject var conversation: Conversation
     @StateObject private var viewModel: ChatViewModel
+    @EnvironmentObject private var deps: Dependencies
 
     @FetchRequest private var messages: FetchedResults<Message>
     @FocusState private var isTextFieldFocused: Bool
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
 
-    init(conversation: Conversation) {
+    @MainActor
+    init(conversation: Conversation, deps: Dependencies? = nil) {
+        let resolvedDeps = deps ?? Dependencies.shared
         self.conversation = conversation
-        self._viewModel = StateObject(wrappedValue: ChatViewModel(conversation: conversation))
+        self._viewModel = StateObject(wrappedValue: ChatViewModel(conversation: conversation, deps: resolvedDeps))
 
         let request = NSFetchRequest<Message>(entityName: "Message")
         request.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: true)]
@@ -40,6 +43,7 @@ struct ChatView: View {
             conversation: conversation,
             messages: messages,
             viewModel: viewModel,
+            deps: deps,
             isTextFieldFocused: $isTextFieldFocused
         )
         .navigationTitle(viewModel.resolvedDisplayName ?? conversation.displayName ?? "Chat")
@@ -74,7 +78,7 @@ struct ChatView: View {
             }
         }
         .sheet(item: $viewModel.messageToForward) { message in
-            ComposeView(mode: .forward(message))
+            ComposeView(mode: .forward(message), deps: deps)
         }
         .sheet(item: $viewModel.contactManager.contactToAdd) { wrapper in
             AddContactView(contact: wrapper.contact)
@@ -94,6 +98,7 @@ struct ChatView: View {
         .sheet(isPresented: $viewModel.contactManager.showingParticipantsList) {
             ParticipantsListView(
                 conversation: conversation,
+                deps: deps,
                 onCreateNewContact: { person in
                     viewModel.contactManager.createNewContact(for: person)
                 },

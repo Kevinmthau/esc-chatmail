@@ -28,6 +28,7 @@ struct VirtualScrollChatView: View {
                                 MessageBubble(
                                     message: message,
                                     conversation: conversation,
+                                    deps: deps,
                                     style: .compact
                                 )
                             }

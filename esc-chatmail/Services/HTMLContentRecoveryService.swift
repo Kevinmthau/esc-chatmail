@@ -1,7 +1,11 @@
 import Foundation
 
+protocol HTMLContentRecovering: Sendable {
+    func recoverHTMLContent(messageId: String) async -> String?
+}
+
 /// Service for recovering HTML content from Gmail API when local files are missing
-actor HTMLContentRecoveryService {
+actor HTMLContentRecoveryService: HTMLContentRecovering {
     static let shared = HTMLContentRecoveryService()
 
     private var recoveringMessageIds: Set<String> = []

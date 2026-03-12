@@ -6,10 +6,28 @@ struct ParticipantsListView: View {
     let onAddToExistingContact: (Person) -> Void
     let onEditContact: (String) -> Void
     @Environment(\.dismiss) private var dismiss
-    private let participantLoader = ParticipantLoader.shared
+    private let participantLoader: ParticipantLoader
+    private let currentUserEmail: String
 
     /// Cached list of other participants to avoid recomputation on every render.
     @State private var cachedOtherParticipants: [Person] = []
+
+    @MainActor
+    init(
+        conversation: Conversation,
+        deps: Dependencies? = nil,
+        onCreateNewContact: @escaping (Person) -> Void,
+        onAddToExistingContact: @escaping (Person) -> Void,
+        onEditContact: @escaping (String) -> Void
+    ) {
+        let resolvedDeps = deps ?? Dependencies.shared
+        self.conversation = conversation
+        self.onCreateNewContact = onCreateNewContact
+        self.onAddToExistingContact = onAddToExistingContact
+        self.onEditContact = onEditContact
+        self.participantLoader = resolvedDeps.participantLoader
+        self.currentUserEmail = resolvedDeps.authSession.userEmail ?? ""
+    }
 
     var body: some View {
         NavigationView {
@@ -47,7 +65,6 @@ struct ParticipantsListView: View {
     /// Computes the list of other participants (non-current-user).
     /// Uses email normalization to properly match participants.
     private func updateOtherParticipants() {
-        let currentUserEmail = AuthSession.shared.userEmail ?? ""
         let otherEmails = Set(participantLoader.extractNonMeParticipants(
             from: conversation,
             currentUserEmail: currentUserEmail

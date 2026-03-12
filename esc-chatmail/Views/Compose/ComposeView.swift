@@ -45,16 +45,19 @@ struct ComposeView: View {
         usesIMessagePresentation && onOpenConversation != nil
     }
 
+    @MainActor
     init(
         mode: ComposeViewModel.Mode = .newMessage,
         presentationStyle: PresentationStyle = .standard,
+        deps: Dependencies? = nil,
         onOpenConversation: ((Conversation) -> Void)? = nil,
         onSendConversation: ((NSManagedObjectID) -> Void)? = nil
     ) {
+        let resolvedDeps = deps ?? Dependencies.shared
         self.presentationStyle = presentationStyle
         self.onOpenConversation = onOpenConversation
         self.onSendConversation = onSendConversation
-        _viewModel = StateObject(wrappedValue: ComposeViewModel(mode: mode))
+        _viewModel = StateObject(wrappedValue: ComposeViewModel(mode: mode, deps: resolvedDeps))
     }
 
     private var recipientSection: RecipientInputSection {

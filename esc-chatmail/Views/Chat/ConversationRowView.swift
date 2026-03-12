@@ -28,16 +28,20 @@ struct ConversationRowView: View {
     /// Keep reference for participant loading (but don't observe it)
     let conversation: Conversation
 
-    private let authSession = AuthSession.shared
-    private let participantLoader = ParticipantLoader.shared
+    private let currentUserEmail: String
+    private let participantLoader: ParticipantLoader
 
     @State private var displayName: String
     @State private var avatarPhotos: [ProfilePhoto] = []
     @State private var participantNames: [String] = []
 
-    init(conversation: Conversation) {
+    @MainActor
+    init(conversation: Conversation, deps: Dependencies? = nil) {
+        let resolvedDeps = deps ?? Dependencies.shared
         self.conversation = conversation
         self.snapshot = ConversationSnapshot(from: conversation)
+        self.currentUserEmail = resolvedDeps.authSession.userEmail ?? ""
+        self.participantLoader = resolvedDeps.participantLoader
         // Initialize displayName with stored value to prevent flickering
         self._displayName = State(initialValue: conversation.displayName ?? "")
     }
@@ -103,12 +107,10 @@ struct ConversationRowView: View {
     }
 
     private func loadContactInfo() async {
-        let myEmail = authSession.userEmail ?? ""
-
         // Use ParticipantLoader for all participant resolution
         let info = await participantLoader.loadParticipants(
             from: conversation,
-            currentUserEmail: myEmail,
+            currentUserEmail: currentUserEmail,
             maxParticipants: 4
         )
 

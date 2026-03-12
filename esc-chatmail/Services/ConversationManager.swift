@@ -9,13 +9,18 @@ import CoreData
 final class ConversationManager: Sendable {
     private let rollupUpdater: ConversationRollupUpdater
     private let merger: ConversationMerger
+    private let currentUserEmail: @MainActor @Sendable () -> String
 
     init(
         rollupUpdater: ConversationRollupUpdater = ConversationRollupUpdater(),
-        merger: ConversationMerger = ConversationMerger()
+        merger: ConversationMerger = ConversationMerger(),
+        currentUserEmail: @escaping @MainActor @Sendable () -> String = {
+            AuthSession.shared.userEmail ?? ""
+        }
     ) {
         self.rollupUpdater = rollupUpdater
         self.merger = merger
+        self.currentUserEmail = currentUserEmail
     }
 
     // MARK: - Conversation Creation
@@ -66,7 +71,10 @@ final class ConversationManager: Sendable {
     /// Updates rollups for ALL conversations - expensive O(n*m) operation.
     @MainActor
     func updateAllConversationRollups(in context: NSManagedObjectContext) async {
-        await rollupUpdater.updateAllRollups(in: context)
+        await rollupUpdater.updateAllRollups(
+            in: context,
+            myEmail: currentUserEmail()
+        )
     }
 
     /// Updates rollups only for conversations that were modified.
@@ -75,7 +83,11 @@ final class ConversationManager: Sendable {
         conversationIDs: Set<NSManagedObjectID>,
         in context: NSManagedObjectContext
     ) async {
-        await rollupUpdater.updateRollupsForModified(conversationIDs: conversationIDs, in: context)
+        await rollupUpdater.updateRollupsForModified(
+            conversationIDs: conversationIDs,
+            in: context,
+            myEmail: currentUserEmail()
+        )
     }
 
     /// Updates rollups for conversations by keyHash.
@@ -84,7 +96,11 @@ final class ConversationManager: Sendable {
         keyHashes: Set<String>,
         in context: NSManagedObjectContext
     ) async {
-        await rollupUpdater.updateRollupsForConversations(keyHashes: keyHashes, in: context)
+        await rollupUpdater.updateRollupsForConversations(
+            keyHashes: keyHashes,
+            in: context,
+            myEmail: currentUserEmail()
+        )
     }
 
     // MARK: - Duplicate Management (delegated to ConversationMerger)

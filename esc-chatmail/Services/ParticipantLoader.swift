@@ -7,10 +7,16 @@ import CoreData
 final class ParticipantLoader {
     static let shared = ParticipantLoader()
 
-    private let personCache = PersonCache.shared
-    private let photoResolver = ProfilePhotoResolver.shared
+    private let personCache: PersonCache
+    private let photoResolver: ProfilePhotoResolver
 
-    private init() {}
+    init(
+        personCache: PersonCache = .shared,
+        photoResolver: ProfilePhotoResolver = .shared
+    ) {
+        self.personCache = personCache
+        self.photoResolver = photoResolver
+    }
 
     // MARK: - Public Types
 

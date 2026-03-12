@@ -10,45 +10,38 @@ struct MessageBubble: View {
     /// Display style configuration
     var style: MessageBubbleStyle = .standard
 
-    private let contactsResolver = ContactsResolver.shared
-    @State private var senderName: String?
-    @State private var senderAvatarURL: String?
-    @State private var senderImageData: Data?
+    @StateObject private var viewModel: MessageBubbleViewModel
     @State private var showingHTMLView = false
-    @State private var hasRichHTMLContent = false
+
     private var showHTMLPreview: Bool {
         MessageDisplayPolicy.shouldShowHTMLPreview(
             hasHTMLSource: message.hasHTMLSource,
             isForwardedEmail: message.isForwardedEmail,
             isNewsletter: message.isNewsletter,
-            hasRichHTMLContent: hasRichHTMLContent,
+            hasRichHTMLContent: viewModel.hasRichHTMLContent,
             isFromMe: message.isFromMe,
             isOneToOneConversation: conversation.conversationType == .oneToOne,
             subject: message.subject,
             senderEmail: effectiveSenderEmail
         )
     }
-    @State private var fullTextContent: String?
-    @State private var hasLoadedContent = false
-    @State private var lastContentSignature: String?
-    @State private var sharedDocumentLinks: [SharedDocumentLink] = []
-    /// Tracks the message ID we're currently loading to prevent stale updates during cell reuse
-    @State private var loadingMessageId: String?
 
+    @MainActor
     init(
         message: Message,
         conversation: Conversation,
+        deps: Dependencies? = nil,
         prefetchedSenderName: String? = nil,
         isLastFromSender: Bool = true,
         style: MessageBubbleStyle = .standard
     ) {
+        let resolvedDeps = deps ?? Dependencies.shared
         self.message = message
         self.conversation = conversation
         self.prefetchedSenderName = prefetchedSenderName
         self.isLastFromSender = isLastFromSender
         self.style = style
-
-        // No stateful HTML preview flag needed; derived from message metadata.
+        self._viewModel = StateObject(wrappedValue: MessageBubbleViewModel(deps: resolvedDeps))
     }
 
     var body: some View {
@@ -70,8 +63,8 @@ struct MessageBubble: View {
                     message: message,
                     style: style,
                     showHTMLPreview: showHTMLPreview,
-                    fullTextContent: fullTextContent,
-                    hasLoadedContent: hasLoadedContent,
+                    fullTextContent: viewModel.fullTextContent,
+                    hasLoadedContent: viewModel.hasLoadedContent,
                     showingHTMLView: $showingHTMLView
                 )
                 .contentShape(Rectangle())
@@ -93,8 +86,8 @@ struct MessageBubble: View {
                 Spacer()
             }
         }
-        .task(id: contentSignature()) {
-            await loadContentIfNeeded()
+        .task(id: loadContext.contentSignature) {
+            await viewModel.loadIfNeeded(using: loadContext)
         }
         .sheet(isPresented: $showingHTMLView) {
             HTMLMessageView(message: message)
@@ -107,7 +100,11 @@ struct MessageBubble: View {
     private var leadingContent: some View {
         if style.showAvatar {
             if isLastFromSender {
-                BubbleAvatarView(name: senderName ?? "?", avatarURL: senderAvatarURL, imageData: senderImageData)
+                BubbleAvatarView(
+                    name: viewModel.senderName ?? "?",
+                    avatarURL: viewModel.senderAvatarURL,
+                    imageData: viewModel.senderImageData
+                )
             } else {
                 Color.clear.frame(width: 24, height: 24)
             }
@@ -116,7 +113,7 @@ struct MessageBubble: View {
 
     @ViewBuilder
     private var senderNameView: some View {
-        if !message.isFromMe && style.showSenderName && isGroupConversation, let name = senderName {
+        if !message.isFromMe && style.showSenderName && isGroupConversation, let name = viewModel.senderName {
             Text(name)
                 .font(.caption2)
                 .fontWeight(.medium)
@@ -166,9 +163,9 @@ struct MessageBubble: View {
             }
         }
 
-        if !sharedDocumentLinks.isEmpty {
+        if !viewModel.sharedDocumentLinks.isEmpty {
             VStack(spacing: 8) {
-                ForEach(sharedDocumentLinks) { link in
+                ForEach(viewModel.sharedDocumentLinks) { link in
                     SharedDocumentLinkCard(link: link)
                 }
             }
@@ -195,206 +192,43 @@ struct MessageBubble: View {
             .email
     }
 
-    // MARK: - Content Loading
-
-    private func loadContentIfNeeded() async {
-        let currentMessageId = message.id
-        let signature = contentSignature()
-
-        // Early exit: content already loaded for this exact message
-        if hasLoadedContent && loadingMessageId == currentMessageId && lastContentSignature == signature {
-            return
+    private var senderRequest: MessageBubbleSenderRequest? {
+        guard !message.isFromMe,
+              let senderParticipant = message.participants?
+                .first(where: { $0.participantKind == .from }),
+              let person = senderParticipant.person else {
+            return nil
         }
 
-        // Claim this message ID and reset state for new load
-        // This ensures a clean slate when cell is reused for a different message
-        loadingMessageId = currentMessageId
-        hasLoadedContent = false
-        fullTextContent = nil
-        hasRichHTMLContent = false
-        lastContentSignature = signature
-        refreshSharedDocumentLinks(using: nil)
+        return MessageBubbleSenderRequest(
+            email: person.email,
+            personDisplayName: person.displayName,
+            personAvatarURL: person.avatarURL
+        )
+    }
 
-        // Use prefetched sender name if available, otherwise load (needed for avatar)
-        if !message.isFromMe {
-            if let prefetched = prefetchedSenderName {
-                senderName = prefetched
-            }
-            // Always load to get avatar URL (and sender name if not prefetched)
-            await loadSenderName()
-        }
-
-        // Verify message ID hasn't changed during async work (cell reuse protection)
-        guard loadingMessageId == currentMessageId else { return }
-
-        // Try cache first (populated by batch prefetch in ChatView.onAppear)
-        if let cached = await ProcessedTextCache.shared.get(messageId: message.id) {
-            // Final check before updating state - ensure this is still the active message
-            guard loadingMessageId == currentMessageId else { return }
-            fullTextContent = cached.plainText
-            hasRichHTMLContent = cached.hasRichContent
-            refreshSharedDocumentLinks(using: cached.plainText)
-
-            let hasHTMLFile = HTMLContentHandler.shared.htmlFileExists(for: message.id)
-            let hasHTMLSource = message.hasHTMLSource
-
-            // Prefetch may have cached a result without considering bodyStorageURI.
-            // If we have an HTML source but the cache lacks plain text and the file isn't
-            // in the messageId location, recompute using the URI for correctness.
-            if hasHTMLSource && cached.plainText == nil && message.bodyStorageURI != nil && !hasHTMLFile {
-                await loadFullTextContentWithCache()
-                return
-            }
-
-            hasLoadedContent = true
-        } else {
-            // Fallback: process on background thread and cache result
-            await loadFullTextContentWithCache()
-        }
+    private var loadContext: MessageBubbleLoadContext {
+        MessageBubbleLoadContext(
+            messageID: message.id,
+            contentSignature: contentSignature(),
+            prefetchedSenderName: prefetchedSenderName,
+            senderRequest: senderRequest,
+            contentRequest: MessageBubbleContentRequest(
+                messageID: message.id,
+                bodyText: message.bodyTextValue,
+                bodyStorageURI: message.bodyStorageURI,
+                snippet: message.snippet,
+                hasHTMLSource: message.hasHTMLSource,
+                hasAttachments: message.hasAttachments,
+                isFromMe: message.isFromMe,
+                effectiveSenderEmail: effectiveSenderEmail
+            )
+        )
     }
 
     private func contentSignature() -> String {
         let bodyTextHash = message.bodyText?.hashValue ?? 0
         let snippetHash = message.snippet?.hashValue ?? 0
         return "\(message.bodyStorageURI ?? "")|\(bodyTextHash)|\(snippetHash)|\(message.hasHTMLSource)"
-    }
-
-    private func loadFullTextContentWithCache() async {
-        let messageId = message.id
-        let bodyText = message.bodyTextValue
-        let bodyStorageURI = message.bodyStorageURI
-        let initialResult: (plainText: String?, hasRichContent: Bool) = await Task.detached(priority: .userInitiated) {
-            let handler = HTMLContentHandler.shared
-            var processedResult = ProcessedTextCache.processMessage(
-                messageId: messageId,
-                bodyStorageURI: bodyStorageURI,
-                handler: handler
-            )
-
-            // If no HTML content, try bodyText
-            if processedResult.plainText == nil, let text = bodyText {
-                let fallbackResult = ChatBubbleTextProcessor.process(
-                    content: text,
-                    options: ChatBubbleTextProcessorOptions(
-                        // Some providers leak HTML markup into text/plain fallbacks.
-                        // Auto-detect so rich transactional templates can still route to preview mode.
-                        inputKind: .autoDetectHTML,
-                        sanitizeRawEmailSource: true,
-                        decodeHTMLEntities: true,
-                        formatSignOffLineBreaks: true,
-                        classifyRichContent: true
-                    )
-                )
-                processedResult = (
-                    fallbackResult.mainText,
-                    fallbackResult.hasRichContent,
-                    fallbackResult.quotedParts
-                )
-            }
-
-            // Cache the result for future use
-            await ProcessedTextCache.shared.set(
-                messageId: messageId,
-                plainText: processedResult.plainText,
-                hasRichContent: processedResult.hasRichContent,
-                quotedParts: processedResult.quotedParts
-            )
-
-            return (processedResult.plainText, processedResult.hasRichContent)
-        }.value
-
-        var result = initialResult
-
-        let missingBodyText = bodyText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
-        let isTrustedTransactionalSender = MessageDisplayPolicy.isTrustedTransactionalSender(effectiveSenderEmail)
-        let shouldAttemptHTMLRecovery =
-            result.plainText == nil &&
-            missingBodyText &&
-            !message.isFromMe &&
-            (message.bodyStorageURI != nil || message.hasAttachments || message.hasHTMLSource)
-        let shouldAttemptTrustedSenderRecovery =
-            !message.isFromMe &&
-            !message.hasHTMLSource &&
-            !result.hasRichContent &&
-            isTrustedTransactionalSender
-
-        if (shouldAttemptHTMLRecovery || shouldAttemptTrustedSenderRecovery),
-           let recoveredHTML = await HTMLContentRecoveryService.shared.recoverHTMLContent(messageId: messageId) {
-            let recoveredResult: (plainText: String?, hasRichContent: Bool) = await Task.detached(priority: .userInitiated) {
-                let processed = ChatBubbleTextProcessor.process(
-                    content: recoveredHTML,
-                    options: ChatBubbleTextProcessorOptions(
-                        inputKind: .html,
-                        sanitizeRawEmailSource: false,
-                        decodeHTMLEntities: true,
-                        formatSignOffLineBreaks: true,
-                        classifyRichContent: true
-                    )
-                )
-
-                await ProcessedTextCache.shared.set(
-                    messageId: messageId,
-                    plainText: processed.mainText,
-                    hasRichContent: processed.hasRichContent,
-                    quotedParts: processed.quotedParts
-                )
-
-                return (processed.mainText, processed.hasRichContent)
-            }.value
-
-            if recoveredResult.plainText != nil || recoveredResult.hasRichContent {
-                result = recoveredResult
-            }
-        }
-
-        // Verify message ID hasn't changed during async processing (cell reuse protection)
-        guard loadingMessageId == messageId else { return }
-
-        fullTextContent = result.plainText
-        hasRichHTMLContent = result.hasRichContent
-        refreshSharedDocumentLinks(using: result.plainText)
-        hasLoadedContent = true
-    }
-
-    private func refreshSharedDocumentLinks(using preferredText: String?) {
-        let candidates = [preferredText, message.bodyText, message.snippet]
-            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        sharedDocumentLinks = SharedDocumentLinkExtractor.extract(from: candidates, maxCount: 4)
-    }
-
-    private func loadSenderName() async {
-        guard let participants = message.participants else { return }
-
-        for participant in participants {
-            if participant.participantKind == .from,
-               let person = participant.person {
-                let email = person.email
-
-                // Load avatar URL from Person entity
-                senderAvatarURL = person.avatarURL
-
-                // Look up contact in address book for name and photo
-                let match = await contactsResolver.lookup(email: email)
-
-                // Use contact image data if available
-                if let imageData = match?.imageData {
-                    senderImageData = imageData
-                }
-
-                if let personName = person.displayName, !personName.isEmpty {
-                    senderName = personName
-                    return
-                }
-
-                if let displayName = match?.displayName {
-                    senderName = displayName
-                } else {
-                    senderName = EmailNormalizer.formatAsDisplayName(email: email)
-                }
-                return
-            }
-        }
     }
 }

@@ -27,4 +27,52 @@ final class ComposeViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.attachments.count, 1)
         XCTAssertEqual(viewModel.attachments.first?.id, attachment.id)
     }
+
+    func testSetupForMode_replyIsIdempotent() {
+        let context = Dependencies.shared.viewContext
+        let originalUserEmail = AuthSession.shared.userEmail
+
+        let conversation = Conversation(context: context)
+        conversation.id = UUID()
+        conversation.keyHash = UUID().uuidString
+        conversation.type = "personal"
+
+        let me = Person(context: context)
+        me.id = UUID()
+        me.email = "me@example.com"
+        me.displayName = "Me"
+
+        let other = Person(context: context)
+        other.id = UUID()
+        other.email = "friend@example.com"
+        other.displayName = "Friend"
+
+        let meParticipant = ConversationParticipant(context: context)
+        meParticipant.id = UUID()
+        meParticipant.participantRole = .normal
+        meParticipant.person = me
+        meParticipant.conversation = conversation
+
+        let otherParticipant = ConversationParticipant(context: context)
+        otherParticipant.id = UUID()
+        otherParticipant.participantRole = .normal
+        otherParticipant.person = other
+        otherParticipant.conversation = conversation
+
+        AuthSession.shared.userEmail = me.email
+        let viewModel = ComposeViewModel(mode: .reply(conversation, nil))
+
+        viewModel.setupForMode()
+        viewModel.setupForMode()
+
+        XCTAssertEqual(viewModel.recipients.map(\.email), ["friend@example.com"])
+
+        AuthSession.shared.userEmail = originalUserEmail
+        context.delete(otherParticipant)
+        context.delete(meParticipant)
+        context.delete(other)
+        context.delete(me)
+        context.delete(conversation)
+        try? context.save()
+    }
 }

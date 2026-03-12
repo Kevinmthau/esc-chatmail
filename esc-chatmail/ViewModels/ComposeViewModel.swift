@@ -37,6 +37,7 @@ final class ComposeViewModel: ObservableObject {
     @Published var showError = false
     private(set) var lastSentConversationObjectID: NSManagedObjectID?
     private var backgroundSendTasks: [String: Task<Void, Never>] = [:]
+    private var hasSetupMode = false
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -119,11 +120,11 @@ final class ComposeViewModel: ObservableObject {
         self.dependencies = resolvedDeps
 
         // Initialize composed services
-        self.recipientManager = RecipientManager(authSession: resolvedDeps.authSession)
-        self.autocompleteService = ContactAutocompleteService()
-        self.attachmentManager = ComposeAttachmentManager(viewContext: resolvedDeps.coreDataStack.viewContext)
-        self.replyMetadataBuilder = ReplyMetadataBuilder(authSession: resolvedDeps.authSession)
-        self.messageFormatBuilder = MessageFormatBuilder(authSession: resolvedDeps.authSession)
+        self.recipientManager = resolvedDeps.makeRecipientManager()
+        self.autocompleteService = resolvedDeps.makeContactAutocompleteService()
+        self.attachmentManager = resolvedDeps.makeComposeAttachmentManager()
+        self.replyMetadataBuilder = resolvedDeps.makeReplyMetadataBuilder()
+        self.messageFormatBuilder = resolvedDeps.makeMessageFormatBuilder()
 
         // Forward child observable changes to trigger view updates
         forwardChanges(from: autocompleteService, storing: &cancellables)
@@ -132,6 +133,9 @@ final class ComposeViewModel: ObservableObject {
     }
 
     func setupForMode() {
+        guard !hasSetupMode else { return }
+        hasSetupMode = true
+
         switch mode {
         case .forward(let message):
             let result = messageFormatBuilder.formatForwardedMessage(message)

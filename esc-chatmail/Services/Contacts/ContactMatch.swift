@@ -4,7 +4,7 @@ import Foundation
 
 /// Protocol for contact resolution services.
 /// Enables dependency injection and testing.
-protocol ContactsResolving {
+protocol ContactsResolving: Sendable {
     /// Ensures the app has authorization to access contacts.
     func ensureAuthorization() async throws
 

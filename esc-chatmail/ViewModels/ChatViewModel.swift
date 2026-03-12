@@ -25,6 +25,9 @@ final class ChatViewModel: ObservableObject {
     private let coreDataStack: CoreDataStack
     private let syncEngine: SyncEngine
     private let authSession: AuthSession
+    private let participantLoader: ParticipantLoader
+    private let processedTextCache: ProcessedTextCache
+    private let contactsResolver: any ContactsResolving
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Task Management
@@ -41,9 +44,12 @@ final class ChatViewModel: ObservableObject {
         self.coreDataStack = dependencies.coreDataStack
         self.syncEngine = dependencies.syncEngine
         self.authSession = dependencies.authSession
+        self.participantLoader = dependencies.participantLoader
+        self.processedTextCache = dependencies.processedTextCache
+        self.contactsResolver = dependencies.contactsResolver
         self.messageActions = dependencies.makeMessageActions()
         self.sendService = dependencies.makeSendService()
-        self.contactManager = ChatContactManager()
+        self.contactManager = dependencies.makeChatContactManager()
 
         // Forward child observable changes to trigger view updates
         forwardChanges(from: contactManager, storing: &cancellables)
@@ -238,14 +244,16 @@ final class ChatViewModel: ObservableObject {
     /// Call from ChatView.onAppear with recent messages.
     func prefetchRecentContent(messageIds: [String], senderEmails: [String]) {
         // Batch prefetch text content for recent messages (eliminates N+1 queries)
+        let processedTextCache = self.processedTextCache
         prefetchTaskManager.runDetached("prefetchText") {
-            await ProcessedTextCache.shared.prefetch(messageIds: messageIds)
+            await processedTextCache.prefetch(messageIds: messageIds)
         }
 
         // Batch prefetch contacts to avoid thundering herd on first load
         let uniqueEmails = Array(Set(senderEmails))
+        let contactsResolver = self.contactsResolver
         prefetchTaskManager.runDetached("prefetchContacts") {
-            await ContactsResolver.shared.prewarm(emails: uniqueEmails)
+            await contactsResolver.prewarm(emails: uniqueEmails)
         }
     }
 
@@ -262,7 +270,7 @@ final class ChatViewModel: ObservableObject {
         prefetchTaskManager.run("displayName") { [weak self] in
             guard let self = self,
                   let myEmail = authSession.userEmail else { return }
-            let info = await ParticipantLoader.shared.loadParticipants(
+            let info = await participantLoader.loadParticipants(
                 from: conversation,
                 currentUserEmail: myEmail,
                 maxParticipants: 4

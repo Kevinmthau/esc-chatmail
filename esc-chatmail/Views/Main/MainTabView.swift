@@ -7,7 +7,7 @@ struct MainTabView: View {
 
     var body: some View {
         TabView {
-            ConversationListView()
+            ConversationListView(deps: deps)
                 .tabItem {
                     SwiftUI.Label("Chats", systemImage: "bubble.left.and.bubble.right")
                 }

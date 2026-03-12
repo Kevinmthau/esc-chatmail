@@ -11,12 +11,18 @@ final class ConversationSearchService: ObservableObject {
             debounceSearch()
         }
     }
-    @Published private(set) var debouncedSearchText = ""
+    @Published private(set) var debouncedSearchText = "" {
+        didSet {
+            guard debouncedSearchText != oldValue else { return }
+            onDebouncedSearchTextChange?()
+        }
+    }
 
     // MARK: - Private State
 
     private var searchDebounceTask: Task<Void, Never>?
     private let debounceInterval: UInt64
+    var onDebouncedSearchTextChange: (() -> Void)?
 
     // MARK: - Initialization
 
@@ -45,11 +51,24 @@ final class ConversationSearchService: ObservableObject {
 
     private func debounceSearch() {
         searchDebounceTask?.cancel()
-        searchDebounceTask = Task { [weak self] in
-            guard let self = self else { return }
-            try? await Task.sleep(nanoseconds: self.debounceInterval)
+
+        if searchText.isEmpty {
+            debouncedSearchText = ""
+            return
+        }
+
+        let pendingQuery = searchText
+        let debounceInterval = debounceInterval
+
+        searchDebounceTask = Task.detached { [weak self] in
+            try? await Task.sleep(nanoseconds: debounceInterval)
             guard !Task.isCancelled else { return }
-            self.debouncedSearchText = self.searchText
+
+            await MainActor.run { [weak self] in
+                guard let self = self else { return }
+                guard self.searchText == pendingQuery else { return }
+                self.debouncedSearchText = pendingQuery
+            }
         }
     }
 }

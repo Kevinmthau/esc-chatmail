@@ -72,6 +72,27 @@ final class ComposeSendOrchestratorTests: XCTestCase {
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 0)
     }
 
+    func testExecuteInBackground_sendFailure_usesUnifiedOptimisticCleanup() async {
+        let sendService = MockComposeSendService()
+        sendService.sendNewError = GmailSendService.SendError.apiError("boom")
+
+        let syncPerformer = MockIncrementalSyncPerformer()
+        let orchestrator = ComposeSendOrchestrator(sendService: sendService, syncPerformer: syncPerformer)
+
+        let task = orchestrator.executeInBackground(
+            input: makeInput(),
+            attachments: [],
+            optimisticMessageID: "optimistic-failure"
+        )
+        await task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.sendNewCalls, 1)
+        XCTAssertEqual(snapshot.handleFailedCalls, 1)
+        XCTAssertEqual(snapshot.markFailedCalls, 0)
+        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 0)
+    }
+
     private func makeInput(
         replyData: ComposeSendOrchestrator.SendInput.ReplyData? = nil
     ) -> ComposeSendOrchestrator.SendInput {
@@ -103,17 +124,21 @@ private final class MockComposeSendService: ComposeSendServicing {
         let sendReplyCalls: Int
         let updateOptimisticCalls: Int
         let markFailedCalls: Int
+        let handleFailedCalls: Int
     }
 
     private let queue = DispatchQueue(label: "ComposeSendOrchestratorTests.MockComposeSendService")
 
     var sendDelayNanoseconds: UInt64 = 0
+    var sendNewError: Error?
+    var sendReplyError: Error?
 
     private var _markUploadedCalls = 0
     private var _sendNewCalls = 0
     private var _sendReplyCalls = 0
     private var _updateOptimisticCalls = 0
     private var _markFailedCalls = 0
+    private var _handleFailedCalls = 0
 
     var snapshot: Snapshot {
         queue.sync {
@@ -122,7 +147,8 @@ private final class MockComposeSendService: ComposeSendServicing {
                 sendNewCalls: _sendNewCalls,
                 sendReplyCalls: _sendReplyCalls,
                 updateOptimisticCalls: _updateOptimisticCalls,
-                markFailedCalls: _markFailedCalls
+                markFailedCalls: _markFailedCalls,
+                handleFailedCalls: _handleFailedCalls
             )
         }
     }
@@ -147,6 +173,9 @@ private final class MockComposeSendService: ComposeSendServicing {
         if sendDelayNanoseconds > 0 {
             try await Task.sleep(nanoseconds: sendDelayNanoseconds)
         }
+        if let sendReplyError {
+            throw sendReplyError
+        }
         return GmailSendService.SendResult(messageId: "sent-id", threadId: "thread-id")
     }
 
@@ -162,6 +191,9 @@ private final class MockComposeSendService: ComposeSendServicing {
 
         if sendDelayNanoseconds > 0 {
             try await Task.sleep(nanoseconds: sendDelayNanoseconds)
+        }
+        if let sendNewError {
+            throw sendNewError
         }
         return GmailSendService.SendResult(messageId: "sent-id", threadId: "thread-id")
     }
@@ -179,5 +211,10 @@ private final class MockComposeSendService: ComposeSendServicing {
     @MainActor
     func markAttachmentsAsFailed(_ attachments: [Attachment]) {
         queue.sync { _markFailedCalls += 1 }
+    }
+
+    @MainActor
+    func handleFailedOptimisticMessage(byID messageID: String, fallbackAttachments: [Attachment]) {
+        queue.sync { _handleFailedCalls += 1 }
     }
 }

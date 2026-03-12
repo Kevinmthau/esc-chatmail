@@ -45,12 +45,19 @@ final class Dependencies: ObservableObject {
 
     let personCache: PersonCache
     let conversationCache: ConversationCache
+    let contactsResolver: any ContactsResolving
+    let htmlContentHandler: HTMLContentHandler
+    let participantLoader: ParticipantLoader
+    let conversationManager: ConversationManager
 
     // MARK: - Actor-based Services
     // Actors stored as let properties for injection, accessed via nonisolated getters
 
     private let _attachmentCache: AttachmentCacheActor
     private let _pendingActionsManager: PendingActionsManager
+    private let _processedTextCache: ProcessedTextCache
+    private let _profilePhotoResolver: ProfilePhotoResolver
+    private let _htmlContentRecoveryService: HTMLContentRecoveryService
 
     /// Returns the AttachmentCacheActor instance.
     /// Use `await` when calling methods on this actor.
@@ -62,6 +69,18 @@ final class Dependencies: ObservableObject {
     /// Use `await` when calling methods on this actor.
     nonisolated var pendingActionsManager: PendingActionsManager {
         _pendingActionsManager
+    }
+
+    nonisolated var processedTextCache: ProcessedTextCache {
+        _processedTextCache
+    }
+
+    nonisolated var profilePhotoResolver: ProfilePhotoResolver {
+        _profilePhotoResolver
+    }
+
+    nonisolated var htmlContentRecoveryService: HTMLContentRecoveryService {
+        _htmlContentRecoveryService
     }
 
     // MARK: - Service Layer
@@ -107,6 +126,54 @@ final class Dependencies: ObservableObject {
         ContactsService()
     }
 
+    func makeConversationSearchService() -> ConversationSearchService {
+        ConversationSearchService()
+    }
+
+    func makeConversationSelectionService() -> ConversationSelectionService {
+        ConversationSelectionService(
+            messageActions: makeMessageActions(),
+            coreDataStack: coreDataStack
+        )
+    }
+
+    func makeConversationFilterService() -> ConversationFilterService {
+        ConversationFilterService(contactsService: makeContactsService())
+    }
+
+    func makeChatContactManager() -> ChatContactManager {
+        ChatContactManager()
+    }
+
+    func makeRecipientManager() -> RecipientManager {
+        RecipientManager(authSession: authSession)
+    }
+
+    func makeContactAutocompleteService() -> ContactAutocompleteService {
+        ContactAutocompleteService()
+    }
+
+    func makeComposeAttachmentManager() -> ComposeAttachmentManager {
+        ComposeAttachmentManager(viewContext: viewContext)
+    }
+
+    func makeReplyMetadataBuilder() -> ReplyMetadataBuilder {
+        ReplyMetadataBuilder(authSession: authSession)
+    }
+
+    func makeMessageFormatBuilder() -> MessageFormatBuilder {
+        MessageFormatBuilder(authSession: authSession)
+    }
+
+    func makeMessageBubbleLoader() -> MessageBubbleLoader {
+        MessageBubbleLoader(
+            contactsResolver: contactsResolver,
+            processedTextCache: processedTextCache,
+            htmlContentHandler: htmlContentHandler,
+            htmlContentRecoveryService: htmlContentRecoveryService
+        )
+    }
+
     // MARK: - Initialization
 
     /// Production initializer - uses all shared singleton instances.
@@ -119,12 +186,28 @@ final class Dependencies: ObservableObject {
         self.gmailAPIClient = GmailAPIClient.shared
         self.personCache = PersonCache.shared
         self.conversationCache = ConversationCache.shared
+        self.contactsResolver = ContactsResolver.shared
+        self.htmlContentHandler = HTMLContentHandler.shared
         self._attachmentCache = AttachmentCacheActor.shared
         self._pendingActionsManager = PendingActionsManager.shared
+        self._processedTextCache = ProcessedTextCache.shared
+        self._profilePhotoResolver = ProfilePhotoResolver.shared
+        self._htmlContentRecoveryService = HTMLContentRecoveryService.shared
         self.syncEngine = SyncEngine.shared
         self.foregroundSyncCoordinator = ForegroundSyncCoordinator.shared
         self.attachmentDownloader = AttachmentDownloader.shared
         self.backgroundSyncManager = BackgroundSyncManager.shared
+        self.participantLoader = ParticipantLoader(
+            personCache: self.personCache,
+            photoResolver: self._profilePhotoResolver
+        )
+        self.conversationManager = ConversationManager(
+            rollupUpdater: ConversationRollupUpdater(coreDataStack: self.coreDataStack),
+            merger: ConversationMerger(coreDataStack: self.coreDataStack),
+            currentUserEmail: { [authSession] in
+                authSession.userEmail ?? ""
+            }
+        )
     }
 
     /// Testing initializer - accepts custom implementations for all dependencies.
@@ -147,12 +230,19 @@ final class Dependencies: ObservableObject {
         gmailAPIClient: GmailAPIClient,
         personCache: PersonCache,
         conversationCache: ConversationCache,
+        contactsResolver: (any ContactsResolving)? = nil,
         attachmentCache: AttachmentCacheActor,
         pendingActionsManager: PendingActionsManager,
+        processedTextCache: ProcessedTextCache = .shared,
+        profilePhotoResolver: ProfilePhotoResolver = .shared,
+        htmlContentHandler: HTMLContentHandler = .shared,
+        htmlContentRecoveryService: HTMLContentRecoveryService = .shared,
         syncEngine: SyncEngine,
         foregroundSyncCoordinator: ForegroundSyncCoordinator,
         attachmentDownloader: AttachmentDownloader,
-        backgroundSyncManager: BackgroundSyncManager
+        backgroundSyncManager: BackgroundSyncManager,
+        participantLoader: ParticipantLoader? = nil,
+        conversationManager: ConversationManager? = nil
     ) {
         self.coreDataStack = coreDataStack
         self.keychainService = keychainService
@@ -161,11 +251,27 @@ final class Dependencies: ObservableObject {
         self.gmailAPIClient = gmailAPIClient
         self.personCache = personCache
         self.conversationCache = conversationCache
+        self.contactsResolver = contactsResolver ?? ContactsResolver.shared
+        self.htmlContentHandler = htmlContentHandler
         self._attachmentCache = attachmentCache
         self._pendingActionsManager = pendingActionsManager
+        self._processedTextCache = processedTextCache
+        self._profilePhotoResolver = profilePhotoResolver
+        self._htmlContentRecoveryService = htmlContentRecoveryService
         self.syncEngine = syncEngine
         self.foregroundSyncCoordinator = foregroundSyncCoordinator
         self.attachmentDownloader = attachmentDownloader
         self.backgroundSyncManager = backgroundSyncManager
+        self.participantLoader = participantLoader ?? ParticipantLoader(
+            personCache: personCache,
+            photoResolver: profilePhotoResolver
+        )
+        self.conversationManager = conversationManager ?? ConversationManager(
+            rollupUpdater: ConversationRollupUpdater(coreDataStack: coreDataStack),
+            merger: ConversationMerger(coreDataStack: coreDataStack),
+            currentUserEmail: { [authSession] in
+                authSession.userEmail ?? ""
+            }
+        )
     }
 }
