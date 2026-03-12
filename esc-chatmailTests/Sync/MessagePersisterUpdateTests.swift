@@ -568,6 +568,65 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertTrue(normalizedCIDs.contains("ii_19c9bbffa4d86c910832"))
     }
 
+    func testUpdateExistingMessage_reconcilesOptimisticLocalRegularAttachmentWithoutDuplication() async throws {
+        let conversation = ConversationBuilder.simple(in: context)
+        let existingMessage = MessageBuilder()
+            .withId("message-regular-attachment-merge")
+            .inConversation(conversation)
+            .withAttachments()
+            .build(in: context)
+
+        let optimisticAttachment = AttachmentBuilder()
+            .withId("local_photo_attachment")
+            .withFilename("photo.jpg")
+            .withMimeType("image/jpeg")
+            .withByteSize(2_048)
+            .withLocalURL("Attachments/local_photo_attachment.jpg")
+            .withPreviewURL("Previews/local_photo_attachment.jpg")
+            .forMessage(existingMessage)
+            .build(in: context)
+        optimisticAttachment.state = .uploaded
+
+        let processedMessage = ProcessedMessage(
+            id: existingMessage.id,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: existingMessage.snippet,
+            cleanedSnippet: existingMessage.cleanedSnippet,
+            internalDate: existingMessage.internalDate,
+            headers: ProcessedHeaders(),
+            htmlBody: nil,
+            plainTextBody: existingMessage.bodyText,
+            labelIds: [],
+            isUnread: existingMessage.isUnread,
+            isNewsletter: existingMessage.isNewsletter,
+            hasAttachments: true,
+            attachmentInfo: [
+                AttachmentInfo(
+                    id: "real_attachment_1",
+                    filename: "photo.jpg",
+                    mimeType: "image/jpeg",
+                    size: 2_048,
+                    contentId: nil
+                )
+            ]
+        )
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertEqual(existingMessage.attachmentsArray.count, 1)
+
+        let savedAttachment = try XCTUnwrap(existingMessage.attachmentsArray.first)
+        XCTAssertEqual(savedAttachment.id, "real_attachment_1")
+        XCTAssertEqual(savedAttachment.localURL, "Attachments/local_photo_attachment.jpg")
+        XCTAssertEqual(savedAttachment.previewURL, "Previews/local_photo_attachment.jpg")
+        XCTAssertEqual(savedAttachment.state, .uploaded)
+    }
+
     func testCreateNewMessage_inlineDataAttachment_isPersistedAsDownloaded() async throws {
         let inlineImageData = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2foAAAAASUVORK5CYII="))
 

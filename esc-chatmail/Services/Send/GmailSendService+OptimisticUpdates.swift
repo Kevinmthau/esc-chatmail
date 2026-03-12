@@ -51,16 +51,11 @@ extension GmailSendService {
                 return []
             }()
 
-            // Create the conversation using the serializer to prevent race conditions
-            // Get the objectID since Conversation isn't safe to pass across threads
-            let conversationID = try await findOrCreateConversation(recipients: recipients, myAliases: myAliases, in: viewContext).objectID
-
-            // Fetch conversation on main thread using the objectID
-            guard let fetched = try? viewContext.existingObject(with: conversationID) as? Conversation else {
-                Log.error("Failed to fetch conversation on main thread", category: .message)
-                throw SendError.conversationNotFound
-            }
-            conversation = fetched
+            conversation = try findOrCreateOptimisticConversation(
+                recipients: recipients,
+                myAliases: myAliases,
+                in: viewContext
+            )
         }
 
         let message = Message(context: viewContext)
@@ -87,13 +82,18 @@ extension GmailSendService {
         conversation.snippet = message.conversationPreviewText
         // IMPORTANT: do NOT set conversation.hasInbox = true here for outgoing messages
 
-        do {
-            if viewContext.hasChanges {
-                try viewContext.save()
-            }
-        } catch {
-            Log.error("Failed to save optimistic message", category: .message, error: error)
-        }
+        // Keep the optimistic graph unsaved so chat navigation is not blocked by a
+        // main-thread Core Data save, especially for image attachments. Stabilize the
+        // objectIDs up front so SwiftUI navigation can still target the new thread.
+        assignPermanentObjectIDsIfNeeded(
+            for: optimisticGraphObjects(
+                conversation: conversation,
+                message: message,
+                attachments: attachments
+            ),
+            in: viewContext
+        )
+        viewContext.processPendingChanges()
 
         return message
     }
@@ -186,15 +186,45 @@ extension GmailSendService {
         markAttachmentsAsFailed(fallbackAttachments)
     }
 
-    /// Finds or creates a conversation for the given recipients.
-    func findOrCreateConversation(recipients: [String], myAliases: Set<String>, in context: NSManagedObjectContext) async throws -> Conversation {
+    /// Finds or creates a conversation for the optimistic send path without forcing
+    /// an immediate save on the main context.
+    @MainActor
+    func findOrCreateOptimisticConversation(
+        recipients: [String],
+        myAliases: Set<String>,
+        in context: NSManagedObjectContext
+    ) throws -> Conversation {
         // Build minimal headers for identity: From + To
         let identityHeaders = recipients.map { MessageHeader(name: "To", value: $0) }
         let identity = makeConversationIdentity(from: identityHeaders, myAliases: myAliases)
 
-        // Use the serializer to prevent race conditions when creating conversations
-        // Pass current date so sent conversations appear at top immediately (prevents UI flash)
-        let conversation = try await ConversationCreationSerializer.shared.findOrCreateConversation(
+        let request = Conversation.fetchRequest()
+        request.predicate = NSPredicate(format: "participantHash == %@", identity.participantHash)
+        request.fetchBatchSize = 10
+        request.includesPendingChanges = true
+
+        let matchingConversations: [Conversation]
+        do {
+            matchingConversations = try context.fetch(request)
+        } catch {
+            Log.error("Failed to fetch optimistic conversation for participantHash", category: .coreData, error: error)
+            throw SendError.conversationNotFound
+        }
+
+        if let activeConversation = matchingConversations.first(where: { $0.archivedAt == nil }) {
+            activeConversation.displayName = DisplayNameFormatter.formatGroupNames(recipients)
+            return activeConversation
+        }
+
+        if let archivedConversation = matchingConversations.first {
+            archivedConversation.archivedAt = nil
+            archivedConversation.hidden = false
+            archivedConversation.displayName = DisplayNameFormatter.formatGroupNames(recipients)
+            Log.debug("Un-archived conversation \(archivedConversation.id) due to optimistic new message", category: .conversation)
+            return archivedConversation
+        }
+
+        let conversation = try ConversationFactory.create(
             for: identity,
             initialLastMessageDate: Date(),
             in: context
@@ -204,5 +234,37 @@ extension GmailSendService {
         conversation.displayName = DisplayNameFormatter.formatGroupNames(recipients)
 
         return conversation
+    }
+
+    @MainActor
+    private func optimisticGraphObjects(
+        conversation: Conversation,
+        message: Message,
+        attachments: [Attachment]
+    ) -> [NSManagedObject] {
+        var objects: [NSManagedObject] = [conversation, message]
+        objects.append(contentsOf: attachments)
+
+        if let participants = conversation.participants {
+            objects.append(contentsOf: participants)
+            objects.append(contentsOf: participants.compactMap(\.person))
+        }
+
+        return objects.filter { $0.managedObjectContext === viewContext }
+    }
+
+    @MainActor
+    private func assignPermanentObjectIDsIfNeeded(
+        for objects: [NSManagedObject],
+        in context: NSManagedObjectContext
+    ) {
+        let temporaryObjects = objects.filter { $0.objectID.isTemporaryID }
+        guard !temporaryObjects.isEmpty else { return }
+
+        do {
+            try context.obtainPermanentIDs(for: temporaryObjects)
+        } catch {
+            Log.error("Failed to obtain permanent IDs for optimistic send", category: .message, error: error)
+        }
     }
 }

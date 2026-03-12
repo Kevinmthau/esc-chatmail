@@ -63,8 +63,28 @@ extension MessagePersister {
         // This prevents missing inline CID images after sent-message reconciliation.
         var existingAttachmentIds = Set(existingMessage.attachmentsArray.compactMap(\.id))
         var existingContentIds = Set(existingMessage.attachmentsArray.compactMap { normalizedContentID($0.contentId) })
+        var consumedOptimisticAttachmentObjectIDs = Set<NSManagedObjectID>()
 
         for attachmentInfo in processedMessage.attachmentInfo {
+            if let optimisticAttachment = matchingOptimisticLocalAttachment(
+                for: attachmentInfo,
+                in: existingMessage.attachmentsArray,
+                excluding: consumedOptimisticAttachmentObjectIDs
+            ) {
+                let previousAttachmentID = optimisticAttachment.id
+                reconcileOptimisticLocalAttachment(optimisticAttachment, with: attachmentInfo)
+                consumedOptimisticAttachmentObjectIDs.insert(optimisticAttachment.objectID)
+
+                if let previousAttachmentID {
+                    existingAttachmentIds.remove(previousAttachmentID)
+                }
+                existingAttachmentIds.insert(attachmentInfo.id)
+                if let normalizedIncomingCID = normalizedContentID(attachmentInfo.contentId) {
+                    existingContentIds.insert(normalizedIncomingCID)
+                }
+                continue
+            }
+
             if existingAttachmentIds.contains(attachmentInfo.id) {
                 continue
             }
@@ -105,6 +125,50 @@ extension MessagePersister {
 
         Log.debug("Updated existing message: \(processedMessage.id)", category: .sync)
         return true
+    }
+
+    private func matchingOptimisticLocalAttachment(
+        for attachmentInfo: AttachmentInfo,
+        in attachments: [Attachment],
+        excluding excludedObjectIDs: Set<NSManagedObjectID>
+    ) -> Attachment? {
+        let localCandidates = attachments.filter {
+            $0.isLocalAttachment && !excludedObjectIDs.contains($0.objectID)
+        }
+
+        guard !localCandidates.isEmpty else { return nil }
+
+        if let normalizedIncomingCID = normalizedContentID(attachmentInfo.contentId),
+           let cidMatch = localCandidates.first(where: {
+               normalizedContentID($0.contentId) == normalizedIncomingCID
+           }) {
+            return cidMatch
+        }
+
+        let normalizedIncomingFilename = normalizedAttachmentFilename(attachmentInfo.filename)
+        let incomingSize = Int64(attachmentInfo.size)
+
+        return localCandidates.first(where: {
+            normalizedContentID($0.contentId) == nil &&
+            normalizedAttachmentFilename($0.filename) == normalizedIncomingFilename &&
+            $0.mimeType == attachmentInfo.mimeType &&
+            $0.byteSize == incomingSize
+        })
+    }
+
+    private func reconcileOptimisticLocalAttachment(_ attachment: Attachment, with attachmentInfo: AttachmentInfo) {
+        attachment.id = attachmentInfo.id
+        attachment.filename = attachmentInfo.filename
+        attachment.mimeType = attachmentInfo.mimeType
+        attachment.contentId = attachmentInfo.contentId
+
+        if attachmentInfo.size > 0 {
+            attachment.byteSize = Int64(attachmentInfo.size)
+        }
+    }
+
+    private func normalizedAttachmentFilename(_ filename: String) -> String {
+        filename.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     private func normalizedContentID(_ rawValue: String?) -> String? {
