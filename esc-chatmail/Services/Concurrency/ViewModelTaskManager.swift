@@ -51,7 +51,7 @@ final class ViewModelTaskManager {
     ///   - operation: The async operation to perform
     func runDetached(_ key: String, operation: @Sendable @escaping () async -> Void) {
         tasks[key]?.cancel()
-        weak let weakSelf = self
+        weak var weakSelf = self
         tasks[key] = Task.detached {
             await operation()
             _ = await MainActor.run {
