@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreData
 
 // MARK: - Optimized Conversation Row
 struct OptimizedConversationRow: View {
@@ -7,10 +8,23 @@ struct OptimizedConversationRow: View {
 
     private let authSession = AuthSession.shared
     private let participantLoader = ParticipantLoader.shared
+    private let conversationObjectID: NSManagedObjectID
+    private let conversationContext: NSManagedObjectContext?
+    private let fallbackDisplayName: String?
 
     @State private var displayName: String = ""
     @State private var avatarPhotos: [ProfilePhoto] = []
     @State private var participantNames: [String] = []
+
+    @MainActor
+    init(conversation: Conversation, onAppear: @escaping () -> Void) {
+        self._conversation = ObservedObject(wrappedValue: conversation)
+        self.onAppear = onAppear
+        self.conversationObjectID = conversation.objectID
+        self.conversationContext = conversation.managedObjectContext
+        self.fallbackDisplayName = conversation.displayName
+        self._displayName = State(initialValue: conversation.displayName ?? "")
+    }
 
     private var timeString: String {
         guard let date = conversation.lastMessageDate else { return "" }
@@ -87,11 +101,14 @@ struct OptimizedConversationRow: View {
 
     private func loadContactInfo() async {
         let myEmail = authSession.userEmail ?? ""
+        guard let conversationContext else { return }
 
         let info = await participantLoader.loadParticipants(
-            from: conversation,
+            from: conversationObjectID,
+            in: conversationContext,
             currentUserEmail: myEmail,
-            maxParticipants: 4
+            maxParticipants: 4,
+            fallbackDisplayName: fallbackDisplayName
         )
 
         displayName = info.formattedDisplayName

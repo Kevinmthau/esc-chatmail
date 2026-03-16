@@ -25,11 +25,11 @@ struct ConversationSnapshot: Equatable {
 struct ConversationRowView: View {
     /// Use snapshot to avoid re-renders from unrelated Conversation property changes
     let snapshot: ConversationSnapshot
-    /// Keep reference for participant loading (but don't observe it)
-    let conversation: Conversation
 
     private let currentUserEmail: String
     private let participantLoader: ParticipantLoader
+    private let conversationObjectID: NSManagedObjectID
+    private let conversationContext: NSManagedObjectContext?
 
     @State private var displayName: String
     @State private var avatarPhotos: [ProfilePhoto] = []
@@ -38,12 +38,12 @@ struct ConversationRowView: View {
     @MainActor
     init(conversation: Conversation, deps: Dependencies? = nil) {
         let resolvedDeps = deps ?? Dependencies.shared
-        self.conversation = conversation
         self.snapshot = ConversationSnapshot(from: conversation)
         self.currentUserEmail = resolvedDeps.authSession.userEmail ?? ""
         self.participantLoader = resolvedDeps.participantLoader
-        // Initialize displayName with stored value to prevent flickering
-        self._displayName = State(initialValue: conversation.displayName ?? "")
+        self.conversationObjectID = conversation.objectID
+        self.conversationContext = conversation.managedObjectContext
+        self._displayName = State(initialValue: snapshot.displayNameHint ?? "")
     }
 
     var body: some View {
@@ -107,11 +107,16 @@ struct ConversationRowView: View {
     }
 
     private func loadContactInfo() async {
-        // Use ParticipantLoader for all participant resolution
+        guard let conversationContext else {
+            return
+        }
+
         let info = await participantLoader.loadParticipants(
-            from: conversation,
+            from: conversationObjectID,
+            in: conversationContext,
             currentUserEmail: currentUserEmail,
-            maxParticipants: 4
+            maxParticipants: 4,
+            fallbackDisplayName: snapshot.displayNameHint
         )
 
         displayName = info.formattedDisplayName

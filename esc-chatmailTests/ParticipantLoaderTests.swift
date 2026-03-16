@@ -52,6 +52,30 @@ final class ParticipantLoaderTests: XCTestCase {
         XCTAssertEqual(emails, ["tickets@sfballet.org"])
     }
 
+    func testLoadParticipants_deletedConversationObjectID_returnsFallback() async throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Fallback Name")
+            .build(in: context)
+        try context.save()
+
+        let conversationObjectID = conversation.objectID
+        context.delete(conversation)
+        try context.save()
+
+        let info = await ParticipantLoader.shared.loadParticipants(
+            from: conversationObjectID,
+            in: context,
+            currentUserEmail: "kmthau@gmail.com",
+            maxParticipants: 4,
+            fallbackDisplayName: "Fallback Name"
+        )
+
+        XCTAssertEqual(info.emails, [])
+        XCTAssertEqual(info.displayNames, [])
+        XCTAssertEqual(info.photos.count, 0)
+        XCTAssertEqual(info.formattedDisplayName, "Fallback Name")
+    }
+
     private func addConversationParticipant(person: Person, to conversation: Conversation) {
         let participant = ConversationParticipant(context: context)
         participant.id = UUID()
@@ -60,4 +84,3 @@ final class ParticipantLoaderTests: XCTestCase {
         participant.conversation = conversation
     }
 }
-

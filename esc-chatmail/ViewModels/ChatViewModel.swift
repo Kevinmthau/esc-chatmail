@@ -26,6 +26,9 @@ final class ChatViewModel: ObservableObject {
     private let syncEngine: SyncEngine
     private let authSession: AuthSession
     private let participantLoader: ParticipantLoader
+    private let conversationObjectID: NSManagedObjectID
+    private let conversationContext: NSManagedObjectContext?
+    private let conversationDisplayNameHint: String?
     private let processedTextCache: ProcessedTextCache
     private let contactsResolver: any ContactsResolving
     private var cancellables = Set<AnyCancellable>()
@@ -45,6 +48,9 @@ final class ChatViewModel: ObservableObject {
         self.syncEngine = dependencies.syncEngine
         self.authSession = dependencies.authSession
         self.participantLoader = dependencies.participantLoader
+        self.conversationObjectID = conversation.objectID
+        self.conversationContext = conversation.managedObjectContext
+        self.conversationDisplayNameHint = conversation.displayName
         self.processedTextCache = dependencies.processedTextCache
         self.contactsResolver = dependencies.contactsResolver
         self.messageActions = dependencies.makeMessageActions()
@@ -269,13 +275,20 @@ final class ChatViewModel: ObservableObject {
     func loadResolvedDisplayName() {
         prefetchTaskManager.run("displayName") { [weak self] in
             guard let self = self,
-                  let myEmail = authSession.userEmail else { return }
-            let info = await participantLoader.loadParticipants(
-                from: conversation,
+                  let myEmail = self.authSession.userEmail else { return }
+            guard let conversationContext = self.conversationContext else {
+                self.resolvedDisplayName = self.conversationDisplayNameHint
+                return
+            }
+
+            let info = await self.participantLoader.loadParticipants(
+                from: self.conversationObjectID,
+                in: conversationContext,
                 currentUserEmail: myEmail,
-                maxParticipants: 4
+                maxParticipants: 4,
+                fallbackDisplayName: self.conversationDisplayNameHint
             )
-            resolvedDisplayName = info.formattedDisplayName
+            self.resolvedDisplayName = info.formattedDisplayName
         }
     }
 }
