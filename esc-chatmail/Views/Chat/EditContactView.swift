@@ -61,14 +61,34 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
             try? await Task.sleep(nanoseconds: 300_000_000)
             guard let topVC = self.getTopViewController() else { return }
 
-            let contactIdentifier = existingContact.identifier
-            let normalizedEmailToAdd = emailToAdd.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let contactName = CNContactFormatter.string(from: existingContact, style: .fullName) ?? "this contact"
 
-            // Ensure we have enough data to update + re-display.
-            let keysToFetch: [CNKeyDescriptor] = [CNContactViewController.descriptorForRequiredKeys()]
+            // Show confirmation alert before saving
+            let confirmAlert = UIAlertController(
+                title: "Add Email",
+                message: "Add \(emailToAdd) to \(contactName)?",
+                preferredStyle: .alert
+            )
 
-            // Always write the update ourselves so the user doesn't need to find a "Save" button in the
-            // contact UI (which may not be present for some contact sources / permission modes).
+            confirmAlert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self] _ in
+                guard let self else { return }
+                self.performAddEmail(toContactIdentifier: existingContact.identifier, emailToAdd: emailToAdd, from: topVC)
+            })
+
+            confirmAlert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+            topVC.present(confirmAlert, animated: true)
+        }
+    }
+
+    private func performAddEmail(toContactIdentifier contactIdentifier: String, emailToAdd: String, from topVC: UIViewController) {
+        let normalizedEmailToAdd = emailToAdd.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        // Ensure we have enough data to update + re-display.
+        let keysToFetch: [CNKeyDescriptor] = [CNContactViewController.descriptorForRequiredKeys()]
+
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+
             let updateResult: Result<CNContact, Error> = await Task.detached(priority: .userInitiated) {
                 let contactStore = CNContactStore()
                 do {
@@ -108,8 +128,6 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
                     await PersonCache.shared.invalidateEntry(for: emailToAdd)
                 }
 
-                // Confirm to the user that the email was saved. "Save"/checkmark controls are not shown
-                // because we commit the change programmatically.
                 let alert = UIAlertController(
                     title: "Saved",
                     message: "Added \(emailToAdd) to this contact.",
@@ -123,7 +141,6 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
                     contactVC.contactStore = CNContactStore()
                     contactVC.delegate = self
                     contactVC.allowsEditing = true
-                    // Ensure the Edit/Done control exists even when presented modally.
                     contactVC.navigationItem.rightBarButtonItem = contactVC.editButtonItem
                     contactVC.navigationItem.leftBarButtonItem = UIBarButtonItem(
                         barButtonSystemItem: .close,
