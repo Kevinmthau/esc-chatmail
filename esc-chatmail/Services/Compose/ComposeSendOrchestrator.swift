@@ -82,7 +82,6 @@ struct ComposeSendOrchestrator {
         // Send in background - don't wait for completion
         return Task.detached(priority: .userInitiated) {
             do {
-                try Task.checkCancellation()
                 let result: GmailSendService.SendResult
 
                 if let replyData = input.replyData {
@@ -106,7 +105,6 @@ struct ComposeSendOrchestrator {
                         inlineAttachmentInfos: input.inlineAttachmentInfos
                     )
                 }
-                try Task.checkCancellation()
 
                 // Update optimistic message with real IDs (on MainActor to avoid Sendable issues)
                 await MainActor.run {
@@ -114,6 +112,14 @@ struct ComposeSendOrchestrator {
                         sendService.updateOptimisticMessage(message, with: result)
                     }
                     sendService.markAttachmentsAsUploaded(attachments)
+                }
+
+                if Task.isCancelled {
+                    Log.info(
+                        "Background send completed after cancellation for optimistic message \(optimisticMessageID); skipping post-send sync",
+                        category: .message
+                    )
+                    return
                 }
 
                 // Trigger sync to fetch the sent message from Gmail
@@ -125,6 +131,12 @@ struct ComposeSendOrchestrator {
                     Log.warning("Post-send sync failed - sent message will appear on next sync: \(error.localizedDescription)", category: .sync)
                 }
             } catch is CancellationError {
+                await MainActor.run {
+                    sendService.handleFailedOptimisticMessage(
+                        byID: optimisticMessageID,
+                        fallbackAttachments: attachments
+                    )
+                }
                 Log.info("Background send cancelled for optimistic message \(optimisticMessageID)", category: .message)
             } catch {
                 // Clean up optimistic state using the same failure policy as the chat reply path.

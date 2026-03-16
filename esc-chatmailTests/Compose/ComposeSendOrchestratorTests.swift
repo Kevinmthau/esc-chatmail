@@ -69,6 +69,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
         let snapshot = sendService.snapshot
         XCTAssertEqual(snapshot.sendNewCalls, 1)
+        XCTAssertEqual(snapshot.handleFailedCalls, 1)
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 0)
     }
 
