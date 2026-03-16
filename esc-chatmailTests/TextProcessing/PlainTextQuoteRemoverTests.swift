@@ -324,6 +324,26 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(result, "Let me know if you need anything else.")
     }
 
+    func testRemoveSignature_signOffWithPostscript_preserved() {
+        let text = """
+        Hi Kevin,
+
+        Please find attached an invoice for planning services and cancellation support.
+
+        Upon approval, we will charge the card on file.
+
+        Best,
+        Janet
+
+        P.S. one more thing.
+        """
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+        XCTAssertEqual(
+            result,
+            "Hi Kevin,\n\nPlease find attached an invoice for planning services and cancellation support.\n\nUpon approval, we will charge the card on file.\n\nBest,\nJanet\n\nP.S. one more thing."
+        )
+    }
+
     func testRemoveSignature_singleTrailingURLWithoutSignatureContext_preserved() {
         let text = """
         Here is the link you asked for:

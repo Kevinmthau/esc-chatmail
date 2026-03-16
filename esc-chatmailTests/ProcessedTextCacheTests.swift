@@ -546,4 +546,16 @@ final class ProcessedTextCacheTests: XCTestCase {
         // "See" ends without punctuation, "you" starts lowercase → should join
         XCTAssertTrue(result.contains("See you Wednesday"), "Should join lines split mid-sentence")
     }
+
+    func testUnwrapEmailLineBreaks_preservesSignOffAndNameFromDivWrappedHTML() {
+        let html = "<div>Upon approval, we will charge the card on file.</div><div>Best,</div><div>Janet</div><div>P.S. one more thing.</div>"
+
+        let extracted = TextProcessing.extractPlainText(from: html)
+        let result = TextProcessing.unwrapEmailLineBreaks(from: extracted)
+
+        XCTAssertEqual(
+            result,
+            "Upon approval, we will charge the card on file.\n\nBest,\nJanet\n\nP.S. one more thing."
+        )
+    }
 }

@@ -530,4 +530,82 @@ final class HTMLQuoteRemoverTests: XCTestCase {
         XCTAssertFalse(quotedAndSignatures?.contains("cid:image001.png@01DC96AF.8C2488C0") ?? true)
         XCTAssertTrue(quotedAndSignatures?.contains("Hope everyone had a good week!") ?? false)
     }
+
+    func testRemoveQuotes_quotedAndSignaturesMode_removesNestedGmailSignatureBlockPreservingSignOffAndTail() {
+        let html = """
+        <div dir="ltr">
+            <div class="gmail_default">Hi Kevin,</div>
+            <div class="gmail_default"><br></div>
+            <div class="gmail_default">Please find attached an invoice for planning services and cancellation support.</div>
+            <div class="gmail_default"><br></div>
+            <div class="gmail_default">Upon approval, we will charge the card on file.</div>
+        </div>
+        <div dir="ltr" class="gmail_signature" data-smartmail="gmail_signature">
+            <div dir="ltr">
+                <div>Best,<br>Janet</div>
+                <div>
+                    <table cellpadding="0" cellspacing="0" border="0">
+                        <tbody>
+                            <tr>
+                                <td style="text-align:center">
+                                    <a href="https://example.com/feature">Feature story</a>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><img src="https://example.com/signature/top.jpg" width="520"></td>
+                            </tr>
+                            <tr>
+                                <td>
+                                    <table cellpadding="0" cellspacing="20" border="0">
+                                        <tbody>
+                                            <tr>
+                                                <td>
+                                                    <h2>Janet Example</h2>
+                                                    <p>COO / Partner</p>
+                                                    <p>Example Travel</p>
+                                                </td>
+                                                <td width="0"><div></div></td>
+                                                <td>
+                                                    <table cellpadding="0" cellspacing="0" border="0">
+                                                        <tbody>
+                                                            <tr>
+                                                                <td width="30"><img src="https://example.com/signature/phone.png" width="13"></td>
+                                                                <td>617.221.4242 x100</td>
+                                                            </tr>
+                                                            <tr>
+                                                                <td width="30"><img src="https://example.com/signature/email.png" width="13"></td>
+                                                                <td><a href="mailto:janet@exampletravel.com">janet@exampletravel.com</a></td>
+                                                            </tr>
+                                                            <tr>
+                                                                <td width="30"><img src="https://example.com/signature/web.png" width="13"></td>
+                                                                <td><a href="https://exampletravel.com">exampletravel.com</a></td>
+                                                            </tr>
+                                                        </tbody>
+                                                    </table>
+                                                </td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        <div class="gmail_default">P.S. one more thing.</div>
+        """
+
+        let result = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures)
+
+        XCTAssertTrue(result?.contains("Please find attached an invoice for planning services and cancellation support.") ?? false)
+        XCTAssertTrue(result?.contains("Upon approval, we will charge the card on file.") ?? false)
+        XCTAssertTrue(result?.contains("Best,") ?? false)
+        XCTAssertTrue(result?.contains("Janet") ?? false)
+        XCTAssertTrue(result?.contains("P.S. one more thing.") ?? false)
+        XCTAssertFalse(result?.contains("Feature story") ?? true)
+        XCTAssertFalse(result?.contains("janet@exampletravel.com") ?? true)
+        XCTAssertFalse(result?.contains("exampletravel.com") ?? true)
+        XCTAssertFalse(result?.contains("gmail_signature") ?? true)
+    }
 }

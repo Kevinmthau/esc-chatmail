@@ -95,6 +95,15 @@ enum HTMLQuoteRemover {
         "-----Original Message-----",
     ]
 
+    /// Signature wrapper patterns that need block-aware removal because nested divs
+    /// can defeat simple regex-based stripping.
+    private static let signatureWrapperPatternStrings = [
+        "<div[^>]*class=\"[^\"]*gmail_signature_prefix[^\"]*\"[^>]*>",
+        "<div[^>]*class=\"[^\"]*gmail_signature[^\"]*\"[^>]*>",
+        "<div[^>]*data-smartmail=\"gmail_signature\"[^>]*>",
+        "<div[^>]*(?:id|class)=\"[^\"]*ms-outlook-mobile-signature[^\"]*\"[^>]*>"
+    ]
+
     /// Signature/footer text patterns. These are applied only in
     /// `.quotedAndSignatures` mode.
     private static let signatureTextTruncationPatternStrings = [
@@ -169,6 +178,13 @@ enum HTMLQuoteRemover {
         }
     }()
 
+    /// Pre-compiled signature wrapper patterns.
+    private static let compiledSignatureWrapperPatterns: [NSRegularExpression] = {
+        signatureWrapperPatternStrings.compactMap {
+            try? NSRegularExpression(pattern: $0, options: [.caseInsensitive, .dotMatchesLineSeparators])
+        }
+    }()
+
     /// Pre-compiled text-based truncation patterns (checked only if no structural boundary found)
     private static let compiledTextBasedTruncationPatterns: [NSRegularExpression] = {
         textBasedTruncationPatternStrings.compactMap {
@@ -197,11 +213,6 @@ enum HTMLQuoteRemover {
         // Remove quote block patterns using pre-compiled regex.
         cleanedHTML = removePatterns(compiledQuotedBlockPatterns, from: cleanedHTML)
 
-        // Optionally remove signature/footer block patterns.
-        if mode == .quotedAndSignatures {
-            cleanedHTML = removePatterns(compiledSignatureBlockPatterns, from: cleanedHTML)
-        }
-
         // Two-pass truncation approach:
         // 1. First check structural patterns (definitive quote boundaries like Outlook containers)
         // 2. Only apply text-based patterns if no structural boundary was found
@@ -216,6 +227,8 @@ enum HTMLQuoteRemover {
         }
 
         if mode == .quotedAndSignatures {
+            cleanedHTML = removeSignatureWrapperBlocks(from: cleanedHTML)
+            cleanedHTML = removePatterns(compiledSignatureBlockPatterns, from: cleanedHTML)
             cleanedHTML = truncateAtPatterns(compiledSignatureTextTruncationPatterns, in: cleanedHTML)
         }
 
@@ -278,5 +291,205 @@ enum HTMLQuoteRemover {
             return (String(text[..<position]), true)
         }
         return (text, false)
+    }
+
+    /// Removes nested signature wrapper divs without truncating later siblings.
+    /// If the wrapper starts with a lightweight sign-off like "Best,\nJanet",
+    /// preserve that prefix while stripping the heavier signature payload.
+    private static func removeSignatureWrapperBlocks(from html: String) -> String {
+        var result = html
+        var searchRange = result.startIndex..<result.endIndex
+
+        while let match = earliestMatch(of: compiledSignatureWrapperPatterns, in: result, range: searchRange),
+              let matchRange = Range(match.range, in: result) {
+            let wrapperStart = matchRange.lowerBound
+            guard let wrapperEnd = findMatchingClosingDiv(in: result, from: wrapperStart) else {
+                searchRange = matchRange.upperBound..<result.endIndex
+                continue
+            }
+            let startOffset = result.distance(from: result.startIndex, to: wrapperStart)
+            let blockHTML = String(result[wrapperStart..<wrapperEnd])
+            let replacement = preservedSignOffHTML(fromSignatureBlock: blockHTML)
+
+            result.replaceSubrange(wrapperStart..<wrapperEnd, with: replacement)
+
+            let nextOffset = min(startOffset + replacement.count, result.count)
+            let nextIndex = result.index(result.startIndex, offsetBy: nextOffset)
+            searchRange = nextIndex..<result.endIndex
+        }
+
+        return result
+    }
+
+    private static func earliestMatch(
+        of patterns: [NSRegularExpression],
+        in text: String,
+        range: Range<String.Index>
+    ) -> NSTextCheckingResult? {
+        let searchRange = NSRange(range, in: text)
+        var earliest: NSTextCheckingResult?
+
+        for regex in patterns {
+            guard let match = regex.firstMatch(in: text, options: [], range: searchRange) else { continue }
+            if earliest == nil || match.range.location < earliest!.range.location {
+                earliest = match
+            }
+        }
+
+        return earliest
+    }
+
+    private static func preservedSignOffHTML(fromSignatureBlock blockHTML: String) -> String {
+        let extracted = HTMLEntityDecoder.decode(TextProcessing.extractPlainText(from: blockHTML))
+        var lines = extracted
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        if lines.first == "--" {
+            lines.removeFirst()
+        }
+
+        guard !lines.isEmpty else { return "" }
+
+        if isLikelyCombinedSignOffAndNameLine(lines[0]) {
+            return "<div>\(escapedHTML(lines[0]))</div>"
+        }
+
+        guard isLikelySignOffLine(lines[0]) else { return "" }
+
+        var preserved = [lines[0]]
+        if lines.count > 1, looksLikeNameLine(lines[1]) {
+            preserved.append(lines[1])
+        }
+
+        return preserved
+            .map { "<div>\(escapedHTML($0))</div>" }
+            .joined()
+    }
+
+    private static func isLikelySignOffLine(_ line: String) -> Bool {
+        let normalized = line
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: .punctuationCharacters)
+
+        let signOffs = [
+            "all the best",
+            "best",
+            "best regards",
+            "best wishes",
+            "cheers",
+            "kind regards",
+            "many thanks",
+            "regards",
+            "sincerely",
+            "thank you",
+            "thanks",
+            "warm regards",
+            "warmly",
+            "yours truly"
+        ]
+
+        return signOffs.contains(normalized)
+    }
+
+    private static func isLikelyCombinedSignOffAndNameLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count <= 60 else { return false }
+
+        let lowercased = trimmed.lowercased()
+        let signOffs = [
+            "all the best",
+            "best regards",
+            "best wishes",
+            "best",
+            "cheers",
+            "kind regards",
+            "many thanks",
+            "regards",
+            "sincerely",
+            "thank you",
+            "thanks",
+            "warm regards",
+            "warmly",
+            "yours truly"
+        ]
+
+        for signOff in signOffs {
+            for separator in [",", " "] {
+                let prefix = signOff + separator
+                guard lowercased.hasPrefix(prefix) else { continue }
+                let remainder = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                return looksLikeNameLine(String(remainder))
+            }
+        }
+
+        return false
+    }
+
+    private static func looksLikeNameLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 40 else { return false }
+        guard trimmed.rangeOfCharacter(from: .letters) != nil else { return false }
+        guard trimmed.rangeOfCharacter(from: .decimalDigits) == nil else { return false }
+
+        let lowercased = trimmed.lowercased()
+        let disallowedFragments = ["@", "http", "www.", "|", "tel:", "fax", "mobile", "office", "cell", "phone"]
+        guard !disallowedFragments.contains(where: { lowercased.contains($0) }) else { return false }
+
+        let words = trimmed.split(whereSeparator: \.isWhitespace)
+        guard (1...4).contains(words.count) else { return false }
+
+        return true
+    }
+
+    private static func escapedHTML(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+    }
+
+    private static func findMatchingClosingDiv(in html: String, from start: String.Index) -> String.Index? {
+        var depth = 0
+        var searchIndex = start
+
+        while searchIndex < html.endIndex {
+            let nextOpen = html.range(of: "<div", options: .caseInsensitive, range: searchIndex..<html.endIndex)
+            let nextClose = html.range(of: "</div", options: .caseInsensitive, range: searchIndex..<html.endIndex)
+
+            switch (nextOpen, nextClose) {
+            case let (open?, close?):
+                if open.lowerBound < close.lowerBound {
+                    depth += 1
+                    searchIndex = open.upperBound
+                } else {
+                    depth -= 1
+                    guard let closeTagEnd = html[close.lowerBound...].firstIndex(of: ">") else { return nil }
+                    let afterClose = html.index(after: closeTagEnd)
+                    searchIndex = afterClose
+                    if depth == 0 {
+                        return afterClose
+                    }
+                }
+            case let (open?, nil):
+                depth += 1
+                searchIndex = open.upperBound
+            case let (nil, close?):
+                depth -= 1
+                guard let closeTagEnd = html[close.lowerBound...].firstIndex(of: ">") else { return nil }
+                let afterClose = html.index(after: closeTagEnd)
+                searchIndex = afterClose
+                if depth == 0 {
+                    return afterClose
+                }
+            case (nil, nil):
+                return nil
+            }
+        }
+
+        return nil
     }
 }

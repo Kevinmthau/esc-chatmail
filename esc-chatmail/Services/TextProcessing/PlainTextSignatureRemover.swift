@@ -190,6 +190,10 @@ enum PlainTextSignatureRemover {
         }
         guard lastNonEmpty >= 0 else { return "" }
 
+        if preservesPostscriptAfterSignOff(lines: lines, lastNonEmpty: lastNonEmpty) {
+            return trimmed
+        }
+
         let scanStart = max(0, lastNonEmpty - trailingScanLineLimit)
         let nonEmptyLineCount = lines.reduce(into: 0) { count, line in
             if !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -275,6 +279,11 @@ enum PlainTextSignatureRemover {
         }
 
         if let startLine = signatureStartLine {
+            if contactSignals == 0 &&
+                signatureSupportSignals == 0 &&
+                hasBodyLikeContentAfterPotentialSignOff(startingAt: startLine, lines: lines, lastNonEmpty: lastNonEmpty) {
+                return trimmed
+            }
             let totalChars = trimmed.count
             if contactSignals == 0 && nonEmptyLineCount <= 4 && totalChars < 180 {
                 return trimmed
@@ -630,6 +639,86 @@ enum PlainTextSignatureRemover {
         }
 
         return false
+    }
+
+    private static func preservesPostscriptAfterSignOff(lines: [String], lastNonEmpty: Int) -> Bool {
+        guard isPostscriptLine(lines[lastNonEmpty].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) else {
+            return false
+        }
+
+        guard let nameIndex = previousNonEmptyLineIndex(before: lastNonEmpty, in: lines),
+              let signOffIndex = previousNonEmptyLineIndex(before: nameIndex, in: lines) else {
+            return false
+        }
+
+        let nameLine = lines[nameIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+        let signOffLine = lines[signOffIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let isNameLine =
+            matchesRegex(singleNamePattern, in: nameLine) ||
+            matchesRegex(multiWordNamePattern, in: nameLine)
+
+        return isNameLine && isSignOffLine(signOffLine.lowercased())
+    }
+
+    private static func hasBodyLikeContentAfterPotentialSignOff(
+        startingAt startLine: Int,
+        lines: [String],
+        lastNonEmpty: Int
+    ) -> Bool {
+        var sawSignOffLikeLine = false
+
+        for index in startLine...lastNonEmpty {
+            let line = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty else { continue }
+
+            let lowercased = line.lowercased()
+            let isNameLine =
+                matchesRegex(singleNamePattern, in: line) ||
+                matchesRegex(multiWordNamePattern, in: line)
+            let isPotentialSignOffLine =
+                isSignOffLine(lowercased) ||
+                isNameLine ||
+                isDelimiterLine(line)
+
+            if isPotentialSignOffLine {
+                sawSignOffLikeLine = true
+                continue
+            }
+
+            guard sawSignOffLikeLine else { return false }
+
+            if isPostscriptLine(lowercased) {
+                return true
+            }
+
+            let evaluation = evaluateLine(line)
+            return !evaluation.isHardIndicator &&
+                !evaluation.hasContactInfo &&
+                !evaluation.isLikelySignatureLine &&
+                !isLikelySignatureContinuation(line)
+        }
+
+        return false
+    }
+
+    private static func previousNonEmptyLineIndex(before index: Int, in lines: [String]) -> Int? {
+        var probe = index - 1
+        while probe >= 0 {
+            if !lines[probe].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return probe
+            }
+            probe -= 1
+        }
+        return nil
+    }
+
+    private static func isPostscriptLine(_ lowercased: String) -> Bool {
+        let trimmed = lowercased.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.hasPrefix("p.s.") ||
+            trimmed.hasPrefix("p.s:") ||
+            trimmed.hasPrefix("ps.") ||
+            trimmed.hasPrefix("ps:")
     }
 
     private static func shouldContinueAcrossBlankLine(

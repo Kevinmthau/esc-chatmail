@@ -282,6 +282,11 @@ enum TextProcessing {
             if currentParagraph.isEmpty {
                 currentParagraph = trimmedLine
             } else {
+                if shouldPreserveLineBreakBetween(currentParagraph, and: trimmedLine) {
+                    currentParagraph += "\n" + trimmedLine
+                    continue
+                }
+
                 // Check if this looks like a continuation (soft wrap) or new paragraph
                 let lastChar = currentParagraph.last
                 let firstChar = trimmedLine.first
@@ -322,6 +327,42 @@ enum TextProcessing {
         // Filter out empty strings and join with double newlines for paragraph breaks
         let paragraphs = result.filter { !$0.isEmpty }
         return paragraphs.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func shouldPreserveLineBreakBetween(_ currentParagraph: String, and nextLine: String) -> Bool {
+        guard let currentLine = currentParagraph
+            .components(separatedBy: "\n")
+            .last?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              isStandaloneSignOffLine(currentLine),
+              looksLikeNameLine(nextLine) else {
+            return false
+        }
+
+        return true
+    }
+
+    private static func isStandaloneSignOffLine(_ line: String) -> Bool {
+        let normalized = line
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: .punctuationCharacters)
+
+        return signOffWords.contains(normalized)
+    }
+
+    private static func looksLikeNameLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 40 else { return false }
+        guard trimmed.rangeOfCharacter(from: .letters) != nil else { return false }
+        guard trimmed.rangeOfCharacter(from: .decimalDigits) == nil else { return false }
+
+        let lowercased = trimmed.lowercased()
+        let disallowedFragments = ["@", "http", "www.", "|", "tel:", "fax", "mobile", "office", "cell", "phone"]
+        guard !disallowedFragments.contains(where: { lowercased.contains($0) }) else { return false }
+
+        let words = trimmed.split(whereSeparator: \.isWhitespace)
+        return (1...4).contains(words.count)
     }
 
     private static func isSignatureDelimiterLine(_ line: String) -> Bool {
