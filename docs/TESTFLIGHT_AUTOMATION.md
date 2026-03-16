@@ -31,7 +31,7 @@ If none of the xcconfig secrets are set, pull request test jobs fall back to pla
 
 1. In App Store Connect, enable API access for your team if it is not already enabled.
 2. Generate an App Store Connect API key and save the `.p8` file immediately. Apple only lets you download it once.
-3. Confirm the `com.esc.inboxchat` App ID and App Store provisioning profile exist for team `3JXY2MS2Y3`.
+3. Confirm the `com.esc.inboxchat` App ID exists for team `3JXY2MS2Y3`.
 4. Ensure the API key has enough access for cloud signing and TestFlight upload. If cloud signing is restricted on your team, an Account Holder or Admin may need to grant access or perform the first signing setup.
 
 ## Secret Preparation Commands
@@ -48,15 +48,15 @@ If your debug and release configs differ, create separate `DEBUG_XCCONFIG` and `
 
 1. Writes CI xcconfig files into `esc-chatmail/Configuration/`.
 2. Runs `bash Scripts/run-tests.sh -skip-testing esc-chatmailUITests`.
-3. Downloads the App Store provisioning profile for `com.esc.inboxchat`.
-4. Archives the app with a UTC timestamp build number.
-5. Uses Xcode automatic signing plus the App Store Connect API key for cloud signing during export.
-6. Exports a signed `.ipa`.
-7. Uploads that `.ipa` to TestFlight.
+3. Archives the app with a UTC timestamp build number.
+4. Uses Xcode automatic signing plus the App Store Connect API key for cloud signing during archive/export.
+5. Exports a signed `.ipa`.
+6. Uploads that `.ipa` to TestFlight.
 
 ## Notes
 
 - The build number is generated from UTC time in `YYYYMMDDHHMMSS` format to avoid duplicate TestFlight uploads.
 - `CFBundleShortVersionString` and `CFBundleVersion` now resolve from `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION`, so CI can inject a unique build number without editing tracked files.
 - This setup intentionally avoids storing a distribution `.p12` in GitHub. It relies on Xcode cloud signing via `-allowProvisioningUpdates` and App Store Connect API key authentication.
+- The workflow does not pre-download a provisioning profile. Xcode is expected to resolve or create the managed App Store profile during archive/export.
 - If the release job fails immediately with a missing-secret message, finish the GitHub secret setup first.

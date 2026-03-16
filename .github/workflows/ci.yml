@@ -82,15 +82,6 @@ jobs:
           printf '%s' "${ASC_API_PRIVATE_KEY}" > "${key_path}"
           echo "ASC_KEY_PATH=${key_path}" >> "${GITHUB_ENV}"
 
-      - name: Download App Store provisioning profile
-        uses: Apple-Actions/download-provisioning-profiles@v1
-        with:
-          bundle-id: com.esc.inboxchat
-          profile-type: IOS_APP_STORE
-          issuer-id: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-          api-key-id: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-          api-private-key: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
-
       - name: Compute build number
         run: echo "BUILD_NUMBER=$(date -u +%Y%m%d%H%M%S)" >> "${GITHUB_ENV}"
 
