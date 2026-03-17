@@ -31,6 +31,7 @@ final class ChatViewModel: ObservableObject {
     private let conversationDisplayNameHint: String?
     private let processedTextCache: ProcessedTextCache
     private let contactsResolver: any ContactsResolving
+    private let replyMetadataBuilder: ReplyMetadataBuilder
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Task Management
@@ -53,6 +54,7 @@ final class ChatViewModel: ObservableObject {
         self.conversationDisplayNameHint = conversation.displayName
         self.processedTextCache = dependencies.processedTextCache
         self.contactsResolver = dependencies.contactsResolver
+        self.replyMetadataBuilder = dependencies.makeReplyMetadataBuilder()
         self.messageActions = dependencies.makeMessageActions()
         self.sendService = dependencies.makeSendService()
         self.contactManager = dependencies.makeChatContactManager()
@@ -158,12 +160,10 @@ final class ChatViewModel: ObservableObject {
         let trimmedReplyText = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedReplyText.isEmpty || !attachments.isEmpty else { return }
 
-        let replyData = ChatReplyBar.ReplyData(
-            from: conversation,
+        let replyData = replyMetadataBuilder.buildReplyData(
+            conversation: conversation,
             replyingTo: replyingTo,
-            body: trimmedReplyText,
-            attachments: attachments,
-            currentUserEmail: authSession.userEmail ?? ""
+            body: trimmedReplyText
         )
 
         guard !replyData.recipients.isEmpty else { return }
@@ -185,62 +185,34 @@ final class ChatViewModel: ObservableObject {
         let optimisticMessageID = optimisticMessage.id
         let sendService = self.sendService
         let attachmentInfos = attachments.map { sendService.attachmentToInfo($0) }
+        let orchestratorReplyData = ComposeSendOrchestrator.SendInput.ReplyData(replyData)
 
         // Clear composer immediately after optimistic insertion.
         replyText = ""
         replyingTo = nil
 
-        let recipients = replyData.recipients
-        let subject = replyData.subject
-        let threadId = replyData.threadId
-        let inReplyTo = replyData.inReplyTo
-        let references = replyData.references
-        let originalMessage = replyData.originalMessage
         let syncEngine = self.syncEngine
         let taskManager = self.taskManager
 
         taskManager.run("sendReply-\(optimisticMessageID)", priority: .userInitiated) {
-            do {
-                let result: GmailSendService.SendResult
-
-                if let subject, let threadId, !threadId.isEmpty {
-                    result = try await sendService.sendReply(
-                        to: recipients,
-                        body: trimmedReplyText,
-                        subject: subject,
-                        threadId: threadId,
-                        inReplyTo: inReplyTo,
-                        references: references,
-                        originalMessage: originalMessage,
-                        attachmentInfos: attachmentInfos
-                    )
-                } else {
-                    result = try await sendService.sendNew(
-                        to: recipients,
-                        body: trimmedReplyText,
-                        attachmentInfos: attachmentInfos
-                    )
-                }
-
-                if let optimisticMessage = await sendService.fetchMessage(byID: optimisticMessageID) {
-                    sendService.updateOptimisticMessage(optimisticMessage, with: result)
-                    sendService.markAttachmentsAsUploaded(optimisticMessage.attachmentsArray)
-                }
-
-                // Trigger sync to fetch server canonical data. Failure is non-critical.
-                taskManager.runDetached("postSendSync-\(optimisticMessageID)") {
-                    do {
-                        try await syncEngine.performIncrementalSync()
-                    } catch {
-                        Log.warning("Post-send sync failed - sent message will appear on next sync: \(error.localizedDescription)", category: .sync)
-                    }
-                }
-            } catch {
-                if let optimisticMessage = await sendService.fetchMessage(byID: optimisticMessageID) {
-                    sendService.handleFailedOptimisticMessage(optimisticMessage)
-                }
-                Log.error("Failed to send reply", category: .message, error: error)
-            }
+            let orchestrator = ComposeSendOrchestrator(
+                sendService: sendService,
+                syncPerformer: syncEngine
+            )
+            let backgroundTask = orchestrator.executeInBackground(
+                input: ComposeSendOrchestrator.SendInput(
+                    recipientEmails: replyData.recipients,
+                    body: trimmedReplyText,
+                    htmlBody: nil,
+                    subject: replyData.subject,
+                    attachmentInfos: attachmentInfos,
+                    inlineAttachmentInfos: [],
+                    replyData: orchestratorReplyData
+                ),
+                attachments: attachments,
+                optimisticMessageID: optimisticMessageID
+            )
+            _ = await backgroundTask.result
         }
     }
 

@@ -17,6 +17,8 @@ actor MessagePersister {
     let messageProcessor: MessageProcessor
     let htmlContentHandler: HTMLContentHandler
     let conversationManager: ConversationManager
+    let conversationRouter: MessageConversationRouter
+    let photoPrefetcher: @Sendable ([String]) async -> Void
 
     // MARK: - Initialization
 
@@ -24,12 +26,20 @@ actor MessagePersister {
         coreDataStack: CoreDataStack = .shared,
         messageProcessor: MessageProcessor = MessageProcessor(),
         htmlContentHandler: HTMLContentHandler = HTMLContentHandler(),
-        conversationManager: ConversationManager = ConversationManager()
+        conversationManager: ConversationManager = ConversationManager(),
+        conversationRouter: MessageConversationRouter? = nil,
+        photoPrefetcher: (@Sendable ([String]) async -> Void)? = nil
     ) {
         self.coreDataStack = coreDataStack
         self.messageProcessor = messageProcessor
         self.htmlContentHandler = htmlContentHandler
         self.conversationManager = conversationManager
+        self.conversationRouter = conversationRouter ?? MessageConversationRouter(
+            conversationManager: conversationManager
+        )
+        self.photoPrefetcher = photoPrefetcher ?? { emails in
+            await ProfilePhotoResolver.shared.prefetchPhotos(for: emails)
+        }
     }
 
     // MARK: - Message Persistence

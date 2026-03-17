@@ -280,15 +280,7 @@ final class ComposeViewModel: ObservableObject {
                 replyingTo: replyingTo,
                 body: userMessageBody
             )
-            orchestratorReplyData = ComposeSendOrchestrator.SendInput.ReplyData(
-                recipients: replyData.recipients,
-                body: replyData.body,
-                subject: replyData.subject,
-                threadId: replyData.threadId,
-                inReplyTo: replyData.inReplyTo,
-                references: replyData.references,
-                originalMessage: replyData.originalMessage
-            )
+            orchestratorReplyData = ComposeSendOrchestrator.SendInput.ReplyData(replyData)
         default:
             orchestratorReplyData = nil
         }

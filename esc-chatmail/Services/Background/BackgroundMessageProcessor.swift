@@ -1,6 +1,14 @@
 import Foundation
 import CoreData
 
+protocol BackgroundSyncMessageCoordinating: AnyObject, Sendable {
+    func prefetchLabelIdsForBackground(in context: NSManagedObjectContext) async -> Set<String>
+    func saveMessage(_ gmailMessage: GmailMessage, labelIds: Set<String>?, in context: NSManagedObjectContext) async
+    func updateConversationRollups(in context: NSManagedObjectContext) async
+}
+
+extension SyncEngine: BackgroundSyncMessageCoordinating {}
+
 /// Categorized history changes for background sync processing.
 struct BackgroundHistoryChangeSet {
     let messageIdsToFetch: Set<String>
@@ -9,27 +17,80 @@ struct BackgroundHistoryChangeSet {
 
 /// Handles message fetching, storing, and deletion for background sync
 final class BackgroundMessageProcessor {
-    private let coreDataStack: CoreDataStack
-    @MainActor private var syncEngine: SyncEngine { SyncEngine.shared }
-    @MainActor private var apiClient: GmailAPIClient { GmailAPIClient.shared }
+    private let makeBackgroundContext: @Sendable () -> NSManagedObjectContext
+    private let saveContext: @Sendable (NSManagedObjectContext) -> Bool
+    private let apiClientProvider: @MainActor @Sendable () -> GmailAPIClientProtocol
+    private let syncCoordinatorProvider: @MainActor @Sendable () -> BackgroundSyncMessageCoordinating
 
-    init(coreDataStack: CoreDataStack = .shared) {
-        self.coreDataStack = coreDataStack
+    @MainActor private var apiClient: GmailAPIClientProtocol {
+        apiClientProvider()
+    }
+
+    @MainActor private var syncCoordinator: BackgroundSyncMessageCoordinating {
+        syncCoordinatorProvider()
+    }
+
+    init(
+        coreDataStack: CoreDataStack = .shared,
+        apiClient: GmailAPIClientProtocol? = nil,
+        syncCoordinator: BackgroundSyncMessageCoordinating? = nil
+    ) {
+        self.makeBackgroundContext = { coreDataStack.newBackgroundContext() }
+        self.saveContext = { coreDataStack.saveIfNeeded(context: $0) }
+        self.apiClientProvider = { apiClient ?? GmailAPIClient.shared }
+        self.syncCoordinatorProvider = { syncCoordinator ?? SyncEngine.shared }
+    }
+
+    init(
+        coreDataStack: CoreDataStack = .shared,
+        apiClientProvider: @escaping @MainActor @Sendable () -> GmailAPIClientProtocol,
+        syncCoordinatorProvider: @escaping @MainActor @Sendable () -> BackgroundSyncMessageCoordinating = {
+            SyncEngine.shared
+        }
+    ) {
+        self.makeBackgroundContext = { coreDataStack.newBackgroundContext() }
+        self.saveContext = { coreDataStack.saveIfNeeded(context: $0) }
+        self.apiClientProvider = apiClientProvider
+        self.syncCoordinatorProvider = syncCoordinatorProvider
+    }
+
+    init(
+        makeBackgroundContext: @escaping @Sendable () -> NSManagedObjectContext,
+        saveContext: @escaping @Sendable (NSManagedObjectContext) -> Bool,
+        apiClient: GmailAPIClientProtocol,
+        syncCoordinator: BackgroundSyncMessageCoordinating
+    ) {
+        self.makeBackgroundContext = makeBackgroundContext
+        self.saveContext = saveContext
+        self.apiClientProvider = { apiClient }
+        self.syncCoordinatorProvider = { syncCoordinator }
     }
 
     /// Processes history changes and categorizes them
-    func processHistoryChanges(histories: [HistoryRecord]) async {
-        let context = coreDataStack.newBackgroundContext()
-
+    func processHistoryChanges(
+        histories: [HistoryRecord],
+        in context: NSManagedObjectContext? = nil
+    ) async {
+        let context = context ?? makeBackgroundContext()
         let changeSet = Self.buildChangeSet(from: histories)
 
-        await deleteMessages(messageIds: Array(changeSet.messageIdsToDelete), in: context)
-
-        if !changeSet.messageIdsToFetch.isEmpty {
-            await fetchAndStoreMessages(messageIds: Array(changeSet.messageIdsToFetch))
+        if !changeSet.messageIdsToDelete.isEmpty {
+            await deleteMessages(messageIds: Array(changeSet.messageIdsToDelete), in: context)
+            _ = saveContext(context)
         }
 
-        coreDataStack.saveIfNeeded(context: context)
+        if !changeSet.messageIdsToFetch.isEmpty {
+            await fetchAndStoreMessages(
+                messageIds: Array(changeSet.messageIdsToFetch),
+                in: context
+            )
+        }
+
+        if !changeSet.messageIdsToDelete.isEmpty || !changeSet.messageIdsToFetch.isEmpty {
+            let syncCoordinator = await MainActor.run { self.syncCoordinator }
+            await syncCoordinator.updateConversationRollups(in: context)
+            _ = saveContext(context)
+        }
     }
 
     /// Builds fetch/delete sets from history records.
@@ -77,11 +138,17 @@ final class BackgroundMessageProcessor {
     }
 
     /// Fetches messages from the API and stores them in Core Data
-    func fetchAndStoreMessages(messageIds: [String]) async {
-        let context = coreDataStack.newBackgroundContext()
+    func fetchAndStoreMessages(
+        messageIds: [String],
+        in context: NSManagedObjectContext? = nil
+    ) async {
+        let ownsContext = context == nil
+        let context = context ?? makeBackgroundContext()
+        let syncCoordinator = await MainActor.run { self.syncCoordinator }
+        let apiClient = await MainActor.run { self.apiClient }
 
         // Prefetch label IDs for efficient lookups (IDs are Sendable, safe to pass across async boundaries)
-        let labelIds = await syncEngine.prefetchLabelIdsForBackground(in: context)
+        let labelIds = await syncCoordinator.prefetchLabelIdsForBackground(in: context)
 
         let batchSize = 10
         var successCount = 0
@@ -90,7 +157,7 @@ final class BackgroundMessageProcessor {
         for batch in messageIds.chunked(into: batchSize) {
             await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
                 for messageId in batch {
-                    group.addTask { [self] in
+                    group.addTask {
                         do {
                             let message = try await apiClient.getMessage(id: messageId)
                             return (messageId, .success(message))
@@ -103,7 +170,7 @@ final class BackgroundMessageProcessor {
                 for await (messageId, result) in group {
                     switch result {
                     case .success(let message):
-                        await syncEngine.saveMessage(message, labelIds: labelIds, in: context)
+                        await syncCoordinator.saveMessage(message, labelIds: labelIds, in: context)
                         successCount += 1
                     case .failure(let error):
                         failedCount += 1
@@ -117,14 +184,9 @@ final class BackgroundMessageProcessor {
             Log.info("Background sync: fetched \(successCount) messages, \(failedCount) failed", category: .background)
         }
 
-        await syncEngine.updateConversationRollups(in: context)
-
-        do {
-            if context.hasChanges {
-                try context.save()
-            }
-        } catch {
-            Log.error("Failed to save background sync context: \(error.localizedDescription)", category: .background)
+        if ownsContext {
+            await syncCoordinator.updateConversationRollups(in: context)
+            _ = saveContext(context)
         }
     }
 

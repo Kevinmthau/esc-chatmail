@@ -12,46 +12,11 @@ extension MessagePersister {
         myAliases: Set<String>,
         in context: NSManagedObjectContext
     ) async throws {
-        let shouldReactivateConversation = processedMessage.labelIds.contains("INBOX")
-
-        let isForwardedMessage = ForwardingHeuristics.indicatesForwarding(
-            subject: processedMessage.headers.subject,
-            contentCandidates: [
-                processedMessage.plainTextBody,
-                processedMessage.htmlBody,
-                processedMessage.cleanedSnippet,
-                processedMessage.snippet
-            ]
+        let conversation = try await conversationRouter.resolveConversation(
+            for: processedMessage,
+            myAliases: myAliases,
+            in: context
         )
-
-        // Prefer grouping by Gmail threadId to avoid splitting a single Gmail thread into
-        // multiple chats when participant sets differ across messages (e.g. Reply-To aliases).
-        // But if the message looks like a forwarded branch, use participant-based routing.
-        let conversation: Conversation
-        if !isForwardedMessage,
-           let existingConversation = findExistingConversation(forGmThreadId: processedMessage.gmThreadId, in: context) {
-            // Reactivate archived conversation when new messages arrive in the same thread.
-            if shouldReactivateConversation, existingConversation.archivedAt != nil {
-                existingConversation.archivedAt = nil
-                existingConversation.hidden = false
-            }
-            conversation = existingConversation
-        } else {
-            // Fallback: participant-based identity (iMessage-style) when we haven't seen this thread yet.
-            let identity = conversationManager.createConversationIdentity(
-                from: processedMessage.headers,
-                gmThreadId: processedMessage.gmThreadId,
-                myAliases: myAliases
-            )
-            // Pass internalDate so new conversations appear at the correct position immediately
-            // (prevents UI flash where conversation appears at bottom before moving to top)
-            conversation = try await conversationManager.findOrCreateConversation(
-                for: identity,
-                initialLastMessageDate: processedMessage.internalDate,
-                reactivateArchivedIfNeeded: shouldReactivateConversation,
-                in: context
-            )
-        }
 
         // Create Core Data message entity
         guard let message = NSEntityDescription.insertNewObject(forEntityName: "Message", into: context) as? Message else {
@@ -91,8 +56,9 @@ extension MessagePersister {
 
         // Prefetch avatars for new participants in background (non-blocking)
         if !participantEmails.isEmpty {
+            let photoPrefetcher = self.photoPrefetcher
             Task.detached(priority: .background) {
-                await ProfilePhotoResolver.shared.prefetchPhotos(for: participantEmails)
+                await photoPrefetcher(participantEmails)
             }
         }
 

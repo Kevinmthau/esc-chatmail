@@ -4,9 +4,33 @@ import Combine
 
 @MainActor
 final class ComposeViewModelTests: XCTestCase {
+    private func makeTestAuthSession(userEmail: String? = nil) -> AuthSession {
+        let authSession = AuthSession(
+            tokenManagerProvider: { MockTokenManager() },
+            keychainService: MockKeychainService(),
+            userDefaults: UserDefaults(suiteName: "ComposeViewModelTests.\(UUID().uuidString)")!,
+            clearConversationCaches: {},
+            cleanupDownloads: {},
+            resetCoreDataStore: {},
+            clearAttachmentCache: {}
+        )
+        authSession.userEmail = userEmail
+        return authSession
+    }
+
+    private func makeDependencies(authSession: AuthSession) -> Dependencies {
+        let tokenManager = MockTokenManager()
+        return Dependencies(
+            authSession: authSession,
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager)
+        )
+    }
+
     func testAddAttachment_forwardsAttachmentManagerChanges() {
-        let viewModel = ComposeViewModel(mode: .newMessage)
-        let attachment = Attachment(context: Dependencies.shared.viewContext)
+        let deps = makeDependencies(authSession: makeTestAuthSession())
+        let viewModel = ComposeViewModel(mode: .newMessage, deps: deps)
+        let attachment = Attachment(context: deps.viewContext)
         attachment.id = "local_\(UUID().uuidString)"
         attachment.filename = "photo.jpg"
         attachment.mimeType = "image/jpeg"
@@ -29,8 +53,9 @@ final class ComposeViewModelTests: XCTestCase {
     }
 
     func testSetupForMode_replyIsIdempotent() {
-        let context = Dependencies.shared.viewContext
-        let originalUserEmail = AuthSession.shared.userEmail
+        let authSession = makeTestAuthSession(userEmail: "me@example.com")
+        let deps = makeDependencies(authSession: authSession)
+        let context = deps.viewContext
 
         let conversation = Conversation(context: context)
         conversation.id = UUID()
@@ -59,15 +84,13 @@ final class ComposeViewModelTests: XCTestCase {
         otherParticipant.person = other
         otherParticipant.conversation = conversation
 
-        AuthSession.shared.userEmail = me.email
-        let viewModel = ComposeViewModel(mode: .reply(conversation, nil))
+        let viewModel = ComposeViewModel(mode: .reply(conversation, nil), deps: deps)
 
         viewModel.setupForMode()
         viewModel.setupForMode()
 
         XCTAssertEqual(viewModel.recipients.map(\.email), ["friend@example.com"])
 
-        AuthSession.shared.userEmail = originalUserEmail
         context.delete(otherParticipant)
         context.delete(meParticipant)
         context.delete(other)

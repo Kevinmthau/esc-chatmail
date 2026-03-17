@@ -7,11 +7,11 @@ final class MessageActions: ObservableObject {
     private let pendingActionsManager: PendingActionsManager
 
     init(
-        coreDataStack: CoreDataStack? = nil,
-        pendingActionsManager: PendingActionsManager? = nil
+        coreDataStack: CoreDataStack,
+        pendingActionsManager: PendingActionsManager
     ) {
-        self.coreDataStack = coreDataStack ?? .shared
-        self.pendingActionsManager = pendingActionsManager ?? .shared
+        self.coreDataStack = coreDataStack
+        self.pendingActionsManager = pendingActionsManager
     }
 
     // MARK: - Mark Read/Unread

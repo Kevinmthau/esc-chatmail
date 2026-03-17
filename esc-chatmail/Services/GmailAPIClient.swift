@@ -60,7 +60,7 @@ actor RateLimitTracker {
 /// - `GmailAPIClient+History.swift` - History API with specialized error handling
 /// - `GmailAPIClient+Attachments.swift` - Attachment downloading
 final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
-    @MainActor static let shared = GmailAPIClient()
+    @MainActor static let shared = GmailAPIClient(tokenManager: TokenManager.shared)
 
     let session: URLSession
     let tokenManager: TokenManagerProtocol
@@ -71,14 +71,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
     // MARK: - Initialization
 
-    /// Production initializer - uses shared TokenManager.
-    @MainActor private init() {
-        self.tokenManager = TokenManager.shared
-        self.retryStrategy = NetworkRetryStrategy()
-        self.session = Self.createSession()
-    }
-
-    /// Testable initializer - accepts custom dependencies.
+    /// Initializer with injectable dependencies.
     init(tokenManager: TokenManagerProtocol, retryStrategy: RetryStrategy = NetworkRetryStrategy()) {
         self.tokenManager = tokenManager
         self.retryStrategy = retryStrategy

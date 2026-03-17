@@ -12,7 +12,7 @@ struct MainTabView: View {
                     SwiftUI.Label("Chats", systemImage: "bubble.left.and.bubble.right")
                 }
             
-            InboxListView()
+            InboxListView(deps: deps)
                 .tabItem {
                     SwiftUI.Label("Inbox", systemImage: "tray")
                 }

@@ -15,8 +15,40 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     @Published var userEmail: String?
     @Published var userName: String?
     @Published var accessToken: String?
-    
-    private init() {
+
+    private let tokenManagerProvider: @MainActor @Sendable () -> TokenManagerProtocol
+    private lazy var tokenManager: TokenManagerProtocol = tokenManagerProvider()
+    private let keychainService: KeychainServiceProtocol
+    private let userDefaults: UserDefaults
+    private let clearConversationCaches: @MainActor @Sendable () -> Void
+    private let cleanupDownloads: @MainActor @Sendable () -> Void
+    private let resetCoreDataStore: @Sendable () async throws -> Void
+    private let clearAttachmentCache: @Sendable () async -> Void
+
+    init(
+        tokenManagerProvider: @escaping @MainActor @Sendable () -> TokenManagerProtocol = { TokenManager.shared },
+        keychainService: KeychainServiceProtocol = KeychainService.shared,
+        userDefaults: UserDefaults = .standard,
+        clearConversationCaches: @escaping @MainActor @Sendable () -> Void = {
+            ConversationCache.shared.clearAllCaches()
+        },
+        cleanupDownloads: @escaping @MainActor @Sendable () -> Void = {
+            AttachmentDownloader.shared.cleanupAll()
+        },
+        resetCoreDataStore: @escaping @Sendable () async throws -> Void = {
+            try await CoreDataStack.shared.resetStore()
+        },
+        clearAttachmentCache: @escaping @Sendable () async -> Void = {
+            await AttachmentCacheActor.shared.clearCache(level: .aggressive)
+        }
+    ) {
+        self.tokenManagerProvider = tokenManagerProvider
+        self.keychainService = keychainService
+        self.userDefaults = userDefaults
+        self.clearConversationCaches = clearConversationCaches
+        self.cleanupDownloads = cleanupDownloads
+        self.resetCoreDataStore = resetCoreDataStore
+        self.clearAttachmentCache = clearAttachmentCache
         // Don't auto-restore on init
         // The app will call restorePreviousSignIn() AFTER fresh install check
     }
@@ -94,7 +126,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
                     // Save tokens securely using TokenManager
                     do {
-                        try TokenManager.shared.saveTokens(
+                        try self.tokenManager.saveTokens(
                             access: result.user.accessToken.tokenString,
                             refresh: result.user.refreshToken.tokenString,
                             expirationDate: result.user.accessToken.expirationDate ?? Date().addingTimeInterval(3600)
@@ -102,14 +134,18 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
                         // Save user email to keychain
                         if let email = result.user.profile?.email {
-                            try KeychainService.shared.saveString(email, for: .googleUserEmail, withAccess: .whenUnlockedThisDeviceOnly)
+                            try self.keychainService.saveString(
+                                email,
+                                for: KeychainService.Key.googleUserEmail.rawValue,
+                                withAccess: .whenUnlockedThisDeviceOnly
+                            )
                         }
 
                         // Only mark as authenticated after tokens are successfully saved
                         self.isAuthenticated = true
 
                         // Mark that user has successfully signed in
-                        UserDefaults.standard.set(true, forKey: "hasCompletedSignIn")
+                        self.userDefaults.set(true, forKey: "hasCompletedSignIn")
 
                         // Success - resume inside do block after all state is set
                         continuation.resume()
@@ -135,20 +171,20 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
         // Clear tokens from secure storage
         do {
-            try TokenManager.shared.clearTokens()
-            try KeychainService.shared.delete(for: .googleUserEmail)
+            try tokenManager.clearTokens()
+            try keychainService.delete(for: KeychainService.Key.googleUserEmail.rawValue)
         } catch {
             Log.error("Failed to clear tokens", category: .auth, error: error)
         }
 
         // Clear the sign-in flag
-        UserDefaults.standard.removeObject(forKey: "hasCompletedSignIn")
+        userDefaults.removeObject(forKey: "hasCompletedSignIn")
 
         // Clear conversation cache to prevent leaking previous user's data
-        ConversationCache.shared.clearAllCaches()
+        clearConversationCaches()
 
         // Clear attachment downloader tracking data
-        AttachmentDownloader.shared.cleanupAll()
+        cleanupDownloads()
 
         // Clear attachment files from disk
         clearAttachmentFiles()
@@ -157,14 +193,14 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         await withTaskGroup(of: Void.self) { group in
             group.addTask {
                 do {
-                    try await CoreDataStack.shared.resetStore()
+                    try await self.resetCoreDataStore()
                 } catch {
                     Log.error("Failed to clear Core Data during sign-out", category: .coreData, error: error)
                 }
             }
 
             group.addTask {
-                await AttachmentCacheActor.shared.clearCache(level: .aggressive)
+                await self.clearAttachmentCache()
             }
         }
         Log.info("Sign-out cleanup completed", category: .auth)
@@ -237,20 +273,20 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
         // Clear tokens from secure storage
         do {
-            try TokenManager.shared.clearTokens()
-            try KeychainService.shared.delete(for: .googleUserEmail)
+            try tokenManager.clearTokens()
+            try keychainService.delete(for: KeychainService.Key.googleUserEmail.rawValue)
         } catch {
             Log.error("Failed to clear tokens", category: .auth, error: error)
         }
 
         // Clear the sign-in flag
-        UserDefaults.standard.removeObject(forKey: "hasCompletedSignIn")
+        userDefaults.removeObject(forKey: "hasCompletedSignIn")
 
         // Clear conversation cache to prevent leaking previous user's data
-        ConversationCache.shared.clearAllCaches()
+        clearConversationCaches()
 
         // Clear attachment downloader tracking data
-        AttachmentDownloader.shared.cleanupAll()
+        cleanupDownloads()
 
         // Clear attachment files from disk
         clearAttachmentFiles()
@@ -259,14 +295,14 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         await withTaskGroup(of: Void.self) { group in
             group.addTask {
                 do {
-                    try await CoreDataStack.shared.resetStore()
+                    try await self.resetCoreDataStore()
                 } catch {
                     Log.error("Failed to clear Core Data during disconnect", category: .coreData, error: error)
                 }
             }
 
             group.addTask {
-                await AttachmentCacheActor.shared.clearCache(level: .aggressive)
+                await self.clearAttachmentCache()
             }
         }
         Log.info("Disconnect cleanup completed", category: .auth)
@@ -274,7 +310,8 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
     nonisolated func withFreshToken() async throws -> String {
         // Delegate to TokenManager for centralized token management
-        return try await TokenManager.shared.getCurrentToken()
+        let tokenManager = await MainActor.run { self.tokenManager }
+        return try await tokenManager.getCurrentToken()
     }
 
     private func hasRequiredGmailScope(_ user: GIDGoogleUser) -> Bool {

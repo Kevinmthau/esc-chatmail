@@ -9,17 +9,37 @@ import CoreData
 final class ConversationManager: Sendable {
     private let rollupUpdater: ConversationRollupUpdater
     private let merger: ConversationMerger
+    private let findOrCreateConversationHandler: @Sendable (
+        ConversationIdentity,
+        Date?,
+        Bool,
+        NSManagedObjectContext
+    ) async throws -> Conversation
     private let currentUserEmail: @MainActor @Sendable () -> String
 
     init(
         rollupUpdater: ConversationRollupUpdater = ConversationRollupUpdater(),
         merger: ConversationMerger = ConversationMerger(),
+        findOrCreateConversationHandler: @escaping @Sendable (
+            ConversationIdentity,
+            Date?,
+            Bool,
+            NSManagedObjectContext
+        ) async throws -> Conversation = { identity, initialLastMessageDate, reactivateArchivedIfNeeded, context in
+            try await ConversationCreationSerializer.shared.findOrCreateConversation(
+                for: identity,
+                initialLastMessageDate: initialLastMessageDate,
+                reactivateArchivedIfNeeded: reactivateArchivedIfNeeded,
+                in: context
+            )
+        },
         currentUserEmail: @escaping @MainActor @Sendable () -> String = {
             AuthSession.shared.userEmail ?? ""
         }
     ) {
         self.rollupUpdater = rollupUpdater
         self.merger = merger
+        self.findOrCreateConversationHandler = findOrCreateConversationHandler
         self.currentUserEmail = currentUserEmail
     }
 
@@ -43,11 +63,11 @@ final class ConversationManager: Sendable {
         reactivateArchivedIfNeeded: Bool = true,
         in context: NSManagedObjectContext
     ) async throws -> Conversation {
-        try await ConversationCreationSerializer.shared.findOrCreateConversation(
-            for: identity,
-            initialLastMessageDate: initialLastMessageDate,
-            reactivateArchivedIfNeeded: reactivateArchivedIfNeeded,
-            in: context
+        try await findOrCreateConversationHandler(
+            identity,
+            initialLastMessageDate,
+            reactivateArchivedIfNeeded,
+            context
         )
     }
 

@@ -178,35 +178,10 @@ final class Dependencies: ObservableObject {
 
     /// Production initializer - uses all shared singleton instances.
     /// This is the default used by `.shared` and production code.
-    init() {
-        self.coreDataStack = CoreDataStack.shared
-        self.keychainService = KeychainService.shared
-        self.authSession = AuthSession.shared
-        self.tokenManager = TokenManager.shared
-        self.gmailAPIClient = GmailAPIClient.shared
-        self.personCache = PersonCache.shared
-        self.conversationCache = ConversationCache.shared
-        self.contactsResolver = ContactsResolver.shared
-        self.htmlContentHandler = HTMLContentHandler.shared
-        self._attachmentCache = AttachmentCacheActor.shared
-        self._pendingActionsManager = PendingActionsManager.shared
-        self._processedTextCache = ProcessedTextCache.shared
-        self._profilePhotoResolver = ProfilePhotoResolver.shared
-        self._htmlContentRecoveryService = HTMLContentRecoveryService.shared
-        self.syncEngine = SyncEngine.shared
-        self.foregroundSyncCoordinator = ForegroundSyncCoordinator.shared
-        self.attachmentDownloader = AttachmentDownloader.shared
-        self.backgroundSyncManager = BackgroundSyncManager.shared
-        self.participantLoader = ParticipantLoader(
-            personCache: self.personCache,
-            photoResolver: self._profilePhotoResolver
-        )
-        self.conversationManager = ConversationManager(
-            rollupUpdater: ConversationRollupUpdater(coreDataStack: self.coreDataStack),
-            merger: ConversationMerger(coreDataStack: self.coreDataStack),
-            currentUserEmail: { [authSession] in
-                authSession.userEmail ?? ""
-            }
+    convenience init() {
+        self.init(
+            coreDataStack: CoreDataStack.shared,
+            keychainService: KeychainService.shared
         )
     }
 
@@ -223,44 +198,53 @@ final class Dependencies: ObservableObject {
     /// let viewModel = ChatViewModel(deps: deps)
     /// ```
     init(
-        coreDataStack: CoreDataStack,
-        keychainService: KeychainServiceProtocol,
-        authSession: AuthSession,
-        tokenManager: TokenManagerProtocol,
-        gmailAPIClient: GmailAPIClient,
-        personCache: PersonCache,
-        conversationCache: ConversationCache,
+        coreDataStack: CoreDataStack = CoreDataStack.shared,
+        keychainService: KeychainServiceProtocol = KeychainService.shared,
+        authSession: AuthSession? = nil,
+        tokenManager: TokenManagerProtocol? = nil,
+        gmailAPIClient: GmailAPIClient? = nil,
+        personCache: PersonCache = PersonCache.shared,
+        conversationCache: ConversationCache? = nil,
         contactsResolver: (any ContactsResolving)? = nil,
-        attachmentCache: AttachmentCacheActor,
-        pendingActionsManager: PendingActionsManager,
+        attachmentCache: AttachmentCacheActor = AttachmentCacheActor.shared,
+        pendingActionsManager: PendingActionsManager = PendingActionsManager.shared,
         processedTextCache: ProcessedTextCache = .shared,
         profilePhotoResolver: ProfilePhotoResolver = .shared,
         htmlContentHandler: HTMLContentHandler = .shared,
         htmlContentRecoveryService: HTMLContentRecoveryService = .shared,
-        syncEngine: SyncEngine,
-        foregroundSyncCoordinator: ForegroundSyncCoordinator,
-        attachmentDownloader: AttachmentDownloader,
-        backgroundSyncManager: BackgroundSyncManager,
+        syncEngine: SyncEngine? = nil,
+        foregroundSyncCoordinator: ForegroundSyncCoordinator? = nil,
+        attachmentDownloader: AttachmentDownloader? = nil,
+        backgroundSyncManager: BackgroundSyncManager = BackgroundSyncManager.shared,
         participantLoader: ParticipantLoader? = nil,
         conversationManager: ConversationManager? = nil
     ) {
+        let resolvedAuthSession = authSession ?? AuthSession.shared
+        let resolvedTokenManager = tokenManager ?? TokenManager.shared
+        let resolvedGmailAPIClient = gmailAPIClient ?? GmailAPIClient.shared
+        let resolvedConversationCache = conversationCache ?? ConversationCache.shared
+        let resolvedContactsResolver = contactsResolver ?? ContactsResolver.shared
+        let resolvedSyncEngine = syncEngine ?? SyncEngine.shared
+        let resolvedForegroundSyncCoordinator = foregroundSyncCoordinator ?? ForegroundSyncCoordinator.shared
+        let resolvedAttachmentDownloader = attachmentDownloader ?? AttachmentDownloader.shared
+
         self.coreDataStack = coreDataStack
         self.keychainService = keychainService
-        self.authSession = authSession
-        self.tokenManager = tokenManager
-        self.gmailAPIClient = gmailAPIClient
+        self.authSession = resolvedAuthSession
+        self.tokenManager = resolvedTokenManager
+        self.gmailAPIClient = resolvedGmailAPIClient
         self.personCache = personCache
-        self.conversationCache = conversationCache
-        self.contactsResolver = contactsResolver ?? ContactsResolver.shared
+        self.conversationCache = resolvedConversationCache
+        self.contactsResolver = resolvedContactsResolver
         self.htmlContentHandler = htmlContentHandler
         self._attachmentCache = attachmentCache
         self._pendingActionsManager = pendingActionsManager
         self._processedTextCache = processedTextCache
         self._profilePhotoResolver = profilePhotoResolver
         self._htmlContentRecoveryService = htmlContentRecoveryService
-        self.syncEngine = syncEngine
-        self.foregroundSyncCoordinator = foregroundSyncCoordinator
-        self.attachmentDownloader = attachmentDownloader
+        self.syncEngine = resolvedSyncEngine
+        self.foregroundSyncCoordinator = resolvedForegroundSyncCoordinator
+        self.attachmentDownloader = resolvedAttachmentDownloader
         self.backgroundSyncManager = backgroundSyncManager
         self.participantLoader = participantLoader ?? ParticipantLoader(
             personCache: personCache,
@@ -269,8 +253,8 @@ final class Dependencies: ObservableObject {
         self.conversationManager = conversationManager ?? ConversationManager(
             rollupUpdater: ConversationRollupUpdater(coreDataStack: coreDataStack),
             merger: ConversationMerger(coreDataStack: coreDataStack),
-            currentUserEmail: { [authSession] in
-                authSession.userEmail ?? ""
+            currentUserEmail: { [resolvedAuthSession] in
+                resolvedAuthSession.userEmail ?? ""
             }
         )
     }

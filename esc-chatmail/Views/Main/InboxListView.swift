@@ -3,17 +3,22 @@ import CoreData
 
 struct InboxListView: View {
     @FetchRequest private var messages: FetchedResults<Message>
+    @StateObject private var messageActions: MessageActions
+    private let deps: Dependencies
 
-    init() {
+    @MainActor
+    init(deps: Dependencies? = nil) {
+        let resolvedDeps = deps ?? Dependencies.shared
+        self.deps = resolvedDeps
         let request = NSFetchRequest<Message>(entityName: "Message")
         request.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: false)]
         // Only show inbox messages that are not drafts
         request.predicate = NSPredicate(format: "ANY labels.id == %@ AND NOT (ANY labels.id == %@)", "INBOX", "DRAFT")
         request.fetchBatchSize = 25  // Load messages in batches for better performance
         _messages = FetchRequest(fetchRequest: request)
+        _messageActions = StateObject(wrappedValue: resolvedDeps.makeMessageActions())
     }
-    
-    @StateObject private var messageActions = MessageActions()
+
     @State private var searchText = ""
     @State private var selectedMessage: Message?
     @State private var showingWebView = false
@@ -59,7 +64,7 @@ struct InboxListView: View {
                 }
             }
             .sheet(isPresented: $showingComposer) {
-                ComposeView(mode: .newMessage)
+                ComposeView(mode: .newMessage, deps: deps)
             }
             .onAppear {
                 updateFilteredMessages()

@@ -11,7 +11,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
         super.setUp()
         testStack = TestCoreDataStack()
         context = testStack.viewContext
-        persister = MessagePersister()
+        persister = MessagePersister(photoPrefetcher: { _ in })
     }
 
     override func tearDown() {

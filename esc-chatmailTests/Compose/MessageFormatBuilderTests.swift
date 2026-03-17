@@ -5,25 +5,27 @@ import XCTest
 final class MessageFormatBuilderTests: XCTestCase {
 
     var sut: MessageFormatBuilder!
-    var originalEmail: String?
-    var originalName: String?
+    var authSession: AuthSession!
 
     override func setUp() {
         super.setUp()
-        // Save original values to restore later
-        originalEmail = AuthSession.shared.userEmail
-        originalName = AuthSession.shared.userName
-        // Set test values
-        AuthSession.shared.userEmail = "test@example.com"
-        AuthSession.shared.userName = "Test User"
-        sut = MessageFormatBuilder(authSession: AuthSession.shared)
+        authSession = AuthSession(
+            tokenManagerProvider: { MockTokenManager() },
+            keychainService: MockKeychainService(),
+            userDefaults: UserDefaults(suiteName: "MessageFormatBuilderTests.\(UUID().uuidString)")!,
+            clearConversationCaches: {},
+            cleanupDownloads: {},
+            resetCoreDataStore: {},
+            clearAttachmentCache: {}
+        )
+        authSession.userEmail = "test@example.com"
+        authSession.userName = "Test User"
+        sut = MessageFormatBuilder(authSession: authSession)
     }
 
     override func tearDown() {
-        // Restore original values
-        AuthSession.shared.userEmail = originalEmail
-        AuthSession.shared.userName = originalName
         sut = nil
+        authSession = nil
         super.tearDown()
     }
 

@@ -36,6 +36,20 @@ protocol ComposeSendServicing: AnyObject {
 
 extension GmailSendService: ComposeSendServicing {}
 
+extension ComposeSendOrchestrator.SendInput.ReplyData {
+    init(_ replyData: ReplyMetadataBuilder.ReplyData) {
+        self.init(
+            recipients: replyData.recipients,
+            body: replyData.body,
+            subject: replyData.subject,
+            threadId: replyData.threadId,
+            inReplyTo: replyData.inReplyTo,
+            references: replyData.references,
+            originalMessage: replyData.originalMessage
+        )
+    }
+}
+
 /// Orchestrates the message sending flow, handling optimistic updates and background execution
 struct ComposeSendOrchestrator {
     let sendService: ComposeSendServicing
@@ -82,31 +96,36 @@ struct ComposeSendOrchestrator {
         // Send in background - don't wait for completion
         return Task.detached(priority: .userInitiated) {
             do {
-                try Task.checkCancellation()
-                let result: GmailSendService.SendResult
+                let sendTask = Task.detached(priority: .userInitiated) {
+                    let result: GmailSendService.SendResult
 
-                if let replyData = input.replyData {
-                    result = try await sendService.sendReply(
-                        to: replyData.recipients,
-                        body: replyData.body,
-                        subject: replyData.subject ?? "",
-                        threadId: replyData.threadId ?? "",
-                        inReplyTo: replyData.inReplyTo,
-                        references: replyData.references,
-                        originalMessage: replyData.originalMessage,
-                        attachmentInfos: input.attachmentInfos
-                    )
-                } else {
-                    result = try await sendService.sendNew(
-                        to: input.recipientEmails,
-                        body: input.body,
-                        htmlBody: input.htmlBody,
-                        subject: input.subject,
-                        attachmentInfos: input.attachmentInfos,
-                        inlineAttachmentInfos: input.inlineAttachmentInfos
-                    )
+                    if let replyData = input.replyData,
+                       let threadId = replyData.threadId,
+                       !threadId.isEmpty {
+                        result = try await sendService.sendReply(
+                            to: replyData.recipients,
+                            body: replyData.body,
+                            subject: replyData.subject ?? "",
+                            threadId: threadId,
+                            inReplyTo: replyData.inReplyTo,
+                            references: replyData.references,
+                            originalMessage: replyData.originalMessage,
+                            attachmentInfos: input.attachmentInfos
+                        )
+                    } else {
+                        result = try await sendService.sendNew(
+                            to: input.recipientEmails,
+                            body: input.body,
+                            htmlBody: input.htmlBody,
+                            subject: input.subject,
+                            attachmentInfos: input.attachmentInfos,
+                            inlineAttachmentInfos: input.inlineAttachmentInfos
+                        )
+                    }
+
+                    return result
                 }
-                try Task.checkCancellation()
+                let result = try await sendTask.value
 
                 // Update optimistic message with real IDs (on MainActor to avoid Sendable issues)
                 await MainActor.run {
@@ -114,6 +133,11 @@ struct ComposeSendOrchestrator {
                         sendService.updateOptimisticMessage(message, with: result)
                     }
                     sendService.markAttachmentsAsUploaded(attachments)
+                }
+
+                if Task.isCancelled {
+                    Log.info("Background send completed after cancellation for optimistic message \(optimisticMessageID)", category: .message)
+                    return
                 }
 
                 // Trigger sync to fetch the sent message from Gmail

@@ -8,20 +8,33 @@ final class BackgroundSyncManager {
 
     // MARK: - Components
 
-    private let taskScheduler = BackgroundTaskScheduler.shared
+    private let taskScheduler: BackgroundTaskScheduler
     private let stateManager: BackgroundSyncStateManager
     private let errorHandler = BackgroundSyncErrorHandler()
     private let messageProcessor: BackgroundMessageProcessor
+    private let authSessionProvider: @MainActor @Sendable () -> AuthSession
+    private let apiClientProvider: @MainActor @Sendable () -> GmailAPIClientProtocol
 
     private let syncQueue = DispatchQueue(label: "com.esc.inboxchat.backgroundsync", qos: .background)
 
-    @MainActor private lazy var apiClient = GmailAPIClient.shared
-    @MainActor private lazy var syncEngine = SyncEngine.shared
-
-    private init() {
-        let coreDataStack = CoreDataStack.shared
+    init(
+        taskScheduler: BackgroundTaskScheduler = .shared,
+        coreDataStack: CoreDataStack = .shared,
+        authSessionProvider: @escaping @MainActor @Sendable () -> AuthSession = { AuthSession.shared },
+        apiClientProvider: @escaping @MainActor @Sendable () -> GmailAPIClientProtocol = { GmailAPIClient.shared },
+        syncCoordinatorProvider: @escaping @MainActor @Sendable () -> BackgroundSyncMessageCoordinating = {
+            SyncEngine.shared
+        }
+    ) {
+        self.taskScheduler = taskScheduler
         self.stateManager = BackgroundSyncStateManager(coreDataStack: coreDataStack)
-        self.messageProcessor = BackgroundMessageProcessor(coreDataStack: coreDataStack)
+        self.messageProcessor = BackgroundMessageProcessor(
+            coreDataStack: coreDataStack,
+            apiClientProvider: apiClientProvider,
+            syncCoordinatorProvider: syncCoordinatorProvider
+        )
+        self.authSessionProvider = authSessionProvider
+        self.apiClientProvider = apiClientProvider
 
         setupTaskHandlers()
     }
@@ -91,7 +104,8 @@ final class BackgroundSyncManager {
 
     private func performDeltaSync(isProcessingTask: Bool) async -> Bool {
         do {
-            _ = try await AuthSession.shared.withFreshToken()
+            let authSession = await MainActor.run { authSessionProvider() }
+            _ = try await authSession.withFreshToken()
 
             let historyId = await stateManager.getStoredHistoryId()
 
@@ -109,6 +123,7 @@ final class BackgroundSyncManager {
 
     private func performHistorySync(startHistoryId: String, isProcessingTask: Bool) async -> Bool {
         do {
+            let apiClient = await MainActor.run { apiClientProvider() }
             var allHistories: [HistoryRecord] = []
             var pageToken: String? = nil
             let maxPages = isProcessingTask ? 10 : 3
@@ -168,7 +183,8 @@ final class BackgroundSyncManager {
 
         case .tokenRefreshAndRetry:
             do {
-                _ = try await AuthSession.shared.withFreshToken()
+                let authSession = await MainActor.run { authSessionProvider() }
+                _ = try await authSession.withFreshToken()
                 return await performHistorySyncRetry(startHistoryId: startHistoryId, isProcessingTask: isProcessingTask)
             } catch {
                 Log.error("Token refresh failed", category: .background, error: error)
@@ -187,6 +203,7 @@ final class BackgroundSyncManager {
 
     private func performHistorySyncRetry(startHistoryId: String, isProcessingTask: Bool) async -> Bool {
         do {
+            let apiClient = await MainActor.run { apiClientProvider() }
             var allHistories: [HistoryRecord] = []
             var pageToken: String? = nil
             let maxPages = isProcessingTask ? 10 : 3
@@ -235,6 +252,7 @@ final class BackgroundSyncManager {
 
     private func performPartialSync(isProcessingTask: Bool) async -> Bool {
         do {
+            let apiClient = await MainActor.run { apiClientProvider() }
             let maxResults = isProcessingTask ? 100 : 50
             let maxPages = isProcessingTask ? 10 : 3
 
