@@ -14,13 +14,16 @@ final class ParticipantLoader {
 
     private let personCache: PersonCache
     private let photoResolver: ProfilePhotoResolver
+    private let contactsResolver: any ContactsResolving
 
     init(
         personCache: PersonCache = .shared,
-        photoResolver: ProfilePhotoResolver = .shared
+        photoResolver: ProfilePhotoResolver = .shared,
+        contactsResolver: any ContactsResolving = ContactsResolver.shared
     ) {
         self.personCache = personCache
         self.photoResolver = photoResolver
+        self.contactsResolver = contactsResolver
     }
 
     // MARK: - Public Types
@@ -164,14 +167,16 @@ final class ParticipantLoader {
         fallbackDisplayName: String?,
         maxParticipants: Int
     ) async -> ParticipantInfo {
-        let topParticipants = Array(emails.prefix(maxParticipants))
+        // Deduplicate emails that belong to the same contact
+        let deduplicatedEmails = await deduplicateByContact(emails: emails)
+        let topParticipants = Array(deduplicatedEmails.prefix(maxParticipants))
 
         await prefetchNamesIfNeeded(for: topParticipants)
 
         let displayNames = await resolveDisplayNames(for: topParticipants)
         let formattedName = DisplayNameFormatter.formatForRow(
             names: displayNames,
-            totalCount: emails.count,
+            totalCount: deduplicatedEmails.count,
             fallback: fallbackDisplayName
         )
         let photos = await loadPhotos(for: topParticipants)
@@ -210,6 +215,28 @@ final class ParticipantLoader {
         return emails.compactMap { email in
             photoResults[EmailNormalizer.normalize(email)]
         }
+    }
+
+    /// Deduplicates emails that belong to the same contact in the address book.
+    /// When multiple emails map to the same CNContact identifier, only the first is kept.
+    private func deduplicateByContact(emails: [String]) async -> [String] {
+        guard emails.count > 1 else { return emails }
+
+        var seenContactIdentifiers = Set<String>()
+        var result: [String] = []
+
+        for email in emails {
+            let match = await contactsResolver.lookup(email: email)
+            if let contactId = match?.contactIdentifier {
+                if seenContactIdentifiers.contains(contactId) {
+                    continue
+                }
+                seenContactIdentifiers.insert(contactId)
+            }
+            result.append(email)
+        }
+
+        return result
     }
 
 }

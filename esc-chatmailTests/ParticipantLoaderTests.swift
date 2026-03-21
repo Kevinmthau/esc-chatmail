@@ -76,6 +76,116 @@ final class ParticipantLoaderTests: XCTestCase {
         XCTAssertEqual(info.formattedDisplayName, "Fallback Name")
     }
 
+    // MARK: - Contact Deduplication Tests
+
+    func testLoadParticipants_deduplicatesByContactIdentifier() async throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Test")
+            .build(in: context)
+
+        let workEmail = PersonBuilder()
+            .withEmail("john@work.com")
+            .withDisplayName("John Work")
+            .build(in: context)
+
+        let personalEmail = PersonBuilder()
+            .withEmail("john@personal.com")
+            .withDisplayName("John Personal")
+            .build(in: context)
+
+        addConversationParticipant(person: workEmail, to: conversation)
+        addConversationParticipant(person: personalEmail, to: conversation)
+        try context.save()
+
+        // Both emails map to the same contact identifier
+        let mockResolver = MockContactsResolving(contactMap: [
+            "john@work.com": ContactMatch(displayName: "John Smith", email: "john@work.com", imageData: nil, contactIdentifier: "contact-123"),
+            "john@personal.com": ContactMatch(displayName: "John Smith", email: "john@personal.com", imageData: nil, contactIdentifier: "contact-123")
+        ])
+
+        let loader = ParticipantLoader(contactsResolver: mockResolver)
+
+        let info = await loader.loadParticipants(
+            from: conversation,
+            currentUserEmail: "me@example.com"
+        )
+
+        // Should only show one participant since both emails belong to the same contact
+        XCTAssertEqual(info.emails.count, 1)
+        XCTAssertEqual(info.emails.first, "john@work.com")
+    }
+
+    func testLoadParticipants_keepsSeparateParticipantsForDifferentContacts() async throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Test")
+            .build(in: context)
+
+        let alice = PersonBuilder()
+            .withEmail("alice@example.com")
+            .withDisplayName("Alice")
+            .build(in: context)
+
+        let bob = PersonBuilder()
+            .withEmail("bob@example.com")
+            .withDisplayName("Bob")
+            .build(in: context)
+
+        addConversationParticipant(person: alice, to: conversation)
+        addConversationParticipant(person: bob, to: conversation)
+        try context.save()
+
+        let mockResolver = MockContactsResolving(contactMap: [
+            "alice@example.com": ContactMatch(displayName: "Alice", email: "alice@example.com", imageData: nil, contactIdentifier: "contact-alice"),
+            "bob@example.com": ContactMatch(displayName: "Bob", email: "bob@example.com", imageData: nil, contactIdentifier: "contact-bob")
+        ])
+
+        let loader = ParticipantLoader(contactsResolver: mockResolver)
+
+        let info = await loader.loadParticipants(
+            from: conversation,
+            currentUserEmail: "me@example.com"
+        )
+
+        XCTAssertEqual(info.emails.count, 2)
+    }
+
+    func testLoadParticipants_keepsEmailsWithNoMatchingContact() async throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Test")
+            .build(in: context)
+
+        let known = PersonBuilder()
+            .withEmail("known@example.com")
+            .withDisplayName("Known")
+            .build(in: context)
+
+        let unknown = PersonBuilder()
+            .withEmail("unknown@example.com")
+            .withDisplayName("Unknown")
+            .build(in: context)
+
+        addConversationParticipant(person: known, to: conversation)
+        addConversationParticipant(person: unknown, to: conversation)
+        try context.save()
+
+        // Only one email has a contact match; the other returns nil
+        let mockResolver = MockContactsResolving(contactMap: [
+            "known@example.com": ContactMatch(displayName: "Known Person", email: "known@example.com", imageData: nil, contactIdentifier: "contact-1")
+        ])
+
+        let loader = ParticipantLoader(contactsResolver: mockResolver)
+
+        let info = await loader.loadParticipants(
+            from: conversation,
+            currentUserEmail: "me@example.com"
+        )
+
+        // Both should be kept since unknown has no contact to deduplicate against
+        XCTAssertEqual(info.emails.count, 2)
+    }
+
+    // MARK: - Helpers
+
     private func addConversationParticipant(person: Person, to conversation: Conversation) {
         let participant = ConversationParticipant(context: context)
         participant.id = UUID()
@@ -83,4 +193,23 @@ final class ParticipantLoaderTests: XCTestCase {
         participant.person = person
         participant.conversation = conversation
     }
+}
+
+// MARK: - Mock ContactsResolving
+
+private final class MockContactsResolving: ContactsResolving, @unchecked Sendable {
+    private let contactMap: [String: ContactMatch]
+
+    init(contactMap: [String: ContactMatch] = [:]) {
+        self.contactMap = contactMap
+    }
+
+    func ensureAuthorization() async throws {}
+
+    func lookup(email: String) async -> ContactMatch? {
+        let normalized = EmailNormalizer.normalize(email)
+        return contactMap[normalized] ?? contactMap[email]
+    }
+
+    func prewarm(emails: [String]) async {}
 }
