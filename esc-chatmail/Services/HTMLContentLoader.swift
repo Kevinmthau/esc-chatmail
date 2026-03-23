@@ -26,6 +26,7 @@ final class HTMLContentLoader {
 
     private let contentHandler: HTMLContentHandler
     private let sanitizer: HTMLSanitizerService
+    private let remoteImageAttachmentFallback: HTMLRemoteImageAttachmentFallback
     private static let linkDetector: NSDataDetector? = {
         try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
     }()
@@ -44,10 +45,12 @@ final class HTMLContentLoader {
 
     init(
         contentHandler: HTMLContentHandler = HTMLContentHandler(),
-        sanitizer: HTMLSanitizerService = .shared
+        sanitizer: HTMLSanitizerService = .shared,
+        remoteImageAttachmentFallback: HTMLRemoteImageAttachmentFallback = .shared
     ) {
         self.contentHandler = contentHandler
         self.sanitizer = sanitizer
+        self.remoteImageAttachmentFallback = remoteImageAttachmentFallback
         // Limit cache to ~50MB with both count and cost limits for proper memory pressure response
         htmlCache.countLimit = 1000
         htmlCache.totalCostLimit = 50 * 1024 * 1024 // 50 MB
@@ -65,6 +68,7 @@ final class HTMLContentLoader {
         messageId: String,
         bodyStorageURI: String?,
         bodyText: String? = nil,
+        senderEmail: String? = nil,
         isDarkMode: Bool,
         cleanupMode: HTMLContentCleanupMode = .none
     ) async -> HTMLLoadResult {
@@ -79,7 +83,12 @@ final class HTMLContentLoader {
         if contentHandler.htmlFileExists(for: messageId),
            let html = contentHandler.loadHTML(for: messageId),
            !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if let wrapped = wrappedHTMLIfMeaningful(html, isDarkMode: isDarkMode, cleanupMode: cleanupMode) {
+            if let wrapped = await wrappedHTMLIfMeaningful(
+                html,
+                senderEmail: senderEmail,
+                isDarkMode: isDarkMode,
+                cleanupMode: cleanupMode
+            ) {
                 let cost = wrapped.utf8.count
                 htmlCache.setObject(wrapped as NSString, forKey: cacheKey, cost: cost)
                 return HTMLLoadResult(html: wrapped, source: .messageId)
@@ -92,7 +101,12 @@ final class HTMLContentLoader {
            FileManager.default.fileExists(atPath: url.path),
            let html = contentHandler.loadHTML(from: url),
            !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if let wrapped = wrappedHTMLIfMeaningful(html, isDarkMode: isDarkMode, cleanupMode: cleanupMode) {
+            if let wrapped = await wrappedHTMLIfMeaningful(
+                html,
+                senderEmail: senderEmail,
+                isDarkMode: isDarkMode,
+                cleanupMode: cleanupMode
+            ) {
                 let cost = wrapped.utf8.count
                 htmlCache.setObject(wrapped as NSString, forKey: cacheKey, cost: cost)
                 return HTMLLoadResult(html: wrapped, source: .storageURI)
@@ -101,7 +115,12 @@ final class HTMLContentLoader {
 
         // Method 3: Recovery - fetch from Gmail API if local content missing
         if let html = await HTMLContentRecoveryService.shared.recoverHTMLContent(messageId: messageId),
-           let wrapped = wrappedHTMLIfMeaningful(html, isDarkMode: isDarkMode, cleanupMode: cleanupMode) {
+           let wrapped = await wrappedHTMLIfMeaningful(
+               html,
+               senderEmail: senderEmail,
+               isDarkMode: isDarkMode,
+               cleanupMode: cleanupMode
+           ) {
             let cost = wrapped.utf8.count
             htmlCache.setObject(wrapped as NSString, forKey: cacheKey, cost: cost)
             return HTMLLoadResult(html: wrapped, source: .recovered)
@@ -127,6 +146,7 @@ final class HTMLContentLoader {
         messageId: String,
         bodyStorageURI: String?,
         bodyText: String? = nil,
+        senderEmail: String? = nil,
         isDarkMode: Bool,
         cleanupMode: HTMLContentCleanupMode = .none,
         timeout: TimeInterval = 5.0
@@ -138,6 +158,7 @@ final class HTMLContentLoader {
                     messageId: messageId,
                     bodyStorageURI: bodyStorageURI,
                     bodyText: bodyText,
+                    senderEmail: senderEmail,
                     isDarkMode: isDarkMode,
                     cleanupMode: cleanupMode
                 )
@@ -171,15 +192,21 @@ final class HTMLContentLoader {
 
     private func wrappedHTMLIfMeaningful(
         _ html: String,
+        senderEmail: String?,
         isDarkMode: Bool,
         cleanupMode: HTMLContentCleanupMode
-    ) -> String? {
+    ) async -> String? {
         let preparedHTML = prepareHTMLForDisplay(html, cleanupMode: cleanupMode)
         guard HTMLMeaningfulContentChecker.hasMeaningfulContent(preparedHTML) else {
             return nil
         }
 
-        let wrapped = sanitizer.wrapHTMLForDisplay(preparedHTML, isDarkMode: isDarkMode)
+        let htmlWithRewrittenImages = await remoteImageAttachmentFallback.inlineAttachmentStyleImages(
+            in: preparedHTML,
+            senderEmail: senderEmail
+        )
+
+        let wrapped = sanitizer.wrapHTMLForDisplay(htmlWithRewrittenImages, isDarkMode: isDarkMode)
         guard HTMLMeaningfulContentChecker.hasMeaningfulContent(wrapped) else {
             return nil
         }

@@ -4,6 +4,7 @@ import XCTest
 final class HTMLContentLoaderTests: XCTestCase {
     private var contentHandler: HTMLContentHandler!
     private var loader: HTMLContentLoader!
+    private let onePixelPNG = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2foAAAAASUVORK5CYII=")!
 
     override func setUp() {
         super.setUp()
@@ -377,5 +378,84 @@ final class HTMLContentLoaderTests: XCTestCase {
 
         XCTAssertNotNil(result.html)
         XCTAssertTrue((result.html ?? "").contains("needs your approval"))
+    }
+
+    func testLoadContent_rewritesAttachmentStyleRemoteImagesBeforeWrapping() async throws {
+        let messageId = "html-loader-remote-attachment-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let recorder = RequestRecorder()
+        let imageData = onePixelPNG
+        let remoteImageFallback = HTMLRemoteImageAttachmentFallback { request in
+            await recorder.record(request)
+
+            let headers = [
+                "Content-Type": "image/png",
+                "Content-Disposition": "attachment; filename=\"Brambles_Banner.png\"",
+                "Content-Length": "\(imageData.count)"
+            ]
+
+            let response = try XCTUnwrap(
+                HTTPURLResponse(
+                    url: try XCTUnwrap(request.url),
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: headers
+                )
+            )
+
+            if request.httpMethod == "HEAD" {
+                return (Data(), response)
+            }
+
+            return (imageData, response)
+        }
+
+        loader = HTMLContentLoader(
+            contentHandler: contentHandler,
+            sanitizer: .shared,
+            remoteImageAttachmentFallback: remoteImageFallback
+        )
+
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <img src="https://d3t000000dywoeaq.file.force.com/file-asset-public/Brambles_Banner?oid=00D3t000000dywO" alt="Banner">
+          <p>Visible body text</p>
+        </body>
+        </html>
+        """
+        _ = contentHandler.saveHTML(html, for: messageId)
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            senderEmail: "thomas@brambles.golf",
+            isDarkMode: false,
+            cleanupMode: .none
+        )
+
+        XCTAssertNotNil(result.html)
+        XCTAssertTrue((result.html ?? "").contains("src=\"data:image/png;base64,"))
+        XCTAssertTrue((result.html ?? "").contains("Visible body text"))
+
+        let snapshot = await recorder.snapshot()
+        XCTAssertEqual(snapshot.methods, ["HEAD", "GET"])
+        XCTAssertEqual(snapshot.referers, ["https://brambles.golf/", "https://brambles.golf/"])
+    }
+}
+
+private actor RequestRecorder {
+    private(set) var methods: [String] = []
+    private(set) var referers: [String?] = []
+
+    func record(_ request: URLRequest) {
+        methods.append(request.httpMethod ?? "")
+        referers.append(request.value(forHTTPHeaderField: "Referer"))
+    }
+
+    func snapshot() -> (methods: [String], referers: [String?]) {
+        (methods, referers)
     }
 }
