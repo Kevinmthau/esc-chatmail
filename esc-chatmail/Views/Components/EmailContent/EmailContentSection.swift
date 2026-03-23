@@ -62,6 +62,7 @@ struct EmailContentSection: View {
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
             bodyText: message.bodyText,
+            senderEmail: message.senderEmail,
             isDarkMode: colorScheme == .dark,
             cleanupMode: message.htmlDisplayCleanupMode,
             timeout: 5.0

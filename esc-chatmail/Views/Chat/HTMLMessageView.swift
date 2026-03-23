@@ -54,6 +54,7 @@ struct HTMLPreviewView: View {
         let result = await htmlContentLoader.loadContent(
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
+            senderEmail: message.senderEmail,
             isDarkMode: colorScheme == .dark,
             cleanupMode: message.htmlDisplayCleanupMode
         )
@@ -116,6 +117,7 @@ struct HTMLMessageView: View {
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
             bodyText: message.bodyText,
+            senderEmail: message.senderEmail,
             isDarkMode: colorScheme == .dark,
             cleanupMode: message.htmlDisplayCleanupMode,
             timeout: 5.0

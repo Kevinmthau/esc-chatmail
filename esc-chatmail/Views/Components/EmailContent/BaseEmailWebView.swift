@@ -146,20 +146,7 @@ struct BaseEmailWebView: UIViewRepresentable {
 
         /// Derives a baseURL from the sender's email domain for proper Referer headers
         private func deriveBaseURL(from message: Message?) -> URL? {
-            guard let email = message?.senderEmail,
-                  let atIndex = email.lastIndex(of: "@") else {
-                return nil
-            }
-            let domain = String(email[email.index(after: atIndex)...])
-            // Validate domain: must be non-empty, contain a dot, and have no spaces or invalid URL chars
-            guard !domain.isEmpty,
-                  domain.contains("."),
-                  !domain.contains(" "),
-                  !domain.contains("/"),
-                  !domain.contains("@") else {
-                return nil
-            }
-            return URL(string: "https://\(domain)/")
+            EmailSenderBaseURLResolver.baseURL(from: message?.senderEmail)
         }
 
         private func wrapWithScale(_ html: String, scale: CGFloat) -> String {
