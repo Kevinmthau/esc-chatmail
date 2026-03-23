@@ -1,6 +1,7 @@
 import SwiftUI
 import CoreData
 import UIKit
+import Contacts
 
 /// Extracted from ChatView to keep SwiftUI type-checking manageable.
 struct ChatMessagesView: View {
@@ -15,11 +16,13 @@ struct ChatMessagesView: View {
 
     @Namespace private var bottomID
     @State private var isReadyToShow = false
+    @State private var senderGroupingKeysByEmail: [String: String] = [:]
 
     @State private var initialScrollTask: Task<Void, Never>?
     @State private var scrollTask: Task<Void, Never>?
     @State private var followUpScrollTask: Task<Void, Never>?
     @State private var stabilizationScrollTask: Task<Void, Never>?
+    @State private var senderGroupingTask: Task<Void, Never>?
 
     private var shouldUseBottomAnchoring: Bool { messages.count > 1 }
 
@@ -31,7 +34,7 @@ struct ChatMessagesView: View {
                         let message = messages[index]
                         let nextMessage = index + 1 < messages.count ? messages[index + 1] : nil
                         let isLastFromSender = nextMessage == nil ||
-                            nextMessage?.senderEmail != message.senderEmail ||
+                            senderRunKey(for: nextMessage) != senderRunKey(for: message) ||
                             nextMessage?.isFromMe != message.isFromMe
 
                         MessageBubble(
@@ -103,7 +106,7 @@ struct ChatMessagesView: View {
 
                 // Delegate prefetching to ViewModel
                 viewModel.prefetchRecentContent(messageIds: messageIds, senderEmails: senderEmails)
-                viewModel.loadResolvedDisplayName()
+                refreshConversationPresentation()
             }
             .onDisappear {
                 // Cancel view-scoped scroll/prefetch work when leaving chat.
@@ -111,6 +114,7 @@ struct ChatMessagesView: View {
                 scrollTask?.cancel()
                 followUpScrollTask?.cancel()
                 stabilizationScrollTask?.cancel()
+                senderGroupingTask?.cancel()
                 viewModel.cancelPrefetch()
             }
             .onChange(of: messages.count) { oldCount, newCount in
@@ -122,6 +126,8 @@ struct ChatMessagesView: View {
                     viewModel.updateReplyingToIfNewSubject(lastMessage: messages.last)
                     scrollToBottom(proxy: proxy, delay: UIConfig.contentChangeScrollDelay)
                 }
+
+                refreshConversationPresentation()
             }
             .onChange(of: keyboard.currentHeight) { oldHeight, newHeight in
                 if newHeight > 0 || (oldHeight > 0 && newHeight == 0) {
@@ -132,6 +138,9 @@ struct ChatMessagesView: View {
                 if !isFocused {
                     scrollToBottom(proxy: proxy, delay: UIConfig.initialScrollDelay)
                 }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .CNContactStoreDidChange)) { _ in
+                refreshConversationPresentation()
             }
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 0) {
@@ -167,6 +176,52 @@ struct ChatMessagesView: View {
     }
 
     // MARK: - Scroll Helpers
+
+    private func refreshConversationPresentation() {
+        viewModel.loadResolvedDisplayName()
+        refreshSenderGroupingKeys()
+    }
+
+    private func refreshSenderGroupingKeys() {
+        senderGroupingTask?.cancel()
+
+        let senderEmails = messages.compactMap { senderEmail(for: $0) }
+        let participantLoader = deps.participantLoader
+
+        senderGroupingTask = Task {
+            let groupingKeys = await participantLoader.senderGroupingKeys(for: senderEmails)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                senderGroupingKeysByEmail = groupingKeys
+            }
+        }
+    }
+
+    private func senderRunKey(for message: Message?) -> String? {
+        guard let message else { return nil }
+        guard !message.isFromMe else { return "me" }
+        guard let senderEmail = senderEmail(for: message) else { return "email:" }
+
+        let normalizedEmail = EmailNormalizer.normalize(senderEmail)
+        if viewModel.isEffectivelyOneToOneConversation {
+            return senderGroupingKeysByEmail[normalizedEmail] ?? "email:\(normalizedEmail)"
+        }
+
+        return "email:\(normalizedEmail)"
+    }
+
+    private func senderEmail(for message: Message) -> String? {
+        if let senderEmail = message.senderEmail?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !senderEmail.isEmpty {
+            return senderEmail
+        }
+
+        return message.participants?
+            .first(where: { $0.participantKind == .from })?
+            .person?
+            .email
+    }
 
     /// Performs the initial scroll to bottom with task tracking to prevent race conditions
     /// when both onAppear and onChange fire for cached data

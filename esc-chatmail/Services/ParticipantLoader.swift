@@ -94,6 +94,36 @@ final class ParticipantLoader {
         )
     }
 
+    /// Resolves stable sender grouping keys for chat bubble run collapsing.
+    /// Emails that map to the same contact identifier share one grouping key.
+    func senderGroupingKeys(for emails: [String]) async -> [String: String] {
+        guard !emails.isEmpty else { return [:] }
+
+        var uniqueNormalizedEmails: [String] = []
+        var seenEmails = Set<String>()
+
+        for email in emails {
+            let normalizedEmail = EmailNormalizer.normalize(email)
+            guard !normalizedEmail.isEmpty,
+                  !seenEmails.contains(normalizedEmail) else { continue }
+
+            seenEmails.insert(normalizedEmail)
+            uniqueNormalizedEmails.append(normalizedEmail)
+        }
+
+        var groupingKeys: [String: String] = [:]
+        for normalizedEmail in uniqueNormalizedEmails {
+            if let contactIdentifier = await contactsResolver.lookup(email: normalizedEmail)?.contactIdentifier,
+               !contactIdentifier.isEmpty {
+                groupingKeys[normalizedEmail] = "contact:\(contactIdentifier)"
+            } else {
+                groupingKeys[normalizedEmail] = "email:\(normalizedEmail)"
+            }
+        }
+
+        return groupingKeys
+    }
+
     /// Extracts non-me participant emails from a conversation, deduplicated
     nonisolated
     func extractNonMeParticipants(

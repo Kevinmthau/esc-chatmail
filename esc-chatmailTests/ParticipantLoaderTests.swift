@@ -188,6 +188,40 @@ final class ParticipantLoaderTests: XCTestCase {
         XCTAssertEqual(info.totalUniqueParticipants, 2)
     }
 
+    func testSenderGroupingKeys_collapseEmailsForSameContact() async {
+        let mockResolver = MockContactsResolving(contactMap: [
+            "john@work.com": ContactMatch(displayName: "John Smith", email: "john@work.com", imageData: nil, contactIdentifier: "contact-123"),
+            "john@personal.com": ContactMatch(displayName: "John Smith", email: "john@personal.com", imageData: nil, contactIdentifier: "contact-123")
+        ])
+
+        let loader = ParticipantLoader(contactsResolver: mockResolver)
+
+        let groupingKeys = await loader.senderGroupingKeys(for: [
+            "john@work.com",
+            "john@personal.com"
+        ])
+
+        XCTAssertEqual(groupingKeys[EmailNormalizer.normalize("john@work.com")], "contact:contact-123")
+        XCTAssertEqual(groupingKeys[EmailNormalizer.normalize("john@personal.com")], "contact:contact-123")
+    }
+
+    func testSenderGroupingKeys_keepDistinctContactsSeparate() async {
+        let mockResolver = MockContactsResolving(contactMap: [
+            "alice@example.com": ContactMatch(displayName: "Alice", email: "alice@example.com", imageData: nil, contactIdentifier: "contact-alice"),
+            "bob@example.com": ContactMatch(displayName: "Bob", email: "bob@example.com", imageData: nil, contactIdentifier: "contact-bob")
+        ])
+
+        let loader = ParticipantLoader(contactsResolver: mockResolver)
+
+        let groupingKeys = await loader.senderGroupingKeys(for: [
+            "alice@example.com",
+            "bob@example.com"
+        ])
+
+        XCTAssertEqual(groupingKeys[EmailNormalizer.normalize("alice@example.com")], "contact:contact-alice")
+        XCTAssertEqual(groupingKeys[EmailNormalizer.normalize("bob@example.com")], "contact:contact-bob")
+    }
+
     // MARK: - Helpers
 
     private func addConversationParticipant(person: Person, to conversation: Conversation) {
