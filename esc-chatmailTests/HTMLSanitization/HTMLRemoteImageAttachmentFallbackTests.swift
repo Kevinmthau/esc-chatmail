@@ -91,18 +91,117 @@ final class HTMLRemoteImageAttachmentFallbackTests: XCTestCase {
         let snapshot = await recorder.snapshot()
         XCTAssertEqual(snapshot.methods, ["HEAD"])
     }
+
+    func testInlineAttachmentStyleImages_doesNotNegativeCacheTransientFailures() async {
+        let recorder = RequestRecorder()
+        let attempts = AttemptCounter()
+        let imageData = onePixelPNG
+
+        let service = HTMLRemoteImageAttachmentFallback { request in
+            await recorder.record(request)
+
+            let requestKey = "\(request.httpMethod ?? "GET")|\(request.url?.absoluteString ?? "")"
+            let attempt = await attempts.increment(for: requestKey)
+            if request.httpMethod == "HEAD", attempt == 1 {
+                throw URLError(.timedOut)
+            }
+
+            let response = HTTPURLResponse(
+                url: request.url ?? URL(string: "https://cdn.example.com/open.php?id=hero")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [
+                    "Content-Type": "image/png",
+                    "Content-Disposition": "attachment; filename=\"hero.png\"",
+                    "Content-Length": "\(imageData.count)"
+                ]
+            )!
+
+            if request.httpMethod == "HEAD" {
+                return (Data(), response)
+            }
+
+            return (imageData, response)
+        }
+
+        let html = #"<img src="https://cdn.example.com/open.php?id=hero">"#
+
+        let first = await service.inlineAttachmentStyleImages(in: html, senderEmail: "sender@example.com")
+        XCTAssertEqual(first, html)
+
+        let second = await service.inlineAttachmentStyleImages(in: html, senderEmail: "sender@example.com")
+        XCTAssertTrue(second.contains("src=\"data:image/png;base64,"))
+
+        let snapshot = await recorder.snapshot()
+        XCTAssertEqual(snapshot.methods, ["HEAD", "HEAD", "GET"])
+    }
+
+    func testInlineAttachmentStyleImages_boundsPositiveDataURLCache() async {
+        let recorder = RequestRecorder()
+        let imageData = onePixelPNG
+        let service = HTMLRemoteImageAttachmentFallback(
+            requestExecutor: { request in
+                await recorder.record(request)
+
+                let response = HTTPURLResponse(
+                    url: request.url ?? URL(string: "https://cdn.example.com/open.php?id=fallback")!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: [
+                        "Content-Type": "image/png",
+                        "Content-Disposition": "attachment; filename=\"hero.png\"",
+                        "Content-Length": "\(imageData.count)"
+                    ]
+                )!
+
+                if request.httpMethod == "HEAD" {
+                    return (Data(), response)
+                }
+
+                return (imageData, response)
+            },
+            rewrittenDataURLCacheMaxEntries: 1,
+            rewrittenDataURLCacheMaxBytes: 1024
+        )
+
+        let firstHTML = #"<img src="https://cdn.example.com/open.php?id=first">"#
+        let secondHTML = #"<img src="https://cdn.example.com/open.php?id=second">"#
+
+        _ = await service.inlineAttachmentStyleImages(in: firstHTML, senderEmail: "sender@example.com")
+        _ = await service.inlineAttachmentStyleImages(in: secondHTML, senderEmail: "sender@example.com")
+        _ = await service.inlineAttachmentStyleImages(in: firstHTML, senderEmail: "sender@example.com")
+
+        let snapshot = await recorder.snapshot()
+        let firstURLRequests = zip(snapshot.urls, snapshot.methods).filter { url, _ in
+            url.contains("id=first")
+        }.map { $0.1 }
+
+        XCTAssertEqual(firstURLRequests, ["HEAD", "GET", "HEAD", "GET"])
+    }
 }
 
 private actor RequestRecorder {
     private(set) var methods: [String] = []
     private(set) var referers: [String?] = []
+    private(set) var urls: [String] = []
 
     func record(_ request: URLRequest) {
         methods.append(request.httpMethod ?? "")
         referers.append(request.value(forHTTPHeaderField: "Referer"))
+        urls.append(request.url?.absoluteString ?? "")
     }
 
-    func snapshot() -> (methods: [String], referers: [String?]) {
-        (methods, referers)
+    func snapshot() -> (methods: [String], referers: [String?], urls: [String]) {
+        (methods, referers, urls)
+    }
+}
+
+private actor AttemptCounter {
+    private var attempts: [String: Int] = [:]
+
+    func increment(for key: String) -> Int {
+        let nextValue = (attempts[key] ?? 0) + 1
+        attempts[key] = nextValue
+        return nextValue
     }
 }

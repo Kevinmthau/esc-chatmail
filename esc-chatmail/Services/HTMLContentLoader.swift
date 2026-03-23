@@ -20,6 +20,11 @@ struct HTMLLoadResult {
     }
 }
 
+private struct WrappedHTMLResult {
+    let html: String
+    let shouldCache: Bool
+}
+
 /// Service for loading HTML content from various sources
 final class HTMLContentLoader {
     static let shared = HTMLContentLoader()
@@ -85,13 +90,16 @@ final class HTMLContentLoader {
            !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             if let wrapped = await wrappedHTMLIfMeaningful(
                 html,
+                messageId: messageId,
                 senderEmail: senderEmail,
                 isDarkMode: isDarkMode,
                 cleanupMode: cleanupMode
             ) {
-                let cost = wrapped.utf8.count
-                htmlCache.setObject(wrapped as NSString, forKey: cacheKey, cost: cost)
-                return HTMLLoadResult(html: wrapped, source: .messageId)
+                if wrapped.shouldCache {
+                    let cost = wrapped.html.utf8.count
+                    htmlCache.setObject(wrapped.html as NSString, forKey: cacheKey, cost: cost)
+                }
+                return HTMLLoadResult(html: wrapped.html, source: .messageId)
             }
         }
 
@@ -103,13 +111,16 @@ final class HTMLContentLoader {
            !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             if let wrapped = await wrappedHTMLIfMeaningful(
                 html,
+                messageId: messageId,
                 senderEmail: senderEmail,
                 isDarkMode: isDarkMode,
                 cleanupMode: cleanupMode
             ) {
-                let cost = wrapped.utf8.count
-                htmlCache.setObject(wrapped as NSString, forKey: cacheKey, cost: cost)
-                return HTMLLoadResult(html: wrapped, source: .storageURI)
+                if wrapped.shouldCache {
+                    let cost = wrapped.html.utf8.count
+                    htmlCache.setObject(wrapped.html as NSString, forKey: cacheKey, cost: cost)
+                }
+                return HTMLLoadResult(html: wrapped.html, source: .storageURI)
             }
         }
 
@@ -117,13 +128,16 @@ final class HTMLContentLoader {
         if let html = await HTMLContentRecoveryService.shared.recoverHTMLContent(messageId: messageId),
            let wrapped = await wrappedHTMLIfMeaningful(
                html,
+               messageId: messageId,
                senderEmail: senderEmail,
                isDarkMode: isDarkMode,
                cleanupMode: cleanupMode
            ) {
-            let cost = wrapped.utf8.count
-            htmlCache.setObject(wrapped as NSString, forKey: cacheKey, cost: cost)
-            return HTMLLoadResult(html: wrapped, source: .recovered)
+            if wrapped.shouldCache {
+                let cost = wrapped.html.utf8.count
+                htmlCache.setObject(wrapped.html as NSString, forKey: cacheKey, cost: cost)
+            }
+            return HTMLLoadResult(html: wrapped.html, source: .recovered)
         }
 
         // Method 4: Plain text fallback (don't cache as it's trivial to generate)
@@ -192,26 +206,48 @@ final class HTMLContentLoader {
 
     private func wrappedHTMLIfMeaningful(
         _ html: String,
+        messageId: String,
         senderEmail: String?,
         isDarkMode: Bool,
         cleanupMode: HTMLContentCleanupMode
-    ) async -> String? {
+    ) async -> WrappedHTMLResult? {
         let preparedHTML = prepareHTMLForDisplay(html, cleanupMode: cleanupMode)
-        guard HTMLMeaningfulContentChecker.hasMeaningfulContent(preparedHTML) else {
+        let sanitizedHTML = sanitizer.sanitize(preparedHTML)
+        guard HTMLMeaningfulContentChecker.hasMeaningfulContent(sanitizedHTML) else {
             return nil
         }
 
-        let htmlWithRewrittenImages = await remoteImageAttachmentFallback.inlineAttachmentStyleImages(
-            in: preparedHTML,
+        let cachedRewrite = await remoteImageAttachmentFallback.cachedInlineAttachmentStyleImages(
+            in: sanitizedHTML,
             senderEmail: senderEmail
         )
+        if cachedRewrite.needsWarmup {
+            warmRemoteImageAttachmentFallback(in: sanitizedHTML, messageId: messageId, senderEmail: senderEmail)
+        }
 
-        let wrapped = sanitizer.wrapHTMLForDisplay(htmlWithRewrittenImages, isDarkMode: isDarkMode)
+        let wrapped = sanitizer.wrapHTMLForDisplay(cachedRewrite.html, isDarkMode: isDarkMode)
         guard HTMLMeaningfulContentChecker.hasMeaningfulContent(wrapped) else {
             return nil
         }
 
-        return wrapped
+        return WrappedHTMLResult(html: wrapped, shouldCache: !cachedRewrite.hasPendingUpdates)
+    }
+
+    private func warmRemoteImageAttachmentFallback(in html: String, messageId: String, senderEmail: String?) {
+        let remoteImageAttachmentFallback = self.remoteImageAttachmentFallback
+        Task.detached(priority: .utility) {
+            let rewrittenHTML = await remoteImageAttachmentFallback.inlineAttachmentStyleImages(
+                in: html,
+                senderEmail: senderEmail
+            )
+
+            if rewrittenHTML != html {
+                Log.debug(
+                    "Warmed attachment-style remote image fallback for message \(messageId)",
+                    category: .ui
+                )
+            }
+        }
     }
 
     private func normalizedPlainTextFallback(from text: String) -> String {

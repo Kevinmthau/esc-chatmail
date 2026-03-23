@@ -8,14 +8,78 @@ actor HTMLRemoteImageAttachmentFallback {
 
     static let shared = HTMLRemoteImageAttachmentFallback()
 
+    struct CachedRewriteResult {
+        let html: String
+        let hasPendingUpdates: Bool
+        let needsWarmup: Bool
+    }
+
     private struct ImageSourceMatch {
-        let originalURL: String
         let resolvedURL: String
         let range: NSRange
     }
 
-    private enum FallbackError: Error {
-        case unsupportedResponse
+    private enum DataURLResolutionResult: Sendable {
+        case rewritten(String)
+        case unchanged
+        case transientFailure(String)
+    }
+
+    private struct CostBoundedStringCache: Sendable {
+        private var values: [String: String] = [:]
+        private var costs: [String: Int] = [:]
+        private var usageOrder: [String] = []
+        private let maxEntries: Int
+        private let maxTotalCost: Int
+        private var currentTotalCost = 0
+
+        init(maxEntries: Int, maxTotalCost: Int) {
+            precondition(maxEntries > 0, "maxEntries must be positive")
+            precondition(maxTotalCost > 0, "maxTotalCost must be positive")
+
+            self.maxEntries = maxEntries
+            self.maxTotalCost = maxTotalCost
+        }
+
+        mutating func value(forKey key: String) -> String? {
+            guard let value = values[key] else { return nil }
+            touch(key)
+            return value
+        }
+
+        mutating func insert(_ value: String, forKey key: String, cost: Int) {
+            guard cost > 0, cost <= maxTotalCost else { return }
+
+            if let existingCost = costs[key] {
+                currentTotalCost -= existingCost
+            }
+            values[key] = nil
+            costs[key] = nil
+            usageOrder.removeAll { $0 == key }
+
+            while !usageOrder.isEmpty && (usageOrder.count >= maxEntries || currentTotalCost + cost > maxTotalCost) {
+                evictLeastRecentlyUsed()
+            }
+
+            values[key] = value
+            costs[key] = cost
+            usageOrder.append(key)
+            currentTotalCost += cost
+        }
+
+        private mutating func touch(_ key: String) {
+            usageOrder.removeAll { $0 == key }
+            usageOrder.append(key)
+        }
+
+        private mutating func evictLeastRecentlyUsed() {
+            guard let key = usageOrder.first else { return }
+            usageOrder.removeFirst()
+            if let cost = costs.removeValue(forKey: key) {
+                currentTotalCost -= cost
+            }
+            values.removeValue(forKey: key)
+        }
     }
 
     private static let imageSourceRegex: NSRegularExpression = {
@@ -51,15 +115,65 @@ actor HTMLRemoteImageAttachmentFallback {
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
 
     private let requestExecutor: RequestExecutor
-    private var rewrittenDataURLCache: [String: String] = [:]
+    private var rewrittenDataURLCache: CostBoundedStringCache
     private var unchangedURLCache = BoundedSet<String>(maxSize: 500, prunePercentage: 0.2)
+    private var inFlightResolutions: [String: Task<DataURLResolutionResult, Never>] = [:]
     private let maxCandidatesPerDocument = 6
     private let maxInlineBytes = 2 * 1024 * 1024
 
-    init(requestExecutor: @escaping RequestExecutor = { request in
-        try await URLSession.shared.data(for: request)
-    }) {
+    init(
+        requestExecutor: @escaping RequestExecutor = { request in
+            try await URLSession.shared.data(for: request)
+        },
+        rewrittenDataURLCacheMaxEntries: Int = 32,
+        rewrittenDataURLCacheMaxBytes: Int = 8 * 1024 * 1024
+    ) {
         self.requestExecutor = requestExecutor
+        self.rewrittenDataURLCache = CostBoundedStringCache(
+            maxEntries: rewrittenDataURLCacheMaxEntries,
+            maxTotalCost: rewrittenDataURLCacheMaxBytes
+        )
+    }
+
+    func cachedInlineAttachmentStyleImages(in html: String, senderEmail: String?) -> CachedRewriteResult {
+        let matches = Self.imageSourceMatches(in: html)
+        guard !matches.isEmpty else {
+            return CachedRewriteResult(html: html, hasPendingUpdates: false, needsWarmup: false)
+        }
+
+        let senderBaseURL = EmailSenderBaseURLResolver.baseURL(from: senderEmail)
+        let candidateURLs = eligibleCandidateURLs(from: matches)
+        guard !candidateURLs.isEmpty else {
+            return CachedRewriteResult(html: html, hasPendingUpdates: false, needsWarmup: false)
+        }
+
+        var rewrittenURLs: [String: String] = [:]
+        var hasPendingUpdates = false
+        var needsWarmup = false
+
+        for url in candidateURLs {
+            let cacheKey = cacheKey(for: url, senderBaseURL: senderBaseURL)
+
+            if let cached = rewrittenDataURLCache.value(forKey: cacheKey) {
+                rewrittenURLs[url] = cached
+                continue
+            }
+
+            if unchangedURLCache.contains(cacheKey) {
+                continue
+            }
+
+            hasPendingUpdates = true
+            if inFlightResolutions[cacheKey] == nil {
+                needsWarmup = true
+            }
+        }
+
+        return CachedRewriteResult(
+            html: Self.rewritingHTML(html, matches: matches, replacements: rewrittenURLs),
+            hasPendingUpdates: hasPendingUpdates,
+            needsWarmup: needsWarmup
+        )
     }
 
     func inlineAttachmentStyleImages(in html: String, senderEmail: String?) async -> String {
@@ -79,17 +193,7 @@ actor HTMLRemoteImageAttachmentFallback {
 
         guard !rewrittenURLs.isEmpty else { return html }
 
-        var result = html
-        for match in matches.reversed() {
-            guard let replacement = rewrittenURLs[match.resolvedURL],
-                  let range = Range(match.range, in: result) else {
-                continue
-            }
-
-            result.replaceSubrange(range, with: replacement)
-        }
-
-        return result
+        return Self.rewritingHTML(html, matches: matches, replacements: rewrittenURLs)
     }
 
     private func eligibleCandidateURLs(from matches: [ImageSourceMatch]) -> [String] {
@@ -114,11 +218,14 @@ actor HTMLRemoteImageAttachmentFallback {
 
     private func resolvedDataURL(for urlString: String, senderBaseURL: URL?) async -> String? {
         let cacheKey = cacheKey(for: urlString, senderBaseURL: senderBaseURL)
-        if let cached = rewrittenDataURLCache[cacheKey] {
+        if let cached = rewrittenDataURLCache.value(forKey: cacheKey) {
             return cached
         }
         if unchangedURLCache.contains(cacheKey) {
             return nil
+        }
+        if let inFlightTask = inFlightResolutions[cacheKey] {
+            return await finalizeResolution(inFlightTask, cacheKey: cacheKey)
         }
 
         guard let url = URL(string: urlString) else {
@@ -126,48 +233,93 @@ actor HTMLRemoteImageAttachmentFallback {
             return nil
         }
 
-        do {
-            let headResponse = try await execute(request(for: url, method: "HEAD", senderBaseURL: senderBaseURL))
-            guard shouldInlineImage(from: headResponse.response) else {
-                unchangedURLCache.insert(cacheKey)
-                return nil
-            }
-
-            if let contentLength = contentLength(from: headResponse.response),
-               contentLength > maxInlineBytes {
-                unchangedURLCache.insert(cacheKey)
-                return nil
-            }
-
-            let getResponse = try await execute(request(for: url, method: "GET", senderBaseURL: senderBaseURL))
-            guard let dataURL = makeDataURL(from: getResponse.data, response: getResponse.response) else {
-                unchangedURLCache.insert(cacheKey)
-                return nil
-            }
-
-            rewrittenDataURLCache[cacheKey] = dataURL
-            return dataURL
-        } catch {
-            unchangedURLCache.insert(cacheKey)
-            Log.debug(
-                "Attachment-style remote image fallback failed for \(url.host ?? "unknown"): \(error.localizedDescription)",
-                category: .ui
+        let requestExecutor = self.requestExecutor
+        let maxInlineBytes = self.maxInlineBytes
+        let task = Task<DataURLResolutionResult, Never> {
+            await Self.resolveDataURL(
+                for: url,
+                senderBaseURL: senderBaseURL,
+                requestExecutor: requestExecutor,
+                maxInlineBytes: maxInlineBytes
             )
+        }
+        inFlightResolutions[cacheKey] = task
+
+        return await finalizeResolution(task, cacheKey: cacheKey)
+    }
+
+    private func finalizeResolution(_ task: Task<DataURLResolutionResult, Never>, cacheKey: String) async -> String? {
+        let result = await task.value
+        inFlightResolutions[cacheKey] = nil
+
+        switch result {
+        case .rewritten(let dataURL):
+            rewrittenDataURLCache.insert(dataURL, forKey: cacheKey, cost: dataURL.utf8.count)
+            unchangedURLCache.remove(cacheKey)
+            return dataURL
+        case .unchanged:
+            unchangedURLCache.insert(cacheKey)
+            return nil
+        case .transientFailure(let description):
+            Log.debug("Attachment-style remote image fallback failed: \(description)", category: .ui)
             return nil
         }
     }
 
-    private func execute(_ request: URLRequest) async throws -> (data: Data, response: HTTPURLResponse) {
+    private static func resolveDataURL(
+        for url: URL,
+        senderBaseURL: URL?,
+        requestExecutor: @escaping RequestExecutor,
+        maxInlineBytes: Int
+    ) async -> DataURLResolutionResult {
+        do {
+            let headResponse = try await execute(
+                request(for: url, method: "HEAD", senderBaseURL: senderBaseURL),
+                requestExecutor: requestExecutor
+            )
+            guard shouldInlineImage(from: headResponse.response) else {
+                return .unchanged
+            }
+
+            if let contentLength = contentLength(from: headResponse.response),
+               contentLength > Int64(maxInlineBytes) {
+                return .unchanged
+            }
+
+            let getResponse = try await execute(
+                request(for: url, method: "GET", senderBaseURL: senderBaseURL),
+                requestExecutor: requestExecutor
+            )
+            guard let dataURL = makeDataURL(
+                from: getResponse.data,
+                response: getResponse.response,
+                maxInlineBytes: maxInlineBytes
+            ) else {
+                return .unchanged
+            }
+
+            return .rewritten(dataURL)
+        } catch is CancellationError {
+            return .transientFailure("cancelled for \(url.host ?? "unknown")")
+        } catch {
+            return .transientFailure("\(url.host ?? "unknown"): \(error.localizedDescription)")
+        }
+    }
+
+    private static func execute(
+        _ request: URLRequest,
+        requestExecutor: @escaping RequestExecutor
+    ) async throws -> (data: Data, response: HTTPURLResponse) {
         let (data, response) = try await requestExecutor(request)
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
-            throw FallbackError.unsupportedResponse
+            throw URLError(.badServerResponse)
         }
 
         return (data, httpResponse)
     }
 
-    private func request(for url: URL, method: String, senderBaseURL: URL?) -> URLRequest {
+    private static func request(for url: URL, method: String, senderBaseURL: URL?) -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = 10.0
@@ -185,7 +337,7 @@ actor HTMLRemoteImageAttachmentFallback {
         return request
     }
 
-    private func shouldInlineImage(from response: HTTPURLResponse) -> Bool {
+    private static func shouldInlineImage(from response: HTTPURLResponse) -> Bool {
         guard let mimeType = response.mimeType?.lowercased(),
               Self.supportedImageMimeTypes.contains(mimeType) else {
             return false
@@ -195,7 +347,7 @@ actor HTMLRemoteImageAttachmentFallback {
         return disposition.contains("attachment")
     }
 
-    private func makeDataURL(from data: Data, response: HTTPURLResponse) -> String? {
+    private static func makeDataURL(from data: Data, response: HTTPURLResponse, maxInlineBytes: Int) -> String? {
         guard !data.isEmpty,
               data.count <= maxInlineBytes,
               let mimeType = response.mimeType?.lowercased(),
@@ -207,7 +359,7 @@ actor HTMLRemoteImageAttachmentFallback {
         return "data:\(mimeType);base64,\(data.base64EncodedString())"
     }
 
-    private func contentLength(from response: HTTPURLResponse) -> Int64? {
+    private static func contentLength(from response: HTTPURLResponse) -> Int64? {
         if response.expectedContentLength > 0 {
             return response.expectedContentLength
         }
@@ -221,7 +373,7 @@ actor HTMLRemoteImageAttachmentFallback {
         return value
     }
 
-    private func headerValue(_ name: String, from response: HTTPURLResponse) -> String? {
+    private static func headerValue(_ name: String, from response: HTTPURLResponse) -> String? {
         for (key, value) in response.allHeaderFields {
             if String(describing: key).caseInsensitiveCompare(name) == .orderedSame {
                 return String(describing: value)
@@ -264,13 +416,29 @@ actor HTMLRemoteImageAttachmentFallback {
                 return nil
             }
 
-            let originalURL = String(html[urlRange])
-            let resolvedURL = HTMLEntityDecoder.decode(originalURL)
+            let resolvedURL = HTMLEntityDecoder.decode(String(html[urlRange]))
             return ImageSourceMatch(
-                originalURL: originalURL,
                 resolvedURL: resolvedURL,
                 range: match.range(at: 2)
             )
         }
+    }
+
+    private static func rewritingHTML(
+        _ html: String,
+        matches: [ImageSourceMatch],
+        replacements: [String: String]
+    ) -> String {
+        var result = html
+        for match in matches.reversed() {
+            guard let replacement = replacements[match.resolvedURL],
+                  let range = Range(match.range, in: result) else {
+                continue
+            }
+
+            result.replaceSubrange(range, with: replacement)
+        }
+
+        return result
     }
 }

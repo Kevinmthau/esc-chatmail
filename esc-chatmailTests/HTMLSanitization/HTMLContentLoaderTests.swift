@@ -380,7 +380,121 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertTrue((result.html ?? "").contains("needs your approval"))
     }
 
-    func testLoadContent_rewritesAttachmentStyleRemoteImagesBeforeWrapping() async throws {
+    func testLoadContentWithTimeout_returnsLocalHTMLWhileRemoteFallbackWarmsInBackground() async {
+        let messageId = "html-loader-timeout-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let imageData = onePixelPNG
+        let remoteImageFallback = HTMLRemoteImageAttachmentFallback { request in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+
+            let headers = [
+                "Content-Type": "image/png",
+                "Content-Disposition": "attachment; filename=\"banner.png\"",
+                "Content-Length": "\(imageData.count)"
+            ]
+
+            let response = HTTPURLResponse(
+                url: request.url ?? URL(string: "https://example.com/open.php")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: headers
+            )!
+
+            if request.httpMethod == "HEAD" {
+                return (Data(), response)
+            }
+
+            return (imageData, response)
+        }
+
+        loader = HTMLContentLoader(
+            contentHandler: contentHandler,
+            sanitizer: .shared,
+            remoteImageAttachmentFallback: remoteImageFallback
+        )
+
+        let html = """
+        <html>
+        <body>
+          <img src="https://cdn.example.com/open.php?id=slow-banner" alt="Banner">
+          <p>Visible body text</p>
+        </body>
+        </html>
+        """
+        _ = contentHandler.saveHTML(html, for: messageId)
+
+        let result = await loader.loadContentWithTimeout(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            senderEmail: "sender@example.com",
+            isDarkMode: false,
+            cleanupMode: .none,
+            timeout: 0.05
+        )
+
+        guard case .messageId = result.source else {
+            XCTFail("Expected fast local HTML render instead of timeout fallback")
+            return
+        }
+
+        XCTAssertNotNil(result.html)
+        XCTAssertTrue((result.html ?? "").contains("Visible body text"))
+    }
+
+    func testLoadContent_sanitizesTrackingPixelsBeforeRemoteFallbackWarmup() async {
+        let messageId = "html-loader-tracking-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let recorder = RequestRecorder()
+        let remoteImageFallback = HTMLRemoteImageAttachmentFallback { request in
+            await recorder.record(request)
+            return (
+                Data(),
+                HTTPURLResponse(
+                    url: request.url ?? URL(string: "https://track.example.com/open.php")!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+            )
+        }
+
+        loader = HTMLContentLoader(
+            contentHandler: contentHandler,
+            sanitizer: .shared,
+            remoteImageAttachmentFallback: remoteImageFallback
+        )
+
+        let html = """
+        <html>
+        <body>
+          <img src="https://track.example.com/open.php?message=123" width="1" height="1" alt="">
+          <p>Visible body text</p>
+        </body>
+        </html>
+        """
+        _ = contentHandler.saveHTML(html, for: messageId)
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            senderEmail: "sender@example.com",
+            isDarkMode: false,
+            cleanupMode: .none
+        )
+
+        XCTAssertNotNil(result.html)
+        XCTAssertTrue((result.html ?? "").contains("Visible body text"))
+        XCTAssertFalse((result.html ?? "").contains("track.example.com"))
+
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        let snapshot = await recorder.snapshot()
+        XCTAssertTrue(snapshot.methods.isEmpty)
+    }
+
+    func testLoadContent_warmsAttachmentStyleRemoteImagesAfterInitialRender() async throws {
         let messageId = "html-loader-remote-attachment-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }
 
@@ -437,8 +551,38 @@ final class HTMLContentLoaderTests: XCTestCase {
         )
 
         XCTAssertNotNil(result.html)
-        XCTAssertTrue((result.html ?? "").contains("src=\"data:image/png;base64,"))
         XCTAssertTrue((result.html ?? "").contains("Visible body text"))
+        XCTAssertFalse((result.html ?? "").contains("src=\"data:image/png;base64,"))
+
+        for _ in 0..<20 {
+            let snapshot = await recorder.snapshot()
+            if snapshot.methods == ["HEAD", "GET"] {
+                break
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        var warmedHTML: String?
+        for _ in 0..<20 {
+            let warmedResult = await loader.loadContent(
+                messageId: messageId,
+                bodyStorageURI: nil,
+                senderEmail: "thomas@brambles.golf",
+                isDarkMode: false,
+                cleanupMode: .none
+            )
+
+            if let html = warmedResult.html,
+               html.contains("src=\"data:image/png;base64,") {
+                warmedHTML = html
+                break
+            }
+
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        XCTAssertNotNil(warmedHTML)
+        XCTAssertTrue((warmedHTML ?? "").contains("Visible body text"))
 
         let snapshot = await recorder.snapshot()
         XCTAssertEqual(snapshot.methods, ["HEAD", "GET"])
