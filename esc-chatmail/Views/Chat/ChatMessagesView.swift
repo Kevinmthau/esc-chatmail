@@ -38,6 +38,7 @@ struct ChatMessagesView: View {
                             message: message,
                             conversation: conversation,
                             deps: deps,
+                            isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
                             isLastFromSender: isLastFromSender
                         )
                         .id(message.id)

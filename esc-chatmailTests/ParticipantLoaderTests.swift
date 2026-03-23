@@ -74,6 +74,7 @@ final class ParticipantLoaderTests: XCTestCase {
         XCTAssertEqual(info.displayNames, [])
         XCTAssertEqual(info.photos.count, 0)
         XCTAssertEqual(info.formattedDisplayName, "Fallback Name")
+        XCTAssertEqual(info.totalUniqueParticipants, 0)
     }
 
     // MARK: - Contact Deduplication Tests
@@ -113,6 +114,7 @@ final class ParticipantLoaderTests: XCTestCase {
         // Should only show one participant since both emails belong to the same contact
         XCTAssertEqual(info.emails.count, 1)
         XCTAssertEqual(info.emails.first, "john@work.com")
+        XCTAssertEqual(info.totalUniqueParticipants, 1)
     }
 
     func testLoadParticipants_keepsSeparateParticipantsForDifferentContacts() async throws {
@@ -147,6 +149,7 @@ final class ParticipantLoaderTests: XCTestCase {
         )
 
         XCTAssertEqual(info.emails.count, 2)
+        XCTAssertEqual(info.totalUniqueParticipants, 2)
     }
 
     func testLoadParticipants_keepsEmailsWithNoMatchingContact() async throws {
@@ -182,6 +185,7 @@ final class ParticipantLoaderTests: XCTestCase {
 
         // Both should be kept since unknown has no contact to deduplicate against
         XCTAssertEqual(info.emails.count, 2)
+        XCTAssertEqual(info.totalUniqueParticipants, 2)
     }
 
     // MARK: - Helpers

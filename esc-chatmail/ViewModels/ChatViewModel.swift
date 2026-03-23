@@ -11,6 +11,7 @@ final class ChatViewModel: ObservableObject {
     @Published var replyingTo: Message?
     @Published var messageToForward: Message?
     @Published var resolvedDisplayName: String?
+    @Published var effectiveParticipantCount: Int?
 
     // MARK: - Composed Services
 
@@ -38,6 +39,14 @@ final class ChatViewModel: ObservableObject {
 
     private let taskManager = ViewModelTaskManager()
     private let prefetchTaskManager = ViewModelTaskManager()
+
+    var isEffectivelyOneToOneConversation: Bool {
+        if let effectiveParticipantCount {
+            return effectiveParticipantCount <= 1
+        }
+
+        return conversation.conversationType == .oneToOne
+    }
 
     // MARK: - Initialization
 
@@ -248,19 +257,25 @@ final class ChatViewModel: ObservableObject {
         prefetchTaskManager.run("displayName") { [weak self] in
             guard let self = self,
                   let myEmail = self.authSession.userEmail else { return }
-            guard let conversationContext = self.conversationContext else {
-                self.resolvedDisplayName = self.conversationDisplayNameHint
-                return
+            let info: ParticipantLoader.ParticipantInfo
+            if let conversationContext = self.conversationContext {
+                info = await self.participantLoader.loadParticipants(
+                    from: self.conversationObjectID,
+                    in: conversationContext,
+                    currentUserEmail: myEmail,
+                    maxParticipants: 4,
+                    fallbackDisplayName: self.conversationDisplayNameHint
+                )
+            } else {
+                info = await self.participantLoader.loadParticipants(
+                    from: self.conversation,
+                    currentUserEmail: myEmail,
+                    maxParticipants: 4
+                )
             }
 
-            let info = await self.participantLoader.loadParticipants(
-                from: self.conversationObjectID,
-                in: conversationContext,
-                currentUserEmail: myEmail,
-                maxParticipants: 4,
-                fallbackDisplayName: self.conversationDisplayNameHint
-            )
             self.resolvedDisplayName = info.formattedDisplayName
+            self.effectiveParticipantCount = info.totalUniqueParticipants
         }
     }
 }

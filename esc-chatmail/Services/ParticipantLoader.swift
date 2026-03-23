@@ -33,6 +33,7 @@ final class ParticipantLoader {
         let displayNames: [String]
         let photos: [ProfilePhoto]
         let formattedDisplayName: String
+        let totalUniqueParticipants: Int
     }
 
     // MARK: - Public API
@@ -185,7 +186,8 @@ final class ParticipantLoader {
             emails: topParticipants,
             displayNames: displayNames,
             photos: photos,
-            formattedDisplayName: formattedName
+            formattedDisplayName: formattedName,
+            totalUniqueParticipants: deduplicatedEmails.count
         )
     }
 

@@ -5,6 +5,8 @@ struct MessageBubble: View {
     let conversation: Conversation
     /// Pre-loaded sender names from batch fetch (avoids N+1 queries)
     var prefetchedSenderName: String?
+    /// Optional presentation override for threads that collapse multiple emails into one contact.
+    var isEffectivelyOneToOneConversation: Bool?
     /// Whether this is the last message from this sender before a different sender (for avatar grouping)
     var isLastFromSender: Bool = true
     /// Display style configuration
@@ -20,7 +22,7 @@ struct MessageBubble: View {
             isNewsletter: message.isNewsletter,
             hasRichHTMLContent: viewModel.hasRichHTMLContent,
             isFromMe: message.isFromMe,
-            isOneToOneConversation: conversation.conversationType == .oneToOne,
+            isOneToOneConversation: effectiveIsOneToOneConversation,
             subject: message.subject,
             senderEmail: effectiveSenderEmail
         )
@@ -32,6 +34,7 @@ struct MessageBubble: View {
         conversation: Conversation,
         deps: Dependencies? = nil,
         prefetchedSenderName: String? = nil,
+        isEffectivelyOneToOneConversation: Bool? = nil,
         isLastFromSender: Bool = true,
         style: MessageBubbleStyle = .standard
     ) {
@@ -39,6 +42,7 @@ struct MessageBubble: View {
         self.message = message
         self.conversation = conversation
         self.prefetchedSenderName = prefetchedSenderName
+        self.isEffectivelyOneToOneConversation = isEffectivelyOneToOneConversation
         self.isLastFromSender = isLastFromSender
         self.style = style
         self._viewModel = StateObject(wrappedValue: MessageBubbleViewModel(deps: resolvedDeps))
@@ -176,7 +180,11 @@ struct MessageBubble: View {
     // MARK: - Helpers
 
     private var isGroupConversation: Bool {
-        conversation.conversationType == .group || conversation.conversationType == .list
+        !effectiveIsOneToOneConversation
+    }
+
+    private var effectiveIsOneToOneConversation: Bool {
+        isEffectivelyOneToOneConversation ?? (conversation.conversationType == .oneToOne)
     }
 
     private var effectiveSenderEmail: String? {
