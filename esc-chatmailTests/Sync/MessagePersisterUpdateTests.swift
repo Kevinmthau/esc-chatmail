@@ -55,9 +55,11 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertTrue(existingMessage.isNewsletter)
     }
 
-    func testCreateNewMessage_reusesConversationForSameGmThreadId_evenWhenParticipantsDiffer() async throws {
+    func testCreateNewMessage_createsNewConversationForSameGmThreadId_whenParticipantsDiffer() async throws {
         let threadId = "thread-join-123"
-        let existingConversation = ConversationBuilder.simple(in: context)
+        let existingConversation = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: ["rirc@advantagetennisclubs.com"]))
+            .build(in: context)
         _ = MessageBuilder()
             .withId("existing-message")
             .withThreadId(threadId)
@@ -69,7 +71,10 @@ final class MessagePersisterUpdateTests: XCTestCase {
         var headers = ProcessedHeaders()
         headers.subject = "Re: private lesson"
         headers.from = "Kevin Thau <kmthau@gmail.com>"
-        headers.to = [EmailAddress(email: "RIRC@advantagetennisclubs.com", displayName: nil)]
+        headers.to = [
+            EmailAddress(email: "RIRC@advantagetennisclubs.com", displayName: nil),
+            EmailAddress(email: "assistant@advantagetennisclubs.com", displayName: nil)
+        ]
         headers.isFromMe = true
 
         let processedMessage = ProcessedMessage(
@@ -96,14 +101,21 @@ final class MessagePersisterUpdateTests: XCTestCase {
         )
 
         let conversationCount = try context.count(for: Conversation.fetchRequest())
-        XCTAssertEqual(conversationCount, 1, "Message should join the existing conversation, not create a new one")
+        XCTAssertEqual(conversationCount, 2, "Participant changes should create a new conversation even when the Gmail thread matches")
 
         let fetch = Message.fetchRequest()
         fetch.predicate = NSPredicate(format: "id == %@", "new-message")
         fetch.fetchLimit = 1
-        let saved = try context.fetch(fetch).first
+        let saved = try XCTUnwrap(context.fetch(fetch).first)
 
-        XCTAssertEqual(saved?.conversation?.objectID, existingConversation.objectID)
+        XCTAssertNotEqual(saved.conversation?.objectID, existingConversation.objectID)
+        XCTAssertEqual(
+            saved.conversation?.participantHash,
+            calculateParticipantHash(from: [
+                "assistant@advantagetennisclubs.com",
+                "rirc@advantagetennisclubs.com"
+            ])
+        )
     }
 
     func testCreateNewMessage_forwardedSubject_createsNewConversationEvenWhenThreadMatches() async throws {

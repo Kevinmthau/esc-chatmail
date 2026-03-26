@@ -264,6 +264,46 @@ final class ConversationMergerTests: XCTestCase {
         XCTAssertEqual(msg1.conversation?.objectID, msg2.conversation?.objectID, "Messages in the same thread should share a conversation after merge")
     }
 
+    func testMergeConversationsByGmThreadId_preservesSplitWhenParticipantHashDiffers() async throws {
+        let threadId = "gm-thread-participant-split"
+
+        let directConversation = ConversationBuilder()
+            .withKeyHash("thread-direct")
+            .withParticipantHash(calculateParticipantHash(from: ["rirc@advantagetennisclubs.com"]))
+            .build(in: context)
+
+        let expandedConversation = ConversationBuilder()
+            .withKeyHash("thread-expanded")
+            .withParticipantHash(calculateParticipantHash(from: [
+                "assistant@advantagetennisclubs.com",
+                "rirc@advantagetennisclubs.com"
+            ]))
+            .build(in: context)
+
+        let directMessage = MessageBuilder()
+            .withId("msg-thread-direct")
+            .withThreadId(threadId)
+            .withSubject("Re: private lesson")
+            .inConversation(directConversation)
+            .build(in: context)
+
+        let expandedMessage = MessageBuilder()
+            .withId("msg-thread-expanded")
+            .withThreadId(threadId)
+            .withSubject("Re: private lesson")
+            .inConversation(expandedConversation)
+            .build(in: context)
+
+        try testStack.saveViewContext()
+
+        let mergedCount = await merger.mergeConversationsByGmThreadId(in: context, mergeChangesInto: [])
+        XCTAssertEqual(mergedCount, 0, "Cleanup merge should not collapse distinct participant groups that share a Gmail thread")
+
+        let conversationCount = try context.count(for: Conversation.fetchRequest())
+        XCTAssertEqual(conversationCount, 2)
+        XCTAssertNotEqual(directMessage.conversation?.objectID, expandedMessage.conversation?.objectID)
+    }
+
     func testMergeConversationsByGmThreadId_preservesForwardedConversationSplit() async throws {
         let threadId = "gm-thread-forward-preserve"
 
