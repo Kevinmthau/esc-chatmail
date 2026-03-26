@@ -34,6 +34,11 @@ Use `xcodebuild` with the `esc-chatmail` scheme.
 - PRs should include a concise summary, tests run, and screenshots for UI changes.
 - Link related issues when applicable.
 
+## Branching Guidelines
+- Work on the current branch by default.
+- Do not create a separate branch for each change.
+- Only create, switch to, merge, or delete branches when the user explicitly asks for branch management.
+
 ## Security & Configuration Notes
 - OAuth/secret values live in xcconfig files under `esc-chatmail/Configuration/` and may be excluded from git.
 - Use `Configuration/SECURITY_SETUP.md` and `Config.xcconfig.template` for local setup.
