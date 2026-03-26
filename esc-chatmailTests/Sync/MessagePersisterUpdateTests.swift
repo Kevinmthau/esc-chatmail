@@ -290,6 +290,60 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertTrue(archivedConversation.hidden)
     }
 
+    func testCreateNewMessage_sameGmThreadIdBackfillsMissingParticipantHashAndReusesConversation() async throws {
+        let threadId = "thread-backfill-participant-hash"
+        let existingConversation = ConversationBuilder()
+            .withSnippet("Old snippet")
+            .withLastMessageDate(Date(timeIntervalSince1970: 1_700_150_000))
+            .build(in: context)
+
+        _ = MessageBuilder()
+            .withId("seed-backfill-message")
+            .withThreadId(threadId)
+            .inConversation(existingConversation)
+            .build(in: context)
+
+        var headers = ProcessedHeaders()
+        headers.subject = "Re: Existing thread"
+        headers.from = "Sender <sender@example.com>"
+        headers.to = [EmailAddress(email: "recipient@example.com", displayName: nil)]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: "backfill-participant-hash-message",
+            gmThreadId: threadId,
+            snippet: "Latest snippet",
+            cleanedSnippet: "Latest snippet",
+            internalDate: Date(timeIntervalSince1970: 1_700_150_120),
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: "Latest snippet",
+            labelIds: ["INBOX"],
+            isUnread: false,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        try await persister.createNewMessage(
+            processedMessage,
+            labelIds: nil,
+            myAliases: [normalizedEmail("recipient@example.com")],
+            in: context
+        )
+
+        let fetch = Message.fetchRequest()
+        fetch.predicate = NSPredicate(format: "id == %@", "backfill-participant-hash-message")
+        fetch.fetchLimit = 1
+        let savedMessage = try XCTUnwrap(context.fetch(fetch).first)
+
+        XCTAssertEqual(savedMessage.conversation?.objectID, existingConversation.objectID)
+        XCTAssertEqual(
+            existingConversation.participantHash,
+            calculateParticipantHash(from: ["sender@example.com"])
+        )
+    }
+
     func testCreateNewMessage_sentOnlyMessageInParticipantFallback_doesNotReactivateConversation() async throws {
         let participantHash = calculateParticipantHash(from: [normalizedEmail("friend@example.com")])
         let archivedConversation = ConversationBuilder()
