@@ -45,11 +45,15 @@ struct ChatMessagesView: View {
                             isLastFromSender: isLastFromSender
                         )
                         .id(message.id)
-                        .contextMenu {
-                            messageContextMenu(for: message)
-                        } preview: {
-                            // Lightweight preview - just show the text content without triggering loads
-                            MessageContextMenuPreview(message: message)
+                        .overlay {
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .contextMenu {
+                                    messageContextMenu(for: message)
+                                } preview: {
+                                    // Lightweight preview - just show the text content without triggering loads
+                                    MessageContextMenuPreview(message: message)
+                                }
                         }
                     }
 
