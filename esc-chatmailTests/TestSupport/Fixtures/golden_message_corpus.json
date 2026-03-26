@@ -175,6 +175,18 @@
   ],
   "displayPolicyCases": [
     {
+      "id": "forwarded_html_stays_bubble",
+      "notes": "Forwarded mail should stay in a tappable chat bubble because the subject already signals the forward.",
+      "hasHTMLSource": true,
+      "isForwardedEmail": true,
+      "isNewsletter": false,
+      "hasRichHTMLContent": true,
+      "isFromMe": false,
+      "isOneToOneConversation": true,
+      "subject": "FW: Thau - post-Judgment matter",
+      "expectedShowHTMLPreview": false
+    },
+    {
       "id": "one_to_one_reply_subject_stays_bubble",
       "notes": "One-to-one reply threads should stay in chat bubbles even if newsletter/rich flags are noisy.",
       "hasHTMLSource": true,

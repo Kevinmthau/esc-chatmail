@@ -12,8 +12,7 @@ struct MessageContentView: View {
 
     var body: some View {
         if showHTMLPreview {
-            // Show HTML preview for newsletters/forwarded emails.
-            // For forwards, also show the user's lead-in text as a normal chat bubble.
+            // Preview-card mode is reserved for newsletters and rich transactional HTML.
             VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 8) {
                 if let intro = forwardedIntroText, !intro.isEmpty {
                     textBubble(text: intro)
@@ -25,8 +24,21 @@ struct MessageContentView: View {
                 )
             }
             .frame(maxWidth: style.maxBubbleWidth, alignment: message.isFromMe ? .trailing : .leading)
+        } else if message.isForwardedEmail {
+            forwardedTextContent
         } else {
             // Personal emails: Show as chat bubbles with text
+            textContent
+        }
+    }
+
+    @ViewBuilder
+    private var forwardedTextContent: some View {
+        if let intro = forwardedIntroText, !intro.isEmpty {
+            textBubble(text: intro)
+        } else if message.hasHTMLSource {
+            openEmailBubble
+        } else {
             textContent
         }
     }

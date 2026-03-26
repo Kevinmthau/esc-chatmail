@@ -17,7 +17,7 @@ final class MessageDisplayPolicyTests: XCTestCase {
         XCTAssertFalse(shouldShow)
     }
 
-    func testShouldShowHTMLPreview_forwardedMessageWithHTML_returnsTrue() {
+    func testShouldShowHTMLPreview_forwardedMessageWithHTML_returnsFalse() {
         let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
             hasHTMLSource: true,
             isForwardedEmail: true,
@@ -29,7 +29,7 @@ final class MessageDisplayPolicyTests: XCTestCase {
             senderEmail: nil
         )
 
-        XCTAssertTrue(shouldShow)
+        XCTAssertFalse(shouldShow)
     }
 
     func testShouldShowHTMLPreview_newsletterWithHTML_returnsTrue() {

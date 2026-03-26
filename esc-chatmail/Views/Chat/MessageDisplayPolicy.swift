@@ -2,7 +2,9 @@ import Foundation
 
 enum MessageDisplayPolicy {
     /// Personal email should stay in chat bubbles.
-    /// Forwarded/newsletter messages always use HTML preview cards.
+    /// Forwarded mail should stay in chat bubbles because the subject already
+    /// signals the forward and tapping the bubble opens the full email.
+    /// Newsletter messages can still use HTML preview cards.
     /// Rich HTML previews are conservative in one-to-one *reply threads* to avoid
     /// treating person-to-person replies like newsletters, but should still show
     /// for genuinely rich transactional/marketing HTML.
@@ -21,7 +23,7 @@ enum MessageDisplayPolicy {
         guard hasHTMLSource || trustedTransactionalSender || hasRichHTMLContent else { return false }
 
         if isForwardedEmail {
-            return true
+            return false
         }
 
         // Trusted transactional system senders should render as preview cards even when
