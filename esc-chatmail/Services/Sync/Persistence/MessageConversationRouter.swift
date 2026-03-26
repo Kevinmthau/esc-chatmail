@@ -29,23 +29,28 @@ final class MessageConversationRouter {
     ) async throws -> Conversation {
         let shouldReactivateConversation = processedMessage.labelIds.contains("INBOX")
 
-        if shouldReuseConversationByThread(for: processedMessage),
-           let existingConversation = findExistingConversation(
-                forGmThreadId: processedMessage.gmThreadId,
-                in: context
-           ) {
-            if shouldReactivateConversation, existingConversation.archivedAt != nil {
-                existingConversation.archivedAt = nil
-                existingConversation.hidden = false
-            }
-            return existingConversation
-        }
-
         let identity = conversationManager.createConversationIdentity(
             from: processedMessage.headers,
             gmThreadId: processedMessage.gmThreadId,
             myAliases: myAliases
         )
+
+        if shouldReuseConversationByThread(for: processedMessage),
+           let existingConversation = findExistingConversation(
+                forGmThreadId: processedMessage.gmThreadId,
+                in: context
+           ) {
+            // Check if participants changed (e.g. someone new was CC'd).
+            // When that happens, create a new conversation for the expanded group
+            // instead of reusing the existing one.
+            if existingConversation.participantHash == identity.participantHash {
+                if shouldReactivateConversation, existingConversation.archivedAt != nil {
+                    existingConversation.archivedAt = nil
+                    existingConversation.hidden = false
+                }
+                return existingConversation
+            }
+        }
 
         return try await conversationManager.findOrCreateConversation(
             for: identity,
