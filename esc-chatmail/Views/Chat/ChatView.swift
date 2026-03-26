@@ -62,7 +62,10 @@ struct ChatView: View {
 
             ToolbarItemGroup(placement: .navigationBarTrailing) {
                 Menu {
-                    Button(action: { viewModel.archiveConversation() }) {
+                    Button(action: {
+                        viewModel.archiveConversation()
+                        dismiss()
+                    }) {
                         SwiftUI.Label("Archive", systemImage: "archivebox")
                     }
 
