@@ -40,10 +40,20 @@ final class MessageConversationRouter {
                 forGmThreadId: processedMessage.gmThreadId,
                 in: context
            ) {
+            let existingParticipantHash = existingConversation.participantHash?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             // Check if participants changed (e.g. someone new was CC'd).
             // When that happens, create a new conversation for the expanded group
             // instead of reusing the existing one.
-            if existingConversation.participantHash == identity.participantHash {
+            if existingParticipantHash.isEmpty {
+                existingConversation.participantHash = identity.participantHash
+                if shouldReactivateConversation, existingConversation.archivedAt != nil {
+                    existingConversation.archivedAt = nil
+                    existingConversation.hidden = false
+                }
+                return existingConversation
+            }
+
+            if existingParticipantHash == identity.participantHash {
                 if shouldReactivateConversation, existingConversation.archivedAt != nil {
                     existingConversation.archivedAt = nil
                     existingConversation.hidden = false
