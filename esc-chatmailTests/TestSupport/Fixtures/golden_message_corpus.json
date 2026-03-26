@@ -175,8 +175,8 @@
   ],
   "displayPolicyCases": [
     {
-      "id": "forwarded_html_stays_bubble",
-      "notes": "Forwarded mail should stay in a tappable chat bubble because the subject already signals the forward.",
+      "id": "forwarded_html_uses_preview",
+      "notes": "Incoming forwarded mail should show the preview card without an extra lead-in bubble so the context only appears once.",
       "hasHTMLSource": true,
       "isForwardedEmail": true,
       "isNewsletter": false,
@@ -184,7 +184,7 @@
       "isFromMe": false,
       "isOneToOneConversation": true,
       "subject": "FW: Thau - post-Judgment matter",
-      "expectedShowHTMLPreview": false
+      "expectedShowHTMLPreview": true
     },
     {
       "id": "one_to_one_reply_subject_stays_bubble",

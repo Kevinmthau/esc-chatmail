@@ -12,33 +12,14 @@ struct MessageContentView: View {
 
     var body: some View {
         if showHTMLPreview {
-            // Preview-card mode is reserved for newsletters and rich transactional HTML.
-            VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 8) {
-                if let intro = forwardedIntroText, !intro.isEmpty {
-                    textBubble(text: intro)
-                }
-
-                EmailContentSection(
-                    message: message,
-                    onOpenFullMessage: onOpenFullMessage
-                )
-            }
+            // Preview-card mode is reserved for forwarded, newsletter, and rich transactional HTML.
+            EmailContentSection(
+                message: message,
+                onOpenFullMessage: onOpenFullMessage
+            )
             .frame(maxWidth: style.maxBubbleWidth, alignment: message.isFromMe ? .trailing : .leading)
-        } else if message.isForwardedEmail {
-            forwardedTextContent
         } else {
             // Personal emails: Show as chat bubbles with text
-            textContent
-        }
-    }
-
-    @ViewBuilder
-    private var forwardedTextContent: some View {
-        if let intro = forwardedIntroText, !intro.isEmpty {
-            textBubble(text: intro)
-        } else if message.hasHTMLSource {
-            openEmailBubble
-        } else {
             textContent
         }
     }
@@ -159,65 +140,6 @@ struct MessageContentView: View {
 
     private func openOriginalEmail() {
         onOpenFullMessage()
-    }
-
-    /// Returns user-written lead-in text for forwarded emails, excluding forwarded content.
-    private var forwardedIntroText: String? {
-        guard message.isForwardedEmail else { return nil }
-
-        // Prefer raw plain-text body for forwards so we can split exactly at the forward marker.
-        if let bodyText = message.bodyText,
-           let intro = extractForwardIntro(from: bodyText),
-           let cleanedIntro = cleanForwardedIntro(intro) {
-            return cleanedIntro
-        }
-
-        // Fallback: only use a short snippet-like value; avoid showing large forwarded content.
-        guard let rawFallback = message.snippet ?? fullTextContent,
-              let fallback = cleanForwardedIntro(rawFallback) else {
-            return nil
-        }
-
-        guard fallback.count <= 280 else {
-            return nil
-        }
-        return fallback
-    }
-
-    private func extractForwardIntro(from text: String) -> String? {
-        let normalized = text
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-
-        let markers = [
-            "---------- Forwarded message ---------",
-            "---------- Forwarded message ----------",
-            "----- Forwarded message -----",
-            "Begin forwarded message:",
-            "-----Original Message-----",
-            "------ Original Message ------"
-        ]
-
-        var intro = normalized
-        for marker in markers {
-            if let range = normalized.range(of: marker, options: [.caseInsensitive]) {
-                intro = String(normalized[..<range.lowerBound])
-                break
-            }
-        }
-
-        let trimmed = intro.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    private func cleanForwardedIntro(_ text: String) -> String? {
-        let sanitized = RawEmailSourceSanitizer.extractDisplayText(from: text)
-        let decoded = HTMLEntityDecoder.decode(sanitized)
-        let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: decoded)
-        let extractionResult = PlainTextQuoteRemover.extractQuotes(from: unwrapped)
-        let formatted = TextProcessing.formatSignOffLineBreaks(in: extractionResult.mainContent)
-        let trimmed = formatted.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// Processes text while preserving paragraph structure and decoding HTML entities
