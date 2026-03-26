@@ -11,6 +11,7 @@ struct ChatMessagesView: View {
     @ObservedObject var viewModel: ChatViewModel
     let deps: Dependencies
     var isTextFieldFocused: FocusState<Bool>.Binding
+    let onOpenFullMessage: (Message) -> Void
 
     @ObservedObject private var keyboard = KeyboardResponder.shared
 
@@ -30,8 +31,7 @@ struct ChatMessagesView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 8) {
-                    ForEach(messages.indices, id: \.self) { index in
-                        let message = messages[index]
+                    ForEach(Array(messages.enumerated()), id: \.element.objectID) { index, message in
                         let nextMessage = index + 1 < messages.count ? messages[index + 1] : nil
                         let isLastFromSender = nextMessage == nil ||
                             senderRunKey(for: nextMessage) != senderRunKey(for: message) ||
@@ -42,7 +42,8 @@ struct ChatMessagesView: View {
                             conversation: conversation,
                             deps: deps,
                             isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
-                            isLastFromSender: isLastFromSender
+                            isLastFromSender: isLastFromSender,
+                            onOpenFullMessage: onOpenFullMessage
                         )
                         .id(message.id)
                         .overlay {

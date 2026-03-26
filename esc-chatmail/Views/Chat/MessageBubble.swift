@@ -13,7 +13,7 @@ struct MessageBubble: View {
     var style: MessageBubbleStyle = .standard
 
     @StateObject private var viewModel: MessageBubbleViewModel
-    @State private var showingHTMLView = false
+    let onOpenFullMessage: (Message) -> Void
 
     private var showHTMLPreview: Bool {
         MessageDisplayPolicy.shouldShowHTMLPreview(
@@ -36,7 +36,8 @@ struct MessageBubble: View {
         prefetchedSenderName: String? = nil,
         isEffectivelyOneToOneConversation: Bool? = nil,
         isLastFromSender: Bool = true,
-        style: MessageBubbleStyle = .standard
+        style: MessageBubbleStyle = .standard,
+        onOpenFullMessage: @escaping (Message) -> Void
     ) {
         let resolvedDeps = deps ?? Dependencies.shared
         self.message = message
@@ -45,6 +46,7 @@ struct MessageBubble: View {
         self.isEffectivelyOneToOneConversation = isEffectivelyOneToOneConversation
         self.isLastFromSender = isLastFromSender
         self.style = style
+        self.onOpenFullMessage = onOpenFullMessage
         self._viewModel = StateObject(wrappedValue: MessageBubbleViewModel(deps: resolvedDeps))
     }
 
@@ -69,11 +71,11 @@ struct MessageBubble: View {
                     showHTMLPreview: showHTMLPreview,
                     fullTextContent: viewModel.fullTextContent,
                     hasLoadedContent: viewModel.hasLoadedContent,
-                    showingHTMLView: $showingHTMLView
+                    onOpenFullMessage: openFullMessage
                 )
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    showingHTMLView = true
+                    openFullMessage()
                 }
 
                 sendStatusView
@@ -92,9 +94,6 @@ struct MessageBubble: View {
         }
         .task(id: loadContext.contentSignature) {
             await viewModel.loadIfNeeded(using: loadContext)
-        }
-        .sheet(isPresented: $showingHTMLView) {
-            HTMLMessageView(message: message)
         }
     }
 
@@ -238,5 +237,9 @@ struct MessageBubble: View {
         let bodyTextHash = message.bodyText?.hashValue ?? 0
         let snippetHash = message.snippet?.hashValue ?? 0
         return "\(message.bodyStorageURI ?? "")|\(bodyTextHash)|\(snippetHash)|\(message.hasHTMLSource)"
+    }
+
+    private func openFullMessage() {
+        onOpenFullMessage(message)
     }
 }

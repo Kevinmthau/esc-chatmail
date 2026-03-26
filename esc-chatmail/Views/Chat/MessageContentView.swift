@@ -8,7 +8,7 @@ struct MessageContentView: View {
     let showHTMLPreview: Bool
     let fullTextContent: String?
     let hasLoadedContent: Bool
-    @Binding var showingHTMLView: Bool
+    let onOpenFullMessage: () -> Void
 
     var body: some View {
         if showHTMLPreview {
@@ -21,7 +21,7 @@ struct MessageContentView: View {
 
                 EmailContentSection(
                     message: message,
-                    showingHTMLView: $showingHTMLView
+                    onOpenFullMessage: onOpenFullMessage
                 )
             }
             .frame(maxWidth: style.maxBubbleWidth, alignment: message.isFromMe ? .trailing : .leading)
@@ -146,7 +146,7 @@ struct MessageContentView: View {
     }
 
     private func openOriginalEmail() {
-        showingHTMLView = true
+        onOpenFullMessage()
     }
 
     /// Returns user-written lead-in text for forwarded emails, excluding forwarded content.

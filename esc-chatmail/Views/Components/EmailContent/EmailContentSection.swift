@@ -3,7 +3,7 @@ import SwiftUI
 /// Container view that displays a mini WebView preview of newsletter HTML content
 struct EmailContentSection: View {
     let message: Message
-    @Binding var showingHTMLView: Bool
+    let onOpenFullMessage: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var htmlContent: String?
@@ -28,13 +28,13 @@ struct EmailContentSection: View {
                             .fill(Color.clear)
                             .contentShape(Rectangle())
                             .onTapGesture {
-                                showingHTMLView = true
+                                onOpenFullMessage()
                             }
                     }
                     .accessibilityAddTraits(.isButton)
                     .accessibilityHint("Opens the full original email")
             } else if isLoading {
-                Button(action: { showingHTMLView = true }) {
+                Button(action: onOpenFullMessage) {
                     EmailContentPlaceholder()
                 }
                 .buttonStyle(PlainButtonStyle())
@@ -42,7 +42,7 @@ struct EmailContentSection: View {
                 // Fallback when no HTML content available
                 // (EmailContentFallback is already tappable, no extra button needed)
                 EmailContentFallback(subject: message.subject) {
-                    showingHTMLView = true
+                    onOpenFullMessage()
                 }
             }
         }

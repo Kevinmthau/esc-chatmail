@@ -8,6 +8,7 @@ struct VirtualScrollChatView: View {
     @StateObject private var scrollState: VirtualScrollState
     @EnvironmentObject private var deps: Dependencies
     @State private var scrollViewReader: ScrollViewProxy?
+    @State private var messageToViewInFull: Message?
 
     init(conversation: Conversation) {
         self.conversation = conversation
@@ -29,7 +30,10 @@ struct VirtualScrollChatView: View {
                                     message: message,
                                     conversation: conversation,
                                     deps: deps,
-                                    style: .compact
+                                    style: .compact,
+                                    onOpenFullMessage: { selectedMessage in
+                                        messageToViewInFull = selectedMessage
+                                    }
                                 )
                             }
                         }
@@ -52,6 +56,9 @@ struct VirtualScrollChatView: View {
                 if let lastMessage = scrollState.visibleMessages.last {
                     proxy.scrollTo(lastMessage.objectID, anchor: .bottom)
                 }
+            }
+            .sheet(item: $messageToViewInFull) { message in
+                HTMLMessageView(message: message)
             }
         }
     }

@@ -10,6 +10,7 @@ final class ChatViewModel: ObservableObject {
     @Published var replyText = ""
     @Published var replyingTo: Message?
     @Published var messageToForward: Message?
+    @Published var messageToViewInFull: Message?
     @Published var resolvedDisplayName: String?
     @Published var effectiveParticipantCount: Int?
 
@@ -162,6 +163,14 @@ final class ChatViewModel: ObservableObject {
 
     func setMessageToForward(_ message: Message) {
         messageToForward = message
+    }
+
+    func openFullMessage(_ message: Message) {
+        messageToViewInFull = message
+    }
+
+    func dismissFullMessage() {
+        messageToViewInFull = nil
     }
 
     /// Sends a reply with optional attachments

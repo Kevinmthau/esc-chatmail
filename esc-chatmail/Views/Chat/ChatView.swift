@@ -44,7 +44,10 @@ struct ChatView: View {
             messages: messages,
             viewModel: viewModel,
             deps: deps,
-            isTextFieldFocused: $isTextFieldFocused
+            isTextFieldFocused: $isTextFieldFocused,
+            onOpenFullMessage: { message in
+                viewModel.openFullMessage(message)
+            }
         )
         .navigationTitle(viewModel.resolvedDisplayName ?? conversation.displayName ?? "Chat")
         .navigationBarTitleDisplayMode(.inline)
@@ -82,6 +85,11 @@ struct ChatView: View {
         }
         .sheet(item: $viewModel.messageToForward) { message in
             ComposeView(mode: .forward(message), deps: deps)
+        }
+        .sheet(item: $viewModel.messageToViewInFull, onDismiss: {
+            viewModel.dismissFullMessage()
+        }) { message in
+            HTMLMessageView(message: message)
         }
         .sheet(item: $viewModel.contactManager.contactToAdd) { wrapper in
             AddContactView(contact: wrapper.contact)
