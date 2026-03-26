@@ -10,6 +10,27 @@ import CoreData
 /// - `DataCleanupService+EntityCleanup.swift` - Empty entity and draft cleanup
 struct DataCleanupService: Sendable {
 
+    enum IncrementalCleanupSchedule {
+        static let lastRunTimeKey = "dataCleanupService.lastIncrementalCleanupAt"
+        static let interval: TimeInterval = 6 * 60 * 60
+
+        static func isDue(
+            now: Date = Date(),
+            defaults: UserDefaults = .standard
+        ) -> Bool {
+            let lastRun = defaults.double(forKey: lastRunTimeKey)
+            guard lastRun > 0 else { return true }
+            return now.timeIntervalSince1970 - lastRun >= interval
+        }
+
+        static func markRun(
+            now: Date = Date(),
+            defaults: UserDefaults = .standard
+        ) {
+            defaults.set(now.timeIntervalSince1970, forKey: lastRunTimeKey)
+        }
+    }
+
     // MARK: - Properties
 
     let coreDataStack: CoreDataStack
@@ -39,6 +60,20 @@ struct DataCleanupService: Sendable {
     /// Runs incremental cleanup (no duplicate message check).
     /// - Parameter context: The Core Data context
     func runIncrementalCleanup(in context: NSManagedObjectContext) async {
+        await mergeConversationsSplitByGmThreadIdIfNeeded(in: context)
+
+        guard IncrementalCleanupSchedule.isDue() else {
+            Log.debug("Skipping incremental cleanup; cadence not due", category: .coreData)
+            return
+        }
+
+        await runMaintenanceCleanup(in: context)
+        IncrementalCleanupSchedule.markRun()
+    }
+
+    /// Runs the heavier store-wide maintenance tasks.
+    /// Use this for periodic maintenance or one-shot repair passes, not every sync.
+    func runMaintenanceCleanup(in context: NSManagedObjectContext) async {
         await removeDuplicateMessages(in: context)
         await removeDuplicateConversations(in: context)
         await mergeActiveConversationDuplicates(in: context)

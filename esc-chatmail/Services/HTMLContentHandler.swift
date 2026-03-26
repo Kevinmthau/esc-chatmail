@@ -63,8 +63,20 @@ final class HTMLContentHandler {
     }
 
     func deleteHTML(for messageId: String) {
+        deleteHTML(for: messageId, bodyStorageURI: nil)
+    }
+
+    func deleteHTML(for messageId: String, bodyStorageURI: String?) {
         let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
         FileSystemErrorHandler.removeItem(at: fileURL, category: .general)
+
+        guard let bodyStorageURI,
+              let resolvedURL = StorageURIResolver.resolve(bodyStorageURI),
+              resolvedURL.path != fileURL.path else {
+            return
+        }
+
+        FileSystemErrorHandler.removeItem(at: resolvedURL, category: .general)
     }
 
     func deleteAllHTML() {
@@ -115,6 +127,19 @@ final class HTMLContentHandler {
                     }
                 } catch {
                     Log.debug("Failed to read creation date for \(fileURL.lastPathComponent)", category: .general)
+                }
+            }
+        }
+    }
+
+    func cleanupOrphanedFiles(validMessageIds: Set<String>) {
+        exclusiveQueue.sync {
+            let contents = FileSystemErrorHandler.contentsOfDirectory(at: messagesDirectory, category: .general)
+            for fileURL in contents {
+                let messageId = fileURL.deletingPathExtension().lastPathComponent
+                guard !messageId.isEmpty else { continue }
+                if !validMessageIds.contains(messageId) {
+                    FileSystemErrorHandler.removeItem(at: fileURL, category: .general)
                 }
             }
         }

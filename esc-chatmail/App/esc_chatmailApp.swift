@@ -99,6 +99,11 @@ struct esc_chatmailApp: App {
         CacheCoordinator.shared.start()
         logStartupTiming("CacheCoordinator started")
 
+        if !isRunningUITests {
+            DatabaseMaintenanceService.shared.scheduleMaintenanceTasks()
+            logStartupTiming("Database maintenance scheduled")
+        }
+
         // 4. Restore auth session (after cleanup complete)
         await AuthSession.shared.restorePreviousSignIn()
         applyUITestLaunchStateIfNeeded()
@@ -150,12 +155,6 @@ struct esc_chatmailApp: App {
         BackgroundSyncManager.shared.registerBackgroundTasks()
     }
     
-    private func runDuplicateCleanup() async {
-        let context = CoreDataStack.shared.newBackgroundContext()
-        let conversationManager = ConversationManager()
-        await conversationManager.mergeActiveConversationDuplicates(in: context)
-    }
-
     private func handleScenePhaseChange(_ newPhase: ScenePhase) {
         if isRunningUITests { return }
 
@@ -176,8 +175,6 @@ struct esc_chatmailApp: App {
                 )
                 Task {
                     await dependencies.pendingActionsManager.processAllPendingActions()
-                    // Run lightweight duplicate cleanup on app activation
-                    await runDuplicateCleanup()
                 }
             }
         case .inactive:

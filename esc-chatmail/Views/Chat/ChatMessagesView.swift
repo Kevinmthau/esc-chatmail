@@ -29,7 +29,7 @@ struct ChatMessagesView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(spacing: 8) {
+                LazyVStack(spacing: 8) {
                     ForEach(messages.indices, id: \.self) { index in
                         let message = messages[index]
                         let nextMessage = index + 1 < messages.count ? messages[index + 1] : nil
@@ -106,7 +106,8 @@ struct ChatMessagesView: View {
 
                 // Delegate prefetching to ViewModel
                 viewModel.prefetchRecentContent(messageIds: messageIds, senderEmails: senderEmails)
-                refreshConversationPresentation()
+                viewModel.loadResolvedDisplayName()
+                refreshSenderGroupingKeys()
             }
             .onDisappear {
                 // Cancel view-scoped scroll/prefetch work when leaving chat.
@@ -127,7 +128,8 @@ struct ChatMessagesView: View {
                     scrollToBottom(proxy: proxy, delay: UIConfig.contentChangeScrollDelay)
                 }
 
-                refreshConversationPresentation()
+                viewModel.loadResolvedDisplayName()
+                refreshSenderGroupingKeys()
             }
             .onChange(of: keyboard.currentHeight) { oldHeight, newHeight in
                 if newHeight > 0 || (oldHeight > 0 && newHeight == 0) {
@@ -140,7 +142,8 @@ struct ChatMessagesView: View {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .CNContactStoreDidChange)) { _ in
-                refreshConversationPresentation()
+                viewModel.loadResolvedDisplayName()
+                refreshSenderGroupingKeys()
             }
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 0) {
@@ -177,19 +180,24 @@ struct ChatMessagesView: View {
 
     // MARK: - Scroll Helpers
 
-    private func refreshConversationPresentation() {
-        viewModel.loadResolvedDisplayName()
-        refreshSenderGroupingKeys()
-    }
-
     private func refreshSenderGroupingKeys() {
         senderGroupingTask?.cancel()
 
-        let senderEmails = messages.compactMap { senderEmail(for: $0) }
+        var uniqueSenderEmails: [String] = []
+        var seenEmails = Set<String>()
+        for message in messages {
+            guard let email = senderEmail(for: message) else { continue }
+            let normalizedEmail = EmailNormalizer.normalize(email)
+            guard !normalizedEmail.isEmpty,
+                  seenEmails.insert(normalizedEmail).inserted else {
+                continue
+            }
+            uniqueSenderEmails.append(email)
+        }
         let participantLoader = deps.participantLoader
 
         senderGroupingTask = Task {
-            let groupingKeys = await participantLoader.senderGroupingKeys(for: senderEmails)
+            let groupingKeys = await participantLoader.senderGroupingKeys(for: uniqueSenderEmails)
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 senderGroupingKeysByEmail = groupingKeys

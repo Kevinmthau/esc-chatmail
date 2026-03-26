@@ -7,21 +7,11 @@ extension DatabaseMaintenanceService {
 
     func performCleanup() async -> Bool {
         let context = coreDataStack.newBackgroundContext()
+        let cleanupService = DataCleanupService(coreDataStack: coreDataStack)
 
-        return await context.perform {
+        let succeeded = await context.perform {
             do {
-                // Cleanup old messages (older than 90 days)
-                let oldMessageDate = Date().addingTimeInterval(-90 * 24 * 60 * 60)
-                let oldMessageRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
-                oldMessageRequest.predicate = MessagePredicates.olderThan(oldMessageDate)
-
-                let deleteOldMessages = NSBatchDeleteRequest(fetchRequest: oldMessageRequest)
-                deleteOldMessages.resultType = .resultTypeCount
-
-                let oldMessageResult = try context.execute(deleteOldMessages) as? NSBatchDeleteResult
-                Log.debug("Deleted \(oldMessageResult?.result ?? 0) old messages", category: .coreData)
-
-                // Cleanup orphaned attachments
+                // Cleanup orphaned attachments that may remain from older bugs or interrupted deletes.
                 let orphanedAttachmentRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Attachment")
                 orphanedAttachmentRequest.predicate = AttachmentPredicates.orphaned
 
@@ -30,24 +20,36 @@ extension DatabaseMaintenanceService {
 
                 let orphanedResult = try context.execute(deleteOrphaned) as? NSBatchDeleteResult
                 Log.debug("Deleted \(orphanedResult?.result ?? 0) orphaned attachments", category: .coreData)
-
-                // Cleanup empty conversations
-                let emptyConversationRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Conversation")
-                emptyConversationRequest.predicate = ConversationPredicates.emptyMessages
-
-                let deleteEmpty = NSBatchDeleteRequest(fetchRequest: emptyConversationRequest)
-                deleteEmpty.resultType = .resultTypeCount
-
-                let emptyResult = try context.execute(deleteEmpty) as? NSBatchDeleteResult
-                Log.debug("Deleted \(emptyResult?.result ?? 0) empty conversations", category: .coreData)
-
-                // Save changes
-                try self.coreDataStack.save(context: context)
                 return true
             } catch {
                 Log.error("Database cleanup failed", category: .coreData, error: error)
                 return false
             }
         }
+
+        guard succeeded else { return false }
+
+        await cleanupService.runMaintenanceCleanup(in: context)
+
+        guard coreDataStack.saveIfNeeded(context: context) else {
+            Log.error("Database cleanup failed while saving maintenance changes", category: .coreData)
+            return false
+        }
+
+        let validMessageIds: Set<String> = await context.perform {
+            let request = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
+            request.resultType = .dictionaryResultType
+            request.propertiesToFetch = ["id"]
+
+            guard let results = try? context.fetch(request) as? [NSDictionary] else {
+                return []
+            }
+
+            return Set(results.compactMap { $0["id"] as? String })
+        }
+
+        HTMLContentHandler.shared.cleanupOrphanedFiles(validMessageIds: validMessageIds)
+        await AttachmentDownloader.shared.cleanupOrphanedFiles()
+        return true
     }
 }

@@ -25,9 +25,17 @@ final class CacheCoordinator {
     private var isStarted = false
 
     private struct CacheInvalidationPlan: Sendable {
+        struct DeletedHTMLArtifact: Sendable, Hashable {
+            let messageId: String
+            let bodyStorageURI: String?
+        }
+
         var conversationIdsToInvalidate: Set<String> = []
         var personEmailsToInvalidate: Set<String> = []
         var messageIdsToInvalidate: Set<String> = []
+        var deletedHTMLArtifacts: Set<DeletedHTMLArtifact> = []
+        var attachmentPathsToDelete: Set<String> = []
+        var attachmentIdsToInvalidate: Set<String> = []
         var shouldClearConversationCache = false
         var shouldClearPersonCache = false
     }
@@ -99,6 +107,40 @@ final class CacheCoordinator {
                    let messageId = message.value(forKey: "id") as? String,
                    !messageId.isEmpty {
                     localPlan.messageIdsToInvalidate.insert(messageId)
+                    localPlan.deletedHTMLArtifacts.insert(
+                        CacheInvalidationPlan.DeletedHTMLArtifact(
+                            messageId: messageId,
+                            bodyStorageURI: message.value(forKey: "bodyStorageURI") as? String
+                        )
+                    )
+
+                    if let attachments = message.value(forKey: "attachments") as? Set<Attachment> {
+                        for attachment in attachments {
+                            if let localURL = attachment.value(forKey: "localURL") as? String, !localURL.isEmpty {
+                                localPlan.attachmentPathsToDelete.insert(localURL)
+                            }
+                            if let previewURL = attachment.value(forKey: "previewURL") as? String, !previewURL.isEmpty {
+                                localPlan.attachmentPathsToDelete.insert(previewURL)
+                            }
+                            if let attachmentId = attachment.value(forKey: "id") as? String, !attachmentId.isEmpty {
+                                localPlan.attachmentIdsToInvalidate.insert(attachmentId)
+                            }
+                        }
+                    }
+                    continue
+                }
+
+                if deletedObjectIDs.contains(objectID),
+                   let attachment = object as? Attachment {
+                    if let localURL = attachment.value(forKey: "localURL") as? String, !localURL.isEmpty {
+                        localPlan.attachmentPathsToDelete.insert(localURL)
+                    }
+                    if let previewURL = attachment.value(forKey: "previewURL") as? String, !previewURL.isEmpty {
+                        localPlan.attachmentPathsToDelete.insert(previewURL)
+                    }
+                    if let attachmentId = attachment.value(forKey: "id") as? String, !attachmentId.isEmpty {
+                        localPlan.attachmentIdsToInvalidate.insert(attachmentId)
+                    }
                 }
             }
 
@@ -139,17 +181,52 @@ final class CacheCoordinator {
             Log.debug("Queued invalidation for \(plan.personEmailsToInvalidate.count) person cache entries", category: .coreData)
         }
 
-        // Invalidate processed text cache for deleted messages
-        // Note: Same fire-and-forget rationale as person cache above
-        if !plan.messageIdsToInvalidate.isEmpty {
-            let messageIds = plan.messageIdsToInvalidate  // Capture for async closure
+        let shouldProcessDeletedArtifacts =
+            !plan.messageIdsToInvalidate.isEmpty ||
+            !plan.deletedHTMLArtifacts.isEmpty ||
+            !plan.attachmentPathsToDelete.isEmpty ||
+            !plan.attachmentIdsToInvalidate.isEmpty
+
+        // Invalidate processed text cache and reclaim deleted message/attachment artifacts.
+        // Note: Same fire-and-forget rationale as person cache above.
+        if shouldProcessDeletedArtifacts {
+            let messageIds = plan.messageIdsToInvalidate
+            let deletedHTMLArtifacts = plan.deletedHTMLArtifacts
+            let attachmentPaths = plan.attachmentPathsToDelete
+            let attachmentIds = plan.attachmentIdsToInvalidate
+
             Task {
                 for messageId in messageIds {
                     await ProcessedTextCache.shared.invalidate(messageId: messageId)
                     HTMLContentLoader.shared.invalidate(messageId: messageId)
                 }
+
+                for artifact in deletedHTMLArtifacts {
+                    HTMLContentHandler.shared.deleteHTML(
+                        for: artifact.messageId,
+                        bodyStorageURI: artifact.bodyStorageURI
+                    )
+                }
+
+                for relativePath in attachmentPaths {
+                    AttachmentPaths.deleteFile(at: relativePath)
+                }
+
+                for attachmentId in attachmentIds {
+                    await AttachmentCacheActor.shared.removeFromCache(attachmentId)
+                }
             }
+        }
+
+        if !plan.messageIdsToInvalidate.isEmpty {
             Log.debug("Queued invalidation for \(plan.messageIdsToInvalidate.count) processed text cache entries", category: .coreData)
+        }
+
+        if !plan.attachmentPathsToDelete.isEmpty || !plan.attachmentIdsToInvalidate.isEmpty {
+            Log.debug(
+                "Queued cleanup for \(plan.attachmentPathsToDelete.count) attachment files and \(plan.attachmentIdsToInvalidate.count) attachment cache entries",
+                category: .coreData
+            )
         }
     }
 }

@@ -192,20 +192,33 @@ final class BackgroundMessageProcessor {
 
     /// Deletes messages from Core Data
     func deleteMessages(messageIds: [String], in context: NSManagedObjectContext) async {
-        await context.perform {
-            for messageId in messageIds {
-                let fetchRequest: NSFetchRequest<Message> = Message.fetchRequest()
-                fetchRequest.predicate = NSPredicate(format: "id == %@", messageId)
+        let modifiedConversationIDs: [NSManagedObjectID] = await context.perform {
+            let fetchRequest: NSFetchRequest<Message> = Message.fetchRequest()
+            fetchRequest.predicate = MessagePredicates.ids(messageIds)
+            fetchRequest.fetchBatchSize = 100
+            fetchRequest.relationshipKeyPathsForPrefetching = ["conversation", "attachments"]
 
-                do {
-                    let messages = try context.fetch(fetchRequest)
-                    for message in messages {
-                        context.delete(message)
+            do {
+                let messages = try context.fetch(fetchRequest)
+                var conversationIDs: [NSManagedObjectID] = []
+                conversationIDs.reserveCapacity(messages.count)
+
+                for message in messages {
+                    if let conversationID = message.conversation?.objectID {
+                        conversationIDs.append(conversationID)
                     }
-                } catch {
-                    Log.error("Failed to delete message \(messageId)", category: .background, error: error)
+                    context.delete(message)
                 }
+
+                return conversationIDs
+            } catch {
+                Log.error("Failed to batch delete background messages", category: .background, error: error)
+                return []
             }
+        }
+
+        if !modifiedConversationIDs.isEmpty {
+            await ModificationTracker.shared.trackModifiedConversations(modifiedConversationIDs)
         }
     }
 }

@@ -218,7 +218,9 @@ final class ConversationListViewModel: ObservableObject {
 
         taskManager.run("refreshNames") { [weak self] in
             guard let self = self else { return }
-            await conversationManager.updateAllConversationRollups(in: coreDataStack.viewContext)
+            let context = coreDataStack.newBackgroundContext()
+            await conversationManager.updateAllConversationRollups(in: context)
+            coreDataStack.saveIfNeeded(context: context)
             UserDefaults.standard.set(true, forKey: hasRefreshedKey)
             Log.info("Refreshed all conversation names (V2: full names for single participants)", category: .conversation)
         }

@@ -253,6 +253,36 @@ final class BackgroundMessageProcessorTests: XCTestCase {
         XCTAssertEqual(syncCoordinator.savedMessageContextIDs, [ObjectIdentifier(backgroundContext)])
         XCTAssertEqual(syncCoordinator.rollupContextIDs, [ObjectIdentifier(backgroundContext)])
     }
+
+    func testDeleteMessages_tracksModifiedConversationIDs() async throws {
+        await ModificationTracker.shared.reset()
+
+        let stack = TestCoreDataStack()
+        let conversation = ConversationBuilder.simple(in: stack.viewContext)
+        _ = MessageBuilder()
+            .withId("delete-me")
+            .withThreadId("thread-delete")
+            .inConversation(conversation)
+            .build(in: stack.viewContext)
+        try stack.saveViewContext()
+
+        let processor = BackgroundMessageProcessor(
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            saveContext: { stack.saveIfNeeded(context: $0) },
+            apiClient: MockGmailAPIClient(),
+            syncCoordinator: MockBackgroundSyncCoordinator(seedConversationObjectID: conversation.objectID)
+        )
+
+        let backgroundContext = stack.newBackgroundContext()
+        await processor.deleteMessages(messageIds: ["delete-me"], in: backgroundContext)
+
+        let modifiedIDs = await ModificationTracker.shared.getAndClearModifiedConversations()
+        let modifiedURIStrings = Set(modifiedIDs.map { $0.uriRepresentation().absoluteString })
+
+        XCTAssertTrue(
+            modifiedURIStrings.contains(conversation.objectID.uriRepresentation().absoluteString)
+        )
+    }
 }
 
 private final class MockBackgroundSyncCoordinator: @unchecked Sendable, BackgroundSyncMessageCoordinating {

@@ -6,6 +6,9 @@
 	<array>
 		<string>com.esc.inboxchat.refresh</string>
 		<string>com.esc.inboxchat.processing</string>
+		<string>com.esc.inboxchat.database.vacuum</string>
+		<string>com.esc.inboxchat.database.analyze</string>
+		<string>com.esc.inboxchat.database.cleanup</string>
 	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
