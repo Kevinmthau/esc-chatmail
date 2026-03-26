@@ -337,6 +337,17 @@
       "subject": "Limited time 50% off sale",
       "expectedIsNewsletter": true,
       "expectedScore": 145
+    },
+    {
+      "id": "one_click_unsubscribe_membership_email_is_newsletter",
+      "notes": "Membership/list mail with both List-Unsubscribe and one-click unsubscribe should classify as newsletter even without Gmail category labels.",
+      "labelIds": ["INBOX"],
+      "from": "American Museum of Natural History <RSVP@email.amnh.org>",
+      "subject": "Enjoy a Family Scientist Experience All About Earth!",
+      "listUnsubscribe": "<https://pages.wordfly.com/americanmuseumofnaturalhistory/pages/Unsubscribe/?sid=example>",
+      "listUnsubscribePost": "List-Unsubscribe=One-Click",
+      "expectedIsNewsletter": true,
+      "expectedScore": 55
     }
   ]
 }

@@ -967,6 +967,7 @@ final class GoldenCorpusReplayTests: XCTestCase {
                 headers.replyTo = scenario.replyTo
                 headers.subject = scenario.subject
                 headers.listUnsubscribe = scenario.listUnsubscribe
+                headers.listUnsubscribePost = scenario.listUnsubscribePost
                 headers.listId = scenario.listId
                 headers.precedence = scenario.precedence
                 headers.to = (0..<scenario.toCount).map { EmailAddress(email: "to\($0)@example.com", displayName: nil) }
@@ -1095,6 +1096,7 @@ private struct NewsletterDetectionCase: Decodable {
     let replyTo: String?
     let subject: String?
     let listUnsubscribe: String?
+    let listUnsubscribePost: String?
     let listId: String?
     let precedence: String?
     let toCount: Int
@@ -1110,6 +1112,7 @@ private struct NewsletterDetectionCase: Decodable {
         case replyTo
         case subject
         case listUnsubscribe
+        case listUnsubscribePost
         case listId
         case precedence
         case toCount
@@ -1127,6 +1130,7 @@ private struct NewsletterDetectionCase: Decodable {
         replyTo = try container.decodeIfPresent(String.self, forKey: .replyTo)
         subject = try container.decodeIfPresent(String.self, forKey: .subject)
         listUnsubscribe = try container.decodeIfPresent(String.self, forKey: .listUnsubscribe)
+        listUnsubscribePost = try container.decodeIfPresent(String.self, forKey: .listUnsubscribePost)
         listId = try container.decodeIfPresent(String.self, forKey: .listId)
         precedence = try container.decodeIfPresent(String.self, forKey: .precedence)
         toCount = try container.decodeIfPresent(Int.self, forKey: .toCount) ?? 0

@@ -84,6 +84,7 @@ class MessageProcessor {
 
         // Headers
         case listUnsubscribe = "list_unsubscribe"
+        case listUnsubscribePostOneClick = "list_unsubscribe_post_one_click"
         case listId = "list_id"
         case precedenceBulk = "precedence_bulk"
 
@@ -148,6 +149,11 @@ class MessageProcessor {
         if headers.listUnsubscribe != nil {
             score += 35
             signals.append(.listUnsubscribe)
+        }
+        if let listUnsubscribePost = headers.listUnsubscribePost?.lowercased(),
+           listUnsubscribePost.contains("list-unsubscribe=one-click") {
+            score += 20
+            signals.append(.listUnsubscribePostOneClick)
         }
         if headers.listId != nil {
             score += 25
@@ -279,6 +285,8 @@ class MessageProcessor {
                 processedHeaders.messageId = header.value
             case "list-unsubscribe":
                 processedHeaders.listUnsubscribe = header.value
+            case "list-unsubscribe-post":
+                processedHeaders.listUnsubscribePost = header.value
             case "list-id":
                 processedHeaders.listId = header.value
             case "precedence":
@@ -718,6 +726,7 @@ struct ProcessedHeaders: Sendable {
     var references: [String] = []
     var messageId: String?
     var listUnsubscribe: String?
+    var listUnsubscribePost: String?
     var listId: String?
     var precedence: String?
 }
