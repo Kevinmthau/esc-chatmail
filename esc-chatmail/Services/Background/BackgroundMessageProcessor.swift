@@ -15,6 +15,17 @@ struct BackgroundHistoryChangeSet {
     let messageIdsToDelete: Set<String>
 }
 
+struct BackgroundMessageProcessingResult: Equatable {
+    let fetchedCount: Int
+    let failedFetchCount: Int
+
+    static let empty = BackgroundMessageProcessingResult(fetchedCount: 0, failedFetchCount: 0)
+
+    var hadFetchFailures: Bool {
+        failedFetchCount > 0
+    }
+}
+
 /// Handles message fetching, storing, and deletion for background sync
 final class BackgroundMessageProcessor {
     private let makeBackgroundContext: @Sendable () -> NSManagedObjectContext
@@ -70,9 +81,10 @@ final class BackgroundMessageProcessor {
     func processHistoryChanges(
         histories: [HistoryRecord],
         in context: NSManagedObjectContext? = nil
-    ) async {
+    ) async -> BackgroundMessageProcessingResult {
         let context = context ?? makeBackgroundContext()
         let changeSet = Self.buildChangeSet(from: histories)
+        var fetchResult = BackgroundMessageProcessingResult.empty
 
         if !changeSet.messageIdsToDelete.isEmpty {
             await deleteMessages(messageIds: Array(changeSet.messageIdsToDelete), in: context)
@@ -80,7 +92,7 @@ final class BackgroundMessageProcessor {
         }
 
         if !changeSet.messageIdsToFetch.isEmpty {
-            await fetchAndStoreMessages(
+            fetchResult = await fetchAndStoreMessages(
                 messageIds: Array(changeSet.messageIdsToFetch),
                 in: context
             )
@@ -91,6 +103,8 @@ final class BackgroundMessageProcessor {
             await syncCoordinator.updateConversationRollups(in: context)
             _ = saveContext(context)
         }
+
+        return fetchResult
     }
 
     /// Builds fetch/delete sets from history records.
@@ -141,7 +155,7 @@ final class BackgroundMessageProcessor {
     func fetchAndStoreMessages(
         messageIds: [String],
         in context: NSManagedObjectContext? = nil
-    ) async {
+    ) async -> BackgroundMessageProcessingResult {
         let ownsContext = context == nil
         let context = context ?? makeBackgroundContext()
         let syncCoordinator = await MainActor.run { self.syncCoordinator }
@@ -188,6 +202,11 @@ final class BackgroundMessageProcessor {
             await syncCoordinator.updateConversationRollups(in: context)
             _ = saveContext(context)
         }
+
+        return BackgroundMessageProcessingResult(
+            fetchedCount: successCount,
+            failedFetchCount: failedCount
+        )
     }
 
     /// Deletes messages from Core Data

@@ -21,6 +21,9 @@ protocol GmailAPIClientProtocol: AnyObject, Sendable {
     /// Archives messages by removing the INBOX label.
     func archiveMessages(ids: [String]) async throws
 
+    /// Sends a MIME-encoded raw message.
+    func sendMessage(rawMessage: String, threadId: String?) async throws -> SendMessageResponse
+
     // MARK: - Profile, Labels & Aliases API
 
     /// Fetches the user's profile.
@@ -62,8 +65,11 @@ extension GmailAPIClientProtocol {
         try await batchModify(ids: ids, addLabelIds: addLabelIds, removeLabelIds: removeLabelIds)
     }
 
+    func sendMessage(rawMessage: String, threadId: String? = nil) async throws -> SendMessageResponse {
+        try await sendMessage(rawMessage: rawMessage, threadId: threadId)
+    }
+
     func listHistory(startHistoryId: String, pageToken: String? = nil) async throws -> HistoryResponse {
         try await listHistory(startHistoryId: startHistoryId, pageToken: pageToken)
     }
 }
-

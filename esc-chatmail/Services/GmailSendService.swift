@@ -13,7 +13,7 @@ final class GmailSendService: ObservableObject {
 
     // MARK: - Properties
 
-    let apiClient: GmailAPIClient
+    let apiClient: any GmailAPIClientProtocol
     let authSession: AuthSession
     let viewContext: NSManagedObjectContext
 
@@ -21,11 +21,11 @@ final class GmailSendService: ObservableObject {
 
     @MainActor init(
         viewContext: NSManagedObjectContext,
-        apiClient: GmailAPIClient? = nil,
+        apiClient: (any GmailAPIClientProtocol)? = nil,
         authSession: AuthSession? = nil
     ) {
         self.viewContext = viewContext
-        self.apiClient = apiClient ?? .shared
+        self.apiClient = apiClient ?? GmailAPIClient.shared
         self.authSession = authSession ?? .shared
     }
 
@@ -100,54 +100,29 @@ final class GmailSendService: ObservableObject {
         Log.debug("Sending MIME message (\(mimeData.count) bytes)", category: .api)
 
         let rawMessage = MimeBuilder.base64UrlEncode(mimeData)
-
-        var requestBody: [String: Any] = ["raw": rawMessage]
-        if let threadId = threadId {
-            requestBody["threadId"] = threadId
-        }
-
-        let accessToken = try await authSession.withFreshToken()
-
-        guard let url = URL(string: APIEndpoints.sendMessage()) else {
-            throw SendError.apiError("Invalid API URL")
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
         do {
-            request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+            let response = try await apiClient.sendMessage(
+                rawMessage: rawMessage,
+                threadId: threadId
+            )
+
+            Log.info("Message sent - ID: \(response.id)", category: .api)
+            return SendResult(messageId: response.id, threadId: response.threadId)
+        } catch let error as APIError {
+            throw mapSendError(error)
         } catch {
-            throw SendError.invalidMimeData
+            throw SendError.apiError(error.localizedDescription)
         }
+    }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw SendError.apiError("Invalid response")
+    private nonisolated func mapSendError(_ error: APIError) -> SendError {
+        switch error {
+        case .authenticationError:
+            return .authenticationFailed
+        case .invalidURL:
+            return .apiError("Invalid API URL")
+        default:
+            return .apiError(error.localizedDescription)
         }
-
-        if httpResponse.statusCode == 401 {
-            throw SendError.authenticationFailed
-        }
-
-        Log.debug("Response status: \(httpResponse.statusCode)", category: .api)
-
-        guard httpResponse.statusCode == 200 else {
-            let errorMessage = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw SendError.apiError("Failed to send message: \(errorMessage)")
-        }
-
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let messageId = json["id"] as? String,
-              let returnedThreadId = json["threadId"] as? String else {
-            throw SendError.apiError("Invalid response format")
-        }
-
-        Log.info("Message sent - ID: \(messageId)", category: .api)
-
-        return SendResult(messageId: messageId, threadId: returnedThreadId)
     }
 }

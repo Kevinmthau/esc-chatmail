@@ -1,14 +1,30 @@
 import Foundation
 import CoreData
 
+protocol MessageActionsCoreDataStacking: AnyObject {
+    var viewContext: NSManagedObjectContext { get }
+    func newBackgroundContext() -> NSManagedObjectContext
+    @discardableResult
+    func saveIfNeeded(context: NSManagedObjectContext, caller: String) -> Bool
+}
+
+extension MessageActionsCoreDataStacking {
+    @discardableResult
+    func saveIfNeeded(context: NSManagedObjectContext) -> Bool {
+        saveIfNeeded(context: context, caller: #function)
+    }
+}
+
+extension CoreDataStack: MessageActionsCoreDataStacking {}
+
 @MainActor
 final class MessageActions: ObservableObject {
-    private let coreDataStack: CoreDataStack
-    private let pendingActionsManager: PendingActionsManager
+    private let coreDataStack: any MessageActionsCoreDataStacking
+    private let pendingActionsManager: any PendingActionsManagerProtocol
 
     init(
-        coreDataStack: CoreDataStack,
-        pendingActionsManager: PendingActionsManager
+        coreDataStack: any MessageActionsCoreDataStacking,
+        pendingActionsManager: any PendingActionsManagerProtocol
     ) {
         self.coreDataStack = coreDataStack
         self.pendingActionsManager = pendingActionsManager
@@ -66,7 +82,8 @@ final class MessageActions: ObservableObject {
         if !messageId.isEmpty {
             await pendingActionsManager.queueAction(
                 type: actionType,
-                messageId: messageId
+                messageId: messageId,
+                payload: nil
             )
         }
     }
@@ -88,7 +105,8 @@ final class MessageActions: ObservableObject {
         if let messageId = gmailMessageId, !messageId.isEmpty {
             await pendingActionsManager.queueAction(
                 type: .markRead,
-                messageId: messageId
+                messageId: messageId,
+                payload: nil
             )
         }
     }
@@ -129,7 +147,8 @@ final class MessageActions: ObservableObject {
         for messageId in gmailMessageIds {
             await pendingActionsManager.queueAction(
                 type: .markRead,
-                messageId: messageId
+                messageId: messageId,
+                payload: nil
             )
         }
     }
@@ -155,7 +174,8 @@ final class MessageActions: ObservableObject {
         if !messageId.isEmpty {
             await pendingActionsManager.queueAction(
                 type: .archive,
-                messageId: messageId
+                messageId: messageId,
+                payload: nil
             )
         }
     }
@@ -348,14 +368,19 @@ final class MessageActions: ObservableObject {
     // MARK: - Star/Unstar
 
     func star(message: Message) async {
-        // Note: Star status isn't currently tracked locally in the schema
-        // Local-only action (one-way sync: Gmail -> App only)
-        coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
+        await updateStarState(
+            message: message,
+            isStarred: true,
+            actionType: .star
+        )
     }
 
     func unstar(message: Message) async {
-        // Local-only action (one-way sync: Gmail -> App only)
-        coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
+        await updateStarState(
+            message: message,
+            isStarred: false,
+            actionType: .unstar
+        )
     }
 
     // MARK: - Helpers
@@ -463,5 +488,40 @@ final class MessageActions: ObservableObject {
             }
         }
         return messageIds
+    }
+
+    private func updateStarState(
+        message: Message,
+        isStarred: Bool,
+        actionType: PendingAction.ActionType
+    ) async {
+        let existingStarLabel = message.labels?.first(where: { $0.id == "STARRED" })
+        let alreadyInDesiredState = existingStarLabel != nil
+
+        if isStarred == alreadyInDesiredState {
+            return
+        }
+
+        if isStarred {
+            if let starLabel = existingStarLabel ?? fetchLabel(id: "STARRED", in: coreDataStack.viewContext, operation: "star") {
+                message.addToLabels(starLabel)
+            } else {
+                Log.warning("STARRED label not found locally; queueing remote star only", category: .message)
+            }
+        } else if let starLabel = existingStarLabel ?? fetchLabel(id: "STARRED", in: coreDataStack.viewContext, operation: "unstar") {
+            message.removeFromLabels(starLabel)
+        }
+
+        message.localModifiedAt = Date()
+        coreDataStack.saveIfNeeded(context: coreDataStack.viewContext, caller: "updateStarState")
+
+        let messageId = message.id
+        if !messageId.isEmpty {
+            await pendingActionsManager.queueAction(
+                type: actionType,
+                messageId: messageId,
+                payload: nil
+            )
+        }
     }
 }

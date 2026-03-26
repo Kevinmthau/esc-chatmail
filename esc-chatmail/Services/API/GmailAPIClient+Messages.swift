@@ -48,6 +48,18 @@ extension GmailAPIClient {
         let _: EmptyResponse = try await performRequestWithRetry(request)
     }
 
+    /// Sends a MIME-encoded raw message.
+    nonisolated func sendMessage(rawMessage: String, threadId: String? = nil) async throws -> SendMessageResponse {
+        let url = try buildURL(endpoint: APIEndpoints.sendMessage())
+        var request = try await authenticatedRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = try JSONEncoder().encode(
+            SendMessageRequest(raw: rawMessage, threadId: threadId)
+        )
+
+        return try await performRequestWithRetry(request)
+    }
+
     /// Archives messages by removing the INBOX label.
     nonisolated func archiveMessages(ids: [String]) async throws {
         try await batchModify(ids: ids, removeLabelIds: ["INBOX"])

@@ -158,7 +158,7 @@ final class BackgroundMessageProcessorTests: XCTestCase {
         )
 
         let backgroundContext = stack.newBackgroundContext()
-        await processor.processHistoryChanges(histories: [history], in: backgroundContext)
+        let result = await processor.processHistoryChanges(histories: [history], in: backgroundContext)
 
         let verificationContext = stack.newBackgroundContext()
         let deletedMessage = await verificationContext.perform {
@@ -174,6 +174,7 @@ final class BackgroundMessageProcessorTests: XCTestCase {
         XCTAssertEqual(syncCoordinator.prefetchContextIDs, [ObjectIdentifier(backgroundContext)])
         XCTAssertEqual(syncCoordinator.savedMessageContextIDs, [ObjectIdentifier(backgroundContext)])
         XCTAssertEqual(syncCoordinator.rollupContextIDs, [ObjectIdentifier(backgroundContext)])
+        XCTAssertEqual(result, BackgroundMessageProcessingResult(fetchedCount: 1, failedFetchCount: 0))
     }
 
     func testProcessHistoryChanges_persistsDeletionsWhenFetchedMessageSaveFails() async throws {
@@ -236,7 +237,7 @@ final class BackgroundMessageProcessorTests: XCTestCase {
         )
 
         let backgroundContext = stack.newBackgroundContext()
-        await processor.processHistoryChanges(histories: [history], in: backgroundContext)
+        let result = await processor.processHistoryChanges(histories: [history], in: backgroundContext)
 
         let verificationContext = stack.newBackgroundContext()
         let deletedMessage = await verificationContext.perform {
@@ -252,6 +253,88 @@ final class BackgroundMessageProcessorTests: XCTestCase {
         XCTAssertEqual(syncCoordinator.prefetchContextIDs, [ObjectIdentifier(backgroundContext)])
         XCTAssertEqual(syncCoordinator.savedMessageContextIDs, [ObjectIdentifier(backgroundContext)])
         XCTAssertEqual(syncCoordinator.rollupContextIDs, [ObjectIdentifier(backgroundContext)])
+        XCTAssertEqual(result, BackgroundMessageProcessingResult(fetchedCount: 1, failedFetchCount: 0))
+    }
+
+    func testProcessHistoryChanges_returnsFailedFetchCountWhenMessageFetchFails() async throws {
+        let stack = TestCoreDataStack()
+        let seedConversation = ConversationBuilder.simple(in: stack.viewContext)
+        try stack.saveViewContext()
+
+        let apiClient = MockGmailAPIClient()
+        apiClient.addMessage(
+            GmailMessage(
+                id: "fetch-ok",
+                threadId: "thread-fetch-ok",
+                labelIds: ["INBOX"],
+                snippet: "Fetched in background",
+                historyId: "h1",
+                internalDate: nil,
+                payload: nil,
+                sizeEstimate: nil
+            )
+        )
+        apiClient.getMessageErrors["fetch-fail"] = APIError.timeout
+
+        let syncCoordinator = MockBackgroundSyncCoordinator(
+            seedConversationObjectID: seedConversation.objectID
+        )
+        let processor = BackgroundMessageProcessor(
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            saveContext: { stack.saveIfNeeded(context: $0) },
+            apiClient: apiClient,
+            syncCoordinator: syncCoordinator
+        )
+
+        let history = HistoryRecord(
+            id: "history-failures",
+            messages: nil,
+            messagesAdded: [
+                HistoryMessageAdded(
+                    message: GmailMessage(
+                        id: "fetch-ok",
+                        threadId: "thread-fetch-ok",
+                        labelIds: ["INBOX"],
+                        snippet: "Fetched in background",
+                        historyId: "h1",
+                        internalDate: nil,
+                        payload: nil,
+                        sizeEstimate: nil
+                    )
+                ),
+                HistoryMessageAdded(
+                    message: GmailMessage(
+                        id: "fetch-fail",
+                        threadId: "thread-fetch-fail",
+                        labelIds: ["INBOX"],
+                        snippet: "This one should fail",
+                        historyId: "h1",
+                        internalDate: nil,
+                        payload: nil,
+                        sizeEstimate: nil
+                    )
+                )
+            ],
+            messagesDeleted: nil,
+            labelsAdded: nil,
+            labelsRemoved: nil
+        )
+
+        let backgroundContext = stack.newBackgroundContext()
+        let result = await processor.processHistoryChanges(histories: [history], in: backgroundContext)
+
+        let verificationContext = stack.newBackgroundContext()
+        let fetchedMessage = await verificationContext.perform {
+            try? verificationContext.fetchMessage(byId: "fetch-ok")
+        }
+        let missingMessage = await verificationContext.perform {
+            try? verificationContext.fetchMessage(byId: "fetch-fail")
+        }
+
+        XCTAssertEqual(result, BackgroundMessageProcessingResult(fetchedCount: 1, failedFetchCount: 1))
+        XCTAssertEqual(Set(apiClient.getMessageCalledIds), Set(["fetch-ok", "fetch-fail"]))
+        XCTAssertEqual(fetchedMessage?.id, "fetch-ok")
+        XCTAssertNil(missingMessage)
     }
 
     func testDeleteMessages_tracksModifiedConversationIDs() async throws {

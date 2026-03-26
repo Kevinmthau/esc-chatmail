@@ -149,8 +149,11 @@ final class BackgroundSyncManager {
 
             let didTruncateHistoryPagination = pageToken != nil
 
+            let processingResult: BackgroundMessageProcessingResult
             if !allHistories.isEmpty {
-                await messageProcessor.processHistoryChanges(histories: allHistories)
+                processingResult = await messageProcessor.processHistoryChanges(histories: allHistories)
+            } else {
+                processingResult = .empty
             }
 
             if didTruncateHistoryPagination {
@@ -158,6 +161,13 @@ final class BackgroundSyncManager {
                     "Background history sync reached page limit (\(maxPages)); keeping stored historyId to avoid data loss",
                     category: .background
                 )
+            } else if processingResult.hadFetchFailures {
+                Log.warning(
+                    "Background history sync had \(processingResult.failedFetchCount) message fetch failures; keeping stored historyId and scheduling retry",
+                    category: .background
+                )
+                handleSyncError()
+                return false
             } else if let latestHistoryId = latestHistoryId {
                 stateManager.storeHistoryId(latestHistoryId)
             }
@@ -227,8 +237,11 @@ final class BackgroundSyncManager {
 
             let didTruncateHistoryPagination = pageToken != nil
 
+            let processingResult: BackgroundMessageProcessingResult
             if !allHistories.isEmpty {
-                await messageProcessor.processHistoryChanges(histories: allHistories)
+                processingResult = await messageProcessor.processHistoryChanges(histories: allHistories)
+            } else {
+                processingResult = .empty
             }
 
             if didTruncateHistoryPagination {
@@ -236,6 +249,13 @@ final class BackgroundSyncManager {
                     "Background history retry reached page limit (\(maxPages)); keeping stored historyId to avoid data loss",
                     category: .background
                 )
+            } else if processingResult.hadFetchFailures {
+                Log.warning(
+                    "Background history retry had \(processingResult.failedFetchCount) message fetch failures; keeping stored historyId and scheduling retry",
+                    category: .background
+                )
+                handleSyncError()
+                return false
             } else if let latestHistoryId = latestHistoryId {
                 stateManager.storeHistoryId(latestHistoryId)
             }
@@ -285,8 +305,11 @@ final class BackgroundSyncManager {
                 pageCount += 1
             } while pageToken != nil && pageCount < maxPages
 
+            let processingResult: BackgroundMessageProcessingResult
             if !allMessageIds.isEmpty {
-                await messageProcessor.fetchAndStoreMessages(messageIds: Array(allMessageIds))
+                processingResult = await messageProcessor.fetchAndStoreMessages(messageIds: Array(allMessageIds))
+            } else {
+                processingResult = .empty
             }
 
             let didTruncateMessagePagination = pageToken != nil
@@ -295,6 +318,13 @@ final class BackgroundSyncManager {
                     "Background partial sync reached page limit (\(maxPages)); skipping historyId advance to avoid missing messages",
                     category: .background
                 )
+            } else if processingResult.hadFetchFailures {
+                Log.warning(
+                    "Background partial sync had \(processingResult.failedFetchCount) message fetch failures; keeping stored historyId and scheduling retry",
+                    category: .background
+                )
+                handleSyncError()
+                return false
             } else {
                 let profile = try await apiClient.getProfile()
                 stateManager.storeHistoryId(profile.historyId)

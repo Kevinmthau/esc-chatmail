@@ -24,6 +24,9 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// Response for modifyMessage() calls
     var modifyMessageResponse: GmailMessage?
 
+    /// Response for sendMessage() calls
+    var sendMessageResponse: SendMessageResponse = SendMessageResponse(id: "sent-message-id", threadId: "sent-thread-id")
+
     /// Response for getProfile() calls
     var profileResponse: GmailProfile = GmailProfile(
         emailAddress: "test@example.com",
@@ -61,6 +64,9 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// Error to throw on modifyMessage() (resets after throwing)
     var modifyMessageError: Error?
 
+    /// Error to throw on sendMessage() (resets after throwing)
+    var sendMessageError: Error?
+
     /// Error to throw on batchModify() (resets after throwing)
     var batchModifyError: Error?
 
@@ -91,6 +97,9 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
     private(set) var modifyMessageCallCount = 0
     private(set) var modifyMessageCalls: [(id: String, add: [String]?, remove: [String]?)] = []
+
+    private(set) var sendMessageCallCount = 0
+    private(set) var sendMessageCalls: [(rawMessage: String, threadId: String?)] = []
 
     private(set) var batchModifyCallCount = 0
     private(set) var batchModifyCalls: [(ids: [String], add: [String]?, remove: [String]?)] = []
@@ -136,6 +145,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             getMessageResponses = [:]
             defaultGetMessageResponse = nil
             modifyMessageResponse = nil
+            sendMessageResponse = SendMessageResponse(id: "sent-message-id", threadId: "sent-thread-id")
             profileResponse = GmailProfile(emailAddress: "test@example.com", messagesTotal: 100, threadsTotal: 50, historyId: "12345")
             labelsResponse = []
             sendAsResponse = []
@@ -148,6 +158,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             getMessageError = nil
             getMessageErrors = [:]
             modifyMessageError = nil
+            sendMessageError = nil
             batchModifyError = nil
             getProfileError = nil
             listLabelsError = nil
@@ -164,6 +175,8 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             getMessageCalledIds = []
             modifyMessageCallCount = 0
             modifyMessageCalls = []
+            sendMessageCallCount = 0
+            sendMessageCalls = []
             batchModifyCallCount = 0
             batchModifyCalls = []
             archiveMessagesCallCount = 0
@@ -296,6 +309,27 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             payload: nil,
             sizeEstimate: nil
         )
+    }
+
+    func sendMessage(rawMessage: String, threadId: String?) async throws -> SendMessageResponse {
+        let delay = withStateLock {
+            sendMessageCallCount += 1
+            sendMessageCalls.append((rawMessage: rawMessage, threadId: threadId))
+            return artificialDelay
+        }
+
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
+
+        return try withStateLock {
+            if let error = sendMessageError {
+                sendMessageError = nil
+                throw error
+            }
+
+            return sendMessageResponse
+        }
     }
 
     func batchModify(ids: [String], addLabelIds: [String]?, removeLabelIds: [String]?) async throws {
@@ -449,6 +483,7 @@ extension MockGmailAPIClient {
         withStateLock {
             listMessagesError = APIError.authenticationError
             getMessageError = APIError.authenticationError
+            sendMessageError = APIError.authenticationError
             getProfileError = APIError.authenticationError
         }
     }
