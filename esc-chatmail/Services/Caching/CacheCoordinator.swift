@@ -114,7 +114,7 @@ final class CacheCoordinator {
                         )
                     )
 
-                    if let attachments = message.value(forKey: "attachments") as? Set<Attachment> {
+                    if let attachments = message.value(forKey: "attachments") as? Set<NSManagedObject> {
                         for attachment in attachments {
                             if let localURL = attachment.value(forKey: "localURL") as? String, !localURL.isEmpty {
                                 localPlan.attachmentPathsToDelete.insert(localURL)

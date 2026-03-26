@@ -16,10 +16,19 @@ extension DatabaseMaintenanceService {
                 orphanedAttachmentRequest.predicate = AttachmentPredicates.orphaned
 
                 let deleteOrphaned = NSBatchDeleteRequest(fetchRequest: orphanedAttachmentRequest)
-                deleteOrphaned.resultType = .resultTypeCount
+                deleteOrphaned.resultType = .resultTypeObjectIDs
 
                 let orphanedResult = try context.execute(deleteOrphaned) as? NSBatchDeleteResult
-                Log.debug("Deleted \(orphanedResult?.result ?? 0) orphaned attachments", category: .coreData)
+                let deletedIDs = orphanedResult?.result as? [NSManagedObjectID] ?? []
+                Log.debug("Deleted \(deletedIDs.count) orphaned attachments", category: .coreData)
+
+                if !deletedIDs.isEmpty {
+                    let changes = [NSDeletedObjectsKey: deletedIDs]
+                    NSManagedObjectContext.mergeChanges(
+                        fromRemoteContextSave: changes,
+                        into: [self.coreDataStack.viewContext]
+                    )
+                }
                 return true
             } catch {
                 Log.error("Database cleanup failed", category: .coreData, error: error)
