@@ -113,6 +113,7 @@ struct HTMLMessageView: View {
     }
 
     private func loadHTMLContent() async {
+        Log.info("HTMLMessageView loading message \(message.id)", category: .ui)
         let result = await htmlContentLoader.loadContentWithTimeout(
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
@@ -147,5 +148,10 @@ struct HTMLMessageView: View {
             self.htmlContent = result.html
             self.isLoading = false
         }
+
+        Log.info(
+            "HTMLMessageView loaded message \(message.id) source=\(String(describing: result.source)) hasHTML=\(result.html != nil)",
+            category: .ui
+        )
     }
 }

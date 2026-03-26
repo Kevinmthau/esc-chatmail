@@ -46,15 +46,12 @@ struct ChatMessagesView: View {
                             onOpenFullMessage: onOpenFullMessage
                         )
                         .id(message.id)
-                        .overlay {
-                            Color.clear
-                                .contentShape(Rectangle())
-                                .contextMenu {
-                                    messageContextMenu(for: message)
-                                } preview: {
-                                    // Lightweight preview - just show the text content without triggering loads
-                                    MessageContextMenuPreview(message: message)
-                                }
+                        .contentShape(Rectangle())
+                        .contextMenu {
+                            messageContextMenu(for: message)
+                        } preview: {
+                            // Lightweight preview - just show the text content without triggering loads
+                            MessageContextMenuPreview(message: message)
                         }
                     }
 

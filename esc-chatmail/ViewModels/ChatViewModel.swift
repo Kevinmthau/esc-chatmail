@@ -166,10 +166,12 @@ final class ChatViewModel: ObservableObject {
     }
 
     func openFullMessage(_ message: Message) {
+        Log.info("Opening full message for \(message.id)", category: .ui)
         messageToViewInFull = message
     }
 
     func dismissFullMessage() {
+        Log.info("Dismissed full message view", category: .ui)
         messageToViewInFull = nil
     }
 

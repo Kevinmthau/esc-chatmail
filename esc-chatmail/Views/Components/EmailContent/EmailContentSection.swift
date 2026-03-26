@@ -18,26 +18,20 @@ struct EmailContentSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let html = htmlContent {
-                // Use an overlay tap target to ensure taps are captured even with embedded WKWebView
-                MiniEmailWebView(htmlContent: html, message: message)
-                    .frame(height: 200)
-                    .cornerRadius(12)
-                    .clipped()
-                    .overlay {
-                        Rectangle()
-                            .fill(Color.clear)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                onOpenFullMessage()
-                            }
-                    }
-                    .accessibilityAddTraits(.isButton)
-                    .accessibilityHint("Opens the full original email")
+                Button(action: onOpenFullMessage) {
+                    MiniEmailWebView(htmlContent: html, message: message)
+                        .allowsHitTesting(false)
+                        .frame(height: 200)
+                        .cornerRadius(12)
+                        .clipped()
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Opens the full original email")
             } else if isLoading {
                 Button(action: onOpenFullMessage) {
                     EmailContentPlaceholder()
                 }
-                .buttonStyle(PlainButtonStyle())
+                .buttonStyle(.plain)
             } else {
                 // Fallback when no HTML content available
                 // (EmailContentFallback is already tappable, no extra button needed)
