@@ -6,7 +6,7 @@ import CoreData
 extension MessagePersister {
 
     /// Creates an attachment entity using AttachmentFactory.
-    func createAttachment(
+    nonisolated func createAttachment(
         _ info: AttachmentInfo,
         for message: Message,
         in context: NSManagedObjectContext
@@ -30,7 +30,7 @@ extension MessagePersister {
         }
     }
 
-    private func persistInlineAttachmentData(
+    nonisolated func persistInlineAttachmentData(
         _ inlineData: Data,
         info: AttachmentInfo,
         attachment: Attachment
@@ -74,27 +74,10 @@ extension MessagePersister {
         return true
     }
 
-    /// Finds a label by ID.
-    func findLabel(id: String, in context: NSManagedObjectContext) async -> Label? {
-        let request = Label.fetchRequest()
-        request.predicate = LabelPredicates.id(id)
-        do {
-            let label = try context.fetch(request).first
-            if label == nil {
-                // Log missing labels for debugging - this can happen if labels haven't been synced yet
-                Log.debug("Label '\(id)' not found in local cache", category: .sync)
-            }
-            return label
-        } catch {
-            Log.error("Error fetching label '\(id)'", category: .sync, error: error)
-            return nil
-        }
-    }
-
     /// Applies list-critical rollup fields immediately when a new message is created.
     /// This allows the conversation row (blue dot + preview text) to update before the
     /// full rollup phase runs later in sync.
-    func applyFastConversationListUpdateForNewMessage(
+    nonisolated func applyFastConversationListUpdateForNewMessage(
         _ message: Message,
         in conversation: Conversation,
         hasInboxLabel: Bool
@@ -136,7 +119,7 @@ extension MessagePersister {
 
     /// Applies list-critical rollup fields immediately when an existing message is updated.
     /// Falls back to a scoped inbox recomputation when INBOX membership changes.
-    func applyFastConversationListUpdateForExistingMessage(
+    nonisolated func applyFastConversationListUpdateForExistingMessage(
         _ message: Message,
         in conversation: Conversation,
         previousHadInboxLabel: Bool,
@@ -188,7 +171,7 @@ extension MessagePersister {
     }
 
     /// Recomputes inbox-specific conversation indicators from the conversation's message set.
-    private func refreshConversationInboxIndicators(_ conversation: Conversation) {
+    nonisolated func refreshConversationInboxIndicators(_ conversation: Conversation) {
         guard let messages = conversation.messages else {
             conversation.hasInbox = false
             conversation.inboxUnreadCount = 0
@@ -220,11 +203,5 @@ extension MessagePersister {
         conversation.hasInbox = hasInbox
         conversation.inboxUnreadCount = unreadCount
         conversation.latestInboxDate = latestInboxDate
-    }
-
-    /// Tracks a conversation as modified for rollup updates.
-    /// Delegates to the shared ModificationTracker for consolidated tracking.
-    func trackModifiedConversation(_ conversation: Conversation) async {
-        await ModificationTracker.shared.trackModifiedConversation(conversation.objectID)
     }
 }

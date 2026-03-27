@@ -71,6 +71,14 @@ struct DataCleanupService: Sendable {
         IncrementalCleanupSchedule.markRun()
     }
 
+    /// Runs incremental cleanup in a dedicated background context.
+    /// This avoids resetting or batch-deleting the active sync transaction context.
+    func runIncrementalCleanup() async {
+        let context = coreDataStack.newBackgroundContext()
+        await runIncrementalCleanup(in: context)
+        _ = await context.performSaveIfNeeded(caller: "DataCleanupService.runIncrementalCleanup")
+    }
+
     /// Runs the heavier store-wide maintenance tasks.
     /// Use this for periodic maintenance or one-shot repair passes, not every sync.
     func runMaintenanceCleanup(in context: NSManagedObjectContext) async {

@@ -7,15 +7,15 @@ extension MessagePersister {
 
     /// Saves all participants for a message.
     /// Returns an array of participant emails for avatar prefetching.
-    func saveParticipants(
+    nonisolated func saveParticipants(
         for processedMessage: ProcessedMessage,
         message: Message,
         in context: NSManagedObjectContext
-    ) async -> [String] {
+    ) -> [String] {
         var participantEmails: [String] = []
 
         if let from = processedMessage.headers.from {
-            await saveParticipant(from: from, kind: .from, for: message, in: context)
+            saveParticipant(from: from, kind: .from, for: message, in: context)
             if let email = EmailNormalizer.extractEmail(from: from) {
                 participantEmails.append(EmailNormalizer.normalize(email))
             }
@@ -25,7 +25,7 @@ extension MessagePersister {
                 continue
             }
             let headerValue = "\(recipient.displayName ?? "") <\(recipient.email)>"
-            await saveParticipant(from: headerValue, kind: .to, for: message, in: context)
+            saveParticipant(from: headerValue, kind: .to, for: message, in: context)
             participantEmails.append(EmailNormalizer.normalize(recipient.email))
         }
         for recipient in processedMessage.headers.cc {
@@ -33,7 +33,7 @@ extension MessagePersister {
                 continue
             }
             let headerValue = "\(recipient.displayName ?? "") <\(recipient.email)>"
-            await saveParticipant(from: headerValue, kind: .cc, for: message, in: context)
+            saveParticipant(from: headerValue, kind: .cc, for: message, in: context)
             participantEmails.append(EmailNormalizer.normalize(recipient.email))
         }
         for recipient in processedMessage.headers.bcc {
@@ -41,7 +41,7 @@ extension MessagePersister {
                 continue
             }
             let headerValue = "\(recipient.displayName ?? "") <\(recipient.email)>"
-            await saveParticipant(from: headerValue, kind: .bcc, for: message, in: context)
+            saveParticipant(from: headerValue, kind: .bcc, for: message, in: context)
             participantEmails.append(EmailNormalizer.normalize(recipient.email))
         }
 
@@ -49,12 +49,12 @@ extension MessagePersister {
     }
 
     /// Saves a single participant using MessageParticipantFactory.
-    func saveParticipant(
+    nonisolated func saveParticipant(
         from headerValue: String,
         kind: ParticipantKind,
         for message: Message,
         in context: NSManagedObjectContext
-    ) async {
+    ) {
         do {
             _ = try MessageParticipantFactory.create(
                 from: headerValue,

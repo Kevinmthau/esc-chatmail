@@ -22,11 +22,11 @@ final class MessageConversationRouter {
         self.forwardingDetector = forwardingDetector
     }
 
-    func resolveConversation(
+    func resolveConversationObjectID(
         for processedMessage: ProcessedMessage,
         myAliases: Set<String>,
         in context: NSManagedObjectContext
-    ) async throws -> Conversation {
+    ) async throws -> NSManagedObjectID {
         let shouldReactivateConversation = processedMessage.labelIds.contains("INBOX")
 
         let identity = conversationManager.createConversationIdentity(
@@ -36,33 +36,16 @@ final class MessageConversationRouter {
         )
 
         if shouldReuseConversationByThread(for: processedMessage),
-           let existingConversation = findExistingConversation(
+           let existingConversationObjectID = await findExistingConversationObjectID(
                 forGmThreadId: processedMessage.gmThreadId,
+                participantHash: identity.participantHash,
+                reactivateArchivedIfNeeded: shouldReactivateConversation,
                 in: context
            ) {
-            let existingParticipantHash = existingConversation.participantHash?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            // Check if participants changed (e.g. someone new was CC'd).
-            // When that happens, create a new conversation for the expanded group
-            // instead of reusing the existing one.
-            if existingParticipantHash.isEmpty {
-                existingConversation.participantHash = identity.participantHash
-                if shouldReactivateConversation, existingConversation.archivedAt != nil {
-                    existingConversation.archivedAt = nil
-                    existingConversation.hidden = false
-                }
-                return existingConversation
-            }
-
-            if existingParticipantHash == identity.participantHash {
-                if shouldReactivateConversation, existingConversation.archivedAt != nil {
-                    existingConversation.archivedAt = nil
-                    existingConversation.hidden = false
-                }
-                return existingConversation
-            }
+            return existingConversationObjectID
         }
 
-        return try await conversationManager.findOrCreateConversation(
+        return try await conversationManager.findOrCreateConversationObjectID(
             for: identity,
             initialLastMessageDate: processedMessage.internalDate,
             reactivateArchivedIfNeeded: shouldReactivateConversation,
@@ -90,28 +73,50 @@ final class MessageConversationRouter {
     /// message with the same `gmThreadId`.
     ///
     /// This keeps a single Gmail thread grouped together unless a forward branch is detected.
-    private func findExistingConversation(
+    private func findExistingConversationObjectID(
         forGmThreadId gmThreadId: String,
+        participantHash: String,
+        reactivateArchivedIfNeeded: Bool,
         in context: NSManagedObjectContext
-    ) -> Conversation? {
+    ) async -> NSManagedObjectID? {
         guard !gmThreadId.isEmpty else { return nil }
 
-        let request = Message.fetchRequest()
-        request.predicate = NSPredicate(format: "gmThreadId == %@ AND conversation != nil", gmThreadId)
-        request.fetchLimit = 1
-        request.fetchBatchSize = 1
-        request.returnsObjectsAsFaults = true
-        request.relationshipKeyPathsForPrefetching = ["conversation"]
+        return await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "gmThreadId == %@ AND conversation != nil", gmThreadId)
+            request.fetchLimit = 1
+            request.fetchBatchSize = 1
+            request.returnsObjectsAsFaults = true
+            request.relationshipKeyPathsForPrefetching = ["conversation"]
 
-        do {
-            return try context.fetch(request).first?.conversation
-        } catch {
-            Log.error(
-                "Failed to fetch existing conversation for gmThreadId \(gmThreadId.prefix(16))...",
-                category: .coreData,
-                error: error
-            )
-            return nil
+            do {
+                guard let existingConversation = try context.fetch(request).first?.conversation else {
+                    return nil
+                }
+
+                let existingParticipantHash = existingConversation.participantHash?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+                if existingParticipantHash.isEmpty {
+                    existingConversation.participantHash = participantHash
+                } else if existingParticipantHash != participantHash {
+                    return nil
+                }
+
+                if reactivateArchivedIfNeeded, existingConversation.archivedAt != nil {
+                    existingConversation.archivedAt = nil
+                    existingConversation.hidden = false
+                }
+
+                return existingConversation.objectID
+            } catch {
+                Log.error(
+                    "Failed to fetch existing conversation for gmThreadId \(gmThreadId.prefix(16))...",
+                    category: .coreData,
+                    error: error
+                )
+                return nil
+            }
         }
     }
 }

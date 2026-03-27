@@ -2,7 +2,7 @@ import Foundation
 import CoreData
 
 /// CoreDataStack uses @unchecked Sendable because:
-/// - destroyAndReloadSync() requires synchronous semaphore-based coordination for fresh installs
+/// - destroyAndReloadSync() supports callers that require synchronous semaphore-based coordination
 /// - newBackgroundContext() and save() must remain synchronous for critical Core Data paths
 /// - DispatchQueue (isolationQueue) provides thread safety for mutable state (_loadAttempts, _isStoreLoaded, _storeLoadError)
 ///
@@ -177,6 +177,28 @@ final class CoreDataStack: @unchecked Sendable {
         }
     }
 
+    private func waitForStoreToLoadSync(timeout: TimeInterval = 10) throws {
+        let startTime = Date()
+
+        while !isStoreLoaded {
+            if let storeLoadError {
+                throw CoreDataError.storeLoadFailed(storeLoadError)
+            }
+
+            if Date().timeIntervalSince(startTime) > timeout {
+                throw CoreDataError.storeLoadFailed(
+                    NSError(
+                        domain: "CoreData",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "Store load timeout"]
+                    )
+                )
+            }
+
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+    }
+
     /// Loads persistent stores asynchronously without blocking the main thread.
     /// Use this instead of destroyAndReloadSync when async behavior is acceptable.
     func loadStoresAsync() async throws {
@@ -198,6 +220,11 @@ final class CoreDataStack: @unchecked Sendable {
     /// Destroys all data and reloads stores asynchronously.
     /// Preferred over destroyAndReloadSync when not on the main thread or when async is acceptable.
     func destroyAndReloadAsync() async throws {
+        _ = persistentContainer
+        if !isStoreLoaded {
+            try await waitForStoreToLoad()
+        }
+
         try destroyAllData()
 
         // Reset the viewContext to clear any stale managed objects
@@ -304,7 +331,7 @@ final class CoreDataStack: @unchecked Sendable {
     }
 
     /// Destroys all data and reloads the persistent stores synchronously.
-    /// Use this for fresh install cleanup where you need to ensure stores are ready before continuing.
+    /// Use this only when the caller must block until the store is ready again.
     ///
     /// - Warning: This method uses a semaphore and will block the calling thread for up to 10 seconds.
     ///   Do NOT call from the main thread as it will freeze the UI. Use `destroyAndReloadAsync()` instead
@@ -316,6 +343,11 @@ final class CoreDataStack: @unchecked Sendable {
         #endif
         if Thread.isMainThread {
             Log.error("destroyAndReloadSync called from main thread - this may freeze the UI", category: .coreData)
+        }
+
+        _ = persistentContainer
+        if !isStoreLoaded {
+            try waitForStoreToLoadSync()
         }
 
         try destroyAllData()

@@ -169,7 +169,7 @@ final class BackgroundSyncManager {
                 handleSyncError()
                 return false
             } else if let latestHistoryId = latestHistoryId {
-                stateManager.storeHistoryId(latestHistoryId)
+                try await stateManager.storeHistoryId(latestHistoryId)
             }
 
             stateManager.resetRetryCount()
@@ -257,7 +257,7 @@ final class BackgroundSyncManager {
                 handleSyncError()
                 return false
             } else if let latestHistoryId = latestHistoryId {
-                stateManager.storeHistoryId(latestHistoryId)
+                try await stateManager.storeHistoryId(latestHistoryId)
             }
 
             stateManager.resetRetryCount()
@@ -327,7 +327,10 @@ final class BackgroundSyncManager {
                 return false
             } else {
                 let profile = try await apiClient.getProfile()
-                stateManager.storeHistoryId(profile.historyId)
+                try await stateManager.storeHistoryId(
+                    profile.historyId,
+                    accountEmail: profile.emailAddress
+                )
             }
 
             stateManager.resetRetryCount()

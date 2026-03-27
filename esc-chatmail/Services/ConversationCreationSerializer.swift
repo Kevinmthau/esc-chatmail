@@ -1,11 +1,6 @@
 import Foundation
 import CoreData
 
-/// Error types for conversation operations
-enum ConversationCreationError: Error {
-    case invalidObjectType
-}
-
 /// Serializes conversation creation to prevent duplicate conversations.
 ///
 /// Uses an actor to ensure only one conversation can be created at a time,
@@ -22,12 +17,12 @@ actor ConversationCreationSerializer {
     ///   - identity: The conversation identity containing participants and type
     ///   - initialLastMessageDate: Optional date to set as lastMessageDate when creating a new conversation (prevents UI flash)
     ///   - context: The Core Data context to use
-    func findOrCreateConversation(
+    func findOrCreateConversationObjectID(
         for identity: ConversationIdentity,
         initialLastMessageDate: Date? = nil,
         reactivateArchivedIfNeeded: Bool = true,
         in context: NSManagedObjectContext
-    ) async throws -> Conversation {
+    ) async throws -> NSManagedObjectID {
         let participantHash = identity.participantHash
 
         // Pre-register this hash to prevent concurrent creation attempts
@@ -82,6 +77,7 @@ actor ConversationCreationSerializer {
                     try context.save()
                 } catch {
                     Log.error("Failed to save new conversation: \(error)", category: .coreData)
+                    return .failure(error)
                 }
             }
 
@@ -99,11 +95,7 @@ actor ConversationCreationSerializer {
             }
         }
 
-        // Fetch the conversation object from the ID
-        guard let conversation = context.object(with: resultObjectID) as? Conversation else {
-            throw ConversationCreationError.invalidObjectType
-        }
-        return conversation
+        return resultObjectID
     }
 
     private func removeFromCache(_ hash: String) {

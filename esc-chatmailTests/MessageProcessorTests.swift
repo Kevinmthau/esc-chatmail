@@ -490,9 +490,6 @@ final class MessageProcessorTests: XCTestCase {
     // MARK: - Attachment Extraction
 
     func testProcessGmailMessage_extractsInlineDataAttachmentWithoutAttachmentId() async throws {
-        let testStack = TestCoreDataStack()
-        let context = testStack.viewContext
-
         let inlineImageData = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2foAAAAASUVORK5CYII="))
         let message = makeMultipartMessage(
             id: "inline-data-attachment-message",
@@ -529,8 +526,7 @@ final class MessageProcessorTests: XCTestCase {
 
         let processed = await processor.processGmailMessage(
             message,
-            myAliases: [],
-            in: context
+            myAliases: []
         )
 
         let attachment = try XCTUnwrap(processed?.attachmentInfo.first)
@@ -544,9 +540,6 @@ final class MessageProcessorTests: XCTestCase {
     }
 
     func testProcessGmailMessage_extractsInlineCIDImageWithoutFilename() async throws {
-        let testStack = TestCoreDataStack()
-        let context = testStack.viewContext
-
         let inlineImageData = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2foAAAAASUVORK5CYII="))
         let message = makeMultipartMessage(
             id: "inline-cid-no-filename-message",
@@ -583,8 +576,7 @@ final class MessageProcessorTests: XCTestCase {
 
         let processed = await processor.processGmailMessage(
             message,
-            myAliases: [],
-            in: context
+            myAliases: []
         )
 
         let attachment = try XCTUnwrap(processed?.attachmentInfo.first)
@@ -596,9 +588,6 @@ final class MessageProcessorTests: XCTestCase {
     }
 
     func testProcessGmailMessage_doesNotTreatHTMLBodyAsAttachment() async {
-        let testStack = TestCoreDataStack()
-        let context = testStack.viewContext
-
         let htmlBody = "<div>Body only</div>"
         let message = GmailMessage(
             id: "html-body-only-message",
@@ -624,8 +613,7 @@ final class MessageProcessorTests: XCTestCase {
 
         let processed = await processor.processGmailMessage(
             message,
-            myAliases: [],
-            in: context
+            myAliases: []
         )
 
         XCTAssertEqual(processed?.attachmentInfo.count, 0)
@@ -633,9 +621,6 @@ final class MessageProcessorTests: XCTestCase {
     }
 
     func testProcessGmailMessage_htmlOnlyMessage_derivesPlainTextBodyFromHTML() async {
-        let testStack = TestCoreDataStack()
-        let context = testStack.viewContext
-
         let htmlBody = """
         <html><body>
         <div>Hi Brynn and Kevin,</div>
@@ -669,8 +654,7 @@ final class MessageProcessorTests: XCTestCase {
 
         let processed = await processor.processGmailMessage(
             message,
-            myAliases: [],
-            in: context
+            myAliases: []
         )
 
         let plainTextBody = processed?.plainTextBody ?? ""
@@ -680,9 +664,6 @@ final class MessageProcessorTests: XCTestCase {
     }
 
     func testProcessGmailMessage_multipartAlternative_withParameterizedHTMLMime_extractsHTMLBody() async {
-        let testStack = TestCoreDataStack()
-        let context = testStack.viewContext
-
         let plainBody = "Fallback plain text body"
         let htmlBody = "<html><body><p>HTML_TOKEN_BILL_APPROVAL</p></body></html>"
 
@@ -731,8 +712,7 @@ final class MessageProcessorTests: XCTestCase {
 
         let processed = await processor.processGmailMessage(
             message,
-            myAliases: [],
-            in: context
+            myAliases: []
         )
 
         XCTAssertEqual(processed?.plainTextBody, plainBody)
@@ -740,9 +720,6 @@ final class MessageProcessorTests: XCTestCase {
     }
 
     func testProcessGmailMessage_multipartAlternative_htmlPartWithMissingMimeType_usesContentTypeHeader() async {
-        let testStack = TestCoreDataStack()
-        let context = testStack.viewContext
-
         let plainBody = "Fallback plain text body"
         let htmlBody = "<html><body><p>HTML_TOKEN_FROM_HEADER_ONLY</p></body></html>"
 
@@ -794,8 +771,7 @@ final class MessageProcessorTests: XCTestCase {
 
         let processed = await processor.processGmailMessage(
             message,
-            myAliases: [],
-            in: context
+            myAliases: []
         )
 
         XCTAssertEqual(processed?.plainTextBody, plainBody)

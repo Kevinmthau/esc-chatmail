@@ -16,6 +16,7 @@ actor MessagePersister {
     let coreDataStack: CoreDataStack
     let messageProcessor: MessageProcessor
     let htmlContentHandler: HTMLContentHandler
+    let saveHTML: (String, String) -> URL?
     let conversationManager: ConversationManager
     let conversationRouter: MessageConversationRouter
     let photoPrefetcher: @Sendable ([String]) async -> Void
@@ -26,6 +27,7 @@ actor MessagePersister {
         coreDataStack: CoreDataStack = .shared,
         messageProcessor: MessageProcessor = MessageProcessor(),
         htmlContentHandler: HTMLContentHandler = HTMLContentHandler(),
+        saveHTML: ((String, String) -> URL?)? = nil,
         conversationManager: ConversationManager = ConversationManager(),
         conversationRouter: MessageConversationRouter? = nil,
         photoPrefetcher: (@Sendable ([String]) async -> Void)? = nil
@@ -33,6 +35,9 @@ actor MessagePersister {
         self.coreDataStack = coreDataStack
         self.messageProcessor = messageProcessor
         self.htmlContentHandler = htmlContentHandler
+        self.saveHTML = saveHTML ?? { html, messageId in
+            htmlContentHandler.saveHTML(html, for: messageId)
+        }
         self.conversationManager = conversationManager
         self.conversationRouter = conversationRouter ?? MessageConversationRouter(
             conversationManager: conversationManager
@@ -76,8 +81,7 @@ actor MessagePersister {
         // Process the Gmail message (may fetch large body parts via API)
         guard let processedMessage = await messageProcessor.processGmailMessage(
             gmailMessage,
-            myAliases: myAliases,
-            in: context
+            myAliases: myAliases
         ) else {
             Log.warning("Failed to process message: \(gmailMessage.id)", category: .sync)
             return

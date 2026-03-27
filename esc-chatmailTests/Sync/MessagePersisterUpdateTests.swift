@@ -55,6 +55,157 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertTrue(existingMessage.isNewsletter)
     }
 
+    func testSaveMessage_newHTMLMessage_savesHTMLOnce() async throws {
+        var headers = ProcessedHeaders()
+        headers.subject = "HTML message"
+        headers.from = "Sender <sender@example.com>"
+        headers.to = [EmailAddress(email: "recipient@example.com", displayName: nil)]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: "new-html-message",
+            gmThreadId: "new-html-thread",
+            snippet: "HTML snippet",
+            cleanedSnippet: "HTML snippet",
+            internalDate: Date(),
+            headers: headers,
+            htmlBody: "<html><body><p>Hello</p></body></html>",
+            plainTextBody: "Hello",
+            labelIds: ["INBOX"],
+            isUnread: true,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+        let htmlSaveSpy = HTMLSaveSpy()
+        let htmlPersister = MessagePersister(
+            messageProcessor: StubMessageProcessor(processedMessage: processedMessage),
+            saveHTML: { html, messageId in
+                htmlSaveSpy.save(html, messageId: messageId)
+            },
+            photoPrefetcher: { _ in }
+        )
+
+        await htmlPersister.saveMessage(
+            GmailMessage(
+                id: processedMessage.id,
+                threadId: processedMessage.gmThreadId,
+                labelIds: processedMessage.labelIds,
+                snippet: processedMessage.snippet,
+                historyId: nil,
+                internalDate: "\(Int(processedMessage.internalDate.timeIntervalSince1970 * 1000))",
+                payload: nil,
+                sizeEstimate: nil
+            ),
+            myAliases: [normalizedEmail("recipient@example.com")],
+            in: context
+        )
+
+        let request = Message.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", processedMessage.id)
+        request.fetchLimit = 1
+
+        let savedMessage = try XCTUnwrap(context.fetch(request).first)
+        XCTAssertEqual(htmlSaveSpy.recordedCallCount, 1)
+        XCTAssertEqual(savedMessage.bodyStorageURI, "file:///tmp/\(processedMessage.id).html")
+    }
+
+    func testCreateNewMessage_onBackgroundContext_persistsMessageAndConversation() async throws {
+        let backgroundContext = testStack.newBackgroundContext()
+        var headers = ProcessedHeaders()
+        headers.subject = "Background sync message"
+        headers.from = "Sender <sender@example.com>"
+        headers.to = [EmailAddress(email: "recipient@example.com", displayName: nil)]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: "background-create-message",
+            gmThreadId: "background-thread-1",
+            snippet: "Created on a background context",
+            cleanedSnippet: "Created on a background context",
+            internalDate: Date(),
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: "Created on a background context",
+            labelIds: ["INBOX", "UNREAD"],
+            isUnread: true,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        try await persister.createNewMessage(
+            processedMessage,
+            labelIds: nil,
+            myAliases: [normalizedEmail("recipient@example.com")],
+            in: backgroundContext
+        )
+        try await backgroundContext.perform {
+            try backgroundContext.save()
+        }
+
+        let fetch = Message.fetchRequest()
+        fetch.predicate = NSPredicate(format: "id == %@", processedMessage.id)
+        fetch.fetchLimit = 1
+
+        let saved = try XCTUnwrap(context.fetch(fetch).first)
+        XCTAssertEqual(saved.subject, "Background sync message")
+        XCTAssertEqual(saved.conversation?.participantHash, calculateParticipantHash(from: ["sender@example.com"]))
+        XCTAssertTrue(saved.isUnread)
+    }
+
+    func testUpdateExistingMessage_onBackgroundContext_persistsChanges() async throws {
+        let conversation = ConversationBuilder.simple(in: context)
+        _ = MessageBuilder()
+            .withId("background-update-message")
+            .inConversation(conversation)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let backgroundContext = testStack.newBackgroundContext()
+        var headers = ProcessedHeaders()
+        headers.subject = "Updated subject"
+        headers.from = "Sender <sender@example.com>"
+        headers.to = [EmailAddress(email: "recipient@example.com", displayName: nil)]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: "background-update-message",
+            gmThreadId: "thread-update-background",
+            snippet: "Updated on background context",
+            cleanedSnippet: "Updated on background context",
+            internalDate: Date(),
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: "Updated on background context",
+            labelIds: ["INBOX"],
+            isUnread: false,
+            isNewsletter: true,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: backgroundContext
+        )
+        XCTAssertTrue(didUpdate)
+
+        try await backgroundContext.perform {
+            try backgroundContext.save()
+        }
+
+        let fetch = Message.fetchRequest()
+        fetch.predicate = NSPredicate(format: "id == %@", processedMessage.id)
+        fetch.fetchLimit = 1
+
+        let saved = try XCTUnwrap(context.fetch(fetch).first)
+        XCTAssertEqual(saved.snippet, "Updated on background context")
+        XCTAssertTrue(saved.isNewsletter)
+        XCTAssertFalse(saved.isUnread)
+    }
+
     func testCreateNewMessage_createsNewConversationForSameGmThreadId_whenParticipantsDiffer() async throws {
         let threadId = "thread-join-123"
         let existingConversation = ConversationBuilder()
@@ -749,5 +900,35 @@ final class MessagePersisterUpdateTests: XCTestCase {
 
         AttachmentPaths.deleteFile(at: savedAttachment.localURL)
         AttachmentPaths.deleteFile(at: savedAttachment.previewURL)
+    }
+}
+
+private final class StubMessageProcessor: MessageProcessor {
+    private let processedMessage: ProcessedMessage?
+
+    init(processedMessage: ProcessedMessage?) {
+        self.processedMessage = processedMessage
+    }
+
+    override func processGmailMessage(_ gmailMessage: GmailMessage, myAliases: Set<String>) async -> ProcessedMessage? {
+        processedMessage
+    }
+}
+
+private final class HTMLSaveSpy {
+    private let lock = NSLock()
+    private var callCount = 0
+
+    var recordedCallCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return callCount
+    }
+
+    func save(_ html: String, messageId: String) -> URL? {
+        lock.lock()
+        callCount += 1
+        lock.unlock()
+        return URL(fileURLWithPath: "/tmp/\(messageId).html")
     }
 }

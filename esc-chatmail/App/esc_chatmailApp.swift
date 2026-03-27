@@ -45,10 +45,6 @@ struct esc_chatmailApp: App {
         configureBackgroundTasks()
         logStartupTiming("BackgroundTasks configured")
 
-        // Trigger Core Data stack initialization (async load starts here)
-        _ = CoreDataStack.shared.persistentContainer
-        logStartupTiming("Core Data container accessed")
-
         // Setup attachment directories
         AttachmentPaths.setupDirectories()
         logStartupTiming("Directories setup")
@@ -91,11 +87,15 @@ struct esc_chatmailApp: App {
         await FreshInstallHandler().checkAndHandleFreshInstall()
         logStartupTiming("FreshInstallHandler complete")
 
-        // 2. Wait for Core Data store to load
+        // 2. Only start Core Data loading after fresh-install cleanup has had a chance to reset it.
+        _ = CoreDataStack.shared.persistentContainer
+        logStartupTiming("Core Data container accessed")
+
+        // 3. Wait for Core Data store to load
         await waitForCoreData()
         logStartupTiming("Core Data ready")
 
-        // 3. Start cache coordinator for Core Data change notifications
+        // 4. Start cache coordinator for Core Data change notifications
         CacheCoordinator.shared.start()
         logStartupTiming("CacheCoordinator started")
 
@@ -104,7 +104,7 @@ struct esc_chatmailApp: App {
             logStartupTiming("Database maintenance scheduled")
         }
 
-        // 4. Restore auth session (after cleanup complete)
+        // 5. Restore auth session (after cleanup complete)
         await AuthSession.shared.restorePreviousSignIn()
         applyUITestLaunchStateIfNeeded()
         logStartupTiming("Auth restored")
@@ -118,11 +118,11 @@ struct esc_chatmailApp: App {
             )
         }
 
-        // 5. Ready to show main UI
+        // 6. Ready to show main UI
         isInitialized = true
         logStartupTiming("initializeApp() complete")
 
-        // 6. Prewarm WebKit after UI becomes available to avoid launch-path contention.
+        // 7. Prewarm WebKit after UI becomes available to avoid launch-path contention.
         if !isRunningUITests {
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 2_000_000_000)

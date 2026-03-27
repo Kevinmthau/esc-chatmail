@@ -5,7 +5,7 @@ class MessageProcessor {
     private let emailTextProcessor = EmailTextProcessor.self
     private let emailNormalizer = EmailNormalizer.self
 
-    func processGmailMessage(_ gmailMessage: GmailMessage, myAliases: Set<String>, in context: NSManagedObjectContext) async -> ProcessedMessage? {
+    func processGmailMessage(_ gmailMessage: GmailMessage, myAliases: Set<String>) async -> ProcessedMessage? {
         guard let payload = gmailMessage.payload,
               let headers = payload.headers else { return nil }
 

@@ -3,6 +3,12 @@ import CoreData
 
 // MARK: - Message Updates
 
+private struct MessageUpdateResult {
+    let didUpdate: Bool
+    let modifiedConversationID: NSManagedObjectID?
+    let shouldInvalidateRenderedContent: Bool
+}
+
 extension MessagePersister {
 
     /// Updates an existing message if it exists.
@@ -12,122 +18,146 @@ extension MessagePersister {
         labelIds: Set<String>?,
         in context: NSManagedObjectContext
     ) async -> Bool {
-        let request = Message.fetchRequest()
-        request.predicate = MessagePredicates.id(processedMessage.id)
+        let saveHTML = self.saveHTML
 
-        let existingMessage: Message?
-        do {
-            existingMessage = try context.fetch(request).first
-        } catch {
-            Log.error("Failed to fetch message for update", category: .coreData, error: error)
-            return false
-        }
-        guard let existingMessage = existingMessage else {
-            return false
-        }
+        let result: MessageUpdateResult = await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = MessagePredicates.id(processedMessage.id)
 
-        let previousWasUnread = existingMessage.isUnread
-        let previousHadInboxLabel = existingMessage.labels?.contains { $0.id == "INBOX" } ?? false
-        let previousSnippet = existingMessage.snippet
-        let previousBodyText = existingMessage.bodyText
-        let previousBodyStorageURI = existingMessage.bodyStorageURI
-
-        // Update existing message properties that might have changed
-        existingMessage.isUnread = processedMessage.isUnread
-        existingMessage.isNewsletter = processedMessage.isNewsletter
-        existingMessage.snippet = processedMessage.snippet
-        existingMessage.cleanedSnippet = processedMessage.cleanedSnippet
-
-        if let plainText = processedMessage.plainTextBody, !plainText.isEmpty {
-            existingMessage.bodyText = plainText
-        }
-
-        if let htmlBody = processedMessage.htmlBody,
-           let fileURL = htmlContentHandler.saveHTML(htmlBody, for: processedMessage.id) {
-            existingMessage.bodyStorageURI = fileURL.absoluteString
-        }
-
-        // Update labels - fetch all needed labels in a single batch query
-        let messageLabelIds = Set(processedMessage.labelIds)
-        let currentHasInboxLabel = messageLabelIds.contains("INBOX")
-        existingMessage.labels = nil
-        // Batch fetch labels (nonisolated function, safe to call directly)
-        let labelCache = fetchLabelsByIds(messageLabelIds, in: context)
-        for labelId in processedMessage.labelIds {
-            if let label = labelCache[labelId] {
-                existingMessage.addToLabels(label)
+            let existingMessage: Message?
+            do {
+                existingMessage = try context.fetch(request).first
+            } catch {
+                Log.error("Failed to fetch message for update", category: .coreData, error: error)
+                return MessageUpdateResult(
+                    didUpdate: false,
+                    modifiedConversationID: nil,
+                    shouldInvalidateRenderedContent: false
+                )
             }
-        }
 
-        // Merge attachments from server payload even when optimistic local attachments already exist.
-        // This prevents missing inline CID images after sent-message reconciliation.
-        var existingAttachmentIds = Set(existingMessage.attachmentsArray.compactMap(\.id))
-        var existingContentIds = Set(existingMessage.attachmentsArray.compactMap { normalizedContentID($0.contentId) })
-        var consumedOptimisticAttachmentObjectIDs = Set<NSManagedObjectID>()
+            guard let existingMessage else {
+                return MessageUpdateResult(
+                    didUpdate: false,
+                    modifiedConversationID: nil,
+                    shouldInvalidateRenderedContent: false
+                )
+            }
 
-        for attachmentInfo in processedMessage.attachmentInfo {
-            if let optimisticAttachment = matchingOptimisticLocalAttachment(
-                for: attachmentInfo,
-                in: existingMessage.attachmentsArray,
-                excluding: consumedOptimisticAttachmentObjectIDs
-            ) {
-                let previousAttachmentID = optimisticAttachment.id
-                reconcileOptimisticLocalAttachment(optimisticAttachment, with: attachmentInfo)
-                consumedOptimisticAttachmentObjectIDs.insert(optimisticAttachment.objectID)
+            let previousWasUnread = existingMessage.isUnread
+            let previousHadInboxLabel = existingMessage.labels?.contains { $0.id == "INBOX" } ?? false
+            let previousSnippet = existingMessage.snippet
+            let previousBodyText = existingMessage.bodyText
+            let previousBodyStorageURI = existingMessage.bodyStorageURI
+            let savedBodyStorageURI = processedMessage.htmlBody.flatMap {
+                saveHTML($0, processedMessage.id)?.absoluteString
+            }
 
-                if let previousAttachmentID {
-                    existingAttachmentIds.remove(previousAttachmentID)
+            existingMessage.isUnread = processedMessage.isUnread
+            existingMessage.isNewsletter = processedMessage.isNewsletter
+            existingMessage.snippet = processedMessage.snippet
+            existingMessage.cleanedSnippet = processedMessage.cleanedSnippet
+
+            if let plainText = processedMessage.plainTextBody, !plainText.isEmpty {
+                existingMessage.bodyText = plainText
+            }
+
+            if let savedBodyStorageURI {
+                existingMessage.bodyStorageURI = savedBodyStorageURI
+            }
+
+            let messageLabelIds = Set(processedMessage.labelIds)
+            let currentHasInboxLabel = messageLabelIds.contains("INBOX")
+            existingMessage.labels = nil
+            let labelCache = self.fetchLabelsByIds(messageLabelIds, in: context)
+            for labelId in processedMessage.labelIds {
+                if let label = labelCache[labelId] {
+                    existingMessage.addToLabels(label)
                 }
+            }
+
+            var existingAttachmentIds = Set(existingMessage.attachmentsArray.compactMap(\.id))
+            var existingContentIds = Set(
+                existingMessage.attachmentsArray.compactMap { self.normalizedContentID($0.contentId) }
+            )
+            var consumedOptimisticAttachmentObjectIDs = Set<NSManagedObjectID>()
+
+            for attachmentInfo in processedMessage.attachmentInfo {
+                if let optimisticAttachment = self.matchingOptimisticLocalAttachment(
+                    for: attachmentInfo,
+                    in: existingMessage.attachmentsArray,
+                    excluding: consumedOptimisticAttachmentObjectIDs
+                ) {
+                    let previousAttachmentID = optimisticAttachment.id
+                    self.reconcileOptimisticLocalAttachment(optimisticAttachment, with: attachmentInfo)
+                    consumedOptimisticAttachmentObjectIDs.insert(optimisticAttachment.objectID)
+
+                    if let previousAttachmentID {
+                        existingAttachmentIds.remove(previousAttachmentID)
+                    }
+                    existingAttachmentIds.insert(attachmentInfo.id)
+                    if let normalizedIncomingCID = self.normalizedContentID(attachmentInfo.contentId) {
+                        existingContentIds.insert(normalizedIncomingCID)
+                    }
+                    continue
+                }
+
+                if existingAttachmentIds.contains(attachmentInfo.id) {
+                    continue
+                }
+
+                if let normalizedIncomingCID = self.normalizedContentID(attachmentInfo.contentId),
+                   existingContentIds.contains(normalizedIncomingCID) {
+                    continue
+                }
+
+                self.createAttachment(attachmentInfo, for: existingMessage, in: context)
+
                 existingAttachmentIds.insert(attachmentInfo.id)
-                if let normalizedIncomingCID = normalizedContentID(attachmentInfo.contentId) {
+                if let normalizedIncomingCID = self.normalizedContentID(attachmentInfo.contentId) {
                     existingContentIds.insert(normalizedIncomingCID)
                 }
-                continue
             }
 
-            if existingAttachmentIds.contains(attachmentInfo.id) {
-                continue
+            var modifiedConversationID: NSManagedObjectID?
+            if let conversation = existingMessage.conversation {
+                self.applyFastConversationListUpdateForExistingMessage(
+                    existingMessage,
+                    in: conversation,
+                    previousHadInboxLabel: previousHadInboxLabel,
+                    previousWasUnread: previousWasUnread,
+                    currentHasInboxLabel: currentHasInboxLabel,
+                    currentIsUnread: processedMessage.isUnread
+                )
+                modifiedConversationID = conversation.objectID
             }
 
-            if let normalizedIncomingCID = normalizedContentID(attachmentInfo.contentId),
-               existingContentIds.contains(normalizedIncomingCID) {
-                continue
-            }
+            let bodyStorageURIChanged = existingMessage.bodyStorageURI != previousBodyStorageURI
+            let bodyTextChanged = existingMessage.bodyText != previousBodyText
+            let snippetChanged = existingMessage.snippet != previousSnippet
 
-            createAttachment(attachmentInfo, for: existingMessage, in: context)
+            Log.debug("Updated existing message: \(processedMessage.id)", category: .sync)
 
-            existingAttachmentIds.insert(attachmentInfo.id)
-            if let normalizedIncomingCID = normalizedContentID(attachmentInfo.contentId) {
-                existingContentIds.insert(normalizedIncomingCID)
-            }
-        }
-
-        // Track the conversation as modified for rollup updates
-        if let conversation = existingMessage.conversation {
-            applyFastConversationListUpdateForExistingMessage(
-                existingMessage,
-                in: conversation,
-                previousHadInboxLabel: previousHadInboxLabel,
-                previousWasUnread: previousWasUnread,
-                currentHasInboxLabel: currentHasInboxLabel,
-                currentIsUnread: processedMessage.isUnread
+            return MessageUpdateResult(
+                didUpdate: true,
+                modifiedConversationID: modifiedConversationID,
+                shouldInvalidateRenderedContent: bodyStorageURIChanged || bodyTextChanged || snippetChanged
             )
-            await trackModifiedConversation(conversation)
         }
 
-        let bodyStorageURIChanged = existingMessage.bodyStorageURI != previousBodyStorageURI
-        let bodyTextChanged = existingMessage.bodyText != previousBodyText
-        let snippetChanged = existingMessage.snippet != previousSnippet
-        if bodyStorageURIChanged || bodyTextChanged || snippetChanged {
+        if let modifiedConversationID = result.modifiedConversationID {
+            await ModificationTracker.shared.trackModifiedConversation(modifiedConversationID)
+        }
+
+        if result.shouldInvalidateRenderedContent {
             await ProcessedTextCache.shared.invalidate(messageId: processedMessage.id)
             HTMLContentLoader.shared.invalidate(messageId: processedMessage.id)
         }
 
-        Log.debug("Updated existing message: \(processedMessage.id)", category: .sync)
-        return true
+        return result.didUpdate
     }
 
-    private func matchingOptimisticLocalAttachment(
+    nonisolated func matchingOptimisticLocalAttachment(
         for attachmentInfo: AttachmentInfo,
         in attachments: [Attachment],
         excluding excludedObjectIDs: Set<NSManagedObjectID>
@@ -156,7 +186,7 @@ extension MessagePersister {
         })
     }
 
-    private func reconcileOptimisticLocalAttachment(_ attachment: Attachment, with attachmentInfo: AttachmentInfo) {
+    nonisolated func reconcileOptimisticLocalAttachment(_ attachment: Attachment, with attachmentInfo: AttachmentInfo) {
         attachment.id = attachmentInfo.id
         attachment.filename = attachmentInfo.filename
         attachment.mimeType = attachmentInfo.mimeType
@@ -167,11 +197,11 @@ extension MessagePersister {
         }
     }
 
-    private func normalizedAttachmentFilename(_ filename: String) -> String {
+    nonisolated func normalizedAttachmentFilename(_ filename: String) -> String {
         filename.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    private func normalizedContentID(_ rawValue: String?) -> String? {
+    nonisolated func normalizedContentID(_ rawValue: String?) -> String? {
         guard let rawValue else { return nil }
 
         var normalized = rawValue

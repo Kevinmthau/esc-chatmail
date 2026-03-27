@@ -14,7 +14,7 @@ final class ConversationManager: Sendable {
         Date?,
         Bool,
         NSManagedObjectContext
-    ) async throws -> Conversation
+    ) async throws -> NSManagedObjectID
     private let currentUserEmail: @MainActor @Sendable () -> String
 
     init(
@@ -25,8 +25,8 @@ final class ConversationManager: Sendable {
             Date?,
             Bool,
             NSManagedObjectContext
-        ) async throws -> Conversation = { identity, initialLastMessageDate, reactivateArchivedIfNeeded, context in
-            try await ConversationCreationSerializer.shared.findOrCreateConversation(
+        ) async throws -> NSManagedObjectID = { identity, initialLastMessageDate, reactivateArchivedIfNeeded, context in
+            try await ConversationCreationSerializer.shared.findOrCreateConversationObjectID(
                 for: identity,
                 initialLastMessageDate: initialLastMessageDate,
                 reactivateArchivedIfNeeded: reactivateArchivedIfNeeded,
@@ -57,12 +57,12 @@ final class ConversationManager: Sendable {
     ///   - identity: The conversation identity containing participants and type
     ///   - initialLastMessageDate: Optional date to set as lastMessageDate when creating a new conversation (prevents UI flash where conversation appears at bottom before moving to top)
     ///   - context: The Core Data context to use
-    func findOrCreateConversation(
+    func findOrCreateConversationObjectID(
         for identity: ConversationIdentity,
         initialLastMessageDate: Date? = nil,
         reactivateArchivedIfNeeded: Bool = true,
         in context: NSManagedObjectContext
-    ) async throws -> Conversation {
+    ) async throws -> NSManagedObjectID {
         try await findOrCreateConversationHandler(
             identity,
             initialLastMessageDate,

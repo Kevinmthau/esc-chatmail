@@ -31,36 +31,36 @@ extension MessagePersister {
         profile: GmailProfile,
         aliases: [String],
         in context: NSManagedObjectContext
-    ) async throws -> Account {
-        let request = Account.fetchRequest()
-        request.predicate = NSPredicate(format: "email == %@", profile.emailAddress)
+    ) async throws {
+        try await context.perform {
+            let request = Account.fetchRequest()
+            request.predicate = NSPredicate(format: "email == %@", profile.emailAddress)
 
-        // Explicit error handling - don't create new account on ANY error
-        do {
-            if let existing = try context.fetch(request).first {
-                existing.aliasesArray = aliases
-                existing.historyId = profile.historyId
-                Log.debug("Updated existing account: \(profile.emailAddress)", category: .sync)
-                return existing
+            do {
+                if let existing = try context.fetch(request).first {
+                    existing.aliasesArray = aliases
+                    existing.historyId = profile.historyId
+                    Log.debug("Updated existing account: \(profile.emailAddress)", category: .sync)
+                    return
+                }
+            } catch {
+                Log.error("Failed to fetch existing account", category: .coreData, error: error)
+                throw AccountPersisterError.fetchFailed(error)
             }
-        } catch {
-            Log.error("Failed to fetch existing account", category: .coreData, error: error)
-            throw AccountPersisterError.fetchFailed(error)
-        }
 
-        guard let account = NSEntityDescription.insertNewObject(
-            forEntityName: "Account",
-            into: context
-        ) as? Account else {
-            Log.error("Failed to create Account entity", category: .coreData)
-            throw AccountPersisterError.entityCreationFailed("Account")
+            guard let account = NSEntityDescription.insertNewObject(
+                forEntityName: "Account",
+                into: context
+            ) as? Account else {
+                Log.error("Failed to create Account entity", category: .coreData)
+                throw AccountPersisterError.entityCreationFailed("Account")
+            }
+            account.id = profile.emailAddress
+            account.email = profile.emailAddress
+            account.historyId = profile.historyId
+            account.aliasesArray = aliases
+            Log.info("Created new account: \(profile.emailAddress) with historyId: \(profile.historyId)", category: .sync)
         }
-        account.id = profile.emailAddress
-        account.email = profile.emailAddress
-        account.historyId = profile.historyId
-        account.aliasesArray = aliases
-        Log.info("Created new account: \(profile.emailAddress) with historyId: \(profile.historyId)", category: .sync)
-        return account
     }
 
     /// Fetches account data

@@ -74,14 +74,19 @@ extension DataCleanupService {
             fetchRequest.predicate = MessagePredicates.drafts
 
             let batchDeleteRequest = NSBatchDeleteRequest(fetchRequest: fetchRequest)
-            batchDeleteRequest.resultType = .resultTypeCount
+            batchDeleteRequest.resultType = .resultTypeObjectIDs
 
             do {
                 let result = try context.execute(batchDeleteRequest) as? NSBatchDeleteResult
-                let deletedCount = result?.result as? Int ?? 0
+                let deletedIDs = result?.result as? [NSManagedObjectID] ?? []
+                let deletedCount = deletedIDs.count
 
                 if deletedCount > 0 {
-                    context.reset()
+                    let changes = [NSDeletedObjectsKey: deletedIDs]
+                    NSManagedObjectContext.mergeChanges(
+                        fromRemoteContextSave: changes,
+                        into: [self.coreDataStack.viewContext, context]
+                    )
 
                     let duration = CFAbsoluteTimeGetCurrent() - startTime
                     Log.info("Removed \(deletedCount) draft messages in \(String(format: "%.3f", duration))s", category: .coreData)

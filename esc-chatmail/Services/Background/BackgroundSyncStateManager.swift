@@ -1,9 +1,22 @@
 import Foundation
 import CoreData
 
+enum BackgroundSyncStateError: LocalizedError {
+    case accountMissing
+
+    var errorDescription: String? {
+        switch self {
+        case .accountMissing:
+            return "No account row exists to persist the background sync history cursor"
+        }
+    }
+}
+
 /// Manages persistent state for background sync (historyId, retry logic)
 final class BackgroundSyncStateManager {
-    private let coreDataStack: CoreDataStack
+    private let makeBackgroundContext: () -> NSManagedObjectContext
+    private let performBackgroundTask: (@escaping (NSManagedObjectContext) throws -> Void) async throws -> Void
+    private let saveContext: (NSManagedObjectContext) throws -> Void
 
     private var currentRetryCount = 0
     private var currentBackoff: TimeInterval
@@ -17,7 +30,32 @@ final class BackgroundSyncStateManager {
         initialBackoffSeconds: TimeInterval = 30,
         maxBackoffSeconds: TimeInterval = 3600
     ) {
-        self.coreDataStack = coreDataStack
+        self.makeBackgroundContext = { coreDataStack.newBackgroundContext() }
+        self.performBackgroundTask = { block in
+            _ = try await coreDataStack.performBackgroundTask { context in
+                try block(context)
+            }
+        }
+        self.saveContext = { context in
+            try coreDataStack.save(context: context)
+        }
+        self.maxRetries = maxRetries
+        self.initialBackoffSeconds = initialBackoffSeconds
+        self.maxBackoffSeconds = maxBackoffSeconds
+        self.currentBackoff = initialBackoffSeconds
+    }
+
+    init(
+        makeBackgroundContext: @escaping () -> NSManagedObjectContext,
+        performBackgroundTask: @escaping (@escaping (NSManagedObjectContext) throws -> Void) async throws -> Void,
+        saveContext: @escaping (NSManagedObjectContext) throws -> Void,
+        maxRetries: Int = 3,
+        initialBackoffSeconds: TimeInterval = 30,
+        maxBackoffSeconds: TimeInterval = 3600
+    ) {
+        self.makeBackgroundContext = makeBackgroundContext
+        self.performBackgroundTask = performBackgroundTask
+        self.saveContext = saveContext
         self.maxRetries = maxRetries
         self.initialBackoffSeconds = initialBackoffSeconds
         self.maxBackoffSeconds = maxBackoffSeconds
@@ -26,7 +64,7 @@ final class BackgroundSyncStateManager {
 
     /// Retrieves the stored history ID from Core Data
     func getStoredHistoryId() async -> String? {
-        let context = coreDataStack.newBackgroundContext()
+        let context = makeBackgroundContext()
         return await context.perform {
             let fetchRequest: NSFetchRequest<Account> = Account.fetchRequest()
             fetchRequest.fetchLimit = 1
@@ -42,23 +80,38 @@ final class BackgroundSyncStateManager {
     }
 
     /// Stores the history ID in Core Data
-    func storeHistoryId(_ historyId: String) {
-        Task {
-            do {
-                try await coreDataStack.performBackgroundTask { [weak self] context in
-                    guard let self = self else { return }
-                    let fetchRequest: NSFetchRequest<Account> = Account.fetchRequest()
-                    fetchRequest.fetchLimit = 1
+    func storeHistoryId(_ historyId: String, accountEmail: String? = nil) async throws {
+        let saveContext = self.saveContext
+        try await performBackgroundTask { context in
 
-                    let accounts = try context.fetch(fetchRequest)
-                    if let account = accounts.first {
-                        account.historyId = historyId
-                        try self.coreDataStack.save(context: context)
-                    }
+            let fetchRequest: NSFetchRequest<Account> = Account.fetchRequest()
+            fetchRequest.fetchLimit = 1
+
+            let accounts = try context.fetch(fetchRequest)
+            let account: Account
+
+            if let existingAccount = accounts.first {
+                account = existingAccount
+            } else {
+                guard let accountEmail else {
+                    throw BackgroundSyncStateError.accountMissing
                 }
-            } catch {
-                Log.error("Failed to store historyId", category: .background, error: error)
+
+                guard let newAccount = NSEntityDescription.insertNewObject(
+                    forEntityName: "Account",
+                    into: context
+                ) as? Account else {
+                    throw CoreDataError.entityCreationFailed("Account")
+                }
+
+                newAccount.id = accountEmail
+                newAccount.email = accountEmail
+                newAccount.aliasesArray = []
+                account = newAccount
             }
+
+            account.historyId = historyId
+            try saveContext(context)
         }
     }
 

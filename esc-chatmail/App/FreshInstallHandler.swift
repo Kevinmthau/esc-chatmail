@@ -98,7 +98,7 @@ struct FreshInstallHandler {
         clearKeychain()
         await clearTokens()
         clearUserDefaults()
-        clearCoreData()
+        await clearCoreData()
         await clearCaches()
         clearAttachmentFiles()
 
@@ -152,10 +152,10 @@ struct FreshInstallHandler {
         }
     }
 
-    private func clearCoreData() {
+    private func clearCoreData() async {
         Log.debug("Clearing Core Data", category: .coreData)
         do {
-            try CoreDataStack.shared.destroyAndReloadSync()
+            try await CoreDataStack.shared.destroyAndReloadAsync()
             Log.debug("Core Data cleared and reloaded", category: .coreData)
         } catch {
             Log.warning("Failed to clear Core Data: \(error)", category: .coreData)

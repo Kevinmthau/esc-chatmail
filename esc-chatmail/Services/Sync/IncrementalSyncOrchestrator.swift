@@ -56,10 +56,7 @@ final class IncrementalSyncOrchestrator {
     )
 
     private lazy var conversationUpdatePhase = ConversationUpdatePhase(
-        conversationManager: conversationManager,
-        dataCleanupService: dataCleanupService,
-        messagePersister: messagePersister,
-        historyProcessor: historyProcessor
+        conversationManager: conversationManager
     )
 
     // MARK: - Initialization
@@ -182,6 +179,7 @@ final class IncrementalSyncOrchestrator {
             try await messagePersister.finalizeSync(historyId: historyIdToSave, in: context)
 
             NotificationCenter.default.post(name: .syncCompleted, object: nil)
+            await dataCleanupService.runIncrementalCleanup()
 
             return IncrementalSyncResult(
                 newMessagesCount: fetchResult.successfulCount,
