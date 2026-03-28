@@ -246,8 +246,8 @@ extension MessagePersister {
     /// Fingerprint for an existing Core Data attachment (filename|mimeType).
     nonisolated func inlineAttachmentFingerprint(_ attachment: Attachment) -> String? {
         guard let id = attachment.id, id.hasPrefix("local_inline_") else { return nil }
-        let filename = normalizedAttachmentFilename(attachment.filename ?? "")
-        let mimeType = attachment.mimeType ?? ""
+        let filename = normalizedAttachmentFilename(attachment.filename)
+        let mimeType = attachment.mimeType
         return "\(filename)|\(mimeType)"
     }
 
