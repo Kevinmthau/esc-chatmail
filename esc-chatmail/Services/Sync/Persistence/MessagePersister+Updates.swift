@@ -82,6 +82,21 @@ extension MessagePersister {
             )
             var consumedOptimisticAttachmentObjectIDs = Set<NSManagedObjectID>()
 
+            // Remove duplicate inline attachments left by earlier syncs that
+            // used non-deterministic (UUID-based) IDs.
+            self.deduplicateInlineAttachments(on: existingMessage, in: context)
+
+            // Rebuild after dedup so the sets reflect current state.
+            existingAttachmentIds = Set(existingMessage.attachmentsArray.compactMap(\.id))
+
+            // Build fingerprint set for inline-data attachments to prevent
+            // re-adding the same content under a new deterministic ID.
+            var existingInlineFingerprints = Set<String>()
+            for attachment in existingMessage.attachmentsArray {
+                let fp = self.inlineAttachmentFingerprint(attachment)
+                if let fp { existingInlineFingerprints.insert(fp) }
+            }
+
             for attachmentInfo in processedMessage.attachmentInfo {
                 if let optimisticAttachment = self.matchingOptimisticLocalAttachment(
                     for: attachmentInfo,
@@ -111,12 +126,20 @@ extension MessagePersister {
                     continue
                 }
 
+                // Skip inline attachments that match an existing one by
+                // filename + mimeType + size (covers old UUID-based IDs).
+                let incomingFP = self.inlineAttachmentFingerprint(for: attachmentInfo)
+                if let incomingFP, existingInlineFingerprints.contains(incomingFP) {
+                    continue
+                }
+
                 self.createAttachment(attachmentInfo, for: existingMessage, in: context)
 
                 existingAttachmentIds.insert(attachmentInfo.id)
                 if let normalizedIncomingCID = self.normalizedContentID(attachmentInfo.contentId) {
                     existingContentIds.insert(normalizedIncomingCID)
                 }
+                if let incomingFP { existingInlineFingerprints.insert(incomingFP) }
             }
 
             var modifiedConversationID: NSManagedObjectID?
@@ -216,5 +239,35 @@ extension MessagePersister {
 
         guard !normalized.isEmpty else { return nil }
         return normalized.lowercased()
+    }
+
+    // MARK: - Inline attachment deduplication
+
+    /// Fingerprint for an existing Core Data attachment (filename|mimeType).
+    nonisolated func inlineAttachmentFingerprint(_ attachment: Attachment) -> String? {
+        guard let id = attachment.id, id.hasPrefix("local_inline_") else { return nil }
+        let filename = normalizedAttachmentFilename(attachment.filename ?? "")
+        let mimeType = attachment.mimeType ?? ""
+        return "\(filename)|\(mimeType)"
+    }
+
+    /// Fingerprint for an incoming AttachmentInfo.
+    nonisolated func inlineAttachmentFingerprint(for info: AttachmentInfo) -> String? {
+        guard info.id.hasPrefix("local_inline_") else { return nil }
+        let filename = normalizedAttachmentFilename(info.filename)
+        return "\(filename)|\(info.mimeType)"
+    }
+
+    /// Removes duplicate inline attachments, keeping only the first per fingerprint.
+    nonisolated func deduplicateInlineAttachments(on message: Message, in context: NSManagedObjectContext) {
+        var seen = Set<String>()
+        for attachment in message.attachmentsArray {
+            guard let fp = inlineAttachmentFingerprint(attachment) else { continue }
+            if seen.contains(fp) {
+                context.delete(attachment)
+            } else {
+                seen.insert(fp)
+            }
+        }
     }
 }

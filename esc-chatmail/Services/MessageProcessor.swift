@@ -1,5 +1,6 @@
 import Foundation
 import CoreData
+import CryptoKit
 
 class MessageProcessor {
     private let emailTextProcessor = EmailTextProcessor.self
@@ -627,8 +628,13 @@ class MessageProcessor {
                 if !seenInlineFingerprints.contains(inlineFingerprint) {
                     seenInlineFingerprints.insert(inlineFingerprint)
 
+                    // Deterministic ID so re-syncing won't create duplicates
+                    // (the update path deduplicates by attachment ID).
+                    let fingerprintData = Data(inlineFingerprint.utf8)
+                    let hash = SHA256.hash(data: fingerprintData)
+                    let hashHex = hash.prefix(16).map { String(format: "%02x", $0) }.joined()
                     let attachment = AttachmentInfo(
-                        id: "local_inline_\(UUID().uuidString)",
+                        id: "local_inline_\(hashHex)",
                         filename: resolvedAttachmentFilename(from: trimmedFilename, mimeType: mimeType),
                         mimeType: mimeType,
                         size: size,
