@@ -77,6 +77,37 @@ final class ParticipantLoaderTests: XCTestCase {
         XCTAssertEqual(info.totalUniqueParticipants, 0)
     }
 
+    func testLoadParticipants_prefersContactDisplayNameForSingleParticipant() async throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Fallback")
+            .build(in: context)
+
+        let participant = PersonBuilder()
+            .withEmail("single-priority@example.com")
+            .withDisplayName("Header Alias")
+            .build(in: context)
+
+        addConversationParticipant(person: participant, to: conversation)
+        try context.save()
+
+        let loader = ParticipantLoader(contactsResolver: MockContactsResolving(contactMap: [
+            "single-priority@example.com": ContactMatch(
+                displayName: "Address Book Name",
+                email: "single-priority@example.com",
+                imageData: nil,
+                contactIdentifier: "contact-single"
+            )
+        ]))
+
+        let info = await loader.loadParticipants(
+            from: conversation,
+            currentUserEmail: "me@example.com"
+        )
+
+        XCTAssertEqual(info.displayNames, ["Address Book Name"])
+        XCTAssertEqual(info.formattedDisplayName, "Address Book Name")
+    }
+
     // MARK: - Contact Deduplication Tests
 
     func testLoadParticipants_deduplicatesByContactIdentifier() async throws {
@@ -220,6 +251,25 @@ final class ParticipantLoaderTests: XCTestCase {
 
         XCTAssertEqual(groupingKeys[EmailNormalizer.normalize("alice@example.com")], "contact:contact-alice")
         XCTAssertEqual(groupingKeys[EmailNormalizer.normalize("bob@example.com")], "contact:contact-bob")
+    }
+
+    func testResolveParticipants_deduplicatesParticipantsListByContactIdentifier() async {
+        let mockResolver = MockContactsResolving(contactMap: [
+            "john@work.com": ContactMatch(displayName: "John Smith", email: "john@work.com", imageData: nil, contactIdentifier: "contact-123"),
+            "john@personal.com": ContactMatch(displayName: "John Smith", email: "john@personal.com", imageData: nil, contactIdentifier: "contact-123")
+        ])
+
+        let loader = ParticipantLoader(contactsResolver: mockResolver)
+
+        let resolvedParticipants = await loader.resolveParticipants(for: [
+            "john@work.com",
+            "john@personal.com"
+        ])
+
+        XCTAssertEqual(resolvedParticipants.count, 1)
+        XCTAssertEqual(resolvedParticipants.first?.email, "john@work.com")
+        XCTAssertEqual(resolvedParticipants.first?.displayName, "John Smith")
+        XCTAssertEqual(resolvedParticipants.first?.contactIdentifier, "contact-123")
     }
 
     // MARK: - Helpers

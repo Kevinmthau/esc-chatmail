@@ -7,6 +7,8 @@ struct MessageBubble: View {
     var prefetchedSenderName: String?
     /// Optional presentation override for threads that collapse multiple emails into one contact.
     var isEffectivelyOneToOneConversation: Bool?
+    /// Bumps when local contact data changes so sender labels/avatars reload in-place.
+    var contactRefreshToken: Int = 0
     /// Whether this is the last message from this sender before a different sender (for avatar grouping)
     var isLastFromSender: Bool = true
     /// Display style configuration
@@ -35,6 +37,7 @@ struct MessageBubble: View {
         deps: Dependencies? = nil,
         prefetchedSenderName: String? = nil,
         isEffectivelyOneToOneConversation: Bool? = nil,
+        contactRefreshToken: Int = 0,
         isLastFromSender: Bool = true,
         style: MessageBubbleStyle = .standard,
         onOpenFullMessage: @escaping (Message) -> Void
@@ -44,6 +47,7 @@ struct MessageBubble: View {
         self.conversation = conversation
         self.prefetchedSenderName = prefetchedSenderName
         self.isEffectivelyOneToOneConversation = isEffectivelyOneToOneConversation
+        self.contactRefreshToken = contactRefreshToken
         self.isLastFromSender = isLastFromSender
         self.style = style
         self.onOpenFullMessage = onOpenFullMessage
@@ -92,7 +96,7 @@ struct MessageBubble: View {
                 Spacer()
             }
         }
-        .task(id: loadContext.contentSignature) {
+        .task(id: loadSignature) {
             await viewModel.loadIfNeeded(using: loadContext)
         }
     }
@@ -217,7 +221,7 @@ struct MessageBubble: View {
     private var loadContext: MessageBubbleLoadContext {
         MessageBubbleLoadContext(
             messageID: message.id,
-            contentSignature: contentSignature(),
+            contentSignature: loadSignature,
             prefetchedSenderName: prefetchedSenderName,
             senderRequest: senderRequest,
             contentRequest: MessageBubbleContentRequest(
@@ -233,10 +237,10 @@ struct MessageBubble: View {
         )
     }
 
-    private func contentSignature() -> String {
+    private var loadSignature: String {
         let bodyTextHash = message.bodyText?.hashValue ?? 0
         let snippetHash = message.snippet?.hashValue ?? 0
-        return "\(message.bodyStorageURI ?? "")|\(bodyTextHash)|\(snippetHash)|\(message.hasHTMLSource)"
+        return "\(message.bodyStorageURI ?? "")|\(bodyTextHash)|\(snippetHash)|\(message.hasHTMLSource)|contacts:\(contactRefreshToken)"
     }
 
     private func openFullMessage() {

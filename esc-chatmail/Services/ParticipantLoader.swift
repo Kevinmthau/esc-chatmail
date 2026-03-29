@@ -36,6 +36,12 @@ final class ParticipantLoader {
         let totalUniqueParticipants: Int
     }
 
+    struct ResolvedParticipant: Equatable {
+        let email: String
+        let displayName: String
+        let contactIdentifier: String?
+    }
+
     // MARK: - Public API
 
     /// Loads participant info for a conversation, excluding the current user
@@ -124,6 +130,43 @@ final class ParticipantLoader {
         return groupingKeys
     }
 
+    /// Resolves display-ready participant records, deduplicating emails that belong to
+    /// the same address book contact.
+    func resolveParticipants(for emails: [String]) async -> [ResolvedParticipant] {
+        guard !emails.isEmpty else { return [] }
+
+        await prefetchNamesIfNeeded(for: emails)
+
+        var resolvedParticipants: [ResolvedParticipant] = []
+        var seenParticipantKeys = Set<String>()
+
+        for email in emails {
+            let normalizedEmail = EmailNormalizer.normalize(email)
+            guard !normalizedEmail.isEmpty else { continue }
+
+            let match = await contactsResolver.lookup(email: email)
+            let participantKey: String
+            if let contactIdentifier = match?.contactIdentifier,
+               !contactIdentifier.isEmpty {
+                participantKey = "contact:\(contactIdentifier)"
+            } else {
+                participantKey = "email:\(normalizedEmail)"
+            }
+
+            guard seenParticipantKeys.insert(participantKey).inserted else { continue }
+
+            resolvedParticipants.append(
+                ResolvedParticipant(
+                    email: email,
+                    displayName: await resolveDisplayName(for: email, match: match),
+                    contactIdentifier: match?.contactIdentifier
+                )
+            )
+        }
+
+        return resolvedParticipants
+    }
+
     /// Extracts non-me participant emails from a conversation, deduplicated
     nonisolated
     func extractNonMeParticipants(
@@ -198,26 +241,22 @@ final class ParticipantLoader {
         fallbackDisplayName: String?,
         maxParticipants: Int
     ) async -> ParticipantInfo {
-        // Deduplicate emails that belong to the same contact
-        let deduplicatedEmails = await deduplicateByContact(emails: emails)
-        let topParticipants = Array(deduplicatedEmails.prefix(maxParticipants))
-
-        await prefetchNamesIfNeeded(for: topParticipants)
-
-        let displayNames = await resolveDisplayNames(for: topParticipants)
+        let resolvedParticipants = await resolveParticipants(for: emails)
+        let topParticipants = Array(resolvedParticipants.prefix(maxParticipants))
+        let displayNames = topParticipants.map(\.displayName)
         let formattedName = DisplayNameFormatter.formatForRow(
             names: displayNames,
-            totalCount: deduplicatedEmails.count,
+            totalCount: resolvedParticipants.count,
             fallback: fallbackDisplayName
         )
-        let photos = await loadPhotos(for: topParticipants)
+        let photos = await loadPhotos(for: topParticipants.map(\.email))
 
         return ParticipantInfo(
-            emails: topParticipants,
+            emails: topParticipants.map(\.email),
             displayNames: displayNames,
             photos: photos,
             formattedDisplayName: formattedName,
-            totalUniqueParticipants: deduplicatedEmails.count
+            totalUniqueParticipants: resolvedParticipants.count
         )
     }
 
@@ -226,16 +265,19 @@ final class ParticipantLoader {
         await personCache.prefetch(emails: emails)
     }
 
-    private func resolveDisplayNames(for emails: [String]) async -> [String] {
-        var names: [String] = []
-        for email in emails {
-            if let cached = await personCache.getCachedDisplayName(for: email) {
-                names.append(cached)
-            } else {
-                names.append(fallbackDisplayName(for: email))
-            }
+    private func resolveDisplayName(for email: String, match: ContactMatch?) async -> String {
+        let trimmedContactName = match?.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedContactName, !trimmedContactName.isEmpty {
+            return trimmedContactName
         }
-        return names
+
+        let cachedName = await personCache.getCachedDisplayName(for: email)
+        let trimmedCachedName = cachedName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedCachedName, !trimmedCachedName.isEmpty {
+            return trimmedCachedName
+        }
+
+        return fallbackDisplayName(for: email)
     }
 
     private func fallbackDisplayName(for email: String) -> String {
@@ -247,28 +289,6 @@ final class ParticipantLoader {
         return emails.compactMap { email in
             photoResults[EmailNormalizer.normalize(email)]
         }
-    }
-
-    /// Deduplicates emails that belong to the same contact in the address book.
-    /// When multiple emails map to the same CNContact identifier, only the first is kept.
-    private func deduplicateByContact(emails: [String]) async -> [String] {
-        guard emails.count > 1 else { return emails }
-
-        var seenContactIdentifiers = Set<String>()
-        var result: [String] = []
-
-        for email in emails {
-            let match = await contactsResolver.lookup(email: email)
-            if let contactId = match?.contactIdentifier {
-                if seenContactIdentifiers.contains(contactId) {
-                    continue
-                }
-                seenContactIdentifiers.insert(contactId)
-            }
-            result.append(email)
-        }
-
-        return result
     }
 
 }

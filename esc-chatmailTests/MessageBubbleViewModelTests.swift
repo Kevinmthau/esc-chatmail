@@ -97,6 +97,37 @@ final class MessageBubbleViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.hasRichHTMLContent)
     }
 
+    func testLoadIfNeeded_reloadsSameMessageWhenSignatureChanges() async {
+        let loader = MockMessageBubbleLoader(
+            senderResults: [
+                MessageBubbleSenderResult(name: "Old Contact Name", avatarURL: nil, imageData: nil),
+                MessageBubbleSenderResult(name: "Updated Contact Name", avatarURL: nil, imageData: nil)
+            ],
+            contentResults: [
+                MessageBubbleContentResult(
+                    fullTextContent: "Same body",
+                    hasRichHTMLContent: false,
+                    sharedDocumentLinks: []
+                ),
+                MessageBubbleContentResult(
+                    fullTextContent: "Same body",
+                    hasRichHTMLContent: false,
+                    sharedDocumentLinks: []
+                )
+            ]
+        )
+        let viewModel = MessageBubbleViewModel(loader: loader)
+
+        await viewModel.loadIfNeeded(using: makeContext(signature: "sig-1|contacts:0"))
+        await viewModel.loadIfNeeded(using: makeContext(signature: "sig-1|contacts:1"))
+
+        let senderCallCount = await loader.senderCallCount()
+        let contentCallCount = await loader.contentCallCount()
+        XCTAssertEqual(senderCallCount, 2)
+        XCTAssertEqual(contentCallCount, 2)
+        XCTAssertEqual(viewModel.senderName, "Updated Contact Name")
+    }
+
     private func makeContext(
         messageID: String = "msg-1",
         signature: String = "sig-1",

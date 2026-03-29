@@ -17,6 +17,7 @@ struct ChatMessagesView: View {
 
     @Namespace private var bottomID
     @State private var isReadyToShow = false
+    @State private var contactRefreshToken = 0
     @State private var senderGroupingKeysByEmail: [String: String] = [:]
 
     @State private var initialScrollTask: Task<Void, Never>?
@@ -42,6 +43,7 @@ struct ChatMessagesView: View {
                             conversation: conversation,
                             deps: deps,
                             isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
+                            contactRefreshToken: contactRefreshToken,
                             isLastFromSender: isLastFromSender,
                             onOpenFullMessage: onOpenFullMessage
                         )
@@ -144,8 +146,15 @@ struct ChatMessagesView: View {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .CNContactStoreDidChange)) { _ in
-                viewModel.loadResolvedDisplayName()
-                refreshSenderGroupingKeys()
+                Task {
+                    await ContactsResolver.shared.invalidateAllCache()
+                    await PersonCache.shared.clearCache()
+                    await MainActor.run {
+                        contactRefreshToken &+= 1
+                        viewModel.loadResolvedDisplayName()
+                        refreshSenderGroupingKeys()
+                    }
+                }
             }
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 0) {

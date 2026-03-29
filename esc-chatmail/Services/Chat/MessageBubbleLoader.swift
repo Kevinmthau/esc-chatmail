@@ -64,19 +64,23 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         let match = await contactsResolver.lookup(email: request.email)
         let preferredName = request.personDisplayName?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let contactName = match?.displayName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         let resolvedName: String
-        if let preferredName, !preferredName.isEmpty {
+        if let contactName, !contactName.isEmpty {
+            resolvedName = contactName
+        } else if let preferredName, !preferredName.isEmpty {
             resolvedName = preferredName
-        } else if let displayName = match?.displayName, !displayName.isEmpty {
-            resolvedName = displayName
         } else {
             resolvedName = EmailNormalizer.formatAsDisplayName(email: request.email)
         }
 
+        let resolvedAvatarURL: String? = match == nil ? request.personAvatarURL : nil
+
         return MessageBubbleSenderResult(
             name: resolvedName,
-            avatarURL: request.personAvatarURL,
+            avatarURL: resolvedAvatarURL,
             imageData: match?.imageData
         )
     }

@@ -1,29 +1,27 @@
 import SwiftUI
 
 struct ParticipantRow: View {
-    let person: Person
+    let displayName: String
+    let email: String
+    let isExistingContact: Bool
+    let contactIdentifier: String?
     let onCreateNewContact: () -> Void
     let onAddToExistingContact: () -> Void
     let onEditContact: (String) -> Void
 
-    @State private var isExistingContact = false
-    @State private var contactIdentifier: String?
-    private let contactsResolver = ContactsResolver.shared
-
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                let trimmedDisplayName = person.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let displayName = (trimmedDisplayName?.isEmpty == false) ? trimmedDisplayName : nil
-                let trimmedEmail = person.email.trimmingCharacters(in: .whitespacesAndNewlines)
+                let trimmedDisplayName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
 
-                Text(displayName ?? trimmedEmail)
+                Text(trimmedDisplayName.isEmpty ? trimmedEmail : trimmedDisplayName)
                     .font(.body)
                     .lineLimit(1)
                     .truncationMode(.tail)
 
-                if let displayName,
-                   !displayName.localizedCaseInsensitiveContains(trimmedEmail) {
+                if !trimmedDisplayName.isEmpty,
+                   !trimmedDisplayName.localizedCaseInsensitiveContains(trimmedEmail) {
                     Text(trimmedEmail)
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -56,12 +54,6 @@ struct ParticipantRow: View {
         .onTapGesture {
             if isExistingContact, let identifier = contactIdentifier {
                 onEditContact(identifier)
-            }
-        }
-        .task {
-            if let match = await contactsResolver.lookup(email: person.email) {
-                isExistingContact = match.contactIdentifier != nil
-                contactIdentifier = match.contactIdentifier
             }
         }
     }

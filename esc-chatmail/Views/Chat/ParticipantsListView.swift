@@ -1,4 +1,5 @@
 import SwiftUI
+import Contacts
 
 struct ParticipantsListView: View {
     let conversation: Conversation
@@ -10,7 +11,7 @@ struct ParticipantsListView: View {
     private let currentUserEmail: String
 
     /// Cached list of other participants to avoid recomputation on every render.
-    @State private var cachedOtherParticipants: [Person] = []
+    @State private var cachedOtherParticipants: [ParticipantListItem] = []
 
     @MainActor
     init(
@@ -32,14 +33,17 @@ struct ParticipantsListView: View {
     var body: some View {
         NavigationView {
             List {
-                ForEach(cachedOtherParticipants, id: \.email) { person in
+                ForEach(cachedOtherParticipants) { participant in
                     ParticipantRow(
-                        person: person,
+                        displayName: participant.displayName,
+                        email: participant.email,
+                        isExistingContact: participant.isExistingContact,
+                        contactIdentifier: participant.contactIdentifier,
                         onCreateNewContact: {
-                            onCreateNewContact(person)
+                            onCreateNewContact(participant.person)
                         },
                         onAddToExistingContact: {
-                            onAddToExistingContact(person)
+                            onAddToExistingContact(participant.person)
                         },
                         onEditContact: { identifier in
                             onEditContact(identifier)
@@ -57,27 +61,78 @@ struct ParticipantsListView: View {
                 }
             }
             .onAppear {
-                updateOtherParticipants()
+                Task {
+                    await updateOtherParticipants()
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .CNContactStoreDidChange)) { _ in
+                Task {
+                    await ContactsResolver.shared.invalidateAllCache()
+                    await PersonCache.shared.clearCache()
+                    await updateOtherParticipants()
+                }
             }
         }
     }
 
     /// Computes the list of other participants (non-current-user).
     /// Uses email normalization to properly match participants.
-    private func updateOtherParticipants() {
-        let otherEmails = Set(participantLoader.extractNonMeParticipants(
+    @MainActor
+    private func updateOtherParticipants() async {
+        let otherEmails = participantLoader.extractNonMeParticipants(
             from: conversation,
             currentUserEmail: currentUserEmail
-        ).map { EmailNormalizer.normalize($0) })
+        )
+        let otherEmailSet = Set(otherEmails.map { EmailNormalizer.normalize($0) })
 
         guard let participants = conversation.participants else {
             cachedOtherParticipants = []
             return
         }
 
-        cachedOtherParticipants = participants.compactMap { participant -> Person? in
-            guard let person = participant.person else { return nil }
-            return otherEmails.contains(EmailNormalizer.normalize(person.email)) ? person : nil
+        var personsByNormalizedEmail: [String: Person] = [:]
+        for participant in participants {
+            guard let person = participant.person else { continue }
+
+            let normalizedEmail = EmailNormalizer.normalize(person.email)
+            guard otherEmailSet.contains(normalizedEmail),
+                  personsByNormalizedEmail[normalizedEmail] == nil else {
+                continue
+            }
+
+            personsByNormalizedEmail[normalizedEmail] = person
         }
+
+        let resolvedParticipants = await participantLoader.resolveParticipants(for: otherEmails)
+
+        cachedOtherParticipants = resolvedParticipants.compactMap { participant in
+            guard let person = personsByNormalizedEmail[EmailNormalizer.normalize(participant.email)] else {
+                return nil
+            }
+
+            return ParticipantListItem(
+                person: person,
+                displayName: participant.displayName,
+                email: person.email,
+                isExistingContact: participant.contactIdentifier != nil,
+                contactIdentifier: participant.contactIdentifier
+            )
+        }
+    }
+}
+
+private struct ParticipantListItem: Identifiable {
+    let person: Person
+    let displayName: String
+    let email: String
+    let isExistingContact: Bool
+    let contactIdentifier: String?
+
+    var id: String {
+        if let contactIdentifier, !contactIdentifier.isEmpty {
+            return "contact:\(contactIdentifier)"
+        }
+
+        return "email:\(EmailNormalizer.normalize(email))"
     }
 }
