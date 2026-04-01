@@ -571,6 +571,47 @@ final class AttachmentDownloaderTests: XCTestCase {
         handler.deleteHTML(for: messageId)
     }
 
+    func testMessage_displayableAttachments_plainBubble_deduplicatesRepeatedInlineContentIDs() throws {
+        let messageId = "msg-inline-duplicate-cid-\(UUID().uuidString)"
+        let message = MessageBuilder()
+            .withId(messageId)
+            .withAttachments()
+            .build(in: context)
+
+        for suffix in 1...3 {
+            let _ = AttachmentBuilder()
+                .withId("att-inline-dup-\(suffix)")
+                .withFilename("IMG_6161.jpeg")
+                .withContentId("6AFCA8C9-D2EF-4407-BD15-8D9F042220E9")
+                .asImage(width: 1200, height: 1200)
+                .withByteSize(350_000)
+                .forMessage(message)
+                .build(in: context)
+        }
+
+        let handler = HTMLContentHandler.shared
+        _ = handler.saveHTML(
+            """
+            <html><body>
+            <img src="cid:6AFCA8C9-D2EF-4407-BD15-8D9F042220E9" alt="IMG_6161.jpeg">
+            <div><strong>RICK THAU</strong></div>
+            <div>Carmel, CA</div>
+            </body></html>
+            """,
+            for: messageId
+        )
+
+        try testStack.saveViewContext()
+
+        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
+        let displayable = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: false) ?? []
+
+        XCTAssertEqual(displayable.count, 1)
+        XCTAssertEqual(displayable.first?.contentId, "6AFCA8C9-D2EF-4407-BD15-8D9F042220E9")
+
+        handler.deleteHTML(for: messageId)
+    }
+
     // MARK: - Local Attachment Tests
 
     func testAttachment_isLocalAttachment_detectsLocalIds() throws {

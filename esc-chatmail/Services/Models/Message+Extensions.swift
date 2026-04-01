@@ -78,7 +78,7 @@ extension Message {
     func displayableAttachments(hidingInlineReferencedInHTML: Bool) -> [Attachment] {
         let html = loadHTMLSource()
         let nonDisplayableInlineContentIDs = extractNonDisplayableInlineContentIDs(from: html)
-        let allAttachments = attachmentsArray.filter { attachment in
+        let allAttachments = deduplicatedInlineAttachments(in: attachmentsArray.filter { attachment in
             guard !attachment.isLikelySignatureImage else { return false }
 
             guard let contentId = normalizedContentID(from: attachment.contentId) else {
@@ -87,7 +87,7 @@ extension Message {
 
             // Hide inline images that only appear in signature/quoted sections removed by cleanup.
             return !nonDisplayableInlineContentIDs.contains(contentId)
-        }
+        })
 
         guard hidingInlineReferencedInHTML else {
             return allAttachments
@@ -113,6 +113,23 @@ extension Message {
             // Hide if this Content-ID is referenced in the HTML body.
             return !referencedCIDs.contains(contentId)
         }
+    }
+
+    private func deduplicatedInlineAttachments(in attachments: [Attachment]) -> [Attachment] {
+        var seenInlineContentIDs = Set<String>()
+        var deduplicated: [Attachment] = []
+
+        for attachment in attachments {
+            if let contentId = normalizedContentID(from: attachment.contentId) {
+                guard seenInlineContentIDs.insert(contentId).inserted else {
+                    continue
+                }
+            }
+
+            deduplicated.append(attachment)
+        }
+
+        return deduplicated
     }
 
     /// Hides inline images that appear only in sections removed by quote/signature cleanup.

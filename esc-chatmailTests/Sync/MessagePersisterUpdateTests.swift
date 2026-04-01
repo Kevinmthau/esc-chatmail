@@ -785,6 +785,75 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertTrue(normalizedCIDs.contains("ii_19c9bbffa4d86c910832"))
     }
 
+    func testUpdateExistingMessage_removesDuplicateInlineAttachmentsSharingContentID() async {
+        let conversation = ConversationBuilder.simple(in: context)
+        let existingMessage = MessageBuilder()
+            .withId("message-inline-cid-dedup")
+            .inConversation(conversation)
+            .withAttachments()
+            .build(in: context)
+        existingMessage.hasAttachments = true
+
+        let downloadedDuplicate = AttachmentBuilder()
+            .withId("dup-inline-downloaded")
+            .withFilename("IMG_6161.jpeg")
+            .withMimeType("image/jpeg")
+            .withContentId("6AFCA8C9-D2EF-4407-BD15-8D9F042220E9")
+            .withLocalURL("Attachments/dup-inline-downloaded.jpg")
+            .withPreviewURL("Previews/dup-inline-downloaded.jpg")
+            .withByteSize(350_000)
+            .downloaded()
+            .forMessage(existingMessage)
+            .build(in: context)
+
+        let _ = AttachmentBuilder()
+            .withId("dup-inline-queued-1")
+            .withFilename("IMG_6161.jpeg")
+            .withMimeType("image/jpeg")
+            .withContentId("6AFCA8C9-D2EF-4407-BD15-8D9F042220E9")
+            .withByteSize(350_000)
+            .queued()
+            .forMessage(existingMessage)
+            .build(in: context)
+
+        let _ = AttachmentBuilder()
+            .withId("dup-inline-queued-2")
+            .withFilename("IMG_6161.jpeg")
+            .withMimeType("image/jpeg")
+            .withContentId("6AFCA8C9-D2EF-4407-BD15-8D9F042220E9")
+            .withByteSize(350_000)
+            .queued()
+            .forMessage(existingMessage)
+            .build(in: context)
+
+        let processedMessage = ProcessedMessage(
+            id: existingMessage.id,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: existingMessage.snippet,
+            cleanedSnippet: existingMessage.cleanedSnippet,
+            internalDate: existingMessage.internalDate,
+            headers: ProcessedHeaders(),
+            htmlBody: nil,
+            plainTextBody: existingMessage.bodyText,
+            labelIds: [],
+            isUnread: existingMessage.isUnread,
+            isNewsletter: existingMessage.isNewsletter,
+            hasAttachments: true,
+            attachmentInfo: []
+        )
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertEqual(existingMessage.attachmentsArray.count, 1)
+        XCTAssertEqual(existingMessage.attachmentsArray.first?.id, downloadedDuplicate.id)
+        XCTAssertEqual(existingMessage.attachmentsArray.first?.localURL, "Attachments/dup-inline-downloaded.jpg")
+    }
+
     func testUpdateExistingMessage_reconcilesOptimisticLocalRegularAttachmentWithoutDuplication() async throws {
         let conversation = ConversationBuilder.simple(in: context)
         let existingMessage = MessageBuilder()

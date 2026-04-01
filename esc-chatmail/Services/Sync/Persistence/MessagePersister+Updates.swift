@@ -85,6 +85,7 @@ extension MessagePersister {
             // Remove duplicate inline attachments left by earlier syncs that
             // used non-deterministic (UUID-based) IDs.
             self.deduplicateInlineAttachments(on: existingMessage, in: context)
+            context.processPendingChanges()
 
             // Rebuild after dedup so the sets reflect current state.
             existingAttachmentIds = Set(existingMessage.attachmentsArray.compactMap(\.id))
@@ -260,8 +261,28 @@ extension MessagePersister {
 
     /// Removes duplicate inline attachments, keeping only the first per fingerprint.
     nonisolated func deduplicateInlineAttachments(on message: Message, in context: NSManagedObjectContext) {
+        var bestAttachmentByContentID: [String: Attachment] = [:]
+
+        for attachment in message.attachmentsArray {
+            guard let contentID = normalizedContentID(attachment.contentId) else { continue }
+
+            if let existing = bestAttachmentByContentID[contentID] {
+                if shouldPreferInlineAttachment(attachment, over: existing) {
+                    context.delete(existing)
+                    bestAttachmentByContentID[contentID] = attachment
+                } else {
+                    context.delete(attachment)
+                }
+            } else {
+                bestAttachmentByContentID[contentID] = attachment
+            }
+        }
+
         var seen = Set<String>()
         for attachment in message.attachmentsArray {
+            if attachment.isDeleted {
+                continue
+            }
             guard let fp = inlineAttachmentFingerprint(attachment) else { continue }
             if seen.contains(fp) {
                 context.delete(attachment)
@@ -269,5 +290,31 @@ extension MessagePersister {
                 seen.insert(fp)
             }
         }
+    }
+
+    nonisolated func shouldPreferInlineAttachment(_ lhs: Attachment, over rhs: Attachment) -> Bool {
+        inlineAttachmentRetentionScore(lhs) > inlineAttachmentRetentionScore(rhs)
+    }
+
+    nonisolated func inlineAttachmentRetentionScore(_ attachment: Attachment) -> Int {
+        var score = 0
+
+        if !(attachment.id?.hasPrefix("local_inline_") ?? false) {
+            score += 8
+        }
+        if attachment.localURL != nil {
+            score += 16
+        }
+        if attachment.previewURL != nil {
+            score += 8
+        }
+        if attachment.isReady {
+            score += 4
+        }
+        if attachment.byteSize > 0 {
+            score += 2
+        }
+
+        return score
     }
 }

@@ -587,6 +587,100 @@ final class MessageProcessorTests: XCTestCase {
         XCTAssertEqual(attachment.inlineData, inlineImageData)
     }
 
+    func testProcessGmailMessage_appleMailMultipartRelatedInlineImage_extractsSingleAttachment() async {
+        let contentID = "6AFCA8C9-D2EF-4407-BD15-8D9F042220E9"
+        let plainBody = "\u{FFFC}\n\nRICK THAU\nCarmel, CA\nrick@thau.net\nCell: 650-255-5222"
+        let htmlBody = """
+        <html><body>
+        <img src="cid:\(contentID)" alt="IMG_6161.jpeg" type="application/x-apple-msg-attachment">
+        <div><b>RICK THAU</b></div>
+        <div>Carmel, CA</div>
+        </body></html>
+        """
+        let inlineJPEGData = Data([0xFF, 0xD8, 0xFF, 0xD9]).base64EncodedString()
+
+        let message = GmailMessage(
+            id: "apple-mail-inline-image-message",
+            threadId: "apple-mail-inline-image-thread",
+            labelIds: ["INBOX"],
+            snippet: "Happy Pesach",
+            historyId: "123",
+            internalDate: "1704067200000",
+            payload: MessagePart(
+                partId: "0",
+                mimeType: "multipart/alternative",
+                filename: nil,
+                headers: baseHeaders(id: "apple-mail-inline-image-message"),
+                body: nil,
+                parts: [
+                    MessagePart(
+                        partId: "0.0",
+                        mimeType: "text/plain",
+                        filename: nil,
+                        headers: nil,
+                        body: MessageBody(
+                            size: plainBody.count,
+                            data: plainBody.data(using: .utf8)?.base64EncodedString(),
+                            attachmentId: nil
+                        ),
+                        parts: nil
+                    ),
+                    MessagePart(
+                        partId: "0.1",
+                        mimeType: "multipart/related",
+                        filename: nil,
+                        headers: [
+                            MessageHeader(name: "Content-Type", value: "multipart/related")
+                        ],
+                        body: nil,
+                        parts: [
+                            MessagePart(
+                                partId: "0.1.0",
+                                mimeType: "text/html",
+                                filename: nil,
+                                headers: [
+                                    MessageHeader(name: "Content-Transfer-Encoding", value: "quoted-printable")
+                                ],
+                                body: MessageBody(
+                                    size: htmlBody.count,
+                                    data: htmlBody.data(using: .utf8)?.base64EncodedString(),
+                                    attachmentId: nil
+                                ),
+                                parts: nil
+                            ),
+                            MessagePart(
+                                partId: "0.1.1",
+                                mimeType: "image/jpeg",
+                                filename: "IMG_6161.jpeg",
+                                headers: [
+                                    MessageHeader(name: "Content-Disposition", value: "inline; filename=\"IMG_6161.jpeg\""),
+                                    MessageHeader(name: "Content-ID", value: "<\(contentID)>")
+                                ],
+                                body: MessageBody(
+                                    size: 4,
+                                    data: inlineJPEGData,
+                                    attachmentId: nil
+                                ),
+                                parts: nil
+                            )
+                        ]
+                    )
+                ]
+            ),
+            sizeEstimate: plainBody.count + htmlBody.count + 4
+        )
+
+        let processed = await processor.processGmailMessage(
+            message,
+            myAliases: []
+        )
+
+        XCTAssertEqual(processed?.attachmentInfo.count, 1)
+        XCTAssertEqual(processed?.attachmentInfo.first?.filename, "IMG_6161.jpeg")
+        XCTAssertEqual(processed?.attachmentInfo.first?.contentId, contentID)
+        XCTAssertTrue(processed?.htmlBody?.contains("cid:\(contentID)") == true)
+    }
+
     func testProcessGmailMessage_doesNotTreatHTMLBodyAsAttachment() async {
         let htmlBody = "<div>Body only</div>"
         let message = GmailMessage(
