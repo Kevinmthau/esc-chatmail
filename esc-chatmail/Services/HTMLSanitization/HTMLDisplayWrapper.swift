@@ -105,9 +105,6 @@ struct HTMLDisplayWrapper {
                     -webkit-text-size-adjust: 100%;
                 }
                 body {
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-                    font-size: 16px;
-                    line-height: 1.5;
                     color: \(textColor);
                     background-color: \(backgroundColor);
                     padding: 8px;
