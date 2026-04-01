@@ -68,8 +68,8 @@ struct LabelOperationProcessor {
                 return []
             }
 
-            // Create dictionary for O(1) lookup
-            let messageDict = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0) })
+            // Create dictionary for O(1) lookup (use uniquingKeysWith to handle potential duplicates)
+            let messageDict = Dictionary(messages.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
 
             // Batch fetch all labels
             let labelRequest = Label.fetchRequest()
@@ -80,7 +80,7 @@ struct LabelOperationProcessor {
                 return []
             }
 
-            let labelDict = Dictionary(uniqueKeysWithValues: labels.map { ($0.id, $0) })
+            let labelDict = Dictionary(labels.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
 
             // Process each item using pre-fetched objects
             var modifiedIDs: [NSManagedObjectID] = []

@@ -1,6 +1,7 @@
 import Foundation
 import BackgroundTasks
 import CoreData
+import os
 
 /// Main orchestrator for background sync operations
 final class BackgroundSyncManager {
@@ -14,8 +15,6 @@ final class BackgroundSyncManager {
     private let messageProcessor: BackgroundMessageProcessor
     private let authSessionProvider: @MainActor @Sendable () -> AuthSession
     private let apiClientProvider: @MainActor @Sendable () -> GmailAPIClientProtocol
-
-    private let syncQueue = DispatchQueue(label: "com.esc.inboxchat.backgroundsync", qos: .background)
 
     init(
         taskScheduler: BackgroundTaskScheduler = .shared,
@@ -66,37 +65,42 @@ final class BackgroundSyncManager {
 
     private func handleAppRefresh(task: BGAppRefreshTask) {
         taskScheduler.scheduleAppRefresh()
-
-        let backgroundTask = Task { [weak self] in
-            guard let self = self else {
-                task.setTaskCompleted(success: false)
-                return
-            }
-            let success = await self.performDeltaSync(isProcessingTask: false)
-            task.setTaskCompleted(success: success)
-        }
-
-        task.expirationHandler = {
-            backgroundTask.cancel()
-            task.setTaskCompleted(success: false)
-        }
+        runBackgroundTask(task, isProcessingTask: false)
     }
 
     private func handleProcessing(task: BGProcessingTask) {
         taskScheduler.scheduleProcessingTask()
+        runBackgroundTask(task, isProcessingTask: true)
+    }
+
+    /// Shared implementation for both app-refresh and processing background tasks.
+    /// Uses an atomic flag to ensure `setTaskCompleted` is called exactly once,
+    /// preventing a race between normal completion and the expiration handler.
+    private func runBackgroundTask(_ task: BGTask, isProcessingTask: Bool) {
+        let completed = OSAllocatedUnfairLock(initialState: false)
+
+        let completeOnce: (Bool) -> Void = { success in
+            let alreadyCompleted = completed.withLock { done -> Bool in
+                if done { return true }
+                done = true
+                return false
+            }
+            guard !alreadyCompleted else { return }
+            task.setTaskCompleted(success: success)
+        }
 
         let backgroundTask = Task { [weak self] in
             guard let self = self else {
-                task.setTaskCompleted(success: false)
+                completeOnce(false)
                 return
             }
-            let success = await self.performDeltaSync(isProcessingTask: true)
-            task.setTaskCompleted(success: success)
+            let success = await self.performDeltaSync(isProcessingTask: isProcessingTask)
+            completeOnce(success)
         }
 
         task.expirationHandler = {
             backgroundTask.cancel()
-            task.setTaskCompleted(success: false)
+            completeOnce(false)
         }
     }
 

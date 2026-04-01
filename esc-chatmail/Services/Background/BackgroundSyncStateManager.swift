@@ -1,5 +1,6 @@
 import Foundation
 import CoreData
+import os
 
 enum BackgroundSyncStateError: LocalizedError {
     case accountMissing
@@ -18,8 +19,12 @@ final class BackgroundSyncStateManager {
     private let performBackgroundTask: (@escaping (NSManagedObjectContext) throws -> Void) async throws -> Void
     private let saveContext: (NSManagedObjectContext) throws -> Void
 
-    private var currentRetryCount = 0
-    private var currentBackoff: TimeInterval
+    private struct RetryState {
+        var retryCount = 0
+        var backoff: TimeInterval
+    }
+
+    private let retryState: OSAllocatedUnfairLock<RetryState>
     private let maxRetries: Int
     private let initialBackoffSeconds: TimeInterval
     private let maxBackoffSeconds: TimeInterval
@@ -42,7 +47,7 @@ final class BackgroundSyncStateManager {
         self.maxRetries = maxRetries
         self.initialBackoffSeconds = initialBackoffSeconds
         self.maxBackoffSeconds = maxBackoffSeconds
-        self.currentBackoff = initialBackoffSeconds
+        self.retryState = OSAllocatedUnfairLock(initialState: RetryState(backoff: initialBackoffSeconds))
     }
 
     init(
@@ -59,7 +64,7 @@ final class BackgroundSyncStateManager {
         self.maxRetries = maxRetries
         self.initialBackoffSeconds = initialBackoffSeconds
         self.maxBackoffSeconds = maxBackoffSeconds
-        self.currentBackoff = initialBackoffSeconds
+        self.retryState = OSAllocatedUnfairLock(initialState: RetryState(backoff: initialBackoffSeconds))
     }
 
     /// Retrieves the stored history ID from Core Data
@@ -118,21 +123,25 @@ final class BackgroundSyncStateManager {
     /// Increments retry count and returns whether we should retry
     /// Returns the backoff interval if we should retry, nil if we've exceeded max retries
     func incrementRetryAndGetBackoff() -> TimeInterval? {
-        currentRetryCount += 1
+        retryState.withLock { state in
+            state.retryCount += 1
 
-        if currentRetryCount >= maxRetries {
-            currentRetryCount = 0
-            currentBackoff = initialBackoffSeconds
-            return nil
-        } else {
-            currentBackoff = min(currentBackoff * 2, maxBackoffSeconds)
-            return currentBackoff
+            if state.retryCount >= maxRetries {
+                state.retryCount = 0
+                state.backoff = initialBackoffSeconds
+                return nil
+            } else {
+                state.backoff = min(state.backoff * 2, maxBackoffSeconds)
+                return state.backoff
+            }
         }
     }
 
     /// Resets retry count and backoff to initial values
     func resetRetryCount() {
-        currentRetryCount = 0
-        currentBackoff = initialBackoffSeconds
+        retryState.withLock { state in
+            state.retryCount = 0
+            state.backoff = initialBackoffSeconds
+        }
     }
 }

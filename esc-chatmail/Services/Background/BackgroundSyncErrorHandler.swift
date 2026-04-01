@@ -18,14 +18,15 @@ struct BackgroundSyncErrorHandler {
             return handleAPIError(apiError)
         }
 
+        // Check for URLError before NSError — every Error bridges to NSError,
+        // so the NSError branch would shadow this one if checked first.
+        if let urlError = error as? URLError {
+            return handleURLError(urlError)
+        }
+
         // Check for NSError (including 404 history expired)
         if let nsError = error as NSError? {
             return handleNSError(nsError)
-        }
-
-        // Check for URLError
-        if let urlError = error as? URLError {
-            return handleURLError(urlError)
         }
 
         Log.error("Unknown error during history sync", category: .background, error: error)
@@ -65,7 +66,7 @@ struct BackgroundSyncErrorHandler {
     }
 
     private func handleNSError(_ nsError: NSError) -> BackgroundSyncRecoveryAction {
-        if nsError.code == 404 || (nsError.domain.contains("Gmail") && nsError.code == 404) {
+        if nsError.code == 404 {
             Log.info("History too old (404), falling back to partial sync", category: .background)
             return .partialSync
         }
