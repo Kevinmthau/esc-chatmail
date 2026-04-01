@@ -115,11 +115,13 @@ struct BaseEmailWebView: UIViewRepresentable {
             switch parent.mode {
             case .scaledPreview(let scale):
                 htmlToLoad = wrapWithScale(parent.htmlContent, scale: scale)
-#if DEBUG
                 let estimatedWidth = Int((HTMLPreviewScaleCalculator.estimatedLayoutWidth(from: parent.htmlContent) ?? 0).rounded())
                 let scaleMilli = Int((scale * 1000).rounded())
-                Log.debug("HTML_PREVIEW scale_milli=\(scaleMilli) estimated_width=\(estimatedWidth)", category: .ui)
-#endif
+                Log.diagnostic(
+                    .htmlPreview,
+                    "HTML_PREVIEW scale_milli=\(scaleMilli) estimated_width=\(estimatedWidth)",
+                    category: .ui
+                )
             case .fullInteractive, .simplePreview:
                 htmlToLoad = parent.htmlContent
             }

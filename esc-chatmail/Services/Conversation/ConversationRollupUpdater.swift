@@ -177,7 +177,11 @@ struct ConversationRollupUpdater: Sendable {
                 if hasInbox {
                     inboxMessages.append(message)
                 }
-                Log.debug("Message \(message.id): labels=\(labelIds), hasINBOX=\(hasInbox)", category: .conversation)
+                Log.diagnostic(
+                    .conversationRollups,
+                    "Message \(message.id): labels=\(labelIds), hasINBOX=\(hasInbox)",
+                    category: .conversation
+                )
             } else {
                 Log.warning("Message \(message.id): could not read labels (labels nil)", category: .conversation)
             }
@@ -205,16 +209,28 @@ struct ConversationRollupUpdater: Sendable {
             // Un-archive: At least one message is back in inbox
             conversation.archivedAt = nil
             conversation.hidden = false
-            Log.debug("Conversation \(conversation.id.uuidString): UN-ARCHIVED (hasInbox=true, archivedAt->nil)", category: .conversation)
+            Log.diagnostic(
+                .conversationRollups,
+                "Conversation \(conversation.id.uuidString): UN-ARCHIVED (hasInbox=true, archivedAt->nil)",
+                category: .conversation
+            )
         } else if !hasInbox && conversation.archivedAt == nil && !isSentOnlyConversation {
             // Archive only if:
             // - No INBOX messages AND
             // - Not a sent-only conversation (awaiting reply)
             conversation.archivedAt = Date()
             conversation.hidden = true
-            Log.debug("Conversation \(conversation.id.uuidString): ARCHIVED (hasInbox=false, archivedAt set)", category: .conversation)
+            Log.diagnostic(
+                .conversationRollups,
+                "Conversation \(conversation.id.uuidString): ARCHIVED (hasInbox=false, archivedAt set)",
+                category: .conversation
+            )
         } else if isSentOnlyConversation && conversation.archivedAt == nil {
-            Log.debug("Conversation \(conversation.id.uuidString): KEPT VISIBLE (sent-only, awaiting reply)", category: .conversation)
+            Log.diagnostic(
+                .conversationRollups,
+                "Conversation \(conversation.id.uuidString): KEPT VISIBLE (sent-only, awaiting reply)",
+                category: .conversation
+            )
         }
 
         // Keep hidden state in sync with archive state (for backward compatibility)
@@ -234,7 +250,11 @@ struct ConversationRollupUpdater: Sendable {
         totalCount: Int
     ) {
         let hasInbox = !inboxMessages.isEmpty
-        Log.debug("Conversation \(conversation.id.uuidString): hasInbox=\(hasInbox) (was \(previousHasInbox)), inboxMsgCount=\(inboxMessages.count), totalMsgCount=\(totalCount), hidden=\(conversation.hidden)", category: .conversation)
+        Log.diagnostic(
+            .conversationRollups,
+            "Conversation \(conversation.id.uuidString): hasInbox=\(hasInbox) (was \(previousHasInbox)), inboxMsgCount=\(inboxMessages.count), totalMsgCount=\(totalCount), hidden=\(conversation.hidden)",
+            category: .conversation
+        )
 
         conversation.inboxUnreadCount = Int32(inboxMessages.filter { $0.isUnread }.count)
 
@@ -251,8 +271,16 @@ struct ConversationRollupUpdater: Sendable {
 
         // Log all participants for debugging
         let allParticipantEmails = participants.compactMap { $0.person?.email }
-        Log.debug("Conversation \(conversation.id): All participants: \(allParticipantEmails)", category: .conversation)
-        Log.debug("My email: \(myEmail) (normalized: \(normalizedMyEmail))", category: .conversation)
+        Log.diagnostic(
+            .conversationRollups,
+            "Conversation \(conversation.id): All participants: \(allParticipantEmails)",
+            category: .conversation
+        )
+        Log.diagnostic(
+            .conversationRollups,
+            "My email: \(myEmail) (normalized: \(normalizedMyEmail))",
+            category: .conversation
+        )
 
         // Deduplicate participants by normalized email
         var seenEmails = Set<String>()
@@ -261,7 +289,11 @@ struct ConversationRollupUpdater: Sendable {
         for participant in participants {
             guard let person = participant.person else { continue }
             if EmailNormalizer.isHideMyEmailDisplayName(person.displayName) {
-                Log.debug("Excluding Hide My Email relay participant: \(person.email)", category: .conversation)
+                Log.diagnostic(
+                    .conversationRollups,
+                    "Excluding Hide My Email relay participant: \(person.email)",
+                    category: .conversation
+                )
                 continue
             }
             let email = person.email
@@ -269,7 +301,7 @@ struct ConversationRollupUpdater: Sendable {
 
             // Exclude current user from display name
             if normalizedEmail == normalizedMyEmail {
-                Log.debug("Excluding self: \(email)", category: .conversation)
+                Log.diagnostic(.conversationRollups, "Excluding self: \(email)", category: .conversation)
                 continue
             }
 
@@ -286,12 +318,16 @@ struct ConversationRollupUpdater: Sendable {
             } else {
                 name = "Unknown"
             }
-            Log.debug("Including participant: \(name)", category: .conversation)
+            Log.diagnostic(.conversationRollups, "Including participant: \(name)", category: .conversation)
             names.append(name)
         }
 
         let finalDisplayName = DisplayNameFormatter.formatGroupNames(names)
-        Log.debug("Final displayName: \(finalDisplayName), snippet: \(conversation.snippet ?? "nil")", category: .conversation)
+        Log.diagnostic(
+            .conversationRollups,
+            "Final displayName: \(finalDisplayName), snippet: \(conversation.snippet ?? "nil")",
+            category: .conversation
+        )
         // Ensure we never set an empty display name
         conversation.displayName = finalDisplayName.isEmpty ? "Unknown" : finalDisplayName
     }

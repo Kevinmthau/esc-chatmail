@@ -9,15 +9,11 @@ import SwiftUI
 import GoogleSignIn
 import BackgroundTasks
 
-#if DEBUG
 private let appStartTime = Date()
-#endif
 
 private func logStartupTiming(_ message: String) {
-    #if DEBUG
     let elapsed = Date().timeIntervalSince(appStartTime)
-    Log.info("STARTUP[\(String(format: "%.3f", elapsed))s]: \(message)", category: .general)
-    #endif
+    Log.diagnostic(.startup, level: .info, "STARTUP[\(String(format: "%.3f", elapsed))s]: \(message)", category: .general)
 }
 
 @main

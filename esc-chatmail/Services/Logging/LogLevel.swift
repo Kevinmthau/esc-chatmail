@@ -31,4 +31,23 @@ enum LogLevel: Int, Comparable {
         case .error: return "ERROR"
         }
     }
+
+    static func parse(environmentValue: String?) -> LogLevel? {
+        guard let environmentValue else { return nil }
+
+        switch environmentValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() {
+        case "debug":
+            return .debug
+        case "info":
+            return .info
+        case "warning", "warn":
+            return .warning
+        case "error":
+            return .error
+        default:
+            return nil
+        }
+    }
 }

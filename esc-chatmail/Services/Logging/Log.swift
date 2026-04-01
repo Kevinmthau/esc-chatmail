@@ -79,6 +79,20 @@ enum Log {
         log(level: .error, message: message(), category: category, error: error, file: file, function: function, line: line)
     }
 
+    /// Log an opt-in diagnostic message for especially noisy traces.
+    static func diagnostic(
+        _ area: LogDiagnosticArea,
+        level: LogLevel = .debug,
+        _ message: @autoclosure () -> String,
+        category: LogCategory = .general,
+        file: String = #file,
+        function: String = #function,
+        line: Int = #line
+    ) {
+        guard LoggerConfiguration.current.isDiagnosticEnabled(area) else { return }
+        log(level: level, message: message(), category: category, error: nil, file: file, function: function, line: line)
+    }
+
     // MARK: - Specialized Logging Methods
 
     /// Log a performance measurement

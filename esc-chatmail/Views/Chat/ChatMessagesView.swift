@@ -73,19 +73,21 @@ struct ChatMessagesView: View {
             .defaultScrollAnchor(.top)
             .scrollDismissesKeyboard(.interactively)
             .onAppear {
-#if DEBUG
                 if let first = messages.first, let last = messages.last {
-                    Log.info(
+                    Log.diagnostic(
+                        .chatView,
+                        level: .info,
                         "ChatView appear conv=\(conversation.id.uuidString) messages=\(messages.count) first=\(first.id) \(first.internalDate) last=\(last.id) \(last.internalDate)",
                         category: .ui
                     )
                 } else {
-                    Log.info(
+                    Log.diagnostic(
+                        .chatView,
+                        level: .info,
                         "ChatView appear conv=\(conversation.id.uuidString) messages=\(messages.count) (empty)",
                         category: .ui
                     )
                 }
-#endif
                 let unreadMessages = messages.filter { $0.isUnread }
                 let unreadMessageIDs = unreadMessages.map { $0.objectID }
                 viewModel.markConversationAsRead(messageObjectIDs: unreadMessageIDs)
@@ -255,9 +257,7 @@ struct ChatMessagesView: View {
             // Wait for layout to complete before scrolling
             try? await Task.sleep(nanoseconds: UInt64(UIConfig.contentChangeScrollDelay * 1_000_000_000))
             guard !Task.isCancelled else { return }
-#if DEBUG
-            Log.info("ChatView initial scroll -> bottom anchor", category: .ui)
-#endif
+            Log.diagnostic(.chatView, level: .info, "ChatView initial scroll -> bottom anchor", category: .ui)
             proxy.scrollTo(bottomID, anchor: .bottom)
             await performFollowUpBottomScroll(proxy: proxy)
         }
@@ -271,9 +271,7 @@ struct ChatMessagesView: View {
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled else { return }
             withAnimation(.easeOut(duration: UIConfig.scrollAnimationDuration)) {
-#if DEBUG
-                Log.info("ChatView animated scroll -> bottom anchor", category: .ui)
-#endif
+                Log.diagnostic(.chatView, level: .info, "ChatView animated scroll -> bottom anchor", category: .ui)
                 proxy.scrollTo(bottomID, anchor: .bottom)
             }
         }
@@ -288,9 +286,7 @@ struct ChatMessagesView: View {
         followUpScrollTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(UIConfig.initialScrollDelay * 1_000_000_000))
             guard !Task.isCancelled else { return }
-#if DEBUG
-            Log.info("ChatView follow-up scroll -> bottom anchor", category: .ui)
-#endif
+            Log.diagnostic(.chatView, level: .info, "ChatView follow-up scroll -> bottom anchor", category: .ui)
             proxy.scrollTo(bottomID, anchor: .bottom)
             isReadyToShow = true
             scheduleStabilizationBottomScrolls(proxy: proxy)
@@ -309,9 +305,12 @@ struct ChatMessagesView: View {
             for delay in delays {
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 guard !Task.isCancelled else { return }
-#if DEBUG
-                Log.info("ChatView stabilization scroll (\(delay)s) -> bottom anchor", category: .ui)
-#endif
+                Log.diagnostic(
+                    .chatView,
+                    level: .info,
+                    "ChatView stabilization scroll (\(delay)s) -> bottom anchor",
+                    category: .ui
+                )
                 proxy.scrollTo(bottomID, anchor: .bottom)
             }
         }

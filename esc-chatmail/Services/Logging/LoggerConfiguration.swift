@@ -20,14 +20,22 @@ struct LoggerConfiguration {
     /// Categories to enable (nil means all categories)
     var enabledCategories: Set<LogCategory>?
 
+    /// Opt-in noisy diagnostics for focused debugging sessions.
+    var enabledDiagnostics: Set<LogDiagnosticArea>
+
     /// Default configuration for debug builds
-    static let debug = LoggerConfiguration(
-        minimumLevel: .debug,
-        includeLocation: true,
-        includeTimestamp: true,
-        mirrorToStdout: ProcessInfo.processInfo.environment["ESC_MIRROR_LOGS_TO_STDOUT"] == "1",
-        enabledCategories: nil
-    )
+    static let debug: LoggerConfiguration = {
+        let environment = ProcessInfo.processInfo.environment
+
+        return LoggerConfiguration(
+            minimumLevel: LogLevel.parse(environmentValue: environment["ESC_LOG_LEVEL"]) ?? .info,
+            includeLocation: true,
+            includeTimestamp: true,
+            mirrorToStdout: environment["ESC_MIRROR_LOGS_TO_STDOUT"] == "1",
+            enabledCategories: nil,
+            enabledDiagnostics: diagnosticAreas(from: environment)
+        )
+    }()
 
     /// Default configuration for release builds
     static let release = LoggerConfiguration(
@@ -35,7 +43,8 @@ struct LoggerConfiguration {
         includeLocation: false,
         includeTimestamp: false,
         mirrorToStdout: false,
-        enabledCategories: nil
+        enabledCategories: nil,
+        enabledDiagnostics: []
     )
 
     /// Current active configuration
@@ -44,4 +53,12 @@ struct LoggerConfiguration {
     #else
     static var current = LoggerConfiguration.release
     #endif
+
+    static func diagnosticAreas(from environment: [String: String]) -> Set<LogDiagnosticArea> {
+        LogDiagnosticArea.parse(environmentValue: environment[LogDiagnosticArea.environmentKey])
+    }
+
+    func isDiagnosticEnabled(_ area: LogDiagnosticArea) -> Bool {
+        enabledDiagnostics.contains(area)
+    }
 }

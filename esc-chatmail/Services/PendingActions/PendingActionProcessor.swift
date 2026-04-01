@@ -85,7 +85,12 @@ extension PendingActionsManager {
             await updateActionStatus(objectID: objectID, status: "completed", context: context)
             await clearLocalModifications(messageId: messageId, payload: payload, context: context)
 
-            Log.info("Processed action: \(type.rawValue) for message: \(messageId ?? "N/A")", category: .sync)
+            Log.diagnostic(
+                .pendingActions,
+                level: .info,
+                "Processed action: \(type.rawValue) for message: \(messageId ?? "N/A")",
+                category: .sync
+            )
 
         } catch {
             Log.error("Failed to process action: \(error)", category: .sync)
@@ -259,10 +264,10 @@ extension PendingActionsManager {
                     context.delete(action)
                 }
                 try context.save()
-                Log.debug("Cleaned up \(completedActions.count) completed actions", category: .sync)
+                Log.diagnostic(.pendingActions, "Cleaned up \(completedActions.count) completed actions", category: .sync)
             } catch {
                 // Non-critical: cleanup will happen on next cycle
-                Log.debug("Failed to cleanup completed actions", category: .sync)
+                Log.diagnostic(.pendingActions, "Failed to cleanup completed actions", category: .sync)
             }
         }
     }

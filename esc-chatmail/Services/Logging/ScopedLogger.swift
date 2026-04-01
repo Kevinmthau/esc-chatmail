@@ -21,6 +21,17 @@ struct ScopedLogger {
     func error(_ message: @autoclosure () -> String, error: Error? = nil, file: String = #file, function: String = #function, line: Int = #line) {
         Log.error(message(), category: category, error: error, file: file, function: function, line: line)
     }
+
+    func diagnostic(
+        _ area: LogDiagnosticArea,
+        level: LogLevel = .debug,
+        _ message: @autoclosure () -> String,
+        file: String = #file,
+        function: String = #function,
+        line: Int = #line
+    ) {
+        Log.diagnostic(area, level: level, message(), category: category, file: file, function: function, line: line)
+    }
 }
 
 extension LogCategory {

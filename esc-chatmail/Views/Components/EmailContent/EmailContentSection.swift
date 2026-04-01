@@ -63,7 +63,7 @@ struct EmailContentSection: View {
         )
 
         if result.html == nil {
-            Log.info("EmailContentSection: No HTML content for message \(message.id)", category: .ui)
+            Log.diagnostic(.htmlPreview, "EmailContentSection: No HTML content for message \(message.id)", category: .ui)
         }
 
         await MainActor.run {
