@@ -29,6 +29,11 @@ struct HTMLURLSanitizer {
         )
     }()
 
+    private static let modernImageFormatQueryHints: [(key: String, riskyValues: Set<String>, replacement: String)] = [
+        ("format", ["auto", "avif", "webp"], "jpeg"),
+        ("fm", ["avif", "webp"], "jpg")
+    ]
+
     // Safe image MIME types for data URLs (excludes SVG which can contain scripts)
     private static let dataURLRegex: NSRegularExpression = {
         // swiftlint:disable:next force_try
@@ -101,6 +106,7 @@ struct HTMLURLSanitizer {
         for match in srcMatches.reversed() {
             if let range = Range(match.range(at: 1), in: result) {
                 let url = String(result[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let decodedURL = HTMLEntityDecoder.decode(url)
 
                 // Skip empty URLs
                 if url.isEmpty {
@@ -110,7 +116,7 @@ struct HTMLURLSanitizer {
                 }
 
                 // Normalize URL to catch bypass attempts
-                let normalized = normalizeURL(url)
+                let normalized = normalizeURL(decodedURL)
 
                 // Block dangerous protocols (javascript:, vbscript:, and unsafe data: URLs)
                 if normalized.hasPrefix("javascript:") || normalized.hasPrefix("vbscript:") {
@@ -120,6 +126,11 @@ struct HTMLURLSanitizer {
                     // Block non-image data URLs (e.g., data:text/html)
                     guard let fullRange = Range(match.range, in: result) else { continue }
                     result.replaceSubrange(fullRange, with: transparentPixel)
+                } else if let rewrittenURL = rewriteModernImageFormatHints(in: decodedURL),
+                          rewrittenURL != decodedURL,
+                          let fullRange = Range(match.range, in: result) {
+                    let escapedURL = htmlAttributeEscaped(rewrittenURL)
+                    result.replaceSubrange(fullRange, with: "src=\"\(escapedURL)\"")
                 }
                 // cid: URLs are preserved - they'll be handled by CIDSchemeHandler
                 // Allow all other URLs including tracking pixels and newsletter images
@@ -248,6 +259,42 @@ struct HTMLURLSanitizer {
     /// Validates that a data URL is a safe image format
     func isDataURL(_ url: String) -> Bool {
         return Self.dataURLRegex.firstMatch(in: url, range: NSRange(url.startIndex..., in: url)) != nil
+    }
+
+    private func rewriteModernImageFormatHints(in urlString: String) -> String? {
+        guard let components = URLComponents(string: urlString),
+              let queryItems = components.queryItems,
+              !queryItems.isEmpty else {
+            return nil
+        }
+
+        var rewrittenItems = queryItems
+        var didRewrite = false
+
+        for index in rewrittenItems.indices {
+            guard let rawValue = rewrittenItems[index].value?.lowercased() else {
+                continue
+            }
+
+            for hint in Self.modernImageFormatQueryHints where rewrittenItems[index].name.caseInsensitiveCompare(hint.key) == .orderedSame {
+                if hint.riskyValues.contains(rawValue) {
+                    rewrittenItems[index].value = hint.replacement
+                    didRewrite = true
+                }
+            }
+        }
+
+        guard didRewrite else { return nil }
+
+        var rewrittenComponents = components
+        rewrittenComponents.queryItems = rewrittenItems
+        return rewrittenComponents.string
+    }
+
+    private func htmlAttributeEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
     }
 
     /// Rewrites Cloudflare cdn-cgi image URLs to use JPEG format instead of auto

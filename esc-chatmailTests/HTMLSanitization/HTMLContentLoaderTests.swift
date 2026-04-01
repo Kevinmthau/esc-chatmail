@@ -552,7 +552,7 @@ final class HTMLContentLoaderTests: XCTestCase {
 
         XCTAssertNotNil(result.html)
         XCTAssertTrue((result.html ?? "").contains("Visible body text"))
-        XCTAssertFalse((result.html ?? "").contains("src=\"data:image/png;base64,"))
+        XCTAssertFalse((result.html ?? "").contains("src=\"data:image/"))
 
         for _ in 0..<20 {
             let snapshot = await recorder.snapshot()
@@ -573,7 +573,7 @@ final class HTMLContentLoaderTests: XCTestCase {
             )
 
             if let html = warmedResult.html,
-               html.contains("src=\"data:image/png;base64,") {
+               html.contains("src=\"data:image/") {
                 warmedHTML = html
                 break
             }

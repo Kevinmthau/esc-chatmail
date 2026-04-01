@@ -816,6 +816,24 @@ final class HTMLURLSanitizerTests: XCTestCase {
         XCTAssertTrue(result.contains("https://example.com/image.jpg"))
     }
 
+    func testSanitizeURLs_srcWithFormatWebp_rewritesToJpeg() {
+        let html = "<img src=\"https://img.example.com/banner.jpg?fit=cover&amp;format=webp&amp;width=600\">"
+        let result = sut.sanitizeURLs(html)
+
+        XCTAssertTrue(result.contains("format=jpeg"))
+        XCTAssertFalse(result.contains("format=webp"))
+        XCTAssertTrue(result.contains("width=600"))
+    }
+
+    func testSanitizeURLs_srcWithFMAvif_rewritesToJpg() {
+        let html = "<img src=\"https://img.example.com/render?id=42&amp;fm=avif&amp;w=1200\">"
+        let result = sut.sanitizeURLs(html)
+
+        XCTAssertTrue(result.contains("fm=jpg"))
+        XCTAssertFalse(result.contains("fm=avif"))
+        XCTAssertTrue(result.contains("id=42"))
+    }
+
     // MARK: - Security: URL-Encoded Bypass Prevention
 
     func testIsURLSafe_urlEncodedJavascript_returnsFalse() {

@@ -2,7 +2,8 @@ import Foundation
 import UIKit
 
 /// Rewrites a narrow set of remote HTML images to data URLs when the host serves them as
-/// downloadable attachments instead of inline image resources.
+/// downloadable attachments or advertises modern formats (AVIF/WEBP) that WKWebView does not
+/// always decode reliably in newsletter previews.
 actor HTMLRemoteImageAttachmentFallback {
     typealias RequestExecutor = @Sendable (URLRequest) async throws -> (Data, URLResponse)
 
@@ -90,12 +91,13 @@ actor HTMLRemoteImageAttachmentFallback {
         )
     }()
 
-    private static let supportedImageMimeTypes: Set<String> = [
+    private static let rewritableSourceImageMimeTypes: Set<String> = [
         "image/png",
         "image/jpeg",
         "image/jpg",
         "image/gif",
         "image/webp",
+        "image/avif",
         "image/bmp",
         "image/x-icon",
         "image/vnd.microsoft.icon"
@@ -277,7 +279,7 @@ actor HTMLRemoteImageAttachmentFallback {
                 request(for: url, method: "HEAD", senderBaseURL: senderBaseURL),
                 requestExecutor: requestExecutor
             )
-            guard shouldInlineImage(from: headResponse.response) else {
+            guard shouldInlineImage(from: headResponse.response, originalURL: url) else {
                 return .unchanged
             }
 
@@ -324,7 +326,7 @@ actor HTMLRemoteImageAttachmentFallback {
         request.httpMethod = method
         request.timeoutInterval = 10.0
         request.setValue(Self.mobileUserAgent, forHTTPHeaderField: "User-Agent")
-        request.setValue("image/avif,image/webp,image/apng,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("image/png,image/jpeg,image/gif,image/bmp,image/*;q=0.8,*/*;q=0.5", forHTTPHeaderField: "Accept")
 
         if let senderBaseURL {
             request.setValue(senderBaseURL.absoluteString, forHTTPHeaderField: "Referer")
@@ -337,26 +339,38 @@ actor HTMLRemoteImageAttachmentFallback {
         return request
     }
 
-    private static func shouldInlineImage(from response: HTTPURLResponse) -> Bool {
+    private static func shouldInlineImage(from response: HTTPURLResponse, originalURL: URL) -> Bool {
         guard let mimeType = response.mimeType?.lowercased(),
-              Self.supportedImageMimeTypes.contains(mimeType) else {
+              Self.rewritableSourceImageMimeTypes.contains(mimeType) else {
             return false
         }
 
         let disposition = headerValue("Content-Disposition", from: response)?.lowercased() ?? ""
-        return disposition.contains("attachment")
+        if disposition.contains("attachment") {
+            return true
+        }
+
+        return isRiskyModernImageURL(originalURL) || mimeType == "image/avif" || mimeType == "image/webp"
     }
 
     private static func makeDataURL(from data: Data, response: HTTPURLResponse, maxInlineBytes: Int) -> String? {
         guard !data.isEmpty,
               data.count <= maxInlineBytes,
               let mimeType = response.mimeType?.lowercased(),
-              Self.supportedImageMimeTypes.contains(mimeType),
-              UIImage(data: data) != nil else {
+              Self.rewritableSourceImageMimeTypes.contains(mimeType),
+              let image = UIImage(data: data) else {
             return nil
         }
 
-        return "data:\(mimeType);base64,\(data.base64EncodedString())"
+        if let pngData = image.pngData(), pngData.count <= maxInlineBytes {
+            return "data:image/png;base64,\(pngData.base64EncodedString())"
+        }
+
+        if let jpegData = image.jpegData(compressionQuality: 0.92), jpegData.count <= maxInlineBytes {
+            return "data:image/jpeg;base64,\(jpegData.base64EncodedString())"
+        }
+
+        return nil
     }
 
     private static func contentLength(from response: HTTPURLResponse) -> Int64? {
@@ -395,6 +409,10 @@ actor HTMLRemoteImageAttachmentFallback {
             return false
         }
 
+        if Self.isRiskyModernImageURL(url) {
+            return true
+        }
+
         let path = url.path.lowercased()
         let pathExtension = url.pathExtension.lowercased()
 
@@ -407,6 +425,37 @@ actor HTMLRemoteImageAttachmentFallback {
         }
 
         return Self.dynamicNonImageExtensions.contains(pathExtension)
+    }
+
+    private static func isRiskyModernImageURL(_ url: URL) -> Bool {
+        let pathExtension = url.pathExtension.lowercased()
+        if pathExtension == "avif" || pathExtension == "webp" {
+            return true
+        }
+
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let queryItems = components.queryItems else {
+            return false
+        }
+
+        for item in queryItems {
+            guard let value = item.value?.lowercased() else { continue }
+
+            switch item.name.lowercased() {
+            case "format":
+                if value == "auto" || value == "avif" || value == "webp" {
+                    return true
+                }
+            case "fm":
+                if value == "avif" || value == "webp" {
+                    return true
+                }
+            default:
+                continue
+            }
+        }
+
+        return false
     }
 
     private static func imageSourceMatches(in html: String) -> [ImageSourceMatch] {
