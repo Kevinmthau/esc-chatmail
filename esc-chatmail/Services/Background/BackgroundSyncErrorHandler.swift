@@ -43,6 +43,10 @@ struct BackgroundSyncErrorHandler {
             Log.warning("Authentication error during background sync, attempting token refresh", category: .background)
             return .tokenRefreshAndRetry
 
+        case .credentialsRevoked:
+            Log.warning("Credentials revoked during background sync; re-authentication required", category: .background)
+            return .abortNoRetry
+
         case .rateLimited:
             Log.warning("Rate limited during background sync, will retry with backoff", category: .background)
             return .retry

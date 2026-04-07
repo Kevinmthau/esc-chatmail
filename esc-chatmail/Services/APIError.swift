@@ -8,6 +8,7 @@ enum APIError: LocalizedError {
     case decodingError(Error)
     case invalidData(String)
     case authenticationError
+    case credentialsRevoked
     case rateLimited
     case serverError(Int)
     case timeout
@@ -26,6 +27,8 @@ enum APIError: LocalizedError {
             return "Invalid data: \(message)"
         case .authenticationError:
             return "Authentication failed"
+        case .credentialsRevoked:
+            return "Your credentials have been revoked. Please sign in again."
         case .rateLimited:
             return "Rate limited by server"
         case .serverError(let code):

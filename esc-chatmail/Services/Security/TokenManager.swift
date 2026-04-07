@@ -108,6 +108,14 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
         self.init(keychainService: KeychainService.shared, authSession: .shared)
     }
 
+    /// Updates the in-memory token cache on the main actor.
+    /// Accessible to extension files (unlike private authSession).
+    func updateMemoryCache(accessToken: String) async {
+        await MainActor.run {
+            authSession.accessToken = accessToken
+        }
+    }
+
     // MARK: - Public Methods
 
     nonisolated func getCurrentToken() async throws -> String {

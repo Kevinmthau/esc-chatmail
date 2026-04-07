@@ -23,6 +23,10 @@ extension TokenManager {
                     expirationDate: tokens.expirationDate
                 )
 
+                // Ensure memory cache is updated before returning so concurrent
+                // callers to getCurrentToken() see the fresh token immediately
+                await self.updateMemoryCache(accessToken: tokens.accessToken)
+
                 await refreshBackoff.reset()
                 return tokens.accessToken
 
@@ -31,10 +35,12 @@ extension TokenManager {
 
                 // Check if error is retryable
                 if !isRetryableError(error) {
+                    // Wrap invalid_grant errors specifically so callers can detect revoked credentials
+                    let thrownError: Error = isInvalidGrantError(error) ? TokenManagerError.invalidCredentials : error
                     await MainActor.run {
-                        self.lastRefreshError = error
+                        self.lastRefreshError = thrownError
                     }
-                    throw error
+                    throw thrownError
                 }
 
                 // Log retry attempt
@@ -130,15 +136,6 @@ extension TokenManager {
         // Check underlying error recursively
         if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
             return isInvalidGrantError(underlyingError)
-        }
-
-        // Last resort: check localizedDescription, but only for 400 errors
-        // This is less reliable but catches edge cases
-        if nsError.code == 400 {
-            let description = nsError.localizedDescription.lowercased()
-            if description.contains("invalid_grant") {
-                return true
-            }
         }
 
         return false

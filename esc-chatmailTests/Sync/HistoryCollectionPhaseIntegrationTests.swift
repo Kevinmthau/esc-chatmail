@@ -65,6 +65,40 @@ final class HistoryCollectionPhaseIntegrationTests: XCTestCase {
         }
     }
 
+    func testExecute_keepsDeletionOnlyHistoryRecordsForLaterProcessing() async throws {
+        let mockAPI = MockGmailAPIClient()
+        let deletedRecord = HistoryRecord(
+            id: "history-delete",
+            messages: nil,
+            messagesAdded: nil,
+            messagesDeleted: [HistoryMessageDeleted(message: MessageListItem(id: "deleted-message", threadId: nil))],
+            labelsAdded: nil,
+            labelsRemoved: nil
+        )
+        mockAPI.setHistoryResponsesByPageToken([
+            (
+                pageToken: nil,
+                response: HistoryResponse(
+                    history: [deletedRecord],
+                    nextPageToken: nil,
+                    historyId: "1001"
+                )
+            )
+        ])
+
+        let phase = HistoryCollectionPhase(
+            messageFetcher: MessageFetcher(apiClient: mockAPI),
+            historyProcessor: HistoryProcessor()
+        )
+
+        let result = try await phase.execute(input: "1000", context: makePhaseContext())
+
+        XCTAssertEqual(result.records.map(\.id), ["history-delete"])
+        XCTAssertTrue(result.newMessageIds.isEmpty)
+        XCTAssertEqual(result.latestHistoryId, "1001")
+        XCTAssertFalse(result.wasTruncated)
+    }
+
     private func makePhaseContext() -> SyncPhaseContext {
         let testStack = TestCoreDataStack()
         let defaults = UserDefaults(suiteName: defaultsSuiteName)!

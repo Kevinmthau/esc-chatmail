@@ -10,6 +10,10 @@ final class AttachmentThumbnailLoader: ObservableObject {
     private let cache = AttachmentCacheActor.shared
     private var loadTask: Task<Void, Never>?
 
+    deinit {
+        loadTask?.cancel()
+    }
+
     /// Load thumbnail from preview path
     func load(attachmentId: String?, previewPath: String?) {
         guard let attachmentId, image == nil, !isLoading else { return }

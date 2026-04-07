@@ -301,6 +301,17 @@ struct ComposeView: View {
                 }
 
                 if viewModel.isForwardMode {
+                    if viewModel.skippedForwardAttachmentCount > 0 {
+                        let count = viewModel.skippedForwardAttachmentCount
+                        HStack(spacing: 4) {
+                            Image(systemName: "exclamationmark.triangle")
+                            Text("\(count) attachment\(count == 1 ? "" : "s") could not be included (not downloaded)")
+                        }
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                        .padding(.horizontal, 12)
+                    }
+
                     forwardPreviewSection
                 }
             }

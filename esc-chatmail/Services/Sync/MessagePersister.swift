@@ -52,7 +52,7 @@ actor MessagePersister {
     /// Saves a Gmail message to Core Data.
     /// - Parameters:
     ///   - gmailMessage: The Gmail message to save
-    ///   - labelIds: Pre-fetched label IDs (Sendable). Labels are fetched inside context.perform for thread safety.
+    ///   - labelIds: Pre-fetched label IDs (Sendable) used to scope label fetches inside `context.perform`.
     ///   - myAliases: Set of user's email aliases
     ///   - context: The Core Data context to save in
     func saveMessage(

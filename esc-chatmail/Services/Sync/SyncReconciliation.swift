@@ -278,6 +278,7 @@ final class SyncReconciliation: Sendable {
             let messageRequest = Message.fetchRequest()
             messageRequest.predicate = NSPredicate(format: "id IN %@", messageIds)
             messageRequest.relationshipKeyPathsForPrefetching = ["labels", "conversation"]
+            messageRequest.fetchBatchSize = 50
 
             let localMessages: [Message]
             do {

@@ -45,6 +45,8 @@ struct HistoryCollectionPhase: SyncPhase {
                 log.debug("Received \(history.count) history records")
                 let newIds = historyProcessor.extractNewMessageIds(from: history)
                 allNewMessageIds.formUnion(newIds)
+                // Preserve the original history records for downstream lightweight processing.
+                // Deletions and any future lightweight operations rely on the full record payload.
                 allHistoryRecords.append(contentsOf: history)
             }
 

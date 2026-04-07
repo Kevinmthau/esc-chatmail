@@ -249,6 +249,9 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                                 currentRequest.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
                                 // Retry with new token
                                 continue
+                            } catch TokenManagerError.invalidCredentials {
+                                Log.error("Refresh token revoked, user must re-authenticate", category: .api)
+                                throw APIError.credentialsRevoked
                             } catch {
                                 Log.error("Token refresh failed during 401 recovery: \(error.localizedDescription)", category: .api)
                                 throw APIError.authenticationError

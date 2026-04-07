@@ -35,6 +35,7 @@ final class ComposeViewModel: ObservableObject {
     @Published var isSending = false
     @Published var error: Error?
     @Published var showError = false
+    @Published var skippedForwardAttachmentCount = 0
     private(set) var lastSentConversationObjectID: NSManagedObjectID?
     private var backgroundSendTasks: [String: Task<Void, Never>] = [:]
     private var hasSetupMode = false
@@ -150,11 +151,15 @@ final class ComposeViewModel: ObservableObject {
             forwardedInlineAttachments = result.inlineAttachments
 
             // Copy regular attachments from original message
+            var skipped = 0
             for original in result.attachments {
                 if let copied = attachmentManager.copyAttachmentForForward(original) {
                     attachmentManager.addAttachment(copied)
+                } else {
+                    skipped += 1
                 }
             }
+            skippedForwardAttachmentCount = skipped
         case .reply(let conversation, _):
             recipientManager.setupReplyRecipients(from: conversation)
         case .newMessage, .newEmail:

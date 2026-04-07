@@ -36,7 +36,7 @@ struct MessageContentView: View {
             // 3. processedText(snippet) - Gmail API snippet with processing (truncated, rarely used)
             // 4. message.snippet - Raw truncated snippet (last resort)
             // Note: We skip message.cleanedSnippet because TextSnippetCreator destroys all newlines
-            if let text = fullTextContent ?? processedText(message.bodyText) ?? processedText(message.snippet) ?? message.snippet, !text.isEmpty {
+            if let text = fullTextContent ?? cachedProcessedText ?? message.snippet, !text.isEmpty {
                 textBubble(text: text)
             } else if message.hasHTMLSource {
                 // No text content but HTML exists - show a tappable bubble to open full email
@@ -142,10 +142,26 @@ struct MessageContentView: View {
         onOpenFullMessage()
     }
 
+    /// Pre-computes the fallback processed text from bodyText or snippet.
+    /// Avoids calling processedText() multiple times during view body evaluation.
+    private var cachedProcessedText: String? {
+        Self.resolvedProcessedText(bodyText: message.bodyText, snippet: message.snippet)
+    }
+
+    static func resolvedProcessedText(bodyText: String?, snippet: String?) -> String? {
+        if let processedBody = processedText(bodyText) {
+            return processedBody
+        }
+        if let processedSnippet = processedText(snippet) {
+            return processedSnippet
+        }
+        return nil
+    }
+
     /// Processes text while preserving paragraph structure and decoding HTML entities
     /// Uses the same processing as ProcessedTextCache but preserves line breaks
     /// (unlike cleanedSnippet which destroyed all newlines for conversation list previews)
-    private func processedText(_ text: String?) -> String? {
+    private static func processedText(_ text: String?) -> String? {
         let result = ChatBubbleTextProcessor.process(
             content: text,
             options: ChatBubbleTextProcessorOptions(

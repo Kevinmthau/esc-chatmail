@@ -42,6 +42,9 @@ extension MimeBuilder {
         mime += "Content-Transfer-Encoding: 8bit\r\n"
         mime += "\r\n"
         mime += body
+        if !body.hasSuffix("\r\n") {
+            mime += "\r\n"
+        }
 
         return mime.data(using: .utf8) ?? Data()
     }

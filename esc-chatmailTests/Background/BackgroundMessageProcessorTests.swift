@@ -368,6 +368,17 @@ final class BackgroundMessageProcessorTests: XCTestCase {
     }
 }
 
+final class BackgroundSyncErrorHandlerTests: XCTestCase {
+    func testHandleError_doesNotRetryRevokedCredentials() {
+        let handler = BackgroundSyncErrorHandler()
+        let action = handler.handleError(APIError.credentialsRevoked)
+
+        guard case .abortNoRetry = action else {
+            return XCTFail("Expected abortNoRetry for revoked credentials, got \(action)")
+        }
+    }
+}
+
 private final class MockBackgroundSyncCoordinator: @unchecked Sendable, BackgroundSyncMessageCoordinating {
     private let lock = NSLock()
     private let seedConversationObjectID: NSManagedObjectID

@@ -156,8 +156,8 @@ extension PendingActionsManager {
         // API errors - check specific cases
         if let apiError = error as? APIError {
             switch apiError {
-            case .authenticationError, .notFound:
-                // 401/403 and 404 - resource doesn't exist or no access, retrying won't help
+            case .authenticationError, .credentialsRevoked, .notFound:
+                // 401/403/revoked and 404 - resource doesn't exist or no access, retrying won't help
                 return false
             case .rateLimited, .serverError, .networkError, .timeout:
                 // Transient errors that may succeed on retry

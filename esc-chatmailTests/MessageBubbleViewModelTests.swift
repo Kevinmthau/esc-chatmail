@@ -202,3 +202,38 @@ actor MockMessageBubbleLoader: MessageBubbleLoading {
         contentCalls
     }
 }
+
+final class MessageBubbleRenderingHelpersTests: XCTestCase {
+    func testContentSignature_changesWhenBodyDiffersAfter64Characters() {
+        let sharedPrefix = String(repeating: "a", count: 64)
+
+        let firstSignature = MessageBubble.contentSignature(
+            bodyStorageURI: nil,
+            bodyText: sharedPrefix + " tail-one",
+            snippet: "Snippet",
+            hasHTMLSource: false,
+            contactRefreshToken: 0
+        )
+        let secondSignature = MessageBubble.contentSignature(
+            bodyStorageURI: nil,
+            bodyText: sharedPrefix + " tail-two",
+            snippet: "Snippet",
+            hasHTMLSource: false,
+            contactRefreshToken: 0
+        )
+
+        XCTAssertNotEqual(firstSignature, secondSignature)
+    }
+
+    func testResolvedProcessedText_fallsBackToProcessedSnippetWhenBodyCleansToNil() {
+        let result = MessageContentView.resolvedProcessedText(
+            bodyText: """
+            On Tue, Jan 2, 2026 at 9:41 AM Alice Example <alice@example.com> wrote:
+            > Earlier message
+            """,
+            snippet: "Tom &amp; Jerry"
+        )
+
+        XCTAssertEqual(result, "Tom & Jerry")
+    }
+}

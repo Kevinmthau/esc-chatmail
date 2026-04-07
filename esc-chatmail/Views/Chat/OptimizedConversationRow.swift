@@ -3,7 +3,7 @@ import CoreData
 
 // MARK: - Optimized Conversation Row
 struct OptimizedConversationRow: View {
-    @ObservedObject var conversation: Conversation
+    let snapshot: ConversationSnapshot
     let onAppear: () -> Void
 
     private let authSession = AuthSession.shared
@@ -18,28 +18,17 @@ struct OptimizedConversationRow: View {
 
     @MainActor
     init(conversation: Conversation, onAppear: @escaping () -> Void) {
-        self._conversation = ObservedObject(wrappedValue: conversation)
+        self.snapshot = ConversationSnapshot(from: conversation)
         self.onAppear = onAppear
         self.conversationObjectID = conversation.objectID
         self.conversationContext = conversation.managedObjectContext
-        self.fallbackDisplayName = conversation.displayName
-        self._displayName = State(initialValue: conversation.displayName ?? "")
+        self.fallbackDisplayName = snapshot.displayNameHint
+        self._displayName = State(initialValue: snapshot.displayNameHint ?? "")
     }
 
     private var timeString: String {
-        guard let date = conversation.lastMessageDate else { return "" }
-
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: date, relativeTo: Date())
-    }
-
-    private var previewText: String {
-        if let latestMessage = conversation.messages?.max(by: { $0.internalDate < $1.internalDate }),
-           let preview = latestMessage.conversationPreviewText {
-            return preview
-        }
-        return conversation.snippet ?? ""
+        guard let date = snapshot.lastMessageDate else { return "" }
+        return TimestampFormatter.format(date)
     }
 
     var body: some View {
@@ -51,7 +40,7 @@ struct OptimizedConversationRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 // Header
                 HStack {
-                    Text(displayName.isEmpty ? (conversation.displayName ?? "Unknown") : displayName)
+                    Text(displayName.isEmpty ? (snapshot.displayNameHint ?? "Unknown") : displayName)
                         .font(.headline)
                         .lineLimit(1)
 
@@ -63,27 +52,21 @@ struct OptimizedConversationRow: View {
                 }
 
                 // Snippet
-                Text(previewText)
+                Text(snapshot.snippet ?? "")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .lineLimit(2)
 
                 // Indicators
                 HStack(spacing: 8) {
-                    if conversation.pinned {
+                    if snapshot.pinned {
                         Image(systemName: "pin.fill")
                             .font(.caption)
                             .foregroundColor(.orange)
                     }
 
-                    if conversation.inboxUnreadCount > 0 {
-                        UnreadBadge(count: Int(conversation.inboxUnreadCount))
-                    }
-
-                    if conversation.hasInbox {
-                        Image(systemName: "tray.fill")
-                            .font(.caption)
-                            .foregroundColor(.blue)
+                    if snapshot.inboxUnreadCount > 0 {
+                        UnreadBadge(count: Int(snapshot.inboxUnreadCount))
                     }
                 }
             }

@@ -94,24 +94,19 @@ actor DiskImageCache: PeriodicCleanupHandler {
         estimatedCacheSize += Int64(data.count)
 
         // Check if cleanup is needed (rate limited to avoid frequent disk scans)
-        // Also prevent concurrent cleanups with isCleaningUp flag
         if estimatedCacheSize > maxCacheSize &&
            Date().timeIntervalSince(lastCleanupTime) > cleanupInterval &&
            !isCleaningUp {
             isCleaningUp = true
             lastCleanupTime = Date()
-            Task.detached(priority: .utility) { [self] in
-                await self.cleanExpiredEntries()
-                // Update estimated size after cleanup (measure actual disk usage)
-                let size = await self.totalSize()
-                await self.updateEstimatedSize(size)
-                await self.setCleaningUp(false)
+            // Run cleanup within the actor to prevent concurrent cleanup races
+            Task {
+                await cleanExpiredEntries()
+                let size = totalSize()
+                estimatedCacheSize = size
+                isCleaningUp = false
             }
         }
-    }
-
-    private func setCleaningUp(_ value: Bool) {
-        isCleaningUp = value
     }
 
     /// Saves UIImage to cache (as JPEG)
@@ -175,7 +170,7 @@ actor DiskImageCache: PeriodicCleanupHandler {
     private static func performCleanup(cacheDirectory: URL, maxCacheAge: TimeInterval, maxCacheSize: Int64, fileManager: FileManager) {
         guard let enumerator = fileManager.enumerator(
             at: cacheDirectory,
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+            includingPropertiesForKeys: [.contentAccessDateKey, .contentModificationDateKey, .fileSizeKey],
             options: [.skipsHiddenFiles]
         ) else { return }
 
@@ -184,19 +179,20 @@ actor DiskImageCache: PeriodicCleanupHandler {
         var fileInfos: [(url: URL, date: Date, size: Int64)] = []
 
         while let fileURL = enumerator.nextObject() as? URL {
-            guard let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
-                  let modDate = values.contentModificationDate,
+            guard let values = try? fileURL.resourceValues(forKeys: [.contentAccessDateKey, .contentModificationDateKey, .fileSizeKey]),
                   let fileSize = values.fileSize else {
                 continue
             }
 
-            let age = Date().timeIntervalSince(modDate)
+            // Use access date for LRU eviction, fall back to modification date
+            let accessDate = values.contentAccessDate ?? values.contentModificationDate ?? .distantPast
+            let age = Date().timeIntervalSince(accessDate)
 
             if age > maxCacheAge {
                 filesToDelete.append(fileURL)
             } else {
                 totalSize += Int64(fileSize)
-                fileInfos.append((fileURL, modDate, Int64(fileSize)))
+                fileInfos.append((fileURL, accessDate, Int64(fileSize)))
             }
         }
 
@@ -205,7 +201,7 @@ actor DiskImageCache: PeriodicCleanupHandler {
             FileSystemErrorHandler.removeItem(at: fileURL, category: .general)
         }
 
-        // If still over size limit, delete oldest files
+        // If still over size limit, delete least-recently-accessed files
         if totalSize > maxCacheSize {
             let sortedFiles = fileInfos.sorted { $0.date < $1.date }
             var currentSize = totalSize

@@ -69,9 +69,10 @@ extension MessagePersister {
             let messageLabelIds = Set(processedMessage.labelIds)
             let currentHasInboxLabel = messageLabelIds.contains("INBOX")
             existingMessage.labels = nil
-            let labelCache = self.fetchLabelsByIds(messageLabelIds, in: context)
+            let availableLabelIds = labelIds.map { messageLabelIds.intersection($0) } ?? messageLabelIds
+            let effectiveLabelCache = self.fetchLabelsByIds(availableLabelIds, in: context)
             for labelId in processedMessage.labelIds {
-                if let label = labelCache[labelId] {
+                if let label = effectiveLabelCache[labelId] {
                     existingMessage.addToLabels(label)
                 }
             }
@@ -261,33 +262,35 @@ extension MessagePersister {
 
     /// Removes duplicate inline attachments, keeping only the first per fingerprint.
     nonisolated func deduplicateInlineAttachments(on message: Message, in context: NSManagedObjectContext) {
-        var bestAttachmentByContentID: [String: Attachment] = [:]
+        autoreleasepool {
+            var bestAttachmentByContentID: [String: Attachment] = [:]
 
-        for attachment in message.attachmentsArray {
-            guard let contentID = normalizedContentID(attachment.contentId) else { continue }
+            for attachment in message.attachmentsArray {
+                guard let contentID = normalizedContentID(attachment.contentId) else { continue }
 
-            if let existing = bestAttachmentByContentID[contentID] {
-                if shouldPreferInlineAttachment(attachment, over: existing) {
-                    context.delete(existing)
-                    bestAttachmentByContentID[contentID] = attachment
+                if let existing = bestAttachmentByContentID[contentID] {
+                    if shouldPreferInlineAttachment(attachment, over: existing) {
+                        context.delete(existing)
+                        bestAttachmentByContentID[contentID] = attachment
+                    } else {
+                        context.delete(attachment)
+                    }
                 } else {
-                    context.delete(attachment)
+                    bestAttachmentByContentID[contentID] = attachment
                 }
-            } else {
-                bestAttachmentByContentID[contentID] = attachment
             }
-        }
 
-        var seen = Set<String>()
-        for attachment in message.attachmentsArray {
-            if attachment.isDeleted {
-                continue
-            }
-            guard let fp = inlineAttachmentFingerprint(attachment) else { continue }
-            if seen.contains(fp) {
-                context.delete(attachment)
-            } else {
-                seen.insert(fp)
+            var seen = Set<String>()
+            for attachment in message.attachmentsArray {
+                if attachment.isDeleted {
+                    continue
+                }
+                guard let fp = inlineAttachmentFingerprint(attachment) else { continue }
+                if seen.contains(fp) {
+                    context.delete(attachment)
+                } else {
+                    seen.insert(fp)
+                }
             }
         }
     }

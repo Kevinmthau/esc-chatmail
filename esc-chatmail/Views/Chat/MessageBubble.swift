@@ -1,4 +1,5 @@
 import SwiftUI
+import CryptoKit
 
 struct MessageBubble: View {
     let message: Message
@@ -238,12 +239,33 @@ struct MessageBubble: View {
     }
 
     private var loadSignature: String {
-        let bodyTextHash = message.bodyText?.hashValue ?? 0
-        let snippetHash = message.snippet?.hashValue ?? 0
-        return "\(message.bodyStorageURI ?? "")|\(bodyTextHash)|\(snippetHash)|\(message.hasHTMLSource)|contacts:\(contactRefreshToken)"
+        Self.contentSignature(
+            bodyStorageURI: message.bodyStorageURI,
+            bodyText: message.bodyTextValue,
+            snippet: message.snippet,
+            hasHTMLSource: message.hasHTMLSource,
+            contactRefreshToken: contactRefreshToken
+        )
     }
 
     private func openFullMessage() {
         onOpenFullMessage(message)
+    }
+
+    static func contentSignature(
+        bodyStorageURI: String?,
+        bodyText: String?,
+        snippet: String?,
+        hasHTMLSource: Bool,
+        contactRefreshToken: Int
+    ) -> String {
+        "\(bodyStorageURI ?? "")|\(contentFingerprint(for: bodyText))|\(contentFingerprint(for: snippet))|\(hasHTMLSource)|contacts:\(contactRefreshToken)"
+    }
+
+    private static func contentFingerprint(for text: String?) -> String {
+        guard let text else { return "nil" }
+        return SHA256.hash(data: Data(text.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 }

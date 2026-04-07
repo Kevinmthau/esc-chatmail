@@ -78,9 +78,10 @@ extension MessagePersister {
             let messageLabelIds = Set(processedMessage.labelIds)
             let hasInboxLabel = messageLabelIds.contains("INBOX")
             var addedLabelIds: [String] = []
-            let labelCache = self.fetchLabelsByIds(messageLabelIds, in: context)
+            let availableLabelIds = labelIds.map { messageLabelIds.intersection($0) } ?? messageLabelIds
+            let effectiveLabelCache = self.fetchLabelsByIds(availableLabelIds, in: context)
             for labelId in processedMessage.labelIds {
-                if let label = labelCache[labelId] {
+                if let label = effectiveLabelCache[labelId] {
                     message.addToLabels(label)
                     addedLabelIds.append(labelId)
                 }

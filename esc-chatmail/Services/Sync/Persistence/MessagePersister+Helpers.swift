@@ -171,7 +171,18 @@ extension MessagePersister {
     }
 
     /// Recomputes inbox-specific conversation indicators from the conversation's message set.
+    /// Note: For best performance, prefetch "messages" and "messages.labels" on the
+    /// conversation's fetch request via relationshipKeyPathsForPrefetching before calling this.
     nonisolated func refreshConversationInboxIndicators(_ conversation: Conversation) {
+        // Prefetch labels for all messages to avoid N individual faults
+        if let context = conversation.managedObjectContext, let messages = conversation.messages, !messages.isEmpty {
+            let messageIDs = messages.compactMap { $0.objectID }
+            let prefetchRequest = Message.fetchRequest()
+            prefetchRequest.predicate = NSPredicate(format: "SELF IN %@", messageIDs)
+            prefetchRequest.relationshipKeyPathsForPrefetching = ["labels"]
+            _ = try? context.fetch(prefetchRequest)
+        }
+
         guard let messages = conversation.messages else {
             conversation.hasInbox = false
             conversation.inboxUnreadCount = 0

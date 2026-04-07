@@ -57,8 +57,9 @@ final class MessageBubbleViewModel: ObservableObject {
             senderAvatarURL = loadedSender.avatarURL
             senderImageData = loadedSender.imageData
 
+            let loadedContent = await contentResult
             guard isStillActive(context) else { return }
-            apply(await contentResult)
+            apply(loadedContent)
             return
         }
 

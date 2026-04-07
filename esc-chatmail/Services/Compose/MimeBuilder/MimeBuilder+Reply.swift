@@ -158,10 +158,6 @@ extension MimeBuilder {
     }
 
     static func base64UrlEncode(_ data: Data) -> String {
-        var base64 = data.base64EncodedString()
-        base64 = base64.replacingOccurrences(of: "+", with: "-")
-        base64 = base64.replacingOccurrences(of: "/", with: "_")
-        base64 = base64.replacingOccurrences(of: "=", with: "")
-        return base64
+        data.base64UrlEncodedString()
     }
 }

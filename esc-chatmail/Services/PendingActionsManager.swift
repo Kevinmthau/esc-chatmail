@@ -61,8 +61,8 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         guard !isInitialized else { return }
         isInitialized = true
 
-        Task { [weak self] in
-            await self?.recoverStuckProcessingActions()
+        Task {
+            await recoverStuckProcessingActions()
         }
 
         networkMonitor.onConnectivityChange = { [weak self] isConnected in

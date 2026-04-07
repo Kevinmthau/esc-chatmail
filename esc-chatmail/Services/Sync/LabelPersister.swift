@@ -42,28 +42,6 @@ extension MessagePersister {
         return Dictionary(uniqueKeysWithValues: labels.map { ($0.id, $0) })
     }
 
-    /// Prefetches all labels into a dictionary for efficient lookups
-    /// @available(*, deprecated, message: "Use prefetchLabelIds instead to avoid passing NSManagedObjects across async boundaries")
-    func prefetchLabels(in context: NSManagedObjectContext) async -> [String: Label] {
-        return await context.perform {
-            let request = Label.fetchRequest()
-            request.fetchBatchSize = 100
-            let labels: [Label]
-            do {
-                labels = try context.fetch(request)
-            } catch {
-                Log.error("Failed to prefetch labels", category: .coreData, error: error)
-                return [:]
-            }
-            var labelCache: [String: Label] = [:]
-            for label in labels {
-                labelCache[label.id] = label
-            }
-            Log.debug("Prefetched \(labelCache.count) labels into cache", category: .sync)
-            return labelCache
-        }
-    }
-
     /// Saves labels from Gmail API to Core Data with upsert logic
     /// Labels are upserted by ID to prevent duplicate Label rows
     func saveLabels(_ gmailLabels: [GmailLabel], in context: NSManagedObjectContext) async {

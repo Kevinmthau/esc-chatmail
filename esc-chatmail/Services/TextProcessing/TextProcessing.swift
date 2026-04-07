@@ -82,44 +82,13 @@ enum TextProcessing {
         // Remove truncated opening tags (e.g., snippet cut in middle of `<div style="...`).
         text = text.replacingOccurrences(of: "<[a-zA-Z][^>\\n]*(?=\\n|$)", with: "", options: .regularExpression, range: nil)
 
-        // Decode HTML entities (non-breaking space variants)
-        text = text.replacingOccurrences(of: "&nbsp;", with: " ")
-        text = text.replacingOccurrences(of: "&#160;", with: " ")
-        text = text.replacingOccurrences(of: "&#xA0;", with: " ", options: .caseInsensitive)
-        text = text.replacingOccurrences(of: "&amp;", with: "&")
-        text = text.replacingOccurrences(of: "&lt;", with: "<")
-        text = text.replacingOccurrences(of: "&gt;", with: ">")
-        text = text.replacingOccurrences(of: "&quot;", with: "\"")
-        text = text.replacingOccurrences(of: "&#39;", with: "'")
-        text = text.replacingOccurrences(of: "&#34;", with: "\"")
-        text = text.replacingOccurrences(of: "&apos;", with: "'")
+        // Decode HTML entities in a single pass using the pre-built lookup table
+        text = decodeHTMLEntities(text)
 
-        // Zero-width characters (strip entirely - they're invisible formatting)
-        text = text.replacingOccurrences(of: "&zwnj;", with: "")
-        text = text.replacingOccurrences(of: "&zwj;", with: "")
-        text = text.replacingOccurrences(of: "&#8204;", with: "")
-        text = text.replacingOccurrences(of: "&#8205;", with: "")
-        text = text.replacingOccurrences(of: "&#x200C;", with: "", options: .caseInsensitive)
-        text = text.replacingOccurrences(of: "&#x200D;", with: "", options: .caseInsensitive)
-        text = text.replacingOccurrences(of: "\u{200C}", with: "")
-        text = text.replacingOccurrences(of: "\u{200D}", with: "")
-        text = text.replacingOccurrences(of: "\u{200B}", with: "") // zero-width space
-
-        // Smart quotes and other typographic entities
-        text = text.replacingOccurrences(of: "&ldquo;", with: "\"")
-        text = text.replacingOccurrences(of: "&rdquo;", with: "\"")
-        text = text.replacingOccurrences(of: "&lsquo;", with: "'")
-        text = text.replacingOccurrences(of: "&rsquo;", with: "'")
-        text = text.replacingOccurrences(of: "&#8220;", with: "\"")
-        text = text.replacingOccurrences(of: "&#8221;", with: "\"")
-        text = text.replacingOccurrences(of: "&#8216;", with: "'")
-        text = text.replacingOccurrences(of: "&#8217;", with: "'")
-        text = text.replacingOccurrences(of: "&ndash;", with: "–")
-        text = text.replacingOccurrences(of: "&mdash;", with: "—")
-        text = text.replacingOccurrences(of: "&#8211;", with: "–")
-        text = text.replacingOccurrences(of: "&#8212;", with: "—")
-        text = text.replacingOccurrences(of: "&hellip;", with: "…")
-        text = text.replacingOccurrences(of: "&#8230;", with: "…")
+        // Strip zero-width Unicode characters in one pass
+        text = text.unicodeScalars.filter { scalar in
+            scalar.value != 0x200B && scalar.value != 0x200C && scalar.value != 0x200D
+        }.map { String($0) }.joined()
 
         // Clean up whitespace
         text = text.replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression, range: nil)
@@ -327,6 +296,71 @@ enum TextProcessing {
         // Filter out empty strings and join with double newlines for paragraph breaks
         let paragraphs = result.filter { !$0.isEmpty }
         return paragraphs.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: - HTML Entity Decoding
+
+    /// Lookup table for HTML entities → replacement strings.
+    /// Using a single-pass scanner instead of 30+ sequential replacingOccurrences calls.
+    private static let htmlEntityMap: [String: String] = [
+        "nbsp": " ", "amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'",
+        "zwnj": "", "zwj": "",
+        "ldquo": "\"", "rdquo": "\"", "lsquo": "'", "rsquo": "'",
+        "ndash": "–", "mdash": "—", "hellip": "…",
+    ]
+
+    /// Lookup for numeric character references (&#NNN; and &#xHH;)
+    private static let numericEntityMap: [String: String] = [
+        "160": " ", "39": "'", "34": "\"",
+        "8204": "", "8205": "",
+        "8220": "\"", "8221": "\"", "8216": "'", "8217": "'",
+        "8211": "–", "8212": "—", "8230": "…",
+    ]
+
+    private static let hexEntityMap: [String: String] = [
+        "a0": " ", "200c": "", "200d": "",
+    ]
+
+    /// Decodes HTML entities in a single pass using a scanner approach.
+    private static func decodeHTMLEntities(_ text: String) -> String {
+        guard text.contains("&") else { return text }
+
+        var result = ""
+        result.reserveCapacity(text.count)
+        var index = text.startIndex
+
+        while index < text.endIndex {
+            if text[index] == "&" {
+                // Look for closing semicolon within a reasonable range
+                let searchEnd = text.index(index, offsetBy: 12, limitedBy: text.endIndex) ?? text.endIndex
+                if let semicolonIndex = text[index...].prefix(through: searchEnd > index ? text.index(before: searchEnd) : index).firstIndex(of: ";"),
+                   semicolonIndex > text.index(after: index) {
+                    let entityStart = text.index(after: index)
+                    let entity = String(text[entityStart..<semicolonIndex])
+
+                    var replacement: String?
+                    if entity.hasPrefix("#x") || entity.hasPrefix("#X") {
+                        let hex = String(entity.dropFirst(2)).lowercased()
+                        replacement = hexEntityMap[hex]
+                    } else if entity.hasPrefix("#") {
+                        let num = String(entity.dropFirst())
+                        replacement = numericEntityMap[num]
+                    } else {
+                        replacement = htmlEntityMap[entity.lowercased()]
+                    }
+
+                    if let replacement = replacement {
+                        result += replacement
+                        index = text.index(after: semicolonIndex)
+                        continue
+                    }
+                }
+            }
+            result.append(text[index])
+            index = text.index(after: index)
+        }
+
+        return result
     }
 
     private static func shouldPreserveLineBreakBetween(_ currentParagraph: String, and nextLine: String) -> Bool {
