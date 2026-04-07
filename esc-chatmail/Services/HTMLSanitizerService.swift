@@ -115,4 +115,19 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
             displayPurpose: displayPurpose
         )
     }
+
+    /// Wraps already-sanitized HTML for display without re-sanitizing.
+    /// Use this when the caller has already applied sanitize() to avoid
+    /// redundant regex passes that can corrupt complex newsletter HTML.
+    func wrapSanitizedHTMLForDisplay(
+        _ html: String,
+        isDarkMode: Bool,
+        displayPurpose: HTMLDisplayPurpose = .preview
+    ) -> String {
+        displayWrapper.wrapHTMLForDisplay(
+            html,
+            isDarkMode: isDarkMode,
+            displayPurpose: displayPurpose
+        )
+    }
 }

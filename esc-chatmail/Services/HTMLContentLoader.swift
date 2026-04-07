@@ -104,6 +104,7 @@ final class HTMLContentLoader {
                 }
                 return HTMLLoadResult(html: wrapped.html, source: .messageId)
             }
+            Log.debug("loadContent: Method 1 (messageId file) rejected by wrappedHTMLIfMeaningful for \(messageId) (htmlLen=\(html.count))", category: .ui)
         }
 
         // Method 2: Try loading from stored URI
@@ -126,6 +127,7 @@ final class HTMLContentLoader {
                 }
                 return HTMLLoadResult(html: wrapped.html, source: .storageURI)
             }
+            Log.debug("loadContent: Method 2 (storageURI) rejected by wrappedHTMLIfMeaningful for \(messageId) (htmlLen=\(html.count))", category: .ui)
         }
 
         // Method 3: Extract embedded HTML from raw RFC822 source stored in bodyText
@@ -162,6 +164,8 @@ final class HTMLContentLoader {
             }
             return HTMLLoadResult(html: wrapped.html, source: .recovered)
         }
+
+        Log.debug("loadContent: All HTML methods failed for \(messageId), falling back to plain text (bodyText=\(bodyText?.count ?? 0) chars)", category: .ui)
 
         // Method 5: Plain text fallback (don't cache as it's trivial to generate)
         if let text = bodyText, !text.isEmpty {
@@ -244,11 +248,13 @@ final class HTMLContentLoader {
         displayPurpose: HTMLDisplayPurpose
     ) async -> WrappedHTMLResult? {
         let preparedHTML = prepareHTMLForDisplay(html, cleanupMode: cleanupMode)
+        let rewriteImageHints = displayPurpose != .original
         let sanitizedHTML = sanitizer.sanitize(
             preparedHTML,
-            rewriteModernImageFormatHints: displayPurpose != .original
+            rewriteModernImageFormatHints: rewriteImageHints
         )
         guard HTMLMeaningfulContentChecker.hasMeaningfulContent(sanitizedHTML) else {
+            Log.debug("wrappedHTMLIfMeaningful: sanitized HTML not meaningful for \(messageId) (len=\(sanitizedHTML.count))", category: .ui)
             return nil
         }
 
@@ -263,7 +269,10 @@ final class HTMLContentLoader {
                 in: sanitizedHTML,
                 senderEmail: senderEmail
             )
-            rewrittenHTML = sanitizer.sanitize(originalSafeHTML)
+            rewrittenHTML = sanitizer.sanitize(
+                originalSafeHTML,
+                rewriteModernImageFormatHints: rewriteImageHints
+            )
             shouldCache = true
         case .preview:
             let cachedRewrite = await remoteImageAttachmentFallback.cachedInlineAttachmentStyleImages(
@@ -277,12 +286,16 @@ final class HTMLContentLoader {
             shouldCache = !cachedRewrite.hasPendingUpdates
         }
 
-        let wrapped = sanitizer.wrapHTMLForDisplay(
+        // Use wrapSanitizedHTMLForDisplay to avoid re-sanitizing already-sanitized HTML.
+        // Triple sanitization (sanitize → sanitize → wrapHTMLForDisplay.sanitize) was corrupting
+        // complex newsletter HTML with nested tables and encoded attributes.
+        let wrapped = sanitizer.wrapSanitizedHTMLForDisplay(
             rewrittenHTML,
             isDarkMode: isDarkMode,
             displayPurpose: displayPurpose
         )
         guard HTMLMeaningfulContentChecker.hasMeaningfulContent(wrapped) else {
+            Log.debug("wrappedHTMLIfMeaningful: wrapped HTML not meaningful for \(messageId) (len=\(wrapped.count))", category: .ui)
             return nil
         }
 
