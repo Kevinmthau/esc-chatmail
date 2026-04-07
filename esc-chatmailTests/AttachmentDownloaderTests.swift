@@ -612,6 +612,44 @@ final class AttachmentDownloaderTests: XCTestCase {
         handler.deleteHTML(for: messageId)
     }
 
+    func testMessage_displayableAttachments_plainBubble_deduplicatesRepeatedRegularFiles() throws {
+        let message = MessageBuilder()
+            .withId("msg-duplicate-regular-files-\(UUID().uuidString)")
+            .withAttachments()
+            .build(in: context)
+
+        for suffix in 1...2 {
+            let _ = AttachmentBuilder()
+                .withId("att-invoice-dup-\(suffix)")
+                .withFilename("Invoice-4B07C32C-0025.pdf")
+                .withMimeType("application/pdf")
+                .withByteSize(91_248)
+                .forMessage(message)
+                .build(in: context)
+        }
+
+        for suffix in 1...2 {
+            let _ = AttachmentBuilder()
+                .withId("att-receipt-dup-\(suffix)")
+                .withFilename("Receipt-2243-8647-5708.pdf")
+                .withMimeType("application/pdf")
+                .withByteSize(88_032)
+                .forMessage(message)
+                .build(in: context)
+        }
+
+        try testStack.saveViewContext()
+
+        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
+        let displayable = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: false) ?? []
+
+        XCTAssertEqual(displayable.count, 2)
+        XCTAssertEqual(displayable.map(\.filename).sorted(), [
+            "Invoice-4B07C32C-0025.pdf",
+            "Receipt-2243-8647-5708.pdf"
+        ])
+    }
+
     // MARK: - Local Attachment Tests
 
     func testAttachment_isLocalAttachment_detectsLocalIds() throws {

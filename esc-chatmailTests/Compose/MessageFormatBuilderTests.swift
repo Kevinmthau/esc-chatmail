@@ -29,6 +29,41 @@ final class MessageFormatBuilderTests: XCTestCase {
         super.tearDown()
     }
 
+    func testFormatForwardedMessage_deduplicatesRepeatedRegularAttachments() {
+        let testStack = TestCoreDataStack()
+        let context = testStack.viewContext
+        let message = MessageBuilder()
+            .withId("forward-duplicate-attachments")
+            .withAttachments()
+            .build(in: context)
+
+        for suffix in 1...2 {
+            let _ = AttachmentBuilder()
+                .withId("att-invoice-dup-\(suffix)")
+                .withFilename("Invoice-4B07C32C-0025.pdf")
+                .withMimeType("application/pdf")
+                .withByteSize(91_248)
+                .forMessage(message)
+                .build(in: context)
+        }
+
+        let _ = AttachmentBuilder()
+            .withId("att-receipt")
+            .withFilename("Receipt-2243-8647-5708.pdf")
+            .withMimeType("application/pdf")
+            .withByteSize(88_032)
+            .forMessage(message)
+            .build(in: context)
+
+        let result = sut.formatForwardedMessage(message)
+
+        XCTAssertEqual(result.attachments.count, 2)
+        XCTAssertEqual(result.attachments.map(\.filename).sorted(), [
+            "Invoice-4B07C32C-0025.pdf",
+            "Receipt-2243-8647-5708.pdf"
+        ])
+    }
+
     // MARK: - buildFinalHTMLForForward Tests
 
     func testBuildFinalHTMLForForward_withUserContent_prependsToHTML() {

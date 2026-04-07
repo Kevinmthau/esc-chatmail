@@ -1,6 +1,12 @@
 import Foundation
 import CoreData
 
+private enum AttachmentDeduplicationKey: Hashable {
+    case contentId(String)
+    case file(filename: String, mimeType: String, byteSize: Int64)
+    case objectID(NSManagedObjectID)
+}
+
 extension Message {
     @nonobjc public class func fetchRequest() -> NSFetchRequest<Message> {
         return NSFetchRequest<Message>(entityName: "Message")
@@ -78,7 +84,7 @@ extension Message {
     func displayableAttachments(hidingInlineReferencedInHTML: Bool) -> [Attachment] {
         let html = loadHTMLSource()
         let nonDisplayableInlineContentIDs = extractNonDisplayableInlineContentIDs(from: html)
-        let allAttachments = deduplicatedInlineAttachments(in: attachmentsArray.filter { attachment in
+        let allAttachments = deduplicatedAttachments(in: attachmentsArray.filter { attachment in
             guard !attachment.isLikelySignatureImage else { return false }
 
             guard let contentId = normalizedContentID(from: attachment.contentId) else {
@@ -115,21 +121,33 @@ extension Message {
         }
     }
 
-    private func deduplicatedInlineAttachments(in attachments: [Attachment]) -> [Attachment] {
-        var seenInlineContentIDs = Set<String>()
+    /// Returns one canonical attachment per repeated Content-ID or repeated file fingerprint.
+    /// This protects the UI and forward-compose flow from Gmail messages that repeat the same
+    /// attachment part multiple times.
+    func deduplicatedAttachments(in attachments: [Attachment]) -> [Attachment] {
+        var bestByKey: [AttachmentDeduplicationKey: (index: Int, attachment: Attachment)] = [:]
         var deduplicated: [Attachment] = []
 
         for attachment in attachments {
-            if let contentId = normalizedContentID(from: attachment.contentId) {
-                guard seenInlineContentIDs.insert(contentId).inserted else {
-                    continue
+            let key = attachmentDeduplicationKey(for: attachment)
+
+            if let existing = bestByKey[key] {
+                if shouldPreferDeduplicatedAttachment(attachment, over: existing.attachment) {
+                    deduplicated[existing.index] = attachment
+                    bestByKey[key] = (existing.index, attachment)
                 }
+                continue
             }
 
+            bestByKey[key] = (deduplicated.count, attachment)
             deduplicated.append(attachment)
         }
 
         return deduplicated
+    }
+
+    var attachmentsForForwarding: [Attachment] {
+        deduplicatedAttachments(in: attachmentsArray)
     }
 
     /// Hides inline images that appear only in sections removed by quote/signature cleanup.
@@ -371,6 +389,45 @@ extension Message {
 
         guard !normalized.isEmpty else { return nil }
         return normalized.lowercased()
+    }
+
+    private func attachmentDeduplicationKey(for attachment: Attachment) -> AttachmentDeduplicationKey {
+        if let contentId = normalizedContentID(from: attachment.contentId) {
+            return .contentId(contentId)
+        }
+
+        let filename = attachment.filename.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let mimeType = attachment.mimeType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let byteSize = attachment.byteSize
+
+        if !filename.isEmpty || !mimeType.isEmpty || byteSize > 0 {
+            return .file(filename: filename, mimeType: mimeType, byteSize: byteSize)
+        }
+
+        return .objectID(attachment.objectID)
+    }
+
+    private func shouldPreferDeduplicatedAttachment(_ lhs: Attachment, over rhs: Attachment) -> Bool {
+        deduplicatedAttachmentRetentionScore(lhs) > deduplicatedAttachmentRetentionScore(rhs)
+    }
+
+    private func deduplicatedAttachmentRetentionScore(_ attachment: Attachment) -> Int {
+        var score = 0
+
+        if attachment.isReady {
+            score += 4
+        }
+        if attachment.localURL != nil {
+            score += 2
+        }
+        if attachment.byteSize > 0 {
+            score += 1
+        }
+        if attachment.pageCount > 0 || attachment.width > 0 || attachment.height > 0 {
+            score += 1
+        }
+
+        return score
     }
 
     /// Type-safe accessor for bodyText (alias for consistency)

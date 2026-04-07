@@ -87,7 +87,7 @@ struct MessageFormatBuilder {
         }
 
         // Separate inline attachments (those with contentId) from regular attachments
-        let allAttachments = message.attachmentsArray
+        let allAttachments = message.attachmentsForForwarding
         let inlineAttachments = allAttachments.filter { attachment in
             guard let contentId = attachment.contentId else { return false }
             return !contentId.isEmpty
