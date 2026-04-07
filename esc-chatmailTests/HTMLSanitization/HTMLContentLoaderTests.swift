@@ -616,6 +616,71 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertEqual(snapshot.methods, ["HEAD", "GET"])
         XCTAssertEqual(snapshot.referers, ["https://brambles.golf/", "https://brambles.golf/"])
     }
+
+    func testLoadContent_originalDisplayPurposeRewritesRiskyModernImagesOnFirstRender() async throws {
+        let messageId = "html-loader-original-webp-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let recorder = RequestRecorder()
+        let imageData = onePixelPNG
+        let remoteImageFallback = HTMLRemoteImageAttachmentFallback { request in
+            await recorder.record(request)
+
+            let response = try XCTUnwrap(
+                HTTPURLResponse(
+                    url: try XCTUnwrap(request.url),
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: [
+                        "Content-Type": "image/webp",
+                        "Content-Disposition": "inline; filename=\"hero.webp\"",
+                        "Content-Length": "\(imageData.count)"
+                    ]
+                )
+            )
+
+            if request.httpMethod == "HEAD" {
+                return (Data(), response)
+            }
+
+            return (imageData, response)
+        }
+
+        loader = HTMLContentLoader(
+            contentHandler: contentHandler,
+            sanitizer: .shared,
+            remoteImageAttachmentFallback: remoteImageFallback
+        )
+
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <img src="https://cdn.example.com/banner.jpg?format=webp&width=600" alt="Banner">
+          <p>Visible body text</p>
+        </body>
+        </html>
+        """
+        _ = contentHandler.saveHTML(html, for: messageId)
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            senderEmail: "sender@example.com",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        XCTAssertNotNil(result.html)
+        XCTAssertTrue((result.html ?? "").contains("Visible body text"))
+        XCTAssertTrue((result.html ?? "").contains("src=\"data:image/"))
+        XCTAssertFalse((result.html ?? "").contains("format=webp"))
+
+        let snapshot = await recorder.snapshot()
+        XCTAssertEqual(snapshot.methods, ["HEAD", "GET"])
+        XCTAssertEqual(snapshot.referers, ["https://example.com/", "https://example.com/"])
+    }
 }
 
 private actor RequestRecorder {

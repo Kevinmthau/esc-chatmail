@@ -230,16 +230,32 @@ final class HTMLContentLoader {
             return nil
         }
 
-        let cachedRewrite = await remoteImageAttachmentFallback.cachedInlineAttachmentStyleImages(
-            in: sanitizedHTML,
-            senderEmail: senderEmail
-        )
-        if cachedRewrite.needsWarmup {
-            warmRemoteImageAttachmentFallback(in: sanitizedHTML, messageId: messageId, senderEmail: senderEmail)
+        let rewrittenHTML: String
+        let shouldCache: Bool
+        switch displayPurpose {
+        case .original:
+            // Full-message rendering should avoid handing risky WEBP/AVIF URLs to WKWebView on the
+            // first open. Resolve the attachment-style fallback eagerly so the original reader is
+            // closer to Apple Mail behavior instead of showing broken images and decoder errors.
+            rewrittenHTML = await remoteImageAttachmentFallback.inlineAttachmentStyleImages(
+                in: sanitizedHTML,
+                senderEmail: senderEmail
+            )
+            shouldCache = true
+        case .preview:
+            let cachedRewrite = await remoteImageAttachmentFallback.cachedInlineAttachmentStyleImages(
+                in: sanitizedHTML,
+                senderEmail: senderEmail
+            )
+            if cachedRewrite.needsWarmup {
+                warmRemoteImageAttachmentFallback(in: sanitizedHTML, messageId: messageId, senderEmail: senderEmail)
+            }
+            rewrittenHTML = cachedRewrite.html
+            shouldCache = !cachedRewrite.hasPendingUpdates
         }
 
         let wrapped = sanitizer.wrapHTMLForDisplay(
-            cachedRewrite.html,
+            rewrittenHTML,
             isDarkMode: isDarkMode,
             displayPurpose: displayPurpose
         )
@@ -247,7 +263,7 @@ final class HTMLContentLoader {
             return nil
         }
 
-        return WrappedHTMLResult(html: wrapped, shouldCache: !cachedRewrite.hasPendingUpdates)
+        return WrappedHTMLResult(html: wrapped, shouldCache: shouldCache)
     }
 
     private func warmRemoteImageAttachmentFallback(in html: String, messageId: String, senderEmail: String?) {
