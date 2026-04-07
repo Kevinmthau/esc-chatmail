@@ -76,12 +76,15 @@ enum RawEmailSourceSanitizer {
     private static func looksLikeRawEmailSource(_ text: String) -> Bool {
         let lines = text.components(separatedBy: .newlines)
         let topHeaderCount = countLeadingHeaderLines(in: lines)
-        guard topHeaderCount >= minimumHeaderLinesForRawSource else { return false }
-
         let lower = text.lowercased()
-        if lower.contains("content-type: multipart/") {
+        let hasMultipartContentType = lower.contains("content-type: multipart/")
+        if hasMultipartContentType,
+           topHeaderCount >= 1,
+           extractBoundary(from: text) != nil {
             return true
         }
+
+        guard topHeaderCount >= minimumHeaderLinesForRawSource else { return false }
 
         return transportMarkers.contains { lower.contains($0) }
     }

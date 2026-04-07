@@ -61,17 +61,23 @@ class MessageProcessor {
     }
 
     private func resolvedPlainTextBody(plainText: String?, html: String?) -> String? {
-        if let plainText {
-            let trimmed = plainText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                return plainText
-            }
+        if let normalizedPlainText = normalizedPlainTextBody(plainText) {
+            return normalizedPlainText
         }
 
         guard let html else { return nil }
         let extracted = TextProcessing.extractPlainText(from: html)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return extracted.isEmpty ? nil : extracted
+    }
+
+    private func normalizedPlainTextBody(_ plainText: String?) -> String? {
+        guard let plainText else { return nil }
+
+        let normalized = RawEmailSourceSanitizer.extractDisplayText(from: plainText)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return normalized.isEmpty ? nil : normalized
     }
 
     // MARK: - Newsletter Detection
@@ -363,9 +369,52 @@ class MessageProcessor {
         // The cleaning will be done only when creating snippets
 
         html = await box.getHTML()
-        plainText = await box.getPlainText()
+        plainText = normalizedPlainTextBody(await box.getPlainText())
+
+        if html == nil {
+            html = await extractEmbeddedHTMLFromTextualBodies(from: part, messageId: messageId)
+        }
 
         return (html, plainText)
+    }
+
+    private func extractEmbeddedHTMLFromTextualBodies(
+        from part: MessagePart,
+        messageId: String
+    ) async -> String? {
+        if let decodedText = await decodedTextualBody(from: part, messageId: messageId),
+           let extractedHTML = RawEmailSourceSanitizer.extractHTMLText(from: decodedText) {
+            let trimmed = extractedHTML.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+
+        if let parts = part.parts {
+            for subpart in parts {
+                if let html = await extractEmbeddedHTMLFromTextualBodies(from: subpart, messageId: messageId) {
+                    return html
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private func decodedTextualBody(from part: MessagePart, messageId: String) async -> String? {
+        if let data = part.body?.data {
+            return decodeBody(data, headers: part.headers)
+        }
+
+        if let attachmentId = part.body?.attachmentId {
+            return await fetchLargeBodyContent(
+                attachmentId: attachmentId,
+                messageId: messageId,
+                headers: part.headers
+            )
+        }
+
+        return nil
     }
 
     /// Fetches large body content via the attachment API

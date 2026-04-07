@@ -80,6 +80,24 @@ final class RawEmailSourceSanitizerTests: XCTestCase {
         XCTAssertFalse(extracted?.contains("Content-Type: text/plain") == true)
     }
 
+    func testExtractDisplayText_mimeOnlyMultipartSource_extractsPlainTextBody() {
+        let extracted = RawEmailSourceSanitizer.extractDisplayText(from: mimeOnlyRawMultipartEmail)
+
+        XCTAssertTrue(extracted.contains("Example Museum"))
+        XCTAssertTrue(extracted.contains("Tickets are now on sale for the 2026 Film Festival"))
+        XCTAssertFalse(extracted.contains("Content-Type: multipart"))
+        XCTAssertFalse(extracted.contains("--newsletter-boundary-123"))
+    }
+
+    func testExtractHTMLText_mimeOnlyMultipartSource_extractsHTMLBody() {
+        let extracted = RawEmailSourceSanitizer.extractHTMLText(from: mimeOnlyRawMultipartEmail)
+
+        XCTAssertNotNil(extracted)
+        XCTAssertTrue(extracted?.contains("HTML_TOKEN_MIME_ONLY") == true)
+        XCTAssertTrue(extracted?.contains("Learn More") == true)
+        XCTAssertFalse(extracted?.contains("Content-Type: text/plain") == true)
+    }
+
     private var rawMultipartEmail: String {
         """
         Delivered-To: kmthau@gmail.com
@@ -254,6 +272,37 @@ final class RawEmailSourceSanitizerTests: XCTestCase {
               </td>
             </tr>
           </table>
+        </body>
+        </html>
+
+        --newsletter-boundary-123--
+        """
+    }
+
+    private var mimeOnlyRawMultipartEmail: String {
+        """
+        Content-Type: multipart/alternative; boundary="newsletter-boundary-123"
+        MIME-Version: 1.0
+
+        --newsletter-boundary-123
+        Content-Type: text/plain; charset="utf-8"
+        Content-Transfer-Encoding: quoted-printable
+
+        Example Museum
+        Tickets are now on sale for the 2026 Film Festival
+        View in Browser
+        Learn More
+
+        --newsletter-boundary-123
+        Content-Type: text/html; charset="utf-8"
+        Content-Transfer-Encoding: quoted-printable
+
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <h1>HTML_TOKEN_MIME_ONLY</h1>
+          <p>Tickets are now on sale for the 2026 Film Festival</p>
+          <p><a href=3D"https://example.com/learn-more">Learn More</a></p>
         </body>
         </html>
 

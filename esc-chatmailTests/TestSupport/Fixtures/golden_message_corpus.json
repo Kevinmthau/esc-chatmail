@@ -137,6 +137,22 @@
       "expectedHTMLContains": "Tickets are now on sale for the Spring Documentary Festival",
       "expectedTextContains": "Join us for a showcase of outstanding documentary films",
       "expectedHasRichHTMLContent": true
+    },
+    {
+      "id": "wordfly_boundary_with_leading_hyphens_extracts_embedded_html",
+      "notes": "WordFly-style raw source can declare the MIME boundary with leading hyphens (`boundary=--...`); the embedded HTML should still be recovered and classified as rich.",
+      "input": "Delivered-To: person@example.com\nReceived: by 2002:ad5:4bcf:0:b0:3b9:5283:f04d with SMTP id v15csp2260452imw;\n        Tue, 7 Apr 2026 12:33:01 -0700 (PDT)\nX-Received: by 2002:a05:7300:571e:b0:2c6:1557:9997 with SMTP id 5a478bee46e88;\n        Tue, 07 Apr 2026 12:33:00 -0700 (PDT)\nReturn-Path: <museum@example.wordfly.com>\nMIME-Version: 1.0\nFrom: Example Museum <publicprograms@example.org>\nSubject: Tickets Now On Sale for the Film Festival\nContent-Type: multipart/alternative; boundary=--boundary_1481459_example\n\n----boundary_1481459_example\nContent-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: quoted-printable\n\nExample Museum\nhttps://e.example.com/click?sid=3Dabc123\n\nView in Browser\nhttps://e.example.com/view?sid=3Dabc123\n\nTickets are now on sale for the 2026 Film Festival\nJoin us for a showcase of outstanding documentary films.\n\nFestival Films Include:\nOpening Night: Time and Water\nDirected by Sara Dosa\nFriday, May 1 | 7 pm\nEntrusted with writing a eulogy for the first Icelandic glacier lost to climate change, Andri Snaer Magnason embarks on a profound exploration of environmental love and mourning.\n\nNuisance Bear\nDirected by Gabriela Osio Vanden, Jack Weisman\nSunday, May 3 | 7:30 pm\nWinner of the U.S. Documentary Competition Grand Jury Prize at Sundance, Nuisance Bear drops us into northern Canada, where a wandering polar bear becomes a menace to a small town.\n\nLearn More\nhttps://e.example.com/click?sid=3Dlearnmore\n\nUnsubscribe\nhttps://pages.example.com/unsubscribe?sid=3Dabc123\n\n----boundary_1481459_example\nContent-Type: text/html; charset=utf-8\nContent-Transfer-Encoding: quoted-printable\n\n<!DOCTYPE html><html><body><div id=3D\"email-container\"><table role=3D\"presentation\" width=3D\"100%\"><tr><td><p>View in Browser</p><h1>Tickets are now on sale for the 2026 Film Festival</h1><p>Join us for a showcase of outstanding documentary films.</p></td></tr></table><table role=3D\"presentation\" width=3D\"100%\"><tr><td><h2>Festival Films Include</h2><p><strong>Opening Night: Time and Water</strong><br/>Directed by Sara Dosa<br/>Friday, May 1 | 7 pm</p><p>Entrusted with writing a eulogy for the first Icelandic glacier lost to climate change, Andri Snaer Magnason embarks on a profound exploration of environmental love and mourning.</p><p><strong>Nuisance Bear</strong><br/>Directed by Gabriela Osio Vanden, Jack Weisman<br/>Sunday, May 3 | 7:30 pm</p><p>Winner of the U.S. Documentary Competition Grand Jury Prize at Sundance, Nuisance Bear drops us into northern Canada, where a wandering polar bear becomes a menace to a small town.</p></td></tr></table><table role=3D\"presentation\"><tr><td><a href=3D\"https://e.example.com/click?sid=3Dlearnmore\">Learn More</a></td></tr></table><table role=3D\"presentation\"><tr><td><a href=3D\"https://pages.example.com/unsubscribe?sid=3Dabc123\">Unsubscribe</a> | <a href=3D\"https://e.example.com/privacy\">Privacy Policy</a></td></tr></table></div></body></html>\n\n----boundary_1481459_example--",
+      "expectedHTMLContains": "Tickets are now on sale for the 2026 Film Festival",
+      "expectedTextContains": "Join us for a showcase of outstanding documentary films",
+      "expectedHasRichHTMLContent": true
+    },
+    {
+      "id": "mime_only_multipart_source_extracts_embedded_html",
+      "notes": "Some payloads only preserve MIME headers and boundaries inside a textual body without the full transport header block; embedded HTML should still be recoverable.",
+      "input": "Content-Type: multipart/alternative; boundary=\"newsletter-boundary-123\"\nMIME-Version: 1.0\n\n--newsletter-boundary-123\nContent-Type: text/plain; charset=\"utf-8\"\nContent-Transfer-Encoding: quoted-printable\n\nExample Museum\nTickets are now on sale for the 2026 Film Festival\nView in Browser\nLearn More\n\nFestival Films Include:\nOpening Night: Time and Water\nDirected by Sara Dosa\nFriday, May 1 | 7 pm\nEntrusted with writing a eulogy for the first Icelandic glacier lost to climate change, Andri Snaer Magnason embarks on a profound exploration of environmental love and mourning.\n\nUnsubscribe\nPrivacy Policy\n\n--newsletter-boundary-123\nContent-Type: text/html; charset=\"utf-8\"\nContent-Transfer-Encoding: quoted-printable\n\n<!DOCTYPE html>\n<html>\n<body>\n  <div id=3D\"email-container\">\n    <table role=3D\"presentation\" width=3D\"100%\">\n      <tr><td><p>View in Browser</p></td></tr>\n      <tr><td><h1>HTML_TOKEN_MIME_ONLY</h1></td></tr>\n      <tr><td><p>Tickets are now on sale for the 2026 Film Festival</p></td></tr>\n      <tr><td><p>Join us for a showcase of outstanding documentary films and immersive conversations around the world.</p></td></tr>\n    </table>\n    <table role=3D\"presentation\" width=3D\"100%\">\n      <tr><td><h2>Festival Films Include</h2></td></tr>\n      <tr><td><p><strong>Opening Night: Time and Water</strong><br/>Directed by Sara Dosa<br/>Friday, May 1 | 7 pm</p></td></tr>\n      <tr><td><p>Entrusted with writing a eulogy for the first Icelandic glacier lost to climate change, Andri Snaer Magnason embarks on a profound exploration of environmental love and mourning.</p></td></tr>\n    </table>\n    <table role=3D\"presentation\"><tr><td><a href=3D\"https://example.com/learn-more\">Learn More</a></td></tr></table>\n    <table role=3D\"presentation\"><tr><td><a href=3D\"https://example.com/unsubscribe\">Unsubscribe</a> | <a href=3D\"https://example.com/privacy\">Privacy Policy</a></td></tr></table>\n  </div>\n</body>\n</html>\n\n--newsletter-boundary-123--",
+      "expectedHTMLContains": "HTML_TOKEN_MIME_ONLY",
+      "expectedTextContains": "Tickets are now on sale for the 2026 Film Festival",
+      "expectedHasRichHTMLContent": true
     }
   ],
   "richHTMLDetectionCases": [
@@ -230,6 +246,19 @@
       "isFromMe": false,
       "isOneToOneConversation": false,
       "subject": "Weekly Update",
+      "expectedShowHTMLPreview": true
+    },
+    {
+      "id": "newsletter_without_html_metadata_uses_preview",
+      "notes": "Newsletter-classified messages should still enter preview mode even when local HTML metadata is missing, so the HTML loader can recover the original markup on demand.",
+      "hasHTMLSource": false,
+      "isForwardedEmail": false,
+      "isNewsletter": true,
+      "hasRichHTMLContent": false,
+      "isFromMe": false,
+      "isOneToOneConversation": true,
+      "subject": "Tickets Now On Sale for the Margaret Mead Film Festival",
+      "senderEmail": "publicprograms@email.amnh.org",
       "expectedShowHTMLPreview": true
     },
     {

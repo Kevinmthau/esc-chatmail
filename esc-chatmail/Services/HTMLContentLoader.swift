@@ -88,7 +88,7 @@ final class HTMLContentLoader {
         // Method 1: Try loading from message ID.
         // Treat empty HTML as missing so we can fall back to storage URI / recovery / plain text.
         if contentHandler.htmlFileExists(for: messageId),
-           let html = contentHandler.loadHTML(for: messageId),
+           let html = canonicalHTMLSource(from: contentHandler.loadHTML(for: messageId)),
            !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             if let wrapped = await wrappedHTMLIfMeaningful(
                 html,
@@ -111,7 +111,7 @@ final class HTMLContentLoader {
         if let urlString = bodyStorageURI,
            let url = StorageURIResolver.resolve(urlString),
            FileManager.default.fileExists(atPath: url.path),
-           let html = contentHandler.loadHTML(from: url),
+           let html = canonicalHTMLSource(from: contentHandler.loadHTML(from: url)),
            !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             if let wrapped = await wrappedHTMLIfMeaningful(
                 html,
@@ -237,6 +237,25 @@ final class HTMLContentLoader {
                 }
             }
         }
+    }
+
+    private func canonicalHTMLSource(from html: String?) -> String? {
+        guard let html else { return nil }
+
+        let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lowercased = trimmed.lowercased()
+
+        // Older builds could persist the generated plain-text "See More" fallback as if it were
+        // the original HTML. Treat those wrappers as stale cache artifacts so we can continue on
+        // to raw-source extraction or Gmail recovery and show the real email instead.
+        if lowercased.contains("esc-plain-text-styles") ||
+            lowercased.contains("esc-plain-main") ||
+            lowercased.contains("esc-plain-details") {
+            return nil
+        }
+
+        return trimmed
     }
 
     private func wrappedHTMLIfMeaningful(

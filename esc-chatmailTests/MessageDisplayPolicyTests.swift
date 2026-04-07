@@ -62,6 +62,21 @@ final class MessageDisplayPolicyTests: XCTestCase {
         XCTAssertTrue(shouldShow)
     }
 
+    func testShouldShowHTMLPreview_newsletterWithoutHTMLMetadata_returnsTrue() {
+        let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
+            hasHTMLSource: false,
+            isForwardedEmail: false,
+            isNewsletter: true,
+            hasRichHTMLContent: false,
+            isFromMe: false,
+            isOneToOneConversation: true,
+            subject: "Tickets Now On Sale for the Margaret Mead Film Festival",
+            senderEmail: "publicprograms@email.amnh.org"
+        )
+
+        XCTAssertTrue(shouldShow)
+    }
+
     func testShouldShowHTMLPreview_richTransactionalHTML_oneToOne_returnsTrue() {
         let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
             hasHTMLSource: true,

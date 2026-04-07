@@ -8,10 +8,26 @@ protocol HTMLContentRecovering: Sendable {
 actor HTMLContentRecoveryService: HTMLContentRecovering {
     static let shared = HTMLContentRecoveryService()
 
-    private var recoveringMessageIds: Set<String> = []
+    private enum RecoveryAttemptResult: Sendable {
+        case html(String)
+        case noHTML
+        case failed
+    }
+
+    private let gmailAPIClientProvider: @Sendable () async -> any GmailAPIClientProtocol
+    private let contentHandler: HTMLContentHandler
+    private var recoveryTasks: [String: Task<RecoveryAttemptResult, Never>] = [:]
     private var messagesKnownWithoutHTML: Set<String> = []
 
-    private init() {}
+    init(
+        gmailAPIClientProvider: @escaping @Sendable () async -> any GmailAPIClientProtocol = {
+            await MainActor.run { GmailAPIClient.shared }
+        },
+        contentHandler: HTMLContentHandler = .shared
+    ) {
+        self.gmailAPIClientProvider = gmailAPIClientProvider
+        self.contentHandler = contentHandler
+    }
 
     /// Recovers HTML content for a message by fetching from Gmail API
     /// Returns the HTML content if successful, nil otherwise
@@ -19,41 +35,128 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
         // Avoid repeated API calls for messages we already confirmed have no HTML part.
         guard !messagesKnownWithoutHTML.contains(messageId) else { return nil }
 
-        // Prevent duplicate recovery attempts
-        guard !recoveringMessageIds.contains(messageId) else { return nil }
-        recoveringMessageIds.insert(messageId)
-        defer { recoveringMessageIds.remove(messageId) }
+        if let existingTask = recoveryTasks[messageId] {
+            return resolvedHTML(from: await existingTask.value, messageId: messageId)
+        }
 
+        let task = Task<RecoveryAttemptResult, Never> { [self] in
+            await performRecovery(messageId: messageId)
+        }
+        recoveryTasks[messageId] = task
+
+        let result = await task.value
+        recoveryTasks[messageId] = nil
+        return resolvedHTML(from: result, messageId: messageId)
+    }
+
+    private func performRecovery(messageId: String) async -> RecoveryAttemptResult {
         do {
             // 1. Fetch full message from Gmail API
-            let apiClient = await MainActor.run { GmailAPIClient.shared }
+            let apiClient = await gmailAPIClientProvider()
             let gmailMessage = try await apiClient.getMessage(id: messageId, format: "full")
 
             // 2. Extract HTML body from MIME structure (may fetch large body parts via API)
-            guard let payload = gmailMessage.payload,
-                  let html = await extractHTMLBody(from: payload, messageId: messageId) else {
-                if gmailMessage.payload != nil {
-                    messagesKnownWithoutHTML.insert(messageId)
-                }
+            guard let payload = gmailMessage.payload else {
                 Log.debug("No HTML body found for message \(messageId)", category: .ui)
-                return nil
+                return .failed
+            }
+
+            let extractedHTML: String?
+            if let recoveredHTML = await extractHTMLBody(from: payload, messageId: messageId, apiClient: apiClient) {
+                extractedHTML = recoveredHTML
+            } else {
+                extractedHTML = await extractEmbeddedHTMLFromTextualBodies(
+                    from: payload,
+                    messageId: messageId,
+                    apiClient: apiClient
+                )
+            }
+
+            guard let html = extractedHTML else {
+                Log.debug("No HTML body found for message \(messageId)", category: .ui)
+                return .noHTML
             }
 
             // 3. Save to disk for future use
-            let handler = HTMLContentHandler.shared
-            _ = handler.saveHTML(html, for: messageId)
-
-            messagesKnownWithoutHTML.remove(messageId)
+            _ = contentHandler.saveHTML(html, for: messageId)
+            HTMLContentLoader.shared.invalidate(messageId: messageId)
+            await ProcessedTextCache.shared.invalidate(messageId: messageId)
             Log.info("Recovered HTML content for message \(messageId)", category: .ui)
-            return html
+            return .html(html)
         } catch {
             Log.warning("Failed to recover HTML for \(messageId): \(error)", category: .ui)
+            return .failed
+        }
+    }
+
+    private func resolvedHTML(from result: RecoveryAttemptResult, messageId: String) -> String? {
+        switch result {
+        case .html(let html):
+            messagesKnownWithoutHTML.remove(messageId)
+            return html
+        case .noHTML:
+            messagesKnownWithoutHTML.insert(messageId)
+            return nil
+        case .failed:
             return nil
         }
     }
 
+    private func extractEmbeddedHTMLFromTextualBodies(
+        from part: MessagePart,
+        messageId: String,
+        apiClient: any GmailAPIClientProtocol
+    ) async -> String? {
+        if let decodedText = await decodedTextualBody(from: part, messageId: messageId, apiClient: apiClient),
+           let extractedHTML = RawEmailSourceSanitizer.extractHTMLText(from: decodedText) {
+            let trimmed = extractedHTML.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+
+        if let parts = part.parts {
+            for subpart in parts {
+                if let html = await extractEmbeddedHTMLFromTextualBodies(
+                    from: subpart,
+                    messageId: messageId,
+                    apiClient: apiClient
+                ) {
+                    return html
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private func decodedTextualBody(
+        from part: MessagePart,
+        messageId: String,
+        apiClient: any GmailAPIClientProtocol
+    ) async -> String? {
+        if let data = part.body?.data {
+            return decodeBody(data, headers: part.headers)
+        }
+
+        if let attachmentId = part.body?.attachmentId {
+            return await fetchLargeBodyContent(
+                attachmentId: attachmentId,
+                messageId: messageId,
+                headers: part.headers,
+                apiClient: apiClient
+            )
+        }
+
+        return nil
+    }
+
     /// Extracts HTML body from MIME structure
-    private func extractHTMLBody(from part: MessagePart, messageId: String) async -> String? {
+    private func extractHTMLBody(
+        from part: MessagePart,
+        messageId: String,
+        apiClient: any GmailAPIClientProtocol
+    ) async -> String? {
         let resolvedMimeType = resolvedMimeType(for: part)
 
         // Check this part for text/html
@@ -62,14 +165,19 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
                 return decodeBody(data, headers: part.headers)
             } else if let attachmentId = part.body?.attachmentId {
                 // Large HTML body - fetch via attachment API
-                return await fetchLargeBodyContent(attachmentId: attachmentId, messageId: messageId, headers: part.headers)
+                return await fetchLargeBodyContent(
+                    attachmentId: attachmentId,
+                    messageId: messageId,
+                    headers: part.headers,
+                    apiClient: apiClient
+                )
             }
         }
 
         // Recursively check child parts
         if let parts = part.parts {
             for subpart in parts {
-                if let html = await extractHTMLBody(from: subpart, messageId: messageId) {
+                if let html = await extractHTMLBody(from: subpart, messageId: messageId, apiClient: apiClient) {
                     return html
                 }
             }
@@ -80,9 +188,13 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
 
     /// Fetches large body content via the attachment API
     /// Gmail returns body parts larger than ~25KB with attachmentId instead of inline data
-    private func fetchLargeBodyContent(attachmentId: String, messageId: String, headers: [MessageHeader]?) async -> String? {
+    private func fetchLargeBodyContent(
+        attachmentId: String,
+        messageId: String,
+        headers: [MessageHeader]?,
+        apiClient: any GmailAPIClientProtocol
+    ) async -> String? {
         do {
-            let apiClient = await MainActor.run { GmailAPIClient.shared }
             let attachmentData = try await apiClient.getAttachment(messageId: messageId, attachmentId: attachmentId)
             let text = String(decoding: attachmentData, as: UTF8.self)
             return decodeTransferEncoding(text, headers: headers)

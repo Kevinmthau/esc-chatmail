@@ -19,8 +19,12 @@ enum MessageDisplayPolicy {
         senderEmail: String?
     ) -> Bool {
         let trustedTransactionalSender = isTrustedTransactionalSender(senderEmail)
-        // Allow rich-content fallback rendering even if the HTML file/URI metadata is missing.
-        guard hasHTMLSource || trustedTransactionalSender || hasRichHTMLContent else { return false }
+        // Allow newsletter and rich-content preview routing even if the local HTML file/URI metadata is missing.
+        // The preview loader can still recover embedded/recoverable HTML on demand.
+        let allowNewsletterRecoveryPreview = isNewsletter && !isForwardedEmail
+        guard hasHTMLSource || trustedTransactionalSender || hasRichHTMLContent || allowNewsletterRecoveryPreview else {
+            return false
+        }
 
         if isForwardedEmail {
             return !isFromMe

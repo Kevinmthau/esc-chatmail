@@ -872,6 +872,68 @@ final class MessageProcessorTests: XCTestCase {
         XCTAssertTrue(processed?.htmlBody?.contains("HTML_TOKEN_FROM_HEADER_ONLY") == true)
     }
 
+    func testProcessGmailMessage_textBodyContainingMimeOnlyRawSource_extractsEmbeddedHTML() async {
+        let rawSource = """
+        Content-Type: multipart/alternative; boundary="newsletter-boundary-123"
+        MIME-Version: 1.0
+
+        --newsletter-boundary-123
+        Content-Type: text/plain; charset="utf-8"
+        Content-Transfer-Encoding: quoted-printable
+
+        Example Museum
+        Tickets are now on sale for the 2026 Film Festival
+        View in Browser
+        Learn More
+
+        --newsletter-boundary-123
+        Content-Type: text/html; charset="utf-8"
+        Content-Transfer-Encoding: quoted-printable
+
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <h1>HTML_TOKEN_MIME_ONLY_PROCESSOR</h1>
+          <p>Tickets are now on sale for the 2026 Film Festival</p>
+        </body>
+        </html>
+
+        --newsletter-boundary-123--
+        """
+
+        let message = GmailMessage(
+            id: "mime-only-raw-source-message",
+            threadId: "mime-only-raw-source-thread",
+            labelIds: ["INBOX"],
+            snippet: "Tickets are now on sale",
+            historyId: "123",
+            internalDate: "1704067200000",
+            payload: MessagePart(
+                partId: "0",
+                mimeType: "text/plain",
+                filename: nil,
+                headers: baseHeaders(id: "mime-only-raw-source-message"),
+                body: MessageBody(
+                    size: rawSource.count,
+                    data: rawSource.data(using: .utf8)?.base64EncodedString(),
+                    attachmentId: nil
+                ),
+                parts: nil
+            ),
+            sizeEstimate: rawSource.count
+        )
+
+        let processed = await processor.processGmailMessage(
+            message,
+            myAliases: []
+        )
+
+        XCTAssertTrue(processed?.htmlBody?.contains("HTML_TOKEN_MIME_ONLY_PROCESSOR") == true)
+        XCTAssertTrue(processed?.plainTextBody?.contains("Example Museum") == true)
+        XCTAssertTrue(processed?.plainTextBody?.contains("Tickets are now on sale for the 2026 Film Festival") == true)
+        XCTAssertFalse(processed?.plainTextBody?.contains("Content-Type: multipart/alternative") == true)
+    }
+
     private func makeMultipartMessage(id: String, parts: [MessagePart]) -> GmailMessage {
         GmailMessage(
             id: id,

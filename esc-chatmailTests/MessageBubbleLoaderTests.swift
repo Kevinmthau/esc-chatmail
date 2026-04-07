@@ -94,6 +94,84 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertTrue(result.hasRichHTMLContent)
         XCTAssertTrue(result.fullTextContent?.contains("Tickets are now on sale for the Spring Documentary Festival") == true)
     }
+
+    func testLoadContent_staleNewsletterFallbackText_recoversRichHTML() async throws {
+        let messageId = "bubble-stale-fallback-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await ProcessedTextCache.shared.set(
+            messageId: messageId,
+            plainText: """
+            American Museum of Natural History
+            https://e.wordfly.com/click?sid=abc123
+
+            View in Browser
+            https://e.wordfly.com/view?sid=abc123
+
+            Manage Subscriptions
+            https://e.wordfly.com/preferences?sid=abc123
+
+            Privacy Policy
+            https://e.wordfly.com/privacy?sid=abc123
+            """,
+            hasRichContent: false
+        )
+
+        let staleFallbackURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bubble-stale-fallback-\(UUID().uuidString).html")
+        defer {
+            try? FileManager.default.removeItem(at: staleFallbackURL)
+        }
+
+        try staleBubbleFallbackHTML.write(to: staleFallbackURL, atomically: true, encoding: .utf8)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlContentRecoveryService: MockHTMLContentRecoverer(
+                recoveredHTMLByMessageID: [
+                    messageId: """
+                    <!DOCTYPE html>
+                    <html>
+                    <body>
+                      <table role="presentation" width="100%">
+                        <tr><td><h1>Tickets are now on sale for the 2026 Margaret Mead Film Festival</h1></td></tr>
+                        <tr><td><p>View in Browser</p></td></tr>
+                        <tr><td><p><a href="https://example.com/unsubscribe">Unsubscribe</a></p></td></tr>
+                      </table>
+                    </body>
+                    </html>
+                    """
+                ]
+            )
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: """
+                American Museum of Natural History
+                https://e.wordfly.com/click?sid=abc123
+
+                View in Browser
+                https://e.wordfly.com/view?sid=abc123
+
+                Manage Subscriptions
+                https://e.wordfly.com/preferences?sid=abc123
+
+                Privacy Policy
+                https://e.wordfly.com/privacy?sid=abc123
+                """,
+                bodyStorageURI: staleFallbackURL.absoluteString,
+                snippet: "Tickets Now On Sale for the Margaret Mead Film Festival",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: false,
+                effectiveSenderEmail: "publicprograms@email.amnh.org"
+            )
+        )
+
+        XCTAssertTrue(result.hasRichHTMLContent)
+        XCTAssertTrue(result.fullTextContent?.contains("Tickets are now on sale for the 2026 Margaret Mead Film Festival") == true)
+    }
 }
 
 private final class MockBubbleContactsResolver: ContactsResolving, @unchecked Sendable {
@@ -112,3 +190,29 @@ private final class MockBubbleContactsResolver: ContactsResolving, @unchecked Se
 
     func prewarm(emails: [String]) async {}
 }
+
+private struct MockHTMLContentRecoverer: HTMLContentRecovering {
+    let recoveredHTMLByMessageID: [String: String]
+
+    func recoverHTMLContent(messageId: String) async -> String? {
+        recoveredHTMLByMessageID[messageId]
+    }
+}
+
+private let staleBubbleFallbackHTML = """
+<!DOCTYPE html>
+<html>
+<head>
+  <style id="esc-plain-text-styles">
+    .esc-plain-main { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <div class="esc-plain-main">American Museum of Natural History</div>
+  <details class="esc-plain-details">
+    <summary>See More</summary>
+    <div class="esc-plain-quotes">Tracked links and collapsed newsletter body</div>
+  </details>
+</body>
+</html>
+"""

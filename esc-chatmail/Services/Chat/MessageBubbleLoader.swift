@@ -108,8 +108,13 @@ actor MessageBubbleLoader: MessageBubbleLoading {
                 cached.plainText == nil &&
                 request.bodyStorageURI != nil &&
                 !hasHTMLFile
+            let shouldBypassCachedNewsletterFallback =
+                !request.isFromMe &&
+                request.hasHTMLSource &&
+                !cached.hasRichContent &&
+                looksLikeNewsletterFallbackText(cached.plainText ?? request.bodyText ?? request.snippet)
 
-            if !requiresURIRecompute {
+            if !requiresURIRecompute && !shouldBypassCachedNewsletterFallback {
                 return (cached.plainText, cached.hasRichContent)
             }
         }
@@ -132,8 +137,13 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             !request.hasHTMLSource &&
             !result.hasRichContent &&
             isTrustedTransactionalSender
+        let shouldAttemptNewsletterFallbackRecovery =
+            !request.isFromMe &&
+            request.hasHTMLSource &&
+            !result.hasRichContent &&
+            looksLikeNewsletterFallbackText(request.bodyText ?? result.plainText ?? request.snippet)
 
-        if (shouldAttemptHTMLRecovery || shouldAttemptTrustedSenderRecovery),
+        if (shouldAttemptHTMLRecovery || shouldAttemptTrustedSenderRecovery || shouldAttemptNewsletterFallbackRecovery),
            let recoveredHTML = await htmlContentRecoveryService.recoverHTMLContent(messageId: request.messageID) {
             let recoveredResult = ChatBubbleTextProcessor.process(
                 content: recoveredHTML,
@@ -145,20 +155,51 @@ actor MessageBubbleLoader: MessageBubbleLoading {
                     classifyRichContent: true
                 )
             )
+            let recoveredHasRichContent =
+                recoveredResult.hasRichContent || shouldAttemptNewsletterFallbackRecovery
 
             await processedTextCache.set(
                 messageId: request.messageID,
                 plainText: recoveredResult.mainText,
-                hasRichContent: recoveredResult.hasRichContent,
+                hasRichContent: recoveredHasRichContent,
                 quotedParts: recoveredResult.quotedParts
             )
 
-            if recoveredResult.mainText != nil || recoveredResult.hasRichContent {
-                result = (recoveredResult.mainText, recoveredResult.hasRichContent)
+            if recoveredResult.mainText != nil || recoveredHasRichContent {
+                result = (recoveredResult.mainText, recoveredHasRichContent)
             }
         }
 
         return result
+    }
+
+    private func looksLikeNewsletterFallbackText(_ text: String?) -> Bool {
+        guard let text = text?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !text.isEmpty else {
+            return false
+        }
+
+        let lowercased = text.lowercased()
+        let hasNewsletterMarkers =
+            lowercased.contains("view in browser") ||
+            lowercased.contains("unsubscribe") ||
+            lowercased.contains("manage subscriptions") ||
+            lowercased.contains("manage preferences") ||
+            lowercased.contains("privacy policy")
+
+        guard hasNewsletterMarkers else {
+            return false
+        }
+
+        let urlLikeCount = text.components(separatedBy: .newlines).reduce(into: 0) { count, line in
+            let lowerLine = line.lowercased()
+            if lowerLine.contains("http://") || lowerLine.contains("https://") {
+                count += 1
+            }
+        }
+
+        return urlLikeCount >= 2
     }
 
     private func processMessageContent(

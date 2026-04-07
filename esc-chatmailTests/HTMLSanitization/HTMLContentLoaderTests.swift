@@ -333,6 +333,89 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertFalse(html.contains("Delivered-To:"))
     }
 
+    func testLoadContent_originalDisplay_prefersStoredWordFlyHTMLOverPlainTextFallback() async {
+        let messageId = "html-loader-wordfly-original-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        _ = contentHandler.saveHTML(wordFlyRecoveredHTML, for: messageId)
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: wordFlyPlainTextFallback,
+            senderEmail: "publicprograms@email.amnh.org",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        guard case .messageId = result.source else {
+            XCTFail("Expected stored HTML source, got \(result.source)")
+            return
+        }
+
+        let html = result.html ?? ""
+        XCTAssertTrue(html.contains("Tickets are now on sale for the 2026 Margaret Mead Film Festival"))
+        XCTAssertTrue(html.contains("Festival Films Include"))
+        XCTAssertFalse(html.contains("<summary>See More</summary>"))
+    }
+
+    func testLoadContent_rawWordFlySource_originalDisplay_prefersExtractedHTMLPart() async {
+        let messageId = "html-loader-wordfly-raw-source-\(UUID().uuidString)"
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: wordFlyRawSource,
+            senderEmail: "publicprograms@email.amnh.org",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        guard case .rawSourceHTML = result.source else {
+            XCTFail("Expected rawSourceHTML source, got \(result.source)")
+            return
+        }
+
+        let html = result.html ?? ""
+        XCTAssertTrue(html.contains("Tickets are now on sale for the 2026 Margaret Mead Film Festival"))
+        XCTAssertTrue(html.contains("Festival Films Include"))
+        XCTAssertFalse(html.contains("<summary>See More</summary>"))
+    }
+
+    func testLoadContent_ignoresStaleStoredPlainTextFallbackHTMLAndUsesRealHTMLSource() async throws {
+        let messageId = "html-loader-stale-fallback-\(UUID().uuidString)"
+        let staleFallbackURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("stale-fallback-\(UUID().uuidString).html")
+
+        defer {
+            try? FileManager.default.removeItem(at: staleFallbackURL)
+        }
+
+        try staleStoredFallbackHTML.write(to: staleFallbackURL, atomically: true, encoding: .utf8)
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: staleFallbackURL.absoluteString,
+            bodyText: wordFlyRawSource,
+            senderEmail: "publicprograms@email.amnh.org",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        guard case .rawSourceHTML = result.source else {
+            XCTFail("Expected rawSourceHTML source, got \(result.source)")
+            return
+        }
+
+        let html = result.html ?? ""
+        XCTAssertTrue(html.contains("Tickets are now on sale for the 2026 Margaret Mead Film Festival"))
+        XCTAssertTrue(html.contains("Festival Films Include"))
+        XCTAssertFalse(html.contains("<summary>See More</summary>"))
+    }
+
     func testLoadContent_plainTextFallback_onlyInvisiblePadding_returnsNotFound() async {
         let messageId = "html-loader-invisible-only-\(UUID().uuidString)"
         let bodyText = String(repeating: "\u{200C}\u{00A0}", count: 400)
@@ -761,3 +844,142 @@ private actor RequestRecorder {
         (methods, referers)
     }
 }
+
+private let wordFlyPlainTextFallback = """
+American Museum of Natural History
+https://e.wordfly.com/click?sid=NDYwXzk0NzcwXzU4NDU4NjBfNjk3MQ&l=aff23ba9-c62e-f111-a83f-0050569d9d1d
+
+View in Browser
+https://e.wordfly.com/view?sid=NDYwXzk0NzcwXzU4NDU4NjBfNjk3MQ&l=aef23ba9-c62e-f111-a83f-0050569d9d1d
+
+Tickets are now on sale for the 2026 Margaret Mead Film Festival
+Join us for a showcase of outstanding documentary films.
+"""
+
+private let wordFlyRecoveredHTML = """
+<!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" dir="ltr" lang="en"><head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0" />
+<style type="text/css">
+@media only screen and (max-width: 480px) {
+  .two-columns-block .column { display: block !important; width: 100% !important; }
+}
+</style>
+<title>American Museum of Natural History</title>
+</head><body style="margin:0; min-width:100%; padding:0px 10px 0px 0px; width:100%; background-color:#ffffff; color:#000000;">
+<div id="email-container" style="background-color:#ffffff; margin-left:auto; margin-right:auto; padding:15px;">
+  <div class="container-block block" style="background-color:#000000;">
+    <div class="text-block block" style="padding:5px 10px 10px 25px; margin-top:10px;">
+      <p style="margin:0px 0px 12px; font-size:12px; color:#ffffff; line-height:17.6px;">Join us for a showcase of outstanding documentary films. | <a href="https://e.wordfly.com/view?sid=NDYwXzk0NzcwXzU4NDU4NjBfNjk3MQ&l=aef23ba9-c62e-f111-a83f-0050569d9d1d" target="_blank" style="color:#d7fa88;">View in Browser</a></p>
+    </div>
+  </div>
+  <div class="image-block block" style="padding:0px 0px 15px;">
+    <a href="https://e.wordfly.com/click?sid=NDYwXzk0NzcwXzU4NDU4NjBfNjk3MQ&l=b0f23ba9-c62e-f111-a83f-0050569d9d1d" target="_blank"><img src="https://media.wordfly.com/americanmuseumofnaturalhistory/emails/260402-pp-mead-on-sale/mead-festival-hero.jpg" alt="A seated audience in the orchestra and balcony of the LeFrak Theater watch the screen." style="width:100%;" /></a>
+  </div>
+  <div class="text-block block" style="padding:5px 10px 0px;">
+    <h1 style="margin:0px; padding:0px 0px 15px; font-size:20px; line-height:32px;">Tickets are now on sale for the 2026 Margaret Mead Film Festival</h1>
+    <p style="margin:0px 0px 14px; font-size:14px; line-height:24px;">The Museum’s Margaret Mead Film Festival is back with a showcase of outstanding documentary films.</p>
+    <p style="margin:0px 0px 14px; font-size:14px; line-height:24px;">Join us from <b>Friday, May 1—Sunday, May 3</b> for a cinematic celebration of voices and perspectives from around the world.</p>
+  </div>
+  <div class="button-block block" style="padding:15px 15px 15px 10px;">
+    <div style="display:inline-block; padding:10px 25px; background-color:#004bb4;"><a href="https://e.wordfly.com/click?sid=NDYwXzk0NzcwXzU4NDU4NjBfNjk3MQ&l=b0f23ba9-c62e-f111-a83f-0050569d9d1d" target="_blank" style="color:#ffffff; font-size:16px; text-decoration:none;">Learn More</a></div>
+  </div>
+  <div class="text-block block" style="padding:10px;">
+    <h1 style="margin:0px; padding:0px; font-size:20px; line-height:32px;">Festival Films Include:</h1>
+  </div>
+  <div class="two-columns-block block split-33-66" style="margin-left:5%; margin-right:5%;">
+    <div class="column" style="display:inline-block; vertical-align:middle; width:33.3333%;">
+      <div class="image-block block" style="padding:15px;">
+        <img src="https://media.wordfly.com/americanmuseumofnaturalhistory/emails/260402-pp-mead-on-sale/time-and-water-thumb.jpg" alt="Árni Kjartansson sits on the edge of a cliff overlooking a glacier." style="width:100%;" />
+      </div>
+    </div>
+    <div class="column" style="display:inline-block; vertical-align:middle; width:66.6667%;">
+      <div class="text-block block" style="padding:5px 10px 0px;">
+        <h3 style="margin:0px 0px 10px; font-size:20px; line-height:20px;">Opening Night: <i><a href="https://e.wordfly.com/click?sid=NDYwXzk0NzcwXzU4NDU4NjBfNjk3MQ&l=b7e0dde4-9632-f111-a83f-0050569d9d1d" target="_blank">Time and Water</a></i></h3>
+        <h2 style="margin:10px 0px; font-size:14px; line-height:19.5px; color:#707070;">Directed by Sara Dosa<br />Friday, May 1 | 7 pm</h2>
+        <p style="margin:0px 0px 14px; font-size:14px; line-height:24px;">Entrusted with writing a eulogy for Okjökull, the first Icelandic glacier lost to climate change, Andri Snær Magnason embarks on a profound exploration of environmental love and mourning.</p>
+      </div>
+    </div>
+  </div>
+</div>
+</body></html>
+"""
+
+private let wordFlyRawSource = """
+Delivered-To: person@example.com
+Received: by 2002:ad5:4bcf:0:b0:3b9:5283:f04d with SMTP id v15csp2260452imw;
+        Tue, 7 Apr 2026 12:33:01 -0700 (PDT)
+X-Received: by 2002:a05:7300:571e:b0:2c6:1557:9997 with SMTP id 5a478bee46e88;
+        Tue, 07 Apr 2026 12:33:00 -0700 (PDT)
+Return-Path: <museum@example.wordfly.com>
+MIME-Version: 1.0
+From: Example Museum <publicprograms@example.org>
+Subject: Tickets Now On Sale for the Film Festival
+Content-Type: multipart/alternative; boundary=--boundary_1481459_example
+
+----boundary_1481459_example
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+American Museum of Natural History
+https://e.wordfly.com/click?sid=3DNDYwXzk0NzcwXzU4NDU4NjBfNjk3MQ&l=3Daff23ba=
+9-c62e-f111-a83f-0050569d9d1d
+
+View in Browser
+https://e.wordfly.com/view?sid=3DNDYwXzk0NzcwXzU4NDU4NjBfNjk3MQ&l=3Daef23ba=
+9-c62e-f111-a83f-0050569d9d1d
+
+Tickets are now on sale for the 2026 Margaret Mead Film Festival
+Join us for a showcase of outstanding documentary films.
+
+----boundary_1481459_example
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<!DOCTYPE html><html xmlns=3D"http://www.w3.org/1999/xhtml" dir=3D"ltr" lang=
+=3D"en"><head><meta charset=3D"utf-8" /><meta name=3D"viewport" content=3D"w=
+idth=3Ddevice-width, initial-scale=3D1.0, minimum-scale=3D1.0, maximum-scal=
+e=3D1.0" /><style type=3D"text/css">@media only screen and (max-width: 480px=
+) {.two-columns-block .column { display: block !important; width: 100% !impo=
+rtant; }}</style><title>American Museum of Natural History</title></head><bo=
+dy style=3D"margin:0; min-width:100%; padding:0px 10px 0px 0px; width:100%; =
+background-color:#ffffff; color:#000000;"><div id=3D"email-container" style=
+=3D"background-color:#ffffff; margin-left:auto; margin-right:auto; padding:1=
+5px;"><div class=3D"container-block block" style=3D"background-color:#000000=
+;"><div class=3D"text-block block" style=3D"padding:5px 10px 10px 25px; marg=
+in-top:10px;"><p style=3D"margin:0px 0px 12px; font-size:12px; color:#ffffff=
+; line-height:17.6px;">Join us for a showcase of outstanding documentary fil=
+ms. | <a href=3D"https://e.wordfly.com/view?sid=3DNDYwXzk0NzcwXzU4NDU4NjBfNjk=
+3MQ&l=3Daef23ba9-c62e-f111-a83f-0050569d9d1d" target=3D"_blank" style=3D"colo=
+r:#d7fa88;">View in Browser</a></p></div></div><div class=3D"text-block bloc=
+k" style=3D"padding:5px 10px 0px;"><h1 style=3D"margin:0px; padding:0px 0px =
+15px; font-size:20px; line-height:32px;">Tickets are now on sale for the 202=
+6 Margaret Mead Film Festival</h1><p style=3D"margin:0px 0px 14px; font-size=
+:14px; line-height:24px;">The Museum=E2=80=99s Margaret Mead Film Festival is=
+ back with a showcase of outstanding documentary films.</p><p style=3D"margi=
+n:0px 0px 14px; font-size:14px; line-height:24px;">Join us from <b>Friday, M=
+ay 1=E2=80=94Sunday, May 3</b> for a cinematic celebration of voices and pers=
+pectives from around the world.</p></div><div class=3D"text-block block" sty=
+le=3D"padding:10px;"><h1 style=3D"margin:0px; padding:0px; font-size:20px; l=
+ine-height:32px;">Festival Films Include:</h1></div></div></body></html>
+
+----boundary_1481459_example--
+"""
+
+private let staleStoredFallbackHTML = """
+<!DOCTYPE html>
+<html>
+<head>
+  <style id="esc-plain-text-styles">
+    .esc-plain-main { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <div class="esc-plain-main">American Museum of Natural History</div>
+  <details class="esc-plain-details">
+    <summary>See More</summary>
+    <div class="esc-plain-quotes">Tracked links and collapsed plain text</div>
+  </details>
+</body>
+</html>
+"""
