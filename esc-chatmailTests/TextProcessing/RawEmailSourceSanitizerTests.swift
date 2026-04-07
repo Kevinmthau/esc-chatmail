@@ -70,6 +70,16 @@ final class RawEmailSourceSanitizerTests: XCTestCase {
         )
     }
 
+    func testExtractHTMLText_newsletterRawSource_extractsHTMLBody() {
+        let extracted = RawEmailSourceSanitizer.extractHTMLText(from: rawNewsletterMultipartEmail)
+
+        XCTAssertNotNil(extracted)
+        XCTAssertTrue(extracted?.contains("Tickets are now on sale for the Spring Documentary Festival") == true)
+        XCTAssertTrue(extracted?.contains("Unsubscribe") == true)
+        XCTAssertFalse(extracted?.contains("Delivered-To:") == true)
+        XCTAssertFalse(extracted?.contains("Content-Type: text/plain") == true)
+    }
+
     private var rawMultipartEmail: String {
         """
         Delivered-To: kmthau@gmail.com
@@ -191,6 +201,63 @@ final class RawEmailSourceSanitizerTests: XCTestCase {
         <html><body><div>Hi team</div></body></html>
 
         --mixed-boundary-12345--
+        """
+    }
+
+    private var rawNewsletterMultipartEmail: String {
+        """
+        Delivered-To: person@example.com
+        Received: by 2002:a05:6e04:71a:b0:3ac:63b9:5e27 with SMTP id o26csp2106356imz;
+                Tue, 7 Apr 2026 12:33:01 -0700 (PDT)
+        X-Received: by 2002:ac8:7dd4:0:b0:503:4257:da03 with SMTP id d75a77;
+                Tue, 7 Apr 2026 12:33:00 -0700 (PDT)
+        Return-Path: <newsletter@example.com>
+        MIME-Version: 1.0
+        Content-Type: multipart/alternative; boundary="newsletter-boundary-123"
+
+        --newsletter-boundary-123
+        Content-Type: text/plain; charset="utf-8"
+        Content-Transfer-Encoding: quoted-printable
+
+        Example Museum
+        https://example.com/logo
+
+        View in Browser
+        https://example.com/view
+
+        Tickets are now on sale for the Spring Documentary Festival
+        Join us for a showcase of outstanding documentary films.
+
+        Learn More
+        https://example.com/learn-more
+
+        Unsubscribe
+        https://example.com/unsubscribe
+
+        --newsletter-boundary-123
+        Content-Type: text/html; charset="utf-8"
+        Content-Transfer-Encoding: quoted-printable
+
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <table role=3D"presentation" width=3D"100%">
+            <tr>
+              <td>
+                <p>View in Browser</p>
+                <h1>Tickets are now on sale for the Spring Documentary Festival</h1>
+                <p>Join us for a showcase of outstanding documentary films and immersive conversations around the world.</p>
+                <table role=3D"presentation">
+                  <tr><td><a href=3D"https://example.com/learn-more">Learn More</a></td></tr>
+                </table>
+                <p><a href=3D"https://example.com/unsubscribe">Unsubscribe</a> | <a href=3D"https://example.com/preferences">Manage Preferences</a></p>
+              </td>
+            </tr>
+          </table>
+        </body>
+        </html>
+
+        --newsletter-boundary-123--
         """
     }
 }

@@ -46,6 +46,10 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
     // MARK: - Main Sanitization Method
 
     func sanitize(_ html: String) -> String {
+        sanitize(html, rewriteModernImageFormatHints: true)
+    }
+
+    func sanitize(_ html: String, rewriteModernImageFormatHints: Bool) -> String {
         var sanitized = html
 
         // Remove dangerous elements (script, form, iframe, etc.) using pre-compiled patterns
@@ -58,7 +62,10 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
         sanitized = removeEventHandlers(sanitized)
 
         // Sanitize URLs (delegated)
-        sanitized = urlSanitizer.sanitizeURLs(sanitized)
+        sanitized = urlSanitizer.sanitizeURLs(
+            sanitized,
+            rewriteModernFormatQueryHints: rewriteModernImageFormatHints
+        )
 
         // Remove tracking pixels (delegated)
         sanitized = trackingRemover.removeTrackingPixels(sanitized)

@@ -268,6 +268,71 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertFalse(html.contains("\u{200C}"))
     }
 
+    func testLoadContent_rawEmailSourceWithEmbeddedHTML_prefersExtractedHTMLPart() async {
+        let messageId = "html-loader-raw-html-\(UUID().uuidString)"
+        let bodyText = """
+        Delivered-To: person@example.com
+        Received: by 2002:a05:6e04:71a:b0:3ac:63b9:5e27 with SMTP id o26csp2106356imz;
+        X-Received: by 2002:ac8:7dd4:0:b0:503:4257:da03 with SMTP id d75a77;
+        Return-Path: <newsletter@example.com>
+        MIME-Version: 1.0
+        Content-Type: multipart/alternative; boundary="newsletter-boundary-123"
+
+        --newsletter-boundary-123
+        Content-Type: text/plain; charset="utf-8"
+        Content-Transfer-Encoding: quoted-printable
+
+        Example Museum
+        View in Browser
+        Tickets are now on sale for the Spring Documentary Festival
+        Learn More
+        Unsubscribe
+
+        --newsletter-boundary-123
+        Content-Type: text/html; charset="utf-8"
+        Content-Transfer-Encoding: quoted-printable
+
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <table role=3D"presentation" width=3D"100%">
+            <tr>
+              <td>
+                <p>View in Browser</p>
+                <h1>Tickets are now on sale for the Spring Documentary Festival</h1>
+                <p>Join us for a showcase of outstanding documentary films and immersive conversations around the world.</p>
+                <table role=3D"presentation">
+                  <tr><td><a href=3D"https://example.com/learn-more">Learn More</a></td></tr>
+                </table>
+                <p><a href=3D"https://example.com/unsubscribe">Unsubscribe</a> | <a href=3D"https://example.com/preferences">Manage Preferences</a></p>
+              </td>
+            </tr>
+          </table>
+        </body>
+        </html>
+
+        --newsletter-boundary-123--
+        """
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: bodyText,
+            isDarkMode: false,
+            cleanupMode: .none
+        )
+
+        guard case .rawSourceHTML = result.source else {
+            XCTFail("Expected rawSourceHTML source")
+            return
+        }
+
+        let html = result.html ?? ""
+        XCTAssertTrue(html.contains("Tickets are now on sale for the Spring Documentary Festival"))
+        XCTAssertTrue(html.contains("Manage Preferences"))
+        XCTAssertFalse(html.contains("Delivered-To:"))
+    }
+
     func testLoadContent_plainTextFallback_onlyInvisiblePadding_returnsNotFound() async {
         let messageId = "html-loader-invisible-only-\(UUID().uuidString)"
         let bodyText = String(repeating: "\u{200C}\u{00A0}", count: 400)

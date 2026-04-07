@@ -14,6 +14,7 @@ struct HTMLLoadResult {
     enum HTMLLoadSource {
         case messageId
         case storageURI
+        case rawSourceHTML
         case recovered
         case plainTextFallback
         case notFound
@@ -127,7 +128,25 @@ final class HTMLContentLoader {
             }
         }
 
-        // Method 3: Recovery - fetch from Gmail API if local content missing
+        // Method 3: Extract embedded HTML from raw RFC822 source stored in bodyText
+        if let text = bodyText,
+           let rawSourceHTML = RawEmailSourceSanitizer.extractHTMLText(from: text),
+           let wrapped = await wrappedHTMLIfMeaningful(
+               rawSourceHTML,
+               messageId: messageId,
+               senderEmail: senderEmail,
+               isDarkMode: isDarkMode,
+               cleanupMode: cleanupMode,
+               displayPurpose: displayPurpose
+           ) {
+            if wrapped.shouldCache {
+                let cost = wrapped.html.utf8.count
+                htmlCache.setObject(wrapped.html as NSString, forKey: cacheKey, cost: cost)
+            }
+            return HTMLLoadResult(html: wrapped.html, source: .rawSourceHTML)
+        }
+
+        // Method 4: Recovery - fetch from Gmail API if local content missing
         if let html = await HTMLContentRecoveryService.shared.recoverHTMLContent(messageId: messageId),
            let wrapped = await wrappedHTMLIfMeaningful(
                html,
@@ -144,7 +163,7 @@ final class HTMLContentLoader {
             return HTMLLoadResult(html: wrapped.html, source: .recovered)
         }
 
-        // Method 4: Plain text fallback (don't cache as it's trivial to generate)
+        // Method 5: Plain text fallback (don't cache as it's trivial to generate)
         if let text = bodyText, !text.isEmpty {
             let normalizedText = normalizedPlainTextFallback(from: text)
             if hasMeaningfulPlainText(normalizedText) {
@@ -225,7 +244,10 @@ final class HTMLContentLoader {
         displayPurpose: HTMLDisplayPurpose
     ) async -> WrappedHTMLResult? {
         let preparedHTML = prepareHTMLForDisplay(html, cleanupMode: cleanupMode)
-        let sanitizedHTML = sanitizer.sanitize(preparedHTML)
+        let sanitizedHTML = sanitizer.sanitize(
+            preparedHTML,
+            rewriteModernImageFormatHints: displayPurpose != .original
+        )
         guard HTMLMeaningfulContentChecker.hasMeaningfulContent(sanitizedHTML) else {
             return nil
         }
@@ -237,10 +259,11 @@ final class HTMLContentLoader {
             // Full-message rendering should avoid handing risky WEBP/AVIF URLs to WKWebView on the
             // first open. Resolve the attachment-style fallback eagerly so the original reader is
             // closer to Apple Mail behavior instead of showing broken images and decoder errors.
-            rewrittenHTML = await remoteImageAttachmentFallback.inlineAttachmentStyleImages(
+            let originalSafeHTML = await remoteImageAttachmentFallback.inlineAttachmentStyleImages(
                 in: sanitizedHTML,
                 senderEmail: senderEmail
             )
+            rewrittenHTML = sanitizer.sanitize(originalSafeHTML)
             shouldCache = true
         case .preview:
             let cachedRewrite = await remoteImageAttachmentFallback.cachedInlineAttachmentStyleImages(

@@ -171,11 +171,21 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         )
 
         if processedResult.plainText == nil, let text = request.bodyText {
+            let fallbackContent = RawEmailSourceSanitizer.extractHTMLText(from: text) ?? text
+            let fallbackInputKind: ChatBubbleTextInputKind =
+                fallbackContent == text ? .autoDetectHTML : .html
+            let shouldSanitizeRawSource: Bool
+            switch fallbackInputKind {
+            case .html:
+                shouldSanitizeRawSource = false
+            case .plainText, .autoDetectHTML:
+                shouldSanitizeRawSource = true
+            }
             let fallbackResult = ChatBubbleTextProcessor.process(
-                content: text,
+                content: fallbackContent,
                 options: ChatBubbleTextProcessorOptions(
-                    inputKind: .autoDetectHTML,
-                    sanitizeRawEmailSource: true,
+                    inputKind: fallbackInputKind,
+                    sanitizeRawEmailSource: shouldSanitizeRawSource,
                     decodeHTMLEntities: true,
                     formatSignOffLineBreaks: true,
                     classifyRichContent: true

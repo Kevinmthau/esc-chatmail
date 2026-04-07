@@ -129,6 +129,16 @@
       "expected": "Any word?"
     }
   ],
+  "rawSourceHTMLRecoveryCases": [
+    {
+      "id": "newsletter_raw_source_prefers_embedded_html_part",
+      "notes": "Raw RFC822 newsletter blobs should recover the embedded HTML part so preview routing can use rich HTML instead of the plain-text fallback with tracking URLs.",
+      "input": "Delivered-To: person@example.com\nReceived: by 2002:a05:6e04:71a:b0:3ac:63b9:5e27 with SMTP id o26csp2106356imz;\n        Tue, 7 Apr 2026 12:33:01 -0700 (PDT)\nX-Received: by 2002:ac8:7dd4:0:b0:503:4257:da03 with SMTP id d75a77;\n        Tue, 7 Apr 2026 12:33:00 -0700 (PDT)\nReturn-Path: <newsletter@example.com>\nMIME-Version: 1.0\nContent-Type: multipart/alternative; boundary=\"newsletter-boundary-123\"\n\n--newsletter-boundary-123\nContent-Type: text/plain; charset=\"utf-8\"\nContent-Transfer-Encoding: quoted-printable\n\nExample Museum\nhttps://example.com/logo\n\nView in Browser\nhttps://example.com/view\n\nTickets are now on sale for the Spring Documentary Festival\nJoin us for a showcase of outstanding documentary films.\n\nLearn More\nhttps://example.com/learn-more\n\nUnsubscribe\nhttps://example.com/unsubscribe\n\n--newsletter-boundary-123\nContent-Type: text/html; charset=\"utf-8\"\nContent-Transfer-Encoding: quoted-printable\n\n<!DOCTYPE html>\n<html>\n<body>\n  <table role=3D\"presentation\" width=3D\"100%\">\n    <tr>\n      <td>\n        <p>View in Browser</p>\n        <h1>Tickets are now on sale for the Spring Documentary Festival</h1>\n        <p>Join us for a showcase of outstanding documentary films and immersive conversations around the world.</p>\n        <table role=3D\"presentation\">\n          <tr><td><a href=3D\"https://example.com/learn-more\">Learn More</a></td></tr>\n        </table>\n        <p><a href=3D\"https://example.com/unsubscribe\">Unsubscribe</a> | <a href=3D\"https://example.com/preferences\">Manage Preferences</a></p>\n      </td>\n    </tr>\n  </table>\n</body>\n</html>\n\n--newsletter-boundary-123--",
+      "expectedHTMLContains": "Tickets are now on sale for the Spring Documentary Festival",
+      "expectedTextContains": "Join us for a showcase of outstanding documentary films",
+      "expectedHasRichHTMLContent": true
+    }
+  ],
   "richHTMLDetectionCases": [
     {
       "id": "apple_mail_rich_link_preview_not_rich",

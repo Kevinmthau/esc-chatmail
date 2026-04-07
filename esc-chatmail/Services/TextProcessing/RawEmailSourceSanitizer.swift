@@ -48,6 +48,25 @@ enum RawEmailSourceSanitizer {
         return stripMimeScaffolding(from: withoutTransportHeaders)
     }
 
+    static func extractHTMLText(from text: String) -> String? {
+        let normalized = normalizeLineEndings(text)
+        guard looksLikeRawEmailSource(normalized) else { return nil }
+
+        let withoutTransportHeaders = stripLeadingTransportHeaders(from: normalized)
+        guard let htmlPart = extractPartBody(
+            from: withoutTransportHeaders,
+            matchingContentType: { lower in
+                lower.hasPrefix("content-type:") && lower.contains("text/html")
+            },
+            stripScaffoldingAfterDecode: false
+        ) else {
+            return nil
+        }
+
+        let trimmed = htmlPart.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     private static func normalizeLineEndings(_ text: String) -> String {
         text
             .replacingOccurrences(of: "\r\n", with: "\n")
@@ -123,6 +142,20 @@ enum RawEmailSourceSanitizer {
     }
 
     private static func extractPlainTextPart(from text: String) -> String? {
+        extractPartBody(
+            from: text,
+            matchingContentType: { lower in
+                lower.hasPrefix("content-type:") && lower.contains("text/plain")
+            },
+            stripScaffoldingAfterDecode: true
+        )
+    }
+
+    private static func extractPartBody(
+        from text: String,
+        matchingContentType: (String) -> Bool,
+        stripScaffoldingAfterDecode: Bool
+    ) -> String? {
         let lines = text.components(separatedBy: .newlines)
         let boundary = extractBoundary(from: text)
         let knownBoundaries = extractKnownBoundaries(from: text)
@@ -132,8 +165,7 @@ enum RawEmailSourceSanitizer {
             let line = lines[index]
             let lower = line.lowercased()
 
-            guard lower.hasPrefix("content-type:"),
-                  lower.contains("text/plain") else {
+            guard matchingContentType(lower) else {
                 index += 1
                 continue
             }
@@ -171,7 +203,9 @@ enum RawEmailSourceSanitizer {
 
             var body = bodyLines.joined(separator: "\n")
             body = decodePartBodyIfNeeded(body, headers: partHeaders)
-            body = stripMimeScaffolding(from: body)
+            if stripScaffoldingAfterDecode || containsEmbeddedMimeScaffolding(body) {
+                body = stripMimeScaffolding(from: body)
+            }
             body = body.trimmingCharacters(in: .whitespacesAndNewlines)
 
             if !body.isEmpty {
@@ -182,6 +216,14 @@ enum RawEmailSourceSanitizer {
         }
 
         return nil
+    }
+
+    private static func containsEmbeddedMimeScaffolding(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return lower.contains("\ncontent-type:") ||
+            lower.contains("\ncontent-transfer-encoding:") ||
+            lower.contains("\ncontent-disposition:") ||
+            lower.contains("\n--")
     }
 
     private static func decodePartBodyIfNeeded(_ body: String, headers: [String]) -> String {

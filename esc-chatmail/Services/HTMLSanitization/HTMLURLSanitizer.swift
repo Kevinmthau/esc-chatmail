@@ -65,14 +65,17 @@ struct HTMLURLSanitizer {
     }()
 
     /// Sanitizes href and src attributes in HTML
-    func sanitizeURLs(_ html: String) -> String {
+    func sanitizeURLs(_ html: String, rewriteModernFormatQueryHints: Bool = true) -> String {
         var result = html
 
         // Sanitize href attributes
         result = sanitizeHrefAttributes(result)
 
         // Sanitize src attributes
-        result = sanitizeSrcAttributes(result)
+        result = sanitizeSrcAttributes(
+            result,
+            rewriteModernFormatQueryHints: rewriteModernFormatQueryHints
+        )
 
         // Rewrite Cloudflare CDN image URLs to avoid AVIF decoding issues
         result = rewriteCloudflareCDNImageURLs(result)
@@ -97,7 +100,7 @@ struct HTMLURLSanitizer {
         return result
     }
 
-    private func sanitizeSrcAttributes(_ html: String) -> String {
+    private func sanitizeSrcAttributes(_ html: String, rewriteModernFormatQueryHints: Bool) -> String {
         var result = html
         let srcMatches = Self.srcRegex.matches(in: result, range: NSRange(result.startIndex..., in: result))
 
@@ -126,7 +129,8 @@ struct HTMLURLSanitizer {
                     // Block non-image data URLs (e.g., data:text/html)
                     guard let fullRange = Range(match.range, in: result) else { continue }
                     result.replaceSubrange(fullRange, with: transparentPixel)
-                } else if let rewrittenURL = rewriteModernImageFormatHints(in: decodedURL),
+                } else if rewriteModernFormatQueryHints,
+                          let rewrittenURL = rewriteModernImageFormatHints(in: decodedURL),
                           rewrittenURL != decodedURL,
                           let fullRange = Range(match.range, in: result) {
                     let escapedURL = htmlAttributeEscaped(rewrittenURL)

@@ -961,6 +961,44 @@ final class GoldenCorpusReplayTests: XCTestCase {
             }
         }
 
+        for scenario in corpus.rawSourceHTMLRecoveryCases {
+            XCTContext.runActivity(named: "rawSourceHTML:\(scenario.id)") { _ in
+                let extractedHTML = RawEmailSourceSanitizer.extractHTMLText(from: scenario.input)
+                XCTAssertNotNil(
+                    extractedHTML,
+                    scenario.notes ?? "Expected embedded HTML for scenario \(scenario.id)"
+                )
+
+                let html = extractedHTML ?? ""
+                XCTAssertTrue(
+                    normalize(html).contains(normalize(scenario.expectedHTMLContains)),
+                    scenario.notes ?? "Raw-source HTML extraction mismatch for scenario \(scenario.id)"
+                )
+
+                let result = ChatBubbleTextProcessor.process(
+                    content: html,
+                    options: ChatBubbleTextProcessorOptions(
+                        inputKind: .html,
+                        sanitizeRawEmailSource: false,
+                        decodeHTMLEntities: true,
+                        formatSignOffLineBreaks: true,
+                        classifyRichContent: true
+                    )
+                )
+
+                XCTAssertEqual(
+                    result.hasRichContent,
+                    scenario.expectedHasRichHTMLContent,
+                    scenario.notes ?? "Raw-source HTML rich-content mismatch for scenario \(scenario.id)"
+                )
+
+                XCTAssertTrue(
+                    normalize(result.mainText ?? "").contains(normalize(scenario.expectedTextContains)),
+                    scenario.notes ?? "Raw-source HTML text extraction mismatch for scenario \(scenario.id)"
+                )
+            }
+        }
+
         for scenario in corpus.richHTMLDetectionCases {
             XCTContext.runActivity(named: "richHTML:\(scenario.id)") { _ in
                 let handler = HTMLContentHandler.shared
@@ -1090,6 +1128,7 @@ final class GoldenCorpusReplayTests: XCTestCase {
 private struct GoldenCorpus: Decodable {
     let plainTextQuoteCleanupCases: [PlainTextQuoteCleanupCase]
     let htmlToBubbleTextCases: [HTMLToBubbleTextCase]
+    let rawSourceHTMLRecoveryCases: [RawSourceHTMLRecoveryCase]
     let richHTMLDetectionCases: [RichHTMLDetectionCase]
     let displayPolicyCases: [DisplayPolicyCase]
     let conversationListSnippetCases: [ConversationListSnippetCase]
@@ -1098,6 +1137,7 @@ private struct GoldenCorpus: Decodable {
     enum CodingKeys: String, CodingKey {
         case plainTextQuoteCleanupCases
         case htmlToBubbleTextCases
+        case rawSourceHTMLRecoveryCases
         case richHTMLDetectionCases
         case displayPolicyCases
         case conversationListSnippetCases
@@ -1108,6 +1148,7 @@ private struct GoldenCorpus: Decodable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         plainTextQuoteCleanupCases = try container.decodeIfPresent([PlainTextQuoteCleanupCase].self, forKey: .plainTextQuoteCleanupCases) ?? []
         htmlToBubbleTextCases = try container.decodeIfPresent([HTMLToBubbleTextCase].self, forKey: .htmlToBubbleTextCases) ?? []
+        rawSourceHTMLRecoveryCases = try container.decodeIfPresent([RawSourceHTMLRecoveryCase].self, forKey: .rawSourceHTMLRecoveryCases) ?? []
         richHTMLDetectionCases = try container.decodeIfPresent([RichHTMLDetectionCase].self, forKey: .richHTMLDetectionCases) ?? []
         displayPolicyCases = try container.decodeIfPresent([DisplayPolicyCase].self, forKey: .displayPolicyCases) ?? []
         conversationListSnippetCases = try container.decodeIfPresent([ConversationListSnippetCase].self, forKey: .conversationListSnippetCases) ?? []
@@ -1126,6 +1167,15 @@ private struct HTMLToBubbleTextCase: Decodable {
     let id: String
     let inputHTML: String
     let expected: String
+    let notes: String?
+}
+
+private struct RawSourceHTMLRecoveryCase: Decodable {
+    let id: String
+    let input: String
+    let expectedHTMLContains: String
+    let expectedTextContains: String
+    let expectedHasRichHTMLContent: Bool
     let notes: String?
 }
 
