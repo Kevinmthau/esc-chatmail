@@ -94,10 +94,18 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
 
     // MARK: - HTML Wrapping for Display
 
-    func wrapHTMLForDisplay(_ html: String, isDarkMode: Bool) -> String {
+    func wrapHTMLForDisplay(
+        _ html: String,
+        isDarkMode: Bool,
+        displayPurpose: HTMLDisplayPurpose = .preview
+    ) -> String {
         // Apply full sanitization first (URL sanitization, CSS sanitization, tracking pixel removal, etc.)
         let sanitized = sanitize(html)
         // Then wrap for display with styling
-        return displayWrapper.wrapHTMLForDisplay(sanitized, isDarkMode: isDarkMode)
+        return displayWrapper.wrapHTMLForDisplay(
+            sanitized,
+            isDarkMode: isDarkMode,
+            displayPurpose: displayPurpose
+        )
     }
 }

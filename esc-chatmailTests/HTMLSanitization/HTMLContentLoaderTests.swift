@@ -76,6 +76,34 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertFalse(second.html?.contains("BODY_QUOTE") == true)
     }
 
+    func testLoadContent_cacheSeparatesPreviewAndOriginalDisplayPurposes() async {
+        let messageId = "html-loader-purpose-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let html = """
+        <p><a href="https://example.com/deck.pdf">Deck</a></p>
+        """
+        _ = contentHandler.saveHTML(html, for: messageId)
+
+        let preview = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .preview
+        )
+        let original = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        XCTAssertTrue(preview.html?.contains("text-decoration: inherit") == true)
+        XCTAssertFalse(original.html?.contains("text-decoration: inherit") == true)
+    }
+
     func testLoadContent_cleanupModeQuotedOnlyPreservesSignatureBlock() async {
         let messageId = "html-loader-signature-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }

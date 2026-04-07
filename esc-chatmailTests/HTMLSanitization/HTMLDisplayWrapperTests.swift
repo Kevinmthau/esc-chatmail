@@ -48,4 +48,16 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertTrue(result.contains("body { font-family: Georgia, serif; font-size: 19px; }"))
         XCTAssertFalse(result.contains("font-family: -apple-system"))
     }
+
+    func testWrapHTMLForDisplay_originalPurpose_preservesDefaultLinkStyling() {
+        let html = """
+        <p><a href="https://example.com/file.pdf">Open file</a></p>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertFalse(result.contains("text-decoration: inherit"))
+        XCTAssertFalse(result.contains("color: inherit"))
+        XCTAssertTrue(result.contains("https://example.com/file.pdf"))
+    }
 }

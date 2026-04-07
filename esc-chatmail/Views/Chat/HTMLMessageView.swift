@@ -120,7 +120,8 @@ struct HTMLMessageView: View {
             bodyText: message.bodyText,
             senderEmail: message.senderEmail,
             isDarkMode: colorScheme == .dark,
-            cleanupMode: message.htmlDisplayCleanupMode,
+            cleanupMode: .none,
+            displayPurpose: .original,
             timeout: 5.0
         )
 

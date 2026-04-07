@@ -75,10 +75,11 @@ final class HTMLContentLoader {
         bodyText: String? = nil,
         senderEmail: String? = nil,
         isDarkMode: Bool,
-        cleanupMode: HTMLContentCleanupMode = .none
+        cleanupMode: HTMLContentCleanupMode = .none,
+        displayPurpose: HTMLDisplayPurpose = .preview
     ) async -> HTMLLoadResult {
         // Check memory cache first
-        let cacheKey = "\(messageId)_\(isDarkMode)_\(cleanupMode.rawValue)" as NSString
+        let cacheKey = "\(messageId)_\(isDarkMode)_\(cleanupMode.rawValue)_\(displayPurpose.rawValue)" as NSString
         if let cachedHTML = htmlCache.object(forKey: cacheKey) {
             return HTMLLoadResult(html: cachedHTML as String, source: .messageId)
         }
@@ -93,7 +94,8 @@ final class HTMLContentLoader {
                 messageId: messageId,
                 senderEmail: senderEmail,
                 isDarkMode: isDarkMode,
-                cleanupMode: cleanupMode
+                cleanupMode: cleanupMode,
+                displayPurpose: displayPurpose
             ) {
                 if wrapped.shouldCache {
                     let cost = wrapped.html.utf8.count
@@ -114,7 +116,8 @@ final class HTMLContentLoader {
                 messageId: messageId,
                 senderEmail: senderEmail,
                 isDarkMode: isDarkMode,
-                cleanupMode: cleanupMode
+                cleanupMode: cleanupMode,
+                displayPurpose: displayPurpose
             ) {
                 if wrapped.shouldCache {
                     let cost = wrapped.html.utf8.count
@@ -131,7 +134,8 @@ final class HTMLContentLoader {
                messageId: messageId,
                senderEmail: senderEmail,
                isDarkMode: isDarkMode,
-               cleanupMode: cleanupMode
+               cleanupMode: cleanupMode,
+               displayPurpose: displayPurpose
            ) {
             if wrapped.shouldCache {
                 let cost = wrapped.html.utf8.count
@@ -145,7 +149,11 @@ final class HTMLContentLoader {
             let normalizedText = normalizedPlainTextFallback(from: text)
             if hasMeaningfulPlainText(normalizedText) {
                 let html = convertPlainTextToHTML(normalizedText)
-                let wrapped = sanitizer.wrapHTMLForDisplay(html, isDarkMode: isDarkMode)
+                let wrapped = sanitizer.wrapHTMLForDisplay(
+                    html,
+                    isDarkMode: isDarkMode,
+                    displayPurpose: displayPurpose
+                )
                 if HTMLMeaningfulContentChecker.hasMeaningfulContent(wrapped) {
                     return HTMLLoadResult(html: wrapped, source: .plainTextFallback)
                 }
@@ -163,6 +171,7 @@ final class HTMLContentLoader {
         senderEmail: String? = nil,
         isDarkMode: Bool,
         cleanupMode: HTMLContentCleanupMode = .none,
+        displayPurpose: HTMLDisplayPurpose = .preview,
         timeout: TimeInterval = 5.0
     ) async -> HTMLLoadResult {
         return await withTaskGroup(of: HTMLLoadResult?.self) { group in
@@ -174,7 +183,8 @@ final class HTMLContentLoader {
                     bodyText: bodyText,
                     senderEmail: senderEmail,
                     isDarkMode: isDarkMode,
-                    cleanupMode: cleanupMode
+                    cleanupMode: cleanupMode,
+                    displayPurpose: displayPurpose
                 )
             }
 
@@ -198,8 +208,10 @@ final class HTMLContentLoader {
     func invalidate(messageId: String) {
         for isDarkMode in [false, true] {
             for cleanupMode in HTMLContentCleanupMode.allCases {
-                let key = "\(messageId)_\(isDarkMode)_\(cleanupMode.rawValue)" as NSString
-                htmlCache.removeObject(forKey: key)
+                for displayPurpose in HTMLDisplayPurpose.allCases {
+                    let key = "\(messageId)_\(isDarkMode)_\(cleanupMode.rawValue)_\(displayPurpose.rawValue)" as NSString
+                    htmlCache.removeObject(forKey: key)
+                }
             }
         }
     }
@@ -209,7 +221,8 @@ final class HTMLContentLoader {
         messageId: String,
         senderEmail: String?,
         isDarkMode: Bool,
-        cleanupMode: HTMLContentCleanupMode
+        cleanupMode: HTMLContentCleanupMode,
+        displayPurpose: HTMLDisplayPurpose
     ) async -> WrappedHTMLResult? {
         let preparedHTML = prepareHTMLForDisplay(html, cleanupMode: cleanupMode)
         let sanitizedHTML = sanitizer.sanitize(preparedHTML)
@@ -225,7 +238,11 @@ final class HTMLContentLoader {
             warmRemoteImageAttachmentFallback(in: sanitizedHTML, messageId: messageId, senderEmail: senderEmail)
         }
 
-        let wrapped = sanitizer.wrapHTMLForDisplay(cachedRewrite.html, isDarkMode: isDarkMode)
+        let wrapped = sanitizer.wrapHTMLForDisplay(
+            cachedRewrite.html,
+            isDarkMode: isDarkMode,
+            displayPurpose: displayPurpose
+        )
         guard HTMLMeaningfulContentChecker.hasMeaningfulContent(wrapped) else {
             return nil
         }

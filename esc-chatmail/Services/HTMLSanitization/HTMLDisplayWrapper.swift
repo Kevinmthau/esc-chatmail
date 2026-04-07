@@ -1,11 +1,20 @@
 import Foundation
 
+enum HTMLDisplayPurpose: String, CaseIterable, Sendable {
+    case preview
+    case original
+}
+
 /// Wraps HTML content for display in WebView with proper styling and security
 /// Designed to match Apple Mail's rendering behavior as closely as possible
 struct HTMLDisplayWrapper {
     /// Wraps HTML content with full HTML document structure and styling
     /// Note: HTML should already be sanitized by HTMLSanitizerService.sanitize() before calling this
-    func wrapHTMLForDisplay(_ html: String, isDarkMode: Bool) -> String {
+    func wrapHTMLForDisplay(
+        _ html: String,
+        isDarkMode: Bool,
+        displayPurpose: HTMLDisplayPurpose = .preview
+    ) -> String {
         // Content is pre-sanitized by HTMLSanitizerService, so we just wrap it
         let sanitized = html
 
@@ -18,15 +27,33 @@ struct HTMLDisplayWrapper {
 
         // If the email already has a full HTML structure, inject our styles minimally
         if hasDoctype || hasHtmlTag {
-            return wrapExistingDocument(sanitized, isDarkMode: isDarkMode, backgroundColor: backgroundColor, textColor: textColor)
+            return wrapExistingDocument(
+                sanitized,
+                isDarkMode: isDarkMode,
+                backgroundColor: backgroundColor,
+                textColor: textColor,
+                displayPurpose: displayPurpose
+            )
         }
 
         // For partial HTML (no document structure), wrap with our template
-        return wrapPartialHTML(sanitized, isDarkMode: isDarkMode, backgroundColor: backgroundColor, textColor: textColor)
+        return wrapPartialHTML(
+            sanitized,
+            isDarkMode: isDarkMode,
+            backgroundColor: backgroundColor,
+            textColor: textColor,
+            displayPurpose: displayPurpose
+        )
     }
 
     /// Wraps HTML that already has document structure - inject styles without breaking existing layout
-    private func wrapExistingDocument(_ html: String, isDarkMode: Bool, backgroundColor: String, textColor: String) -> String {
+    private func wrapExistingDocument(
+        _ html: String,
+        isDarkMode: Bool,
+        backgroundColor: String,
+        textColor: String,
+        displayPurpose: HTMLDisplayPurpose
+    ) -> String {
         // Inject our viewport meta, CSP, and minimal styles into the existing document
         // This preserves the email's original <style> tags and media queries
 
@@ -52,11 +79,7 @@ struct HTMLDisplayWrapper {
             table {
                 max-width: 100%;
             }
-            /* Reset link styling to inherit - allows email's inline styles to work */
-            a {
-                color: inherit;
-                text-decoration: inherit;
-            }
+            \(linkCSS(for: displayPurpose))
             \(isDarkMode ? darkModeCSS(textColor: textColor) : "")
         </style>
         """
@@ -89,7 +112,13 @@ struct HTMLDisplayWrapper {
     }
 
     /// Wraps partial HTML (no document structure) with our full template
-    private func wrapPartialHTML(_ html: String, isDarkMode: Bool, backgroundColor: String, textColor: String) -> String {
+    private func wrapPartialHTML(
+        _ html: String,
+        isDarkMode: Bool,
+        backgroundColor: String,
+        textColor: String,
+        displayPurpose: HTMLDisplayPurpose
+    ) -> String {
         return """
         <!DOCTYPE html>
         <html>
@@ -122,11 +151,7 @@ struct HTMLDisplayWrapper {
                     max-width: 100%;
                     border-collapse: collapse;
                 }
-                /* Reset link styling to inherit - allows email's inline styles to work */
-                a {
-                    color: inherit;
-                    text-decoration: inherit;
-                }
+                \(linkCSS(for: displayPurpose))
                 /* Text wrapping */
                 div, td, th, p {
                     overflow-wrap: break-word;
@@ -142,6 +167,20 @@ struct HTMLDisplayWrapper {
             \(html)
         </body>
         </html>
+        """
+    }
+
+    private func linkCSS(for displayPurpose: HTMLDisplayPurpose) -> String {
+        guard displayPurpose == .preview else {
+            return ""
+        }
+
+        return """
+        /* Preview cards should inherit surrounding text styling. */
+        a {
+            color: inherit;
+            text-decoration: inherit;
+        }
         """
     }
 
