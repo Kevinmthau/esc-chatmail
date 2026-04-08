@@ -38,11 +38,17 @@ extension EmailPreviewClassification {
     }
 }
 
+enum NewsletterPreviewHeroImageDisplayMode: String, Equatable, Sendable {
+    case fill
+    case fit
+}
+
 struct NewsletterPreviewModel: Equatable, Sendable {
     let title: String
     let subtitle: String?
     let snippet: String
     let heroImageURL: String?
+    let heroImageDisplayMode: NewsletterPreviewHeroImageDisplayMode
     let sourceLabel: String?
     let sourceDomain: String?
 }

@@ -23,7 +23,8 @@ struct NewsletterPreviewBuilder {
             from: lines,
             excluding: [title, subtitle, subject, sourceLabel, sourceDomain]
         )
-        let heroImageURL = bestHeroImageURL(from: canonicalHTML)
+        let heroImage = bestHeroImageCandidate(from: canonicalHTML)
+        let heroImageURL = heroImage?.url
 
         guard title != nil || subtitle != nil || snippet != nil || heroImageURL != nil else {
             return nil
@@ -39,6 +40,7 @@ struct NewsletterPreviewBuilder {
             subtitle: subtitle,
             snippet: truncate(resolvedSnippet, limit: 220),
             heroImageURL: heroImageURL,
+            heroImageDisplayMode: heroImage?.displayMode ?? .fill,
             sourceLabel: sourceLabel,
             sourceDomain: sourceDomain
         )
@@ -206,7 +208,7 @@ struct NewsletterPreviewBuilder {
         return score
     }
 
-    private func bestHeroImageURL(from canonicalHTML: String) -> String? {
+    private func bestHeroImageCandidate(from canonicalHTML: String) -> HeroImageCandidate? {
         // Reuse the existing HTML safety pipeline before extracting any image candidate for the
         // native newsletter card so preview loading does not bypass URL sanitization/tracking rules.
         let sanitizedHTML = sanitizer.sanitize(canonicalHTML)
@@ -214,7 +216,7 @@ struct NewsletterPreviewBuilder {
         let nsRange = NSRange(sanitizedHTML.startIndex..., in: sanitizedHTML)
         let matches = regex?.matches(in: sanitizedHTML, options: [], range: nsRange) ?? []
 
-        var bestCandidate: (url: String, score: Int)?
+        var bestCandidate: HeroImageCandidate?
 
         for (index, match) in matches.prefix(8).enumerated() {
             guard let range = Range(match.range, in: sanitizedHTML) else {
@@ -237,6 +239,15 @@ struct NewsletterPreviewBuilder {
                     width: width,
                     height: height
                   ) else {
+                continue
+            }
+            let lowercasedSource = safeSource.lowercased()
+            guard let displayMode = heroImageDisplayMode(
+                width: width,
+                height: height,
+                descriptor: descriptor,
+                url: lowercasedSource
+            ) else {
                 continue
             }
 
@@ -262,11 +273,11 @@ struct NewsletterPreviewBuilder {
                 score -= 18
             }
 
-            if safeSource.lowercased().contains("hero") || safeSource.lowercased().contains("banner") || safeSource.lowercased().contains("cover") {
+            if lowercasedSource.contains("hero") || lowercasedSource.contains("banner") || lowercasedSource.contains("cover") {
                 score += 14
             }
 
-            if safeSource.lowercased().contains("logo") || safeSource.lowercased().contains("icon") || safeSource.lowercased().contains("avatar") || safeSource.lowercased().contains("pixel") {
+            if lowercasedSource.contains("logo") || lowercasedSource.contains("icon") || lowercasedSource.contains("avatar") || lowercasedSource.contains("pixel") {
                 score -= 18
             }
 
@@ -278,16 +289,27 @@ struct NewsletterPreviewBuilder {
                 score -= 15
             }
 
+            // Keep very wide images available as a fallback, but prefer conventional hero images
+            // when both are present.
+            if displayMode == .fit {
+                score -= 20
+            }
+
             guard score >= 18 else {
                 continue
             }
 
+            let candidate = HeroImageCandidate(
+                url: safeSource,
+                displayMode: displayMode,
+                score: score
+            )
             if bestCandidate == nil || score > (bestCandidate?.score ?? Int.min) {
-                bestCandidate = (safeSource, score)
+                bestCandidate = candidate
             }
         }
 
-        return bestCandidate?.url
+        return bestCandidate
     }
 
     private func safeHeroImageURL(
@@ -379,8 +401,11 @@ struct NewsletterPreviewBuilder {
             return true
         }
 
-        if let width, let height, width * height <= 20_000 {
-            return true
+        if let width, let height {
+            let (area, overflow) = width.multipliedReportingOverflow(by: height)
+            if !overflow, area <= 20_000 {
+                return true
+            }
         }
 
         return false
@@ -400,6 +425,44 @@ struct NewsletterPreviewBuilder {
         }
 
         return positiveHeroImageHints.contains(where: url.contains)
+    }
+
+    private func heroImageDisplayMode(
+        width: Int?,
+        height: Int?,
+        descriptor: String,
+        url: String
+    ) -> NewsletterPreviewHeroImageDisplayMode? {
+        guard let aspectRatio = aspectRatio(width: width, height: height) else {
+            return .fill
+        }
+
+        let looksLikeBanner = bannerLikeHeroImageHints.contains(where: descriptor.contains)
+            || bannerLikeHeroImageHints.contains(where: url.contains)
+        let looksPromotional = promotionalHeroImageHints.contains(where: descriptor.contains)
+            || promotionalHeroImageHints.contains(where: url.contains)
+
+        if aspectRatio >= 4.0, looksLikeBanner || looksPromotional {
+            return nil
+        }
+
+        if aspectRatio >= 2.8 {
+            return .fit
+        }
+
+        if aspectRatio >= 2.3, looksLikeBanner {
+            return .fit
+        }
+
+        return .fill
+    }
+
+    private func aspectRatio(width: Int?, height: Int?) -> Double? {
+        guard let width, let height, width > 0, height > 0 else {
+            return nil
+        }
+
+        return Double(width) / Double(height)
     }
 
     private func isRenderableRemoteImageURL(_ url: String) -> Bool {
@@ -661,6 +724,12 @@ struct NewsletterPreviewBuilder {
     }
 }
 
+private struct HeroImageCandidate {
+    let url: String
+    let displayMode: NewsletterPreviewHeroImageDisplayMode
+    let score: Int
+}
+
 private let footerStopPatterns = [
     "unsubscribe",
     "manage preferences",
@@ -750,6 +819,24 @@ private let positiveHeroImageHints = [
     "banner",
     "cover",
     "feature"
+]
+
+private let bannerLikeHeroImageHints = [
+    "banner",
+    "header",
+    "masthead",
+    "promo"
+]
+
+private let promotionalHeroImageHints = [
+    "coupon",
+    "deal",
+    "discount",
+    "membership",
+    "offer",
+    "promo",
+    "sale",
+    "shop"
 ]
 
 private let blockedHeroImageHints = [

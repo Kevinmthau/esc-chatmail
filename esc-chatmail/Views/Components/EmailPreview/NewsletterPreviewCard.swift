@@ -7,7 +7,10 @@ struct NewsletterPreviewCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let heroImageURL = model.heroImageURL {
-                NewsletterPreviewHeroImage(imageURL: heroImageURL)
+                NewsletterPreviewHeroImage(
+                    imageURL: heroImageURL,
+                    displayMode: model.heroImageDisplayMode
+                )
                     .frame(height: 142)
                     .clipped()
             }
@@ -81,6 +84,7 @@ struct NewsletterPreviewCard: View {
 
 private struct NewsletterPreviewHeroImage: View {
     let imageURL: String
+    let displayMode: NewsletterPreviewHeroImageDisplayMode
 
     @State private var loadedImage: UIImage?
     @State private var isLoading = false
@@ -97,9 +101,7 @@ private struct NewsletterPreviewHeroImage: View {
             )
 
             if let loadedImage {
-                Image(uiImage: loadedImage)
-                    .resizable()
-                    .scaledToFill()
+                heroImageView(for: loadedImage)
                     .transition(.opacity)
             } else if isLoading {
                 ProgressView()
@@ -113,6 +115,25 @@ private struct NewsletterPreviewHeroImage: View {
         }
         .task(id: imageURL) {
             await loadImage()
+        }
+    }
+
+    @ViewBuilder
+    private func heroImageView(for image: UIImage) -> some View {
+        switch displayMode {
+        case .fill:
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+        case .fit:
+            VStack(spacing: 0) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity)
+
+                Spacer(minLength: 0)
+            }
         }
     }
 

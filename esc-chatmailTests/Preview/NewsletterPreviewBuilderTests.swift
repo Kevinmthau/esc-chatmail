@@ -29,6 +29,7 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
 
         XCTAssertEqual(result?.title, "Markets are back in motion")
         XCTAssertEqual(result?.heroImageURL, "https://cdn.example.com/hero-banner.jpg")
+        XCTAssertEqual(result?.heroImageDisplayMode, .fill)
         XCTAssertEqual(result?.sourceDomain, "morningbrew.com")
         XCTAssertTrue(result?.snippet.contains("Stocks rallied sharply") == true)
         XCTAssertFalse(result?.snippet.lowercased().contains("unsubscribe") == true)
@@ -56,6 +57,7 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         )
 
         XCTAssertEqual(result?.heroImageURL, "https://cdn.example.com/daily-cover.jpg")
+        XCTAssertEqual(result?.heroImageDisplayMode, .fill)
     }
 
     func testBuildPreview_omitsHeroWhenOnlyTinyOrSuspiciousImagesExist() {
@@ -80,6 +82,98 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
 
         XCTAssertNil(result?.heroImageURL)
         XCTAssertEqual(result?.title, "Weekend edit")
+    }
+
+    func testBuildPreview_marksWideHeroImageForAspectFitPresentation() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <img src="https://cdn.example.com/briefing-banner.jpg" width="900" height="300" alt="Morning briefing banner">
+            <h1>Morning markets briefing</h1>
+            <p>The setup into the open is calmer, but treasury yields are still driving sentiment.</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderEmail: "newsletter@example.com",
+            subject: "Morning markets briefing"
+        )
+
+        XCTAssertEqual(result?.heroImageURL, "https://cdn.example.com/briefing-banner.jpg")
+        XCTAssertEqual(result?.heroImageDisplayMode, .fit)
+    }
+
+    func testBuildPreview_omitsExtremelyWidePromotionalBannerHero() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <img src="https://cdn.example.com/membership-banner.jpg" width="665" height="142" alt="Membership banner">
+            <h1>Spring Stationery Refresh</h1>
+            <p>Fresh boxed stationery, thank-you notes, and personalized desk sets just landed.</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderEmail: "create@papersource.com",
+            subject: "The Latest from Paper Source"
+        )
+
+        XCTAssertNil(result?.heroImageURL)
+    }
+
+    func testBuildPreview_prefersStandardHeroImageOverWideBannerFallback() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <img src="https://cdn.example.com/opening-banner.jpg" width="900" height="300" alt="Opening banner">
+            <img src="https://cdn.example.com/lead-story-photo.jpg" width="640" height="360" alt="Lead story hero">
+            <h1>Rates cool as inflation slows</h1>
+            <p>Stocks climbed after the latest CPI report came in softer than expected.</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderEmail: "briefing@example.com",
+            subject: "Opening bell"
+        )
+
+        XCTAssertEqual(result?.heroImageURL, "https://cdn.example.com/lead-story-photo.jpg")
+        XCTAssertEqual(result?.heroImageDisplayMode, .fill)
+    }
+
+    func testBuildPreview_handlesAbsurdImageDimensionsWithoutOverflow() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <img src="https://cdn.example.com/hero.jpg" width="3037000500" height="3037000500" alt="Hero image">
+            <h1>Large dimension test</h1>
+            <p>This should still build a preview without crashing on malformed image metadata.</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderEmail: "newsletter@example.com",
+            subject: "Large dimension test"
+        )
+
+        XCTAssertEqual(result?.heroImageURL, "https://cdn.example.com/hero.jpg")
+        XCTAssertEqual(result?.heroImageDisplayMode, .fill)
     }
 
     func testBuildPreview_fallsBackToSubjectAndStopsBeforeFooter() {
