@@ -15,10 +15,15 @@ struct EmailContentSection: View {
     private let newsletterPreviewBuilder = NewsletterPreviewBuilder()
 
     private var loadKey: String {
+        Self.makeLoadKey(for: message, isDarkMode: colorScheme == .dark)
+    }
+
+    static func makeLoadKey(for message: Message, isDarkMode: Bool) -> String {
         let bodyTextHash = message.bodyText?.hashValue ?? 0
+        let cleanedSnippetHash = message.cleanedSnippet?.hashValue ?? 0
         let subjectHash = message.subject?.hashValue ?? 0
         let senderHash = message.senderEmail?.hashValue ?? 0
-        return "\(message.id)|\(message.bodyStorageURI ?? "")|\(bodyTextHash)|\(subjectHash)|\(senderHash)|\(colorScheme == .dark)|\(message.htmlDisplayCleanupMode.rawValue)"
+        return "\(message.id)|\(message.bodyStorageURI ?? "")|\(bodyTextHash)|\(cleanedSnippetHash)|\(subjectHash)|\(senderHash)|\(isDarkMode)|\(message.htmlDisplayCleanupMode.rawValue)"
     }
 
     var body: some View {

@@ -83,7 +83,11 @@ struct NewsletterPreviewBuilder {
     ) -> String? {
         let excludedValues = normalizedSet(from: excluded)
 
-        if let preferredSnippet = normalizedPreviewSummary(preferredSnippet, excluding: excludedValues) {
+        if let preferredSnippet = normalizedPreviewSummary(
+            preferredSnippet,
+            excluding: excluded,
+            excludedValues: excludedValues
+        ) {
             return truncate(preferredSnippet, limit: 190)
         }
 
@@ -415,8 +419,15 @@ struct NewsletterPreviewBuilder {
         normalizedText(text).lowercased()
     }
 
-    private func normalizedPreviewSummary(_ text: String?, excluding excludedValues: Set<String>) -> String? {
-        let normalized = normalizedText(text)
+    private func normalizedPreviewSummary(
+        _ text: String?,
+        excluding excluded: [String?],
+        excludedValues: Set<String>
+    ) -> String? {
+        var normalized = trimmedPreviewBoundaryText(normalizedText(text))
+        normalized = trimmingLeadingExcludedText(from: normalized, excluded: excluded)
+        normalized = trimmingFooterContent(from: normalized)
+
         guard !normalized.isEmpty,
               normalized.count >= 24,
               !lineLooksLikePreviewNoise(normalized),
@@ -431,6 +442,59 @@ struct NewsletterPreviewBuilder {
         }
 
         return normalized
+    }
+
+    private func trimmingLeadingExcludedText(from text: String, excluded: [String?]) -> String {
+        let candidates = excluded
+            .compactMap { candidate -> String? in
+                let normalized = normalizedText(candidate)
+                guard normalized.count >= 4 else {
+                    return nil
+                }
+                return normalized
+            }
+            .sorted { $0.count > $1.count }
+
+        guard !candidates.isEmpty else {
+            return text
+        }
+
+        var trimmed = text
+
+        while true {
+            let previousValue = trimmed
+
+            for candidate in candidates {
+                guard let range = trimmed.range(of: candidate, options: [.anchored, .caseInsensitive]) else {
+                    continue
+                }
+
+                trimmed = trimmedPreviewBoundaryText(String(trimmed[range.upperBound...]))
+                break
+            }
+
+            if trimmed == previousValue {
+                return trimmed
+            }
+        }
+    }
+
+    private func trimmingFooterContent(from text: String) -> String {
+        let footerStart = footerStopPatterns
+            .compactMap { text.range(of: $0, options: [.caseInsensitive])?.lowerBound }
+            .min()
+
+        guard let footerStart else {
+            return text
+        }
+
+        return trimmedPreviewBoundaryText(String(text[..<footerStart]))
+    }
+
+    private func trimmedPreviewBoundaryText(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "^[\\s\\-:;,.!?|>*]+", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "[\\s\\-:;,.!?|>*]+$", with: "", options: .regularExpression)
     }
 
     private func normalizedText(_ text: String?) -> String {

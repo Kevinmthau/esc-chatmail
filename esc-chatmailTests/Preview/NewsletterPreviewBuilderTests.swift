@@ -100,6 +100,59 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         XCTAssertFalse(result?.snippet.contains("96") == true)
     }
 
+    func testBuildPreview_stripsLeadingTitleFromPreferredCleanedSnippet() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <h1>Spring Stationery Refresh</h1>
+            <p>Fresh boxed stationery, thank-you notes, and personalized desk sets just landed.</p>
+            <p>Discover new designs for gifting, correspondence, and everyday writing.</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            cleanedSnippet: "Spring Stationery Refresh: Fresh boxed stationery, thank-you notes, and personalized desk sets just landed. Discover new designs for gifting, correspondence, and everyday writing.",
+            senderName: "Paper Source",
+            senderEmail: "create@papersource.com",
+            subject: "The Latest from Paper Source"
+        )
+
+        XCTAssertEqual(result?.title, "Spring Stationery Refresh")
+        XCTAssertTrue(result?.snippet.hasPrefix("Fresh boxed stationery") == true)
+        XCTAssertFalse(result?.snippet.hasPrefix("Spring Stationery Refresh") == true)
+    }
+
+    func testBuildPreview_trimsFooterFromPreferredCleanedSnippetInsteadOfDiscardingIt() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <img src="https://cdn.example.com/membership-banner.jpg" width="665" height="142" alt="Membership banner">
+            <h1>Spring Stationery Refresh</h1>
+            <p>Terms and Conditions.</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            cleanedSnippet: "Fresh boxed stationery, thank-you notes, and personalized desk sets just landed. Discover new designs for gifting, correspondence, and everyday writing. Unsubscribe or manage preferences anytime.",
+            senderName: "Paper Source",
+            senderEmail: "create@papersource.com",
+            subject: "The Latest from Paper Source"
+        )
+
+        XCTAssertEqual(result?.title, "Spring Stationery Refresh")
+        XCTAssertTrue(result?.snippet.contains("Fresh boxed stationery") == true)
+        XCTAssertFalse(result?.snippet.lowercased().contains("unsubscribe") == true)
+        XCTAssertFalse(result?.snippet.lowercased().contains("manage preferences") == true)
+    }
+
     func testBuildPreview_fallsBackToHTMLWhenPlainTextLooksPoisonedAndNoCleanedSnippetExists() {
         let html = """
         <!DOCTYPE html>
@@ -165,5 +218,36 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         XCTAssertFalse(result?.snippet.lowercased().contains("join our community") == true)
         XCTAssertFalse(result?.snippet.lowercased().contains("terms and conditions") == true)
         XCTAssertFalse(result?.snippet.contains("&#8202;") == true)
+    }
+}
+
+final class EmailContentSectionTests: XCTestCase {
+    private var testStack: TestCoreDataStack!
+
+    override func setUp() {
+        super.setUp()
+        testStack = TestCoreDataStack()
+    }
+
+    override func tearDown() {
+        testStack = nil
+        super.tearDown()
+    }
+
+    func testMakeLoadKeyIncludesCleanedSnippet() {
+        let context = testStack.viewContext
+        let message = MessageBuilder()
+            .withId("message-id")
+            .withSubject("Subject")
+            .withSender(email: "sender@example.com", name: "Sender")
+            .build(in: context)
+
+        message.cleanedSnippet = "Original cleaned snippet"
+        let initialKey = EmailContentSection.makeLoadKey(for: message, isDarkMode: false)
+
+        message.cleanedSnippet = "Updated cleaned snippet"
+        let updatedKey = EmailContentSection.makeLoadKey(for: message, isDarkMode: false)
+
+        XCTAssertNotEqual(initialKey, updatedKey)
     }
 }
