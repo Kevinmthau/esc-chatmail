@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 enum EmailPreviewKind: String, Equatable, Sendable {
@@ -41,6 +42,23 @@ extension EmailPreviewClassification {
 enum NewsletterPreviewHeroImageDisplayMode: String, Equatable, Sendable {
     case fill
     case fit
+}
+
+extension NewsletterPreviewHeroImageDisplayMode {
+    /// Falls back to the decoded image's actual aspect ratio when HTML metadata was
+    /// too sparse to classify a banner-like hero image correctly.
+    static func resolved(preferred: Self, imageSize: CGSize) -> Self {
+        guard imageSize.width > 1, imageSize.height > 1 else {
+            return preferred
+        }
+
+        if preferred == .fit {
+            return .fit
+        }
+
+        let aspectRatio = imageSize.width / imageSize.height
+        return aspectRatio >= 2.8 ? .fit : .fill
+    }
 }
 
 struct NewsletterPreviewModel: Equatable, Sendable {

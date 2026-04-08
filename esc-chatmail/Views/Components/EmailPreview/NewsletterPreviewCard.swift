@@ -113,7 +113,10 @@ private struct NewsletterPreviewHeroImage: View {
 
     @ViewBuilder
     private func heroImageView(for image: UIImage) -> some View {
-        switch displayMode {
+        switch NewsletterPreviewHeroImageDisplayMode.resolved(
+            preferred: displayMode,
+            imageSize: image.size
+        ) {
         case .fill:
             Image(uiImage: image)
                 .resizable()
@@ -146,7 +149,12 @@ private struct NewsletterPreviewHeroImage: View {
             guard activeImageURL == requestedURL else {
                 return
             }
-            loadedImage = image
+            loadedImage = image.flatMap { loaded in
+                guard loaded.size.width > 1, loaded.size.height > 1 else {
+                    return nil
+                }
+                return loaded
+            }
             isLoading = false
         }
     }

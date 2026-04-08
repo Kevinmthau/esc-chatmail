@@ -1,6 +1,20 @@
 import SwiftUI
 import WebKit
 
+private final class LayoutAwareWKWebView: WKWebView {
+    var onLayoutChange: ((WKWebView) -> Void)?
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        onLayoutChange?(self)
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        onLayoutChange?(self)
+    }
+}
+
 /// Configuration mode for email WebView rendering
 enum EmailWebViewMode {
     /// Full interactive view with JavaScript, scrolling, and link handling
@@ -43,8 +57,11 @@ struct BaseEmailWebView: UIViewRepresentable {
             configuration.defaultWebpagePreferences.allowsContentJavaScript = false
         }
 
-        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let webView = LayoutAwareWKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
+        webView.onLayoutChange = { [weak coordinator = context.coordinator] webView in
+            coordinator?.loadContentIfReady(in: webView)
+        }
 
         switch mode {
         case .fullInteractive:
@@ -73,16 +90,12 @@ struct BaseEmailWebView: UIViewRepresentable {
             webView.backgroundColor = .clear
             webView.scrollView.backgroundColor = .clear
         }
-
-        context.coordinator.loadContent(in: webView)
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.parent = self
-        if context.coordinator.needsReload {
-            context.coordinator.loadContent(in: webView)
-        }
+        context.coordinator.loadContentIfReady(in: webView)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -141,6 +154,20 @@ struct BaseEmailWebView: UIViewRepresentable {
             webView.loadHTMLString(htmlToLoad, baseURL: baseURL)
         }
 
+        func loadContentIfReady(in webView: WKWebView) {
+            guard needsReload, !isLoading else {
+                return
+            }
+
+            guard webView.window != nil,
+                  webView.bounds.width > 1,
+                  webView.bounds.height > 1 else {
+                return
+            }
+
+            loadContent(in: webView)
+        }
+
         private func modeSignature(for mode: EmailWebViewMode) -> String {
             let colorSchemeSignature = parent.isDarkMode ? "dark" : "light"
             switch mode {
@@ -184,6 +211,7 @@ struct BaseEmailWebView: UIViewRepresentable {
                 html, body {
                     overflow: hidden !important;
                     background-color: \(backgroundColor) !important;
+                    min-height: 1px !important;
                 }
                 /* Use higher specificity + !important so template body rules don't override preview scaling. */
                 html body {
@@ -192,6 +220,8 @@ struct BaseEmailWebView: UIViewRepresentable {
                     transform-origin: top left !important;
                     width: \(100.0 / scale)% !important;
                     min-width: 0 !important;
+                    min-height: 1px !important;
+                    display: block !important;
                 }
                 img { max-width: 100%; height: auto; }
                 table { max-width: 100%; }
@@ -249,11 +279,14 @@ struct BaseEmailWebView: UIViewRepresentable {
                         background-color: \(backgroundColor);
                         overflow: hidden;
                         -webkit-text-size-adjust: 100%;
+                        min-height: 1px;
                     }
                     .scale-wrapper {
                         transform: scale(\(scale));
                         transform-origin: top left;
                         width: \(100.0 / scale)%;
+                        min-height: 1px;
+                        display: inline-block;
                     }
                     /* Only constrain, don't force widths */
                     img { max-width: 100%; height: auto; }
