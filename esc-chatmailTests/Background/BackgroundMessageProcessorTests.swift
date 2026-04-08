@@ -379,6 +379,52 @@ final class BackgroundSyncErrorHandlerTests: XCTestCase {
     }
 }
 
+final class LabelOperationProcessorTests: XCTestCase {
+    func testProcess_removesAllDuplicateLabelRowsForMatchingId() async throws {
+        let stack = TestCoreDataStack()
+        let context = stack.viewContext
+
+        let conversation = ConversationBuilder()
+            .hasInboxMessages(true)
+            .withUnreadCount(1)
+            .recentlyActive()
+            .build(in: context)
+        let message = MessageBuilder()
+            .withId("message-1")
+            .withThreadId("thread-1")
+            .withDate(Date())
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+
+        let inboxLabelA = LabelBuilder.inboxLabel(in: context)
+        let inboxLabelB = LabelBuilder.inboxLabel(in: context)
+
+        message.addToLabels(inboxLabelA)
+        message.addToLabels(inboxLabelB)
+
+        try stack.saveViewContext()
+
+        let modifiedIDs = await LabelOperationProcessor.process(
+            items: [
+                HistoryLabelRemoved(
+                    message: MessageListItem(id: "message-1", threadId: nil),
+                    labelIds: ["INBOX"]
+                )
+            ],
+            operation: .remove,
+            in: context,
+            syncStartTime: nil
+        )
+
+        XCTAssertEqual(modifiedIDs, [conversation.objectID])
+        XCTAssertFalse(message.labels?.contains(where: { $0.id == "INBOX" }) ?? false)
+        XCTAssertFalse(conversation.hasInbox)
+        XCTAssertEqual(conversation.inboxUnreadCount, 0)
+        XCTAssertNil(conversation.latestInboxDate)
+    }
+}
+
 private final class MockBackgroundSyncCoordinator: @unchecked Sendable, BackgroundSyncMessageCoordinating {
     private let lock = NSLock()
     private let seedConversationObjectID: NSManagedObjectID

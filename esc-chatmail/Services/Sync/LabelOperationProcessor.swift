@@ -80,7 +80,9 @@ struct LabelOperationProcessor {
                 return []
             }
 
-            let labelDict = Dictionary(labels.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+            // A corrupted store can contain multiple Label rows for the same Gmail id.
+            // Apply mutations to every matching row so we don't depend on fetch order.
+            let labelsById = Dictionary(grouping: labels, by: \.id)
 
             // Process each item using pre-fetched objects
             var modifiedIDs: [NSManagedObjectID] = []
@@ -113,13 +115,17 @@ struct LabelOperationProcessor {
                 // Apply label changes using pre-fetched label objects
                 var foundLabels = 0
                 for labelId in labelIds {
-                    if let label = labelDict[labelId] {
+                    if let labels = labelsById[labelId], !labels.isEmpty {
                         switch operation {
                         case .add:
-                            message.addToLabels(label)
+                            for label in labels {
+                                message.addToLabels(label)
+                            }
                         case .remove:
-                            message.removeFromLabels(label)
-                            Log.debug("Removed label '\(label.id)' from message \(messageId)", category: .sync)
+                            for label in labels {
+                                message.removeFromLabels(label)
+                            }
+                            Log.debug("Removed label '\(labelId)' from message \(messageId)", category: .sync)
                         }
                         foundLabels += 1
                     }
