@@ -1,167 +1,117 @@
-# Repository Guidelines
+# AGENTS.md
 
-## Project Structure & Module Organization
-- `esc-chatmail/` contains app source (Swift/SwiftUI), including `Services/`, `Views/`, `Models/`, and `Resources/`.
-- `esc-chatmail.xcodeproj/` contains Xcode project settings.
-- `esc-chatmailTests/` contains unit tests; `esc-chatmailUITests/` contains UI tests.
-- Configuration is under `esc-chatmail/Configuration/` (see Security & Configuration Notes).
+## Purpose
+This repository is an iOS app focused on making email feel like chat while preserving message fidelity where it matters.
+When making changes, optimize for:
+1. correctness
+2. readability
+3. minimal diffs
+4. preserving existing architecture unless there is a clear improvement
 
-## Build, Test, and Development Commands
-Use `xcodebuild` with the `esc-chatmail` scheme.
+## Repo-specific priorities
+Important areas include:
+- HTMLContentLoader
+- HTMLSanitizerService
+- HTMLDisplayWrapper
+- BaseEmailWebView
+- preview rendering in chat/thread UI
 
-- Build (Debug, device): `xcodebuild build -scheme esc-chatmail -configuration Debug -sdk iphoneos`
-- Build (Debug, simulator): `xcodebuild build -scheme esc-chatmail -configuration Debug -destination 'platform=iOS Simulator'`
-- Build (Release): `xcodebuild build -scheme esc-chatmail -configuration Release -sdk iphoneos`
-- Run all tests: `bash Scripts/run-tests.sh`
-- Run a specific test: `bash Scripts/run-tests.sh -only-testing 'esc-chatmailTests/ConversationMergerTests'`
-- Pre-submission checklist: `bash Scripts/testflight-checklist.sh`
+Be especially careful when changing code that affects both preview rendering and full-message rendering.
+Default to separating those paths rather than sharing a single transformed HTML pipeline.
 
-## Coding Style & Naming Conventions
-- Language: Swift/SwiftUI. Follow Swift API Design Guidelines.
-- Indentation: 4 spaces; use trailing closures and explicit labels for clarity.
-- Naming: `PascalCase` for types, `camelCase` for methods/vars, `UPPER_SNAKE_CASE` only when conventional.
-- File names should generally match the primary type (for example, `MessageProcessor.swift`).
+## Product principles
+- Full message view should prioritize fidelity to the original email.
+- Chat previews are allowed to be derived representations optimized for speed, clarity, and stable layout.
+- Do not use preview-specific transformations to degrade the full message rendering path.
+- Prefer predictable UI over clever rendering tricks.
+- Avoid fragile solutions that depend on scaling full email HTML documents.
 
-## Testing Guidelines
-- Framework: XCTest.
-- Test files live in `esc-chatmailTests/` and `esc-chatmailUITests/` and use `*Tests.swift` naming.
-- Prefer in-memory Core Data via `TestCoreDataStack` and builders (for example, `MessageBuilder`).
-- Add tests for behavior changes; keep tests fast and deterministic.
+## How to work
+- Start by reading the relevant code paths before editing.
+- Prefer small, reviewable commits.
+- Reuse existing patterns and naming conventions in the repo.
+- Do not introduce broad rewrites unless they are necessary to complete the task.
+- Do not add dependencies unless absolutely necessary.
+- Prefer native SwiftUI/UIKit solutions over adding complex parsing frameworks.
+- Prefer simple heuristics and maintainable code over overfitting edge cases.
 
-## Commit & Pull Request Guidelines
-- Commit messages should be action-led and include: what changed, why it changed, behavior impact/scope, and tests run (when applicable).
-- Preferred format: concise subject line plus explanatory body covering the items above.
-- PRs should include a concise summary, tests run, and screenshots for UI changes.
-- Link related issues when applicable.
+## Architecture guidance
+When working on email rendering or previews, keep these concerns separated:
+1. source selection
+2. canonical normalization
+3. safety sanitization
+4. presentation
 
-## Branching Guidelines
-- Work on the current branch by default.
-- Do not create a separate branch for each change.
-- Only create, switch to, merge, or delete branches when the user explicitly asks for branch management.
+Do not mix preview logic into the full-message rendering path unless required.
 
-## Security & Configuration Notes
-- OAuth/secret values live in xcconfig files under `esc-chatmail/Configuration/` and may be excluded from git.
-- Use `Configuration/SECURITY_SETUP.md` and `Config.xcconfig.template` for local setup.
-- Git worktrees (including Codex worktrees under `~/.codex/worktrees/...`) do not share gitignored files. Before building/running in a new worktree, ensure `esc-chatmail/Configuration/Debug.xcconfig` and `esc-chatmail/Configuration/Release.xcconfig` exist. If missing, sync them from any worktree that already has them:
+## Rendering guidance
+### Full message rendering
+- Preserve original HTML as much as possible.
+- Keep sanitization and security protections intact.
+- Minimize layout-altering wrapper CSS.
+- Avoid destructive transformations unless clearly required for safety or rendering.
 
-```bash
-# Copy Debug.xcconfig + Release.xcconfig from the first worktree that has them into all worktrees.
-set -euo pipefail
+### Chat previews
+- For newsletter-like messages, prefer a derived preview model or preview-specific fragment.
+- Do not render the full original email HTML at a reduced scale for chat previews unless explicitly requested.
+- Favor stable card-like previews with predictable height and fast scrolling.
+- Regular conversational email should keep lightweight text-style previews.
 
-SRC=""
-for wt in $(git worktree list --porcelain | awk '$1=="worktree"{print $2}'); do
-  if [ -f "$wt/esc-chatmail/Configuration/Debug.xcconfig" ] && [ -f "$wt/esc-chatmail/Configuration/Release.xcconfig" ]; then
-    SRC="$wt/esc-chatmail/Configuration"
-    break
-  fi
-done
+## Code style
+- Keep code straightforward and readable.
+- Prefer explicit names over clever abstractions.
+- Avoid unnecessary indirection.
+- Keep functions focused and single-purpose.
+- Add comments only where they clarify intent or non-obvious tradeoffs.
+- Avoid “AI-sounding” abstractions and boilerplate-heavy code.
 
-if [ -z "$SRC" ]; then
-  echo "No worktree has Debug.xcconfig/Release.xcconfig. Create them from esc-chatmail/Configuration/Config.xcconfig.template first."
-  exit 1
-fi
+## Testing
+Before finishing:
+- Run the narrowest relevant tests first.
+- Then run broader tests if the change touches shared infrastructure.
+- Do not claim something works unless you ran the relevant checks or clearly state what was not run.
+- If tests fail, diagnose whether the failure is caused by your change or is pre-existing.
 
-for wt in $(git worktree list --porcelain | awk '$1=="worktree"{print $2}'); do
-  mkdir -p "$wt/esc-chatmail/Configuration"
-  cp -f "$SRC/Debug.xcconfig" "$wt/esc-chatmail/Configuration/Debug.xcconfig"
-  cp -f "$SRC/Release.xcconfig" "$wt/esc-chatmail/Configuration/Release.xcconfig"
-done
-```
+## Expected workflow for tasks
+1. Inspect the current implementation.
+2. Identify the minimum set of files to change.
+3. Make the smallest clean change that satisfies the task.
+4. Run relevant tests or build checks.
+5. Summarize:
+   - what changed
+   - why it changed
+   - what was validated
+   - any follow-up opportunities
 
-## Architecture Overview
-ESC Chatmail is a SwiftUI iOS email client that syncs with Gmail via the Gmail API and presents a conversation-first UI.
+## For UI changes
+- Keep visual output intentional and polished.
+- Prefer consistency with iOS conventions.
+- Avoid unstable WebView hacks when a simpler native UI would work.
+- Preserve scrolling performance.
 
-### Core Data Model
-Core entities in `ESCChatmail.xcdatamodel`:
-- **Account**: Gmail account with sync state (`historyId`).
-- **Conversation**: Groups messages by participants; tracks inbox/archive/muted state.
-- **Message**: Individual emails; body stored at `bodyStorageURI`.
-- **Person**: Unique by email; linked via join tables.
-- **Attachment**: File metadata with local caching state.
-- **PendingAction**: Queued Gmail API operations (archive, star, spam, etc.).
+## For email HTML changes
+- Be conservative.
+- Assume email HTML is fragile.
+- Avoid repeated sanitization or repeated transformation passes.
+- Avoid mutating canonical content just to improve a preview.
+- If preview behavior and fidelity conflict, separate the paths.
 
-### Dependency Injection
-`Dependencies.swift` is the service container (`Dependencies.shared`). Tests inject mocks via `TestDependencies`.
+## For refactors
+- Do not refactor unrelated code while implementing a feature.
+- If a refactor is necessary, keep it tightly scoped to the task.
+- Preserve public behavior unless the task explicitly changes it.
 
-### Concurrency Model
-- **@MainActor**: ViewModels and UI classes.
-- **Actors**: Thread-safe services such as `PendingActionsManager`, `PersonCache`, `AttachmentCacheActor`, `HistoryProcessor`, and `TokenManager`.
-- **@unchecked Sendable**: Mixed main/background services such as `CoreDataStack` and `AuthSession`.
-- Utilities in `Services/Concurrency/`: `ViewModelTaskManager`, `TaskCoordinator`, `BackgroundWork`.
+## Communication in task summaries
+At the end of the task, report:
+- files changed
+- key decisions
+- tests run
+- known limitations
+- suggested next steps only if genuinely useful
 
-### Sync Engine
-Two orchestrators in `Services/Sync/`:
-- **InitialSyncOrchestrator**: Full mailbox sync.
-- **IncrementalSyncOrchestrator**: Delta sync via Gmail History API.
-
-Key components: `MessageFetcher`, `MessagePersister`, `HistoryProcessor`.
-
-### HTML Email Rendering
-Pipeline:
-1. `HTMLSanitizerService.sanitize()` removes scripts/forms/tracking pixels and preserves `<style>` tags.
-2. `HTMLDisplayWrapper.wrapHTMLForDisplay()` adds viewport meta and minimal CSS.
-3. `BaseEmailWebView` renders via `WKWebView`.
-
-### Message Cleanup & Chat Bubbles
-Chat bubble text should be conservative: prefer leaving extra quoted/footer content over deleting user-authored text.
-
-Bubble/plain-text processing pipeline (see `Views/Chat/MessageContentView.swift` and `Services/TextProcessing/`):
-1. `RawEmailSourceSanitizer.extractDisplayText(...)` (strips RFC822/MIME scaffolding when needed)
-2. `HTMLEntityDecoder.decode(...)`
-3. `TextProcessing.unwrapEmailLineBreaks(...)`
-4. `PlainTextQuoteRemover.extractQuotes(...)` (quote boundary detection + `PlainTextSignatureRemover`)
-5. `TextProcessing.formatSignOffLineBreaks(...)`
-
-Notes:
-- Keep "immediate fallback" and "background cached" processing paths unified. If you change quote/signature removal, ensure both paths use the same APIs (typically `PlainTextQuoteRemover.extractQuotes`).
-- Do not use `TextSnippetCreator` for chat bubbles; it condenses whitespace/newlines and is intended for preview snippets.
-- Signature stripping must not treat phone numbers inside body sentences (for example, "call me at 415-...") as standalone contact blocks. Treat phone numbers as signature contact info only when the line is primarily a phone line or has explicit prefixes (`T:`, `M:`, etc).
-- Remove Outlook legal footer variants from bubble text when they appear as trailing disclaimers (for example, "This electronic mail transmission may contain confidential or privileged information...").
-
-### Newsletter Detection & Preview Routing
-- Newsletter classification is scored in `Services/MessageProcessor.swift` (`calculateNewsletterScore(...)`) and stored as `Message.isNewsletter`.
-- Chat rendering decisions (HTML preview vs chat bubble) live in `Views/Chat/MessageDisplayPolicy.swift`.
-- Rich transactional/marketing HTML can show preview cards even in one-to-one conversations; outgoing messages and `Re:` reply threads stay plain chat bubbles.
-- For false positives (personal mail treated as newsletter), adjust scoring/signals and add a golden corpus `newsletterDetectionCases` fixture.
-
-### Golden Message Corpus (Regression Fixtures)
-- Fixture: `esc-chatmailTests/TestSupport/Fixtures/golden_message_corpus.json`
-- Harness: `GoldenCorpusReplayTests` in `esc-chatmailTests/MessageProcessorTests.swift`
-- Run: `bash Scripts/run-tests.sh -only-testing 'esc-chatmailTests/GoldenCorpusReplayTests'`
-
-Agent requirement:
-- If you fix or change behavior in any of these areas, you MUST add (or update) a minimally scoped, anonymized regression case in the golden corpus and run `GoldenCorpusReplayTests`:
-  - HTML/plain-text extraction (`TextProcessing.extractPlainText`, `unwrapEmailLineBreaks`)
-  - Quote/signature removal (`PlainTextQuoteRemover`, `PlainTextSignatureRemover`, `HTMLQuoteRemover`)
-  - Snippet/preview generation (`TextSnippetCreator`, `Message.conversationPreviewText`, conversation list snippet behavior)
-  - Display routing/policy (`MessageDisplayPolicy`)
-  - Newsletter detection (`MessageProcessor.calculateNewsletterScore`)
-- Prefer adding to an existing section (`plainTextQuoteCleanupCases`, `htmlToBubbleTextCases`, `displayPolicyCases`, `newsletterDetectionCases`). If the regression does not fit, extend the corpus schema plus `GoldenCorpusReplayTests` rather than skipping the corpus.
-
-Workflow for cleanup/policy regressions:
-1. Add a failing real-world sample to the corpus (and a focused unit test if the bug is in a helper).
-2. Confirm the corpus test fails.
-3. Fix the parser/policy logic.
-4. Re-run and keep the fixture permanently.
-
-### View Architecture
-ViewModels (`ChatViewModel`, `ConversationListViewModel`, `ComposeViewModel`) use `@Published`.
-Views use `@FetchRequest` for reactive Core Data queries.
-
-### Pending Actions System
-User actions are stored as `PendingAction` entities:
-1. `MessageActions` creates the record.
-2. `PendingActionsManager` executes via `GmailActionExecutor`.
-3. Success removes the record; failures retry with backoff.
-
-### Error Handling
-Error types: `APIError`, `CoreDataError`, `TokenManagerError`.
-Retry behavior is handled via `RetryExecutor`, the `GmailAPIClient` rate-limit circuit breaker, and `MessageFetcher` retry classification.
-
-### Logging
-```swift
-Log.info("Sync started", category: .sync)
-Log.error("Failed", category: .api, error: error)
-```
-
-Categories: `.sync`, `.api`, `.coreData`, `.auth`, `.ui`, `.attachment`, `.message`, `.conversation`, `.background`.
+## Good defaults
+If the task is ambiguous, prefer:
+- smaller change
+- clearer code
+- preserving current behavior
+- native rendering over fragile HTML tricks
