@@ -52,3 +52,21 @@ struct NewsletterPreviewModel: Equatable, Sendable {
     let sourceLabel: String?
     let sourceDomain: String?
 }
+
+enum TransactionalPreviewImageStyle: String, Equatable, Sendable {
+    case avatar
+    case card
+}
+
+struct TransactionalPreviewModel: Equatable, Sendable {
+    let title: String
+    let subtitle: String?
+    let amount: String?
+    let status: String?
+    let actionLabel: String?
+    let detailLine: String?
+    let imageURL: String?
+    let imageStyle: TransactionalPreviewImageStyle
+    let sourceLabel: String?
+    let sourceDomain: String?
+}

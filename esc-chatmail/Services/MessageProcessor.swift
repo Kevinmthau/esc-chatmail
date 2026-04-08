@@ -5,6 +5,7 @@ import CryptoKit
 class MessageProcessor {
     private let emailTextProcessor = EmailTextProcessor.self
     private let emailNormalizer = EmailNormalizer.self
+    private let previewClassifier = EmailPreviewClassifier()
 
     func processGmailMessage(_ gmailMessage: GmailMessage, myAliases: Set<String>) async -> ProcessedMessage? {
         guard let payload = gmailMessage.payload,
@@ -47,7 +48,9 @@ class MessageProcessor {
         // Detect if this is a newsletter/promotion
         processedMessage.isNewsletter = isNewsletterOrPromotion(
             labelIds: processedMessage.labelIds,
-            headers: processedMessage.headers
+            headers: processedMessage.headers,
+            html: content.html,
+            plainText: content.plainText
         )
 
         // Check for attachments (exclude body parts that we fetched as content)
@@ -129,8 +132,30 @@ class MessageProcessor {
 
     /// Calculates newsletter score using weighted signals
     /// Returns true if score >= 50 (threshold)
-    private func isNewsletterOrPromotion(labelIds: [String], headers: ProcessedHeaders) -> Bool {
-        calculateNewsletterScore(labelIds: labelIds, headers: headers).isNewsletter
+    private func isNewsletterOrPromotion(
+        labelIds: [String],
+        headers: ProcessedHeaders,
+        html: String?,
+        plainText: String?
+    ) -> Bool {
+        let headerResult = calculateNewsletterScore(labelIds: labelIds, headers: headers)
+        if headerResult.isNewsletter {
+            return true
+        }
+
+        guard let html else {
+            return false
+        }
+
+        let senderEmail = headers.from.flatMap { emailNormalizer.extractEmail(from: $0) }
+        let contentClassification = previewClassifier.classify(
+            canonicalHTML: html,
+            bodyText: plainText,
+            senderEmail: senderEmail,
+            subject: headers.subject
+        )
+
+        return contentClassification.kind == .newsletter
     }
 
     /// Calculates newsletter detection score with detailed signal tracking

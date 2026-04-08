@@ -392,4 +392,12 @@ final class EmailContentSectionTests: XCTestCase {
 
         XCTAssertNotEqual(initialKey, updatedKey)
     }
+
+    func testShouldUseTransactionalPreviewCard_forwardedMessage_returnsFalse() {
+        XCTAssertFalse(EmailContentSection.shouldUseTransactionalPreviewCard(isForwardedEmail: true))
+    }
+
+    func testShouldUseTransactionalPreviewCard_regularMessage_returnsTrue() {
+        XCTAssertTrue(EmailContentSection.shouldUseTransactionalPreviewCard(isForwardedEmail: false))
+    }
 }

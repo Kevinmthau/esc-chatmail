@@ -441,6 +441,105 @@ final class MessageProcessorTests: XCTestCase {
         XCTAssertEqual(result.score, 30)
     }
 
+    func testProcessGmailMessage_promotesInstitutionalSecurityUpdateFromHTMLContent() async {
+        let filler = String(repeating: "<p>Security guidance content block.</p>", count: 400)
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <div id="emailPreHeader" style="display:none">Secure your mobile phone in minutes</div>
+            <table><tr><td><a href="https://pb.jpmorgan.com/home"><img src="https://pages-pb.jpmorgan.com/logo.png" width="640" height="77" alt="J.P. Morgan Private Bank"></a></td></tr></table>
+            <table><tr><td><img src="https://pages-pb.jpmorgan.com/lock.jpg" width="160" height="160" alt="Lock icon"></td><td><h2>Enable extra security at sign-in on mobile</h2><p>Use your device passcode each time for stronger sign-in.</p><a href="https://pb.jpmorgan.com/passcode">Enable device passcode</a></td></tr></table>
+            <table><tr><td><img src="https://pages-pb.jpmorgan.com/fingerprint.jpg" width="160" height="160" alt="Fingerprint"></td><td><h2>Use biometrics instead of usernames and passwords</h2><p>Sign in with Face ID or fingerprint for stronger protection.</p><a href="https://pb.jpmorgan.com/biometrics">Turn on biometrics</a></td></tr></table>
+            <table><tr><td><img src="https://pages-pb.jpmorgan.com/phone.jpg" width="160" height="160" alt="Mobile phone"></td><td><h2>Sign in regularly to your mobile app to keep your device trusted</h2><p>A trusted device helps us confirm it's you when you call your Client Service team.</p><a href="https://pb.jpmorgan.com/app">Download the app</a></td></tr></table>
+            <table><tr><td><h2>Stay one step ahead: Smart habits for stronger mobile security</h2><p>Mobile phones are a prime target for fraud. These tips can help keep your phone safe.</p><a href="https://pb.jpmorgan.com/article">Read article</a></td></tr></table>
+            \(filler)
+            <table><tr><td><a href="https://pb.jpmorgan.com/privacy">Privacy Policy</a> <a href="https://pb.jpmorgan.com/finra">FINRA</a> <a href="https://pb.jpmorgan.com/sipc">SIPC</a> <a href="https://pb.jpmorgan.com/legal">Important information</a> <a href="https://pb.jpmorgan.com/contact">Contact us</a></td></tr></table>
+        </body>
+        </html>
+        """
+
+        var weakHeaders = ProcessedHeaders()
+        weakHeaders.from = "\"J.P. Morgan Private Bank\" <private_banking@pb.jpmorgan.com>"
+        weakHeaders.replyTo = "private_banking@jpmorgan.com"
+        weakHeaders.subject = "Quick steps to strengthen your mobile security"
+
+        let headerOnlyResult = processor.calculateNewsletterScore(
+            labelIds: ["CATEGORY_UPDATES"],
+            headers: weakHeaders
+        )
+
+        XCTAssertFalse(headerOnlyResult.isNewsletter)
+
+        let plainText = """
+        ${Body-Copy-Text}
+        ${Body-Strong-Copy-Text}
+        ${Article-Headline}
+        """
+
+        let message = GmailMessage(
+            id: "jpm-security-update",
+            threadId: "jpm-security-thread",
+            labelIds: ["INBOX", "CATEGORY_UPDATES"],
+            snippet: "Secure your mobile phone in minutes",
+            historyId: "123",
+            internalDate: "1775658731000",
+            payload: MessagePart(
+                partId: "0",
+                mimeType: "multipart/alternative",
+                filename: nil,
+                headers: [
+                    MessageHeader(name: "Subject", value: "Quick steps to strengthen your mobile security"),
+                    MessageHeader(name: "From", value: "\"J.P. Morgan Private Bank\" <private_banking@pb.jpmorgan.com>"),
+                    MessageHeader(name: "Reply-To", value: "private_banking@jpmorgan.com"),
+                    MessageHeader(name: "To", value: "kmthau@gmail.com"),
+                    MessageHeader(name: "Date", value: "Wed, 8 Apr 2026 09:32:11 -0500"),
+                    MessageHeader(name: "Message-ID", value: "<jpm-security@test.example.com>")
+                ],
+                body: nil,
+                parts: [
+                    MessagePart(
+                        partId: "0.0",
+                        mimeType: "text/plain",
+                        filename: nil,
+                        headers: [
+                            MessageHeader(name: "Content-Type", value: "text/plain; charset=UTF-8")
+                        ],
+                        body: MessageBody(
+                            size: plainText.count,
+                            data: plainText.data(using: .utf8)?.base64EncodedString(),
+                            attachmentId: nil
+                        ),
+                        parts: nil
+                    ),
+                    MessagePart(
+                        partId: "0.1",
+                        mimeType: "text/html",
+                        filename: nil,
+                        headers: [
+                            MessageHeader(name: "Content-Type", value: "text/html; charset=UTF-8")
+                        ],
+                        body: MessageBody(
+                            size: html.count,
+                            data: html.data(using: .utf8)?.base64EncodedString(),
+                            attachmentId: nil
+                        ),
+                        parts: nil
+                    )
+                ]
+            ),
+            sizeEstimate: html.count + plainText.count
+        )
+
+        let processed = await processor.processGmailMessage(
+            message,
+            myAliases: []
+        )
+
+        XCTAssertTrue(processed?.isNewsletter == true)
+        XCTAssertTrue(processed?.htmlBody?.contains("Stay one step ahead") == true)
+    }
+
     // MARK: - Edge Cases
 
     func testIsNewsletter_noSignals_doesNotFlag() {
