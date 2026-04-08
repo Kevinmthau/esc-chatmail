@@ -1,32 +1,30 @@
 import SwiftUI
 
-/// Container view that displays a mini WebView preview of newsletter HTML content
+/// Container view that routes chat previews by content type.
+/// Newsletter-like email renders as a derived native card; other rich HTML still falls back
+/// to the existing scaled WebView preview until those paths get their own dedicated treatment.
 struct EmailContentSection: View {
     let message: Message
     let onOpenFullMessage: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
-    @State private var htmlContent: String?
+    @State private var renderedPreview: LoadedPreview?
     @State private var isLoading = true
     private let htmlContentLoader = HTMLContentLoader.shared
+    private let previewClassifier = EmailPreviewClassifier()
+    private let newsletterPreviewBuilder = NewsletterPreviewBuilder()
 
     private var loadKey: String {
         let bodyTextHash = message.bodyText?.hashValue ?? 0
-        return "\(message.id)|\(message.bodyStorageURI ?? "")|\(bodyTextHash)|\(colorScheme == .dark)|\(message.htmlDisplayCleanupMode.rawValue)"
+        let subjectHash = message.subject?.hashValue ?? 0
+        let senderHash = message.senderEmail?.hashValue ?? 0
+        return "\(message.id)|\(message.bodyStorageURI ?? "")|\(bodyTextHash)|\(subjectHash)|\(senderHash)|\(colorScheme == .dark)|\(message.htmlDisplayCleanupMode.rawValue)"
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let html = htmlContent {
-                Button(action: onOpenFullMessage) {
-                    MiniEmailWebView(htmlContent: html, message: message)
-                        .allowsHitTesting(false)
-                        .frame(height: 200)
-                        .cornerRadius(12)
-                        .clipped()
-                }
-                .buttonStyle(.plain)
-                .accessibilityHint("Opens the full original email")
+            if let renderedPreview {
+                previewView(for: renderedPreview)
             } else if isLoading {
                 Button(action: onOpenFullMessage) {
                     EmailContentPlaceholder()
@@ -46,9 +44,35 @@ struct EmailContentSection: View {
     }
 
     private func loadHTML() async {
-        if htmlContent == nil {
-            await MainActor.run {
-                isLoading = true
+        await MainActor.run {
+            renderedPreview = nil
+            isLoading = true
+        }
+
+        if let canonicalHTML = await htmlContentLoader.loadCanonicalHTML(
+            messageId: message.id,
+            bodyStorageURI: message.bodyStorageURI,
+            bodyText: message.bodyText
+        ) {
+            let classification = previewClassifier.classify(
+                canonicalHTML: canonicalHTML,
+                bodyText: message.bodyText,
+                senderEmail: message.senderEmail,
+                subject: message.subject
+            )
+
+            if classification.kind == .newsletter,
+               let model = newsletterPreviewBuilder.buildPreview(
+                canonicalHTML: canonicalHTML,
+                bodyText: message.bodyText,
+                senderEmail: message.senderEmail,
+                subject: message.subject
+               ) {
+                await MainActor.run {
+                    renderedPreview = .newsletter(model)
+                    isLoading = false
+                }
+                return
             }
         }
 
@@ -67,8 +91,35 @@ struct EmailContentSection: View {
         }
 
         await MainActor.run {
-            htmlContent = result.html
+            renderedPreview = result.html.map(LoadedPreview.transactionalHTML)
             isLoading = false
         }
     }
+
+    @ViewBuilder
+    private func previewView(for renderedPreview: LoadedPreview) -> some View {
+        switch renderedPreview {
+        case .newsletter(let model):
+            Button(action: onOpenFullMessage) {
+                NewsletterPreviewCard(model: model)
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens the full original email")
+        case .transactionalHTML(let html):
+            Button(action: onOpenFullMessage) {
+                MiniEmailWebView(htmlContent: html, message: message)
+                    .allowsHitTesting(false)
+                    .frame(height: 200)
+                    .cornerRadius(12)
+                    .clipped()
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens the full original email")
+        }
+    }
+}
+
+private enum LoadedPreview: Equatable {
+    case newsletter(NewsletterPreviewModel)
+    case transactionalHTML(String)
 }

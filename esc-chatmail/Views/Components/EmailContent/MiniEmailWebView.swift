@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// A scaled-down WKWebView that shows a preview of HTML email content
-/// Wraps BaseEmailWebView with scaledPreview mode
+/// A scaled-down WKWebView that shows a preview of HTML email content.
+/// Keep newsletter chat previews out of this path; they should use the derived native preview card.
 struct MiniEmailWebView: View {
     let htmlContent: String
     var scale: CGFloat = 0.5

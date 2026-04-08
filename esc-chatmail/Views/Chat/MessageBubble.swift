@@ -131,7 +131,8 @@ struct MessageBubble: View {
 
     @ViewBuilder
     private var subjectView: some View {
-        if let subject = message.subject, !subject.isEmpty {
+        if !(showHTMLPreview && message.isNewsletter),
+           let subject = message.subject, !subject.isEmpty {
             Text(subject)
                 .font(.footnote)
                 .fontWeight(.semibold)

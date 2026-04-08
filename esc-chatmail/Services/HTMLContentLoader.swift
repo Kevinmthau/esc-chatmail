@@ -227,6 +227,39 @@ final class HTMLContentLoader {
         }
     }
 
+    /// Loads canonical HTML content without preview/full-message wrapping.
+    /// Chat newsletter previews use this to derive native cards from the original message content
+    /// instead of scaling the full email DOM inside the thread list.
+    func loadCanonicalHTML(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String? = nil
+    ) async -> String? {
+        if contentHandler.htmlFileExists(for: messageId),
+           let html = canonicalHTMLSource(from: contentHandler.loadHTML(for: messageId)) {
+            return html
+        }
+
+        if let urlString = bodyStorageURI,
+           let url = StorageURIResolver.resolve(urlString),
+           FileManager.default.fileExists(atPath: url.path),
+           let html = canonicalHTMLSource(from: contentHandler.loadHTML(from: url)) {
+            return html
+        }
+
+        if let text = bodyText,
+           let rawSourceHTML = RawEmailSourceSanitizer.extractHTMLText(from: text),
+           let html = canonicalHTMLSource(from: rawSourceHTML) {
+            return html
+        }
+
+        if let html = await HTMLContentRecoveryService.shared.recoverHTMLContent(messageId: messageId) {
+            return canonicalHTMLSource(from: html)
+        }
+
+        return nil
+    }
+
     /// Invalidates cached HTML content for a message (both light/dark variants).
     func invalidate(messageId: String) {
         for isDarkMode in [false, true] {
