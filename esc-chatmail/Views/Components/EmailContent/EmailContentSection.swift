@@ -65,6 +65,12 @@ struct EmailContentSection: View {
                 senderEmail: message.senderEmail,
                 subject: message.subject
             )
+            Log.diagnostic(
+                .htmlPreview,
+                level: .info,
+                "EmailContentSection classified message \(message.id): \(classification.diagnosticSummary)",
+                category: .ui
+            )
 
             if classification.kind == .newsletter,
                let model = newsletterPreviewBuilder.buildPreview(
@@ -80,6 +86,13 @@ struct EmailContentSection: View {
                     isLoading = false
                 }
                 return
+            } else if classification.kind == .newsletter {
+                Log.diagnostic(
+                    .htmlPreview,
+                    level: .info,
+                    "EmailContentSection newsletter fallback for message \(message.id): preview model unavailable",
+                    category: .ui
+                )
             }
         }
 

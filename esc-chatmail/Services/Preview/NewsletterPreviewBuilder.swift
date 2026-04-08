@@ -1,6 +1,10 @@
 import Foundation
 
 struct NewsletterPreviewBuilder {
+    private let sanitizer = HTMLSanitizerService.shared
+    private let urlSanitizer = HTMLURLSanitizer()
+    private let trackingRemover = HTMLTrackingRemover()
+
     func buildPreview(
         canonicalHTML: String,
         bodyText: String?,
@@ -203,23 +207,21 @@ struct NewsletterPreviewBuilder {
     }
 
     private func bestHeroImageURL(from canonicalHTML: String) -> String? {
+        // Reuse the existing HTML safety pipeline before extracting any image candidate for the
+        // native newsletter card so preview loading does not bypass URL sanitization/tracking rules.
+        let sanitizedHTML = sanitizer.sanitize(canonicalHTML)
         let regex = try? NSRegularExpression(pattern: "<img\\b[^>]*>", options: [.caseInsensitive])
-        let nsRange = NSRange(canonicalHTML.startIndex..., in: canonicalHTML)
-        let matches = regex?.matches(in: canonicalHTML, options: [], range: nsRange) ?? []
+        let nsRange = NSRange(sanitizedHTML.startIndex..., in: sanitizedHTML)
+        let matches = regex?.matches(in: sanitizedHTML, options: [], range: nsRange) ?? []
 
         var bestCandidate: (url: String, score: Int)?
 
         for (index, match) in matches.prefix(8).enumerated() {
-            guard let range = Range(match.range, in: canonicalHTML) else {
+            guard let range = Range(match.range, in: sanitizedHTML) else {
                 continue
             }
 
-            let tag = String(canonicalHTML[range])
-            guard let source = attributeValue(named: "src", in: tag),
-                  isRenderableRemoteImageURL(source) else {
-                continue
-            }
-
+            let tag = String(sanitizedHTML[range])
             let width = numericAttribute(named: "width", in: tag)
             let height = numericAttribute(named: "height", in: tag)
             let descriptor = [
@@ -228,6 +230,15 @@ struct NewsletterPreviewBuilder {
             ]
             .compactMap { $0?.lowercased() }
             .joined(separator: " ")
+            guard let source = attributeValue(named: "src", in: tag),
+                  let safeSource = safeHeroImageURL(
+                    from: source,
+                    descriptor: descriptor,
+                    width: width,
+                    height: height
+                  ) else {
+                continue
+            }
 
             var score = 30 - (index * 3)
 
@@ -251,11 +262,11 @@ struct NewsletterPreviewBuilder {
                 score -= 18
             }
 
-            if source.lowercased().contains("hero") || source.lowercased().contains("banner") || source.lowercased().contains("cover") {
+            if safeSource.lowercased().contains("hero") || safeSource.lowercased().contains("banner") || safeSource.lowercased().contains("cover") {
                 score += 14
             }
 
-            if source.lowercased().contains("logo") || source.lowercased().contains("icon") || source.lowercased().contains("avatar") || source.lowercased().contains("pixel") {
+            if safeSource.lowercased().contains("logo") || safeSource.lowercased().contains("icon") || safeSource.lowercased().contains("avatar") || safeSource.lowercased().contains("pixel") {
                 score -= 18
             }
 
@@ -272,11 +283,33 @@ struct NewsletterPreviewBuilder {
             }
 
             if bestCandidate == nil || score > (bestCandidate?.score ?? Int.min) {
-                bestCandidate = (source, score)
+                bestCandidate = (safeSource, score)
             }
         }
 
         return bestCandidate?.url
+    }
+
+    private func safeHeroImageURL(
+        from rawURL: String,
+        descriptor: String,
+        width: Int?,
+        height: Int?
+    ) -> String? {
+        let normalizedURL = normalizedText(rawURL)
+        let lowercasedURL = normalizedURL.lowercased()
+
+        guard isRenderableRemoteImageURL(normalizedURL),
+              urlSanitizer.isURLSafe(normalizedURL),
+              !trackingRemover.isTrackingLikeImageURL(normalizedURL),
+              !containsBlockedHeroHint(in: descriptor),
+              !containsBlockedHeroHint(in: lowercasedURL),
+              !isObviouslyTinyImage(width: width, height: height),
+              looksHeroSized(width: width, height: height, descriptor: descriptor, url: lowercasedURL) else {
+            return nil
+        }
+
+        return normalizedURL
     }
 
     private func firstTagText(_ tagName: String, in html: String) -> String? {
@@ -333,16 +366,57 @@ struct NewsletterPreviewBuilder {
         return Int(value.replacingOccurrences(of: "[^0-9]", with: "", options: .regularExpression))
     }
 
+    private func containsBlockedHeroHint(in text: String) -> Bool {
+        blockedHeroImageHints.contains { text.contains($0) }
+    }
+
+    private func isObviouslyTinyImage(width: Int?, height: Int?) -> Bool {
+        if let width, width <= 4 {
+            return true
+        }
+
+        if let height, height <= 4 {
+            return true
+        }
+
+        if let width, let height, width * height <= 20_000 {
+            return true
+        }
+
+        return false
+    }
+
+    private func looksHeroSized(width: Int?, height: Int?, descriptor: String, url: String) -> Bool {
+        if let width, width >= 240 {
+            return true
+        }
+
+        if let height, height >= 120 {
+            return true
+        }
+
+        if positiveHeroImageHints.contains(where: descriptor.contains) {
+            return true
+        }
+
+        return positiveHeroImageHints.contains(where: url.contains)
+    }
+
     private func isRenderableRemoteImageURL(_ url: String) -> Bool {
-        let lowercased = url.lowercased()
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = trimmed.lowercased()
         guard !lowercased.isEmpty,
               !lowercased.hasPrefix("cid:"),
               !lowercased.hasPrefix("data:"),
-              !lowercased.contains("about:blank") else {
+              !lowercased.contains("about:blank"),
+              let parsedURL = URL(string: trimmed),
+              let scheme = parsedURL.scheme?.lowercased(),
+              let host = parsedURL.host,
+              !host.isEmpty else {
             return false
         }
 
-        return lowercased.hasPrefix("http://") || lowercased.hasPrefix("https://")
+        return scheme == "http" || scheme == "https"
     }
 
     private func normalizedSourceDomain(from senderEmail: String?) -> String? {
@@ -669,4 +743,26 @@ private let ignoredSourceSubdomains: Set<String> = [
     "tracking",
     "updates",
     "www"
+]
+
+private let positiveHeroImageHints = [
+    "hero",
+    "banner",
+    "cover",
+    "feature"
+]
+
+private let blockedHeroImageHints = [
+    "avatar",
+    "beacon",
+    "blank",
+    "divider",
+    "icon",
+    "logo",
+    "pixel",
+    "social",
+    "spacer",
+    "tracking",
+    "tracker",
+    "transparent"
 ]

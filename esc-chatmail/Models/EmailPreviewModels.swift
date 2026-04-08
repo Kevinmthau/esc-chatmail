@@ -31,6 +31,13 @@ struct EmailPreviewClassification: Equatable, Sendable {
     let signals: [EmailPreviewClassificationSignal]
 }
 
+extension EmailPreviewClassification {
+    var diagnosticSummary: String {
+        let signalSummary = signals.map(\.rawValue).joined(separator: ",")
+        return "kind=\(kind.rawValue) newsletter=\(newsletterScore) transactional=\(transactionalScore) signals=[\(signalSummary)]"
+    }
+}
+
 struct NewsletterPreviewModel: Equatable, Sendable {
     let title: String
     let subtitle: String?

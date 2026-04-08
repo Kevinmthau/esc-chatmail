@@ -118,4 +118,44 @@ struct HTMLTrackingRemover {
 
         return result
     }
+
+    /// Shared tracking heuristics for image URLs that may be surfaced outside the HTML render path.
+    func isTrackingLikeImageURL(_ urlString: String) -> Bool {
+        let normalized = urlString
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        guard !normalized.isEmpty else {
+            return true
+        }
+
+        let components = URLComponents(string: normalized)
+        let host = components?.host?.lowercased()
+        let path = components?.path.lowercased() ?? ""
+
+        if Self.trackingDomains.contains(where: { domain in
+            if domain.contains("/") {
+                return normalized.contains(domain)
+            }
+
+            guard let host else { return false }
+            return host == domain || host.hasSuffix(".\(domain)")
+        }) {
+            return true
+        }
+
+        if let host,
+           Self.trackingSubdomains.contains(where: { token in
+               host == token || host.hasPrefix("\(token).") || host.contains(".\(token).")
+           }) {
+            return true
+        }
+
+        let lastPathComponent = (path as NSString).lastPathComponent
+        if Self.trackingFilenames.contains(lastPathComponent) {
+            return true
+        }
+
+        return false
+    }
 }

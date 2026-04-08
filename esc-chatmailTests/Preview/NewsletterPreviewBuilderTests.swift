@@ -34,6 +34,54 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         XCTAssertFalse(result?.snippet.lowercased().contains("unsubscribe") == true)
     }
 
+    func testBuildPreview_skipsUnsafeAndTrackingHeroCandidates() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <img src="javascript:alert('xss')" width="640" height="320" alt="Hero banner">
+            <img src="https://tracking.example.com/open.gif" width="640" height="320" alt="Hero banner">
+            <img src="https://cdn.example.com/daily-cover.jpg" width="640" height="320" alt="Cover image">
+            <h1>Daily briefing</h1>
+            <p>The five stories shaping markets before the opening bell.</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderEmail: "newsletter@example.com",
+            subject: "Daily briefing"
+        )
+
+        XCTAssertEqual(result?.heroImageURL, "https://cdn.example.com/daily-cover.jpg")
+    }
+
+    func testBuildPreview_omitsHeroWhenOnlyTinyOrSuspiciousImagesExist() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <img src="https://cdn.example.com/logo.png" width="48" height="48" alt="Brand logo">
+            <img src="https://cdn.example.com/social-icon.png" width="64" height="64" class="social-icon">
+            <h1>Weekend edit</h1>
+            <p>Ideas for cooking, reading, and getting outside this weekend.</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderEmail: "newsletter@example.com",
+            subject: "Weekend edit"
+        )
+
+        XCTAssertNil(result?.heroImageURL)
+        XCTAssertEqual(result?.title, "Weekend edit")
+    }
+
     func testBuildPreview_fallsBackToSubjectAndStopsBeforeFooter() {
         let html = """
         <!DOCTYPE html>
