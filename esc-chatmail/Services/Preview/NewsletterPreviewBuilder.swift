@@ -4,15 +4,21 @@ struct NewsletterPreviewBuilder {
     func buildPreview(
         canonicalHTML: String,
         bodyText: String?,
+        cleanedSnippet: String? = nil,
+        senderName: String? = nil,
         senderEmail: String?,
         subject: String? = nil
     ) -> NewsletterPreviewModel? {
         let sourceDomain = normalizedSourceDomain(from: senderEmail)
-        let sourceLabel = sourceLabel(from: sourceDomain)
+        let sourceLabel = sourceLabel(senderName: senderName, sourceDomain: sourceDomain)
         let title = resolvedTitle(from: canonicalHTML, subject: subject)
         let lines = cleanedPreviewLines(bodyText: bodyText, canonicalHTML: canonicalHTML)
         let subtitle = resolvedSubtitle(from: lines, excluding: [title, subject, sourceLabel, sourceDomain])
-        let snippet = resolvedSnippet(from: lines, excluding: [title, subtitle, subject, sourceLabel, sourceDomain])
+        let snippet = resolvedSnippet(
+            preferredSnippet: cleanedSnippet,
+            from: lines,
+            excluding: [title, subtitle, subject, sourceLabel, sourceDomain]
+        )
         let heroImageURL = bestHeroImageURL(from: canonicalHTML)
 
         guard title != nil || subtitle != nil || snippet != nil || heroImageURL != nil else {
@@ -38,6 +44,7 @@ struct NewsletterPreviewBuilder {
         let candidates = [
             firstTagText("h1", in: canonicalHTML),
             firstTagText("h2", in: canonicalHTML),
+            firstPreheaderText(in: canonicalHTML),
             firstTagText("title", in: canonicalHTML),
             normalizedText(subject)
         ]
@@ -69,8 +76,17 @@ struct NewsletterPreviewBuilder {
         return nil
     }
 
-    private func resolvedSnippet(from lines: [String], excluding excluded: [String?]) -> String? {
+    private func resolvedSnippet(
+        preferredSnippet: String?,
+        from lines: [String],
+        excluding excluded: [String?]
+    ) -> String? {
         let excludedValues = normalizedSet(from: excluded)
+
+        if let preferredSnippet = normalizedPreviewSummary(preferredSnippet, excluding: excludedValues) {
+            return truncate(preferredSnippet, limit: 190)
+        }
+
         var collected: [String] = []
 
         for line in lines {
@@ -95,7 +111,23 @@ struct NewsletterPreviewBuilder {
     }
 
     private func cleanedPreviewLines(bodyText: String?, canonicalHTML: String) -> [String] {
-        let rawText = normalizedBodyText(bodyText) ?? normalizedText(TextProcessing.extractPlainText(from: canonicalHTML))
+        let bodyLines = previewLines(from: normalizedBodyText(bodyText) ?? "")
+        let htmlLines = previewLines(from: normalizedText(TextProcessing.extractPlainText(from: canonicalHTML)))
+
+        guard !bodyLines.isEmpty else {
+            return htmlLines
+        }
+
+        guard !htmlLines.isEmpty else {
+            return bodyLines
+        }
+
+        let bodyScore = previewQualityScore(for: bodyLines)
+        let htmlScore = previewQualityScore(for: htmlLines)
+        return htmlScore >= bodyScore + 8 ? htmlLines : bodyLines
+    }
+
+    private func previewLines(from rawText: String) -> [String] {
         guard !rawText.isEmpty else { return [] }
 
         let rawLines = rawText.components(separatedBy: .newlines)
@@ -127,6 +159,43 @@ struct NewsletterPreviewBuilder {
         }
 
         return lines
+    }
+
+    private func previewQualityScore(for lines: [String]) -> Int {
+        var score = 0
+
+        for line in lines.prefix(4) {
+            if lineLooksLikePreviewNoise(line) {
+                score -= 40
+                continue
+            }
+
+            if line.count >= 24 {
+                score += 12
+            } else if line.count >= 12 {
+                score += 7
+            } else {
+                score += 2
+            }
+
+            if line.contains(" ") {
+                score += 4
+            }
+
+            if line.range(of: "[.!?]$", options: .regularExpression) != nil {
+                score += 3
+            }
+        }
+
+        if lines.count >= 2 {
+            score += 10
+        }
+
+        if lines.count >= 3 {
+            score += 6
+        }
+
+        return score
     }
 
     private func bestHeroImageURL(from canonicalHTML: String) -> String? {
@@ -218,6 +287,19 @@ struct NewsletterPreviewBuilder {
         return normalizedText(TextProcessing.extractPlainText(from: String(html[range])))
     }
 
+    private func firstPreheaderText(in html: String) -> String? {
+        let pattern = "<(?:div|span)\\b[^>]*class\\s*=\\s*[\"'][^\"']*preheader[^\"']*[\"'][^>]*>([\\s\\S]*?)</(?:div|span)>"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: html, options: [], range: NSRange(html.startIndex..., in: html)),
+              match.numberOfRanges > 1,
+              let range = Range(match.range(at: 1), in: html) else {
+            return nil
+        }
+
+        let extracted = normalizedText(TextProcessing.extractPlainText(from: String(html[range])))
+        return shouldSkipLine(extracted) || shouldStopAtFooter(extracted) ? nil : extracted
+    }
+
     private func attributeValue(named attribute: String, in tag: String) -> String? {
         let pattern = "\(attribute)\\s*=\\s*(?:\"([^\"]+)\"|'([^']+)'|([^\\s>]+))"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
@@ -280,15 +362,22 @@ struct NewsletterPreviewBuilder {
         return domain.isEmpty ? nil : domain
     }
 
-    private func sourceLabel(from sourceDomain: String?) -> String? {
+    private func sourceLabel(senderName: String?, sourceDomain: String?) -> String? {
+        if let senderName = normalizedSenderName(senderName) {
+            return truncate(senderName, limit: 40)
+        }
+
         guard let sourceDomain, !sourceDomain.isEmpty else {
             return nil
         }
 
         let primarySegment = sourceDomain
             .split(separator: ".")
-            .first
-            .map(String.init)?
+            .map(String.init)
+            .first(where: { segment in
+                let lowercased = segment.lowercased()
+                return lowercased.count > 1 && !ignoredSourceSubdomains.contains(lowercased)
+            })?
             .replacingOccurrences(of: "-", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -297,6 +386,16 @@ struct NewsletterPreviewBuilder {
         }
 
         return primarySegment.capitalized
+    }
+
+    private func normalizedSenderName(_ senderName: String?) -> String? {
+        let normalized = normalizedText(senderName)
+        guard !normalized.isEmpty,
+              !normalized.contains("@") else {
+            return nil
+        }
+
+        return normalized
     }
 
     private func normalizedBodyText(_ bodyText: String?) -> String? {
@@ -316,6 +415,24 @@ struct NewsletterPreviewBuilder {
         normalizedText(text).lowercased()
     }
 
+    private func normalizedPreviewSummary(_ text: String?, excluding excludedValues: Set<String>) -> String? {
+        let normalized = normalizedText(text)
+        guard !normalized.isEmpty,
+              normalized.count >= 24,
+              !lineLooksLikePreviewNoise(normalized),
+              !shouldSkipLine(normalized),
+              !shouldStopAtFooter(normalized) else {
+            return nil
+        }
+
+        let comparable = normalizedComparableText(normalized)
+        guard !excludedValues.contains(comparable) else {
+            return nil
+        }
+
+        return normalized
+    }
+
     private func normalizedText(_ text: String?) -> String {
         guard let text else { return "" }
         return HTMLEntityDecoder.decode(text)
@@ -332,6 +449,10 @@ struct NewsletterPreviewBuilder {
             return true
         }
 
+        if lineLooksLikePreviewNoise(line) {
+            return true
+        }
+
         if lowercased.hasPrefix("http://") || lowercased.hasPrefix("https://") {
             return true
         }
@@ -342,6 +463,35 @@ struct NewsletterPreviewBuilder {
     private func shouldStopAtFooter(_ line: String) -> Bool {
         let lowercased = line.lowercased()
         return footerStopPatterns.contains { lowercased.contains($0) }
+    }
+
+    private func lineLooksLikePreviewNoise(_ line: String) -> Bool {
+        let lowercased = line.lowercased()
+
+        if lowercased.contains("{") && lowercased.contains("}") && lowercased.contains(":") {
+            return true
+        }
+
+        if lowercased.range(of: "^[\\d\\W]{1,6}$", options: .regularExpression) != nil {
+            return true
+        }
+
+        if line.range(of: "<[^>]+>", options: .regularExpression) != nil {
+            return true
+        }
+
+        if line.range(of: "&#(?:x?[0-9a-fA-F]+);", options: .regularExpression) != nil {
+            return true
+        }
+
+        if lowercased.range(
+            of: "[a-z-]+\\s*:\\s*[^;]+;\\s*[a-z-]+\\s*:",
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil {
+            return true
+        }
+
+        return previewNoisePatterns.contains { lowercased.contains($0) }
     }
 
     private func isMeaningfulTitle(_ title: String) -> Bool {
@@ -377,9 +527,12 @@ private let footerStopPatterns = [
     "unsubscribe",
     "manage preferences",
     "manage subscriptions",
+    "join our community",
     "view in browser",
     "view online",
+    "terms and conditions",
     "privacy policy",
+    "questions? contact us",
     "why did i get this email",
     "all rights reserved"
 ]
@@ -392,11 +545,16 @@ private let ignoredLinePatterns = [
     "twitter",
     "mastodon",
     "threads",
+    "join our community",
+    "questions? contact us",
+    "free shipping on orders",
+    "valid within the contiguous united states",
     "view in browser",
     "view online",
     "unsubscribe",
     "manage preferences",
     "manage subscriptions",
+    "terms and conditions",
     "privacy policy",
     "terms of service",
     "all rights reserved",
@@ -408,4 +566,43 @@ private let ignoredTitlePatterns = [
     "view in browser",
     "unsubscribe",
     "manage preferences"
+]
+
+private let previewNoisePatterns = [
+    "box-sizing",
+    "content-type:",
+    "content-transfer-encoding:",
+    "mime-version:",
+    "charset=",
+    "font-family:",
+    "max-height:",
+    "mso-",
+    "padding:",
+    "style=",
+    "target=",
+    "text-decoration:",
+    "visibility:",
+    "#messageviewbody"
+]
+
+private let ignoredSourceSubdomains: Set<String> = [
+    "cdn",
+    "click",
+    "e",
+    "email",
+    "em",
+    "img",
+    "image",
+    "links",
+    "m",
+    "mail",
+    "mailer",
+    "news",
+    "newsletter",
+    "notifications",
+    "notify",
+    "track",
+    "tracking",
+    "updates",
+    "www"
 ]

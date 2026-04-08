@@ -65,6 +65,8 @@ struct EmailContentSection: View {
                let model = newsletterPreviewBuilder.buildPreview(
                 canonicalHTML: canonicalHTML,
                 bodyText: message.bodyText,
+                cleanedSnippet: message.cleanedSnippet,
+                senderName: message.senderName,
                 senderEmail: message.senderEmail,
                 subject: message.subject
                ) {

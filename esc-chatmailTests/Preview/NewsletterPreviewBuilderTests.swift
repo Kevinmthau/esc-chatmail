@@ -59,4 +59,111 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         XCTAssertTrue(result?.snippet.contains("Top analysis from our editors") == true)
         XCTAssertFalse(result?.snippet.lowercased().contains("privacy policy") == true)
     }
+
+    func testBuildPreview_prefersCleanedSnippetAndSenderNameWhenPlainTextLooksPoisoned() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <img src="https://cdn.example.com/membership-banner.jpg" width="665" height="142" alt="Membership banner">
+            <h1>Spring Stationery Refresh</h1>
+            <p>Fresh boxed stationery, thank-you notes, and personalized desk sets just landed.</p>
+            <p>Discover new designs for gifting, correspondence, and everyday writing.</p>
+            <p><a href="https://example.com/shop-now">Shop now</a></p>
+            <p>Terms and Conditions.</p>
+        </body>
+        </html>
+        """
+
+        let poisonedBodyText = """
+        The Latest from Paper Source
+
+        96
+
+        *{box-sizing:border-box}body{margin:0;padding:0}a[x-apple-data-detectors]{color:inherit!important;text-decoration:inherit!important}#MessageViewBody a{color:inherit;text-decoration:none}
+        *Terms and Conditions. https://www.papersource.com/pages/membership
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: poisonedBodyText,
+            cleanedSnippet: "Fresh boxed stationery, thank-you notes, and personalized desk sets just landed. Discover new designs for gifting, correspondence, and everyday writing.",
+            senderName: "Paper Source",
+            senderEmail: "create@e.papersource.com",
+            subject: "The Latest from Paper Source"
+        )
+
+        XCTAssertEqual(result?.title, "Spring Stationery Refresh")
+        XCTAssertEqual(result?.sourceLabel, "Paper Source")
+        XCTAssertTrue(result?.snippet.contains("Fresh boxed stationery") == true)
+        XCTAssertFalse(result?.snippet.lowercased().contains("box-sizing") == true)
+        XCTAssertFalse(result?.snippet.contains("96") == true)
+    }
+
+    func testBuildPreview_fallsBackToHTMLWhenPlainTextLooksPoisonedAndNoCleanedSnippetExists() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <h1>Spring Stationery Refresh</h1>
+            <p>Fresh boxed stationery, thank-you notes, and personalized desk sets just landed.</p>
+            <p>Discover new designs for gifting, correspondence, and everyday writing.</p>
+            <p>Terms and Conditions.</p>
+        </body>
+        </html>
+        """
+
+        let poisonedBodyText = """
+        The Latest from Paper Source
+
+        96
+
+        *{box-sizing:border-box}body{margin:0;padding:0}a[x-apple-data-detectors]{color:inherit!important;text-decoration:inherit!important}#MessageViewBody a{color:inherit;text-decoration:none}
+        *Terms and Conditions. https://www.papersource.com/pages/membership
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: poisonedBodyText,
+            senderEmail: "create@e.papersource.com",
+            subject: "The Latest from Paper Source"
+        )
+
+        XCTAssertEqual(result?.title, "Spring Stationery Refresh")
+        XCTAssertEqual(result?.sourceLabel, "Papersource")
+        XCTAssertTrue(result?.snippet.contains("Fresh boxed stationery") == true)
+        XCTAssertFalse(result?.snippet.lowercased().contains("box-sizing") == true)
+        XCTAssertFalse(result?.snippet.contains("96") == true)
+    }
+
+    func testBuildPreview_prefersPreheaderTitleAndRejectsFooterSnippetNoise() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head><title>The Latest from Paper Source</title></head>
+        <body>
+            <div class="preheader">Spring Stationery Refresh</div>
+            <img src="https://cdn.example.com/membership-banner.jpg" width="665" height="142" alt="Membership banner">
+            <p>Join Our Community on Social</p>
+            <p>Questions? Contact Us!</p>
+            <p>Terms and Conditions. Free shipping on orders $50 or more valid within the contiguous United States.</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            cleanedSnippet: "&#8202; Join Our Community on Social *Terms and Conditions. Free shipping on orders $50 or more valid within the contiguous United States.",
+            senderName: "Paper Source",
+            senderEmail: "create@e.papersource.com",
+            subject: "The Latest from Paper Source"
+        )
+
+        XCTAssertEqual(result?.title, "Spring Stationery Refresh")
+        XCTAssertEqual(result?.sourceLabel, "Paper Source")
+        XCTAssertFalse(result?.snippet.lowercased().contains("join our community") == true)
+        XCTAssertFalse(result?.snippet.lowercased().contains("terms and conditions") == true)
+        XCTAssertFalse(result?.snippet.contains("&#8202;") == true)
+    }
 }
