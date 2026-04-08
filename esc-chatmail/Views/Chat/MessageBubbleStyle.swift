@@ -47,7 +47,7 @@ enum MessageBubbleStyle {
     var maxBubbleWidth: CGFloat {
         switch self {
         case .standard: return 280
-        case .compact: return UIScreen.main.bounds.width * 0.75
+        case .compact: return min(UIScreen.main.bounds.width * 0.75, 320)
         }
     }
 

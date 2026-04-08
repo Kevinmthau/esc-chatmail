@@ -78,10 +78,6 @@ struct MessageBubble: View {
                     hasLoadedContent: viewModel.hasLoadedContent,
                     onOpenFullMessage: openFullMessage
                 )
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    openFullMessage()
-                }
 
                 sendStatusView
 
@@ -166,7 +162,7 @@ struct MessageBubble: View {
         if !displayable.isEmpty {
             if style.showAttachmentGrid {
                 AttachmentGridView(attachments: displayable)
-                    .frame(maxWidth: UIScreen.main.bounds.width * 0.65)
+                    .frame(maxWidth: style.maxBubbleWidth)
             } else {
                 AttachmentIndicator(count: displayable.count)
             }
@@ -178,7 +174,7 @@ struct MessageBubble: View {
                     SharedDocumentLinkCard(link: link)
                 }
             }
-            .frame(maxWidth: UIScreen.main.bounds.width * 0.65)
+            .frame(maxWidth: style.maxBubbleWidth)
         }
     }
 

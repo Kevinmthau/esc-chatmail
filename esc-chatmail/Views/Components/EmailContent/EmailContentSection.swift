@@ -10,6 +10,7 @@ struct EmailContentSection: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var renderedPreview: LoadedPreview?
     @State private var isLoading = true
+    @State private var loadGeneration = 0
     private let htmlContentLoader = HTMLContentLoader.shared
     private let previewClassifier = EmailPreviewClassifier()
     private let newsletterPreviewBuilder = NewsletterPreviewBuilder()
@@ -49,21 +50,30 @@ struct EmailContentSection: View {
             }
         }
         .task(id: loadKey) {
-            await loadHTML()
+            let generation = await beginLoad()
+            await loadHTML(generation: generation)
         }
     }
 
-    private func loadHTML() async {
+    private func beginLoad() async -> Int {
         await MainActor.run {
-            renderedPreview = nil
+            loadGeneration &+= 1
             isLoading = true
+            return loadGeneration
         }
+    }
+
+    private func loadHTML(generation: Int) async {
 
         if let canonicalHTML = await htmlContentLoader.loadCanonicalHTML(
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
             bodyText: message.bodyText
         ) {
+            guard !Task.isCancelled else {
+                return
+            }
+
             let classification = previewClassifier.classify(
                 canonicalHTML: canonicalHTML,
                 bodyText: message.bodyText,
@@ -87,10 +97,7 @@ struct EmailContentSection: View {
                     senderEmail: message.senderEmail,
                     subject: message.subject
                 ) {
-                    await MainActor.run {
-                        renderedPreview = .newsletter(model)
-                        isLoading = false
-                    }
+                    await finishLoad(with: .newsletter(model), generation: generation)
                     return
                 }
 
@@ -109,10 +116,7 @@ struct EmailContentSection: View {
                     senderEmail: message.senderEmail,
                     subject: message.subject
                 ) {
-                    await MainActor.run {
-                        renderedPreview = .transactional(model)
-                        isLoading = false
-                    }
+                    await finishLoad(with: .transactional(model), generation: generation)
                     return
                 }
 
@@ -137,12 +141,24 @@ struct EmailContentSection: View {
             timeout: 5.0
         )
 
+        guard !Task.isCancelled else {
+            return
+        }
+
         if result.html == nil {
             Log.diagnostic(.htmlPreview, "EmailContentSection: No HTML content for message \(message.id)", category: .ui)
         }
 
+        await finishLoad(with: result.html.map(LoadedPreview.transactionalHTML), generation: generation)
+    }
+
+    private func finishLoad(with preview: LoadedPreview?, generation: Int) async {
         await MainActor.run {
-            renderedPreview = result.html.map(LoadedPreview.transactionalHTML)
+            guard generation == loadGeneration else {
+                return
+            }
+
+            renderedPreview = preview
             isLoading = false
         }
     }
@@ -155,24 +171,37 @@ struct EmailContentSection: View {
                 NewsletterPreviewCard(model: model)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Email preview: \(model.title)")
             .accessibilityHint("Opens the full original email")
         case .transactional(let model):
             Button(action: onOpenFullMessage) {
                 TransactionalPreviewCard(model: model)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Email preview: \(model.title)")
             .accessibilityHint("Opens the full original email")
         case .transactionalHTML(let html):
             Button(action: onOpenFullMessage) {
-                MiniEmailWebView(htmlContent: html, message: message)
+                MiniEmailWebView(
+                    htmlContent: html,
+                    isDarkMode: colorScheme == .dark,
+                    message: message
+                )
                     .allowsHitTesting(false)
-                    .frame(height: 200)
-                    .cornerRadius(12)
-                    .clipped()
+                    .emailPreviewCardChrome()
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(transactionalPreviewAccessibilityLabel)
             .accessibilityHint("Opens the full original email")
         }
+    }
+
+    private var transactionalPreviewAccessibilityLabel: String {
+        if let subject = message.subject, !subject.isEmpty {
+            return "Email preview: \(subject)"
+        }
+
+        return "Email preview"
     }
 }
 

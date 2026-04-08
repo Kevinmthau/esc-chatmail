@@ -39,15 +39,7 @@ struct NewsletterPreviewCard: View {
             .padding(14)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemBackground))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .emailPreviewCardChrome()
     }
 
     @ViewBuilder
@@ -88,6 +80,7 @@ private struct NewsletterPreviewHeroImage: View {
 
     @State private var loadedImage: UIImage?
     @State private var isLoading = false
+    @State private var activeImageURL: String?
 
     var body: some View {
         ZStack {
@@ -114,7 +107,7 @@ private struct NewsletterPreviewHeroImage: View {
             }
         }
         .task(id: imageURL) {
-            await loadImage()
+            await loadImage(for: imageURL)
         }
     }
 
@@ -137,17 +130,22 @@ private struct NewsletterPreviewHeroImage: View {
         }
     }
 
-    private func loadImage() async {
-        guard loadedImage == nil else {
+    private func loadImage(for requestedURL: String) async {
+        await MainActor.run {
+            activeImageURL = requestedURL
+            loadedImage = nil
+            isLoading = true
+        }
+
+        let image = await EnhancedImageCache.shared.loadImage(from: requestedURL)
+        guard !Task.isCancelled else {
             return
         }
 
         await MainActor.run {
-            isLoading = true
-        }
-
-        let image = await EnhancedImageCache.shared.loadImage(from: imageURL)
-        await MainActor.run {
+            guard activeImageURL == requestedURL else {
+                return
+            }
             loadedImage = image
             isLoading = false
         }

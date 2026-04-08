@@ -5,8 +5,14 @@ import SwiftUI
 struct MiniEmailWebView: View {
     let htmlContent: String
     var scale: CGFloat = 0.5
+    var isDarkMode: Bool = false
     /// Optional message for resolving cid: URLs to inline attachments
     var message: Message?
+    @State private var measuredHeight = Self.defaultPreviewHeight
+
+    private static let defaultPreviewHeight: CGFloat = 180
+    private static let minimumPreviewHeight: CGFloat = 120
+    private static let maximumPreviewHeight: CGFloat = 320
 
     var body: some View {
         GeometryReader { geometry in
@@ -19,8 +25,24 @@ struct MiniEmailWebView: View {
             BaseEmailWebView(
                 htmlContent: htmlContent,
                 mode: .scaledPreview(scale: adaptiveScale),
-                message: message
+                isDarkMode: isDarkMode,
+                message: message,
+                onPreviewHeightChange: updateMeasuredHeight
             )
         }
+        .frame(height: clampedPreviewHeight)
+    }
+
+    private var clampedPreviewHeight: CGFloat {
+        min(max(measuredHeight, Self.minimumPreviewHeight), Self.maximumPreviewHeight)
+    }
+
+    private func updateMeasuredHeight(_ height: CGFloat) {
+        let clampedHeight = min(max(height, Self.minimumPreviewHeight), Self.maximumPreviewHeight)
+        guard abs(clampedHeight - measuredHeight) > 1 else {
+            return
+        }
+
+        measuredHeight = clampedHeight
     }
 }

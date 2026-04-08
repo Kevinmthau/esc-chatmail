@@ -64,15 +64,7 @@ struct TransactionalPreviewCard: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, minHeight: 148, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemBackground))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .emailPreviewCardChrome()
     }
 
     @ViewBuilder
@@ -129,6 +121,7 @@ private struct TransactionalPreviewThumbnail: View {
 
     @State private var loadedImage: UIImage?
     @State private var isLoading = false
+    @State private var activeImageURL: String?
 
     private let avatarSize: CGFloat = 52
     private let cardSize = CGSize(width: 56, height: 56)
@@ -142,7 +135,7 @@ private struct TransactionalPreviewThumbnail: View {
             }
         }
         .task(id: imageURL) {
-            await loadImage()
+            await loadImage(for: imageURL)
         }
     }
 
@@ -200,17 +193,22 @@ private struct TransactionalPreviewThumbnail: View {
         }
     }
 
-    private func loadImage() async {
-        guard loadedImage == nil else {
+    private func loadImage(for requestedURL: String) async {
+        await MainActor.run {
+            activeImageURL = requestedURL
+            loadedImage = nil
+            isLoading = true
+        }
+
+        let image = await EnhancedImageCache.shared.loadImage(from: requestedURL)
+        guard !Task.isCancelled else {
             return
         }
 
         await MainActor.run {
-            isLoading = true
-        }
-
-        let image = await EnhancedImageCache.shared.loadImage(from: imageURL)
-        await MainActor.run {
+            guard activeImageURL == requestedURL else {
+                return
+            }
             loadedImage = image
             isLoading = false
         }

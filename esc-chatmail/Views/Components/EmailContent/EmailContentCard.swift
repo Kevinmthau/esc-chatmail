@@ -1,5 +1,30 @@
 import SwiftUI
 
+enum EmailPreviewCardStyle {
+    static let cornerRadius: CGFloat = 16
+}
+
+extension View {
+    func emailPreviewCardChrome() -> some View {
+        modifier(EmailPreviewCardChromeModifier())
+    }
+}
+
+private struct EmailPreviewCardChromeModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: EmailPreviewCardStyle.cornerRadius, style: .continuous)
+                    .fill(Color(uiColor: .secondarySystemBackground))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: EmailPreviewCardStyle.cornerRadius, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: EmailPreviewCardStyle.cornerRadius, style: .continuous))
+    }
+}
+
 /// Placeholder shown while loading email content
 struct EmailContentPlaceholder: View {
     var body: some View {
@@ -23,8 +48,7 @@ struct EmailContentPlaceholder: View {
             }
             .padding(12)
         }
-        .background(Color(UIColor.secondarySystemBackground))
-        .cornerRadius(12)
+        .emailPreviewCardChrome()
     }
 }
 
@@ -41,16 +65,13 @@ struct EmailContentFallback: View {
                     .foregroundColor(.blue)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    if let subject = subject, !subject.isEmpty {
-                        Text(subject)
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.primary)
-                            .lineLimit(2)
-                    } else {
-                        Text("View Email")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.primary)
-                    }
+                    Text("Open original email")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.primary)
+
+                    Text("Preview unavailable")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
 
                 Spacer()
@@ -60,9 +81,17 @@ struct EmailContentFallback: View {
                     .foregroundColor(.secondary)
             }
             .padding(12)
-            .background(Color(UIColor.secondarySystemBackground))
-            .cornerRadius(12)
+            .emailPreviewCardChrome()
         }
         .buttonStyle(PlainButtonStyle())
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var accessibilityLabel: String {
+        if let subject, !subject.isEmpty {
+            return "Open original email: \(subject)"
+        }
+
+        return "Open original email"
     }
 }

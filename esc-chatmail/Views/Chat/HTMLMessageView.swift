@@ -10,6 +10,9 @@ struct HTMLPreviewView: View {
     @State private var isLoading = true
 
     private let htmlContentLoader = HTMLContentLoader.shared
+    private var loadKey: String {
+        "\(message.id)|\(message.bodyStorageURI ?? "")|\(message.bodyText?.hashValue ?? 0)|\(colorScheme == .dark)"
+    }
 
     var body: some View {
         Group {
@@ -45,12 +48,18 @@ struct HTMLPreviewView: View {
                     )
             }
         }
-        .task {
+        .task(id: loadKey) {
             await loadHTMLContent()
         }
     }
 
     private func loadHTMLContent() async {
+        await MainActor.run {
+            if htmlContent == nil {
+                isLoading = true
+            }
+        }
+
         let result = await htmlContentLoader.loadContent(
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
@@ -58,6 +67,10 @@ struct HTMLPreviewView: View {
             isDarkMode: colorScheme == .dark,
             cleanupMode: message.htmlDisplayCleanupMode
         )
+
+        guard !Task.isCancelled else {
+            return
+        }
 
         await MainActor.run {
             self.htmlContent = result.html
@@ -75,6 +88,9 @@ struct HTMLMessageView: View {
     @State private var isLoading = true
 
     private let htmlContentLoader = HTMLContentLoader.shared
+    private var loadKey: String {
+        "\(message.id)|\(message.bodyStorageURI ?? "")|\(message.bodyText?.hashValue ?? 0)|\(colorScheme == .dark)"
+    }
 
     var body: some View {
         NavigationStack {
@@ -107,12 +123,18 @@ struct HTMLMessageView: View {
                 }
             }
         }
-        .task {
+        .task(id: loadKey) {
             await loadHTMLContent()
         }
     }
 
     private func loadHTMLContent() async {
+        await MainActor.run {
+            if htmlContent == nil {
+                isLoading = true
+            }
+        }
+
         Log.diagnostic(.htmlPreview, level: .info, "HTMLMessageView loading message \(message.id)", category: .ui)
         let result = await htmlContentLoader.loadContentWithTimeout(
             messageId: message.id,
@@ -124,6 +146,10 @@ struct HTMLMessageView: View {
             displayPurpose: .original,
             timeout: 5.0
         )
+
+        guard !Task.isCancelled else {
+            return
+        }
 
         // If we loaded HTML from the per-message file location (or recovered it and saved it there),
         // ensure Core Data points at the canonical file URL so the rest of the UI can treat it as

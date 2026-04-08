@@ -19,6 +19,8 @@ struct BaseEmailWebView: UIViewRepresentable {
     var isDarkMode: Bool = false
     /// Optional message for resolving cid: URLs to inline attachments
     var message: Message?
+    /// Optional callback for non-interactive previews that need their rendered height.
+    var onPreviewHeightChange: ((CGFloat) -> Void)? = nil
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -94,6 +96,7 @@ struct BaseEmailWebView: UIViewRepresentable {
         var lastLoadedContent: String = ""
         var lastLoadedModeSignature: String = ""
         private var isLoading = false
+        private var lastDeliveredPreviewHeight: CGFloat = 0
         /// Holds strong reference to the cid: scheme handler
         var cidHandler: CIDSchemeHandler?
 
@@ -108,13 +111,18 @@ struct BaseEmailWebView: UIViewRepresentable {
         func loadContent(in webView: WKWebView) {
             guard !isLoading else { return }
             isLoading = true
+            lastDeliveredPreviewHeight = 0
             lastLoadedContent = parent.htmlContent
             lastLoadedModeSignature = modeSignature(for: parent.mode)
 
             let htmlToLoad: String
             switch parent.mode {
             case .scaledPreview(let scale):
-                htmlToLoad = wrapWithScale(parent.htmlContent, scale: scale)
+                htmlToLoad = wrapWithScale(
+                    parent.htmlContent,
+                    scale: scale,
+                    isDarkMode: parent.isDarkMode
+                )
                 let estimatedWidth = Int((HTMLPreviewScaleCalculator.estimatedLayoutWidth(from: parent.htmlContent) ?? 0).rounded())
                 let scaleMilli = Int((scale * 1000).rounded())
                 Log.diagnostic(
@@ -134,15 +142,16 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
 
         private func modeSignature(for mode: EmailWebViewMode) -> String {
+            let colorSchemeSignature = parent.isDarkMode ? "dark" : "light"
             switch mode {
             case .fullInteractive:
-                return "fullInteractive"
+                return "fullInteractive:\(colorSchemeSignature)"
             case .simplePreview:
-                return "simplePreview"
+                return "simplePreview:\(colorSchemeSignature)"
             case .scaledPreview(let scale):
                 // Quantize to prevent unnecessary reloads from insignificant layout jitter.
                 let quantized = Int((scale * 1000.0).rounded())
-                return "scaledPreview:\(quantized)"
+                return "scaledPreview:\(quantized):\(colorSchemeSignature)"
             }
         }
 
@@ -151,28 +160,31 @@ struct BaseEmailWebView: UIViewRepresentable {
             EmailSenderBaseURLResolver.baseURL(from: message?.senderEmail)
         }
 
-        private func wrapWithScale(_ html: String, scale: CGFloat) -> String {
-            let isDarkMode = UITraitCollection.current.userInterfaceStyle == .dark
-            let bgColor = isDarkMode ? "#1c1c1e" : "#f2f2f7"
+        private func wrapWithScale(_ html: String, scale: CGFloat, isDarkMode: Bool) -> String {
+            let bgColor = backgroundColorHex(isDarkMode: isDarkMode)
 
             // Avoid nesting full HTML documents inside another <html> wrapper; that can produce blank
             // previews or render only partial/head content. Instead, inject a tiny stylesheet that scales
             // the existing document when the input already contains <html>/<doctype>.
             if html.range(of: "<!doctype", options: .caseInsensitive) != nil ||
                 html.range(of: "<html", options: .caseInsensitive) != nil {
-                return injectScaleStyles(into: html, scale: scale)
+                return injectScaleStyles(into: html, scale: scale, isDarkMode: isDarkMode)
             }
 
             // Partial fragments (no document structure): wrap in our own container.
             return wrapPartialHTMLWithScale(html, scale: scale, backgroundColor: bgColor)
         }
 
-        private func injectScaleStyles(into html: String, scale: CGFloat) -> String {
+        private func injectScaleStyles(into html: String, scale: CGFloat, isDarkMode: Bool) -> String {
             // Scale the rendered page without touching the email's DOM structure.
             // Keep rules minimal to avoid overriding the email's own layout/CSS.
+            let backgroundColor = backgroundColorHex(isDarkMode: isDarkMode)
             let injected = """
             <style id="esc-preview-scale">
-                html, body { overflow: hidden !important; }
+                html, body {
+                    overflow: hidden !important;
+                    background-color: \(backgroundColor) !important;
+                }
                 /* Use higher specificity + !important so template body rules don't override preview scaling. */
                 html body {
                     -webkit-text-size-adjust: 100% !important;
@@ -214,8 +226,12 @@ struct BaseEmailWebView: UIViewRepresentable {
             }
 
             // Worst-case fallback: wrap as a fragment.
-            let bgColor = UITraitCollection.current.userInterfaceStyle == .dark ? "#1c1c1e" : "#f2f2f7"
+            let bgColor = backgroundColorHex(isDarkMode: isDarkMode)
             return wrapPartialHTMLWithScale(result, scale: scale, backgroundColor: bgColor)
+        }
+
+        private func backgroundColorHex(isDarkMode: Bool) -> String {
+            isDarkMode ? "#1c1c1e" : "#f2f2f7"
         }
 
         private func wrapPartialHTMLWithScale(_ html: String, scale: CGFloat, backgroundColor: String) -> String {
@@ -291,7 +307,7 @@ struct BaseEmailWebView: UIViewRepresentable {
                 // Block unsupported schemes that cause errors
                 // Note: "cid" is NOT blocked - it's handled by CIDSchemeHandler
                 let scheme = url.scheme?.lowercased() ?? ""
-                let unsupportedSchemes = ["javascript", "vbscript", "file", "x-apple-data-detectors"]
+                let unsupportedSchemes = ["javascript", "vbscript", "file"]
                 if unsupportedSchemes.contains(scheme) {
                     decisionHandler(.cancel)
                     return
@@ -301,8 +317,15 @@ struct BaseEmailWebView: UIViewRepresentable {
             // Handle link clicks
             if navigationAction.navigationType == .linkActivated,
                let url = navigationAction.request.url {
+                let scheme = url.scheme?.lowercased() ?? ""
+
+                if scheme == "x-apple-data-detectors" {
+                    decisionHandler(.allow)
+                    return
+                }
+
                 // Don't open localhost links
-                if url.host != "localhost" && url.scheme?.hasPrefix("http") == true {
+                if url.host != "localhost" && UIApplication.shared.canOpenURL(url) {
                     UIApplication.shared.open(url)
                 }
                 decisionHandler(.cancel)
@@ -323,6 +346,7 @@ struct BaseEmailWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             isLoading = false
+            schedulePreviewHeightMeasurements(in: webView)
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -333,6 +357,90 @@ struct BaseEmailWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             isLoading = false
             Log.debug("WebView provisional navigation failed: \(error)", category: .ui)
+        }
+
+        private func schedulePreviewHeightMeasurements(in webView: WKWebView) {
+            guard case .scaledPreview = parent.mode else {
+                return
+            }
+
+            for delayMilliseconds in [0, 250, 750] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(delayMilliseconds)) { [weak self, weak webView] in
+                    guard let self, let webView else {
+                        return
+                    }
+                    self.measurePreviewHeight(in: webView)
+                }
+            }
+        }
+
+        private func measurePreviewHeight(in webView: WKWebView) {
+            guard case .scaledPreview(let scale) = parent.mode else {
+                return
+            }
+
+            let measurementScript = """
+            (function() {
+                var heights = [];
+                function push(value) {
+                    if (typeof value === 'number' && isFinite(value) && value > 0) {
+                        heights.push(value);
+                    }
+                }
+
+                var wrapper = document.querySelector('.scale-wrapper');
+                if (wrapper) {
+                    push(wrapper.getBoundingClientRect().height);
+                    push(wrapper.scrollHeight * \(scale));
+                    push(wrapper.offsetHeight * \(scale));
+                }
+
+                if (document.body) {
+                    push(document.body.getBoundingClientRect().height);
+                    push(document.body.scrollHeight * \(scale));
+                    push(document.body.offsetHeight * \(scale));
+                }
+
+                if (document.documentElement) {
+                    push(document.documentElement.getBoundingClientRect().height);
+                    push(document.documentElement.scrollHeight * \(scale));
+                    push(document.documentElement.offsetHeight * \(scale));
+                }
+
+                return heights.length ? Math.ceil(Math.max.apply(null, heights)) : 0;
+            })();
+            """
+
+            webView.evaluateJavaScript(measurementScript) { [weak self] result, error in
+                guard let self else {
+                    return
+                }
+
+                if let error {
+                    Log.debug("WebView preview height measurement failed: \(error)", category: .ui)
+                    return
+                }
+
+                let height = CGFloat((result as? NSNumber)?.doubleValue ?? 0)
+                self.deliverPreviewHeight(height)
+            }
+        }
+
+        private func deliverPreviewHeight(_ height: CGFloat) {
+            guard height > 0 else {
+                return
+            }
+
+            let roundedHeight = height.rounded(.up)
+            guard abs(roundedHeight - lastDeliveredPreviewHeight) > 1 else {
+                return
+            }
+
+            lastDeliveredPreviewHeight = roundedHeight
+            let callback = parent.onPreviewHeightChange
+            DispatchQueue.main.async {
+                callback?(roundedHeight)
+            }
         }
     }
 }
