@@ -12,22 +12,23 @@ struct ComposeForwardModeContext: Identifiable {
 @MainActor
 struct ComposeForwardModeContextBuilder {
     let messageFormatBuilder: MessageFormatBuilder
-    let outboundAttachmentContextBuilder: OutboundAttachmentContextBuilder
 
-    func build(message: Message) throws -> ComposeForwardModeContext {
-        let formattedMessage = messageFormatBuilder.formatForwardedMessage(message)
+    struct Input {
+        let source: MessageFormatBuilder.ForwardSource
+        let forwardedInlineAttachmentInfos: [GmailSendService.AttachmentInfo]
+        let forwardedRegularAttachmentObjectURIs: [String]
+    }
+
+    func build(input: Input) -> ComposeForwardModeContext {
+        let formattedMessage = messageFormatBuilder.formatForwardedMessage(input.source)
 
         return ComposeForwardModeContext(
-            id: message.id,
+            id: input.source.id,
             initialSubject: formattedMessage.subject,
             forwardedPlainTextBody: formattedMessage.body,
             forwardedHTMLBody: formattedMessage.htmlBody,
-            forwardedInlineAttachmentInfos: try outboundAttachmentContextBuilder.buildInlineAttachmentInfos(
-                from: formattedMessage.inlineAttachments
-            ),
-            forwardedRegularAttachmentObjectURIs: try outboundAttachmentContextBuilder.buildObjectURIs(
-                from: formattedMessage.attachments
-            )
+            forwardedInlineAttachmentInfos: input.forwardedInlineAttachmentInfos,
+            forwardedRegularAttachmentObjectURIs: input.forwardedRegularAttachmentObjectURIs
         )
     }
 }

@@ -28,6 +28,7 @@ final class ChatViewModel: ObservableObject {
     private let composeForwardModeContextBuilder: ComposeForwardModeContextBuilder
 
     private let authSession: AuthSession
+    private let htmlContentHandler: HTMLContentHandler
     private let participantLoader: ParticipantLoader
     private let conversationObjectID: NSManagedObjectID
     private let conversationContext: NSManagedObjectContext?
@@ -56,6 +57,7 @@ final class ChatViewModel: ObservableObject {
         let dependencies = deps ?? .shared
         self.conversation = conversation
         self.authSession = dependencies.authSession
+        self.htmlContentHandler = dependencies.htmlContentHandler
         self.participantLoader = dependencies.participantLoader
         self.conversationObjectID = conversation.objectID
         self.conversationContext = conversation.managedObjectContext
@@ -163,7 +165,9 @@ final class ChatViewModel: ObservableObject {
 
     func setMessageToForward(_ message: Message) {
         do {
-            forwardComposeContext = try composeForwardModeContextBuilder.build(message: message)
+            forwardComposeContext = try composeForwardModeContextBuilder.build(
+                input: makeForwardModeInput(message)
+            )
         } catch {
             Log.error("Failed to prepare forward compose context", category: .message, error: error)
         }
@@ -301,5 +305,82 @@ final class ChatViewModel: ObservableObject {
                 body: message.bodyTextValue
             )
         )
+    }
+
+    private func makeForwardModeInput(_ message: Message) throws -> ComposeForwardModeContextBuilder.Input {
+        let attachments = try makeForwardAttachmentPayload(message)
+
+        return ComposeForwardModeContextBuilder.Input(
+            source: makeForwardSource(message),
+            forwardedInlineAttachmentInfos: attachments.inlineAttachmentInfos,
+            forwardedRegularAttachmentObjectURIs: attachments.regularAttachmentObjectURIs
+        )
+    }
+
+    private func makeForwardSource(_ message: Message) -> MessageFormatBuilder.ForwardSource {
+        MessageFormatBuilder.ForwardSource(
+            id: message.id,
+            subject: message.subject,
+            internalDate: message.internalDate,
+            isFromMe: message.isFromMe,
+            bodyText: message.bodyTextValue,
+            snippet: message.snippet,
+            originalHTML: loadForwardOriginalHTML(for: message),
+            participants: Array(message.conversation?.participants ?? []).compactMap { participant in
+                guard let person = participant.person else { return nil }
+                return .init(
+                    email: person.email,
+                    displayName: person.displayName
+                )
+            }
+        )
+    }
+
+    private func loadForwardOriginalHTML(for message: Message) -> String? {
+        if let html = htmlContentHandler.loadHTML(for: message.id) {
+            return html
+        }
+
+        guard let bodyStorageURI = message.bodyStorageURI else {
+            return nil
+        }
+
+        if htmlContentHandler.migrateIfNeeded(from: bodyStorageURI),
+           let migratedHTML = htmlContentHandler.loadHTML(for: message.id) {
+            return migratedHTML
+        }
+
+        guard let resolvedURL = StorageURIResolver.resolve(bodyStorageURI),
+              FileManager.default.fileExists(atPath: resolvedURL.path) else {
+            return nil
+        }
+
+        return htmlContentHandler.loadHTML(from: resolvedURL)
+    }
+
+    private func makeForwardAttachmentPayload(_ message: Message) throws -> ForwardAttachmentPayload {
+        let attachments = message.attachmentsForForwarding
+        let inlineAttachments = attachments.filter { attachment in
+            guard let contentId = attachment.contentId else { return false }
+            return !contentId.isEmpty
+        }
+        let regularAttachments = attachments.filter { attachment in
+            guard let contentId = attachment.contentId else { return true }
+            return contentId.isEmpty
+        }
+
+        return ForwardAttachmentPayload(
+            inlineAttachmentInfos: try outboundAttachmentContextBuilder.buildInlineAttachmentInfos(
+                from: inlineAttachments
+            ),
+            regularAttachmentObjectURIs: try outboundAttachmentContextBuilder.buildObjectURIs(
+                from: regularAttachments
+            )
+        )
+    }
+
+    private struct ForwardAttachmentPayload {
+        let inlineAttachmentInfos: [GmailSendService.AttachmentInfo]
+        let regularAttachmentObjectURIs: [String]
     }
 }

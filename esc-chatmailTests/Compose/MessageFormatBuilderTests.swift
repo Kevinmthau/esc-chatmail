@@ -29,39 +29,30 @@ final class MessageFormatBuilderTests: XCTestCase {
         super.tearDown()
     }
 
-    func testFormatForwardedMessage_deduplicatesRepeatedRegularAttachments() {
-        let testStack = TestCoreDataStack()
-        let context = testStack.viewContext
-        let message = MessageBuilder()
-            .withId("forward-duplicate-attachments")
-            .withAttachments()
-            .build(in: context)
+    func testFormatForwardedMessage_buildsForwardHeaderFromValueSnapshot() {
+        let result = sut.formatForwardedMessage(
+            .init(
+                id: "forward-source-message",
+                subject: "Quarterly Update",
+                internalDate: Date(timeIntervalSince1970: 1_704_326_400),
+                isFromMe: false,
+                bodyText: "Original message body",
+                snippet: nil,
+                originalHTML: "<html><body><p>Original HTML body</p></body></html>",
+                participants: [
+                    .init(email: "test@example.com", displayName: "Test User"),
+                    .init(email: "friend@example.com", displayName: "Friend")
+                ]
+            )
+        )
 
-        for suffix in 1...2 {
-            let _ = AttachmentBuilder()
-                .withId("att-invoice-dup-\(suffix)")
-                .withFilename("Invoice-4B07C32C-0025.pdf")
-                .withMimeType("application/pdf")
-                .withByteSize(91_248)
-                .forMessage(message)
-                .build(in: context)
-        }
-
-        let _ = AttachmentBuilder()
-            .withId("att-receipt")
-            .withFilename("Receipt-2243-8647-5708.pdf")
-            .withMimeType("application/pdf")
-            .withByteSize(88_032)
-            .forMessage(message)
-            .build(in: context)
-
-        let result = sut.formatForwardedMessage(message)
-
-        XCTAssertEqual(result.attachments.count, 2)
-        XCTAssertEqual(result.attachments.map(\.filename).sorted(), [
-            "Invoice-4B07C32C-0025.pdf",
-            "Receipt-2243-8647-5708.pdf"
-        ])
+        XCTAssertEqual(result.subject, "Fwd: Quarterly Update")
+        XCTAssertTrue(result.body.contains("---------- Forwarded message ---------"))
+        XCTAssertTrue(result.body.contains("From: Friend"))
+        XCTAssertTrue(result.body.contains("Subject: Quarterly Update"))
+        XCTAssertTrue(result.body.contains("To: friend@example.com"))
+        XCTAssertTrue(result.body.contains("Original message body"))
+        XCTAssertTrue(result.htmlBody?.contains("Original HTML body") == true)
     }
 
     // MARK: - buildFinalHTMLForForward Tests

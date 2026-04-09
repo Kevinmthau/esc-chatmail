@@ -17,88 +17,40 @@ final class ComposeForwardModeContextBuilderTests: XCTestCase {
         return authSession
     }
 
-    private func makeDependencies(authSession: AuthSession) -> Dependencies {
-        let tokenManager = MockTokenManager()
-        return Dependencies(
-            authSession: authSession,
-            tokenManager: tokenManager,
-            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager)
+    func testBuild_formatsForwardContextFromValueInput() {
+        let builder = ComposeForwardModeContextBuilder(
+            messageFormatBuilder: MessageFormatBuilder(
+                authSession: makeTestAuthSession(userEmail: "me@example.com")
+            )
         )
-    }
-
-    func testBuild_extractsForwardContentAndAttachmentContexts() throws {
-        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
-        let context = deps.viewContext
-        AttachmentPaths.setupDirectories()
-
-        let conversation = Conversation(context: context)
-        conversation.id = UUID()
-        conversation.keyHash = UUID().uuidString
-        conversation.type = "personal"
-
-        let me = Person(context: context)
-        me.id = UUID()
-        me.email = "me@example.com"
-        me.displayName = "Me"
-
-        let other = Person(context: context)
-        other.id = UUID()
-        other.email = "friend@example.com"
-        other.displayName = "Friend"
-
-        let meParticipant = ConversationParticipant(context: context)
-        meParticipant.id = UUID()
-        meParticipant.participantRole = .normal
-        meParticipant.person = me
-        meParticipant.conversation = conversation
-
-        let otherParticipant = ConversationParticipant(context: context)
-        otherParticipant.id = UUID()
-        otherParticipant.participantRole = .normal
-        otherParticipant.person = other
-        otherParticipant.conversation = conversation
-
-        let message = MessageBuilder()
-            .withId("forward-source-message")
-            .withSubject("Original Subject")
-            .withSender(email: "friend@example.com", name: "Friend")
-            .withBody("Original message body")
-            .inConversation(conversation)
-            .build(in: context)
-
-        _ = HTMLContentHandler.shared.saveHTML(
-            "<html><body><p>Forwarded HTML body</p></body></html>",
-            for: message.id
+        let result = builder.build(
+            input: .init(
+                source: .init(
+                    id: "forward-source-message",
+                    subject: "Original Subject",
+                    internalDate: Date(timeIntervalSince1970: 1_704_326_400),
+                    isFromMe: false,
+                    bodyText: "Original message body",
+                    snippet: nil,
+                    originalHTML: "<html><body><p>Forwarded HTML body</p></body></html>",
+                    participants: [
+                        .init(email: "me@example.com", displayName: "Me"),
+                        .init(email: "friend@example.com", displayName: "Friend")
+                    ]
+                ),
+                forwardedInlineAttachmentInfos: [
+                    .init(
+                        localURL: "Attachments/forward-inline.png",
+                        filename: "inline.png",
+                        mimeType: "image/png",
+                        contentId: "cid-inline"
+                    )
+                ],
+                forwardedRegularAttachmentObjectURIs: [
+                    "x-coredata://attachment/regular-1"
+                ]
+            )
         )
-
-        let regularPath = AttachmentPaths.originalPath(idOrUUID: "forward-regular", ext: "pdf")
-        XCTAssertTrue(AttachmentPaths.saveData(Data("regular".utf8), to: regularPath))
-        defer { AttachmentPaths.deleteFile(at: regularPath) }
-
-        let inlinePath = AttachmentPaths.originalPath(idOrUUID: "forward-inline", ext: "png")
-        XCTAssertTrue(AttachmentPaths.saveData(Data("inline".utf8), to: inlinePath))
-        defer { AttachmentPaths.deleteFile(at: inlinePath) }
-
-        let regularAttachment = AttachmentBuilder()
-            .withId("attachment-regular")
-            .withFilename("report.pdf")
-            .withMimeType("application/pdf")
-            .withLocalURL(regularPath)
-            .downloaded()
-            .forMessage(message)
-            .build(in: context)
-
-        let _ = AttachmentBuilder()
-            .withId("attachment-inline")
-            .withFilename("inline.png")
-            .withMimeType("image/png")
-            .withLocalURL(inlinePath)
-            .withContentId("cid-inline")
-            .downloaded()
-            .forMessage(message)
-            .build(in: context)
-
-        let result = try deps.makeComposeForwardModeContextBuilder().build(message: message)
 
         XCTAssertEqual(result.id, "forward-source-message")
         XCTAssertEqual(result.initialSubject, "Fwd: Original Subject")
@@ -108,8 +60,6 @@ final class ComposeForwardModeContextBuilderTests: XCTestCase {
         XCTAssertTrue(result.forwardedHTMLBody?.contains("Forwarded HTML body") == true)
         XCTAssertEqual(result.forwardedInlineAttachmentInfos.count, 1)
         XCTAssertEqual(result.forwardedInlineAttachmentInfos.first?.contentId, "cid-inline")
-        XCTAssertEqual(result.forwardedRegularAttachmentObjectURIs, [
-            regularAttachment.objectID.uriRepresentation().absoluteString
-        ])
+        XCTAssertEqual(result.forwardedRegularAttachmentObjectURIs, ["x-coredata://attachment/regular-1"])
     }
 }

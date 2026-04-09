@@ -71,9 +71,10 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.messageToViewInFull)
     }
 
-    func testSetMessageToForward_buildsForwardComposeContext() {
+    func testSetMessageToForward_buildsForwardSnapshotsAtViewModelEdge() {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let context = deps.viewContext
+        AttachmentPaths.setupDirectories()
         let conversation = ConversationBuilder()
             .withDisplayName("Test Chat")
             .visible()
@@ -109,6 +110,46 @@ final class ChatViewModelTests: XCTestCase {
             .withBody("Original forward body")
             .inConversation(conversation)
             .build(in: context)
+        _ = deps.htmlContentHandler.saveHTML(
+            "<html><body><p>Forwarded HTML body</p></body></html>",
+            for: message.id
+        )
+
+        let regularPath = AttachmentPaths.originalPath(idOrUUID: "forward-regular", ext: "pdf")
+        XCTAssertTrue(AttachmentPaths.saveData(Data("regular".utf8), to: regularPath))
+        defer { AttachmentPaths.deleteFile(at: regularPath) }
+
+        let inlinePath = AttachmentPaths.originalPath(idOrUUID: "forward-inline", ext: "png")
+        XCTAssertTrue(AttachmentPaths.saveData(Data("inline".utf8), to: inlinePath))
+        defer { AttachmentPaths.deleteFile(at: inlinePath) }
+
+        let _ = AttachmentBuilder()
+            .withId("attachment-regular-1")
+            .withFilename("report.pdf")
+            .withMimeType("application/pdf")
+            .withByteSize(91_248)
+            .withLocalURL(regularPath)
+            .downloaded()
+            .forMessage(message)
+            .build(in: context)
+        let _ = AttachmentBuilder()
+            .withId("attachment-regular-2")
+            .withFilename("report.pdf")
+            .withMimeType("application/pdf")
+            .withByteSize(91_248)
+            .withLocalURL(regularPath)
+            .downloaded()
+            .forMessage(message)
+            .build(in: context)
+        let _ = AttachmentBuilder()
+            .withId("attachment-inline")
+            .withFilename("inline.png")
+            .withMimeType("image/png")
+            .withLocalURL(inlinePath)
+            .withContentId("cid-inline")
+            .downloaded()
+            .forMessage(message)
+            .build(in: context)
 
         let viewModel = ChatViewModel(conversation: conversation, deps: deps)
 
@@ -116,7 +157,11 @@ final class ChatViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.forwardComposeContext?.id, "message-forward")
         XCTAssertEqual(viewModel.forwardComposeContext?.initialSubject, "Fwd: Forward Me")
-        XCTAssertEqual(viewModel.forwardComposeContext?.forwardedInlineAttachmentInfos.count, 0)
+        XCTAssertTrue(viewModel.forwardComposeContext?.forwardedPlainTextBody.contains("Original forward body") == true)
+        XCTAssertTrue(viewModel.forwardComposeContext?.forwardedHTMLBody?.contains("Forwarded HTML body") == true)
+        XCTAssertEqual(viewModel.forwardComposeContext?.forwardedInlineAttachmentInfos.count, 1)
+        XCTAssertEqual(viewModel.forwardComposeContext?.forwardedInlineAttachmentInfos.first?.contentId, "cid-inline")
+        XCTAssertEqual(viewModel.forwardComposeContext?.forwardedRegularAttachmentObjectURIs.count, 1)
     }
 
     func testSendReply_buildsReplySnapshotsAtViewModelEdge() async {

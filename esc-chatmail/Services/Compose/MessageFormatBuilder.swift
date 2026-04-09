@@ -3,6 +3,22 @@ import Foundation
 /// Formats quoted text for forwards and replies
 @MainActor
 struct MessageFormatBuilder {
+    struct ForwardSource {
+        struct Participant {
+            let email: String
+            let displayName: String?
+        }
+
+        let id: String
+        let subject: String?
+        let internalDate: Date
+        let isFromMe: Bool
+        let bodyText: String?
+        let snippet: String?
+        let originalHTML: String?
+        let participants: [Participant]
+    }
+
     let authSession: AuthSession
 
     init(authSession: AuthSession) {
@@ -14,35 +30,33 @@ struct MessageFormatBuilder {
         let body: String
         let htmlBody: String?
         let subject: String?
-        let attachments: [Attachment]
-        let inlineAttachments: [Attachment]
     }
 
-    func formatForwardedMessage(_ message: Message) -> ForwardResult {
+    func formatForwardedMessage(_ source: ForwardSource) -> ForwardResult {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
 
         // Build forward header info
         var fromLine = ""
-        let participants = Array(message.conversation?.participants ?? [])
+        let participants = source.participants
 
-        if message.isFromMe {
+        if source.isFromMe {
             fromLine = authSession.userEmail ?? "Me"
         } else {
             if let otherParticipant = participants.first(where: { participant in
-                let email = participant.person?.email ?? ""
+                let email = participant.email
                 return EmailNormalizer.normalize(email) != EmailNormalizer.normalize(authSession.userEmail ?? "")
-            })?.person {
-                fromLine = otherParticipant.name ?? otherParticipant.email
+            }) {
+                fromLine = otherParticipant.displayName ?? otherParticipant.email
             }
         }
 
-        let dateLine = formatter.string(from: message.internalDate)
+        let dateLine = formatter.string(from: source.internalDate)
 
         var subject: String?
         var subjectLine = ""
-        if let originalSubject = message.subject, !originalSubject.isEmpty {
+        if let originalSubject = source.subject, !originalSubject.isEmpty {
             subjectLine = originalSubject
 
             // Set subject with Fwd: prefix
@@ -53,7 +67,7 @@ struct MessageFormatBuilder {
             }
         }
 
-        let recipientList = participants.compactMap { $0.person?.email }
+        let recipientList = participants.map(\.email)
             .filter { EmailNormalizer.normalize($0) != EmailNormalizer.normalize(authSession.userEmail ?? "") }
 
         let toLine = recipientList.joined(separator: ", ")
@@ -71,12 +85,12 @@ struct MessageFormatBuilder {
         quotedText += "\n"
 
         // Use full body text if available, otherwise fall back to snippet
-        let messageContent = HTMLEntityDecoder.decode(message.bodyTextValue ?? message.snippet ?? "")
+        let messageContent = HTMLEntityDecoder.decode(source.bodyText ?? source.snippet ?? "")
         quotedText += messageContent
 
         // Load HTML content if available
         var htmlBody: String?
-        if let originalHTML = loadOriginalHTML(for: message) {
+        if let originalHTML = source.originalHTML {
             htmlBody = buildHTMLForward(
                 originalHTML: originalHTML,
                 from: fromLine,
@@ -86,38 +100,11 @@ struct MessageFormatBuilder {
             )
         }
 
-        // Separate inline attachments (those with contentId) from regular attachments
-        let allAttachments = message.attachmentsForForwarding
-        let inlineAttachments = allAttachments.filter { attachment in
-            guard let contentId = attachment.contentId else { return false }
-            return !contentId.isEmpty
-        }
-        let regularAttachments = allAttachments.filter { attachment in
-            guard let contentId = attachment.contentId else { return true }
-            return contentId.isEmpty
-        }
-
         return ForwardResult(
             body: quotedText,
             htmlBody: htmlBody,
-            subject: subject,
-            attachments: regularAttachments,
-            inlineAttachments: inlineAttachments
+            subject: subject
         )
-    }
-
-    private func loadOriginalHTML(for message: Message) -> String? {
-        if let html = HTMLContentHandler.shared.loadHTML(for: message.id) {
-            return html
-        }
-
-        guard let uri = message.bodyStorageURI,
-              let resolved = StorageURIResolver.resolve(uri),
-              FileManager.default.fileExists(atPath: resolved.path) else {
-            return nil
-        }
-
-        return HTMLContentHandler.shared.loadHTML(from: resolved)
     }
 
     /// Builds HTML content for forwarded message with proper header styling
