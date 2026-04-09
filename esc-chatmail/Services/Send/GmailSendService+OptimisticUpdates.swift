@@ -14,7 +14,7 @@ extension GmailSendService {
         subject: String? = nil,
         threadId: String? = nil,
         attachments: [Attachment] = [],
-        existingConversationObjectID: NSManagedObjectID? = nil
+        existingConversation: OutboundMessageRequest.ExistingConversationContext? = nil
     ) async throws -> Message {
         // Pre-compute values that don't need Core Data
         let messageId = UUID().uuidString
@@ -24,7 +24,7 @@ extension GmailSendService {
         let hasAttachments = !attachments.isEmpty
 
         let conversation: Conversation
-        if let existingConversationObjectID {
+        if let existingConversationObjectID = existingConversation?.objectID {
             // Replies from an open chat should always attach to the currently visible
             // conversation so the optimistic bubble appears immediately in-thread.
             if let registered = viewContext.registeredObject(for: existingConversationObjectID) as? Conversation {

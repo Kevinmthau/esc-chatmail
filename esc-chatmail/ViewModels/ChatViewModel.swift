@@ -23,6 +23,7 @@ final class ChatViewModel: ObservableObject {
     let conversation: Conversation
     let messageActions: MessageActions
     private let outboundMessageCoordinator: any OutboundMessageCoordinating
+    private let outboundReplyContextBuilder: OutboundReplyContextBuilder
 
     private let authSession: AuthSession
     private let participantLoader: ParticipantLoader
@@ -61,6 +62,7 @@ final class ChatViewModel: ObservableObject {
         self.contactsResolver = dependencies.contactsResolver
         self.messageActions = dependencies.makeMessageActions()
         self.outboundMessageCoordinator = dependencies.makeOutboundMessageCoordinator()
+        self.outboundReplyContextBuilder = dependencies.makeOutboundReplyContextBuilder()
         self.contactManager = dependencies.makeChatContactManager()
 
         // Forward child observable changes to trigger view updates
@@ -179,8 +181,10 @@ final class ChatViewModel: ObservableObject {
             result = try await outboundMessageCoordinator.send(
                 .reply(
                     .init(
-                        conversationObjectID: conversation.objectID,
-                        replyingToMessageObjectID: replyingTo?.objectID,
+                        context: outboundReplyContextBuilder.build(
+                            conversation: conversation,
+                            replyingTo: replyingTo
+                        ),
                         body: trimmedReplyText,
                         attachments: attachments
                     )

@@ -61,14 +61,12 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     }
 
     func testSend_replyBuildsReplyMetadataAndRunsSendReply() async throws {
-        let authSession = makeTestAuthSession(userEmail: "me@example.com")
         let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
         let syncPerformer = MockCoordinatorSyncPerformer()
         let mutationTracker = MockOutboundSendMutationTracker()
         let coordinator = makeCoordinator(
             sendService: sendService,
             syncPerformer: syncPerformer,
-            authSession: authSession,
             mutationTracker: mutationTracker
         )
         let completionExpectation = expectation(description: "reply send completes")
@@ -80,43 +78,23 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
             .recentlyActive()
             .build(in: context)
 
-        let me = Person(context: context)
-        me.id = UUID()
-        me.email = "me@example.com"
-
-        let friend = Person(context: context)
-        friend.id = UUID()
-        friend.email = "friend@example.com"
-        friend.displayName = "Friend"
-
-        let meParticipant = ConversationParticipant(context: context)
-        meParticipant.id = UUID()
-        meParticipant.person = me
-        meParticipant.participantRole = .normal
-        meParticipant.conversation = conversation
-
-        let friendParticipant = ConversationParticipant(context: context)
-        friendParticipant.id = UUID()
-        friendParticipant.person = friend
-        friendParticipant.participantRole = .normal
-        friendParticipant.conversation = conversation
-
-        let replyingTo = MessageBuilder()
-            .withId("message-1")
-            .withThreadId("thread-123")
-            .withSubject("Original Subject")
-            .withSender(email: "friend@example.com", name: "Friend")
-            .withBody("Original body")
-            .inConversation(conversation)
-            .build(in: context)
-        replyingTo.messageId = "<message-1@example.com>"
-        replyingTo.references = "<older@example.com>"
-
         let submission = try await coordinator.send(
             .reply(
                 .init(
-                    conversationObjectID: conversation.objectID,
-                    replyingToMessageObjectID: replyingTo.objectID,
+                    context: .init(
+                        recipientEmails: ["friend@example.com"],
+                        subject: "Re: Original Subject",
+                        threadId: "thread-123",
+                        inReplyTo: "<message-1@example.com>",
+                        references: ["<older@example.com>", "<message-1@example.com>"],
+                        originalMessage: QuotedMessage(
+                            senderName: "Friend",
+                            senderEmail: "friend@example.com",
+                            date: Date(timeIntervalSince1970: 1_700_000_000),
+                            body: "Original body"
+                        ),
+                        existingConversation: .init(objectID: conversation.objectID)
+                    ),
                     body: " Reply body ",
                     attachments: []
                 )
@@ -136,7 +114,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.body, "Reply body")
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.subject, "Re: Original Subject")
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.threadId, "thread-123")
-        XCTAssertEqual(snapshot.createOptimisticCalls.first?.existingConversationObjectID, conversation.objectID)
+        XCTAssertEqual(snapshot.createOptimisticCalls.first?.existingConversation?.objectID, conversation.objectID)
         XCTAssertEqual(snapshot.sendNewCalls.count, 0)
         XCTAssertEqual(snapshot.sendReplyCalls.count, 1)
         XCTAssertEqual(snapshot.sendReplyCalls.first?.recipients, ["friend@example.com"])
@@ -278,10 +256,8 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     ) -> OutboundMessageCoordinator {
         let resolvedAuthSession = authSession ?? makeTestAuthSession(userEmail: "me@example.com")
         return OutboundMessageCoordinator(
-            viewContext: coreDataStack.viewContext,
             sendService: sendService,
             syncPerformer: syncPerformer,
-            replyMetadataBuilder: ReplyMetadataBuilder(authSession: resolvedAuthSession),
             messageFormatBuilder: MessageFormatBuilder(authSession: resolvedAuthSession),
             mutationTracker: mutationTracker ?? MockOutboundSendMutationTracker()
         )
@@ -322,7 +298,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         let body: String
         let subject: String?
         let threadId: String?
-        let existingConversationObjectID: NSManagedObjectID?
+        let existingConversation: OutboundMessageRequest.ExistingConversationContext?
     }
 
     struct SendNewCall {
@@ -384,7 +360,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         subject: String?,
         threadId: String?,
         attachments: [Attachment],
-        existingConversationObjectID: NSManagedObjectID?
+        existingConversation: OutboundMessageRequest.ExistingConversationContext?
     ) async throws -> Message {
         queue.sync {
             createCalls.append(
@@ -393,13 +369,13 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
                     body: body,
                     subject: subject,
                     threadId: threadId,
-                    existingConversationObjectID: existingConversationObjectID
+                    existingConversation: existingConversation
                 )
             )
         }
 
         let conversation: Conversation
-        if let existingConversationObjectID,
+        if let existingConversationObjectID = existingConversation?.objectID,
            let existingConversation = try? context.existingObject(with: existingConversationObjectID) as? Conversation {
             conversation = existingConversation
         } else {

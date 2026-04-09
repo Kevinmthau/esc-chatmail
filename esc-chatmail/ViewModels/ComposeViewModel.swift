@@ -60,6 +60,7 @@ final class ComposeViewModel: ObservableObject {
 
     private let messageFormatBuilder: MessageFormatBuilder
     private let outboundMessageCoordinator: any OutboundMessageCoordinating
+    private let outboundReplyContextBuilder: OutboundReplyContextBuilder
 
     // MARK: - Dependencies
 
@@ -123,6 +124,7 @@ final class ComposeViewModel: ObservableObject {
         self.attachmentManager = resolvedDeps.makeComposeAttachmentManager()
         self.messageFormatBuilder = resolvedDeps.makeMessageFormatBuilder()
         self.outboundMessageCoordinator = resolvedDeps.makeOutboundMessageCoordinator()
+        self.outboundReplyContextBuilder = resolvedDeps.makeOutboundReplyContextBuilder()
 
         // Forward child observable changes to trigger view updates
         forwardChanges(from: autocompleteService, storing: &cancellables)
@@ -274,8 +276,10 @@ final class ComposeViewModel: ObservableObject {
         case .reply(let conversation, let replyingTo):
             return .reply(
                 .init(
-                    conversationObjectID: conversation.objectID,
-                    replyingToMessageObjectID: replyingTo?.objectID,
+                    context: outboundReplyContextBuilder.build(
+                        conversation: conversation,
+                        replyingTo: replyingTo
+                    ),
                     body: body,
                     attachments: attachments
                 )

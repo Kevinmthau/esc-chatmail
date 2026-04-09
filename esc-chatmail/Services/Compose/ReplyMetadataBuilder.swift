@@ -22,6 +22,15 @@ struct ReplyMetadataBuilder {
         self.authSession = authSession
     }
 
+    struct ReplyMetadata {
+        let recipients: [String]
+        let subject: String?
+        let threadId: String?
+        let inReplyTo: String?
+        let references: [String]
+        let originalMessage: QuotedMessage?
+    }
+
     /// Data needed to send a reply email
     struct ReplyData {
         let recipients: [String]
@@ -38,6 +47,26 @@ struct ReplyMetadataBuilder {
         replyingTo: ReplyTargetContext?,
         body: String
     ) -> ReplyData {
+        let metadata = buildReplyMetadata(
+            conversation: conversation,
+            replyingTo: replyingTo
+        )
+
+        return ReplyData(
+            recipients: metadata.recipients,
+            body: body,
+            subject: metadata.subject,
+            threadId: metadata.threadId,
+            inReplyTo: metadata.inReplyTo,
+            references: metadata.references,
+            originalMessage: metadata.originalMessage
+        )
+    }
+
+    func buildReplyMetadata(
+        conversation: ConversationContext,
+        replyingTo: ReplyTargetContext?
+    ) -> ReplyMetadata {
         let currentUserEmail = authSession.userEmail ?? ""
 
         let recipients = conversation.participantEmails.filter {
@@ -63,9 +92,8 @@ struct ReplyMetadataBuilder {
             threadId = conversation.latestThreadId
         }
 
-        return ReplyData(
+        return ReplyMetadata(
             recipients: recipients,
-            body: body,
             subject: subject,
             threadId: threadId,
             inReplyTo: inReplyTo,

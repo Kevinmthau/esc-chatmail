@@ -129,13 +129,15 @@ final class Dependencies: ObservableObject {
         }
 
         return OutboundMessageCoordinator(
-            viewContext: viewContext,
             sendService: makeSendService(),
             syncPerformer: syncEngine,
-            replyMetadataBuilder: makeReplyMetadataBuilder(),
             messageFormatBuilder: makeMessageFormatBuilder(),
             mutationTracker: outboundSendMutationTracker
         )
+    }
+
+    func makeOutboundReplyContextBuilder() -> OutboundReplyContextBuilder {
+        OutboundReplyContextBuilder(replyMetadataBuilder: makeReplyMetadataBuilder())
     }
 
     /// Creates a new ContactsService instance
