@@ -59,6 +59,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertNotNil(queuedSubmission.conversationObjectURI)
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
         XCTAssertEqual(mutationTracker.pendingMutationIDs, [queuedSubmission.optimisticMessageID])
+        XCTAssertEqual(mutationTracker.trackedConversationObjectURIs, [queuedSubmission.conversationObjectURI])
         XCTAssertEqual(mutationTracker.successfulMutationIDs, [queuedSubmission.optimisticMessageID])
     }
 
@@ -134,6 +135,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.sendReplyCalls.first?.references, ["<older@example.com>", "<message-1@example.com>"])
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
         XCTAssertEqual(mutationTracker.pendingMutationIDs, [queuedSubmission.optimisticMessageID])
+        XCTAssertEqual(mutationTracker.trackedConversationObjectURIs, [queuedSubmission.conversationObjectURI])
         XCTAssertEqual(mutationTracker.successfulMutationIDs, [queuedSubmission.optimisticMessageID])
     }
 
@@ -369,7 +371,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         threadId: String?,
         attachments: [OutboundMessageRequest.AttachmentContext],
         optimisticConversation: OutboundMessageRequest.OptimisticConversationContext?
-    ) async throws -> Message {
+    ) async throws -> OptimisticSendHandle {
         queue.sync {
             createCalls.append(
                 CreateOptimisticCall(
@@ -404,7 +406,10 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         message.conversation = conversation
 
         optimisticMessages[message.id] = message
-        return message
+        return OptimisticSendHandle(
+            optimisticMessageID: message.id,
+            conversationObjectURI: conversation.objectID.uriRepresentation().absoluteString
+        )
     }
 
     @MainActor
@@ -521,6 +526,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
 private final class MockOutboundSendMutationTracker: OutboundSendMutationTracking {
     private var pendingMutationIDSet: Set<String> = []
     private(set) var pendingMutationIDs: [String] = []
+    private(set) var trackedConversationObjectURIs: [String?] = []
     private(set) var successfulMutationIDs: [String] = []
     private(set) var failedMutationIDs: [String] = []
 
@@ -543,6 +549,7 @@ private final class MockOutboundSendMutationTracker: OutboundSendMutationTrackin
     func trackPendingMutation(_ mutation: OutboundSendMutationTracker.PendingMutation) {
         pendingMutationIDSet.insert(mutation.id)
         pendingMutationIDs.append(mutation.id)
+        trackedConversationObjectURIs.append(mutation.conversationObjectURI)
     }
 
     func reconcileSuccess(_ success: OutboundMessageReconciliationHooks.Success) {

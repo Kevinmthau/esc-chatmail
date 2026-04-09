@@ -30,7 +30,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
             .withPreviewURL("Previews/photo.jpg")
             .build(in: context)
 
-        let message = try await sendService.createOptimisticMessage(
+        let handle = try await sendService.createOptimisticMessage(
             to: ["friend@example.com"],
             body: "hello",
             subject: "Subject",
@@ -41,13 +41,13 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         )
 
         XCTAssertTrue(context.hasChanges, "Optimistic creation should defer persistence so send navigation is not blocked.")
-        XCTAssertFalse(message.objectID.isTemporaryID)
+        let fetched = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertFalse(fetched.objectID.isTemporaryID)
 
-        let conversation = try XCTUnwrap(message.conversation)
+        let conversation = try XCTUnwrap(fetched.conversation)
         XCTAssertFalse(conversation.objectID.isTemporaryID)
+        XCTAssertEqual(handle.conversationObjectURI, conversation.objectID.uriRepresentation().absoluteString)
 
-        let fetched = try XCTUnwrap(sendService.fetchMessageSync(byID: message.id))
-        XCTAssertEqual(fetched.objectID, message.objectID)
         XCTAssertEqual(fetched.attachmentsArray.compactMap(\.id), ["local_attachment_1"])
     }
 
@@ -63,14 +63,16 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
             .build(in: context)
         try coreDataStack.saveViewContext()
 
-        let message = try await sendService.createOptimisticMessage(
+        let handle = try await sendService.createOptimisticMessage(
             to: [recipient],
             body: "hello again",
             optimisticConversation: .participantHash(participantHash)
         )
 
+        let message = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
         let conversation = try XCTUnwrap(message.conversation)
         XCTAssertEqual(conversation.objectID, archivedConversation.objectID)
+        XCTAssertEqual(handle.conversationObjectURI, conversation.objectID.uriRepresentation().absoluteString)
         XCTAssertNil(conversation.archivedAt)
         XCTAssertTrue(context.hasChanges, "Reactivating the conversation and inserting the optimistic message should remain unsaved until the send flow persists it.")
     }
@@ -84,7 +86,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
             .build(in: context)
         try coreDataStack.saveViewContext()
 
-        let message = try await sendService.createOptimisticMessage(
+        let handle = try await sendService.createOptimisticMessage(
             to: ["friend@example.com"],
             body: "anchored reply",
             subject: "Re: Hello",
@@ -94,7 +96,9 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
             )
         )
 
+        let message = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
         XCTAssertEqual(message.conversation?.objectID, conversation.objectID)
+        XCTAssertEqual(handle.conversationObjectURI, conversation.objectID.uriRepresentation().absoluteString)
         XCTAssertEqual(message.gmThreadId, "thread-123")
         XCTAssertTrue(context.hasChanges, "Anchored optimistic replies should stay unsaved until the background send path persists them.")
     }

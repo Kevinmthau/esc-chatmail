@@ -1,5 +1,4 @@
 import Foundation
-import CoreData
 
 extension Notification.Name {
     static let outboundSendMutationChanged = Notification.Name("com.esc.inboxchat.outboundSendMutationChanged")
@@ -26,11 +25,11 @@ final class OutboundSendMutationTracker: OutboundSendMutationTracking {
 
         init(
             optimisticMessageID: String,
-            conversationObjectID: NSManagedObjectID?,
+            conversationObjectURI: String?,
             createdAt: Date = Date()
         ) {
             self.id = optimisticMessageID
-            self.conversationObjectURI = conversationObjectID?.uriRepresentation().absoluteString
+            self.conversationObjectURI = conversationObjectURI
             self.createdAt = createdAt
         }
     }

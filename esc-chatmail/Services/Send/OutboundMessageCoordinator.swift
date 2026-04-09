@@ -1,5 +1,4 @@
 import Foundation
-import CoreData
 
 enum OutboundMessageRequest {
     case compose(Compose)
@@ -152,7 +151,7 @@ protocol OutboundMessageSendServicing: ComposeSendServicing {
         threadId: String?,
         attachments: [OutboundMessageRequest.AttachmentContext],
         optimisticConversation: OutboundMessageRequest.OptimisticConversationContext?
-    ) async throws -> Message
+    ) async throws -> OptimisticSendHandle
 
     @MainActor
     func markAttachmentsAsUploading(
@@ -204,7 +203,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             return nil
         }
 
-        let optimisticMessage = try await sendService.createOptimisticMessage(
+        let optimisticSendHandle = try await sendService.createOptimisticMessage(
             to: preparedSend.recipientEmails,
             body: preparedSend.body,
             subject: preparedSend.subject,
@@ -212,11 +211,11 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             attachments: preparedSend.attachments,
             optimisticConversation: preparedSend.optimisticConversation
         )
-        let optimisticMessageID = optimisticMessage.id
+        let optimisticMessageID = optimisticSendHandle.optimisticMessageID
         mutationTracker.trackPendingMutation(
             .init(
                 optimisticMessageID: optimisticMessageID,
-                conversationObjectID: optimisticMessage.conversation?.objectID
+                conversationObjectURI: optimisticSendHandle.conversationObjectURI
             )
         )
         if !preparedSend.attachments.isEmpty {
@@ -256,7 +255,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
 
         return OutboundMessageResult(
             optimisticMessageID: optimisticMessageID,
-            conversationObjectURI: optimisticMessage.conversation?.objectID.uriRepresentation().absoluteString
+            conversationObjectURI: optimisticSendHandle.conversationObjectURI
         )
     }
 

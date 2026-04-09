@@ -15,7 +15,7 @@ extension GmailSendService {
         threadId: String? = nil,
         attachments: [OutboundMessageRequest.AttachmentContext] = [],
         optimisticConversation: OutboundMessageRequest.OptimisticConversationContext? = nil
-    ) async throws -> Message {
+    ) async throws -> OptimisticSendHandle {
         // Pre-compute values that don't need Core Data
         let messageId = UUID().uuidString
         let snippet = String(body.prefix(120))
@@ -85,7 +85,10 @@ extension GmailSendService {
         )
         viewContext.processPendingChanges()
 
-        return message
+        return OptimisticSendHandle(
+            optimisticMessageID: message.id,
+            conversationObjectURI: conversation.objectID.uriRepresentation().absoluteString
+        )
     }
 
     /// Fetches a message by its ID (async to avoid blocking main thread).
