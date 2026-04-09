@@ -128,6 +128,7 @@ final class Dependencies: ObservableObject {
         }
 
         return OutboundMessageCoordinator(
+            viewContext: viewContext,
             sendService: makeSendService(),
             syncPerformer: syncEngine,
             replyMetadataBuilder: makeReplyMetadataBuilder(),

@@ -1,9 +1,71 @@
 import Foundation
 import CoreData
 
+enum OutboundMessageRequest {
+    case compose(Compose)
+    case forward(Forward)
+    case reply(Reply)
+
+    struct Compose {
+        let recipientEmails: [String]
+        let subject: String?
+        let body: String
+        let attachments: [Attachment]
+    }
+
+    struct Forward {
+        let recipientEmails: [String]
+        let subject: String?
+        let body: String
+        let attachments: [Attachment]
+        let forwardedPlainTextBody: String
+        let forwardedHTMLBody: String?
+        let forwardedInlineAttachments: [Attachment]
+    }
+
+    struct Reply {
+        let conversationObjectID: NSManagedObjectID
+        let replyingToMessageObjectID: NSManagedObjectID?
+        let body: String
+        let attachments: [Attachment]
+    }
+}
+
+struct OutboundMessageResult {
+    let optimisticMessageID: String
+    let conversationObjectID: NSManagedObjectID?
+}
+
+struct OutboundMessageReconciliationHooks: Sendable {
+    struct Success: Sendable {
+        let optimisticMessageID: String
+        let sentMessageID: String
+        let threadID: String
+    }
+
+    struct Failure: Sendable {
+        let optimisticMessageID: String
+        let errorDescription: String
+    }
+
+    let onSuccess: (@Sendable @MainActor (Success) -> Void)?
+    let onFailure: (@Sendable @MainActor (Failure) -> Void)?
+
+    static let none = Self(onSuccess: nil, onFailure: nil)
+}
+
 @MainActor
 protocol OutboundMessageCoordinating: AnyObject {
-    func send(_ request: OutboundMessageCoordinator.Request) async throws -> OutboundMessageCoordinator.Submission?
+    func send(
+        _ request: OutboundMessageRequest,
+        reconciliationHooks: OutboundMessageReconciliationHooks
+    ) async throws -> OutboundMessageResult?
+}
+
+extension OutboundMessageCoordinating {
+    func send(_ request: OutboundMessageRequest) async throws -> OutboundMessageResult? {
+        try await send(request, reconciliationHooks: .none)
+    }
 }
 
 protocol OutboundMessageSendServicing: ComposeSendServicing {
@@ -14,7 +76,7 @@ protocol OutboundMessageSendServicing: ComposeSendServicing {
         subject: String?,
         threadId: String?,
         attachments: [Attachment],
-        existingConversation: Conversation?
+        existingConversationObjectID: NSManagedObjectID?
     ) async throws -> Message
 
     func attachmentToInfo(_ attachment: Attachment) -> GmailSendService.AttachmentInfo
@@ -24,42 +86,6 @@ extension GmailSendService: OutboundMessageSendServicing {}
 
 @MainActor
 final class OutboundMessageCoordinator: OutboundMessageCoordinating {
-    enum Request {
-        case compose(Compose)
-        case forward(Forward)
-        case reply(Reply)
-
-        struct Compose {
-            let recipientEmails: [String]
-            let subject: String?
-            let body: String
-            let attachments: [Attachment]
-        }
-
-        struct Forward {
-            let recipientEmails: [String]
-            let subject: String?
-            let body: String
-            let attachments: [Attachment]
-            let forwardedPlainTextBody: String
-            let forwardedHTMLBody: String?
-            let forwardedInlineAttachments: [Attachment]
-        }
-
-        struct Reply {
-            let conversation: Conversation
-            let replyingTo: Message?
-            let body: String
-            let attachments: [Attachment]
-        }
-    }
-
-    struct Submission {
-        let optimisticMessageID: String
-        let conversationObjectID: NSManagedObjectID?
-        let backgroundTask: Task<Void, Never>
-    }
-
     private struct PreparedSend {
         let recipientEmails: [String]
         let body: String
@@ -68,29 +94,36 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         let threadId: String?
         let attachments: [Attachment]
         let inlineAttachments: [Attachment]
-        let existingConversation: Conversation?
+        let existingConversationObjectID: NSManagedObjectID?
         let replyData: ComposeSendOrchestrator.SendInput.ReplyData?
     }
 
+    private let viewContext: NSManagedObjectContext
     private let sendService: any OutboundMessageSendServicing
     private let syncPerformer: IncrementalSyncPerforming
     private let replyMetadataBuilder: ReplyMetadataBuilder
     private let messageFormatBuilder: MessageFormatBuilder
+    private var backgroundSendTasks: [String: Task<Void, Never>] = [:]
 
     init(
+        viewContext: NSManagedObjectContext,
         sendService: any OutboundMessageSendServicing,
         syncPerformer: IncrementalSyncPerforming,
         replyMetadataBuilder: ReplyMetadataBuilder,
         messageFormatBuilder: MessageFormatBuilder
     ) {
+        self.viewContext = viewContext
         self.sendService = sendService
         self.syncPerformer = syncPerformer
         self.replyMetadataBuilder = replyMetadataBuilder
         self.messageFormatBuilder = messageFormatBuilder
     }
 
-    func send(_ request: Request) async throws -> Submission? {
-        let preparedSend = prepare(request)
+    func send(
+        _ request: OutboundMessageRequest,
+        reconciliationHooks: OutboundMessageReconciliationHooks = .none
+    ) async throws -> OutboundMessageResult? {
+        let preparedSend = try prepare(request)
         guard !preparedSend.recipientEmails.isEmpty else {
             Log.warning("Skipping outbound send with no recipients", category: .message)
             return nil
@@ -102,8 +135,9 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             subject: preparedSend.subject,
             threadId: preparedSend.threadId,
             attachments: preparedSend.attachments,
-            existingConversation: preparedSend.existingConversation
+            existingConversationObjectID: preparedSend.existingConversationObjectID
         )
+        let optimisticMessageID = optimisticMessage.id
 
         let sendInput = ComposeSendOrchestrator.SendInput(
             recipientEmails: preparedSend.recipientEmails,
@@ -120,18 +154,26 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             syncPerformer: syncPerformer
         ).executeInBackground(
             input: sendInput,
-            attachments: preparedSend.attachments,
-            optimisticMessageID: optimisticMessage.id
+            attachmentObjectIDs: preparedSend.attachments.map(\.objectID),
+            optimisticMessageID: optimisticMessageID,
+            reconciliationHooks: reconciliationHooks
         )
 
-        return Submission(
-            optimisticMessageID: optimisticMessage.id,
-            conversationObjectID: optimisticMessage.conversation?.objectID,
-            backgroundTask: backgroundTask
+        backgroundSendTasks[optimisticMessageID] = backgroundTask
+        Task { [weak self] in
+            _ = await backgroundTask.result
+            await MainActor.run {
+                _ = self?.backgroundSendTasks.removeValue(forKey: optimisticMessageID)
+            }
+        }
+
+        return OutboundMessageResult(
+            optimisticMessageID: optimisticMessageID,
+            conversationObjectID: optimisticMessage.conversation?.objectID
         )
     }
 
-    private func prepare(_ request: Request) -> PreparedSend {
+    private func prepare(_ request: OutboundMessageRequest) throws -> PreparedSend {
         switch request {
         case .compose(let compose):
             return PreparedSend(
@@ -142,7 +184,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 threadId: nil,
                 attachments: compose.attachments,
                 inlineAttachments: [],
-                existingConversation: nil,
+                existingConversationObjectID: nil,
                 replyData: nil
             )
 
@@ -175,15 +217,28 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 threadId: nil,
                 attachments: forward.attachments,
                 inlineAttachments: forward.forwardedInlineAttachments,
-                existingConversation: nil,
+                existingConversationObjectID: nil,
                 replyData: nil
             )
 
         case .reply(let reply):
+            guard let conversation = fetchConversation(objectID: reply.conversationObjectID) else {
+                throw GmailSendService.SendError.conversationNotFound
+            }
+
+            let replyConversation = ReplyMetadataBuilder.ConversationContext(
+                participantEmails: Array(conversation.participants ?? [])
+                    .compactMap { $0.person?.email },
+                latestThreadId: Array(conversation.messages ?? [])
+                    .sorted { $0.internalDate > $1.internalDate }
+                    .first?
+                    .gmThreadId
+            )
+            let replyTarget = reply.replyingToMessageObjectID.flatMap(makeReplyTargetContext)
             let body = normalizedBody(reply.body)
             let replyData = replyMetadataBuilder.buildReplyData(
-                conversation: reply.conversation,
-                replyingTo: reply.replyingTo,
+                conversation: replyConversation,
+                replyingTo: replyTarget,
                 body: body
             )
 
@@ -195,10 +250,49 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 threadId: replyData.threadId,
                 attachments: reply.attachments,
                 inlineAttachments: [],
-                existingConversation: reply.conversation,
+                existingConversationObjectID: reply.conversationObjectID,
                 replyData: ComposeSendOrchestrator.SendInput.ReplyData(replyData)
             )
         }
+    }
+
+    private func fetchConversation(objectID: NSManagedObjectID) -> Conversation? {
+        do {
+            return try viewContext.existingObject(with: objectID) as? Conversation
+        } catch {
+            Log.error("Failed to fetch conversation for outbound send", category: .coreData, error: error)
+            return nil
+        }
+    }
+
+    private func makeReplyTargetContext(objectID: NSManagedObjectID) -> ReplyMetadataBuilder.ReplyTargetContext? {
+        let replyingTo: Message
+        do {
+            guard let message = try viewContext.existingObject(with: objectID) as? Message else {
+                return nil
+            }
+            replyingTo = message
+        } catch {
+            Log.error("Failed to fetch reply target for outbound send", category: .coreData, error: error)
+            return nil
+        }
+
+        let references = replyingTo.referencesValue?
+            .split(separator: " ")
+            .map(String.init) ?? []
+
+        return ReplyMetadataBuilder.ReplyTargetContext(
+            subject: replyingTo.subject,
+            threadId: replyingTo.gmThreadId,
+            messageId: replyingTo.messageIdValue,
+            references: references,
+            originalMessage: QuotedMessage(
+                senderName: replyingTo.senderNameValue,
+                senderEmail: replyingTo.senderEmailValue ?? "",
+                date: replyingTo.internalDate,
+                body: replyingTo.bodyTextValue
+            )
+        )
     }
 
     private func normalizedBody(_ body: String) -> String {

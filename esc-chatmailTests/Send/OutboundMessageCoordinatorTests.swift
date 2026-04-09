@@ -20,6 +20,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
         let syncPerformer = MockCoordinatorSyncPerformer()
         let coordinator = makeCoordinator(sendService: sendService, syncPerformer: syncPerformer)
+        let completionExpectation = expectation(description: "compose send completes")
 
         let submission = try await coordinator.send(
             .compose(
@@ -29,11 +30,15 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
                     body: "  Hello world  ",
                     attachments: []
                 )
+            ),
+            reconciliationHooks: .init(
+                onSuccess: { _ in completionExpectation.fulfill() },
+                onFailure: nil
             )
         )
 
         let queuedSubmission = try XCTUnwrap(submission)
-        await queuedSubmission.backgroundTask.value
+        await fulfillment(of: [completionExpectation], timeout: 1.0)
 
         let snapshot = sendService.snapshot
         XCTAssertEqual(snapshot.createOptimisticCalls.count, 1)
@@ -57,6 +62,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
             syncPerformer: syncPerformer,
             authSession: authSession
         )
+        let completionExpectation = expectation(description: "reply send completes")
 
         let context = coreDataStack.viewContext
         let conversation = ConversationBuilder()
@@ -100,16 +106,20 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         let submission = try await coordinator.send(
             .reply(
                 .init(
-                    conversation: conversation,
-                    replyingTo: replyingTo,
+                    conversationObjectID: conversation.objectID,
+                    replyingToMessageObjectID: replyingTo.objectID,
                     body: " Reply body ",
                     attachments: []
                 )
+            ),
+            reconciliationHooks: .init(
+                onSuccess: { _ in completionExpectation.fulfill() },
+                onFailure: nil
             )
         )
 
         let queuedSubmission = try XCTUnwrap(submission)
-        await queuedSubmission.backgroundTask.value
+        await fulfillment(of: [completionExpectation], timeout: 1.0)
 
         let snapshot = sendService.snapshot
         XCTAssertEqual(snapshot.createOptimisticCalls.count, 1)
@@ -133,6 +143,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
         let syncPerformer = MockCoordinatorSyncPerformer()
         let coordinator = makeCoordinator(sendService: sendService, syncPerformer: syncPerformer)
+        let completionExpectation = expectation(description: "forward send completes")
 
         let submission = try await coordinator.send(
             .forward(
@@ -145,11 +156,15 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
                     forwardedHTMLBody: "<html><body><p>Forwarded HTML</p></body></html>",
                     forwardedInlineAttachments: []
                 )
+            ),
+            reconciliationHooks: .init(
+                onSuccess: { _ in completionExpectation.fulfill() },
+                onFailure: nil
             )
         )
 
         let queuedSubmission = try XCTUnwrap(submission)
-        await queuedSubmission.backgroundTask.value
+        await fulfillment(of: [completionExpectation], timeout: 1.0)
 
         let snapshot = sendService.snapshot
         XCTAssertEqual(snapshot.createOptimisticCalls.count, 1)
@@ -162,6 +177,39 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
     }
 
+    func testSend_invokesSuccessHooksAfterBackgroundSend() async throws {
+        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let syncPerformer = MockCoordinatorSyncPerformer()
+        let coordinator = makeCoordinator(sendService: sendService, syncPerformer: syncPerformer)
+
+        let successExpectation = expectation(description: "success hook called")
+        var successPayload: OutboundMessageReconciliationHooks.Success?
+
+        let submission = try await coordinator.send(
+            .compose(
+                .init(
+                    recipientEmails: ["to@example.com"],
+                    subject: "Hello",
+                    body: "Body",
+                    attachments: []
+                )
+            ),
+            reconciliationHooks: .init(
+                onSuccess: { payload in
+                    successPayload = payload
+                    successExpectation.fulfill()
+                },
+                onFailure: nil
+            )
+        )
+
+        XCTAssertNotNil(submission)
+        await fulfillment(of: [successExpectation], timeout: 1.0)
+        XCTAssertEqual(successPayload?.optimisticMessageID, submission?.optimisticMessageID)
+        XCTAssertNotNil(successPayload?.sentMessageID)
+        XCTAssertNotNil(successPayload?.threadID)
+    }
+
     private func makeCoordinator(
         sendService: MockOutboundMessageSendService,
         syncPerformer: MockCoordinatorSyncPerformer,
@@ -169,6 +217,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     ) -> OutboundMessageCoordinator {
         let resolvedAuthSession = authSession ?? makeTestAuthSession(userEmail: "me@example.com")
         return OutboundMessageCoordinator(
+            viewContext: coreDataStack.viewContext,
             sendService: sendService,
             syncPerformer: syncPerformer,
             replyMetadataBuilder: ReplyMetadataBuilder(authSession: resolvedAuthSession),
@@ -259,7 +308,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         subject: String?,
         threadId: String?,
         attachments: [Attachment],
-        existingConversation: Conversation?
+        existingConversationObjectID: NSManagedObjectID?
     ) async throws -> Message {
         queue.sync {
             createCalls.append(
@@ -268,15 +317,21 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
                     body: body,
                     subject: subject,
                     threadId: threadId,
-                    existingConversationObjectID: existingConversation?.objectID
+                    existingConversationObjectID: existingConversationObjectID
                 )
             )
         }
 
-        let conversation = existingConversation ?? ConversationBuilder()
-            .visible()
-            .recentlyActive()
-            .build(in: context)
+        let conversation: Conversation
+        if let existingConversationObjectID,
+           let existingConversation = try? context.existingObject(with: existingConversationObjectID) as? Conversation {
+            conversation = existingConversation
+        } else {
+            conversation = ConversationBuilder()
+                .visible()
+                .recentlyActive()
+                .build(in: context)
+        }
 
         let message = Message(context: context)
         message.id = "optimistic-\(UUID().uuidString)"
@@ -368,13 +423,10 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     }
 
     @MainActor
-    func markAttachmentsAsUploaded(_ attachments: [Attachment]) {}
+    func markAttachmentsAsUploaded(objectIDs: [NSManagedObjectID]) {}
 
     @MainActor
-    func markAttachmentsAsFailed(_ attachments: [Attachment]) {}
-
-    @MainActor
-    func handleFailedOptimisticMessage(byID messageID: String, fallbackAttachments: [Attachment]) {
+    func handleFailedOptimisticMessage(byID messageID: String, fallbackAttachmentObjectIDs: [NSManagedObjectID]) {
         optimisticMessages[messageID] = nil
     }
 }

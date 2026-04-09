@@ -3,6 +3,19 @@ import Foundation
 /// Builds email threading metadata (references, in-reply-to, thread ID) for replies
 @MainActor
 struct ReplyMetadataBuilder {
+    struct ConversationContext {
+        let participantEmails: [String]
+        let latestThreadId: String?
+    }
+
+    struct ReplyTargetContext {
+        let subject: String?
+        let threadId: String?
+        let messageId: String?
+        let references: [String]
+        let originalMessage: QuotedMessage
+    }
+
     let authSession: AuthSession
 
     init(authSession: AuthSession) {
@@ -21,16 +34,13 @@ struct ReplyMetadataBuilder {
     }
 
     func buildReplyData(
-        conversation: Conversation,
-        replyingTo: Message?,
+        conversation: ConversationContext,
+        replyingTo: ReplyTargetContext?,
         body: String
     ) -> ReplyData {
         let currentUserEmail = authSession.userEmail ?? ""
 
-        // Extract participants from conversation
-        let participantEmails = Array(conversation.participants ?? [])
-            .compactMap { $0.person?.email }
-        let recipients = participantEmails.filter {
+        let recipients = conversation.participantEmails.filter {
             EmailNormalizer.normalize($0) != EmailNormalizer.normalize(currentUserEmail)
         }
 
@@ -42,30 +52,15 @@ struct ReplyMetadataBuilder {
 
         if let replyingTo = replyingTo {
             subject = replyingTo.subject.map { MimeBuilder.prefixSubjectForReply($0) }
-            threadId = replyingTo.gmThreadId
-            inReplyTo = replyingTo.messageIdValue
-
-            // Build references chain
-            if let previousRefs = replyingTo.referencesValue, !previousRefs.isEmpty {
-                references = previousRefs.split(separator: " ").map(String.init)
-            }
-            if let messageId = replyingTo.messageIdValue {
+            threadId = replyingTo.threadId
+            inReplyTo = replyingTo.messageId
+            references = replyingTo.references
+            if let messageId = replyingTo.messageId {
                 references.append(messageId)
             }
-
-            // Store original message info for quoting
-            originalMessage = QuotedMessage(
-                senderName: replyingTo.senderNameValue,
-                senderEmail: replyingTo.senderEmailValue ?? "",
-                date: replyingTo.internalDate,
-                body: replyingTo.bodyTextValue
-            )
+            originalMessage = replyingTo.originalMessage
         } else {
-            // Find latest message in conversation
-            let latestMessage = Array(conversation.messages ?? [])
-                .sorted { $0.internalDate > $1.internalDate }
-                .first
-            threadId = latestMessage?.gmThreadId
+            threadId = conversation.latestThreadId
         }
 
         return ReplyData(

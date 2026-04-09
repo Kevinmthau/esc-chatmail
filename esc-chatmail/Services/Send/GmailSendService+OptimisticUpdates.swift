@@ -14,7 +14,7 @@ extension GmailSendService {
         subject: String? = nil,
         threadId: String? = nil,
         attachments: [Attachment] = [],
-        existingConversation: Conversation? = nil
+        existingConversationObjectID: NSManagedObjectID? = nil
     ) async throws -> Message {
         // Pre-compute values that don't need Core Data
         let messageId = UUID().uuidString
@@ -24,12 +24,12 @@ extension GmailSendService {
         let hasAttachments = !attachments.isEmpty
 
         let conversation: Conversation
-        if let existingConversation {
+        if let existingConversationObjectID {
             // Replies from an open chat should always attach to the currently visible
             // conversation so the optimistic bubble appears immediately in-thread.
-            if existingConversation.managedObjectContext === viewContext {
-                conversation = existingConversation
-            } else if let fetched = try? viewContext.existingObject(with: existingConversation.objectID) as? Conversation {
+            if let registered = viewContext.registeredObject(for: existingConversationObjectID) as? Conversation {
+                conversation = registered
+            } else if let fetched = try? viewContext.existingObject(with: existingConversationObjectID) as? Conversation {
                 conversation = fetched
             } else {
                 Log.error("Failed to resolve existing conversation for optimistic message", category: .message)
@@ -176,12 +176,18 @@ extension GmailSendService {
     }
 
     @MainActor
-    func handleFailedOptimisticMessage(byID messageID: String, fallbackAttachments: [Attachment]) {
+    func handleFailedOptimisticMessage(
+        byID messageID: String,
+        fallbackAttachmentObjectIDs: [NSManagedObjectID]
+    ) {
         if let message = fetchMessageSync(byID: messageID) {
             handleFailedOptimisticMessage(message)
             return
         }
 
+        let fallbackAttachments = fallbackAttachmentObjectIDs.compactMap { objectID in
+            try? viewContext.existingObject(with: objectID) as? Attachment
+        }
         guard !fallbackAttachments.isEmpty else { return }
         markAttachmentsAsFailed(fallbackAttachments)
     }

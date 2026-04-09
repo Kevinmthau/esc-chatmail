@@ -174,13 +174,13 @@ final class ChatViewModel: ObservableObject {
         let trimmedReplyText = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedReplyText.isEmpty || !attachments.isEmpty else { return }
 
-        let submission: OutboundMessageCoordinator.Submission?
+        let result: OutboundMessageResult?
         do {
-            submission = try await outboundMessageCoordinator.send(
+            result = try await outboundMessageCoordinator.send(
                 .reply(
                     .init(
-                        conversation: conversation,
-                        replyingTo: replyingTo,
+                        conversationObjectID: conversation.objectID,
+                        replyingToMessageObjectID: replyingTo?.objectID,
                         body: trimmedReplyText,
                         attachments: attachments
                     )
@@ -190,17 +190,11 @@ final class ChatViewModel: ObservableObject {
             Log.error("Failed to create optimistic message for reply", category: .message, error: error)
             return
         }
-        guard let submission else { return }
+        guard result != nil else { return }
 
         // Clear composer immediately after optimistic insertion.
         replyText = ""
         replyingTo = nil
-
-        let taskManager = self.taskManager
-
-        taskManager.run("sendReply-\(submission.optimisticMessageID)", priority: .userInitiated) {
-            _ = await submission.backgroundTask.result
-        }
     }
 
     // MARK: - Prefetch Operations

@@ -37,7 +37,6 @@ final class ComposeViewModel: ObservableObject {
     @Published var showError = false
     @Published var skippedForwardAttachmentCount = 0
     private(set) var lastSentConversationObjectID: NSManagedObjectID?
-    private var backgroundSendTasks: [String: Task<Void, Never>] = [:]
     private var hasSetupMode = false
 
     private var cancellables = Set<AnyCancellable>()
@@ -86,7 +85,7 @@ final class ComposeViewModel: ObservableObject {
 
     var canSend: Bool {
         let hasValidRecipients = !recipients.isEmpty && recipients.allSatisfy { $0.isValid }
-        guard hasValidRecipients && !isSending && backgroundSendTasks.isEmpty else { return false }
+        guard hasValidRecipients && !isSending else { return false }
 
         switch mode {
         case .forward:
@@ -227,9 +226,9 @@ final class ComposeViewModel: ObservableObject {
 
         let recipientEmails = recipients.map { $0.email }
         let request = makeOutboundSendRequest(recipientEmails: recipientEmails)
-        let submission: OutboundMessageCoordinator.Submission?
+        let result: OutboundMessageResult?
         do {
-            submission = try await outboundMessageCoordinator.send(request)
+            result = try await outboundMessageCoordinator.send(request)
         } catch {
             Log.error("Failed to create optimistic message", category: .message, error: error)
             self.error = GmailSendService.SendError.optimisticCreationFailed
@@ -237,25 +236,17 @@ final class ComposeViewModel: ObservableObject {
             isSending = false
             return false
         }
-        guard let submission else {
+        guard let result else {
             isSending = false
             return false
         }
 
-        lastSentConversationObjectID = submission.conversationObjectID
-        backgroundSendTasks[submission.optimisticMessageID] = submission.backgroundTask
-        Task { [weak self] in
-            _ = await submission.backgroundTask.result
-            await MainActor.run {
-                _ = self?.backgroundSendTasks.removeValue(forKey: submission.optimisticMessageID)
-            }
-        }
-
+        lastSentConversationObjectID = result.conversationObjectID
         isSending = false
         return true
     }
 
-    private func makeOutboundSendRequest(recipientEmails: [String]) -> OutboundMessageCoordinator.Request {
+    private func makeOutboundSendRequest(recipientEmails: [String]) -> OutboundMessageRequest {
         switch mode {
         case .newMessage, .newEmail:
             return .compose(
@@ -283,8 +274,8 @@ final class ComposeViewModel: ObservableObject {
         case .reply(let conversation, let replyingTo):
             return .reply(
                 .init(
-                    conversation: conversation,
-                    replyingTo: replyingTo,
+                    conversationObjectID: conversation.objectID,
+                    replyingToMessageObjectID: replyingTo?.objectID,
                     body: body,
                     attachments: attachments
                 )

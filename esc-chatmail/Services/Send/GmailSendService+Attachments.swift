@@ -68,12 +68,24 @@ extension GmailSendService {
 
     /// Marks attachments as successfully uploaded.
     @MainActor
+    func markAttachmentsAsUploaded(objectIDs: [NSManagedObjectID]) {
+        let attachments = objectIDs.compactMap { objectID in
+            try? viewContext.existingObject(with: objectID) as? Attachment
+        }
+        guard !attachments.isEmpty else { return }
+
+        markAttachmentsAsUploaded(attachments)
+    }
+
+    @MainActor
     func markAttachmentsAsUploaded(_ attachments: [Attachment]) {
         for attachment in attachments {
             attachment.state = .uploaded
         }
         do {
-            try CoreDataStack.shared.save(context: viewContext)
+            if viewContext.hasChanges {
+                try viewContext.save()
+            }
         } catch {
             Log.error("Failed to save attachment state", category: .attachment, error: error)
         }
@@ -86,7 +98,9 @@ extension GmailSendService {
             attachment.state = .failed
         }
         do {
-            try CoreDataStack.shared.save(context: viewContext)
+            if viewContext.hasChanges {
+                try viewContext.save()
+            }
         } catch {
             Log.error("Failed to save attachment state", category: .attachment, error: error)
         }

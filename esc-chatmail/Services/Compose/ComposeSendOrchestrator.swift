@@ -9,7 +9,7 @@ protocol IncrementalSyncPerforming: AnyObject {
 extension SyncEngine: IncrementalSyncPerforming {}
 
 protocol ComposeSendServicing: AnyObject {
-    @MainActor func markAttachmentsAsUploaded(_ attachments: [Attachment])
+    @MainActor func markAttachmentsAsUploaded(objectIDs: [NSManagedObjectID])
     func sendReply(
         to recipients: [String],
         body: String,
@@ -30,8 +30,10 @@ protocol ComposeSendServicing: AnyObject {
     ) async throws -> GmailSendService.SendResult
     @MainActor func fetchMessageSync(byID messageID: String) -> Message?
     @MainActor func updateOptimisticMessage(_ message: Message, with result: GmailSendService.SendResult)
-    @MainActor func markAttachmentsAsFailed(_ attachments: [Attachment])
-    @MainActor func handleFailedOptimisticMessage(byID messageID: String, fallbackAttachments: [Attachment])
+    @MainActor func handleFailedOptimisticMessage(
+        byID messageID: String,
+        fallbackAttachmentObjectIDs: [NSManagedObjectID]
+    )
 }
 
 extension GmailSendService: ComposeSendServicing {}
@@ -80,14 +82,15 @@ struct ComposeSendOrchestrator {
     /// Creates an optimistic message and triggers background send
     /// - Parameters:
     ///   - input: The send input data
-    ///   - attachments: Original attachment entities for marking as uploaded
+    ///   - attachmentObjectIDs: Attachment object IDs for post-send state updates
     ///   - optimisticMessageID: ID of the pre-created optimistic message
     @MainActor
     @discardableResult
     func executeInBackground(
         input: SendInput,
-        attachments: [Attachment],
-        optimisticMessageID: String
+        attachmentObjectIDs: [NSManagedObjectID],
+        optimisticMessageID: String,
+        reconciliationHooks: OutboundMessageReconciliationHooks = .none
     ) -> Task<Void, Never> {
         // Capture services for background task
         let sendService = self.sendService
@@ -132,7 +135,14 @@ struct ComposeSendOrchestrator {
                     if let message = sendService.fetchMessageSync(byID: optimisticMessageID) {
                         sendService.updateOptimisticMessage(message, with: result)
                     }
-                    sendService.markAttachmentsAsUploaded(attachments)
+                    sendService.markAttachmentsAsUploaded(objectIDs: attachmentObjectIDs)
+                    reconciliationHooks.onSuccess?(
+                        .init(
+                            optimisticMessageID: optimisticMessageID,
+                            sentMessageID: result.messageId,
+                            threadID: result.threadId
+                        )
+                    )
                 }
 
                 if Task.isCancelled {
@@ -155,7 +165,13 @@ struct ComposeSendOrchestrator {
                 await MainActor.run {
                     sendService.handleFailedOptimisticMessage(
                         byID: optimisticMessageID,
-                        fallbackAttachments: attachments
+                        fallbackAttachmentObjectIDs: attachmentObjectIDs
+                    )
+                    reconciliationHooks.onFailure?(
+                        .init(
+                            optimisticMessageID: optimisticMessageID,
+                            errorDescription: error.localizedDescription
+                        )
                     )
                 }
                 Log.error("Background send failed", category: .message, error: error)

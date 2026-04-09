@@ -1,4 +1,5 @@
 import XCTest
+import CoreData
 @testable import esc_chatmail
 
 @MainActor
@@ -10,7 +11,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
         let task = orchestrator.executeInBackground(
             input: makeInput(),
-            attachments: [],
+            attachmentObjectIDs: [],
             optimisticMessageID: "optimistic-1"
         )
         await task.value
@@ -40,7 +41,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
         let task = orchestrator.executeInBackground(
             input: makeInput(replyData: replyData),
-            attachments: [],
+            attachmentObjectIDs: [],
             optimisticMessageID: "optimistic-2"
         )
         await task.value
@@ -68,7 +69,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
         let task = orchestrator.executeInBackground(
             input: makeInput(replyData: replyData),
-            attachments: [],
+            attachmentObjectIDs: [],
             optimisticMessageID: "optimistic-2b"
         )
         await task.value
@@ -88,7 +89,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
         let task = orchestrator.executeInBackground(
             input: makeInput(),
-            attachments: [],
+            attachmentObjectIDs: [],
             optimisticMessageID: "optimistic-3"
         )
 
@@ -109,7 +110,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
         let task = orchestrator.executeInBackground(
             input: makeInput(),
-            attachments: [],
+            attachmentObjectIDs: [],
             optimisticMessageID: "optimistic-failure"
         )
         await task.value
@@ -182,7 +183,7 @@ private final class MockComposeSendService: ComposeSendServicing {
     }
 
     @MainActor
-    func markAttachmentsAsUploaded(_ attachments: [Attachment]) {
+    func markAttachmentsAsUploaded(objectIDs: [NSManagedObjectID]) {
         queue.sync { _markUploadedCalls += 1 }
     }
 
@@ -237,12 +238,7 @@ private final class MockComposeSendService: ComposeSendServicing {
     }
 
     @MainActor
-    func markAttachmentsAsFailed(_ attachments: [Attachment]) {
-        queue.sync { _markFailedCalls += 1 }
-    }
-
-    @MainActor
-    func handleFailedOptimisticMessage(byID messageID: String, fallbackAttachments: [Attachment]) {
+    func handleFailedOptimisticMessage(byID messageID: String, fallbackAttachmentObjectIDs: [NSManagedObjectID]) {
         queue.sync { _handleFailedCalls += 1 }
     }
 }

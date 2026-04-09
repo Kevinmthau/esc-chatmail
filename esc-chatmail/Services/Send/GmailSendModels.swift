@@ -5,7 +5,7 @@ import Foundation
 extension GmailSendService {
 
     /// Result of a successful message send operation.
-    struct SendResult {
+    struct SendResult: Sendable {
         let messageId: String
         let threadId: String
     }
@@ -26,7 +26,7 @@ extension GmailSendService {
     }
 
     /// Errors that can occur during message sending.
-    enum SendError: LocalizedError {
+    enum SendError: LocalizedError, Sendable {
         case invalidMimeData
         case apiError(String)
         case authenticationFailed

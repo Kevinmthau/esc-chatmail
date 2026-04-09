@@ -13,7 +13,7 @@ struct InlineAttachmentData {
     let mimeType: String
 }
 
-struct QuotedMessage {
+struct QuotedMessage: Sendable {
     let senderName: String?
     let senderEmail: String
     let date: Date
