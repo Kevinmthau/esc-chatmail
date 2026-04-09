@@ -151,8 +151,8 @@ final class ComposeViewModel: ObservableObject {
 
             // Copy regular attachments from original message
             var skipped = 0
-            for objectURI in context.forwardedRegularAttachmentObjectURIs {
-                if let copied = attachmentManager.copyAttachmentForForward(objectURI: objectURI) {
+            for attachment in context.forwardedRegularAttachments {
+                if let copied = attachmentManager.copyAttachmentForForward(attachment) {
                     attachmentManager.addAttachment(copied)
                 } else {
                     skipped += 1

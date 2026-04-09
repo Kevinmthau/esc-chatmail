@@ -2,6 +2,17 @@ import Foundation
 import CoreData
 import Combine
 
+struct ForwardAttachmentSnapshot: Equatable {
+    let filename: String
+    let mimeType: String
+    let byteSize: Int64
+    let localURL: String?
+    let previewURL: String?
+    let width: Int16
+    let height: Int16
+    let pageCount: Int16
+}
+
 /// Handles attachment lifecycle including cleanup of local files
 @MainActor
 final class ComposeAttachmentManager: ObservableObject {
@@ -52,29 +63,18 @@ final class ComposeAttachmentManager: ObservableObject {
         attachments.removeAll()
     }
 
-    /// Copies an existing attachment for forwarding
-    /// Returns nil if the attachment data is not available (not downloaded)
-    func copyAttachmentForForward(_ original: Attachment) -> Attachment? {
-        copyAttachmentForForward(originalAttachment: original)
-    }
-
-    /// Copies an existing attachment for forwarding by resolving it from an object URI.
-    /// Returns nil if the attachment cannot be resolved or its data is not available.
-    func copyAttachmentForForward(objectURI: String) -> Attachment? {
-        guard let original = resolveAttachment(objectURI: objectURI) else { return nil }
-        return copyAttachmentForForward(originalAttachment: original)
-    }
-
-    private func copyAttachmentForForward(originalAttachment original: Attachment) -> Attachment? {
+    /// Copies a forwarded attachment into local draft state.
+    /// Returns nil if the attachment data is not available (for example not downloaded).
+    func copyAttachmentForForward(_ snapshot: ForwardAttachmentSnapshot) -> Attachment? {
         // Load the original attachment data
-        guard let data = AttachmentPaths.loadData(from: original.localURLValue) else {
+        guard let data = AttachmentPaths.loadData(from: snapshot.localURL) else {
             Log.warning("Cannot copy attachment for forward: not downloaded", category: .attachment)
             return nil
         }
 
         // Generate new local ID and paths
         let newId = "local_\(UUID().uuidString)"
-        let ext = AttachmentPaths.fileExtension(for: original.mimeTypeValue)
+        let ext = AttachmentPaths.fileExtension(for: snapshot.mimeType)
         let newPath = AttachmentPaths.originalPath(idOrUUID: newId, ext: ext)
 
         // Save the copied file
@@ -85,7 +85,7 @@ final class ComposeAttachmentManager: ObservableObject {
 
         // Copy preview if available
         var newPreviewPath: String?
-        if let originalPreview = original.previewURLValue,
+        if let originalPreview = snapshot.previewURL,
            let previewData = AttachmentPaths.loadData(from: originalPreview) {
             let previewPath = AttachmentPaths.previewPath(idOrUUID: newId)
             if AttachmentPaths.saveData(previewData, to: previewPath) {
@@ -96,26 +96,16 @@ final class ComposeAttachmentManager: ObservableObject {
         // Create new attachment entity
         let newAttachment = Attachment(context: viewContext)
         newAttachment.setValue(newId, forKey: "id")
-        newAttachment.setValue(original.filenameValue, forKey: "filename")
-        newAttachment.setValue(original.mimeTypeValue, forKey: "mimeType")
-        newAttachment.setValue(original.byteSize, forKey: "byteSize")
+        newAttachment.setValue(snapshot.filename, forKey: "filename")
+        newAttachment.setValue(snapshot.mimeType, forKey: "mimeType")
+        newAttachment.setValue(snapshot.byteSize, forKey: "byteSize")
         newAttachment.setValue(newPath, forKey: "localURL")
         newAttachment.setValue(newPreviewPath, forKey: "previewURL")
         newAttachment.setValue("queued", forKey: "stateRaw")
-        newAttachment.setValue(original.width, forKey: "width")
-        newAttachment.setValue(original.height, forKey: "height")
-        newAttachment.setValue(original.pageCount, forKey: "pageCount")
+        newAttachment.setValue(snapshot.width, forKey: "width")
+        newAttachment.setValue(snapshot.height, forKey: "height")
+        newAttachment.setValue(snapshot.pageCount, forKey: "pageCount")
 
         return newAttachment
-    }
-
-    private func resolveAttachment(objectURI: String) -> Attachment? {
-        guard let url = URL(string: objectURI),
-              let coordinator = viewContext.persistentStoreCoordinator,
-              let objectID = coordinator.managedObjectID(forURIRepresentation: url) else {
-            return nil
-        }
-
-        return try? viewContext.existingObject(with: objectID) as? Attachment
     }
 }

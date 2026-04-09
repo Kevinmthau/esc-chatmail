@@ -77,6 +77,55 @@ final class ComposeViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.recipients.map(\.email), ["friend@example.com"])
     }
 
+    func testSetupForMode_forwardCopiesForwardAttachmentSnapshots() {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        AttachmentPaths.setupDirectories()
+
+        let regularPath = AttachmentPaths.originalPath(idOrUUID: "forward-regular", ext: "pdf")
+        XCTAssertTrue(AttachmentPaths.saveData(Data("regular".utf8), to: regularPath))
+        defer { AttachmentPaths.deleteFile(at: regularPath) }
+
+        let forwardModeContext = ComposeForwardModeContext(
+            id: "forward-source-message",
+            initialSubject: "Fwd: Original Subject",
+            forwardedPlainTextBody: "Forwarded body",
+            forwardedHTMLBody: "<html><body><p>Forwarded HTML body</p></body></html>",
+            forwardedInlineAttachmentInfos: [],
+            forwardedRegularAttachments: [
+                .init(
+                    filename: "report.pdf",
+                    mimeType: "application/pdf",
+                    byteSize: 91_248,
+                    localURL: regularPath,
+                    previewURL: nil,
+                    width: 0,
+                    height: 0,
+                    pageCount: 0
+                ),
+                .init(
+                    filename: "missing.pdf",
+                    mimeType: "application/pdf",
+                    byteSize: 10,
+                    localURL: "Attachments/missing.pdf",
+                    previewURL: nil,
+                    width: 0,
+                    height: 0,
+                    pageCount: 0
+                )
+            ]
+        )
+        let viewModel = ComposeViewModel(mode: .forward(forwardModeContext), deps: deps)
+        defer { viewModel.attachmentManager.clear() }
+
+        viewModel.setupForMode()
+        viewModel.setupForMode()
+
+        XCTAssertEqual(viewModel.subject, "Fwd: Original Subject")
+        XCTAssertEqual(viewModel.attachments.count, 1)
+        XCTAssertEqual(viewModel.attachments.first?.filename, "report.pdf")
+        XCTAssertEqual(viewModel.skippedForwardAttachmentCount, 1)
+    }
+
     func testSend_newMessageBuildsParticipantHashOptimisticConversationContext() async {
         let authSession = makeTestAuthSession(userEmail: "me@example.com")
         let coordinator = MockOutboundMessageCoordinator()

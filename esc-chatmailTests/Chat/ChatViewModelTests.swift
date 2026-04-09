@@ -161,7 +161,8 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.forwardComposeContext?.forwardedHTMLBody?.contains("Forwarded HTML body") == true)
         XCTAssertEqual(viewModel.forwardComposeContext?.forwardedInlineAttachmentInfos.count, 1)
         XCTAssertEqual(viewModel.forwardComposeContext?.forwardedInlineAttachmentInfos.first?.contentId, "cid-inline")
-        XCTAssertEqual(viewModel.forwardComposeContext?.forwardedRegularAttachmentObjectURIs.count, 1)
+        XCTAssertEqual(viewModel.forwardComposeContext?.forwardedRegularAttachments.count, 1)
+        XCTAssertEqual(viewModel.forwardComposeContext?.forwardedRegularAttachments.first?.filename, "report.pdf")
     }
 
     func testSendReply_buildsReplySnapshotsAtViewModelEdge() async {

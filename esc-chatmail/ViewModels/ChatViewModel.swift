@@ -313,7 +313,7 @@ final class ChatViewModel: ObservableObject {
         return ComposeForwardModeContextBuilder.Input(
             source: makeForwardSource(message),
             forwardedInlineAttachmentInfos: attachments.inlineAttachmentInfos,
-            forwardedRegularAttachmentObjectURIs: attachments.regularAttachmentObjectURIs
+            forwardedRegularAttachments: attachments.regularAttachments
         )
     }
 
@@ -373,14 +373,25 @@ final class ChatViewModel: ObservableObject {
             inlineAttachmentInfos: try outboundAttachmentContextBuilder.buildInlineAttachmentInfos(
                 from: inlineAttachments
             ),
-            regularAttachmentObjectURIs: try outboundAttachmentContextBuilder.buildObjectURIs(
-                from: regularAttachments
-            )
+            regularAttachments: regularAttachments.map(makeForwardAttachmentSnapshot)
+        )
+    }
+
+    private func makeForwardAttachmentSnapshot(_ attachment: Attachment) -> ForwardAttachmentSnapshot {
+        ForwardAttachmentSnapshot(
+            filename: attachment.filenameValue,
+            mimeType: attachment.mimeTypeValue,
+            byteSize: attachment.byteSize,
+            localURL: attachment.localURLValue,
+            previewURL: attachment.previewURLValue,
+            width: attachment.width,
+            height: attachment.height,
+            pageCount: attachment.pageCount
         )
     }
 
     private struct ForwardAttachmentPayload {
         let inlineAttachmentInfos: [GmailSendService.AttachmentInfo]
-        let regularAttachmentObjectURIs: [String]
+        let regularAttachments: [ForwardAttachmentSnapshot]
     }
 }

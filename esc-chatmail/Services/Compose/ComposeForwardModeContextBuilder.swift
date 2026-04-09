@@ -6,7 +6,7 @@ struct ComposeForwardModeContext: Identifiable {
     let forwardedPlainTextBody: String
     let forwardedHTMLBody: String?
     let forwardedInlineAttachmentInfos: [GmailSendService.AttachmentInfo]
-    let forwardedRegularAttachmentObjectURIs: [String]
+    let forwardedRegularAttachments: [ForwardAttachmentSnapshot]
 }
 
 @MainActor
@@ -16,7 +16,7 @@ struct ComposeForwardModeContextBuilder {
     struct Input {
         let source: MessageFormatBuilder.ForwardSource
         let forwardedInlineAttachmentInfos: [GmailSendService.AttachmentInfo]
-        let forwardedRegularAttachmentObjectURIs: [String]
+        let forwardedRegularAttachments: [ForwardAttachmentSnapshot]
     }
 
     func build(input: Input) -> ComposeForwardModeContext {
@@ -28,7 +28,7 @@ struct ComposeForwardModeContextBuilder {
             forwardedPlainTextBody: formattedMessage.body,
             forwardedHTMLBody: formattedMessage.htmlBody,
             forwardedInlineAttachmentInfos: input.forwardedInlineAttachmentInfos,
-            forwardedRegularAttachmentObjectURIs: input.forwardedRegularAttachmentObjectURIs
+            forwardedRegularAttachments: input.forwardedRegularAttachments
         )
     }
 }

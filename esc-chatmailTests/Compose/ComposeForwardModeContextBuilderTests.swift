@@ -46,8 +46,17 @@ final class ComposeForwardModeContextBuilderTests: XCTestCase {
                         contentId: "cid-inline"
                     )
                 ],
-                forwardedRegularAttachmentObjectURIs: [
-                    "x-coredata://attachment/regular-1"
+                forwardedRegularAttachments: [
+                    .init(
+                        filename: "report.pdf",
+                        mimeType: "application/pdf",
+                        byteSize: 91_248,
+                        localURL: "Attachments/forward-regular.pdf",
+                        previewURL: nil,
+                        width: 0,
+                        height: 0,
+                        pageCount: 0
+                    )
                 ]
             )
         )
@@ -60,6 +69,20 @@ final class ComposeForwardModeContextBuilderTests: XCTestCase {
         XCTAssertTrue(result.forwardedHTMLBody?.contains("Forwarded HTML body") == true)
         XCTAssertEqual(result.forwardedInlineAttachmentInfos.count, 1)
         XCTAssertEqual(result.forwardedInlineAttachmentInfos.first?.contentId, "cid-inline")
-        XCTAssertEqual(result.forwardedRegularAttachmentObjectURIs, ["x-coredata://attachment/regular-1"])
+        XCTAssertEqual(
+            result.forwardedRegularAttachments,
+            [
+                .init(
+                    filename: "report.pdf",
+                    mimeType: "application/pdf",
+                    byteSize: 91_248,
+                    localURL: "Attachments/forward-regular.pdf",
+                    previewURL: nil,
+                    width: 0,
+                    height: 0,
+                    pageCount: 0
+                )
+            ]
+        )
     }
 }
