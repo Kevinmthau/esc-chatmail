@@ -1,4 +1,5 @@
 import XCTest
+import CoreData
 @testable import esc_chatmail
 
 @MainActor
@@ -78,5 +79,21 @@ final class GmailSendServiceTests: XCTestCase {
         } catch {
             XCTFail("Expected GmailSendService.SendError.authenticationFailed but got \(error)")
         }
+    }
+
+    func testAttachmentSnapshot_doesNotMutateAttachmentState() {
+        let attachment = Attachment(context: coreDataStack.viewContext)
+        attachment.id = "inline-1"
+        attachment.filename = "inline.png"
+        attachment.mimeType = "image/png"
+        attachment.stateRaw = Attachment.State.downloaded.rawValue
+        attachment.contentId = "cid-inline"
+
+        let info = sendService.attachmentSnapshot(attachment)
+
+        XCTAssertEqual(attachment.state, .downloaded)
+        XCTAssertEqual(info.filename, "inline.png")
+        XCTAssertEqual(info.mimeType, "image/png")
+        XCTAssertEqual(info.contentId, "cid-inline")
     }
 }

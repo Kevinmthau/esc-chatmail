@@ -80,6 +80,7 @@ protocol OutboundMessageSendServicing: ComposeSendServicing {
     ) async throws -> Message
 
     func attachmentToInfo(_ attachment: Attachment) -> GmailSendService.AttachmentInfo
+    func attachmentSnapshot(_ attachment: Attachment) -> GmailSendService.AttachmentInfo
 }
 
 extension GmailSendService: OutboundMessageSendServicing {}
@@ -103,6 +104,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
     private let syncPerformer: IncrementalSyncPerforming
     private let replyMetadataBuilder: ReplyMetadataBuilder
     private let messageFormatBuilder: MessageFormatBuilder
+    private let mutationTracker: any OutboundSendMutationTracking
     private var backgroundSendTasks: [String: Task<Void, Never>] = [:]
 
     init(
@@ -110,13 +112,15 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         sendService: any OutboundMessageSendServicing,
         syncPerformer: IncrementalSyncPerforming,
         replyMetadataBuilder: ReplyMetadataBuilder,
-        messageFormatBuilder: MessageFormatBuilder
+        messageFormatBuilder: MessageFormatBuilder,
+        mutationTracker: any OutboundSendMutationTracking
     ) {
         self.viewContext = viewContext
         self.sendService = sendService
         self.syncPerformer = syncPerformer
         self.replyMetadataBuilder = replyMetadataBuilder
         self.messageFormatBuilder = messageFormatBuilder
+        self.mutationTracker = mutationTracker
     }
 
     func send(
@@ -138,6 +142,12 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             existingConversationObjectID: preparedSend.existingConversationObjectID
         )
         let optimisticMessageID = optimisticMessage.id
+        mutationTracker.trackPendingMutation(
+            .init(
+                optimisticMessageID: optimisticMessageID,
+                conversationObjectID: optimisticMessage.conversation?.objectID
+            )
+        )
 
         let sendInput = ComposeSendOrchestrator.SendInput(
             recipientEmails: preparedSend.recipientEmails,
@@ -145,10 +155,11 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             htmlBody: preparedSend.htmlBody,
             subject: preparedSend.subject,
             attachmentInfos: preparedSend.attachments.map { sendService.attachmentToInfo($0) },
-            inlineAttachmentInfos: preparedSend.inlineAttachments.map { sendService.attachmentToInfo($0) },
+            inlineAttachmentInfos: preparedSend.inlineAttachments.map { sendService.attachmentSnapshot($0) },
             replyData: preparedSend.replyData
         )
 
+        let effectiveHooks = makeReconciliationHooks(reconciliationHooks)
         let backgroundTask = ComposeSendOrchestrator(
             sendService: sendService,
             syncPerformer: syncPerformer
@@ -156,7 +167,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             input: sendInput,
             attachmentObjectIDs: preparedSend.attachments.map(\.objectID),
             optimisticMessageID: optimisticMessageID,
-            reconciliationHooks: reconciliationHooks
+            reconciliationHooks: effectiveHooks
         )
 
         backgroundSendTasks[optimisticMessageID] = backgroundTask
@@ -305,5 +316,20 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         }
 
         return subject
+    }
+
+    private func makeReconciliationHooks(
+        _ externalHooks: OutboundMessageReconciliationHooks
+    ) -> OutboundMessageReconciliationHooks {
+        OutboundMessageReconciliationHooks(
+            onSuccess: { [weak mutationTracker] success in
+                mutationTracker?.reconcileSuccess(success)
+                externalHooks.onSuccess?(success)
+            },
+            onFailure: { [weak mutationTracker] failure in
+                mutationTracker?.reconcileFailure(failure)
+                externalHooks.onFailure?(failure)
+            }
+        )
     }
 }

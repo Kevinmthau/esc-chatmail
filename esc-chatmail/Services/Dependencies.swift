@@ -89,6 +89,7 @@ final class Dependencies: ObservableObject {
     let foregroundSyncCoordinator: ForegroundSyncCoordinator
     let attachmentDownloader: AttachmentDownloader
     let backgroundSyncManager: BackgroundSyncManager
+    let outboundSendMutationTracker: any OutboundSendMutationTracking
     private let outboundMessageCoordinatorOverride: (any OutboundMessageCoordinating)?
 
     // MARK: - Convenience Accessors
@@ -132,7 +133,8 @@ final class Dependencies: ObservableObject {
             sendService: makeSendService(),
             syncPerformer: syncEngine,
             replyMetadataBuilder: makeReplyMetadataBuilder(),
-            messageFormatBuilder: makeMessageFormatBuilder()
+            messageFormatBuilder: makeMessageFormatBuilder(),
+            mutationTracker: outboundSendMutationTracker
         )
     }
 
@@ -233,6 +235,7 @@ final class Dependencies: ObservableObject {
         backgroundSyncManager: BackgroundSyncManager = BackgroundSyncManager.shared,
         participantLoader: ParticipantLoader? = nil,
         conversationManager: ConversationManager? = nil,
+        outboundSendMutationTracker: (any OutboundSendMutationTracking)? = nil,
         outboundMessageCoordinator: (any OutboundMessageCoordinating)? = nil
     ) {
         let resolvedAuthSession = authSession ?? AuthSession.shared
@@ -262,6 +265,7 @@ final class Dependencies: ObservableObject {
         self.foregroundSyncCoordinator = resolvedForegroundSyncCoordinator
         self.attachmentDownloader = resolvedAttachmentDownloader
         self.backgroundSyncManager = backgroundSyncManager
+        self.outboundSendMutationTracker = outboundSendMutationTracker ?? OutboundSendMutationTracker()
         self.outboundMessageCoordinatorOverride = outboundMessageCoordinator
         self.participantLoader = participantLoader ?? ParticipantLoader(
             personCache: personCache,

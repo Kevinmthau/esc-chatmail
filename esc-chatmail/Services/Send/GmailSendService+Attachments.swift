@@ -57,8 +57,12 @@ extension GmailSendService {
     func attachmentToInfo(_ attachment: Attachment) -> AttachmentInfo {
         // Update attachment state to uploading (will be marked as uploaded after successful send)
         attachment.state = .uploading
+        return attachmentSnapshot(attachment)
+    }
 
-        return AttachmentInfo(
+    /// Creates a read-only attachment snapshot for MIME building without mutating local send state.
+    func attachmentSnapshot(_ attachment: Attachment) -> AttachmentInfo {
+        AttachmentInfo(
             localURL: attachment.localURLValue,
             filename: attachment.filenameValue,
             mimeType: attachment.mimeTypeValue,

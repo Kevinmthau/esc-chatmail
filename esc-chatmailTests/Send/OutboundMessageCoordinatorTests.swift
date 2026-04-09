@@ -19,7 +19,12 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
     func testSend_composeNormalizesInputAndRunsSendNew() async throws {
         let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
         let syncPerformer = MockCoordinatorSyncPerformer()
-        let coordinator = makeCoordinator(sendService: sendService, syncPerformer: syncPerformer)
+        let mutationTracker = MockOutboundSendMutationTracker()
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: syncPerformer,
+            mutationTracker: mutationTracker
+        )
         let completionExpectation = expectation(description: "compose send completes")
 
         let submission = try await coordinator.send(
@@ -51,16 +56,20 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.sendReplyCalls.count, 0)
         XCTAssertNotNil(queuedSubmission.conversationObjectID)
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
+        XCTAssertEqual(mutationTracker.pendingMutationIDs, [queuedSubmission.optimisticMessageID])
+        XCTAssertEqual(mutationTracker.successfulMutationIDs, [queuedSubmission.optimisticMessageID])
     }
 
     func testSend_replyBuildsReplyMetadataAndRunsSendReply() async throws {
         let authSession = makeTestAuthSession(userEmail: "me@example.com")
         let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
         let syncPerformer = MockCoordinatorSyncPerformer()
+        let mutationTracker = MockOutboundSendMutationTracker()
         let coordinator = makeCoordinator(
             sendService: sendService,
             syncPerformer: syncPerformer,
-            authSession: authSession
+            authSession: authSession,
+            mutationTracker: mutationTracker
         )
         let completionExpectation = expectation(description: "reply send completes")
 
@@ -137,13 +146,22 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.sendReplyCalls.first?.inReplyTo, "<message-1@example.com>")
         XCTAssertEqual(snapshot.sendReplyCalls.first?.references, ["<older@example.com>", "<message-1@example.com>"])
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
+        XCTAssertEqual(mutationTracker.pendingMutationIDs, [queuedSubmission.optimisticMessageID])
+        XCTAssertEqual(mutationTracker.successfulMutationIDs, [queuedSubmission.optimisticMessageID])
     }
 
-    func testSend_forwardBuildsCombinedBodiesAndRunsSendNew() async throws {
+    func testSend_forwardBuildsCombinedBodiesUsesInlineSnapshotsAndRunsSendNew() async throws {
         let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
         let syncPerformer = MockCoordinatorSyncPerformer()
         let coordinator = makeCoordinator(sendService: sendService, syncPerformer: syncPerformer)
         let completionExpectation = expectation(description: "forward send completes")
+        let inlineAttachment = AttachmentBuilder()
+            .withId("inline-attachment")
+            .withFilename("inline.png")
+            .withMimeType("image/png")
+            .downloaded()
+            .build(in: coreDataStack.viewContext)
+        inlineAttachment.contentId = "cid-inline"
 
         let submission = try await coordinator.send(
             .forward(
@@ -154,7 +172,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
                     attachments: [],
                     forwardedPlainTextBody: "Forwarded plain text",
                     forwardedHTMLBody: "<html><body><p>Forwarded HTML</p></body></html>",
-                    forwardedInlineAttachments: []
+                    forwardedInlineAttachments: [inlineAttachment]
                 )
             ),
             reconciliationHooks: .init(
@@ -174,6 +192,8 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.sendNewCalls.first?.subject, "Fwd: Hello")
         XCTAssertTrue(snapshot.sendNewCalls.first?.htmlBody?.contains("Intro line") == true)
         XCTAssertTrue(snapshot.sendNewCalls.first?.htmlBody?.contains("Forwarded HTML") == true)
+        XCTAssertEqual(snapshot.attachmentToInfoCalls.count, 0)
+        XCTAssertEqual(snapshot.attachmentSnapshotCalls.map(\.contentId), ["cid-inline"])
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
     }
 
@@ -210,10 +230,51 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertNotNil(successPayload?.threadID)
     }
 
+    func testSend_backgroundFailureTracksFailedMutationAndInvokesFailureHook() async throws {
+        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        sendService.sendNewError = GmailSendService.SendError.apiError("boom")
+        let syncPerformer = MockCoordinatorSyncPerformer()
+        let mutationTracker = MockOutboundSendMutationTracker()
+        let coordinator = makeCoordinator(
+            sendService: sendService,
+            syncPerformer: syncPerformer,
+            mutationTracker: mutationTracker
+        )
+
+        let failureExpectation = expectation(description: "failure hook called")
+        var failurePayload: OutboundMessageReconciliationHooks.Failure?
+
+        let submission = try await coordinator.send(
+            .compose(
+                .init(
+                    recipientEmails: ["to@example.com"],
+                    subject: "Hello",
+                    body: "Body",
+                    attachments: []
+                )
+            ),
+            reconciliationHooks: .init(
+                onSuccess: nil,
+                onFailure: { payload in
+                    failurePayload = payload
+                    failureExpectation.fulfill()
+                }
+            )
+        )
+
+        let queuedSubmission = try XCTUnwrap(submission)
+        await fulfillment(of: [failureExpectation], timeout: 1.0)
+        XCTAssertEqual(failurePayload?.optimisticMessageID, queuedSubmission.optimisticMessageID)
+        XCTAssertEqual(mutationTracker.pendingMutationIDs, [queuedSubmission.optimisticMessageID])
+        XCTAssertEqual(mutationTracker.failedMutationIDs, [queuedSubmission.optimisticMessageID])
+        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 0)
+    }
+
     private func makeCoordinator(
         sendService: MockOutboundMessageSendService,
         syncPerformer: MockCoordinatorSyncPerformer,
-        authSession: AuthSession? = nil
+        authSession: AuthSession? = nil,
+        mutationTracker: MockOutboundSendMutationTracker? = nil
     ) -> OutboundMessageCoordinator {
         let resolvedAuthSession = authSession ?? makeTestAuthSession(userEmail: "me@example.com")
         return OutboundMessageCoordinator(
@@ -221,7 +282,8 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
             sendService: sendService,
             syncPerformer: syncPerformer,
             replyMetadataBuilder: ReplyMetadataBuilder(authSession: resolvedAuthSession),
-            messageFormatBuilder: MessageFormatBuilder(authSession: resolvedAuthSession)
+            messageFormatBuilder: MessageFormatBuilder(authSession: resolvedAuthSession),
+            mutationTracker: mutationTracker ?? MockOutboundSendMutationTracker()
         )
     }
 
@@ -250,6 +312,11 @@ private final class MockCoordinatorSyncPerformer: IncrementalSyncPerforming {
 }
 
 private final class MockOutboundMessageSendService: OutboundMessageSendServicing {
+    struct AttachmentInfoCall {
+        let filename: String
+        let contentId: String?
+    }
+
     struct CreateOptimisticCall {
         let recipients: [String]
         let body: String
@@ -278,6 +345,8 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         let createOptimisticCalls: [CreateOptimisticCall]
         let sendNewCalls: [SendNewCall]
         let sendReplyCalls: [SendReplyCall]
+        let attachmentToInfoCalls: [AttachmentInfoCall]
+        let attachmentSnapshotCalls: [AttachmentInfoCall]
     }
 
     private let context: NSManagedObjectContext
@@ -286,6 +355,11 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     private var createCalls: [CreateOptimisticCall] = []
     private var newCalls: [SendNewCall] = []
     private var replyCalls: [SendReplyCall] = []
+    private var attachmentInfoCalls: [AttachmentInfoCall] = []
+    private var attachmentSnapshotCalls: [AttachmentInfoCall] = []
+    var sendDelayNanoseconds: UInt64 = 0
+    var sendNewError: Error?
+    var sendReplyError: Error?
 
     init(context: NSManagedObjectContext) {
         self.context = context
@@ -296,7 +370,9 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
             Snapshot(
                 createOptimisticCalls: createCalls,
                 sendNewCalls: newCalls,
-                sendReplyCalls: replyCalls
+                sendReplyCalls: replyCalls,
+                attachmentToInfoCalls: attachmentInfoCalls,
+                attachmentSnapshotCalls: attachmentSnapshotCalls
             )
         }
     }
@@ -347,7 +423,32 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     }
 
     func attachmentToInfo(_ attachment: Attachment) -> GmailSendService.AttachmentInfo {
-        GmailSendService.AttachmentInfo(
+        queue.sync {
+            attachmentInfoCalls.append(
+                AttachmentInfoCall(
+                    filename: attachment.filenameValue,
+                    contentId: attachment.contentId
+                )
+            )
+        }
+        return GmailSendService.AttachmentInfo(
+            localURL: attachment.localURLValue,
+            filename: attachment.filenameValue,
+            mimeType: attachment.mimeTypeValue,
+            contentId: attachment.contentId
+        )
+    }
+
+    func attachmentSnapshot(_ attachment: Attachment) -> GmailSendService.AttachmentInfo {
+        queue.sync {
+            attachmentSnapshotCalls.append(
+                AttachmentInfoCall(
+                    filename: attachment.filenameValue,
+                    contentId: attachment.contentId
+                )
+            )
+        }
+        return GmailSendService.AttachmentInfo(
             localURL: attachment.localURLValue,
             filename: attachment.filenameValue,
             mimeType: attachment.mimeTypeValue,
@@ -378,6 +479,13 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
             )
         }
 
+        if sendDelayNanoseconds > 0 {
+            try await Task.sleep(nanoseconds: sendDelayNanoseconds)
+        }
+        if let sendReplyError {
+            throw sendReplyError
+        }
+
         return GmailSendService.SendResult(
             messageId: "sent-\(UUID().uuidString)",
             threadId: threadId
@@ -401,6 +509,13 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
                     subject: subject
                 )
             )
+        }
+
+        if sendDelayNanoseconds > 0 {
+            try await Task.sleep(nanoseconds: sendDelayNanoseconds)
+        }
+        if let sendNewError {
+            throw sendNewError
         }
 
         return GmailSendService.SendResult(
@@ -428,5 +543,44 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     @MainActor
     func handleFailedOptimisticMessage(byID messageID: String, fallbackAttachmentObjectIDs: [NSManagedObjectID]) {
         optimisticMessages[messageID] = nil
+    }
+}
+
+@MainActor
+private final class MockOutboundSendMutationTracker: OutboundSendMutationTracking {
+    private var pendingMutationIDSet: Set<String> = []
+    private(set) var pendingMutationIDs: [String] = []
+    private(set) var successfulMutationIDs: [String] = []
+    private(set) var failedMutationIDs: [String] = []
+
+    var pendingMutationCount: Int {
+        pendingMutationIDSet.count
+    }
+
+    var failedMutations: [OutboundSendMutationTracker.FailedMutation] {
+        failedMutationIDs.map {
+            .init(
+                id: $0,
+                conversationObjectURI: nil,
+                createdAt: Date(),
+                failedAt: Date(),
+                errorDescription: "mock"
+            )
+        }
+    }
+
+    func trackPendingMutation(_ mutation: OutboundSendMutationTracker.PendingMutation) {
+        pendingMutationIDSet.insert(mutation.id)
+        pendingMutationIDs.append(mutation.id)
+    }
+
+    func reconcileSuccess(_ success: OutboundMessageReconciliationHooks.Success) {
+        pendingMutationIDSet.remove(success.optimisticMessageID)
+        successfulMutationIDs.append(success.optimisticMessageID)
+    }
+
+    func reconcileFailure(_ failure: OutboundMessageReconciliationHooks.Failure) {
+        pendingMutationIDSet.remove(failure.optimisticMessageID)
+        failedMutationIDs.append(failure.optimisticMessageID)
     }
 }
