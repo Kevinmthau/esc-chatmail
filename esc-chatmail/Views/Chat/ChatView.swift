@@ -83,8 +83,8 @@ struct ChatView: View {
                 }
             }
         }
-        .sheet(item: $viewModel.messageToForward) { message in
-            ComposeView(mode: .forward(message), deps: deps)
+        .sheet(item: $viewModel.forwardComposeContext) { context in
+            ComposeView(mode: .forward(context), deps: deps)
         }
         .sheet(item: $viewModel.messageToViewInFull, onDismiss: {
             viewModel.dismissFullMessage()

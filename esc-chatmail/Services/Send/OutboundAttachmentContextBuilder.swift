@@ -25,6 +25,15 @@ struct OutboundAttachmentContextBuilder {
         return attachments.map(makeAttachmentInfo)
     }
 
+    func buildObjectURIs(
+        from attachments: [Attachment]
+    ) throws -> [String] {
+        try ensurePermanentObjectIDs(for: attachments)
+        return attachments.map { attachment in
+            attachment.objectID.uriRepresentation().absoluteString
+        }
+    }
+
     private func makeAttachmentInfo(from attachment: Attachment) -> GmailSendService.AttachmentInfo {
         GmailSendService.AttachmentInfo(
             localURL: attachment.localURLValue,

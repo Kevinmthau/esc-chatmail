@@ -55,6 +55,17 @@ final class ComposeAttachmentManager: ObservableObject {
     /// Copies an existing attachment for forwarding
     /// Returns nil if the attachment data is not available (not downloaded)
     func copyAttachmentForForward(_ original: Attachment) -> Attachment? {
+        copyAttachmentForForward(originalAttachment: original)
+    }
+
+    /// Copies an existing attachment for forwarding by resolving it from an object URI.
+    /// Returns nil if the attachment cannot be resolved or its data is not available.
+    func copyAttachmentForForward(objectURI: String) -> Attachment? {
+        guard let original = resolveAttachment(objectURI: objectURI) else { return nil }
+        return copyAttachmentForForward(originalAttachment: original)
+    }
+
+    private func copyAttachmentForForward(originalAttachment original: Attachment) -> Attachment? {
         // Load the original attachment data
         guard let data = AttachmentPaths.loadData(from: original.localURLValue) else {
             Log.warning("Cannot copy attachment for forward: not downloaded", category: .attachment)
@@ -96,5 +107,15 @@ final class ComposeAttachmentManager: ObservableObject {
         newAttachment.setValue(original.pageCount, forKey: "pageCount")
 
         return newAttachment
+    }
+
+    private func resolveAttachment(objectURI: String) -> Attachment? {
+        guard let url = URL(string: objectURI),
+              let coordinator = viewContext.persistentStoreCoordinator,
+              let objectID = coordinator.managedObjectID(forURIRepresentation: url) else {
+            return nil
+        }
+
+        return try? viewContext.existingObject(with: objectID) as? Attachment
     }
 }

@@ -13,14 +13,14 @@ final class ComposeViewModel: ObservableObject {
     enum Mode: Equatable {
         case newMessage
         case newEmail // includes subject field
-        case forward(Message)
+        case forward(ComposeForwardModeContext)
         case reply(ComposeReplyModeContext)
 
         static func == (lhs: Mode, rhs: Mode) -> Bool {
             switch (lhs, rhs) {
             case (.newMessage, .newMessage): return true
             case (.newEmail, .newEmail): return true
-            case (.forward(let m1), .forward(let m2)): return m1.objectID == m2.objectID
+            case (.forward(let c1), .forward(let c2)): return c1.id == c2.id
             case (.reply(let c1), .reply(let c2)):
                 return c1.initialRecipients == c2.initialRecipients &&
                     c1.outboundRequestContext.threadId == c2.outboundRequestContext.threadId &&
@@ -52,8 +52,8 @@ final class ComposeViewModel: ObservableObject {
     /// Plain text body of the forwarded message (used for MIME text part)
     private var forwardedPlainTextBody: String = ""
 
-    /// Inline attachments from forwarded message (images referenced by cid: URLs)
-    private var forwardedInlineAttachments: [Attachment] = []
+    /// Inline attachment infos from the forwarded message (images referenced by cid: URLs)
+    private var forwardedInlineAttachmentInfos: [GmailSendService.AttachmentInfo] = []
 
     // MARK: - Composed Services
 
@@ -61,7 +61,6 @@ final class ComposeViewModel: ObservableObject {
     let autocompleteService: ContactAutocompleteService
     let attachmentManager: ComposeAttachmentManager
 
-    private let messageFormatBuilder: MessageFormatBuilder
     private let outboundMessageCoordinator: any OutboundMessageCoordinating
     private let outboundAttachmentContextBuilder: OutboundAttachmentContextBuilder
 
@@ -125,7 +124,6 @@ final class ComposeViewModel: ObservableObject {
         self.recipientManager = resolvedDeps.makeRecipientManager()
         self.autocompleteService = resolvedDeps.makeContactAutocompleteService()
         self.attachmentManager = resolvedDeps.makeComposeAttachmentManager()
-        self.messageFormatBuilder = resolvedDeps.makeMessageFormatBuilder()
         self.outboundMessageCoordinator = resolvedDeps.makeOutboundMessageCoordinator()
         self.outboundAttachmentContextBuilder = resolvedDeps.makeOutboundAttachmentContextBuilder()
 
@@ -140,22 +138,21 @@ final class ComposeViewModel: ObservableObject {
         hasSetupMode = true
 
         switch mode {
-        case .forward(let message):
-            let result = messageFormatBuilder.formatForwardedMessage(message)
+        case .forward(let context):
             body = ""
-            subject = result.subject ?? ""
+            subject = context.initialSubject ?? ""
 
             // Store HTML content for forwarding
-            forwardedHTMLBody = result.htmlBody
-            forwardedPlainTextBody = result.body
+            forwardedHTMLBody = context.forwardedHTMLBody
+            forwardedPlainTextBody = context.forwardedPlainTextBody
 
             // Store inline attachments for forwarding (these will be included in multipart/related)
-            forwardedInlineAttachments = result.inlineAttachments
+            forwardedInlineAttachmentInfos = context.forwardedInlineAttachmentInfos
 
             // Copy regular attachments from original message
             var skipped = 0
-            for original in result.attachments {
-                if let copied = attachmentManager.copyAttachmentForForward(original) {
+            for objectURI in context.forwardedRegularAttachmentObjectURIs {
+                if let copied = attachmentManager.copyAttachmentForForward(objectURI: objectURI) {
                     attachmentManager.addAttachment(copied)
                 } else {
                     skipped += 1
@@ -272,9 +269,7 @@ final class ComposeViewModel: ObservableObject {
                     attachments: try outboundAttachmentContextBuilder.buildSendAttachments(from: attachments),
                     forwardedPlainTextBody: forwardedPlainTextBody,
                     forwardedHTMLBody: forwardedHTMLBody,
-                    forwardedInlineAttachmentInfos: try outboundAttachmentContextBuilder.buildInlineAttachmentInfos(
-                        from: forwardedInlineAttachments
-                    )
+                    forwardedInlineAttachmentInfos: forwardedInlineAttachmentInfos
                 )
             )
 

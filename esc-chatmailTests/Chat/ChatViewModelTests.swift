@@ -70,4 +70,52 @@ final class ChatViewModelTests: XCTestCase {
 
         XCTAssertNil(viewModel.messageToViewInFull)
     }
+
+    func testSetMessageToForward_buildsForwardComposeContext() {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder()
+            .withDisplayName("Test Chat")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+
+        let me = Person(context: context)
+        me.id = UUID()
+        me.email = "me@example.com"
+        me.displayName = "Me"
+
+        let other = Person(context: context)
+        other.id = UUID()
+        other.email = "friend@example.com"
+        other.displayName = "Friend"
+
+        let meParticipant = ConversationParticipant(context: context)
+        meParticipant.id = UUID()
+        meParticipant.participantRole = .normal
+        meParticipant.person = me
+        meParticipant.conversation = conversation
+
+        let otherParticipant = ConversationParticipant(context: context)
+        otherParticipant.id = UUID()
+        otherParticipant.participantRole = .normal
+        otherParticipant.person = other
+        otherParticipant.conversation = conversation
+
+        let message = MessageBuilder()
+            .withId("message-forward")
+            .withSubject("Forward Me")
+            .withSender(email: "friend@example.com", name: "Friend")
+            .withBody("Original forward body")
+            .inConversation(conversation)
+            .build(in: context)
+
+        let viewModel = ChatViewModel(conversation: conversation, deps: deps)
+
+        viewModel.setMessageToForward(message)
+
+        XCTAssertEqual(viewModel.forwardComposeContext?.id, "message-forward")
+        XCTAssertEqual(viewModel.forwardComposeContext?.initialSubject, "Fwd: Forward Me")
+        XCTAssertEqual(viewModel.forwardComposeContext?.forwardedInlineAttachmentInfos.count, 0)
+    }
 }

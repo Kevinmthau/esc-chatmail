@@ -9,7 +9,7 @@ final class ChatViewModel: ObservableObject {
 
     @Published var replyText = ""
     @Published var replyingTo: Message?
-    @Published var messageToForward: Message?
+    @Published var forwardComposeContext: ComposeForwardModeContext?
     @Published var messageToViewInFull: Message?
     @Published var resolvedDisplayName: String?
     @Published var effectiveParticipantCount: Int?
@@ -25,6 +25,7 @@ final class ChatViewModel: ObservableObject {
     private let outboundMessageCoordinator: any OutboundMessageCoordinating
     private let outboundAttachmentContextBuilder: OutboundAttachmentContextBuilder
     private let outboundReplyContextBuilder: OutboundReplyContextBuilder
+    private let composeForwardModeContextBuilder: ComposeForwardModeContextBuilder
 
     private let authSession: AuthSession
     private let participantLoader: ParticipantLoader
@@ -65,6 +66,7 @@ final class ChatViewModel: ObservableObject {
         self.outboundMessageCoordinator = dependencies.makeOutboundMessageCoordinator()
         self.outboundAttachmentContextBuilder = dependencies.makeOutboundAttachmentContextBuilder()
         self.outboundReplyContextBuilder = dependencies.makeOutboundReplyContextBuilder()
+        self.composeForwardModeContextBuilder = dependencies.makeComposeForwardModeContextBuilder()
         self.contactManager = dependencies.makeChatContactManager()
 
         // Forward child observable changes to trigger view updates
@@ -160,7 +162,11 @@ final class ChatViewModel: ObservableObject {
     }
 
     func setMessageToForward(_ message: Message) {
-        messageToForward = message
+        do {
+            forwardComposeContext = try composeForwardModeContextBuilder.build(message: message)
+        } catch {
+            Log.error("Failed to prepare forward compose context", category: .message, error: error)
+        }
     }
 
     func openFullMessage(_ message: Message) {

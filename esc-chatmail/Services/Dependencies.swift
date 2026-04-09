@@ -147,6 +147,13 @@ final class Dependencies: ObservableObject {
         )
     }
 
+    func makeComposeForwardModeContextBuilder() -> ComposeForwardModeContextBuilder {
+        ComposeForwardModeContextBuilder(
+            messageFormatBuilder: makeMessageFormatBuilder(),
+            outboundAttachmentContextBuilder: makeOutboundAttachmentContextBuilder()
+        )
+    }
+
     func makeOutboundAttachmentContextBuilder() -> OutboundAttachmentContextBuilder {
         OutboundAttachmentContextBuilder(viewContext: viewContext)
     }
