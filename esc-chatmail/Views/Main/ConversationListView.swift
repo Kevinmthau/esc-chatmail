@@ -34,7 +34,7 @@ struct ConversationListView: View {
     // MARK: - Conversation List
 
     @State private var selectedConversation: Conversation?
-    @State private var pendingConversationObjectID: NSManagedObjectID?
+    @State private var pendingConversationObjectURI: String?
 
     private var conversationList: some View {
         List {
@@ -94,8 +94,8 @@ struct ConversationListView: View {
                 mode: .newMessage,
                 presentationStyle: .iMessage,
                 deps: deps,
-                onSendConversation: { conversationObjectID in
-                    openConversationIfAvailable(objectID: conversationObjectID)
+                onSendConversation: { conversationObjectURI in
+                    openConversationIfAvailable(objectURI: conversationObjectURI)
                 }
             )
         }
@@ -286,27 +286,41 @@ struct ConversationListView: View {
     }
 
     private func handleComposerDismiss() {
-        guard let objectID = pendingConversationObjectID else { return }
-        openConversationIfAvailable(objectID: objectID)
+        guard let objectURI = pendingConversationObjectURI else { return }
+        openConversationIfAvailable(objectURI: objectURI)
     }
 
-    /// Attempts immediate navigation to a conversation by objectID.
+    /// Attempts immediate navigation to a conversation by object URI.
     /// If the conversation is not resolvable yet, defers navigation until next sheet dismissal.
-    private func openConversationIfAvailable(objectID: NSManagedObjectID) {
+    private func openConversationIfAvailable(objectURI: String) {
+        guard let objectID = resolveConversationObjectID(from: objectURI) else {
+            pendingConversationObjectURI = objectURI
+            return
+        }
+
         if let conversation = conversations.first(where: { $0.objectID == objectID }) {
             selectedConversation = conversation
-            pendingConversationObjectID = nil
+            pendingConversationObjectURI = nil
             return
         }
 
         if let conversation = try? viewContext.existingObject(with: objectID) as? Conversation,
            conversation.archivedAt == nil {
             selectedConversation = conversation
-            pendingConversationObjectID = nil
+            pendingConversationObjectURI = nil
             return
         }
 
-        pendingConversationObjectID = objectID
+        pendingConversationObjectURI = objectURI
+    }
+
+    private func resolveConversationObjectID(from objectURI: String) -> NSManagedObjectID? {
+        guard let coordinator = viewContext.persistentStoreCoordinator,
+              let url = URL(string: objectURI) else {
+            return nil
+        }
+
+        return coordinator.managedObjectID(forURIRepresentation: url)
     }
 
     private func circleButton(icon: String) -> some View {

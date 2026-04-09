@@ -54,7 +54,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.sendNewCalls.first?.body, "Hello world")
         XCTAssertNil(snapshot.sendNewCalls.first?.subject)
         XCTAssertEqual(snapshot.sendReplyCalls.count, 0)
-        XCTAssertNotNil(queuedSubmission.conversationObjectID)
+        XCTAssertNotNil(queuedSubmission.conversationObjectURI)
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
         XCTAssertEqual(mutationTracker.pendingMutationIDs, [queuedSubmission.optimisticMessageID])
         XCTAssertEqual(mutationTracker.successfulMutationIDs, [queuedSubmission.optimisticMessageID])
@@ -93,7 +93,9 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
                             date: Date(timeIntervalSince1970: 1_700_000_000),
                             body: "Original body"
                         ),
-                        existingConversation: .init(objectID: conversation.objectID)
+                        existingConversation: .init(
+                            objectURI: conversation.objectID.uriRepresentation().absoluteString
+                        )
                     ),
                     body: " Reply body ",
                     attachments: []
@@ -114,7 +116,10 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.body, "Reply body")
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.subject, "Re: Original Subject")
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.threadId, "thread-123")
-        XCTAssertEqual(snapshot.createOptimisticCalls.first?.existingConversation?.objectID, conversation.objectID)
+        XCTAssertEqual(
+            snapshot.createOptimisticCalls.first?.existingConversation?.objectURI,
+            conversation.objectID.uriRepresentation().absoluteString
+        )
         XCTAssertEqual(snapshot.sendNewCalls.count, 0)
         XCTAssertEqual(snapshot.sendReplyCalls.count, 1)
         XCTAssertEqual(snapshot.sendReplyCalls.first?.recipients, ["friend@example.com"])
@@ -133,6 +138,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         let syncPerformer = MockCoordinatorSyncPerformer()
         let coordinator = makeCoordinator(sendService: sendService, syncPerformer: syncPerformer)
         let completionExpectation = expectation(description: "forward send completes")
+        let attachmentBuilder = OutboundAttachmentContextBuilder(viewContext: coreDataStack.viewContext)
         let inlineAttachment = AttachmentBuilder()
             .withId("inline-attachment")
             .withFilename("inline.png")
@@ -150,7 +156,9 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
                     attachments: [],
                     forwardedPlainTextBody: "Forwarded plain text",
                     forwardedHTMLBody: "<html><body><p>Forwarded HTML</p></body></html>",
-                    forwardedInlineAttachments: [inlineAttachment]
+                    forwardedInlineAttachmentInfos: try attachmentBuilder.buildInlineAttachmentInfos(
+                        from: [inlineAttachment]
+                    )
                 )
             ),
             reconciliationHooks: .init(
@@ -170,8 +178,8 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.sendNewCalls.first?.subject, "Fwd: Hello")
         XCTAssertTrue(snapshot.sendNewCalls.first?.htmlBody?.contains("Intro line") == true)
         XCTAssertTrue(snapshot.sendNewCalls.first?.htmlBody?.contains("Forwarded HTML") == true)
-        XCTAssertEqual(snapshot.attachmentToInfoCalls.count, 0)
-        XCTAssertEqual(snapshot.attachmentSnapshotCalls.map(\.contentId), ["cid-inline"])
+        XCTAssertEqual(snapshot.markAttachmentsAsUploadingCalls, [])
+        XCTAssertEqual(snapshot.sendNewCalls.first?.inlineAttachmentContentIDs, ["cid-inline"])
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
     }
 
@@ -288,17 +296,13 @@ private final class MockCoordinatorSyncPerformer: IncrementalSyncPerforming {
 }
 
 private final class MockOutboundMessageSendService: OutboundMessageSendServicing {
-    struct AttachmentInfoCall {
-        let filename: String
-        let contentId: String?
-    }
-
     struct CreateOptimisticCall {
         let recipients: [String]
         let body: String
         let subject: String?
         let threadId: String?
         let existingConversation: OutboundMessageRequest.ExistingConversationContext?
+        let attachmentURIs: [String]
     }
 
     struct SendNewCall {
@@ -306,6 +310,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         let body: String
         let htmlBody: String?
         let subject: String?
+        let inlineAttachmentContentIDs: [String]
     }
 
     struct SendReplyCall {
@@ -321,8 +326,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         let createOptimisticCalls: [CreateOptimisticCall]
         let sendNewCalls: [SendNewCall]
         let sendReplyCalls: [SendReplyCall]
-        let attachmentToInfoCalls: [AttachmentInfoCall]
-        let attachmentSnapshotCalls: [AttachmentInfoCall]
+        let markAttachmentsAsUploadingCalls: [[String]]
     }
 
     private let context: NSManagedObjectContext
@@ -331,8 +335,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     private var createCalls: [CreateOptimisticCall] = []
     private var newCalls: [SendNewCall] = []
     private var replyCalls: [SendReplyCall] = []
-    private var attachmentInfoCalls: [AttachmentInfoCall] = []
-    private var attachmentSnapshotCalls: [AttachmentInfoCall] = []
+    private var markUploadingCalls: [[String]] = []
     var sendDelayNanoseconds: UInt64 = 0
     var sendNewError: Error?
     var sendReplyError: Error?
@@ -347,8 +350,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
                 createOptimisticCalls: createCalls,
                 sendNewCalls: newCalls,
                 sendReplyCalls: replyCalls,
-                attachmentToInfoCalls: attachmentInfoCalls,
-                attachmentSnapshotCalls: attachmentSnapshotCalls
+                markAttachmentsAsUploadingCalls: markUploadingCalls
             )
         }
     }
@@ -359,7 +361,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         body: String,
         subject: String?,
         threadId: String?,
-        attachments: [Attachment],
+        attachments: [OutboundMessageRequest.AttachmentContext],
         existingConversation: OutboundMessageRequest.ExistingConversationContext?
     ) async throws -> Message {
         queue.sync {
@@ -369,13 +371,14 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
                     body: body,
                     subject: subject,
                     threadId: threadId,
-                    existingConversation: existingConversation
+                    existingConversation: existingConversation,
+                    attachmentURIs: attachments.map(\.localStateAttachmentURI)
                 )
             )
         }
 
         let conversation: Conversation
-        if let existingConversationObjectID = existingConversation?.objectID,
+        if let existingConversationObjectID = existingConversation.flatMap({ resolveObjectID(for: $0) }),
            let existingConversation = try? context.existingObject(with: existingConversationObjectID) as? Conversation {
             conversation = existingConversation
         } else {
@@ -398,38 +401,11 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         return message
     }
 
-    func attachmentToInfo(_ attachment: Attachment) -> GmailSendService.AttachmentInfo {
+    @MainActor
+    func markAttachmentsAsUploading(uris: [String]) {
         queue.sync {
-            attachmentInfoCalls.append(
-                AttachmentInfoCall(
-                    filename: attachment.filenameValue,
-                    contentId: attachment.contentId
-                )
-            )
+            markUploadingCalls.append(uris)
         }
-        return GmailSendService.AttachmentInfo(
-            localURL: attachment.localURLValue,
-            filename: attachment.filenameValue,
-            mimeType: attachment.mimeTypeValue,
-            contentId: attachment.contentId
-        )
-    }
-
-    func attachmentSnapshot(_ attachment: Attachment) -> GmailSendService.AttachmentInfo {
-        queue.sync {
-            attachmentSnapshotCalls.append(
-                AttachmentInfoCall(
-                    filename: attachment.filenameValue,
-                    contentId: attachment.contentId
-                )
-            )
-        }
-        return GmailSendService.AttachmentInfo(
-            localURL: attachment.localURLValue,
-            filename: attachment.filenameValue,
-            mimeType: attachment.mimeTypeValue,
-            contentId: attachment.contentId
-        )
     }
 
     func sendReply(
@@ -482,7 +458,8 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
                     recipients: recipients,
                     body: body,
                     htmlBody: htmlBody,
-                    subject: subject
+                    subject: subject,
+                    inlineAttachmentContentIDs: inlineAttachmentInfos.compactMap(\.contentId)
                 )
             )
         }
@@ -514,11 +491,22 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     }
 
     @MainActor
-    func markAttachmentsAsUploaded(objectIDs: [NSManagedObjectID]) {}
+    func markAttachmentsAsUploaded(objectURIs: [String]) {}
 
     @MainActor
-    func handleFailedOptimisticMessage(byID messageID: String, fallbackAttachmentObjectIDs: [NSManagedObjectID]) {
+    func handleFailedOptimisticMessage(byID messageID: String, fallbackAttachmentObjectURIs: [String]) {
         optimisticMessages[messageID] = nil
+    }
+
+    private func resolveObjectID(
+        for existingConversation: OutboundMessageRequest.ExistingConversationContext
+    ) -> NSManagedObjectID? {
+        guard let coordinator = context.persistentStoreCoordinator,
+              let url = URL(string: existingConversation.objectURI) else {
+            return nil
+        }
+
+        return coordinator.managedObjectID(forURIRepresentation: url)
     }
 }
 

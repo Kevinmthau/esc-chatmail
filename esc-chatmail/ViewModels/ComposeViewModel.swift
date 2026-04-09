@@ -14,15 +14,18 @@ final class ComposeViewModel: ObservableObject {
         case newMessage
         case newEmail // includes subject field
         case forward(Message)
-        case reply(Conversation, Message?)
+        case reply(ComposeReplyModeContext)
 
         static func == (lhs: Mode, rhs: Mode) -> Bool {
             switch (lhs, rhs) {
             case (.newMessage, .newMessage): return true
             case (.newEmail, .newEmail): return true
             case (.forward(let m1), .forward(let m2)): return m1.objectID == m2.objectID
-            case (.reply(let c1, let m1), .reply(let c2, let m2)):
-                return c1.objectID == c2.objectID && m1?.objectID == m2?.objectID
+            case (.reply(let c1), .reply(let c2)):
+                return c1.initialRecipients == c2.initialRecipients &&
+                    c1.outboundRequestContext.threadId == c2.outboundRequestContext.threadId &&
+                    c1.outboundRequestContext.inReplyTo == c2.outboundRequestContext.inReplyTo &&
+                    c1.outboundRequestContext.existingConversation?.objectURI == c2.outboundRequestContext.existingConversation?.objectURI
             default: return false
             }
         }
@@ -36,7 +39,7 @@ final class ComposeViewModel: ObservableObject {
     @Published var error: Error?
     @Published var showError = false
     @Published var skippedForwardAttachmentCount = 0
-    private(set) var lastSentConversationObjectID: NSManagedObjectID?
+    private(set) var lastSentConversationObjectURI: String?
     private var hasSetupMode = false
 
     private var cancellables = Set<AnyCancellable>()
@@ -60,7 +63,7 @@ final class ComposeViewModel: ObservableObject {
 
     private let messageFormatBuilder: MessageFormatBuilder
     private let outboundMessageCoordinator: any OutboundMessageCoordinating
-    private let outboundReplyContextBuilder: OutboundReplyContextBuilder
+    private let outboundAttachmentContextBuilder: OutboundAttachmentContextBuilder
 
     // MARK: - Dependencies
 
@@ -124,7 +127,7 @@ final class ComposeViewModel: ObservableObject {
         self.attachmentManager = resolvedDeps.makeComposeAttachmentManager()
         self.messageFormatBuilder = resolvedDeps.makeMessageFormatBuilder()
         self.outboundMessageCoordinator = resolvedDeps.makeOutboundMessageCoordinator()
-        self.outboundReplyContextBuilder = resolvedDeps.makeOutboundReplyContextBuilder()
+        self.outboundAttachmentContextBuilder = resolvedDeps.makeOutboundAttachmentContextBuilder()
 
         // Forward child observable changes to trigger view updates
         forwardChanges(from: autocompleteService, storing: &cancellables)
@@ -159,8 +162,8 @@ final class ComposeViewModel: ObservableObject {
                 }
             }
             skippedForwardAttachmentCount = skipped
-        case .reply(let conversation, _):
-            recipientManager.setupReplyRecipients(from: conversation)
+        case .reply(let context):
+            recipientManager.setupRecipients(context.initialRecipients)
         case .newMessage, .newEmail:
             break
         }
@@ -220,16 +223,16 @@ final class ComposeViewModel: ObservableObject {
     // MARK: - Send Message
 
     func send() async -> Bool {
-        lastSentConversationObjectID = nil
+        lastSentConversationObjectURI = nil
         guard canSend else { return false }
 
         isSending = true
         error = nil
 
-        let recipientEmails = recipients.map { $0.email }
-        let request = makeOutboundSendRequest(recipientEmails: recipientEmails)
         let result: OutboundMessageResult?
         do {
+            let recipientEmails = recipients.map { $0.email }
+            let request = try makeOutboundSendRequest(recipientEmails: recipientEmails)
             result = try await outboundMessageCoordinator.send(request)
         } catch {
             Log.error("Failed to create optimistic message", category: .message, error: error)
@@ -243,12 +246,12 @@ final class ComposeViewModel: ObservableObject {
             return false
         }
 
-        lastSentConversationObjectID = result.conversationObjectID
+        lastSentConversationObjectURI = result.conversationObjectURI
         isSending = false
         return true
     }
 
-    private func makeOutboundSendRequest(recipientEmails: [String]) -> OutboundMessageRequest {
+    private func makeOutboundSendRequest(recipientEmails: [String]) throws -> OutboundMessageRequest {
         switch mode {
         case .newMessage, .newEmail:
             return .compose(
@@ -256,7 +259,7 @@ final class ComposeViewModel: ObservableObject {
                     recipientEmails: recipientEmails,
                     subject: subject,
                     body: body,
-                    attachments: attachments
+                    attachments: try outboundAttachmentContextBuilder.buildSendAttachments(from: attachments)
                 )
             )
 
@@ -266,22 +269,21 @@ final class ComposeViewModel: ObservableObject {
                     recipientEmails: recipientEmails,
                     subject: subject,
                     body: body,
-                    attachments: attachments,
+                    attachments: try outboundAttachmentContextBuilder.buildSendAttachments(from: attachments),
                     forwardedPlainTextBody: forwardedPlainTextBody,
                     forwardedHTMLBody: forwardedHTMLBody,
-                    forwardedInlineAttachments: forwardedInlineAttachments
+                    forwardedInlineAttachmentInfos: try outboundAttachmentContextBuilder.buildInlineAttachmentInfos(
+                        from: forwardedInlineAttachments
+                    )
                 )
             )
 
-        case .reply(let conversation, let replyingTo):
+        case .reply(let context):
             return .reply(
                 .init(
-                    context: outboundReplyContextBuilder.build(
-                        conversation: conversation,
-                        replyingTo: replyingTo
-                    ),
+                    context: context.outboundRequestContext,
                     body: body,
-                    attachments: attachments
+                    attachments: try outboundAttachmentContextBuilder.buildSendAttachments(from: attachments)
                 )
             )
         }

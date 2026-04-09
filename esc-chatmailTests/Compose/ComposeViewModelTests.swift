@@ -84,7 +84,11 @@ final class ComposeViewModelTests: XCTestCase {
         otherParticipant.person = other
         otherParticipant.conversation = conversation
 
-        let viewModel = ComposeViewModel(mode: .reply(conversation, nil), deps: deps)
+        let replyModeContext = deps.makeComposeReplyModeContextBuilder().build(
+            conversation: conversation,
+            replyingTo: nil
+        )
+        let viewModel = ComposeViewModel(mode: .reply(replyModeContext), deps: deps)
 
         viewModel.setupForMode()
         viewModel.setupForMode()

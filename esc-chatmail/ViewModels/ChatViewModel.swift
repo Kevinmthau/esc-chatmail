@@ -23,6 +23,7 @@ final class ChatViewModel: ObservableObject {
     let conversation: Conversation
     let messageActions: MessageActions
     private let outboundMessageCoordinator: any OutboundMessageCoordinating
+    private let outboundAttachmentContextBuilder: OutboundAttachmentContextBuilder
     private let outboundReplyContextBuilder: OutboundReplyContextBuilder
 
     private let authSession: AuthSession
@@ -62,6 +63,7 @@ final class ChatViewModel: ObservableObject {
         self.contactsResolver = dependencies.contactsResolver
         self.messageActions = dependencies.makeMessageActions()
         self.outboundMessageCoordinator = dependencies.makeOutboundMessageCoordinator()
+        self.outboundAttachmentContextBuilder = dependencies.makeOutboundAttachmentContextBuilder()
         self.outboundReplyContextBuilder = dependencies.makeOutboundReplyContextBuilder()
         self.contactManager = dependencies.makeChatContactManager()
 
@@ -178,6 +180,9 @@ final class ChatViewModel: ObservableObject {
 
         let result: OutboundMessageResult?
         do {
+            let attachmentContexts = try outboundAttachmentContextBuilder.buildSendAttachments(
+                from: attachments
+            )
             result = try await outboundMessageCoordinator.send(
                 .reply(
                     .init(
@@ -186,7 +191,7 @@ final class ChatViewModel: ObservableObject {
                             replyingTo: replyingTo
                         ),
                         body: trimmedReplyText,
-                        attachments: attachments
+                        attachments: attachmentContexts
                     )
                 )
             )

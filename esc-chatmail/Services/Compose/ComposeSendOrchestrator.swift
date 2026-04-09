@@ -9,7 +9,7 @@ protocol IncrementalSyncPerforming: AnyObject {
 extension SyncEngine: IncrementalSyncPerforming {}
 
 protocol ComposeSendServicing: AnyObject {
-    @MainActor func markAttachmentsAsUploaded(objectIDs: [NSManagedObjectID])
+    @MainActor func markAttachmentsAsUploaded(objectURIs: [String])
     func sendReply(
         to recipients: [String],
         body: String,
@@ -32,7 +32,7 @@ protocol ComposeSendServicing: AnyObject {
     @MainActor func updateOptimisticMessage(_ message: Message, with result: GmailSendService.SendResult)
     @MainActor func handleFailedOptimisticMessage(
         byID messageID: String,
-        fallbackAttachmentObjectIDs: [NSManagedObjectID]
+        fallbackAttachmentObjectURIs: [String]
     )
 }
 
@@ -82,13 +82,13 @@ struct ComposeSendOrchestrator {
     /// Creates an optimistic message and triggers background send
     /// - Parameters:
     ///   - input: The send input data
-    ///   - attachmentObjectIDs: Attachment object IDs for post-send state updates
+    ///   - attachmentObjectURIs: Attachment object URIs for post-send state updates
     ///   - optimisticMessageID: ID of the pre-created optimistic message
     @MainActor
     @discardableResult
     func executeInBackground(
         input: SendInput,
-        attachmentObjectIDs: [NSManagedObjectID],
+        attachmentObjectURIs: [String],
         optimisticMessageID: String,
         reconciliationHooks: OutboundMessageReconciliationHooks = .none
     ) -> Task<Void, Never> {
@@ -135,7 +135,7 @@ struct ComposeSendOrchestrator {
                     if let message = sendService.fetchMessageSync(byID: optimisticMessageID) {
                         sendService.updateOptimisticMessage(message, with: result)
                     }
-                    sendService.markAttachmentsAsUploaded(objectIDs: attachmentObjectIDs)
+                    sendService.markAttachmentsAsUploaded(objectURIs: attachmentObjectURIs)
                     reconciliationHooks.onSuccess?(
                         .init(
                             optimisticMessageID: optimisticMessageID,
@@ -165,7 +165,7 @@ struct ComposeSendOrchestrator {
                 await MainActor.run {
                     sendService.handleFailedOptimisticMessage(
                         byID: optimisticMessageID,
-                        fallbackAttachmentObjectIDs: attachmentObjectIDs
+                        fallbackAttachmentObjectURIs: attachmentObjectURIs
                     )
                     reconciliationHooks.onFailure?(
                         .init(

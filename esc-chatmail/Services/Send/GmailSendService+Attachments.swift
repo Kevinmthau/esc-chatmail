@@ -72,10 +72,18 @@ extension GmailSendService {
 
     /// Marks attachments as successfully uploaded.
     @MainActor
-    func markAttachmentsAsUploaded(objectIDs: [NSManagedObjectID]) {
-        let attachments = objectIDs.compactMap { objectID in
-            try? viewContext.existingObject(with: objectID) as? Attachment
+    func markAttachmentsAsUploading(uris: [String]) {
+        let attachments = resolveAttachmentsForStateUpdate(from: uris)
+        guard !attachments.isEmpty else { return }
+
+        for attachment in attachments {
+            attachment.state = Attachment.State.uploading
         }
+    }
+
+    @MainActor
+    func markAttachmentsAsUploaded(objectURIs: [String]) {
+        let attachments = resolveAttachmentsForStateUpdate(from: objectURIs)
         guard !attachments.isEmpty else { return }
 
         markAttachmentsAsUploaded(attachments)
@@ -107,6 +115,22 @@ extension GmailSendService {
             }
         } catch {
             Log.error("Failed to save attachment state", category: .attachment, error: error)
+        }
+    }
+
+    @MainActor
+    private func resolveAttachmentsForStateUpdate(from uris: [String]) -> [Attachment] {
+        guard let coordinator = viewContext.persistentStoreCoordinator else {
+            return []
+        }
+
+        return uris.compactMap { uri in
+            guard let url = URL(string: uri),
+                  let objectID = coordinator.managedObjectID(forURIRepresentation: url) else {
+                return nil
+            }
+
+            return try? viewContext.existingObject(with: objectID) as? Attachment
         }
     }
 }

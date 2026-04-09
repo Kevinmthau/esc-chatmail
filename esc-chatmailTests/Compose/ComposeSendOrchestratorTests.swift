@@ -11,7 +11,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
         let task = orchestrator.executeInBackground(
             input: makeInput(),
-            attachmentObjectIDs: [],
+            attachmentObjectURIs: [],
             optimisticMessageID: "optimistic-1"
         )
         await task.value
@@ -41,7 +41,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
         let task = orchestrator.executeInBackground(
             input: makeInput(replyData: replyData),
-            attachmentObjectIDs: [],
+            attachmentObjectURIs: [],
             optimisticMessageID: "optimistic-2"
         )
         await task.value
@@ -69,7 +69,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
         let task = orchestrator.executeInBackground(
             input: makeInput(replyData: replyData),
-            attachmentObjectIDs: [],
+            attachmentObjectURIs: [],
             optimisticMessageID: "optimistic-2b"
         )
         await task.value
@@ -89,7 +89,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
         let task = orchestrator.executeInBackground(
             input: makeInput(),
-            attachmentObjectIDs: [],
+            attachmentObjectURIs: [],
             optimisticMessageID: "optimistic-3"
         )
 
@@ -110,7 +110,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
         let task = orchestrator.executeInBackground(
             input: makeInput(),
-            attachmentObjectIDs: [],
+            attachmentObjectURIs: [],
             optimisticMessageID: "optimistic-failure"
         )
         await task.value
@@ -183,7 +183,7 @@ private final class MockComposeSendService: ComposeSendServicing {
     }
 
     @MainActor
-    func markAttachmentsAsUploaded(objectIDs: [NSManagedObjectID]) {
+    func markAttachmentsAsUploaded(objectURIs: [String]) {
         queue.sync { _markUploadedCalls += 1 }
     }
 
@@ -238,7 +238,7 @@ private final class MockComposeSendService: ComposeSendServicing {
     }
 
     @MainActor
-    func handleFailedOptimisticMessage(byID messageID: String, fallbackAttachmentObjectIDs: [NSManagedObjectID]) {
+    func handleFailedOptimisticMessage(byID messageID: String, fallbackAttachmentObjectURIs: [String]) {
         queue.sync { _handleFailedCalls += 1 }
     }
 }

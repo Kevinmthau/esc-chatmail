@@ -30,7 +30,9 @@ struct OutboundReplyContextBuilder {
             inReplyTo: metadata.inReplyTo,
             references: metadata.references,
             originalMessage: metadata.originalMessage,
-            existingConversation: .init(objectID: conversation.objectID)
+            existingConversation: .init(
+                objectURI: conversation.objectID.uriRepresentation().absoluteString
+            )
         )
     }
 

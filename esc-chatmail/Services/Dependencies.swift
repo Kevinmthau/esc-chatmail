@@ -140,6 +140,17 @@ final class Dependencies: ObservableObject {
         OutboundReplyContextBuilder(replyMetadataBuilder: makeReplyMetadataBuilder())
     }
 
+    func makeComposeReplyModeContextBuilder() -> ComposeReplyModeContextBuilder {
+        ComposeReplyModeContextBuilder(
+            authSession: authSession,
+            outboundReplyContextBuilder: makeOutboundReplyContextBuilder()
+        )
+    }
+
+    func makeOutboundAttachmentContextBuilder() -> OutboundAttachmentContextBuilder {
+        OutboundAttachmentContextBuilder(viewContext: viewContext)
+    }
+
     /// Creates a new ContactsService instance
     func makeContactsService() -> ContactsService {
         ContactsService()
@@ -165,7 +176,7 @@ final class Dependencies: ObservableObject {
     }
 
     func makeRecipientManager() -> RecipientManager {
-        RecipientManager(authSession: authSession)
+        RecipientManager()
     }
 
     func makeContactAutocompleteService() -> ContactAutocompleteService {

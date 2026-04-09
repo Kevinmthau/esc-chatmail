@@ -7,7 +7,12 @@ enum OutboundMessageRequest {
     case reply(Reply)
 
     struct ExistingConversationContext {
-        let objectID: NSManagedObjectID
+        let objectURI: String
+    }
+
+    struct AttachmentContext {
+        let info: GmailSendService.AttachmentInfo
+        let localStateAttachmentURI: String
     }
 
     struct ReplyContext {
@@ -24,29 +29,29 @@ enum OutboundMessageRequest {
         let recipientEmails: [String]
         let subject: String?
         let body: String
-        let attachments: [Attachment]
+        let attachments: [AttachmentContext]
     }
 
     struct Forward {
         let recipientEmails: [String]
         let subject: String?
         let body: String
-        let attachments: [Attachment]
+        let attachments: [AttachmentContext]
         let forwardedPlainTextBody: String
         let forwardedHTMLBody: String?
-        let forwardedInlineAttachments: [Attachment]
+        let forwardedInlineAttachmentInfos: [GmailSendService.AttachmentInfo]
     }
 
     struct Reply {
         let context: ReplyContext
         let body: String
-        let attachments: [Attachment]
+        let attachments: [AttachmentContext]
     }
 }
 
 struct OutboundMessageResult {
     let optimisticMessageID: String
-    let conversationObjectID: NSManagedObjectID?
+    let conversationObjectURI: String?
 }
 
 struct OutboundMessageReconciliationHooks: Sendable {
@@ -88,12 +93,14 @@ protocol OutboundMessageSendServicing: ComposeSendServicing {
         body: String,
         subject: String?,
         threadId: String?,
-        attachments: [Attachment],
+        attachments: [OutboundMessageRequest.AttachmentContext],
         existingConversation: OutboundMessageRequest.ExistingConversationContext?
     ) async throws -> Message
 
-    func attachmentToInfo(_ attachment: Attachment) -> GmailSendService.AttachmentInfo
-    func attachmentSnapshot(_ attachment: Attachment) -> GmailSendService.AttachmentInfo
+    @MainActor
+    func markAttachmentsAsUploading(
+        uris: [String]
+    )
 }
 
 extension GmailSendService: OutboundMessageSendServicing {}
@@ -106,8 +113,8 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         let subject: String?
         let htmlBody: String?
         let threadId: String?
-        let attachments: [Attachment]
-        let inlineAttachments: [Attachment]
+        let attachments: [OutboundMessageRequest.AttachmentContext]
+        let inlineAttachmentInfos: [GmailSendService.AttachmentInfo]
         let existingConversation: OutboundMessageRequest.ExistingConversationContext?
         let replyData: ComposeSendOrchestrator.SendInput.ReplyData?
     }
@@ -155,14 +162,19 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 conversationObjectID: optimisticMessage.conversation?.objectID
             )
         )
+        if !preparedSend.attachments.isEmpty {
+            sendService.markAttachmentsAsUploading(
+                uris: preparedSend.attachments.map(\.localStateAttachmentURI)
+            )
+        }
 
         let sendInput = ComposeSendOrchestrator.SendInput(
             recipientEmails: preparedSend.recipientEmails,
             body: preparedSend.body,
             htmlBody: preparedSend.htmlBody,
             subject: preparedSend.subject,
-            attachmentInfos: preparedSend.attachments.map { sendService.attachmentToInfo($0) },
-            inlineAttachmentInfos: preparedSend.inlineAttachments.map { sendService.attachmentSnapshot($0) },
+            attachmentInfos: preparedSend.attachments.map(\.info),
+            inlineAttachmentInfos: preparedSend.inlineAttachmentInfos,
             replyData: preparedSend.replyData
         )
 
@@ -172,7 +184,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             syncPerformer: syncPerformer
         ).executeInBackground(
             input: sendInput,
-            attachmentObjectIDs: preparedSend.attachments.map(\.objectID),
+            attachmentObjectURIs: preparedSend.attachments.map(\.localStateAttachmentURI),
             optimisticMessageID: optimisticMessageID,
             reconciliationHooks: effectiveHooks
         )
@@ -187,7 +199,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
 
         return OutboundMessageResult(
             optimisticMessageID: optimisticMessageID,
-            conversationObjectID: optimisticMessage.conversation?.objectID
+            conversationObjectURI: optimisticMessage.conversation?.objectID.uriRepresentation().absoluteString
         )
     }
 
@@ -201,7 +213,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 htmlBody: nil,
                 threadId: nil,
                 attachments: compose.attachments,
-                inlineAttachments: [],
+                inlineAttachmentInfos: [],
                 existingConversation: nil,
                 replyData: nil
             )
@@ -234,7 +246,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 htmlBody: htmlBody,
                 threadId: nil,
                 attachments: forward.attachments,
-                inlineAttachments: forward.forwardedInlineAttachments,
+                inlineAttachmentInfos: forward.forwardedInlineAttachmentInfos,
                 existingConversation: nil,
                 replyData: nil
             )
@@ -249,7 +261,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 htmlBody: nil,
                 threadId: reply.context.threadId,
                 attachments: reply.attachments,
-                inlineAttachments: [],
+                inlineAttachmentInfos: [],
                 existingConversation: reply.context.existingConversation,
                 replyData: .init(
                     recipients: reply.context.recipientEmails,

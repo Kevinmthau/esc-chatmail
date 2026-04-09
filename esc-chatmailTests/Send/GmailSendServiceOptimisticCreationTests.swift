@@ -21,6 +21,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
 
     func testCreateOptimisticMessage_newConversationLeavesChangesPendingWithStableIDs() async throws {
         let context = coreDataStack.viewContext
+        let attachmentBuilder = OutboundAttachmentContextBuilder(viewContext: context)
         let attachment = AttachmentBuilder()
             .withId("local_attachment_1")
             .asImage()
@@ -33,7 +34,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
             to: ["friend@example.com"],
             body: "hello",
             subject: "Subject",
-            attachments: [attachment]
+            attachments: try attachmentBuilder.buildSendAttachments(from: [attachment])
         )
 
         XCTAssertTrue(context.hasChanges, "Optimistic creation should defer persistence so send navigation is not blocked.")

@@ -7,12 +7,6 @@ final class RecipientManager: ObservableObject {
     @Published var recipients: [Recipient] = []
     @Published var recipientInput = ""
 
-    private let authSession: AuthSession
-
-    init(authSession: AuthSession) {
-        self.authSession = authSession
-    }
-
     func addRecipient(_ recipient: Recipient) {
         guard !recipients.contains(where: { $0.email == recipient.email }) else { return }
         recipients.append(recipient)
@@ -39,20 +33,9 @@ final class RecipientManager: ObservableObject {
         return true
     }
 
-    func setupReplyRecipients(from conversation: Conversation) {
-        let currentUserEmail = authSession.userEmail ?? ""
-        let participantEmails = Array(conversation.participants ?? [])
-            .compactMap { $0.person?.email }
-            .filter { EmailNormalizer.normalize($0) != EmailNormalizer.normalize(currentUserEmail) }
-
-        for email in participantEmails {
-            // Try to get display name from person
-            if let participant = conversation.participants?.first(where: { $0.person?.email == email }),
-               let person = participant.person {
-                addRecipient(Recipient(from: person))
-            } else {
-                addRecipient(Recipient(email: email))
-            }
+    func setupRecipients(_ recipients: [Recipient]) {
+        for recipient in recipients {
+            addRecipient(recipient)
         }
     }
 

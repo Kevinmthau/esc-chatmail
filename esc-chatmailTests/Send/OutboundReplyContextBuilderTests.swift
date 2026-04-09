@@ -73,7 +73,10 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertEqual(replyContext.originalMessage?.senderName, "Friend")
         XCTAssertEqual(replyContext.originalMessage?.senderEmail, "friend@example.com")
         XCTAssertEqual(replyContext.originalMessage?.body, "Original body")
-        XCTAssertEqual(replyContext.existingConversation?.objectID, conversation.objectID)
+        XCTAssertEqual(
+            replyContext.existingConversation?.objectURI,
+            conversation.objectID.uriRepresentation().absoluteString
+        )
     }
 
     private func makeTestAuthSession(userEmail: String? = nil) -> AuthSession {
