@@ -59,15 +59,13 @@ final class ComposeViewModel: ObservableObject {
     let autocompleteService: ContactAutocompleteService
     let attachmentManager: ComposeAttachmentManager
 
-    private let replyMetadataBuilder: ReplyMetadataBuilder
     private let messageFormatBuilder: MessageFormatBuilder
+    private let outboundMessageCoordinator: any OutboundMessageCoordinating
 
     // MARK: - Dependencies
 
     let mode: Mode
     private let dependencies: Dependencies
-    private var syncEngine: SyncEngine { dependencies.syncEngine }
-    private lazy var sendService: GmailSendService = dependencies.makeSendService()
 
     // MARK: - Computed Properties
 
@@ -124,8 +122,8 @@ final class ComposeViewModel: ObservableObject {
         self.recipientManager = resolvedDeps.makeRecipientManager()
         self.autocompleteService = resolvedDeps.makeContactAutocompleteService()
         self.attachmentManager = resolvedDeps.makeComposeAttachmentManager()
-        self.replyMetadataBuilder = resolvedDeps.makeReplyMetadataBuilder()
         self.messageFormatBuilder = resolvedDeps.makeMessageFormatBuilder()
+        self.outboundMessageCoordinator = resolvedDeps.makeOutboundMessageCoordinator()
 
         // Forward child observable changes to trigger view updates
         forwardChanges(from: autocompleteService, storing: &cancellables)
@@ -228,38 +226,10 @@ final class ComposeViewModel: ObservableObject {
         error = nil
 
         let recipientEmails = recipients.map { $0.email }
-        let userMessageBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        let messageSubject = subject.isEmpty ? nil : subject
-        let outboundBody: String
-
-        if case .forward = mode {
-            if userMessageBody.isEmpty {
-                outboundBody = forwardedPlainTextBody
-            } else if forwardedPlainTextBody.isEmpty {
-                outboundBody = userMessageBody
-            } else {
-                outboundBody = "\(userMessageBody)\n\n\(forwardedPlainTextBody)"
-            }
-        } else {
-            outboundBody = userMessageBody
-        }
-
-        // Create optimistic message
-        let optimisticMessage: Message
-        let targetConversation: Conversation?
-        if case .reply(let conversation, _) = mode {
-            targetConversation = conversation
-        } else {
-            targetConversation = nil
-        }
+        let request = makeOutboundSendRequest(recipientEmails: recipientEmails)
+        let submission: OutboundMessageCoordinator.Submission?
         do {
-            optimisticMessage = try await sendService.createOptimisticMessage(
-                to: recipientEmails,
-                body: outboundBody,
-                subject: messageSubject,
-                attachments: attachments,
-                existingConversation: targetConversation
-            )
+            submission = try await outboundMessageCoordinator.send(request)
         } catch {
             Log.error("Failed to create optimistic message", category: .message, error: error)
             self.error = GmailSendService.SendError.optimisticCreationFailed
@@ -267,71 +237,58 @@ final class ComposeViewModel: ObservableObject {
             isSending = false
             return false
         }
-        let optimisticMessageID = optimisticMessage.id
-        lastSentConversationObjectID = optimisticMessage.conversation?.objectID
-
-        // Prepare attachment infos for background send
-        let attachmentInfos = attachments.map { sendService.attachmentToInfo($0) }
-
-        // Prepare inline attachment infos for forwarded messages
-        let inlineAttachmentInfos = forwardedInlineAttachments.map { sendService.attachmentToInfo($0) }
-
-        // Build reply data on main actor before background task (Core Data objects aren't Sendable)
-        let orchestratorReplyData: ComposeSendOrchestrator.SendInput.ReplyData?
-        switch mode {
-        case .reply(let conversation, let replyingTo):
-            let replyData = replyMetadataBuilder.buildReplyData(
-                conversation: conversation,
-                replyingTo: replyingTo,
-                body: userMessageBody
-            )
-            orchestratorReplyData = ComposeSendOrchestrator.SendInput.ReplyData(replyData)
-        default:
-            orchestratorReplyData = nil
+        guard let submission else {
+            isSending = false
+            return false
         }
 
-        // Build final HTML body for forwards (merge user content with forwarded HTML)
-        let finalHTMLBody: String?
-        if case .forward = mode {
-            if let existingHTML = forwardedHTMLBody {
-                // Merge user's new content into the existing forwarded HTML
-                finalHTMLBody = messageFormatBuilder.buildFinalHTMLForForward(
-                    userContent: userMessageBody,
-                    forwardedHTML: existingHTML
-                )
-            } else {
-                // No HTML exists - generate from plain text to preserve formatting and links
-                finalHTMLBody = messageFormatBuilder.generateHTMLFromPlainText(outboundBody)
-            }
-        } else {
-            finalHTMLBody = forwardedHTMLBody
-        }
-
-        let input = ComposeSendOrchestrator.SendInput(
-            recipientEmails: recipientEmails,
-            body: outboundBody,
-            htmlBody: finalHTMLBody,
-            subject: messageSubject,
-            attachmentInfos: attachmentInfos,
-            inlineAttachmentInfos: inlineAttachmentInfos,
-            replyData: orchestratorReplyData
-        )
-
-        let orchestrator = ComposeSendOrchestrator(sendService: sendService, syncPerformer: syncEngine)
-        let backgroundTask = orchestrator.executeInBackground(
-            input: input,
-            attachments: Array(attachments),
-            optimisticMessageID: optimisticMessageID
-        )
-        backgroundSendTasks[optimisticMessageID] = backgroundTask
+        lastSentConversationObjectID = submission.conversationObjectID
+        backgroundSendTasks[submission.optimisticMessageID] = submission.backgroundTask
         Task { [weak self] in
-            _ = await backgroundTask.result
+            _ = await submission.backgroundTask.result
             await MainActor.run {
-                _ = self?.backgroundSendTasks.removeValue(forKey: optimisticMessageID)
+                _ = self?.backgroundSendTasks.removeValue(forKey: submission.optimisticMessageID)
             }
         }
 
         isSending = false
         return true
+    }
+
+    private func makeOutboundSendRequest(recipientEmails: [String]) -> OutboundMessageCoordinator.Request {
+        switch mode {
+        case .newMessage, .newEmail:
+            return .compose(
+                .init(
+                    recipientEmails: recipientEmails,
+                    subject: subject,
+                    body: body,
+                    attachments: attachments
+                )
+            )
+
+        case .forward:
+            return .forward(
+                .init(
+                    recipientEmails: recipientEmails,
+                    subject: subject,
+                    body: body,
+                    attachments: attachments,
+                    forwardedPlainTextBody: forwardedPlainTextBody,
+                    forwardedHTMLBody: forwardedHTMLBody,
+                    forwardedInlineAttachments: forwardedInlineAttachments
+                )
+            )
+
+        case .reply(let conversation, let replyingTo):
+            return .reply(
+                .init(
+                    conversation: conversation,
+                    replyingTo: replyingTo,
+                    body: body,
+                    attachments: attachments
+                )
+            )
+        }
     }
 }

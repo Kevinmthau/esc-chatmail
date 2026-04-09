@@ -89,6 +89,7 @@ final class Dependencies: ObservableObject {
     let foregroundSyncCoordinator: ForegroundSyncCoordinator
     let attachmentDownloader: AttachmentDownloader
     let backgroundSyncManager: BackgroundSyncManager
+    private let outboundMessageCoordinatorOverride: (any OutboundMessageCoordinating)?
 
     // MARK: - Convenience Accessors
 
@@ -118,6 +119,19 @@ final class Dependencies: ObservableObject {
             viewContext: viewContext,
             apiClient: gmailAPIClient,
             authSession: authSession
+        )
+    }
+
+    func makeOutboundMessageCoordinator() -> any OutboundMessageCoordinating {
+        if let outboundMessageCoordinatorOverride {
+            return outboundMessageCoordinatorOverride
+        }
+
+        return OutboundMessageCoordinator(
+            sendService: makeSendService(),
+            syncPerformer: syncEngine,
+            replyMetadataBuilder: makeReplyMetadataBuilder(),
+            messageFormatBuilder: makeMessageFormatBuilder()
         )
     }
 
@@ -217,7 +231,8 @@ final class Dependencies: ObservableObject {
         attachmentDownloader: AttachmentDownloader? = nil,
         backgroundSyncManager: BackgroundSyncManager = BackgroundSyncManager.shared,
         participantLoader: ParticipantLoader? = nil,
-        conversationManager: ConversationManager? = nil
+        conversationManager: ConversationManager? = nil,
+        outboundMessageCoordinator: (any OutboundMessageCoordinating)? = nil
     ) {
         let resolvedAuthSession = authSession ?? AuthSession.shared
         let resolvedTokenManager = tokenManager ?? TokenManager.shared
@@ -246,6 +261,7 @@ final class Dependencies: ObservableObject {
         self.foregroundSyncCoordinator = resolvedForegroundSyncCoordinator
         self.attachmentDownloader = resolvedAttachmentDownloader
         self.backgroundSyncManager = backgroundSyncManager
+        self.outboundMessageCoordinatorOverride = outboundMessageCoordinator
         self.participantLoader = participantLoader ?? ParticipantLoader(
             personCache: personCache,
             photoResolver: profilePhotoResolver

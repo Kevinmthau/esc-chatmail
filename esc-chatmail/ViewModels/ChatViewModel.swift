@@ -22,10 +22,8 @@ final class ChatViewModel: ObservableObject {
 
     let conversation: Conversation
     let messageActions: MessageActions
-    let sendService: GmailSendService
+    private let outboundMessageCoordinator: any OutboundMessageCoordinating
 
-    private let coreDataStack: CoreDataStack
-    private let syncEngine: SyncEngine
     private let authSession: AuthSession
     private let participantLoader: ParticipantLoader
     private let conversationObjectID: NSManagedObjectID
@@ -33,7 +31,6 @@ final class ChatViewModel: ObservableObject {
     private let conversationDisplayNameHint: String?
     private let processedTextCache: ProcessedTextCache
     private let contactsResolver: any ContactsResolving
-    private let replyMetadataBuilder: ReplyMetadataBuilder
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Task Management
@@ -55,8 +52,6 @@ final class ChatViewModel: ObservableObject {
     init(conversation: Conversation, deps: Dependencies? = nil) {
         let dependencies = deps ?? .shared
         self.conversation = conversation
-        self.coreDataStack = dependencies.coreDataStack
-        self.syncEngine = dependencies.syncEngine
         self.authSession = dependencies.authSession
         self.participantLoader = dependencies.participantLoader
         self.conversationObjectID = conversation.objectID
@@ -64,9 +59,8 @@ final class ChatViewModel: ObservableObject {
         self.conversationDisplayNameHint = conversation.displayName
         self.processedTextCache = dependencies.processedTextCache
         self.contactsResolver = dependencies.contactsResolver
-        self.replyMetadataBuilder = dependencies.makeReplyMetadataBuilder()
         self.messageActions = dependencies.makeMessageActions()
-        self.sendService = dependencies.makeSendService()
+        self.outboundMessageCoordinator = dependencies.makeOutboundMessageCoordinator()
         self.contactManager = dependencies.makeChatContactManager()
 
         // Forward child observable changes to trigger view updates
@@ -180,59 +174,32 @@ final class ChatViewModel: ObservableObject {
         let trimmedReplyText = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedReplyText.isEmpty || !attachments.isEmpty else { return }
 
-        let replyData = replyMetadataBuilder.buildReplyData(
-            conversation: conversation,
-            replyingTo: replyingTo,
-            body: trimmedReplyText
-        )
-
-        guard !replyData.recipients.isEmpty else { return }
-
-        let optimisticMessage: Message
+        let submission: OutboundMessageCoordinator.Submission?
         do {
-            optimisticMessage = try await sendService.createOptimisticMessage(
-                to: replyData.recipients,
-                body: trimmedReplyText,
-                subject: replyData.subject,
-                threadId: replyData.threadId,
-                attachments: attachments,
-                existingConversation: conversation
+            submission = try await outboundMessageCoordinator.send(
+                .reply(
+                    .init(
+                        conversation: conversation,
+                        replyingTo: replyingTo,
+                        body: trimmedReplyText,
+                        attachments: attachments
+                    )
+                )
             )
         } catch {
             Log.error("Failed to create optimistic message for reply", category: .message, error: error)
             return
         }
-        let optimisticMessageID = optimisticMessage.id
-        let sendService = self.sendService
-        let attachmentInfos = attachments.map { sendService.attachmentToInfo($0) }
-        let orchestratorReplyData = ComposeSendOrchestrator.SendInput.ReplyData(replyData)
+        guard let submission else { return }
 
         // Clear composer immediately after optimistic insertion.
         replyText = ""
         replyingTo = nil
 
-        let syncEngine = self.syncEngine
         let taskManager = self.taskManager
 
-        taskManager.run("sendReply-\(optimisticMessageID)", priority: .userInitiated) {
-            let orchestrator = ComposeSendOrchestrator(
-                sendService: sendService,
-                syncPerformer: syncEngine
-            )
-            let backgroundTask = orchestrator.executeInBackground(
-                input: ComposeSendOrchestrator.SendInput(
-                    recipientEmails: replyData.recipients,
-                    body: trimmedReplyText,
-                    htmlBody: nil,
-                    subject: replyData.subject,
-                    attachmentInfos: attachmentInfos,
-                    inlineAttachmentInfos: [],
-                    replyData: orchestratorReplyData
-                ),
-                attachments: attachments,
-                optimisticMessageID: optimisticMessageID
-            )
-            _ = await backgroundTask.result
+        taskManager.run("sendReply-\(submission.optimisticMessageID)", priority: .userInitiated) {
+            _ = await submission.backgroundTask.result
         }
     }
 
