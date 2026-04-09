@@ -6,8 +6,8 @@ enum OutboundMessageRequest {
     case forward(Forward)
     case reply(Reply)
 
-    struct ExistingConversationContext {
-        let objectURI: String
+    struct OptimisticConversationContext {
+        let existingConversationObjectURI: String
     }
 
     struct AttachmentContext {
@@ -15,14 +15,18 @@ enum OutboundMessageRequest {
         let localStateAttachmentURI: String
     }
 
-    struct ReplyContext {
+    struct ReplyMetadata: Sendable {
         let recipientEmails: [String]
         let subject: String?
         let threadId: String?
         let inReplyTo: String?
         let references: [String]
         let originalMessage: QuotedMessage?
-        let existingConversation: ExistingConversationContext?
+    }
+
+    struct ReplyContext {
+        let metadata: ReplyMetadata
+        let optimisticConversation: OptimisticConversationContext?
     }
 
     struct Compose {
@@ -94,7 +98,7 @@ protocol OutboundMessageSendServicing: ComposeSendServicing {
         subject: String?,
         threadId: String?,
         attachments: [OutboundMessageRequest.AttachmentContext],
-        existingConversation: OutboundMessageRequest.ExistingConversationContext?
+        optimisticConversation: OutboundMessageRequest.OptimisticConversationContext?
     ) async throws -> Message
 
     @MainActor
@@ -115,8 +119,8 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         let threadId: String?
         let attachments: [OutboundMessageRequest.AttachmentContext]
         let inlineAttachmentInfos: [GmailSendService.AttachmentInfo]
-        let existingConversation: OutboundMessageRequest.ExistingConversationContext?
-        let replyData: ComposeSendOrchestrator.SendInput.ReplyData?
+        let optimisticConversation: OutboundMessageRequest.OptimisticConversationContext?
+        let replyMetadata: OutboundMessageRequest.ReplyMetadata?
     }
 
     private let sendService: any OutboundMessageSendServicing
@@ -153,7 +157,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             subject: preparedSend.subject,
             threadId: preparedSend.threadId,
             attachments: preparedSend.attachments,
-            existingConversation: preparedSend.existingConversation
+            optimisticConversation: preparedSend.optimisticConversation
         )
         let optimisticMessageID = optimisticMessage.id
         mutationTracker.trackPendingMutation(
@@ -175,7 +179,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             subject: preparedSend.subject,
             attachmentInfos: preparedSend.attachments.map(\.info),
             inlineAttachmentInfos: preparedSend.inlineAttachmentInfos,
-            replyData: preparedSend.replyData
+            replyMetadata: preparedSend.replyMetadata
         )
 
         let effectiveHooks = makeReconciliationHooks(reconciliationHooks)
@@ -214,8 +218,8 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 threadId: nil,
                 attachments: compose.attachments,
                 inlineAttachmentInfos: [],
-                existingConversation: nil,
-                replyData: nil
+                optimisticConversation: nil,
+                replyMetadata: nil
             )
 
         case .forward(let forward):
@@ -247,31 +251,23 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 threadId: nil,
                 attachments: forward.attachments,
                 inlineAttachmentInfos: forward.forwardedInlineAttachmentInfos,
-                existingConversation: nil,
-                replyData: nil
+                optimisticConversation: nil,
+                replyMetadata: nil
             )
 
         case .reply(let reply):
             let body = normalizedBody(reply.body)
 
             return PreparedSend(
-                recipientEmails: reply.context.recipientEmails,
+                recipientEmails: reply.context.metadata.recipientEmails,
                 body: body,
-                subject: reply.context.subject,
+                subject: reply.context.metadata.subject,
                 htmlBody: nil,
-                threadId: reply.context.threadId,
+                threadId: reply.context.metadata.threadId,
                 attachments: reply.attachments,
                 inlineAttachmentInfos: [],
-                existingConversation: reply.context.existingConversation,
-                replyData: .init(
-                    recipients: reply.context.recipientEmails,
-                    body: body,
-                    subject: reply.context.subject,
-                    threadId: reply.context.threadId,
-                    inReplyTo: reply.context.inReplyTo,
-                    references: reply.context.references,
-                    originalMessage: reply.context.originalMessage
-                )
+                optimisticConversation: reply.context.optimisticConversation,
+                replyMetadata: reply.context.metadata
             )
         }
     }

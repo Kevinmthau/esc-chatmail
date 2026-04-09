@@ -38,20 +38,6 @@ protocol ComposeSendServicing: AnyObject {
 
 extension GmailSendService: ComposeSendServicing {}
 
-extension ComposeSendOrchestrator.SendInput.ReplyData {
-    init(_ replyData: ReplyMetadataBuilder.ReplyData) {
-        self.init(
-            recipients: replyData.recipients,
-            body: replyData.body,
-            subject: replyData.subject,
-            threadId: replyData.threadId,
-            inReplyTo: replyData.inReplyTo,
-            references: replyData.references,
-            originalMessage: replyData.originalMessage
-        )
-    }
-}
-
 /// Orchestrates the message sending flow, handling optimistic updates and background execution
 struct ComposeSendOrchestrator {
     let sendService: ComposeSendServicing
@@ -65,18 +51,7 @@ struct ComposeSendOrchestrator {
         let subject: String?
         let attachmentInfos: [GmailSendService.AttachmentInfo]
         let inlineAttachmentInfos: [GmailSendService.AttachmentInfo]
-        let replyData: ReplyData?
-
-        /// Reply-specific data extracted before background execution
-        struct ReplyData: Sendable {
-            let recipients: [String]
-            let body: String
-            let subject: String?
-            let threadId: String?
-            let inReplyTo: String?
-            let references: [String]
-            let originalMessage: QuotedMessage?
-        }
+        let replyMetadata: OutboundMessageRequest.ReplyMetadata?
     }
 
     /// Creates an optimistic message and triggers background send
@@ -102,17 +77,17 @@ struct ComposeSendOrchestrator {
                 let sendTask = Task.detached(priority: .userInitiated) {
                     let result: GmailSendService.SendResult
 
-                    if let replyData = input.replyData,
-                       let threadId = replyData.threadId,
+                    if let replyMetadata = input.replyMetadata,
+                       let threadId = replyMetadata.threadId,
                        !threadId.isEmpty {
                         result = try await sendService.sendReply(
-                            to: replyData.recipients,
-                            body: replyData.body,
-                            subject: replyData.subject ?? "",
+                            to: replyMetadata.recipientEmails,
+                            body: input.body,
+                            subject: replyMetadata.subject ?? "",
                             threadId: threadId,
-                            inReplyTo: replyData.inReplyTo,
-                            references: replyData.references,
-                            originalMessage: replyData.originalMessage,
+                            inReplyTo: replyMetadata.inReplyTo,
+                            references: replyMetadata.references,
+                            originalMessage: replyMetadata.originalMessage,
                             attachmentInfos: input.attachmentInfos
                         )
                     } else {

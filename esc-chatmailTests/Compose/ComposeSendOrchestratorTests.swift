@@ -29,9 +29,8 @@ final class ComposeSendOrchestratorTests: XCTestCase {
         let syncPerformer = MockIncrementalSyncPerformer()
         let orchestrator = ComposeSendOrchestrator(sendService: sendService, syncPerformer: syncPerformer)
 
-        let replyData = ComposeSendOrchestrator.SendInput.ReplyData(
-            recipients: ["to@example.com"],
-            body: "reply body",
+        let replyMetadata = OutboundMessageRequest.ReplyMetadata(
+            recipientEmails: ["to@example.com"],
             subject: "Re: Hello",
             threadId: "thread-1",
             inReplyTo: "<id-1>",
@@ -40,7 +39,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
         )
 
         let task = orchestrator.executeInBackground(
-            input: makeInput(replyData: replyData),
+            input: makeInput(body: "reply body", replyMetadata: replyMetadata),
             attachmentObjectURIs: [],
             optimisticMessageID: "optimistic-2"
         )
@@ -57,9 +56,8 @@ final class ComposeSendOrchestratorTests: XCTestCase {
         let syncPerformer = MockIncrementalSyncPerformer()
         let orchestrator = ComposeSendOrchestrator(sendService: sendService, syncPerformer: syncPerformer)
 
-        let replyData = ComposeSendOrchestrator.SendInput.ReplyData(
-            recipients: ["to@example.com"],
-            body: "reply body",
+        let replyMetadata = OutboundMessageRequest.ReplyMetadata(
+            recipientEmails: ["to@example.com"],
             subject: nil,
             threadId: "thread-1",
             inReplyTo: "<id-1>",
@@ -68,7 +66,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
         )
 
         let task = orchestrator.executeInBackground(
-            input: makeInput(replyData: replyData),
+            input: makeInput(body: "reply body", replyMetadata: replyMetadata),
             attachmentObjectURIs: [],
             optimisticMessageID: "optimistic-2b"
         )
@@ -123,16 +121,17 @@ final class ComposeSendOrchestratorTests: XCTestCase {
     }
 
     private func makeInput(
-        replyData: ComposeSendOrchestrator.SendInput.ReplyData? = nil
+        body: String = "hello",
+        replyMetadata: OutboundMessageRequest.ReplyMetadata? = nil
     ) -> ComposeSendOrchestrator.SendInput {
         ComposeSendOrchestrator.SendInput(
             recipientEmails: ["to@example.com"],
-            body: "hello",
+            body: body,
             htmlBody: nil,
             subject: "Subject",
             attachmentInfos: [],
             inlineAttachmentInfos: [],
-            replyData: replyData
+            replyMetadata: replyMetadata
         )
     }
 }

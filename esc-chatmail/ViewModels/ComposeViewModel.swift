@@ -23,9 +23,9 @@ final class ComposeViewModel: ObservableObject {
             case (.forward(let c1), .forward(let c2)): return c1.id == c2.id
             case (.reply(let c1), .reply(let c2)):
                 return c1.initialRecipients == c2.initialRecipients &&
-                    c1.outboundRequestContext.threadId == c2.outboundRequestContext.threadId &&
-                    c1.outboundRequestContext.inReplyTo == c2.outboundRequestContext.inReplyTo &&
-                    c1.outboundRequestContext.existingConversation?.objectURI == c2.outboundRequestContext.existingConversation?.objectURI
+                    c1.outboundRequestContext.metadata.threadId == c2.outboundRequestContext.metadata.threadId &&
+                    c1.outboundRequestContext.metadata.inReplyTo == c2.outboundRequestContext.metadata.inReplyTo &&
+                    c1.outboundRequestContext.optimisticConversation?.existingConversationObjectURI == c2.outboundRequestContext.optimisticConversation?.existingConversationObjectURI
             default: return false
             }
         }

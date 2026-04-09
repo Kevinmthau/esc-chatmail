@@ -76,13 +76,13 @@ final class ComposeReplyModeContextBuilderTests: XCTestCase {
 
         XCTAssertEqual(result.initialRecipients.map(\.email), ["friend@example.com"])
         XCTAssertEqual(result.initialRecipients.first?.displayName, "Friend")
-        XCTAssertEqual(result.outboundRequestContext.recipientEmails, ["friend@example.com"])
-        XCTAssertEqual(result.outboundRequestContext.subject, "Re: Original Subject")
-        XCTAssertEqual(result.outboundRequestContext.threadId, "thread-123")
-        XCTAssertEqual(result.outboundRequestContext.inReplyTo, "<message-1@example.com>")
-        XCTAssertEqual(result.outboundRequestContext.references, ["<older@example.com>", "<message-1@example.com>"])
+        XCTAssertEqual(result.outboundRequestContext.metadata.recipientEmails, ["friend@example.com"])
+        XCTAssertEqual(result.outboundRequestContext.metadata.subject, "Re: Original Subject")
+        XCTAssertEqual(result.outboundRequestContext.metadata.threadId, "thread-123")
+        XCTAssertEqual(result.outboundRequestContext.metadata.inReplyTo, "<message-1@example.com>")
+        XCTAssertEqual(result.outboundRequestContext.metadata.references, ["<older@example.com>", "<message-1@example.com>"])
         XCTAssertEqual(
-            result.outboundRequestContext.existingConversation?.objectURI,
+            result.outboundRequestContext.optimisticConversation?.existingConversationObjectURI,
             conversation.objectID.uriRepresentation().absoluteString
         )
     }

@@ -70,4 +70,28 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertNil(conversation.archivedAt)
         XCTAssertTrue(context.hasChanges, "Reactivating the conversation and inserting the optimistic message should remain unsaved until the send flow persists it.")
     }
+
+    func testCreateOptimisticMessage_withOptimisticConversationContextReusesExistingConversation() async throws {
+        let context = coreDataStack.viewContext
+        let conversation = ConversationBuilder()
+            .withDisplayName("Reply Thread")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        try coreDataStack.saveViewContext()
+
+        let message = try await sendService.createOptimisticMessage(
+            to: ["friend@example.com"],
+            body: "anchored reply",
+            subject: "Re: Hello",
+            threadId: "thread-123",
+            optimisticConversation: .init(
+                existingConversationObjectURI: conversation.objectID.uriRepresentation().absoluteString
+            )
+        )
+
+        XCTAssertEqual(message.conversation?.objectID, conversation.objectID)
+        XCTAssertEqual(message.gmThreadId, "thread-123")
+        XCTAssertTrue(context.hasChanges, "Anchored optimistic replies should stay unsaved until the background send path persists them.")
+    }
 }

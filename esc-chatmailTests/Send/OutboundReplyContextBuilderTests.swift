@@ -65,16 +65,16 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
             replyingTo: replyingTo
         )
 
-        XCTAssertEqual(replyContext.recipientEmails, ["friend@example.com"])
-        XCTAssertEqual(replyContext.subject, "Re: Original Subject")
-        XCTAssertEqual(replyContext.threadId, "thread-123")
-        XCTAssertEqual(replyContext.inReplyTo, "<message-1@example.com>")
-        XCTAssertEqual(replyContext.references, ["<older@example.com>", "<message-1@example.com>"])
-        XCTAssertEqual(replyContext.originalMessage?.senderName, "Friend")
-        XCTAssertEqual(replyContext.originalMessage?.senderEmail, "friend@example.com")
-        XCTAssertEqual(replyContext.originalMessage?.body, "Original body")
+        XCTAssertEqual(replyContext.metadata.recipientEmails, ["friend@example.com"])
+        XCTAssertEqual(replyContext.metadata.subject, "Re: Original Subject")
+        XCTAssertEqual(replyContext.metadata.threadId, "thread-123")
+        XCTAssertEqual(replyContext.metadata.inReplyTo, "<message-1@example.com>")
+        XCTAssertEqual(replyContext.metadata.references, ["<older@example.com>", "<message-1@example.com>"])
+        XCTAssertEqual(replyContext.metadata.originalMessage?.senderName, "Friend")
+        XCTAssertEqual(replyContext.metadata.originalMessage?.senderEmail, "friend@example.com")
+        XCTAssertEqual(replyContext.metadata.originalMessage?.body, "Original body")
         XCTAssertEqual(
-            replyContext.existingConversation?.objectURI,
+            replyContext.optimisticConversation?.existingConversationObjectURI,
             conversation.objectID.uriRepresentation().absoluteString
         )
     }

@@ -9,14 +9,7 @@ struct OutboundReplyContextBuilder {
         conversation: Conversation,
         replyingTo: Message?
     ) -> OutboundMessageRequest.ReplyContext {
-        let conversationContext = ReplyMetadataBuilder.ConversationContext(
-            participantEmails: Array(conversation.participants ?? [])
-                .compactMap { $0.person?.email },
-            latestThreadId: Array(conversation.messages ?? [])
-                .sorted { $0.internalDate > $1.internalDate }
-                .first?
-                .gmThreadId
-        )
+        let conversationContext = makeConversationContext(conversation)
         let replyTarget = replyingTo.map(makeReplyTargetContext)
         let metadata = replyMetadataBuilder.buildReplyMetadata(
             conversation: conversationContext,
@@ -24,15 +17,29 @@ struct OutboundReplyContextBuilder {
         )
 
         return OutboundMessageRequest.ReplyContext(
-            recipientEmails: metadata.recipients,
-            subject: metadata.subject,
-            threadId: metadata.threadId,
-            inReplyTo: metadata.inReplyTo,
-            references: metadata.references,
-            originalMessage: metadata.originalMessage,
-            existingConversation: .init(
-                objectURI: conversation.objectID.uriRepresentation().absoluteString
-            )
+            metadata: metadata,
+            optimisticConversation: makeOptimisticConversationContext(conversation)
+        )
+    }
+
+    private func makeConversationContext(
+        _ conversation: Conversation
+    ) -> ReplyMetadataBuilder.ConversationContext {
+        ReplyMetadataBuilder.ConversationContext(
+            participantEmails: Array(conversation.participants ?? [])
+                .compactMap { $0.person?.email },
+            latestThreadId: Array(conversation.messages ?? [])
+                .sorted { $0.internalDate > $1.internalDate }
+                .first?
+                .gmThreadId
+        )
+    }
+
+    private func makeOptimisticConversationContext(
+        _ conversation: Conversation
+    ) -> OutboundMessageRequest.OptimisticConversationContext {
+        .init(
+            existingConversationObjectURI: conversation.objectID.uriRepresentation().absoluteString
         )
     }
 

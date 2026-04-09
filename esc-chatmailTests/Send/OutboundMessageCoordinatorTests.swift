@@ -82,19 +82,21 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
             .reply(
                 .init(
                     context: .init(
-                        recipientEmails: ["friend@example.com"],
-                        subject: "Re: Original Subject",
-                        threadId: "thread-123",
-                        inReplyTo: "<message-1@example.com>",
-                        references: ["<older@example.com>", "<message-1@example.com>"],
-                        originalMessage: QuotedMessage(
-                            senderName: "Friend",
-                            senderEmail: "friend@example.com",
-                            date: Date(timeIntervalSince1970: 1_700_000_000),
-                            body: "Original body"
+                        metadata: .init(
+                            recipientEmails: ["friend@example.com"],
+                            subject: "Re: Original Subject",
+                            threadId: "thread-123",
+                            inReplyTo: "<message-1@example.com>",
+                            references: ["<older@example.com>", "<message-1@example.com>"],
+                            originalMessage: QuotedMessage(
+                                senderName: "Friend",
+                                senderEmail: "friend@example.com",
+                                date: Date(timeIntervalSince1970: 1_700_000_000),
+                                body: "Original body"
+                            )
                         ),
-                        existingConversation: .init(
-                            objectURI: conversation.objectID.uriRepresentation().absoluteString
+                        optimisticConversation: .init(
+                            existingConversationObjectURI: conversation.objectID.uriRepresentation().absoluteString
                         )
                     ),
                     body: " Reply body ",
@@ -117,7 +119,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.subject, "Re: Original Subject")
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.threadId, "thread-123")
         XCTAssertEqual(
-            snapshot.createOptimisticCalls.first?.existingConversation?.objectURI,
+            snapshot.createOptimisticCalls.first?.optimisticConversation?.existingConversationObjectURI,
             conversation.objectID.uriRepresentation().absoluteString
         )
         XCTAssertEqual(snapshot.sendNewCalls.count, 0)
@@ -301,7 +303,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         let body: String
         let subject: String?
         let threadId: String?
-        let existingConversation: OutboundMessageRequest.ExistingConversationContext?
+        let optimisticConversation: OutboundMessageRequest.OptimisticConversationContext?
         let attachmentURIs: [String]
     }
 
@@ -362,7 +364,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         subject: String?,
         threadId: String?,
         attachments: [OutboundMessageRequest.AttachmentContext],
-        existingConversation: OutboundMessageRequest.ExistingConversationContext?
+        optimisticConversation: OutboundMessageRequest.OptimisticConversationContext?
     ) async throws -> Message {
         queue.sync {
             createCalls.append(
@@ -371,14 +373,14 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
                     body: body,
                     subject: subject,
                     threadId: threadId,
-                    existingConversation: existingConversation,
+                    optimisticConversation: optimisticConversation,
                     attachmentURIs: attachments.map(\.localStateAttachmentURI)
                 )
             )
         }
 
         let conversation: Conversation
-        if let existingConversationObjectID = existingConversation.flatMap({ resolveObjectID(for: $0) }),
+        if let existingConversationObjectID = optimisticConversation.flatMap({ resolveObjectID(for: $0) }),
            let existingConversation = try? context.existingObject(with: existingConversationObjectID) as? Conversation {
             conversation = existingConversation
         } else {
@@ -499,10 +501,10 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     }
 
     private func resolveObjectID(
-        for existingConversation: OutboundMessageRequest.ExistingConversationContext
+        for optimisticConversation: OutboundMessageRequest.OptimisticConversationContext
     ) -> NSManagedObjectID? {
         guard let coordinator = context.persistentStoreCoordinator,
-              let url = URL(string: existingConversation.objectURI) else {
+              let url = URL(string: optimisticConversation.existingConversationObjectURI) else {
             return nil
         }
 
