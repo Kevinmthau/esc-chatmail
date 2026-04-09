@@ -3,19 +3,6 @@ import Foundation
 /// Builds email threading metadata (references, in-reply-to, thread ID) for replies
 @MainActor
 struct ReplyMetadataBuilder {
-    struct ConversationContext {
-        let participantEmails: [String]
-        let latestThreadId: String?
-    }
-
-    struct ReplyTargetContext {
-        let subject: String?
-        let threadId: String?
-        let messageId: String?
-        let references: [String]
-        let originalMessage: QuotedMessage
-    }
-
     let authSession: AuthSession
 
     init(authSession: AuthSession) {
@@ -23,8 +10,8 @@ struct ReplyMetadataBuilder {
     }
 
     func buildReplyMetadata(
-        conversation: ConversationContext,
-        replyingTo: ReplyTargetContext?
+        conversation: ReplyConversationSnapshot,
+        replyingTo: ReplyTargetSnapshot?
     ) -> OutboundMessageRequest.ReplyMetadata {
         let currentUserEmail = authSession.userEmail ?? ""
 

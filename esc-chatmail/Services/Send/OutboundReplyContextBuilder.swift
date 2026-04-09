@@ -5,8 +5,8 @@ struct OutboundReplyContextBuilder {
     let replyMetadataBuilder: ReplyMetadataBuilder
 
     func build(
-        conversation: ReplyMetadataBuilder.ConversationContext,
-        replyingTo: ReplyMetadataBuilder.ReplyTargetContext?,
+        conversation: ReplyConversationSnapshot,
+        replyingTo: ReplyTargetSnapshot?,
         optimisticConversation: OutboundMessageRequest.OptimisticConversationContext?
     ) -> OutboundMessageRequest.ReplyContext {
         let metadata = replyMetadataBuilder.buildReplyMetadata(

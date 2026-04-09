@@ -8,7 +8,11 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Published State
 
     @Published var replyText = ""
-    @Published var replyingTo: Message?
+    @Published var replyingTo: Message? {
+        didSet {
+            replyingToSnapshot = replyingTo.map { ReplyTargetSnapshot(message: $0) }
+        }
+    }
     @Published var forwardComposeContext: ComposeForwardModeContext?
     @Published var messageToViewInFull: Message?
     @Published var resolvedDisplayName: String?
@@ -33,8 +37,10 @@ final class ChatViewModel: ObservableObject {
     private let conversationObjectID: NSManagedObjectID
     private let conversationContext: NSManagedObjectContext?
     private let conversationDisplayNameHint: String?
+    private let replyOptimisticConversation: OutboundMessageRequest.OptimisticConversationContext
     private let processedTextCache: ProcessedTextCache
     private let contactsResolver: any ContactsResolving
+    private var replyingToSnapshot: ReplyTargetSnapshot?
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Task Management
@@ -62,6 +68,9 @@ final class ChatViewModel: ObservableObject {
         self.conversationObjectID = conversation.objectID
         self.conversationContext = conversation.managedObjectContext
         self.conversationDisplayNameHint = conversation.displayName
+        self.replyOptimisticConversation = .existingConversation(
+            conversation.objectID.uriRepresentation().absoluteString
+        )
         self.processedTextCache = dependencies.processedTextCache
         self.contactsResolver = dependencies.contactsResolver
         self.messageActions = dependencies.makeMessageActions()
@@ -197,9 +206,9 @@ final class ChatViewModel: ObservableObject {
                 .reply(
                     .init(
                         context: outboundReplyContextBuilder.build(
-                            conversation: makeReplyConversationContext(),
-                            replyingTo: replyingTo.map(makeReplyTargetContext),
-                            optimisticConversation: makeReplyOptimisticConversationContext()
+                            conversation: ReplyConversationSnapshot(conversation: conversation),
+                            replyingTo: replyingToSnapshot,
+                            optimisticConversation: replyOptimisticConversation
                         ),
                         body: trimmedReplyText,
                         attachments: attachmentContexts
@@ -269,42 +278,6 @@ final class ChatViewModel: ObservableObject {
             self.resolvedDisplayName = info.formattedDisplayName
             self.effectiveParticipantCount = info.totalUniqueParticipants
         }
-    }
-
-    private func makeReplyConversationContext() -> ReplyMetadataBuilder.ConversationContext {
-        ReplyMetadataBuilder.ConversationContext(
-            participantEmails: Array(conversation.participants ?? [])
-                .compactMap { $0.person?.email },
-            latestThreadId: Array(conversation.messages ?? [])
-                .sorted { $0.internalDate > $1.internalDate }
-                .first?
-                .gmThreadId
-        )
-    }
-
-    private func makeReplyOptimisticConversationContext() -> OutboundMessageRequest.OptimisticConversationContext {
-        .existingConversation(
-            conversation.objectID.uriRepresentation().absoluteString
-        )
-    }
-
-    private func makeReplyTargetContext(_ message: Message) -> ReplyMetadataBuilder.ReplyTargetContext {
-        let references = message.referencesValue?
-            .split(separator: " ")
-            .map(String.init) ?? []
-
-        return ReplyMetadataBuilder.ReplyTargetContext(
-            subject: message.subject,
-            threadId: message.gmThreadId,
-            messageId: message.messageIdValue,
-            references: references,
-            originalMessage: QuotedMessage(
-                senderName: message.senderNameValue,
-                senderEmail: message.senderEmailValue ?? "",
-                date: message.internalDate,
-                body: message.bodyTextValue
-            )
-        )
     }
 
     private func makeForwardModeInput(_ message: Message) throws -> ComposeForwardModeContextBuilder.Input {

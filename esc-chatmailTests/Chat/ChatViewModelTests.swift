@@ -236,6 +236,75 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.replyText, "")
         XCTAssertNil(viewModel.replyingTo)
     }
+
+    func testSendReply_usesCapturedReplyTargetSnapshotAfterSelection() async {
+        let authSession = makeTestAuthSession(userEmail: "me@example.com")
+        let coordinator = MockChatOutboundMessageCoordinator()
+        let tokenManager = MockTokenManager()
+        let deps = Dependencies(
+            authSession: authSession,
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        let context = deps.viewContext
+        let conversation = ConversationBuilder()
+            .withDisplayName("Reply Thread")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+
+        let me = Person(context: context)
+        me.id = UUID()
+        me.email = "me@example.com"
+
+        let friend = Person(context: context)
+        friend.id = UUID()
+        friend.email = "friend@example.com"
+        friend.displayName = "Friend"
+
+        let meParticipant = ConversationParticipant(context: context)
+        meParticipant.id = UUID()
+        meParticipant.person = me
+        meParticipant.participantRole = .normal
+        meParticipant.conversation = conversation
+
+        let friendParticipant = ConversationParticipant(context: context)
+        friendParticipant.id = UUID()
+        friendParticipant.person = friend
+        friendParticipant.participantRole = .normal
+        friendParticipant.conversation = conversation
+
+        let replyTarget = MessageBuilder()
+            .withId("message-1")
+            .withThreadId("thread-123")
+            .withSubject("Original Subject")
+            .withSender(email: "friend@example.com", name: "Friend")
+            .withBody("Original body")
+            .inConversation(conversation)
+            .build(in: context)
+        replyTarget.messageId = "<message-1@example.com>"
+        replyTarget.references = "<older@example.com>"
+
+        let viewModel = ChatViewModel(conversation: conversation, deps: deps)
+        viewModel.replyingTo = replyTarget
+        viewModel.replyText = "Reply body"
+
+        replyTarget.subject = "Mutated Subject"
+        replyTarget.messageId = "<mutated@example.com>"
+        replyTarget.references = "<mutated-ref@example.com>"
+        replyTarget.bodyText = "Mutated body"
+
+        await viewModel.sendReply(with: [])
+
+        guard case .reply(let request)? = coordinator.lastRequest else {
+            return XCTFail("Expected reply request")
+        }
+        XCTAssertEqual(request.context.metadata.subject, "Re: Original Subject")
+        XCTAssertEqual(request.context.metadata.inReplyTo, "<message-1@example.com>")
+        XCTAssertEqual(request.context.metadata.references, ["<older@example.com>", "<message-1@example.com>"])
+        XCTAssertEqual(request.context.metadata.originalMessage?.body, "Original body")
+    }
 }
 
 @MainActor

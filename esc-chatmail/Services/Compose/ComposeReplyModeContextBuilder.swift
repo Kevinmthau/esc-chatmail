@@ -11,8 +11,8 @@ struct ComposeReplyModeContextBuilder {
 
     struct Input {
         let initialRecipients: [Recipient]
-        let conversation: ReplyMetadataBuilder.ConversationContext
-        let replyingTo: ReplyMetadataBuilder.ReplyTargetContext?
+        let conversation: ReplyConversationSnapshot
+        let replyingTo: ReplyTargetSnapshot?
         let optimisticConversation: OutboundMessageRequest.OptimisticConversationContext?
     }
 
