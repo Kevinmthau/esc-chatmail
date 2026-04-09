@@ -3,66 +3,30 @@ import XCTest
 
 @MainActor
 final class OutboundReplyContextBuilderTests: XCTestCase {
-    private var coreDataStack: TestCoreDataStack!
-
-    override func setUp() {
-        super.setUp()
-        coreDataStack = TestCoreDataStack()
-    }
-
-    override func tearDown() {
-        coreDataStack = nil
-        super.tearDown()
-    }
-
-    func testBuild_replyingToMessageExtractsReplyMetadataAndConversationAnchor() {
+    func testBuild_replySnapshotsProduceReplyMetadataAndConversationAnchor() {
         let authSession = makeTestAuthSession(userEmail: "me@example.com")
         let builder = OutboundReplyContextBuilder(
             replyMetadataBuilder: ReplyMetadataBuilder(authSession: authSession)
         )
-        let context = coreDataStack.viewContext
-
-        let conversation = ConversationBuilder()
-            .withDisplayName("Reply Thread")
-            .visible()
-            .recentlyActive()
-            .build(in: context)
-
-        let me = Person(context: context)
-        me.id = UUID()
-        me.email = "me@example.com"
-
-        let friend = Person(context: context)
-        friend.id = UUID()
-        friend.email = "friend@example.com"
-        friend.displayName = "Friend"
-
-        let meParticipant = ConversationParticipant(context: context)
-        meParticipant.id = UUID()
-        meParticipant.person = me
-        meParticipant.participantRole = .normal
-        meParticipant.conversation = conversation
-
-        let friendParticipant = ConversationParticipant(context: context)
-        friendParticipant.id = UUID()
-        friendParticipant.person = friend
-        friendParticipant.participantRole = .normal
-        friendParticipant.conversation = conversation
-
-        let replyingTo = MessageBuilder()
-            .withId("message-1")
-            .withThreadId("thread-123")
-            .withSubject("Original Subject")
-            .withSender(email: "friend@example.com", name: "Friend")
-            .withBody("Original body")
-            .inConversation(conversation)
-            .build(in: context)
-        replyingTo.messageId = "<message-1@example.com>"
-        replyingTo.references = "<older@example.com>"
 
         let replyContext = builder.build(
-            conversation: conversation,
-            replyingTo: replyingTo
+            conversation: .init(
+                participantEmails: ["me@example.com", "friend@example.com"],
+                latestThreadId: "thread-123"
+            ),
+            replyingTo: .init(
+                subject: "Original Subject",
+                threadId: "thread-123",
+                messageId: "<message-1@example.com>",
+                references: ["<older@example.com>"],
+                originalMessage: QuotedMessage(
+                    senderName: "Friend",
+                    senderEmail: "friend@example.com",
+                    date: Date(timeIntervalSince1970: 1_700_000_000),
+                    body: "Original body"
+                )
+            ),
+            optimisticConversation: .existingConversation("x-coredata://conversation/123")
         )
 
         XCTAssertEqual(replyContext.metadata.recipientEmails, ["friend@example.com"])
@@ -75,7 +39,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertEqual(replyContext.metadata.originalMessage?.body, "Original body")
         XCTAssertEqual(
             replyContext.optimisticConversation?.existingConversationObjectURI,
-            conversation.objectID.uriRepresentation().absoluteString
+            "x-coredata://conversation/123"
         )
     }
 

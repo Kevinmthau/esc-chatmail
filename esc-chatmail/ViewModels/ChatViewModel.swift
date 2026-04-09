@@ -193,8 +193,9 @@ final class ChatViewModel: ObservableObject {
                 .reply(
                     .init(
                         context: outboundReplyContextBuilder.build(
-                            conversation: conversation,
-                            replyingTo: replyingTo
+                            conversation: makeReplyConversationContext(),
+                            replyingTo: replyingTo.map(makeReplyTargetContext),
+                            optimisticConversation: makeReplyOptimisticConversationContext()
                         ),
                         body: trimmedReplyText,
                         attachments: attachmentContexts
@@ -264,5 +265,41 @@ final class ChatViewModel: ObservableObject {
             self.resolvedDisplayName = info.formattedDisplayName
             self.effectiveParticipantCount = info.totalUniqueParticipants
         }
+    }
+
+    private func makeReplyConversationContext() -> ReplyMetadataBuilder.ConversationContext {
+        ReplyMetadataBuilder.ConversationContext(
+            participantEmails: Array(conversation.participants ?? [])
+                .compactMap { $0.person?.email },
+            latestThreadId: Array(conversation.messages ?? [])
+                .sorted { $0.internalDate > $1.internalDate }
+                .first?
+                .gmThreadId
+        )
+    }
+
+    private func makeReplyOptimisticConversationContext() -> OutboundMessageRequest.OptimisticConversationContext {
+        .existingConversation(
+            conversation.objectID.uriRepresentation().absoluteString
+        )
+    }
+
+    private func makeReplyTargetContext(_ message: Message) -> ReplyMetadataBuilder.ReplyTargetContext {
+        let references = message.referencesValue?
+            .split(separator: " ")
+            .map(String.init) ?? []
+
+        return ReplyMetadataBuilder.ReplyTargetContext(
+            subject: message.subject,
+            threadId: message.gmThreadId,
+            messageId: message.messageIdValue,
+            references: references,
+            originalMessage: QuotedMessage(
+                senderName: message.senderNameValue,
+                senderEmail: message.senderEmailValue ?? "",
+                date: message.internalDate,
+                body: message.bodyTextValue
+            )
+        )
     }
 }

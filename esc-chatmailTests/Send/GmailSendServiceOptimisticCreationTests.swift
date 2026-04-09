@@ -34,7 +34,10 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
             to: ["friend@example.com"],
             body: "hello",
             subject: "Subject",
-            attachments: try attachmentBuilder.buildSendAttachments(from: [attachment])
+            attachments: try attachmentBuilder.buildSendAttachments(from: [attachment]),
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail("friend@example.com")])
+            )
         )
 
         XCTAssertTrue(context.hasChanges, "Optimistic creation should defer persistence so send navigation is not blocked.")
@@ -62,7 +65,8 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
 
         let message = try await sendService.createOptimisticMessage(
             to: [recipient],
-            body: "hello again"
+            body: "hello again",
+            optimisticConversation: .participantHash(participantHash)
         )
 
         let conversation = try XCTUnwrap(message.conversation)
@@ -85,8 +89,8 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
             body: "anchored reply",
             subject: "Re: Hello",
             threadId: "thread-123",
-            optimisticConversation: .init(
-                existingConversationObjectURI: conversation.objectID.uriRepresentation().absoluteString
+            optimisticConversation: .existingConversation(
+                conversation.objectID.uriRepresentation().absoluteString
             )
         )
 

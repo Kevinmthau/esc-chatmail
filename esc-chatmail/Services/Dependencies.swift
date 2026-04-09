@@ -142,7 +142,6 @@ final class Dependencies: ObservableObject {
 
     func makeComposeReplyModeContextBuilder() -> ComposeReplyModeContextBuilder {
         ComposeReplyModeContextBuilder(
-            authSession: authSession,
             outboundReplyContextBuilder: makeOutboundReplyContextBuilder()
         )
     }

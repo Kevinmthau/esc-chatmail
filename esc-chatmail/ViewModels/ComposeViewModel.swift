@@ -256,7 +256,8 @@ final class ComposeViewModel: ObservableObject {
                     recipientEmails: recipientEmails,
                     subject: subject,
                     body: body,
-                    attachments: try outboundAttachmentContextBuilder.buildSendAttachments(from: attachments)
+                    attachments: try outboundAttachmentContextBuilder.buildSendAttachments(from: attachments),
+                    optimisticConversation: makeOptimisticConversationContext(forRecipients: recipientEmails)
                 )
             )
 
@@ -269,7 +270,8 @@ final class ComposeViewModel: ObservableObject {
                     attachments: try outboundAttachmentContextBuilder.buildSendAttachments(from: attachments),
                     forwardedPlainTextBody: forwardedPlainTextBody,
                     forwardedHTMLBody: forwardedHTMLBody,
-                    forwardedInlineAttachmentInfos: forwardedInlineAttachmentInfos
+                    forwardedInlineAttachmentInfos: forwardedInlineAttachmentInfos,
+                    optimisticConversation: makeOptimisticConversationContext(forRecipients: recipientEmails)
                 )
             )
 
@@ -282,5 +284,18 @@ final class ComposeViewModel: ObservableObject {
                 )
             )
         }
+    }
+
+    private func makeOptimisticConversationContext(
+        forRecipients recipients: [String]
+    ) -> OutboundMessageRequest.OptimisticConversationContext? {
+        let normalizedParticipants = Array(
+            Set(recipients.map(EmailNormalizer.normalize).filter { !$0.isEmpty })
+        )
+        guard !normalizedParticipants.isEmpty else { return nil }
+
+        return .participantHash(
+            calculateParticipantHash(from: normalizedParticipants)
+        )
     }
 }

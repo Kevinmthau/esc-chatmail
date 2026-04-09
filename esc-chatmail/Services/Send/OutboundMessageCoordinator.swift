@@ -6,8 +6,25 @@ enum OutboundMessageRequest {
     case forward(Forward)
     case reply(Reply)
 
-    struct OptimisticConversationContext {
-        let existingConversationObjectURI: String
+    enum OptimisticConversationContext: Equatable {
+        case existingConversation(String)
+        case participantHash(String)
+
+        var existingConversationObjectURI: String? {
+            guard case .existingConversation(let objectURI) = self else {
+                return nil
+            }
+
+            return objectURI
+        }
+
+        var participantHash: String? {
+            guard case .participantHash(let participantHash) = self else {
+                return nil
+            }
+
+            return participantHash
+        }
     }
 
     struct AttachmentContext {
@@ -34,6 +51,21 @@ enum OutboundMessageRequest {
         let subject: String?
         let body: String
         let attachments: [AttachmentContext]
+        let optimisticConversation: OptimisticConversationContext?
+
+        init(
+            recipientEmails: [String],
+            subject: String?,
+            body: String,
+            attachments: [AttachmentContext],
+            optimisticConversation: OptimisticConversationContext? = nil
+        ) {
+            self.recipientEmails = recipientEmails
+            self.subject = subject
+            self.body = body
+            self.attachments = attachments
+            self.optimisticConversation = optimisticConversation
+        }
     }
 
     struct Forward {
@@ -44,6 +76,27 @@ enum OutboundMessageRequest {
         let forwardedPlainTextBody: String
         let forwardedHTMLBody: String?
         let forwardedInlineAttachmentInfos: [GmailSendService.AttachmentInfo]
+        let optimisticConversation: OptimisticConversationContext?
+
+        init(
+            recipientEmails: [String],
+            subject: String?,
+            body: String,
+            attachments: [AttachmentContext],
+            forwardedPlainTextBody: String,
+            forwardedHTMLBody: String?,
+            forwardedInlineAttachmentInfos: [GmailSendService.AttachmentInfo],
+            optimisticConversation: OptimisticConversationContext? = nil
+        ) {
+            self.recipientEmails = recipientEmails
+            self.subject = subject
+            self.body = body
+            self.attachments = attachments
+            self.forwardedPlainTextBody = forwardedPlainTextBody
+            self.forwardedHTMLBody = forwardedHTMLBody
+            self.forwardedInlineAttachmentInfos = forwardedInlineAttachmentInfos
+            self.optimisticConversation = optimisticConversation
+        }
     }
 
     struct Reply {
@@ -218,7 +271,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 threadId: nil,
                 attachments: compose.attachments,
                 inlineAttachmentInfos: [],
-                optimisticConversation: nil,
+                optimisticConversation: compose.optimisticConversation,
                 replyMetadata: nil
             )
 
@@ -251,7 +304,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 threadId: nil,
                 attachments: forward.attachments,
                 inlineAttachmentInfos: forward.forwardedInlineAttachmentInfos,
-                optimisticConversation: nil,
+                optimisticConversation: forward.optimisticConversation,
                 replyMetadata: nil
             )
 

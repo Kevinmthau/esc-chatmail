@@ -55,38 +55,19 @@ final class ComposeViewModelTests: XCTestCase {
     func testSetupForMode_replyIsIdempotent() {
         let authSession = makeTestAuthSession(userEmail: "me@example.com")
         let deps = makeDependencies(authSession: authSession)
-        let context = deps.viewContext
-
-        let conversation = Conversation(context: context)
-        conversation.id = UUID()
-        conversation.keyHash = UUID().uuidString
-        conversation.type = "personal"
-
-        let me = Person(context: context)
-        me.id = UUID()
-        me.email = "me@example.com"
-        me.displayName = "Me"
-
-        let other = Person(context: context)
-        other.id = UUID()
-        other.email = "friend@example.com"
-        other.displayName = "Friend"
-
-        let meParticipant = ConversationParticipant(context: context)
-        meParticipant.id = UUID()
-        meParticipant.participantRole = .normal
-        meParticipant.person = me
-        meParticipant.conversation = conversation
-
-        let otherParticipant = ConversationParticipant(context: context)
-        otherParticipant.id = UUID()
-        otherParticipant.participantRole = .normal
-        otherParticipant.person = other
-        otherParticipant.conversation = conversation
 
         let replyModeContext = deps.makeComposeReplyModeContextBuilder().build(
-            conversation: conversation,
-            replyingTo: nil
+            input: .init(
+                initialRecipients: [
+                    Recipient(email: "friend@example.com", displayName: "Friend")
+                ],
+                conversation: .init(
+                    participantEmails: ["me@example.com", "friend@example.com"],
+                    latestThreadId: "thread-123"
+                ),
+                replyingTo: nil,
+                optimisticConversation: .existingConversation("x-coredata://conversation/123")
+            )
         )
         let viewModel = ComposeViewModel(mode: .reply(replyModeContext), deps: deps)
 
@@ -94,12 +75,48 @@ final class ComposeViewModelTests: XCTestCase {
         viewModel.setupForMode()
 
         XCTAssertEqual(viewModel.recipients.map(\.email), ["friend@example.com"])
+    }
 
-        context.delete(otherParticipant)
-        context.delete(meParticipant)
-        context.delete(other)
-        context.delete(me)
-        context.delete(conversation)
-        try? context.save()
+    func testSend_newMessageBuildsParticipantHashOptimisticConversationContext() async {
+        let authSession = makeTestAuthSession(userEmail: "me@example.com")
+        let coordinator = MockOutboundMessageCoordinator()
+        let tokenManager = MockTokenManager()
+        let deps = Dependencies(
+            authSession: authSession,
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        let viewModel = ComposeViewModel(mode: .newMessage, deps: deps)
+        viewModel.addRecipient(email: "Friend@example.com")
+        viewModel.body = "Hello"
+
+        let didSend = await viewModel.send()
+
+        XCTAssertTrue(didSend)
+        guard case .compose(let request)? = coordinator.lastRequest else {
+            return XCTFail("Expected compose request")
+        }
+        XCTAssertEqual(request.recipientEmails, ["Friend@example.com"])
+        XCTAssertEqual(
+            request.optimisticConversation?.participantHash,
+            calculateParticipantHash(from: [EmailNormalizer.normalize("Friend@example.com")])
+        )
+    }
+}
+
+@MainActor
+private final class MockOutboundMessageCoordinator: OutboundMessageCoordinating {
+    private(set) var lastRequest: OutboundMessageRequest?
+
+    func send(
+        _ request: OutboundMessageRequest,
+        reconciliationHooks: OutboundMessageReconciliationHooks
+    ) async throws -> OutboundMessageResult? {
+        lastRequest = request
+        return .init(
+            optimisticMessageID: "optimistic-1",
+            conversationObjectURI: "x-coredata://conversation/123"
+        )
     }
 }

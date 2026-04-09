@@ -38,24 +38,10 @@ extension GmailSendService {
                 throw SendError.conversationNotFound
             }
         } else {
-            // Get account aliases only when participant-based lookup is needed.
-            let myAliases: Set<String> = {
-                let accountRequest = Account.fetchRequest()
-                accountRequest.fetchLimit = 1
-                accountRequest.fetchBatchSize = 1
-                do {
-                    if let account = try viewContext.fetch(accountRequest).first {
-                        return Set(([account.email] + account.aliasesArray).map(normalizedEmail))
-                    }
-                } catch {
-                    Log.error("Failed to fetch account for aliases", category: .coreData, error: error)
-                }
-                return []
-            }()
-
             conversation = try findOrCreateOptimisticConversation(
+                participantHash: optimisticConversation?.participantHash
+                    ?? makeOptimisticParticipantHash(from: recipients),
                 recipients: recipients,
-                myAliases: myAliases,
                 in: viewContext
             )
         }
@@ -198,16 +184,12 @@ extension GmailSendService {
     /// an immediate save on the main context.
     @MainActor
     func findOrCreateOptimisticConversation(
+        participantHash: String,
         recipients: [String],
-        myAliases: Set<String>,
         in context: NSManagedObjectContext
     ) throws -> Conversation {
-        // Build minimal headers for identity: From + To
-        let identityHeaders = recipients.map { MessageHeader(name: "To", value: $0) }
-        let identity = makeConversationIdentity(from: identityHeaders, myAliases: myAliases)
-
         let request = Conversation.fetchRequest()
-        request.predicate = NSPredicate(format: "participantHash == %@", identity.participantHash)
+        request.predicate = NSPredicate(format: "participantHash == %@", participantHash)
         request.fetchBatchSize = 10
         request.includesPendingChanges = true
 
@@ -232,6 +214,8 @@ extension GmailSendService {
             return archivedConversation
         }
 
+        let identityHeaders = recipients.map { MessageHeader(name: "To", value: $0) }
+        let identity = makeConversationIdentity(from: identityHeaders, myAliases: [])
         let conversation = try ConversationFactory.create(
             for: identity,
             initialLastMessageDate: Date(),
@@ -274,6 +258,13 @@ extension GmailSendService {
         } catch {
             Log.error("Failed to obtain permanent IDs for optimistic send", category: .message, error: error)
         }
+    }
+
+    private func makeOptimisticParticipantHash(from recipients: [String]) -> String {
+        let normalizedParticipants = Array(
+            Set(recipients.map(normalizedEmail).filter { !$0.isEmpty })
+        )
+        return calculateParticipantHash(from: normalizedParticipants)
     }
 
     @MainActor

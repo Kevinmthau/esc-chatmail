@@ -33,7 +33,8 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
                     recipientEmails: ["to@example.com"],
                     subject: "",
                     body: "  Hello world  ",
-                    attachments: []
+                    attachments: [],
+                    optimisticConversation: .participantHash("participant-hash-1")
                 )
             ),
             reconciliationHooks: .init(
@@ -50,6 +51,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.recipients, ["to@example.com"])
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.body, "Hello world")
         XCTAssertNil(snapshot.createOptimisticCalls.first?.subject)
+        XCTAssertEqual(snapshot.createOptimisticCalls.first?.optimisticConversation?.participantHash, "participant-hash-1")
         XCTAssertEqual(snapshot.sendNewCalls.count, 1)
         XCTAssertEqual(snapshot.sendNewCalls.first?.body, "Hello world")
         XCTAssertNil(snapshot.sendNewCalls.first?.subject)
@@ -95,8 +97,8 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
                                 body: "Original body"
                             )
                         ),
-                        optimisticConversation: .init(
-                            existingConversationObjectURI: conversation.objectID.uriRepresentation().absoluteString
+                        optimisticConversation: .existingConversation(
+                            conversation.objectID.uriRepresentation().absoluteString
                         )
                     ),
                     body: " Reply body ",
@@ -160,7 +162,8 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
                     forwardedHTMLBody: "<html><body><p>Forwarded HTML</p></body></html>",
                     forwardedInlineAttachmentInfos: try attachmentBuilder.buildInlineAttachmentInfos(
                         from: [inlineAttachment]
-                    )
+                    ),
+                    optimisticConversation: .participantHash("participant-hash-2")
                 )
             ),
             reconciliationHooks: .init(
@@ -175,6 +178,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         let snapshot = sendService.snapshot
         XCTAssertEqual(snapshot.createOptimisticCalls.count, 1)
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.body, "Intro line\n\nForwarded plain text")
+        XCTAssertEqual(snapshot.createOptimisticCalls.first?.optimisticConversation?.participantHash, "participant-hash-2")
         XCTAssertEqual(snapshot.sendNewCalls.count, 1)
         XCTAssertEqual(snapshot.sendNewCalls.first?.body, "Intro line\n\nForwarded plain text")
         XCTAssertEqual(snapshot.sendNewCalls.first?.subject, "Fwd: Hello")
@@ -504,7 +508,8 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         for optimisticConversation: OutboundMessageRequest.OptimisticConversationContext
     ) -> NSManagedObjectID? {
         guard let coordinator = context.persistentStoreCoordinator,
-              let url = URL(string: optimisticConversation.existingConversationObjectURI) else {
+              let objectURI = optimisticConversation.existingConversationObjectURI,
+              let url = URL(string: objectURI) else {
             return nil
         }
 
