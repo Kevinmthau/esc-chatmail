@@ -11,6 +11,9 @@ final class ComposeReplyModeContextBuilderTests: XCTestCase {
                 )
             )
         )
+        let conversationReference = ConversationReference(
+            persistentStoreURI: URL(string: "x-coredata://conversation/123")!
+        )
 
         let result = builder.build(
             input: .init(
@@ -33,7 +36,7 @@ final class ComposeReplyModeContextBuilderTests: XCTestCase {
                         body: "Original body"
                     )
                 ),
-                optimisticConversation: .existingConversation("x-coredata://conversation/123")
+                optimisticConversation: .existingConversation(conversationReference)
             )
         )
 
@@ -44,10 +47,7 @@ final class ComposeReplyModeContextBuilderTests: XCTestCase {
         XCTAssertEqual(result.outboundRequestContext.metadata.threadId, "thread-123")
         XCTAssertEqual(result.outboundRequestContext.metadata.inReplyTo, "<message-1@example.com>")
         XCTAssertEqual(result.outboundRequestContext.metadata.references, ["<older@example.com>", "<message-1@example.com>"])
-        XCTAssertEqual(
-            result.outboundRequestContext.optimisticConversation?.existingConversationObjectURI,
-            "x-coredata://conversation/123"
-        )
+        XCTAssertEqual(result.outboundRequestContext.optimisticConversation?.existingConversationReference, conversationReference)
     }
 
     private func makeTestAuthSession(userEmail: String? = nil) -> AuthSession {

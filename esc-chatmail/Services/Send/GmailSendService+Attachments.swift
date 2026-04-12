@@ -72,8 +72,8 @@ extension GmailSendService {
 
     /// Marks attachments as successfully uploaded.
     @MainActor
-    func markAttachmentsAsUploading(uris: [String]) {
-        let attachments = resolveAttachmentsForStateUpdate(from: uris)
+    func markAttachmentsAsUploading(references: [LocalAttachmentReference]) {
+        let attachments = resolveAttachmentsForStateUpdate(from: references)
         guard !attachments.isEmpty else { return }
 
         for attachment in attachments {
@@ -82,8 +82,8 @@ extension GmailSendService {
     }
 
     @MainActor
-    func markAttachmentsAsUploaded(objectURIs: [String]) {
-        let attachments = resolveAttachmentsForStateUpdate(from: objectURIs)
+    func markAttachmentsAsUploaded(references: [LocalAttachmentReference]) {
+        let attachments = resolveAttachmentsForStateUpdate(from: references)
         guard !attachments.isEmpty else { return }
 
         markAttachmentsAsUploaded(attachments)
@@ -119,14 +119,11 @@ extension GmailSendService {
     }
 
     @MainActor
-    private func resolveAttachmentsForStateUpdate(from uris: [String]) -> [Attachment] {
-        guard let coordinator = viewContext.persistentStoreCoordinator else {
-            return []
-        }
-
-        return uris.compactMap { uri in
-            guard let url = URL(string: uri),
-                  let objectID = coordinator.managedObjectID(forURIRepresentation: url) else {
+    private func resolveAttachmentsForStateUpdate(
+        from references: [LocalAttachmentReference]
+    ) -> [Attachment] {
+        references.compactMap { reference in
+            guard let objectID = reference.resolveObjectID(in: viewContext) else {
                 return nil
             }
 

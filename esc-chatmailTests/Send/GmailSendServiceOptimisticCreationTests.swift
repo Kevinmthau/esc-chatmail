@@ -46,7 +46,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
 
         let conversation = try XCTUnwrap(fetched.conversation)
         XCTAssertFalse(conversation.objectID.isTemporaryID)
-        XCTAssertEqual(handle.conversationObjectURI, conversation.objectID.uriRepresentation().absoluteString)
+        XCTAssertEqual(handle.conversationReference, ConversationReference(objectID: conversation.objectID))
 
         XCTAssertEqual(fetched.attachmentsArray.compactMap(\.id), ["local_attachment_1"])
     }
@@ -72,12 +72,12 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         let message = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
         let conversation = try XCTUnwrap(message.conversation)
         XCTAssertEqual(conversation.objectID, archivedConversation.objectID)
-        XCTAssertEqual(handle.conversationObjectURI, conversation.objectID.uriRepresentation().absoluteString)
+        XCTAssertEqual(handle.conversationReference, ConversationReference(objectID: conversation.objectID))
         XCTAssertNil(conversation.archivedAt)
         XCTAssertTrue(context.hasChanges, "Reactivating the conversation and inserting the optimistic message should remain unsaved until the send flow persists it.")
     }
 
-    func testCreateOptimisticMessage_withOptimisticConversationContextReusesExistingConversation() async throws {
+    func testCreateOptimisticMessage_withOptimisticConversationReferenceReusesExistingConversation() async throws {
         let context = coreDataStack.viewContext
         let conversation = ConversationBuilder()
             .withDisplayName("Reply Thread")
@@ -91,14 +91,12 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
             body: "anchored reply",
             subject: "Re: Hello",
             threadId: "thread-123",
-            optimisticConversation: .existingConversation(
-                conversation.objectID.uriRepresentation().absoluteString
-            )
+            optimisticConversation: .existingConversation(ConversationReference(objectID: conversation.objectID))
         )
 
         let message = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
         XCTAssertEqual(message.conversation?.objectID, conversation.objectID)
-        XCTAssertEqual(handle.conversationObjectURI, conversation.objectID.uriRepresentation().absoluteString)
+        XCTAssertEqual(handle.conversationReference, ConversationReference(objectID: conversation.objectID))
         XCTAssertEqual(message.gmThreadId, "thread-123")
         XCTAssertTrue(context.hasChanges, "Anchored optimistic replies should stay unsaved until the background send path persists them.")
     }

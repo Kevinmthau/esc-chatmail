@@ -37,7 +37,7 @@ final class ChatViewModel: ObservableObject {
     private let conversationObjectID: NSManagedObjectID
     private let conversationContext: NSManagedObjectContext?
     private let conversationDisplayNameHint: String?
-    private let replyOptimisticConversation: OutboundMessageRequest.OptimisticConversationContext
+    private let replyOptimisticConversation: OptimisticConversationReference
     private let processedTextCache: ProcessedTextCache
     private let contactsResolver: any ContactsResolving
     private var replyingToSnapshot: ReplyTargetSnapshot?
@@ -69,7 +69,7 @@ final class ChatViewModel: ObservableObject {
         self.conversationContext = conversation.managedObjectContext
         self.conversationDisplayNameHint = conversation.displayName
         self.replyOptimisticConversation = .existingConversation(
-            conversation.objectID.uriRepresentation().absoluteString
+            ConversationReference(objectID: conversation.objectID)
         )
         self.processedTextCache = dependencies.processedTextCache
         self.contactsResolver = dependencies.contactsResolver

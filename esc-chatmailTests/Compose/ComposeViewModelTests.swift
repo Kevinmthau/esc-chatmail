@@ -66,7 +66,11 @@ final class ComposeViewModelTests: XCTestCase {
                     latestThreadId: "thread-123"
                 ),
                 replyingTo: nil,
-                optimisticConversation: .existingConversation("x-coredata://conversation/123")
+                optimisticConversation: .existingConversation(
+                    ConversationReference(
+                        persistentStoreURI: URL(string: "x-coredata://conversation/123")!
+                    )
+                )
             )
         )
         let viewModel = ComposeViewModel(mode: .reply(replyModeContext), deps: deps)
@@ -146,9 +150,9 @@ final class ComposeViewModelTests: XCTestCase {
         guard case .compose(let request)? = coordinator.lastRequest else {
             return XCTFail("Expected compose request")
         }
-        XCTAssertEqual(request.recipientEmails, ["Friend@example.com"])
+        XCTAssertEqual(request.recipientEmails, ["friend@example.com"])
         XCTAssertEqual(
-            request.optimisticConversation?.participantHash,
+            request.optimisticConversation?.participantHashValue,
             calculateParticipantHash(from: [EmailNormalizer.normalize("Friend@example.com")])
         )
     }
@@ -165,7 +169,9 @@ private final class MockOutboundMessageCoordinator: OutboundMessageCoordinating 
         lastRequest = request
         return .init(
             optimisticMessageID: "optimistic-1",
-            conversationObjectURI: "x-coredata://conversation/123"
+            conversationReference: ConversationReference(
+                persistentStoreURI: URL(string: "x-coredata://conversation/123")!
+            )
         )
     }
 }

@@ -25,7 +25,7 @@ final class ComposeViewModel: ObservableObject {
                 return c1.initialRecipients == c2.initialRecipients &&
                     c1.outboundRequestContext.metadata.threadId == c2.outboundRequestContext.metadata.threadId &&
                     c1.outboundRequestContext.metadata.inReplyTo == c2.outboundRequestContext.metadata.inReplyTo &&
-                    c1.outboundRequestContext.optimisticConversation?.existingConversationObjectURI == c2.outboundRequestContext.optimisticConversation?.existingConversationObjectURI
+                    c1.outboundRequestContext.optimisticConversation?.existingConversationReference == c2.outboundRequestContext.optimisticConversation?.existingConversationReference
             default: return false
             }
         }
@@ -39,7 +39,7 @@ final class ComposeViewModel: ObservableObject {
     @Published var error: Error?
     @Published var showError = false
     @Published var skippedForwardAttachmentCount = 0
-    private(set) var lastSentConversationObjectURI: String?
+    private(set) var lastSentConversationReference: ConversationReference?
     private var hasSetupMode = false
 
     private var cancellables = Set<AnyCancellable>()
@@ -220,7 +220,7 @@ final class ComposeViewModel: ObservableObject {
     // MARK: - Send Message
 
     func send() async -> Bool {
-        lastSentConversationObjectURI = nil
+        lastSentConversationReference = nil
         guard canSend else { return false }
 
         isSending = true
@@ -243,7 +243,7 @@ final class ComposeViewModel: ObservableObject {
             return false
         }
 
-        lastSentConversationObjectURI = result.conversationObjectURI
+        lastSentConversationReference = result.conversationReference
         isSending = false
         return true
     }
@@ -257,7 +257,7 @@ final class ComposeViewModel: ObservableObject {
                     subject: subject,
                     body: body,
                     attachments: try outboundAttachmentContextBuilder.buildSendAttachments(from: attachments),
-                    optimisticConversation: makeOptimisticConversationContext(forRecipients: recipientEmails)
+                    optimisticConversation: makeOptimisticConversationReference(forRecipients: recipientEmails)
                 )
             )
 
@@ -271,7 +271,7 @@ final class ComposeViewModel: ObservableObject {
                     forwardedPlainTextBody: forwardedPlainTextBody,
                     forwardedHTMLBody: forwardedHTMLBody,
                     forwardedInlineAttachmentInfos: forwardedInlineAttachmentInfos,
-                    optimisticConversation: makeOptimisticConversationContext(forRecipients: recipientEmails)
+                    optimisticConversation: makeOptimisticConversationReference(forRecipients: recipientEmails)
                 )
             )
 
@@ -286,9 +286,9 @@ final class ComposeViewModel: ObservableObject {
         }
     }
 
-    private func makeOptimisticConversationContext(
+    private func makeOptimisticConversationReference(
         forRecipients recipients: [String]
-    ) -> OutboundMessageRequest.OptimisticConversationContext? {
+    ) -> OptimisticConversationReference? {
         let normalizedParticipants = Array(
             Set(recipients.map(EmailNormalizer.normalize).filter { !$0.isEmpty })
         )

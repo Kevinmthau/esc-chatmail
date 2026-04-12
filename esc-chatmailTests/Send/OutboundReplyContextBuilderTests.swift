@@ -8,6 +8,9 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         let builder = OutboundReplyContextBuilder(
             replyMetadataBuilder: ReplyMetadataBuilder(authSession: authSession)
         )
+        let conversationReference = ConversationReference(
+            persistentStoreURI: URL(string: "x-coredata://conversation/123")!
+        )
 
         let replyContext = builder.build(
             conversation: .init(
@@ -26,7 +29,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
                     body: "Original body"
                 )
             ),
-            optimisticConversation: .existingConversation("x-coredata://conversation/123")
+            optimisticConversation: .existingConversation(conversationReference)
         )
 
         XCTAssertEqual(replyContext.metadata.recipientEmails, ["friend@example.com"])
@@ -37,10 +40,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertEqual(replyContext.metadata.originalMessage?.senderName, "Friend")
         XCTAssertEqual(replyContext.metadata.originalMessage?.senderEmail, "friend@example.com")
         XCTAssertEqual(replyContext.metadata.originalMessage?.body, "Original body")
-        XCTAssertEqual(
-            replyContext.optimisticConversation?.existingConversationObjectURI,
-            "x-coredata://conversation/123"
-        )
+        XCTAssertEqual(replyContext.optimisticConversation?.existingConversationReference, conversationReference)
     }
 
     private func makeTestAuthSession(userEmail: String? = nil) -> AuthSession {

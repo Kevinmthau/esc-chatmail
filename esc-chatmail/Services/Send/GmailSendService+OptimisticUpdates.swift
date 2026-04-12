@@ -14,7 +14,7 @@ extension GmailSendService {
         subject: String? = nil,
         threadId: String? = nil,
         attachments: [OutboundMessageRequest.AttachmentContext] = [],
-        optimisticConversation: OutboundMessageRequest.OptimisticConversationContext? = nil
+        optimisticConversation: OptimisticConversationReference? = nil
     ) async throws -> OptimisticSendHandle {
         // Pre-compute values that don't need Core Data
         let messageId = UUID().uuidString
@@ -24,9 +24,7 @@ extension GmailSendService {
         let hasAttachments = !attachments.isEmpty
 
         let conversation: Conversation
-        if let existingConversationObjectID = resolveObjectID(
-            from: optimisticConversation?.existingConversationObjectURI
-        ) {
+        if let existingConversationObjectID = optimisticConversation?.existingConversationReference?.resolveObjectID(in: viewContext) {
             // Replies from an open chat should always attach to the currently visible
             // conversation so the optimistic bubble appears immediately in-thread.
             if let registered = viewContext.registeredObject(for: existingConversationObjectID) as? Conversation {
@@ -39,7 +37,7 @@ extension GmailSendService {
             }
         } else {
             conversation = try findOrCreateOptimisticConversation(
-                participantHash: optimisticConversation?.participantHash
+                participantHash: optimisticConversation?.participantHashValue
                     ?? makeOptimisticParticipantHash(from: recipients),
                 recipients: recipients,
                 in: viewContext
@@ -87,7 +85,7 @@ extension GmailSendService {
 
         return OptimisticSendHandle(
             optimisticMessageID: message.id,
-            conversationObjectURI: conversation.objectID.uriRepresentation().absoluteString
+            conversationReference: ConversationReference(objectID: conversation.objectID)
         )
     }
 
@@ -171,14 +169,14 @@ extension GmailSendService {
     @MainActor
     func handleFailedOptimisticMessage(
         byID messageID: String,
-        fallbackAttachmentObjectURIs: [String]
+        fallbackAttachmentReferences: [LocalAttachmentReference]
     ) {
         if let message = fetchMessageSync(byID: messageID) {
             handleFailedOptimisticMessage(message)
             return
         }
 
-        let fallbackAttachments = resolveAttachments(from: fallbackAttachmentObjectURIs)
+        let fallbackAttachments = resolveAttachments(from: fallbackAttachmentReferences)
         guard !fallbackAttachments.isEmpty else { return }
         markAttachmentsAsFailed(fallbackAttachments)
     }
@@ -275,26 +273,15 @@ extension GmailSendService {
         from contexts: [OutboundMessageRequest.AttachmentContext]
     ) -> [Attachment] {
         resolveAttachments(
-            from: contexts.map(\.localStateAttachmentURI)
+            from: contexts.map(\.localAttachmentReference)
         )
     }
 
     @MainActor
-    private func resolveAttachments(from uris: [String]) -> [Attachment] {
-        uris.compactMap { uri in
-            guard let objectID = resolveObjectID(from: uri) else { return nil }
+    private func resolveAttachments(from references: [LocalAttachmentReference]) -> [Attachment] {
+        references.compactMap { reference in
+            guard let objectID = reference.resolveObjectID(in: viewContext) else { return nil }
             return try? viewContext.existingObject(with: objectID) as? Attachment
         }
-    }
-
-    @MainActor
-    private func resolveObjectID(from uri: String?) -> NSManagedObjectID? {
-        guard let uri,
-              let url = URL(string: uri),
-              let coordinator = viewContext.persistentStoreCoordinator else {
-            return nil
-        }
-
-        return coordinator.managedObjectID(forURIRepresentation: url)
     }
 }

@@ -16,7 +16,7 @@ struct ComposeView: View {
 
     private let presentationStyle: PresentationStyle
     private let onOpenConversation: ((Conversation) -> Void)?
-    private let onSendConversation: ((String) -> Void)?
+    private let onSendConversation: ((ConversationReference) -> Void)?
 
     private var iMessageCanvasColor: Color {
         Color(uiColor: UIColor(red: 239/255, green: 239/255, blue: 244/255, alpha: 1))
@@ -51,7 +51,7 @@ struct ComposeView: View {
         presentationStyle: PresentationStyle = .standard,
         deps: Dependencies? = nil,
         onOpenConversation: ((Conversation) -> Void)? = nil,
-        onSendConversation: ((String) -> Void)? = nil
+        onSendConversation: ((ConversationReference) -> Void)? = nil
     ) {
         let resolvedDeps = deps ?? Dependencies.shared
         self.presentationStyle = presentationStyle
@@ -227,8 +227,8 @@ struct ComposeView: View {
     }
 
     private func handleSendSuccess() {
-        if let conversationObjectURI = viewModel.lastSentConversationObjectURI {
-            onSendConversation?(conversationObjectURI)
+        if let conversationReference = viewModel.lastSentConversationReference {
+            onSendConversation?(conversationReference)
         }
         dismiss()
     }

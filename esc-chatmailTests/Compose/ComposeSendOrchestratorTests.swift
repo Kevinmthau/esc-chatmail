@@ -11,7 +11,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
         let task = orchestrator.executeInBackground(
             input: makeInput(),
-            attachmentObjectURIs: [],
+            attachmentReferences: [],
             optimisticMessageID: "optimistic-1"
         )
         await task.value
@@ -22,6 +22,26 @@ final class ComposeSendOrchestratorTests: XCTestCase {
         XCTAssertEqual(snapshot.sendReplyCalls, 0)
         XCTAssertEqual(snapshot.markFailedCalls, 0)
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
+    }
+
+    func testExecuteInBackground_successMarksProvidedAttachmentReferencesUploaded() async {
+        let sendService = MockComposeSendService()
+        let syncPerformer = MockIncrementalSyncPerformer()
+        let orchestrator = ComposeSendOrchestrator(sendService: sendService, syncPerformer: syncPerformer)
+        let attachmentReference = LocalAttachmentReference(
+            persistentStoreURI: URL(string: "x-coredata://attachment/1")!
+        )
+
+        let task = orchestrator.executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [attachmentReference],
+            optimisticMessageID: "optimistic-1a"
+        )
+        await task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.markUploadedCalls, 1)
+        XCTAssertEqual(snapshot.uploadedAttachmentReferences, [attachmentReference])
     }
 
     func testExecuteInBackground_reply_runsSendReplyAndSync() async {
@@ -40,7 +60,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
         let task = orchestrator.executeInBackground(
             input: makeInput(body: "reply body", replyMetadata: replyMetadata),
-            attachmentObjectURIs: [],
+            attachmentReferences: [],
             optimisticMessageID: "optimistic-2"
         )
         await task.value
@@ -67,7 +87,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
         let task = orchestrator.executeInBackground(
             input: makeInput(body: "reply body", replyMetadata: replyMetadata),
-            attachmentObjectURIs: [],
+            attachmentReferences: [],
             optimisticMessageID: "optimistic-2b"
         )
         await task.value
@@ -87,7 +107,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
         let task = orchestrator.executeInBackground(
             input: makeInput(),
-            attachmentObjectURIs: [],
+            attachmentReferences: [],
             optimisticMessageID: "optimistic-3"
         )
 
@@ -108,7 +128,7 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
         let task = orchestrator.executeInBackground(
             input: makeInput(),
-            attachmentObjectURIs: [],
+            attachmentReferences: [],
             optimisticMessageID: "optimistic-failure"
         )
         await task.value
@@ -118,6 +138,27 @@ final class ComposeSendOrchestratorTests: XCTestCase {
         XCTAssertEqual(snapshot.handleFailedCalls, 1)
         XCTAssertEqual(snapshot.markFailedCalls, 0)
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 0)
+    }
+
+    func testExecuteInBackground_sendFailurePassesFallbackAttachmentReferences() async {
+        let sendService = MockComposeSendService()
+        sendService.sendNewError = GmailSendService.SendError.apiError("boom")
+        let syncPerformer = MockIncrementalSyncPerformer()
+        let orchestrator = ComposeSendOrchestrator(sendService: sendService, syncPerformer: syncPerformer)
+        let attachmentReference = LocalAttachmentReference(
+            persistentStoreURI: URL(string: "x-coredata://attachment/2")!
+        )
+
+        let task = orchestrator.executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [attachmentReference],
+            optimisticMessageID: "optimistic-failure-refs"
+        )
+        await task.value
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.handleFailedCalls, 1)
+        XCTAssertEqual(snapshot.failedAttachmentReferences, [attachmentReference])
     }
 
     private func makeInput(
@@ -153,6 +194,8 @@ private final class MockComposeSendService: ComposeSendServicing {
         let updateOptimisticCalls: Int
         let markFailedCalls: Int
         let handleFailedCalls: Int
+        let uploadedAttachmentReferences: [LocalAttachmentReference]
+        let failedAttachmentReferences: [LocalAttachmentReference]
     }
 
     private let queue = DispatchQueue(label: "ComposeSendOrchestratorTests.MockComposeSendService")
@@ -167,6 +210,8 @@ private final class MockComposeSendService: ComposeSendServicing {
     private var _updateOptimisticCalls = 0
     private var _markFailedCalls = 0
     private var _handleFailedCalls = 0
+    private var _uploadedAttachmentReferences: [LocalAttachmentReference] = []
+    private var _failedAttachmentReferences: [LocalAttachmentReference] = []
 
     var snapshot: Snapshot {
         queue.sync {
@@ -176,14 +221,19 @@ private final class MockComposeSendService: ComposeSendServicing {
                 sendReplyCalls: _sendReplyCalls,
                 updateOptimisticCalls: _updateOptimisticCalls,
                 markFailedCalls: _markFailedCalls,
-                handleFailedCalls: _handleFailedCalls
+                handleFailedCalls: _handleFailedCalls,
+                uploadedAttachmentReferences: _uploadedAttachmentReferences,
+                failedAttachmentReferences: _failedAttachmentReferences
             )
         }
     }
 
     @MainActor
-    func markAttachmentsAsUploaded(objectURIs: [String]) {
-        queue.sync { _markUploadedCalls += 1 }
+    func markAttachmentsAsUploaded(references: [LocalAttachmentReference]) {
+        queue.sync {
+            _markUploadedCalls += 1
+            _uploadedAttachmentReferences = references
+        }
     }
 
     func sendReply(
@@ -237,7 +287,13 @@ private final class MockComposeSendService: ComposeSendServicing {
     }
 
     @MainActor
-    func handleFailedOptimisticMessage(byID messageID: String, fallbackAttachmentObjectURIs: [String]) {
-        queue.sync { _handleFailedCalls += 1 }
+    func handleFailedOptimisticMessage(
+        byID messageID: String,
+        fallbackAttachmentReferences: [LocalAttachmentReference]
+    ) {
+        queue.sync {
+            _handleFailedCalls += 1
+            _failedAttachmentReferences = fallbackAttachmentReferences
+        }
     }
 }

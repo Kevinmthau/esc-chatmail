@@ -35,8 +35,8 @@ final class OutboundAttachmentContextBuilderTests: XCTestCase {
         XCTAssertEqual(contexts.map(\.info.filename), ["photo.jpg"])
         XCTAssertEqual(contexts.map(\.info.mimeType), ["image/jpeg"])
         XCTAssertEqual(
-            contexts.map(\.localStateAttachmentURI),
-            [attachment.objectID.uriRepresentation().absoluteString]
+            contexts.map(\.localAttachmentReference),
+            [LocalAttachmentReference(objectID: attachment.objectID)]
         )
     }
 }

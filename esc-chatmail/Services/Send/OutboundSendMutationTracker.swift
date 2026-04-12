@@ -20,23 +20,23 @@ protocol OutboundSendMutationTracking: AnyObject {
 final class OutboundSendMutationTracker: OutboundSendMutationTracking {
     struct PendingMutation: Identifiable, Sendable {
         let id: String
-        let conversationObjectURI: String?
+        let conversationReference: ConversationReference?
         let createdAt: Date
 
         init(
             optimisticMessageID: String,
-            conversationObjectURI: String?,
+            conversationReference: ConversationReference?,
             createdAt: Date = Date()
         ) {
             self.id = optimisticMessageID
-            self.conversationObjectURI = conversationObjectURI
+            self.conversationReference = conversationReference
             self.createdAt = createdAt
         }
     }
 
     struct FailedMutation: Identifiable, Sendable {
         let id: String
-        let conversationObjectURI: String?
+        let conversationReference: ConversationReference?
         let createdAt: Date
         let failedAt: Date
         let errorDescription: String
@@ -70,7 +70,7 @@ final class OutboundSendMutationTracker: OutboundSendMutationTracking {
         let pendingMutation = pendingMutationsByID.removeValue(forKey: failure.optimisticMessageID)
         failedMutationsByID[failure.optimisticMessageID] = FailedMutation(
             id: failure.optimisticMessageID,
-            conversationObjectURI: pendingMutation?.conversationObjectURI,
+            conversationReference: pendingMutation?.conversationReference,
             createdAt: pendingMutation?.createdAt ?? Date(),
             failedAt: Date(),
             errorDescription: failure.errorDescription

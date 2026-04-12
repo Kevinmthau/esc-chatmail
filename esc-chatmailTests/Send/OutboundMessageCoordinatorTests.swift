@@ -51,15 +51,15 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.recipients, ["to@example.com"])
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.body, "Hello world")
         XCTAssertNil(snapshot.createOptimisticCalls.first?.subject)
-        XCTAssertEqual(snapshot.createOptimisticCalls.first?.optimisticConversation?.participantHash, "participant-hash-1")
+        XCTAssertEqual(snapshot.createOptimisticCalls.first?.optimisticConversation?.participantHashValue, "participant-hash-1")
         XCTAssertEqual(snapshot.sendNewCalls.count, 1)
         XCTAssertEqual(snapshot.sendNewCalls.first?.body, "Hello world")
         XCTAssertNil(snapshot.sendNewCalls.first?.subject)
         XCTAssertEqual(snapshot.sendReplyCalls.count, 0)
-        XCTAssertNotNil(queuedSubmission.conversationObjectURI)
+        XCTAssertNotNil(queuedSubmission.conversationReference)
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
         XCTAssertEqual(mutationTracker.pendingMutationIDs, [queuedSubmission.optimisticMessageID])
-        XCTAssertEqual(mutationTracker.trackedConversationObjectURIs, [queuedSubmission.conversationObjectURI])
+        XCTAssertEqual(mutationTracker.trackedConversationReferences, [queuedSubmission.conversationReference])
         XCTAssertEqual(mutationTracker.successfulMutationIDs, [queuedSubmission.optimisticMessageID])
     }
 
@@ -99,7 +99,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
                             )
                         ),
                         optimisticConversation: .existingConversation(
-                            conversation.objectID.uriRepresentation().absoluteString
+                            ConversationReference(objectID: conversation.objectID)
                         )
                     ),
                     body: " Reply body ",
@@ -122,8 +122,8 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.subject, "Re: Original Subject")
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.threadId, "thread-123")
         XCTAssertEqual(
-            snapshot.createOptimisticCalls.first?.optimisticConversation?.existingConversationObjectURI,
-            conversation.objectID.uriRepresentation().absoluteString
+            snapshot.createOptimisticCalls.first?.optimisticConversation?.existingConversationReference,
+            ConversationReference(objectID: conversation.objectID)
         )
         XCTAssertEqual(snapshot.sendNewCalls.count, 0)
         XCTAssertEqual(snapshot.sendReplyCalls.count, 1)
@@ -135,7 +135,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.sendReplyCalls.first?.references, ["<older@example.com>", "<message-1@example.com>"])
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
         XCTAssertEqual(mutationTracker.pendingMutationIDs, [queuedSubmission.optimisticMessageID])
-        XCTAssertEqual(mutationTracker.trackedConversationObjectURIs, [queuedSubmission.conversationObjectURI])
+        XCTAssertEqual(mutationTracker.trackedConversationReferences, [queuedSubmission.conversationReference])
         XCTAssertEqual(mutationTracker.successfulMutationIDs, [queuedSubmission.optimisticMessageID])
     }
 
@@ -180,7 +180,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         let snapshot = sendService.snapshot
         XCTAssertEqual(snapshot.createOptimisticCalls.count, 1)
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.body, "Intro line\n\nForwarded plain text")
-        XCTAssertEqual(snapshot.createOptimisticCalls.first?.optimisticConversation?.participantHash, "participant-hash-2")
+        XCTAssertEqual(snapshot.createOptimisticCalls.first?.optimisticConversation?.participantHashValue, "participant-hash-2")
         XCTAssertEqual(snapshot.sendNewCalls.count, 1)
         XCTAssertEqual(snapshot.sendNewCalls.first?.body, "Intro line\n\nForwarded plain text")
         XCTAssertEqual(snapshot.sendNewCalls.first?.subject, "Fwd: Hello")
@@ -309,8 +309,8 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         let body: String
         let subject: String?
         let threadId: String?
-        let optimisticConversation: OutboundMessageRequest.OptimisticConversationContext?
-        let attachmentURIs: [String]
+        let optimisticConversation: OptimisticConversationReference?
+        let attachmentReferences: [LocalAttachmentReference]
     }
 
     struct SendNewCall {
@@ -334,7 +334,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         let createOptimisticCalls: [CreateOptimisticCall]
         let sendNewCalls: [SendNewCall]
         let sendReplyCalls: [SendReplyCall]
-        let markAttachmentsAsUploadingCalls: [[String]]
+        let markAttachmentsAsUploadingCalls: [[LocalAttachmentReference]]
     }
 
     private let context: NSManagedObjectContext
@@ -343,7 +343,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     private var createCalls: [CreateOptimisticCall] = []
     private var newCalls: [SendNewCall] = []
     private var replyCalls: [SendReplyCall] = []
-    private var markUploadingCalls: [[String]] = []
+    private var markUploadingCalls: [[LocalAttachmentReference]] = []
     var sendDelayNanoseconds: UInt64 = 0
     var sendNewError: Error?
     var sendReplyError: Error?
@@ -370,7 +370,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         subject: String?,
         threadId: String?,
         attachments: [OutboundMessageRequest.AttachmentContext],
-        optimisticConversation: OutboundMessageRequest.OptimisticConversationContext?
+        optimisticConversation: OptimisticConversationReference?
     ) async throws -> OptimisticSendHandle {
         queue.sync {
             createCalls.append(
@@ -380,7 +380,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
                     subject: subject,
                     threadId: threadId,
                     optimisticConversation: optimisticConversation,
-                    attachmentURIs: attachments.map(\.localStateAttachmentURI)
+                    attachmentReferences: attachments.map(\.localAttachmentReference)
                 )
             )
         }
@@ -408,14 +408,14 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         optimisticMessages[message.id] = message
         return OptimisticSendHandle(
             optimisticMessageID: message.id,
-            conversationObjectURI: conversation.objectID.uriRepresentation().absoluteString
+            conversationReference: ConversationReference(objectID: conversation.objectID)
         )
     }
 
     @MainActor
-    func markAttachmentsAsUploading(uris: [String]) {
+    func markAttachmentsAsUploading(references: [LocalAttachmentReference]) {
         queue.sync {
-            markUploadingCalls.append(uris)
+            markUploadingCalls.append(references)
         }
     }
 
@@ -502,23 +502,21 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     }
 
     @MainActor
-    func markAttachmentsAsUploaded(objectURIs: [String]) {}
+    func markAttachmentsAsUploaded(references: [LocalAttachmentReference]) {}
 
     @MainActor
-    func handleFailedOptimisticMessage(byID messageID: String, fallbackAttachmentObjectURIs: [String]) {
+    func handleFailedOptimisticMessage(
+        byID messageID: String,
+        fallbackAttachmentReferences: [LocalAttachmentReference]
+    ) {
         optimisticMessages[messageID] = nil
     }
 
+    @MainActor
     private func resolveObjectID(
-        for optimisticConversation: OutboundMessageRequest.OptimisticConversationContext
+        for optimisticConversation: OptimisticConversationReference
     ) -> NSManagedObjectID? {
-        guard let coordinator = context.persistentStoreCoordinator,
-              let objectURI = optimisticConversation.existingConversationObjectURI,
-              let url = URL(string: objectURI) else {
-            return nil
-        }
-
-        return coordinator.managedObjectID(forURIRepresentation: url)
+        optimisticConversation.existingConversationReference?.resolveObjectID(in: context)
     }
 }
 
@@ -526,7 +524,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
 private final class MockOutboundSendMutationTracker: OutboundSendMutationTracking {
     private var pendingMutationIDSet: Set<String> = []
     private(set) var pendingMutationIDs: [String] = []
-    private(set) var trackedConversationObjectURIs: [String?] = []
+    private(set) var trackedConversationReferences: [ConversationReference?] = []
     private(set) var successfulMutationIDs: [String] = []
     private(set) var failedMutationIDs: [String] = []
 
@@ -538,7 +536,7 @@ private final class MockOutboundSendMutationTracker: OutboundSendMutationTrackin
         failedMutationIDs.map {
             .init(
                 id: $0,
-                conversationObjectURI: nil,
+                conversationReference: nil,
                 createdAt: Date(),
                 failedAt: Date(),
                 errorDescription: "mock"
@@ -549,7 +547,7 @@ private final class MockOutboundSendMutationTracker: OutboundSendMutationTrackin
     func trackPendingMutation(_ mutation: OutboundSendMutationTracker.PendingMutation) {
         pendingMutationIDSet.insert(mutation.id)
         pendingMutationIDs.append(mutation.id)
-        trackedConversationObjectURIs.append(mutation.conversationObjectURI)
+        trackedConversationReferences.append(mutation.conversationReference)
     }
 
     func reconcileSuccess(_ success: OutboundMessageReconciliationHooks.Success) {

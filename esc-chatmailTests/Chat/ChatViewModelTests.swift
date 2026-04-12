@@ -229,8 +229,8 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(request.context.metadata.inReplyTo, "<message-1@example.com>")
         XCTAssertEqual(request.context.metadata.references, ["<older@example.com>", "<message-1@example.com>"])
         XCTAssertEqual(
-            request.context.optimisticConversation?.existingConversationObjectURI,
-            conversation.objectID.uriRepresentation().absoluteString
+            request.context.optimisticConversation?.existingConversationReference,
+            ConversationReference(objectID: conversation.objectID)
         )
         XCTAssertEqual(request.body, "Reply body")
         XCTAssertEqual(viewModel.replyText, "")
@@ -318,7 +318,9 @@ private final class MockChatOutboundMessageCoordinator: OutboundMessageCoordinat
         lastRequest = request
         return .init(
             optimisticMessageID: "optimistic-1",
-            conversationObjectURI: "x-coredata://conversation/123"
+            conversationReference: ConversationReference(
+                persistentStoreURI: URL(string: "x-coredata://conversation/123")!
+            )
         )
     }
 }

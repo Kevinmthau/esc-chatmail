@@ -13,7 +13,7 @@ struct ComposeReplyModeContextBuilder {
         let initialRecipients: [Recipient]
         let conversation: ReplyConversationSnapshot
         let replyingTo: ReplyTargetSnapshot?
-        let optimisticConversation: OutboundMessageRequest.OptimisticConversationContext?
+        let optimisticConversation: OptimisticConversationReference?
     }
 
     func build(input: Input) -> ComposeReplyModeContext {

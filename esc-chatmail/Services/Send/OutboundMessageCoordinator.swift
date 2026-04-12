@@ -5,30 +5,9 @@ enum OutboundMessageRequest {
     case forward(Forward)
     case reply(Reply)
 
-    enum OptimisticConversationContext: Equatable {
-        case existingConversation(String)
-        case participantHash(String)
-
-        var existingConversationObjectURI: String? {
-            guard case .existingConversation(let objectURI) = self else {
-                return nil
-            }
-
-            return objectURI
-        }
-
-        var participantHash: String? {
-            guard case .participantHash(let participantHash) = self else {
-                return nil
-            }
-
-            return participantHash
-        }
-    }
-
     struct AttachmentContext {
         let info: GmailSendService.AttachmentInfo
-        let localStateAttachmentURI: String
+        let localAttachmentReference: LocalAttachmentReference
     }
 
     struct ReplyMetadata: Sendable {
@@ -42,7 +21,7 @@ enum OutboundMessageRequest {
 
     struct ReplyContext {
         let metadata: ReplyMetadata
-        let optimisticConversation: OptimisticConversationContext?
+        let optimisticConversation: OptimisticConversationReference?
     }
 
     struct Compose {
@@ -50,14 +29,14 @@ enum OutboundMessageRequest {
         let subject: String?
         let body: String
         let attachments: [AttachmentContext]
-        let optimisticConversation: OptimisticConversationContext?
+        let optimisticConversation: OptimisticConversationReference?
 
         init(
             recipientEmails: [String],
             subject: String?,
             body: String,
             attachments: [AttachmentContext],
-            optimisticConversation: OptimisticConversationContext? = nil
+            optimisticConversation: OptimisticConversationReference? = nil
         ) {
             self.recipientEmails = recipientEmails
             self.subject = subject
@@ -75,7 +54,7 @@ enum OutboundMessageRequest {
         let forwardedPlainTextBody: String
         let forwardedHTMLBody: String?
         let forwardedInlineAttachmentInfos: [GmailSendService.AttachmentInfo]
-        let optimisticConversation: OptimisticConversationContext?
+        let optimisticConversation: OptimisticConversationReference?
 
         init(
             recipientEmails: [String],
@@ -85,7 +64,7 @@ enum OutboundMessageRequest {
             forwardedPlainTextBody: String,
             forwardedHTMLBody: String?,
             forwardedInlineAttachmentInfos: [GmailSendService.AttachmentInfo],
-            optimisticConversation: OptimisticConversationContext? = nil
+            optimisticConversation: OptimisticConversationReference? = nil
         ) {
             self.recipientEmails = recipientEmails
             self.subject = subject
@@ -107,7 +86,7 @@ enum OutboundMessageRequest {
 
 struct OutboundMessageResult {
     let optimisticMessageID: String
-    let conversationObjectURI: String?
+    let conversationReference: ConversationReference?
 }
 
 struct OutboundMessageReconciliationHooks: Sendable {
@@ -150,12 +129,12 @@ protocol OutboundMessageSendServicing: ComposeSendServicing {
         subject: String?,
         threadId: String?,
         attachments: [OutboundMessageRequest.AttachmentContext],
-        optimisticConversation: OutboundMessageRequest.OptimisticConversationContext?
+        optimisticConversation: OptimisticConversationReference?
     ) async throws -> OptimisticSendHandle
 
     @MainActor
     func markAttachmentsAsUploading(
-        uris: [String]
+        references: [LocalAttachmentReference]
     )
 }
 
@@ -171,7 +150,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         let threadId: String?
         let attachments: [OutboundMessageRequest.AttachmentContext]
         let inlineAttachmentInfos: [GmailSendService.AttachmentInfo]
-        let optimisticConversation: OutboundMessageRequest.OptimisticConversationContext?
+        let optimisticConversation: OptimisticConversationReference?
         let replyMetadata: OutboundMessageRequest.ReplyMetadata?
     }
 
@@ -215,12 +194,12 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         mutationTracker.trackPendingMutation(
             .init(
                 optimisticMessageID: optimisticMessageID,
-                conversationObjectURI: optimisticSendHandle.conversationObjectURI
+                conversationReference: optimisticSendHandle.conversationReference
             )
         )
         if !preparedSend.attachments.isEmpty {
             sendService.markAttachmentsAsUploading(
-                uris: preparedSend.attachments.map(\.localStateAttachmentURI)
+                references: preparedSend.attachments.map(\.localAttachmentReference)
             )
         }
 
@@ -240,7 +219,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             syncPerformer: syncPerformer
         ).executeInBackground(
             input: sendInput,
-            attachmentObjectURIs: preparedSend.attachments.map(\.localStateAttachmentURI),
+            attachmentReferences: preparedSend.attachments.map(\.localAttachmentReference),
             optimisticMessageID: optimisticMessageID,
             reconciliationHooks: effectiveHooks
         )
@@ -255,7 +234,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
 
         return OutboundMessageResult(
             optimisticMessageID: optimisticMessageID,
-            conversationObjectURI: optimisticSendHandle.conversationObjectURI
+            conversationReference: optimisticSendHandle.conversationReference
         )
     }
 
