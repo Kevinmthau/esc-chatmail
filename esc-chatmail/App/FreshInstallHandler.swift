@@ -93,7 +93,7 @@ struct FreshInstallHandler {
     private func performCleanup() async {
         Log.info("Performing fresh install cleanup...", category: .auth)
 
-        signOutFromGoogle()
+        await disconnectGoogleSession()
         await clearAuthSession()
         clearKeychain()
         await clearTokens()
@@ -105,9 +105,21 @@ struct FreshInstallHandler {
         Log.info("Fresh install cleanup complete", category: .auth)
     }
 
-    private func signOutFromGoogle() {
-        Log.debug("Signing out from Google", category: .auth)
-        GIDSignIn.sharedInstance.signOut()
+    private func disconnectGoogleSession() async {
+        Log.debug("Disconnecting Google session", category: .auth)
+
+        await withCheckedContinuation { continuation in
+            GIDSignIn.sharedInstance.disconnect { error in
+                if let error {
+                    GIDSignIn.sharedInstance.signOut()
+                    Log.warning("Failed to disconnect Google session during fresh install cleanup: \(error.localizedDescription)", category: .auth)
+                    Log.debug("Fell back to local Google sign-out during fresh install cleanup", category: .auth)
+                } else {
+                    Log.debug("Google session disconnected", category: .auth)
+                }
+                continuation.resume()
+            }
+        }
     }
 
     private func clearAuthSession() async {

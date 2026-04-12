@@ -88,13 +88,14 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     }
     
     @MainActor
-    func signIn(presenting viewController: UIViewController) async throws {
+    func signIn(presenting viewController: UIViewController, loginHint: String? = nil) async throws {
         GIDSignIn.sharedInstance.configuration = GIDConfiguration(clientID: GoogleConfig.clientId)
+        let normalizedLoginHint = Self.normalizedLoginHint(loginHint)
 
         return try await withCheckedThrowingContinuation { continuation in
             GIDSignIn.sharedInstance.signIn(
                 withPresenting: viewController,
-                hint: nil,
+                hint: normalizedLoginHint,
                 additionalScopes: GoogleConfig.additionalScopes
             ) { [weak self] result, error in
                 if let error = error {
@@ -312,6 +313,13 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         // Delegate to TokenManager for centralized token management
         let tokenManager = await MainActor.run { self.tokenManager }
         return try await tokenManager.getCurrentToken()
+    }
+
+    nonisolated static func normalizedLoginHint(_ value: String?) -> String? {
+        guard let value else { return nil }
+
+        let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedValue.isEmpty ? nil : trimmedValue
     }
 
     private func hasRequiredGmailScope(_ user: GIDGoogleUser) -> Bool {

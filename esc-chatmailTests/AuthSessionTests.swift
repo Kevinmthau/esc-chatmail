@@ -16,6 +16,19 @@ final class AuthSessionTests: XCTestCase {
         XCTAssertEqual(factory.createdManagers.first?.getCurrentTokenCallCount, 2)
     }
 
+    func testNormalizedLoginHint_trimsWhitespace() {
+        XCTAssertEqual(
+            AuthSession.normalizedLoginHint("  person@example.com \n"),
+            "person@example.com"
+        )
+    }
+
+    func testNormalizedLoginHint_returnsNilForEmptyInput() {
+        XCTAssertNil(AuthSession.normalizedLoginHint(nil))
+        XCTAssertNil(AuthSession.normalizedLoginHint(""))
+        XCTAssertNil(AuthSession.normalizedLoginHint("   \n\t"))
+    }
+
     private func makeAuthSession(
         tokenManagerProvider: @escaping @MainActor @Sendable () -> TokenManagerProtocol
     ) -> AuthSession {

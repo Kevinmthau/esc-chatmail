@@ -18,7 +18,7 @@ struct SettingsView: View {
                             VStack(alignment: .leading) {
                                 Text(email)
                                     .font(.headline)
-                                Text("Signed in")
+                                Text("Signed in. Sign out to connect a different Google account.")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -70,7 +70,7 @@ struct SettingsView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Are you sure you want to sign out?")
+                Text("Sign out to return to the Google sign-in screen, where you can connect a different account.")
             }
         }
     }

@@ -5,6 +5,7 @@ struct SignInView: View {
     @EnvironmentObject private var authSession: AuthSession
     @State private var isSigningIn = false
     @State private var errorMessage: String?
+    @State private var loginHint = ""
     
     var body: some View {
         VStack(spacing: 40) {
@@ -24,10 +25,25 @@ struct SignInView: View {
             }
             
             VStack(spacing: 16) {
+                TextField("Google account email (optional)", text: $loginHint)
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.emailAddress)
+                    .textContentType(.username)
+                    .autocorrectionDisabled()
+                    .padding()
+                    .background(Color(.secondarySystemBackground))
+                    .cornerRadius(10)
+                    .disabled(isSigningIn)
+
+                Text("If Google keeps reusing the wrong account, enter the address you want to connect before continuing.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+
                 Button(action: signIn) {
                     HStack {
                         Image(systemName: "person.badge.key")
-                        Text("Sign in with Google")
+                        Text("Continue with Google")
                     }
                     .frame(maxWidth: .infinity)
                     .padding()
@@ -67,7 +83,10 @@ struct SignInView: View {
         
         Task {
             do {
-                try await authSession.signIn(presenting: rootViewController)
+                try await authSession.signIn(
+                    presenting: rootViewController,
+                    loginHint: loginHint
+                )
             } catch {
                 await MainActor.run {
                     errorMessage = error.localizedDescription
