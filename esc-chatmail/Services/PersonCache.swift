@@ -164,6 +164,7 @@ actor PersonCache: PeriodicCleanupHandler {
     /// Clear all cached entries
     func clearCache() {
         cache.removeAll()
+        ParticipantRollupDependencyTracker.shared.invalidateAll()
     }
 
     /// Invalidates a specific cache entry by email.
@@ -171,6 +172,7 @@ actor PersonCache: PeriodicCleanupHandler {
     func invalidateEntry(for email: String) {
         let normalized = EmailNormalizer.normalize(email)
         cache.removeValue(forKey: normalized)
+        ParticipantRollupDependencyTracker.shared.invalidate(email: normalized)
     }
 
     /// Get fallback display name from email, formatted as a proper name

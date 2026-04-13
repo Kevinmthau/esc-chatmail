@@ -265,6 +265,7 @@ final class ChatViewModel: ObservableObject {
                     in: conversationContext,
                     currentUserEmail: myEmail,
                     maxParticipants: 4,
+                    participantHash: self.conversation.participantHash,
                     fallbackDisplayName: self.conversationDisplayNameHint
                 )
             } else {

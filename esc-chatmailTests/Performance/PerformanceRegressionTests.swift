@@ -104,7 +104,7 @@ final class PerformanceRegressionTests: XCTestCase {
             in: context,
             conversationCount: 220
         )
-        let conversationObjectIDs = Array(conversations.prefix(120)).map(\.objectID)
+        let snapshots = Array(conversations.prefix(120)).map(ConversationSnapshot.init(from:))
         let contactMap = makeContactMap(from: conversations)
         let loader = ParticipantLoader(
             contactsResolver: PerformanceMockContactsResolver(contactMap: contactMap),
@@ -121,18 +121,31 @@ final class PerformanceRegressionTests: XCTestCase {
         ) {
             var loadedDisplayNames: [String] = []
 
-            for objectID in conversationObjectIDs {
+            for snapshot in snapshots {
                 let info = await loader.loadParticipants(
-                    from: objectID,
+                    from: snapshot.objectID,
                     in: self.context,
                     currentUserEmail: PerformanceFixtureFactory.currentUserEmail,
                     maxParticipants: 4,
+                    participantHash: snapshot.participantHash,
                     includePhotos: false
                 )
                 loadedDisplayNames.append(info.formattedDisplayName)
             }
 
-            XCTAssertEqual(loadedDisplayNames.count, conversationObjectIDs.count)
+            for snapshot in snapshots {
+                let info = await loader.loadParticipants(
+                    from: snapshot.objectID,
+                    in: self.context,
+                    currentUserEmail: PerformanceFixtureFactory.currentUserEmail,
+                    maxParticipants: 4,
+                    participantHash: snapshot.participantHash,
+                    includePhotos: false
+                )
+                loadedDisplayNames.append(info.formattedDisplayName)
+            }
+
+            XCTAssertEqual(loadedDisplayNames.count, snapshots.count * 2)
             XCTAssertFalse(loadedDisplayNames.contains(where: \.isEmpty))
         }
     }

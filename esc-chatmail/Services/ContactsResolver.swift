@@ -141,12 +141,14 @@ actor ContactsResolver: ContactsResolving {
     public func invalidateCache(for email: String) {
         let normalizedEmail = EmailNormalizer.normalize(email)
         cache.removeObject(forKey: normalizedEmail as NSString)
+        ParticipantRollupDependencyTracker.shared.invalidate(email: normalizedEmail)
     }
 
     /// Invalidates all cached contact data.
     /// Call this if a contact was modified and we don't know which emails changed.
     public func invalidateAllCache() {
         cache.removeAllObjects()
+        ParticipantRollupDependencyTracker.shared.invalidateAll()
     }
 }
 

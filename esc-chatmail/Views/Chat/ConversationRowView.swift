@@ -11,6 +11,7 @@ struct ConversationSnapshot: Equatable {
     let snippet: String?
     let lastMessageDate: Date?
     let displayNameHint: String?
+    let participantHash: String?
 
     init(from conversation: Conversation) {
         self.objectID = conversation.objectID
@@ -19,6 +20,7 @@ struct ConversationSnapshot: Equatable {
         self.snippet = conversation.snippet
         self.lastMessageDate = conversation.lastMessageDate
         self.displayNameHint = conversation.displayName
+        self.participantHash = conversation.participantHash
     }
 }
 
@@ -31,9 +33,9 @@ struct ConversationRowView: View {
     private let conversationObjectID: NSManagedObjectID
     private let conversationContext: NSManagedObjectContext
 
-    @State private var displayName: String
-    @State private var avatarPhotos: [ProfilePhoto] = []
-    @State private var participantNames: [String] = []
+    @State private var uncachedParticipantInfo: ParticipantLoader.ParticipantInfo?
+    @State private var uncachedParticipantInfoKey: String?
+    @State private var cacheRefreshToken = 0
 
     @MainActor
     init(
@@ -48,11 +50,10 @@ struct ConversationRowView: View {
         self.participantLoader = resolvedDeps.participantLoader
         self.conversationObjectID = conversationObjectID
         self.conversationContext = conversationContext
-        self._displayName = State(initialValue: snapshot.displayNameHint ?? "")
     }
 
     var body: some View {
-        HStack(spacing: 12) {
+        let rowContent = HStack(spacing: 12) {
             // Unread indicator with fixed width container
             ZStack {
                 if snapshot.inboxUnreadCount > 0 {
@@ -106,23 +107,102 @@ struct ConversationRowView: View {
         }
         .frame(height: 88)
         .padding(.horizontal, 12)
-        .task {
-            await loadContactInfo()
+
+        if needsParticipantLoad {
+            rowContent.task(id: participantInfoKey) {
+                await loadContactInfo(for: participantInfoKey)
+            }
+        } else {
+            rowContent
         }
     }
 
-    private func loadContactInfo() async {
+    private var participantInfoKey: String {
+        [
+            conversationObjectID.uriRepresentation().absoluteString,
+            snapshot.participantHash ?? "",
+            snapshot.displayNameHint ?? "",
+            EmailNormalizer.normalize(currentUserEmail)
+        ].joined(separator: "|")
+    }
+
+    private var cachedBaseParticipantInfo: ParticipantLoader.ParticipantInfo? {
+        participantLoader.cachedParticipantInfo(
+            conversationObjectID: conversationObjectID,
+            participantHash: snapshot.participantHash,
+            currentUserEmail: currentUserEmail,
+            maxParticipants: 4,
+            fallbackDisplayName: snapshot.displayNameHint,
+            includePhotos: false
+        )
+    }
+
+    private var cachedFullParticipantInfo: ParticipantLoader.ParticipantInfo? {
+        participantLoader.cachedParticipantInfo(
+            conversationObjectID: conversationObjectID,
+            participantHash: snapshot.participantHash,
+            currentUserEmail: currentUserEmail,
+            maxParticipants: 4,
+            fallbackDisplayName: snapshot.displayNameHint,
+            includePhotos: true
+        )
+    }
+
+    private var effectiveParticipantInfo: ParticipantLoader.ParticipantInfo? {
+        cachedFullParticipantInfo
+            ?? cachedBaseParticipantInfo
+            ?? currentUncachedParticipantInfo
+    }
+
+    private var currentUncachedParticipantInfo: ParticipantLoader.ParticipantInfo? {
+        guard uncachedParticipantInfoKey == participantInfoKey else {
+            return nil
+        }
+
+        return uncachedParticipantInfo
+    }
+
+    private var displayName: String {
+        effectiveParticipantInfo?.formattedDisplayName ?? snapshot.displayNameHint ?? ""
+    }
+
+    private var participantNames: [String] {
+        effectiveParticipantInfo?.displayNames ?? []
+    }
+
+    private var avatarPhotos: [ProfilePhoto] {
+        effectiveParticipantInfo?.photos ?? []
+    }
+
+    private var needsParticipantLoad: Bool {
+        if snapshot.participantHash?.isEmpty == false {
+            return cachedFullParticipantInfo == nil
+        }
+
+        return currentUncachedParticipantInfo == nil
+    }
+
+    private func loadContactInfo(for participantInfoKey: String) async {
         let info = await participantLoader.loadParticipants(
             from: conversationObjectID,
             in: conversationContext,
             currentUserEmail: currentUserEmail,
             maxParticipants: 4,
+            participantHash: snapshot.participantHash,
             fallbackDisplayName: snapshot.displayNameHint
         )
 
-        displayName = info.formattedDisplayName
-        participantNames = info.displayNames
-        avatarPhotos = info.photos
+        guard participantInfoKey == self.participantInfoKey else { return }
+
+        if snapshot.participantHash?.isEmpty == false {
+            uncachedParticipantInfo = nil
+            uncachedParticipantInfoKey = nil
+            cacheRefreshToken &+= 1
+            return
+        }
+
+        uncachedParticipantInfo = info
+        uncachedParticipantInfoKey = participantInfoKey
     }
 
     private func formatDate(_ date: Date) -> String {
