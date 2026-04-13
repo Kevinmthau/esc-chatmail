@@ -270,17 +270,22 @@ final class VirtualScrollState: ObservableObject {
     // re-resolve background-fetched object IDs on the viewContext before caching or
     // publishing them so SwiftUI only ever sees main-context `Message` objects.
     private func resolveMessagesOnViewContext(for messageIDs: [NSManagedObjectID]) async -> [Message] {
-        let messages: [Message] = await viewContext.perform { [viewContext] in
-            messageIDs.compactMap { objectID in
-                guard let message = try? viewContext.existingObject(with: objectID) as? Message,
-                      !message.isDeleted else {
-                    return nil
+        guard !messageIDs.isEmpty else { return [] }
+
+        let resolvedMessages: [NSManagedObjectID: Message] = await viewContext.perform { [viewContext] in
+            let request = NSFetchRequest<Message>(entityName: "Message")
+            request.predicate = NSPredicate(format: "SELF IN %@", messageIDs)
+            request.fetchBatchSize = messageIDs.count
+
+            let fetchedMessages = (try? viewContext.fetch(request)) ?? []
+            return Dictionary(
+                uniqueKeysWithValues: fetchedMessages.compactMap { message in
+                    guard !message.isDeleted else { return nil }
+                    return (message.objectID, message)
                 }
-                return message
-            }
+            )
         }
 
-        let resolvedMessages = Dictionary(uniqueKeysWithValues: messages.map { ($0.objectID, $0) })
         for objectID in messageIDs {
             if let message = resolvedMessages[objectID] {
                 resolvedMessagesByID[objectID] = message
@@ -289,7 +294,7 @@ final class VirtualScrollState: ObservableObject {
             }
         }
 
-        return messages
+        return messageIDs.compactMap { resolvedMessages[$0] }
     }
 
     private func resolveCachedMessages(for messageIDs: [NSManagedObjectID]) -> [Message] {
