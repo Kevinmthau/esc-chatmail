@@ -1,5 +1,6 @@
 import XCTest
 import CoreData
+import Contacts
 @testable import esc_chatmail
 
 @MainActor
@@ -639,6 +640,129 @@ final class ParticipantLoaderTests: XCTestCase {
         XCTAssertEqual(contactsResolver.lookupCount, 2)
     }
 
+    func testLoadParticipants_invalidatesCachedRollupWhenContactStoreChanges() async throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Fallback Name")
+            .withParticipantHash(calculateParticipantHash(from: ["friend@example.com"]))
+            .build(in: context)
+
+        let friend = PersonBuilder()
+            .withEmail("friend@example.com")
+            .withDisplayName("Header Friend")
+            .build(in: context)
+
+        addConversationParticipant(person: friend, to: conversation)
+        try context.save()
+
+        let dependencyTracker = ParticipantRollupDependencyTracker()
+        let contactsResolver = CountingContactsResolving(contactMap: [:])
+        let loader = ParticipantLoader(
+            contactsResolver: contactsResolver,
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { _ in [] },
+            rollupDependencyTracker: dependencyTracker
+        )
+
+        let initial = await loader.loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            participantHash: conversation.participantHash,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: false
+        )
+
+        contactsResolver.setContact(
+            ContactMatch(
+                displayName: "Address Book Friend",
+                email: "friend@example.com",
+                imageData: nil,
+                contactIdentifier: "contact-friend"
+            ),
+            for: "friend@example.com"
+        )
+        NotificationCenter.default.post(name: .CNContactStoreDidChange, object: nil)
+
+        let updated = await loader.loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            participantHash: conversation.participantHash,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: false
+        )
+
+        XCTAssertEqual(initial.formattedDisplayName, "Friend")
+        XCTAssertEqual(updated.formattedDisplayName, "Address Book Friend")
+        XCTAssertEqual(contactsResolver.lookupCount, 2)
+    }
+
+    func testLoadParticipants_doesNotRetainRawPhotoPayloadsInRollupCache() async throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Fallback Name")
+            .withParticipantHash(calculateParticipantHash(from: ["friend@example.com"]))
+            .build(in: context)
+
+        let friend = PersonBuilder()
+            .withEmail("friend@example.com")
+            .withDisplayName("Header Friend")
+            .build(in: context)
+
+        addConversationParticipant(person: friend, to: conversation)
+        try context.save()
+
+        let dependencyTracker = ParticipantRollupDependencyTracker()
+        let contactsResolver = CountingContactsResolving(contactMap: [
+            "friend@example.com": ContactMatch(
+                displayName: "Address Book Friend",
+                email: "friend@example.com",
+                imageData: nil,
+                contactIdentifier: "contact-friend"
+            )
+        ])
+        let photoCounter = Counter()
+        let payload = Data(repeating: 0xAB, count: 1_024)
+        let loader = ParticipantLoader(
+            contactsResolver: contactsResolver,
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { emails in
+                photoCounter.increment()
+                return emails.map { _ in
+                    ProfilePhoto(source: .contacts, imageData: payload, url: nil)
+                }
+            },
+            rollupDependencyTracker: dependencyTracker
+        )
+
+        let first = await loader.loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            participantHash: conversation.participantHash,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: true
+        )
+        let second = await loader.loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            participantHash: conversation.participantHash,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: true
+        )
+
+        XCTAssertEqual(first.photos.first?.imageData, payload)
+        XCTAssertEqual(second.photos.first?.imageData, payload)
+        XCTAssertEqual(photoCounter.count, 2)
+        XCTAssertEqual(contactsResolver.lookupCount, 1)
+    }
+
     func testLoadParticipants_cachedRollupPreservesDeduplicatedContactBehavior() async throws {
         let conversation = ConversationBuilder()
             .withDisplayName("Fallback Name")
@@ -727,7 +851,7 @@ private final class MockContactsResolving: ContactsResolving, @unchecked Sendabl
 }
 
 private final class CountingContactsResolving: ContactsResolving, @unchecked Sendable {
-    private let contactMap: [String: ContactMatch]
+    private var contactMap: [String: ContactMatch]
     private let lock = NSLock()
     private var _lookupCount = 0
 
@@ -748,12 +872,26 @@ private final class CountingContactsResolving: ContactsResolving, @unchecked Sen
 
         lock.lock()
         _lookupCount += 1
+        let match = contactMap[normalized] ?? contactMap[email]
         lock.unlock()
 
-        return contactMap[normalized] ?? contactMap[email]
+        return match
     }
 
     func prewarm(emails: [String]) async {}
+
+    func setContact(_ match: ContactMatch?, for email: String) {
+        let normalized = EmailNormalizer.normalize(email)
+
+        lock.lock()
+        if let match {
+            contactMap[normalized] = match
+        } else {
+            contactMap.removeValue(forKey: normalized)
+            contactMap.removeValue(forKey: email)
+        }
+        lock.unlock()
+    }
 }
 
 private final class Counter: @unchecked Sendable {

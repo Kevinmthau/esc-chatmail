@@ -1,5 +1,6 @@
 import Foundation
 import CoreData
+import Contacts
 
 protocol ParticipantRollupDependencyTracking: AnyObject {
     func fingerprint(for emails: [String]) -> ParticipantRollupDependencyFingerprint
@@ -10,18 +11,39 @@ protocol ParticipantRollupDependencyTracking: AnyObject {
 struct ParticipantRollupDependencyFingerprint: Equatable, Sendable {
     let globalGeneration: UInt64
     let emailGenerations: [String: UInt64]
+    let contactsAuthorizationStatusRawValue: Int
 }
 
 final class ParticipantRollupDependencyTracker: ParticipantRollupDependencyTracking, @unchecked Sendable {
     static let shared = ParticipantRollupDependencyTracker()
 
     private let lock = NSLock()
+    private let notificationCenter: NotificationCenter
+    private var contactsDidChangeObserver: NSObjectProtocol?
     private var nextGeneration: UInt64 = 1
     private var globalGeneration: UInt64 = 0
     private var emailGenerations: [String: UInt64] = [:]
 
+    init(notificationCenter: NotificationCenter = .default) {
+        self.notificationCenter = notificationCenter
+        self.contactsDidChangeObserver = notificationCenter.addObserver(
+            forName: .CNContactStoreDidChange,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            self?.invalidateAll()
+        }
+    }
+
+    deinit {
+        if let contactsDidChangeObserver {
+            notificationCenter.removeObserver(contactsDidChangeObserver)
+        }
+    }
+
     func fingerprint(for emails: [String]) -> ParticipantRollupDependencyFingerprint {
         let normalizedEmails = normalizedUniqueEmails(from: emails)
+        let contactsAuthorizationStatusRawValue = CNContactStore.authorizationStatus(for: .contacts).rawValue
 
         lock.lock()
         defer { lock.unlock() }
@@ -35,7 +57,8 @@ final class ParticipantRollupDependencyTracker: ParticipantRollupDependencyTrack
 
         return ParticipantRollupDependencyFingerprint(
             globalGeneration: globalGeneration,
-            emailGenerations: versions
+            emailGenerations: versions,
+            contactsAuthorizationStatusRawValue: contactsAuthorizationStatusRawValue
         )
     }
 
@@ -602,7 +625,7 @@ final class ParticipantLoader {
             sourceEmails: cachedRollup.sourceEmails,
             dependencyFingerprint: cachedRollup.dependencyFingerprint,
             baseInfo: cachedRollup.baseInfo,
-            photoInfo: upgradedInfo,
+            photoInfo: cacheablePhotoInfo(from: upgradedInfo),
             cachedAt: cachedRollup.cachedAt,
             lastAccessedAt: now
         )
@@ -640,7 +663,7 @@ final class ParticipantLoader {
             sourceEmails: sourceEmails,
             dependencyFingerprint: rollupDependencyTracker.fingerprint(for: sourceEmails),
             baseInfo: baseInfo,
-            photoInfo: fullInfo,
+            photoInfo: cacheablePhotoInfo(from: fullInfo),
             cachedAt: now,
             lastAccessedAt: now
         )
@@ -687,6 +710,19 @@ final class ParticipantLoader {
             participantHash: effectiveParticipantHash,
             fallbackDisplayName: fallbackDisplayName
         )
+    }
+
+    private func cacheablePhotoInfo(from participantInfo: ParticipantInfo?) -> ParticipantInfo? {
+        guard let participantInfo else {
+            return nil
+        }
+
+        // Keep raw avatar bytes in ProfilePhotoResolver's bounded cache, not this rollup dictionary.
+        guard participantInfo.photos.allSatisfy({ $0.imageData == nil }) else {
+            return nil
+        }
+
+        return participantInfo
     }
 
     private func trimParticipantRollupCacheIfNeeded() {
