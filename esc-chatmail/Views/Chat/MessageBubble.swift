@@ -31,6 +31,10 @@ struct MessageBubble: View {
         )
     }
 
+    private var outgoingForwardedDisplayContent: ForwardedMessageDisplayContent? {
+        viewModel.forwardedDisplayContent ?? message.outgoingForwardedDisplayContent
+    }
+
     @MainActor
     init(
         message: Message,
@@ -76,6 +80,7 @@ struct MessageBubble: View {
                     showHTMLPreview: showHTMLPreview,
                     fullTextContent: viewModel.fullTextContent,
                     hasLoadedContent: viewModel.hasLoadedContent,
+                    forwardedDisplayContent: outgoingForwardedDisplayContent,
                     onOpenFullMessage: openFullMessage
                 )
 
@@ -127,7 +132,8 @@ struct MessageBubble: View {
 
     @ViewBuilder
     private var subjectView: some View {
-        if !(showHTMLPreview && message.isNewsletter),
+        if outgoingForwardedDisplayContent == nil,
+           !(showHTMLPreview && message.isNewsletter),
            let subject = message.subject, !subject.isEmpty {
             Text(subject)
                 .font(.footnote)
@@ -230,6 +236,7 @@ struct MessageBubble: View {
                 hasHTMLSource: message.hasHTMLSource,
                 hasAttachments: message.hasAttachments,
                 isFromMe: message.isFromMe,
+                isForwardedEmail: message.isForwardedEmail,
                 effectiveSenderEmail: effectiveSenderEmail
             )
         )

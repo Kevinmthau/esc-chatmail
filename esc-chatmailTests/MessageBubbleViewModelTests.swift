@@ -21,7 +21,8 @@ final class MessageBubbleViewModelTests: XCTestCase {
                 MessageBubbleContentResult(
                     fullTextContent: "Project update",
                     hasRichHTMLContent: true,
-                    sharedDocumentLinks: [expectedLink]
+                    sharedDocumentLinks: [expectedLink],
+                    forwardedDisplayContent: nil
                 )
             ]
         )
@@ -36,6 +37,7 @@ final class MessageBubbleViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.hasRichHTMLContent)
         XCTAssertTrue(viewModel.hasLoadedContent)
         XCTAssertEqual(viewModel.sharedDocumentLinks, [expectedLink])
+        XCTAssertNil(viewModel.forwardedDisplayContent)
     }
 
     func testLoadIfNeeded_skipsReloadForSameSignature() async {
@@ -47,7 +49,8 @@ final class MessageBubbleViewModelTests: XCTestCase {
                 MessageBubbleContentResult(
                     fullTextContent: "First load",
                     hasRichHTMLContent: false,
-                    sharedDocumentLinks: []
+                    sharedDocumentLinks: [],
+                    forwardedDisplayContent: nil
                 )
             ]
         )
@@ -74,12 +77,14 @@ final class MessageBubbleViewModelTests: XCTestCase {
                 MessageBubbleContentResult(
                     fullTextContent: "First load",
                     hasRichHTMLContent: false,
-                    sharedDocumentLinks: []
+                    sharedDocumentLinks: [],
+                    forwardedDisplayContent: nil
                 ),
                 MessageBubbleContentResult(
                     fullTextContent: "Second load",
                     hasRichHTMLContent: true,
-                    sharedDocumentLinks: []
+                    sharedDocumentLinks: [],
+                    forwardedDisplayContent: nil
                 )
             ]
         )
@@ -107,12 +112,14 @@ final class MessageBubbleViewModelTests: XCTestCase {
                 MessageBubbleContentResult(
                     fullTextContent: "Same body",
                     hasRichHTMLContent: false,
-                    sharedDocumentLinks: []
+                    sharedDocumentLinks: [],
+                    forwardedDisplayContent: nil
                 ),
                 MessageBubbleContentResult(
                     fullTextContent: "Same body",
                     hasRichHTMLContent: false,
-                    sharedDocumentLinks: []
+                    sharedDocumentLinks: [],
+                    forwardedDisplayContent: nil
                 )
             ]
         )
@@ -150,6 +157,7 @@ final class MessageBubbleViewModelTests: XCTestCase {
                 hasHTMLSource: false,
                 hasAttachments: false,
                 isFromMe: false,
+                isForwardedEmail: false,
                 effectiveSenderEmail: senderEmail
             )
         )
@@ -190,7 +198,8 @@ actor MockMessageBubbleLoader: MessageBubbleLoading {
         return MessageBubbleContentResult(
             fullTextContent: request.bodyText,
             hasRichHTMLContent: false,
-            sharedDocumentLinks: []
+            sharedDocumentLinks: [],
+            forwardedDisplayContent: nil
         )
     }
 

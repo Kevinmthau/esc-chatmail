@@ -88,4 +88,61 @@ final class MessageExtensionsTests: XCTestCase {
 
         XCTAssertEqual(message.htmlDisplayCleanupMode, .none)
     }
+
+    func testForwardedDisplaySubject_stripsForwardPrefix() {
+        let message = MessageBuilder()
+            .withSubject("FW: Fwd: Weekly update")
+            .build(in: context)
+
+        XCTAssertEqual(message.forwardedDisplaySubject, "Weekly update")
+    }
+
+    func testOutgoingForwardedDisplayContent_parsesStructuredSummary() {
+        let message = MessageBuilder()
+            .fromMe()
+            .withSubject("Fwd: Spring plans")
+            .withBody(
+                """
+                FYI
+
+                ---------- Forwarded message ---------
+                From: Jane Example &lt;jane@example.com&gt;
+                Date: Mon, Feb 16, 2026 at 5:56 PM
+                Subject: Spring plans
+                To: me@example.com
+
+                Looking forward to seeing you there.
+                """
+            )
+            .build(in: context)
+
+        XCTAssertEqual(message.outgoingForwardedDisplayContent?.leadInText, "FYI")
+        XCTAssertEqual(message.outgoingForwardedDisplayContent?.senderDisplayName, "Jane Example")
+        XCTAssertEqual(message.outgoingForwardedDisplayContent?.subject, "Spring plans")
+        XCTAssertEqual(message.outgoingForwardedDisplayContent?.recipientSummary, "me@example.com")
+        XCTAssertEqual(
+            message.outgoingForwardedDisplayContent?.previewSnippet,
+            "Looking forward to seeing you there."
+        )
+    }
+
+    func testOutgoingForwardedDisplayContent_snippetFallback_parsesFlattenedHeaders() {
+        let message = MessageBuilder()
+            .fromMe()
+            .withSubject("Fwd: Spring plans")
+            .withSnippet(
+                "FYI ---------- Forwarded message --------- From: Jane Example <jane@example.com> Date: Mon, Feb 16, 2026 at 5:56 PM Subject: Spring plans To: me@example.com, friend@example.com Looking forward to seeing you there."
+            )
+            .build(in: context)
+        message.bodyText = nil
+
+        XCTAssertEqual(message.outgoingForwardedDisplayContent?.leadInText, "FYI")
+        XCTAssertEqual(message.outgoingForwardedDisplayContent?.senderDisplayName, "Jane Example")
+        XCTAssertEqual(message.outgoingForwardedDisplayContent?.subject, "Spring plans")
+        XCTAssertEqual(message.outgoingForwardedDisplayContent?.recipientSummary, "me@example.com +1")
+        XCTAssertEqual(
+            message.outgoingForwardedDisplayContent?.previewSnippet,
+            "Looking forward to seeing you there."
+        )
+    }
 }

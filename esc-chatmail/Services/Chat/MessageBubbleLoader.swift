@@ -20,6 +20,7 @@ struct MessageBubbleContentRequest: Sendable {
     let hasHTMLSource: Bool
     let hasAttachments: Bool
     let isFromMe: Bool
+    let isForwardedEmail: Bool
     let effectiveSenderEmail: String?
 }
 
@@ -27,6 +28,7 @@ struct MessageBubbleContentResult: Sendable, Equatable {
     let fullTextContent: String?
     let hasRichHTMLContent: Bool
     let sharedDocumentLinks: [SharedDocumentLink]
+    let forwardedDisplayContent: ForwardedMessageDisplayContent?
 }
 
 struct MessageBubbleLoadContext: Sendable {
@@ -86,15 +88,30 @@ actor MessageBubbleLoader: MessageBubbleLoading {
     }
 
     func loadContent(from request: MessageBubbleContentRequest) async -> MessageBubbleContentResult {
+        let forwardedDisplayContent =
+            request.isFromMe && request.isForwardedEmail
+            ? ForwardedMessageDisplayParser.parseOutgoingForward(
+                from: request.bodyText ?? request.snippet
+            )
+            : nil
         let loadedContent = await loadProcessedContent(from: request)
+
+        let fullTextContent =
+            forwardedDisplayContent != nil
+            ? forwardedDisplayContent?.leadInText
+            : loadedContent.plainText
+        let sharedDocumentLinkBodyText = forwardedDisplayContent == nil ? request.bodyText : nil
+        let sharedDocumentLinkSnippet = forwardedDisplayContent == nil ? request.snippet : nil
+
         return MessageBubbleContentResult(
-            fullTextContent: loadedContent.plainText,
+            fullTextContent: fullTextContent,
             hasRichHTMLContent: loadedContent.hasRichContent,
             sharedDocumentLinks: extractSharedDocumentLinks(
-                preferredText: loadedContent.plainText,
-                bodyText: request.bodyText,
-                snippet: request.snippet
-            )
+                preferredText: fullTextContent,
+                bodyText: sharedDocumentLinkBodyText,
+                snippet: sharedDocumentLinkSnippet
+            ),
+            forwardedDisplayContent: forwardedDisplayContent
         )
     }
 

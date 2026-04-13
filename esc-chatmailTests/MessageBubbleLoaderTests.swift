@@ -87,6 +87,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
                 hasHTMLSource: false,
                 hasAttachments: false,
                 isFromMe: false,
+                isForwardedEmail: false,
                 effectiveSenderEmail: "newsletter@example.com"
             )
         )
@@ -165,12 +166,125 @@ final class MessageBubbleLoaderTests: XCTestCase {
                 hasHTMLSource: true,
                 hasAttachments: false,
                 isFromMe: false,
+                isForwardedEmail: false,
                 effectiveSenderEmail: "publicprograms@email.amnh.org"
             )
         )
 
         XCTAssertTrue(result.hasRichHTMLContent)
         XCTAssertTrue(result.fullTextContent?.contains("Tickets are now on sale for the 2026 Margaret Mead Film Festival") == true)
+    }
+
+    func testLoadContent_outgoingForwardedMessage_returnsStructuredForwardPreview() async {
+        let messageId = "bubble-forwarded-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: """
+                FYI
+
+                ---------- Forwarded message ---------
+                From: Jane Example &lt;jane@example.com&gt;
+                Date: Mon, Feb 16, 2026 at 5:56 PM
+                Subject: Spring plans
+                To: me@example.com
+
+                Looking forward to seeing you there.
+                """,
+                bodyStorageURI: nil,
+                snippet: "FYI ---------- Forwarded message --------- From: Jane Example",
+                hasHTMLSource: false,
+                hasAttachments: false,
+                isFromMe: true,
+                isForwardedEmail: true,
+                effectiveSenderEmail: "me@example.com"
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "FYI")
+        XCTAssertFalse(result.hasRichHTMLContent)
+        XCTAssertEqual(result.forwardedDisplayContent?.senderDisplayName, "Jane Example")
+        XCTAssertEqual(result.forwardedDisplayContent?.subject, "Spring plans")
+        XCTAssertEqual(
+            result.forwardedDisplayContent?.previewSnippet,
+            "Looking forward to seeing you there."
+        )
+        XCTAssertTrue(result.sharedDocumentLinks.isEmpty)
+    }
+
+    func testLoadContent_outgoingForwardedMessageWithoutLeadIn_avoidsRawSnippetFallback() async {
+        let messageId = "bubble-forwarded-empty-note-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: """
+                ---------- Forwarded message ---------
+                From: Jane Example &lt;jane@example.com&gt;
+                Date: Mon, Feb 16, 2026 at 5:56 PM
+                Subject: Spring plans
+
+                Looking forward to seeing you there.
+                """,
+                bodyStorageURI: nil,
+                snippet: "---------- Forwarded message --------- From: Jane Example",
+                hasHTMLSource: false,
+                hasAttachments: false,
+                isFromMe: true,
+                isForwardedEmail: true,
+                effectiveSenderEmail: "me@example.com"
+            )
+        )
+
+        XCTAssertNil(result.fullTextContent)
+        XCTAssertEqual(result.forwardedDisplayContent?.senderDisplayName, "Jane Example")
+        XCTAssertEqual(
+            result.forwardedDisplayContent?.previewSnippet,
+            "Looking forward to seeing you there."
+        )
+    }
+
+    func testLoadContent_outgoingForwardedMessageSnippetFallback_parsesFlattenedHeaders() async {
+        let messageId = "bubble-forwarded-snippet-only-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: nil,
+                bodyStorageURI: nil,
+                snippet: "FYI ---------- Forwarded message --------- From: Jane Example <jane@example.com> Date: Mon, Feb 16, 2026 at 5:56 PM Subject: Spring plans To: me@example.com, friend@example.com Looking forward to seeing you there.",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: true,
+                isForwardedEmail: true,
+                effectiveSenderEmail: "me@example.com"
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "FYI")
+        XCTAssertEqual(result.forwardedDisplayContent?.senderDisplayName, "Jane Example")
+        XCTAssertEqual(result.forwardedDisplayContent?.subject, "Spring plans")
+        XCTAssertEqual(result.forwardedDisplayContent?.recipientSummary, "me@example.com +1")
+        XCTAssertEqual(
+            result.forwardedDisplayContent?.previewSnippet,
+            "Looking forward to seeing you there."
+        )
     }
 }
 

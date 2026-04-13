@@ -490,9 +490,8 @@ extension Message {
     /// Preferred one-line preview for conversation list rows.
     /// Forwarded messages use subject-based preview for better readability.
     var conversationPreviewText: String? {
-        if isForwardedEmail, let subject = subject?.trimmingCharacters(in: .whitespacesAndNewlines), !subject.isEmpty {
-            let originalSubject = normalizedForwardSubject(from: subject)
-            return "fwd: \"\(originalSubject)\""
+        if let forwardedDisplaySubject {
+            return "fwd: \"\(forwardedDisplaySubject)\""
         }
 
         if isNewsletter, let subject = subject, !subject.isEmpty {
@@ -500,6 +499,26 @@ extension Message {
         }
 
         return cleanedSnippet ?? snippet
+    }
+
+    var forwardedDisplaySubject: String? {
+        guard isForwardedEmail,
+              let subject = subject?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !subject.isEmpty else {
+            return nil
+        }
+
+        return normalizedForwardSubject(from: subject)
+    }
+
+    var outgoingForwardedDisplayContent: ForwardedMessageDisplayContent? {
+        guard isFromMe, isForwardedEmail else {
+            return nil
+        }
+
+        return ForwardedMessageDisplayParser.parseOutgoingForward(
+            from: bodyTextValue ?? snippet
+        )
     }
 
     private func normalizedForwardSubject(from subject: String) -> String {

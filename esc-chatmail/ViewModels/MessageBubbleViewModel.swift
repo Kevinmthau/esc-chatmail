@@ -9,6 +9,7 @@ final class MessageBubbleViewModel: ObservableObject {
     @Published private(set) var fullTextContent: String?
     @Published private(set) var hasLoadedContent = false
     @Published private(set) var sharedDocumentLinks: [SharedDocumentLink] = []
+    @Published private(set) var forwardedDisplayContent: ForwardedMessageDisplayContent?
 
     private let loader: any MessageBubbleLoading
     private var loadingMessageID: String?
@@ -35,6 +36,7 @@ final class MessageBubbleViewModel: ObservableObject {
         fullTextContent = nil
         hasRichHTMLContent = false
         sharedDocumentLinks = []
+        forwardedDisplayContent = nil
         senderAvatarURL = nil
         senderImageData = nil
 
@@ -72,6 +74,7 @@ final class MessageBubbleViewModel: ObservableObject {
         fullTextContent = contentResult.fullTextContent
         hasRichHTMLContent = contentResult.hasRichHTMLContent
         sharedDocumentLinks = contentResult.sharedDocumentLinks
+        forwardedDisplayContent = contentResult.forwardedDisplayContent
         hasLoadedContent = true
     }
 

@@ -8,6 +8,7 @@ struct MessageContentView: View {
     let showHTMLPreview: Bool
     let fullTextContent: String?
     let hasLoadedContent: Bool
+    let forwardedDisplayContent: ForwardedMessageDisplayContent?
     let onOpenFullMessage: () -> Void
 
     var body: some View {
@@ -26,8 +27,10 @@ struct MessageContentView: View {
 
     @ViewBuilder
     private var textContent: some View {
-        // Avoid flashing raw/partial HTML-derived text while async content detection is still running.
-        if message.hasHTMLSource && !hasLoadedContent {
+        if let forwardedDisplay = resolvedForwardedDisplayContent {
+            forwardedTextContent(for: forwardedDisplay)
+        } else if message.hasHTMLSource && !hasLoadedContent {
+            // Avoid flashing raw/partial HTML-derived text while async content detection is still running.
             loadingPlaceholder
         } else {
             // Fallback chain:
@@ -77,6 +80,29 @@ struct MessageContentView: View {
                 .background(style.bubbleBackground(isFromMe: message.isFromMe))
                 .foregroundColor(style.textColor(isFromMe: message.isFromMe))
                 .cornerRadius(style.bubbleCornerRadius)
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Opens the full original email")
+    }
+
+    @ViewBuilder
+    private func forwardedTextContent(for content: ForwardedMessageDisplayContent) -> some View {
+        Button(action: openOriginalEmail) {
+            VStack(alignment: .leading, spacing: 10) {
+                if let leadInText = resolvedLeadInText(from: content) {
+                    Text(leadInText)
+                        .foregroundColor(style.textColor(isFromMe: message.isFromMe))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                ForwardedMessageCard(
+                    content: content,
+                    subjectFallback: message.forwardedDisplaySubject
+                )
+            }
+            .padding(style.bubblePadding)
+            .background(style.bubbleBackground(isFromMe: message.isFromMe))
+            .cornerRadius(style.bubbleCornerRadius)
         }
         .buttonStyle(.plain)
         .accessibilityHint("Opens the full original email")
@@ -146,6 +172,25 @@ struct MessageContentView: View {
     /// Avoids calling processedText() multiple times during view body evaluation.
     private var cachedProcessedText: String? {
         Self.resolvedProcessedText(bodyText: message.bodyText, snippet: message.snippet)
+    }
+
+    private var resolvedForwardedDisplayContent: ForwardedMessageDisplayContent? {
+        forwardedDisplayContent ?? message.outgoingForwardedDisplayContent
+    }
+
+    private func resolvedLeadInText(from content: ForwardedMessageDisplayContent) -> String? {
+        let baseText = content.leadInText
+        guard let baseText, !baseText.isEmpty else {
+            return nil
+        }
+
+        let compactCharLimit = style.textLineLimit == nil ? nil : 800
+        let (displayText, _) = truncatedText(
+            baseText,
+            lineLimit: style.textLineLimit,
+            charLimit: compactCharLimit
+        )
+        return displayText
     }
 
     static func resolvedProcessedText(bodyText: String?, snippet: String?) -> String? {
