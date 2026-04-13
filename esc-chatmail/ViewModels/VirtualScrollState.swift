@@ -1,10 +1,22 @@
 import SwiftUI
 import CoreData
-import Combine
+
+// `NSManagedObjectID` is the cross-context token Core Data intends us to pass
+// between queues, so this payload is safe to move across task boundaries.
+struct VirtualScrollMessagePage: @unchecked Sendable {
+    let messageIDs: [NSManagedObjectID]
+    let totalCount: Int
+}
 
 // MARK: - Virtual Scroll State
 @MainActor
 final class VirtualScrollState: ObservableObject {
+    typealias MessagePageLoader = (
+        _ conversationId: String,
+        _ range: Range<Int>,
+        _ context: NSManagedObjectContext
+    ) async -> VirtualScrollMessagePage
+
     @Published var visibleMessages: [Message] = []
     @Published var totalMessageCount = 0
     @Published var scrollPosition: Int = 0
@@ -14,8 +26,13 @@ final class VirtualScrollState: ObservableObject {
     private let configuration: VirtualScrollConfiguration
     private var messageWindow: MessageWindow?
     private let conversationId: String
-    private let coreDataStack = CoreDataStack.shared
-    private var cancellables = Set<AnyCancellable>()
+    private let viewContext: NSManagedObjectContext
+    private let makeBackgroundContext: () -> NSManagedObjectContext
+    private let pageLoader: MessagePageLoader
+
+    // Cache only view-context messages for the current window. Background contexts
+    // fetch IDs, and the UI never stores those background `Message` instances.
+    private var resolvedMessagesByID: [NSManagedObjectID: Message] = [:]
 
     // Task tracking to prevent orphaned tasks during rapid scrolling
     private let taskManager = ViewModelTaskManager()
@@ -23,7 +40,29 @@ final class VirtualScrollState: ObservableObject {
     init(conversationId: String, configuration: VirtualScrollConfiguration = .default) {
         self.conversationId = conversationId
         self.configuration = configuration
+        self.viewContext = CoreDataStack.shared.viewContext
+        self.makeBackgroundContext = { CoreDataStack.shared.newBackgroundContext() }
+        self.pageLoader = VirtualScrollState.loadMessagePage
         loadInitialMessages()
+    }
+
+    init(
+        conversationId: String,
+        configuration: VirtualScrollConfiguration = .default,
+        viewContext: NSManagedObjectContext,
+        makeBackgroundContext: @escaping () -> NSManagedObjectContext,
+        pageLoader: @escaping MessagePageLoader = VirtualScrollState.loadMessagePage,
+        autoLoad: Bool = true
+    ) {
+        self.conversationId = conversationId
+        self.configuration = configuration
+        self.viewContext = viewContext
+        self.makeBackgroundContext = makeBackgroundContext
+        self.pageLoader = pageLoader
+
+        if autoLoad {
+            loadInitialMessages()
+        }
     }
 
     /// Notifies the scroll state that a message at the given index is now visible.
@@ -43,22 +82,30 @@ final class VirtualScrollState: ObservableObject {
 
         taskManager.run("loadInitial") { [weak self] in
             guard let self = self else { return }
-            let context = coreDataStack.newBackgroundContext()
-            let (messages, total) = await loadMessages(
-                range: 0..<configuration.visibleItemCount,
-                in: context
+
+            let page = await self.pageLoader(
+                self.conversationId,
+                0..<self.configuration.visibleItemCount,
+                self.makeBackgroundContext()
             )
 
             guard !Task.isCancelled else { return }
 
-            self.visibleMessages = messages
-            self.totalMessageCount = total
-            self.messageWindow = MessageWindow(
+            let messages = await self.resolveMessagesOnViewContext(for: page.messageIDs)
+
+            guard !Task.isCancelled else { return }
+
+            let endIndex = min(page.totalCount, page.messageIDs.count)
+            let window = MessageWindow(
                 startIndex: 0,
-                endIndex: min(configuration.visibleItemCount, total),
-                messages: messages,
+                endIndex: endIndex,
+                messageIDs: page.messageIDs,
                 isLoading: false
             )
+
+            self.totalMessageCount = page.totalCount
+            self.setMessageWindow(window)
+            self.visibleMessages = messages
             self.isLoadingMore = false
         }
     }
@@ -70,12 +117,13 @@ final class VirtualScrollState: ObservableObject {
         let endIndex = min(totalMessageCount, scrollPosition + configuration.visibleItemCount + configuration.bufferSize)
 
         if window.contains(index: startIndex) && window.contains(index: endIndex - 1) {
-            // Current window is sufficient
+            // Current window is sufficient.
             let windowStart = startIndex - window.startIndex
             let windowEnd = endIndex - window.startIndex
-            visibleMessages = Array(window.messages[windowStart..<windowEnd])
+            let visibleIDs = Array(window.messageIDs[windowStart..<windowEnd])
+            visibleMessages = resolveCachedMessages(for: visibleIDs)
         } else {
-            // Need to load new window
+            // Need to load a new window.
             loadWindow(startIndex: startIndex, endIndex: endIndex)
         }
     }
@@ -88,20 +136,29 @@ final class VirtualScrollState: ObservableObject {
 
         taskManager.run("loadWindow") { [weak self] in
             guard let self = self else { return }
-            let context = coreDataStack.newBackgroundContext()
-            let (messages, _) = await loadMessages(
-                range: startIndex..<endIndex,
-                in: context
+
+            let page = await self.pageLoader(
+                self.conversationId,
+                startIndex..<endIndex,
+                self.makeBackgroundContext()
             )
 
             guard !Task.isCancelled else { return }
 
-            self.messageWindow = MessageWindow(
+            let messages = await self.resolveMessagesOnViewContext(for: page.messageIDs)
+
+            guard !Task.isCancelled else { return }
+
+            let loadedEndIndex = startIndex + page.messageIDs.count
+            let window = MessageWindow(
                 startIndex: startIndex,
-                endIndex: endIndex,
-                messages: messages,
+                endIndex: loadedEndIndex,
+                messageIDs: page.messageIDs,
                 isLoading: false
             )
+
+            self.totalMessageCount = page.totalCount
+            self.setMessageWindow(window)
             self.visibleMessages = messages
             self.placeholderIndices.removeAll()
             self.isLoadingMore = false
@@ -131,23 +188,31 @@ final class VirtualScrollState: ObservableObject {
 
         taskManager.run("preloadNext") { [weak self] in
             guard let self = self else { return }
-            let context = coreDataStack.newBackgroundContext()
-            let (messages, _) = await loadMessages(
-                range: startIndex..<endIndex,
-                in: context
+
+            let page = await self.pageLoader(
+                self.conversationId,
+                startIndex..<endIndex,
+                self.makeBackgroundContext()
             )
 
             guard !Task.isCancelled else { return }
 
+            _ = await self.resolveMessagesOnViewContext(for: page.messageIDs)
+
+            guard !Task.isCancelled else { return }
+
             guard var currentWindow = self.messageWindow else { return }
-            currentWindow.messages.append(contentsOf: messages)
+
+            currentWindow.messageIDs.append(contentsOf: page.messageIDs)
             currentWindow = MessageWindow(
                 startIndex: currentWindow.startIndex,
-                endIndex: endIndex,
-                messages: currentWindow.messages,
+                endIndex: startIndex + page.messageIDs.count,
+                messageIDs: currentWindow.messageIDs,
                 isLoading: false
             )
-            self.messageWindow = currentWindow
+
+            self.totalMessageCount = page.totalCount
+            self.setMessageWindow(currentWindow)
         }
     }
 
@@ -160,23 +225,31 @@ final class VirtualScrollState: ObservableObject {
 
         taskManager.run("preloadPrevious") { [weak self] in
             guard let self = self else { return }
-            let context = coreDataStack.newBackgroundContext()
-            let (messages, _) = await loadMessages(
-                range: startIndex..<endIndex,
-                in: context
+
+            let page = await self.pageLoader(
+                self.conversationId,
+                startIndex..<endIndex,
+                self.makeBackgroundContext()
             )
 
             guard !Task.isCancelled else { return }
 
+            _ = await self.resolveMessagesOnViewContext(for: page.messageIDs)
+
+            guard !Task.isCancelled else { return }
+
             guard var currentWindow = self.messageWindow else { return }
-            currentWindow.messages = messages + currentWindow.messages
+
+            currentWindow.messageIDs = page.messageIDs + currentWindow.messageIDs
             currentWindow = MessageWindow(
                 startIndex: startIndex,
                 endIndex: currentWindow.endIndex,
-                messages: currentWindow.messages,
+                messageIDs: currentWindow.messageIDs,
                 isLoading: false
             )
-            self.messageWindow = currentWindow
+
+            self.totalMessageCount = page.totalCount
+            self.setMessageWindow(currentWindow)
         }
     }
 
@@ -185,23 +258,94 @@ final class VirtualScrollState: ObservableObject {
         taskManager.cancelAll()
     }
 
-    private func loadMessages(range: Range<Int>, in context: NSManagedObjectContext) async -> ([Message], Int) {
-        await context.perform {
-            let request = Message.fetchRequest()
-            request.predicate = NSPredicate(format: "conversation.id == %@", self.conversationId)
-            request.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: true)]
+    private func setMessageWindow(_ window: MessageWindow) {
+        messageWindow = window
+
+        let allowedIDs = Set(window.messageIDs)
+        resolvedMessagesByID = resolvedMessagesByID.filter { allowedIDs.contains($0.key) }
+    }
+
+    // The original bug was caused by fetching `Message` instances in a background
+    // context and then storing those managed objects on `@MainActor` state. We now
+    // re-resolve background-fetched object IDs on the viewContext before caching or
+    // publishing them so SwiftUI only ever sees main-context `Message` objects.
+    private func resolveMessagesOnViewContext(for messageIDs: [NSManagedObjectID]) async -> [Message] {
+        let messages: [Message] = await viewContext.perform { [viewContext] in
+            messageIDs.compactMap { objectID in
+                guard let message = try? viewContext.existingObject(with: objectID) as? Message,
+                      !message.isDeleted else {
+                    return nil
+                }
+                return message
+            }
+        }
+
+        let resolvedMessages = Dictionary(uniqueKeysWithValues: messages.map { ($0.objectID, $0) })
+        for objectID in messageIDs {
+            if let message = resolvedMessages[objectID] {
+                resolvedMessagesByID[objectID] = message
+            } else {
+                resolvedMessagesByID.removeValue(forKey: objectID)
+            }
+        }
+
+        return messages
+    }
+
+    private func resolveCachedMessages(for messageIDs: [NSManagedObjectID]) -> [Message] {
+        messageIDs.compactMap { objectID in
+            if let cached = resolvedMessagesByID[objectID],
+               cached.managedObjectContext === viewContext,
+               !cached.isDeleted {
+                return cached
+            }
+
+            do {
+                guard let resolved = try viewContext.existingObject(with: objectID) as? Message,
+                      !resolved.isDeleted else {
+                    resolvedMessagesByID.removeValue(forKey: objectID)
+                    return nil
+                }
+
+                resolvedMessagesByID[objectID] = resolved
+                return resolved
+            } catch {
+                resolvedMessagesByID.removeValue(forKey: objectID)
+                return nil
+            }
+        }
+    }
+
+    nonisolated static func loadMessagePage(
+        conversationId: String,
+        range: Range<Int>,
+        in context: NSManagedObjectContext
+    ) async -> VirtualScrollMessagePage {
+        guard let conversationUUID = UUID(uuidString: conversationId) else {
+            return VirtualScrollMessagePage(messageIDs: [], totalCount: 0)
+        }
+
+        let predicate = NSPredicate(format: "conversation.id == %@", conversationUUID as CVarArg)
+        nonisolated(unsafe) let safePredicate = predicate
+
+        return await context.perform {
+            let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
+            request.predicate = safePredicate
+            request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: true)]
             request.fetchOffset = range.lowerBound
             request.fetchLimit = range.count
             request.fetchBatchSize = 20
+            request.resultType = .managedObjectIDResultType
 
-            let messages = (try? context.fetch(request)) ?? []
+            let messageIDs = (try? context.fetch(request)) ?? []
 
-            // Get total count using efficient count() method instead of a full fetch
-            let countRequest = Message.fetchRequest()
-            countRequest.predicate = request.predicate
-            let total = (try? context.count(for: countRequest)) ?? 0
+            // Keep count() on the background context so window sizing stays cheap and
+            // the main actor only resolves the IDs it actually needs to render.
+            let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
+            countRequest.predicate = safePredicate
+            let totalCount = (try? context.count(for: countRequest)) ?? 0
 
-            return (messages, total)
+            return VirtualScrollMessagePage(messageIDs: messageIDs, totalCount: totalCount)
         }
     }
 }
