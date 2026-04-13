@@ -392,9 +392,267 @@ final class HTMLContentLoaderTests: XCTestCase {
         }
 
         let html = result.html ?? ""
+        XCTAssertEqual(result.presentation, .html)
+        XCTAssertNil(result.nativeText)
+        XCTAssertFalse(result.canViewOriginalHTML)
         XCTAssertTrue(html.contains("Tickets are now on sale for the 2026 Margaret Mead Film Festival"))
         XCTAssertTrue(html.contains("Festival Films Include"))
         XCTAssertFalse(html.contains("<summary>See More</summary>"))
+    }
+
+    func testLoadContent_originalDisplay_fallsBackToReadableTextForDegradedTransactionalHTML() async {
+        let messageId = "html-loader-degraded-transactional-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        _ = contentHandler.saveHTML(degradedTransactionalHTML, for: messageId)
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: degradedTransactionalPlainText,
+            senderEmail: "alerts@cnb.com",
+            subject: "Zelle payment alert",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        guard case .qualityFallback = result.source else {
+            XCTFail("Expected qualityFallback source, got \(result.source)")
+            return
+        }
+
+        XCTAssertEqual(result.presentation, .nativePlainText)
+        XCTAssertNil(result.html)
+        XCTAssertTrue(result.canViewOriginalHTML)
+        XCTAssertTrue(result.nativeText?.contains("Andrew Archer sent you $100.00.") == true)
+        XCTAssertTrue(result.nativeText?.contains("https://example.com/open") == true)
+    }
+
+    func testLoadContent_previewDisplay_keepsTransactionalHTMLWhenOriginalDisplayFallsBack() async {
+        let messageId = "html-loader-degraded-preview-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        _ = contentHandler.saveHTML(degradedTransactionalHTML, for: messageId)
+
+        let previewResult = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: degradedTransactionalPlainText,
+            senderEmail: "alerts@cnb.com",
+            subject: "Zelle payment alert",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .preview
+        )
+
+        let originalResult = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: degradedTransactionalPlainText,
+            senderEmail: "alerts@cnb.com",
+            subject: "Zelle payment alert",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        XCTAssertEqual(previewResult.presentation, .html)
+        XCTAssertNotNil(previewResult.html)
+        XCTAssertTrue(previewResult.html?.contains("View Payment") == true)
+
+        XCTAssertEqual(originalResult.presentation, .nativePlainText)
+        XCTAssertNil(originalResult.html)
+        XCTAssertTrue(originalResult.nativeText?.contains("Andrew Archer sent you $100.00.") == true)
+    }
+
+    func testLoadContent_originalDisplay_keepsResponsiveHTMLWhenOnlyHeadMarkupIsHeavy() async {
+        let messageId = "html-loader-responsive-head-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let responsiveCSS = (0..<160).map { index in
+            """
+            @media only screen and (max-width: 600px) {
+              .stack-\(index) { display: block !important; width: 100% !important; }
+              .pad-\(index) { padding-left: \(index % 12)px !important; padding-right: \(index % 10)px !important; }
+            }
+            """
+        }.joined(separator: "\n")
+
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <style>
+          \(responsiveCSS)
+          </style>
+        </head>
+        <body>
+          <table width="100%"><tr><td><strong>Your monthly statement is ready.</strong></td></tr></table>
+          <table width="100%"><tr><td>Review the latest activity in the secure message center.</td></tr></table>
+        </body>
+        </html>
+        """
+        _ = contentHandler.saveHTML(html, for: messageId)
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: """
+            Example Bank account update
+
+            Your monthly statement is ready.
+            Review the latest activity in the secure message center.
+            """,
+            senderEmail: "alerts@examplebank.com",
+            subject: "Statement ready",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        XCTAssertEqual(result.presentation, .html)
+        XCTAssertNotNil(result.html)
+        XCTAssertTrue(result.html?.contains("Your monthly statement is ready.") == true)
+    }
+
+    func testLoadContent_originalDisplay_hiddenCTAContentTriggersReadableFallback() async {
+        let messageId = "html-loader-hidden-cta-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        _ = contentHandler.saveHTML(hiddenCTAHTML, for: messageId)
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: hiddenCTAPlainText,
+            senderEmail: "security@examplebank.com",
+            subject: "Verify your login",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        XCTAssertEqual(result.presentation, .nativePlainText)
+        XCTAssertTrue(result.canViewOriginalHTML)
+        XCTAssertTrue(result.nativeText?.contains("Use this verification code: 482913") == true)
+    }
+
+    func testLoadContent_cachedStorageURIResultPreservesSource() async throws {
+        let messageId = "html-loader-storage-cache-\(UUID().uuidString)"
+        let storageURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("html-loader-storage-\(UUID().uuidString).html")
+
+        defer {
+            try? FileManager.default.removeItem(at: storageURL)
+        }
+
+        try """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <p>Stored HTML token</p>
+        </body>
+        </html>
+        """.write(to: storageURL, atomically: true, encoding: .utf8)
+
+        let first = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: storageURL.absoluteString,
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        XCTAssertEqual(first.source, .storageURI)
+        XCTAssertEqual(first.presentation, .html)
+
+        try FileManager.default.removeItem(at: storageURL)
+
+        let second = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: storageURL.absoluteString,
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        XCTAssertEqual(second.source, .storageURI)
+        XCTAssertEqual(second.presentation, .html)
+        XCTAssertTrue(second.html?.contains("Stored HTML token") == true)
+    }
+
+    func testLoadContent_originalAutomaticCacheReevaluatesWhenReadableFallbackInputsChange() async {
+        let messageId = "html-loader-metadata-cache-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <style>
+            .primaryCTA { display: none; }
+          </style>
+        </head>
+        <body>
+          <table width="100%"><tr><td align="center"><img src="https://example.com/logo.png" alt="Example Bank" width="180"></td></tr></table>
+          <table width="100%"><tr><td height="64">&nbsp;</td></tr></table>
+          <table width="100%"><tr><td>A new notice is available in your secure inbox.</td></tr></table>
+          <table class="primaryCTA" width="100%"><tr><td><a href="https://example.com/verify">Open notice</a></td></tr></table>
+        </body>
+        </html>
+        """
+        _ = contentHandler.saveHTML(html, for: messageId)
+
+        let initial = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: nil,
+            senderEmail: nil,
+            subject: nil,
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        XCTAssertEqual(initial.presentation, .html)
+        XCTAssertNotNil(initial.html)
+
+        let hydrated = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: hiddenCTAPlainText,
+            senderEmail: "alerts@examplebank.com",
+            subject: "Security alert",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        XCTAssertEqual(hydrated.source, .qualityFallback)
+        XCTAssertEqual(hydrated.presentation, .nativePlainText)
+        XCTAssertTrue(hydrated.canViewOriginalHTML)
+        XCTAssertTrue(hydrated.nativeText?.contains("Use this verification code: 482913") == true)
+    }
+
+    func testLoadContent_originalDisplay_rawSourceWithDuplicatePlainTextPartsFallsBackToReadableText() async {
+        let messageId = "html-loader-duplicate-plain-\(UUID().uuidString)"
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: duplicatedPlainTextTransactionalRawSource,
+            senderEmail: "alerts@cnb.com",
+            subject: "Zelle payment alert",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        XCTAssertEqual(result.presentation, .nativePlainText)
+        XCTAssertTrue(result.canViewOriginalHTML)
+        XCTAssertTrue(result.nativeText?.contains("Andrew Archer sent you $100.00.") == true)
+        XCTAssertFalse(result.nativeText?.contains("Content-Type: text/plain") == true)
     }
 
     func testLoadContent_rawWordFlySource_originalDisplay_prefersExtractedHTMLPart() async {
@@ -416,6 +674,8 @@ final class HTMLContentLoaderTests: XCTestCase {
         }
 
         let html = result.html ?? ""
+        XCTAssertEqual(result.presentation, .html)
+        XCTAssertNil(result.nativeText)
         XCTAssertTrue(html.contains("Tickets are now on sale for the 2026 Margaret Mead Film Festival"))
         XCTAssertTrue(html.contains("Festival Films Include"))
         XCTAssertFalse(html.contains("<summary>See More</summary>"))
@@ -1019,4 +1279,125 @@ private let staleStoredFallbackHTML = """
   </details>
 </body>
 </html>
+"""
+
+private let degradedTransactionalPlainText = """
+City National Bank / Zelle payment alert
+
+Andrew Archer sent you $100.00.
+Date
+Apr 8, 2026
+Status
+Completed
+
+Review this payment in your banking app:
+https://example.com/open
+"""
+
+private let degradedTransactionalHTML = """
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    .actionButton table { display: none; }
+    body { margin: 0; padding: 0; background: #ffffff; }
+    table { border-collapse: collapse; }
+  </style>
+</head>
+<body>
+  <table width="100%"><tr><td align="center"><img src="https://example.com/logo.png" alt="City National Bank" width="180"></td></tr></table>
+  <table width="100%"><tr><td height="72">&nbsp;</td></tr></table>
+  <table width="100%"><tr><td height="96">&nbsp;</td></tr></table>
+  <table width="100%"><tr><td align="center"><img src="https://example.com/zelle.png" alt="Zelle" width="110"></td></tr></table>
+  <table width="100%"><tr><td style="font-size:14px; line-height:22px;">A payment notification is available in your secure inbox.</td></tr></table>
+  <table class="actionButton" width="100%"><tr><td><a href="https://example.com/open">View Payment</a></td></tr></table>
+  <table width="100%"><tr><td height="84">&nbsp;</td></tr></table>
+  <table width="100%"><tr><td style="font-size:11px; line-height:18px; color:#666666;">Privacy Policy | Security Center | Do not reply to this email.</td></tr></table>
+</body>
+</html>
+"""
+
+private let hiddenCTAPlainText = """
+Example Bank security alert
+
+Verify your login to continue.
+Use this verification code: 482913
+https://example.com/verify
+"""
+
+private let hiddenCTAHTML = """
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    .primaryCTA { display: none; }
+  </style>
+</head>
+<body>
+  <table width="100%"><tr><td align="center"><img src="https://example.com/logo.png" alt="Example Bank" width="180"></td></tr></table>
+  <table width="100%"><tr><td height="64">&nbsp;</td></tr></table>
+  <table width="100%"><tr><td>Please verify your login in the mobile app.</td></tr></table>
+  <table class="primaryCTA" width="100%"><tr><td><a href="https://example.com/verify">Verify now</a></td></tr></table>
+  <table width="100%"><tr><td style="font-size:11px; color:#666666;">Security Center | Privacy Policy</td></tr></table>
+</body>
+</html>
+"""
+
+private let duplicatedPlainTextTransactionalRawSource = """
+Delivered-To: person@example.com
+Received: by 2002:a05:6e04:108f:b0:3ac:63b9:5e27 with SMTP id u15csp476934imc;
+X-Received: by 2002:a05:7022:6899:b0:123:35c4:f39c with SMTP id a92af1059eb24;
+Return-Path: <alerts@cnb.com>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="dup-boundary-123"
+
+--dup-boundary-123
+Content-Type: text/plain; charset="UTF-8"
+
+City National Bank / Zelle payment alert
+
+Andrew Archer sent you $100.00.
+Date
+Apr 8, 2026
+Status
+Completed
+
+Review this payment in your banking app:
+https://example.com/open
+
+--dup-boundary-123
+Content-Type: text/plain; charset="UTF-8"
+
+City National Bank / Zelle payment alert
+
+Andrew Archer sent you $100.00.
+Date
+Apr 8, 2026
+Status
+Completed
+
+Review this payment in your banking app:
+https://example.com/open
+
+--dup-boundary-123
+Content-Type: text/html; charset="UTF-8"
+
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    .actionButton table { display: none; }
+  </style>
+</head>
+<body>
+  <table width="100%"><tr><td align="center"><img src="https://example.com/logo.png" alt="City National Bank" width="180"></td></tr></table>
+  <table width="100%"><tr><td height="72">&nbsp;</td></tr></table>
+  <table width="100%"><tr><td height="96">&nbsp;</td></tr></table>
+  <table width="100%"><tr><td>A payment notification is available in your secure inbox.</td></tr></table>
+  <table class="actionButton" width="100%"><tr><td><a href="https://example.com/open">View Payment</a></td></tr></table>
+  <table width="100%"><tr><td style="font-size:11px; color:#666666;">Privacy Policy | Security Center | Do not reply to this email.</td></tr></table>
+</body>
+</html>
+
+--dup-boundary-123--
 """

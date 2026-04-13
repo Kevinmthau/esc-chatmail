@@ -45,6 +45,10 @@ enum HTMLMeaningfulContentChecker {
         return !normalized.isEmpty
     }
 
+    static func renderableHTML(from html: String) -> String {
+        stripNonRenderableContent(from: html)
+    }
+
     private static func stripNonRenderableContent(from html: String) -> String {
         var filtered = html
             .replacingOccurrences(

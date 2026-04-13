@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 enum HTMLContentCleanupMode: String, CaseIterable, Sendable {
@@ -6,24 +7,60 @@ enum HTMLContentCleanupMode: String, CaseIterable, Sendable {
     case quotedAndSignature
 }
 
+enum HTMLLoadPresentation: String, Sendable, Equatable {
+    case html
+    case nativePlainText
+}
+
 /// Result of HTML content loading
 struct HTMLLoadResult {
     let html: String?
     let source: HTMLLoadSource
+    let presentation: HTMLLoadPresentation
+    let nativeText: String?
+    let canViewOriginalHTML: Bool
 
-    enum HTMLLoadSource {
+    enum HTMLLoadSource: Equatable {
         case messageId
         case storageURI
         case rawSourceHTML
         case recovered
+        case qualityFallback
         case plainTextFallback
         case notFound
+    }
+
+    init(
+        html: String?,
+        source: HTMLLoadSource,
+        presentation: HTMLLoadPresentation = .html,
+        nativeText: String? = nil,
+        canViewOriginalHTML: Bool = false
+    ) {
+        self.html = html
+        self.source = source
+        self.presentation = presentation
+        self.nativeText = nativeText
+        self.canViewOriginalHTML = canViewOriginalHTML
+    }
+}
+
+private final class CachedHTMLLoadResultBox {
+    let result: HTMLLoadResult
+
+    init(_ result: HTMLLoadResult) {
+        self.result = result
     }
 }
 
 private struct WrappedHTMLResult {
     let html: String
     let shouldCache: Bool
+}
+
+private enum PreparedLoadResult {
+    case html(WrappedHTMLResult)
+    case nativePlainText(String)
 }
 
 /// Service for loading HTML content from various sources
@@ -33,6 +70,7 @@ final class HTMLContentLoader {
     private let contentHandler: HTMLContentHandler
     private let sanitizer: HTMLSanitizerService
     private let remoteImageAttachmentFallback: HTMLRemoteImageAttachmentFallback
+    private let qualityEvaluator: EmailRenderQualityEvaluator
     private static let linkDetector: NSDataDetector? = {
         try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
     }()
@@ -45,18 +83,22 @@ final class HTMLContentLoader {
         )
     }()
 
-    /// In-memory cache for wrapped HTML content to avoid repeated disk I/O
-    /// Key format: "\(messageId)_\(isDarkMode)" to cache both light and dark variants
-    private let htmlCache = NSCache<NSString, NSString>()
+    /// In-memory cache for wrapped HTML content to avoid repeated disk I/O.
+    /// Keys include the display variant plus automatic original-view evaluator inputs when needed.
+    private let htmlCache = NSCache<NSString, CachedHTMLLoadResultBox>()
+    private let htmlCacheKeyLock = NSLock()
+    private var htmlCacheKeysByMessageID: [String: Set<String>] = [:]
 
     init(
         contentHandler: HTMLContentHandler = HTMLContentHandler(),
         sanitizer: HTMLSanitizerService = .shared,
-        remoteImageAttachmentFallback: HTMLRemoteImageAttachmentFallback = .shared
+        remoteImageAttachmentFallback: HTMLRemoteImageAttachmentFallback = .shared,
+        qualityEvaluator: EmailRenderQualityEvaluator = EmailRenderQualityEvaluator()
     ) {
         self.contentHandler = contentHandler
         self.sanitizer = sanitizer
         self.remoteImageAttachmentFallback = remoteImageAttachmentFallback
+        self.qualityEvaluator = qualityEvaluator
         // Limit cache to ~50MB with both count and cost limits for proper memory pressure response
         htmlCache.countLimit = 1000
         htmlCache.totalCostLimit = 50 * 1024 * 1024 // 50 MB
@@ -75,14 +117,26 @@ final class HTMLContentLoader {
         bodyStorageURI: String?,
         bodyText: String? = nil,
         senderEmail: String? = nil,
+        subject: String? = nil,
         isDarkMode: Bool,
         cleanupMode: HTMLContentCleanupMode = .none,
-        displayPurpose: HTMLDisplayPurpose = .preview
+        displayPurpose: HTMLDisplayPurpose = .preview,
+        originalHTMLPreference: OriginalEmailHTMLPreference = .automatic
     ) async -> HTMLLoadResult {
-        // Check memory cache first
-        let cacheKey = "\(messageId)_\(isDarkMode)_\(cleanupMode.rawValue)_\(displayPurpose.rawValue)" as NSString
-        if let cachedHTML = htmlCache.object(forKey: cacheKey) {
-            return HTMLLoadResult(html: cachedHTML as String, source: .messageId)
+        let normalizedFallbackText = normalizedMeaningfulPlainText(from: bodyText)
+        let cacheKey = cacheKey(
+            messageId: messageId,
+            plainText: normalizedFallbackText,
+            senderEmail: senderEmail,
+            subject: subject,
+            isDarkMode: isDarkMode,
+            cleanupMode: cleanupMode,
+            displayPurpose: displayPurpose,
+            originalHTMLPreference: originalHTMLPreference
+        )
+
+        if let cachedResult = htmlCache.object(forKey: cacheKey) {
+            return cachedResult.result
         }
 
         // Method 1: Try loading from message ID.
@@ -90,19 +144,29 @@ final class HTMLContentLoader {
         if contentHandler.htmlFileExists(for: messageId),
            let html = canonicalHTMLSource(from: contentHandler.loadHTML(for: messageId)),
            !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if let wrapped = await wrappedHTMLIfMeaningful(
+            if let prepared = await wrappedHTMLIfMeaningful(
                 html,
                 messageId: messageId,
+                plainText: normalizedFallbackText,
                 senderEmail: senderEmail,
+                subject: subject,
                 isDarkMode: isDarkMode,
                 cleanupMode: cleanupMode,
-                displayPurpose: displayPurpose
+                displayPurpose: displayPurpose,
+                originalHTMLPreference: originalHTMLPreference
             ) {
-                if wrapped.shouldCache {
-                    let cost = wrapped.html.utf8.count
-                    htmlCache.setObject(wrapped.html as NSString, forKey: cacheKey, cost: cost)
+                switch prepared {
+                case .html(let wrapped):
+                    return cachedHTMLResult(
+                        html: wrapped.html,
+                        source: .messageId,
+                        shouldCache: wrapped.shouldCache,
+                        cacheKey: cacheKey,
+                        messageId: messageId
+                    )
+                case .nativePlainText(let text):
+                    return qualityFallbackResult(text)
                 }
-                return HTMLLoadResult(html: wrapped.html, source: .messageId)
             }
             Log.debug("loadContent: Method 1 (messageId file) rejected by wrappedHTMLIfMeaningful for \(messageId) (htmlLen=\(html.count))", category: .ui)
         }
@@ -113,19 +177,29 @@ final class HTMLContentLoader {
            FileManager.default.fileExists(atPath: url.path),
            let html = canonicalHTMLSource(from: contentHandler.loadHTML(from: url)),
            !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if let wrapped = await wrappedHTMLIfMeaningful(
+            if let prepared = await wrappedHTMLIfMeaningful(
                 html,
                 messageId: messageId,
+                plainText: normalizedFallbackText,
                 senderEmail: senderEmail,
+                subject: subject,
                 isDarkMode: isDarkMode,
                 cleanupMode: cleanupMode,
-                displayPurpose: displayPurpose
+                displayPurpose: displayPurpose,
+                originalHTMLPreference: originalHTMLPreference
             ) {
-                if wrapped.shouldCache {
-                    let cost = wrapped.html.utf8.count
-                    htmlCache.setObject(wrapped.html as NSString, forKey: cacheKey, cost: cost)
+                switch prepared {
+                case .html(let wrapped):
+                    return cachedHTMLResult(
+                        html: wrapped.html,
+                        source: .storageURI,
+                        shouldCache: wrapped.shouldCache,
+                        cacheKey: cacheKey,
+                        messageId: messageId
+                    )
+                case .nativePlainText(let text):
+                    return qualityFallbackResult(text)
                 }
-                return HTMLLoadResult(html: wrapped.html, source: .storageURI)
             }
             Log.debug("loadContent: Method 2 (storageURI) rejected by wrappedHTMLIfMeaningful for \(messageId) (htmlLen=\(html.count))", category: .ui)
         }
@@ -133,53 +207,79 @@ final class HTMLContentLoader {
         // Method 3: Extract embedded HTML from raw RFC822 source stored in bodyText
         if let text = bodyText,
            let rawSourceHTML = RawEmailSourceSanitizer.extractHTMLText(from: text),
-           let wrapped = await wrappedHTMLIfMeaningful(
+           let prepared = await wrappedHTMLIfMeaningful(
                rawSourceHTML,
                messageId: messageId,
+               plainText: normalizedFallbackText,
                senderEmail: senderEmail,
+               subject: subject,
                isDarkMode: isDarkMode,
                cleanupMode: cleanupMode,
-               displayPurpose: displayPurpose
+               displayPurpose: displayPurpose,
+               originalHTMLPreference: originalHTMLPreference
            ) {
-            if wrapped.shouldCache {
-                let cost = wrapped.html.utf8.count
-                htmlCache.setObject(wrapped.html as NSString, forKey: cacheKey, cost: cost)
+            switch prepared {
+            case .html(let wrapped):
+                return cachedHTMLResult(
+                    html: wrapped.html,
+                    source: .rawSourceHTML,
+                    shouldCache: wrapped.shouldCache,
+                    cacheKey: cacheKey,
+                    messageId: messageId
+                )
+            case .nativePlainText(let text):
+                return qualityFallbackResult(text)
             }
-            return HTMLLoadResult(html: wrapped.html, source: .rawSourceHTML)
         }
 
         // Method 4: Recovery - fetch from Gmail API if local content missing
         if let html = await HTMLContentRecoveryService.shared.recoverHTMLContent(messageId: messageId),
-           let wrapped = await wrappedHTMLIfMeaningful(
+           let prepared = await wrappedHTMLIfMeaningful(
                html,
                messageId: messageId,
+               plainText: normalizedFallbackText,
                senderEmail: senderEmail,
+               subject: subject,
                isDarkMode: isDarkMode,
                cleanupMode: cleanupMode,
-               displayPurpose: displayPurpose
+               displayPurpose: displayPurpose,
+               originalHTMLPreference: originalHTMLPreference
            ) {
-            if wrapped.shouldCache {
-                let cost = wrapped.html.utf8.count
-                htmlCache.setObject(wrapped.html as NSString, forKey: cacheKey, cost: cost)
+            switch prepared {
+            case .html(let wrapped):
+                return cachedHTMLResult(
+                    html: wrapped.html,
+                    source: .recovered,
+                    shouldCache: wrapped.shouldCache,
+                    cacheKey: cacheKey,
+                    messageId: messageId
+                )
+            case .nativePlainText(let text):
+                return qualityFallbackResult(text)
             }
-            return HTMLLoadResult(html: wrapped.html, source: .recovered)
         }
 
         Log.debug("loadContent: All HTML methods failed for \(messageId), falling back to plain text (bodyText=\(bodyText?.count ?? 0) chars)", category: .ui)
 
         // Method 5: Plain text fallback (don't cache as it's trivial to generate)
-        if let text = bodyText, !text.isEmpty {
-            let normalizedText = normalizedPlainTextFallback(from: text)
-            if hasMeaningfulPlainText(normalizedText) {
-                let html = convertPlainTextToHTML(normalizedText)
-                let wrapped = sanitizer.wrapHTMLForDisplay(
-                    html,
-                    isDarkMode: isDarkMode,
-                    displayPurpose: displayPurpose
+        if let normalizedText = normalizedFallbackText {
+            if displayPurpose == .original {
+                return HTMLLoadResult(
+                    html: nil,
+                    source: .plainTextFallback,
+                    presentation: .nativePlainText,
+                    nativeText: normalizedText
                 )
-                if HTMLMeaningfulContentChecker.hasMeaningfulContent(wrapped) {
-                    return HTMLLoadResult(html: wrapped, source: .plainTextFallback)
-                }
+            }
+
+            let html = convertPlainTextToHTML(normalizedText)
+            let wrapped = sanitizer.wrapHTMLForDisplay(
+                html,
+                isDarkMode: isDarkMode,
+                displayPurpose: displayPurpose
+            )
+            if HTMLMeaningfulContentChecker.hasMeaningfulContent(wrapped) {
+                return HTMLLoadResult(html: wrapped, source: .plainTextFallback)
             }
         }
 
@@ -192,9 +292,11 @@ final class HTMLContentLoader {
         bodyStorageURI: String?,
         bodyText: String? = nil,
         senderEmail: String? = nil,
+        subject: String? = nil,
         isDarkMode: Bool,
         cleanupMode: HTMLContentCleanupMode = .none,
         displayPurpose: HTMLDisplayPurpose = .preview,
+        originalHTMLPreference: OriginalEmailHTMLPreference = .automatic,
         timeout: TimeInterval = 5.0
     ) async -> HTMLLoadResult {
         return await withTaskGroup(of: HTMLLoadResult?.self) { group in
@@ -205,9 +307,11 @@ final class HTMLContentLoader {
                     bodyStorageURI: bodyStorageURI,
                     bodyText: bodyText,
                     senderEmail: senderEmail,
+                    subject: subject,
                     isDarkMode: isDarkMode,
                     cleanupMode: cleanupMode,
-                    displayPurpose: displayPurpose
+                    displayPurpose: displayPurpose,
+                    originalHTMLPreference: originalHTMLPreference
                 )
             }
 
@@ -262,14 +366,84 @@ final class HTMLContentLoader {
 
     /// Invalidates cached HTML content for a message (both light/dark variants).
     func invalidate(messageId: String) {
-        for isDarkMode in [false, true] {
-            for cleanupMode in HTMLContentCleanupMode.allCases {
-                for displayPurpose in HTMLDisplayPurpose.allCases {
-                    let key = "\(messageId)_\(isDarkMode)_\(cleanupMode.rawValue)_\(displayPurpose.rawValue)" as NSString
-                    htmlCache.removeObject(forKey: key)
-                }
-            }
+        let keys: [String]
+        htmlCacheKeyLock.lock()
+        keys = Array(htmlCacheKeysByMessageID.removeValue(forKey: messageId) ?? [])
+        htmlCacheKeyLock.unlock()
+
+        for key in keys {
+            htmlCache.removeObject(forKey: key as NSString)
         }
+    }
+
+    private func cacheKey(
+        messageId: String,
+        plainText: String?,
+        senderEmail: String?,
+        subject: String?,
+        isDarkMode: Bool,
+        cleanupMode: HTMLContentCleanupMode,
+        displayPurpose: HTMLDisplayPurpose,
+        originalHTMLPreference: OriginalEmailHTMLPreference
+    ) -> NSString {
+        let evaluatorInputsKey: String
+        if displayPurpose == .original, originalHTMLPreference == .automatic {
+            evaluatorInputsKey = [
+                cacheFingerprint(for: plainText),
+                cacheFingerprint(for: subject),
+                cacheFingerprint(for: senderEmail)
+            ].joined(separator: "_")
+        } else {
+            evaluatorInputsKey = "static"
+        }
+
+        return "\(messageId)_\(isDarkMode)_\(cleanupMode.rawValue)_\(displayPurpose.rawValue)_\(originalHTMLPreference.rawValue)_\(evaluatorInputsKey)" as NSString
+    }
+
+    private func cacheFingerprint(for text: String?) -> String {
+        guard let text = text?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !text.isEmpty else {
+            return "nil"
+        }
+
+        return SHA256.hash(data: Data(text.utf8))
+            .prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private func cachedHTMLResult(
+        html: String,
+        source: HTMLLoadResult.HTMLLoadSource,
+        shouldCache: Bool,
+        cacheKey: NSString,
+        messageId: String
+    ) -> HTMLLoadResult {
+        let result = HTMLLoadResult(html: html, source: source)
+
+        guard shouldCache else {
+            return result
+        }
+
+        let cost = html.utf8.count
+        htmlCache.setObject(CachedHTMLLoadResultBox(result), forKey: cacheKey, cost: cost)
+
+        htmlCacheKeyLock.lock()
+        htmlCacheKeysByMessageID[messageId, default: []].insert(cacheKey as String)
+        htmlCacheKeyLock.unlock()
+
+        return result
+    }
+
+    private func qualityFallbackResult(_ text: String) -> HTMLLoadResult {
+        HTMLLoadResult(
+            html: nil,
+            source: .qualityFallback,
+            presentation: .nativePlainText,
+            nativeText: text,
+            canViewOriginalHTML: true
+        )
     }
 
     private func canonicalHTMLSource(from html: String?) -> String? {
@@ -294,11 +468,14 @@ final class HTMLContentLoader {
     private func wrappedHTMLIfMeaningful(
         _ html: String,
         messageId: String,
+        plainText: String?,
         senderEmail: String?,
+        subject: String?,
         isDarkMode: Bool,
         cleanupMode: HTMLContentCleanupMode,
-        displayPurpose: HTMLDisplayPurpose
-    ) async -> WrappedHTMLResult? {
+        displayPurpose: HTMLDisplayPurpose,
+        originalHTMLPreference: OriginalEmailHTMLPreference
+    ) async -> PreparedLoadResult? {
         let preparedHTML = prepareHTMLForDisplay(html, cleanupMode: cleanupMode)
         let rewriteImageHints = displayPurpose != .original
         let sanitizedHTML = sanitizer.sanitize(
@@ -308,6 +485,24 @@ final class HTMLContentLoader {
         guard HTMLMeaningfulContentChecker.hasMeaningfulContent(sanitizedHTML) else {
             Log.debug("wrappedHTMLIfMeaningful: sanitized HTML not meaningful for \(messageId) (len=\(sanitizedHTML.count))", category: .ui)
             return nil
+        }
+
+        if displayPurpose == .original, originalHTMLPreference == .automatic {
+            let evaluation = qualityEvaluator.evaluate(
+                html: sanitizedHTML,
+                plainText: plainText,
+                senderEmail: senderEmail,
+                subject: subject
+            )
+
+            if evaluation.presentation == .nativePlainText,
+               let fallbackText = evaluation.fallbackText {
+                Log.debug(
+                    "wrappedHTMLIfMeaningful: original quality fallback for \(messageId): \(evaluation.summary)",
+                    category: .ui
+                )
+                return .nativePlainText(fallbackText)
+            }
         }
 
         let rewrittenHTML: String
@@ -351,7 +546,7 @@ final class HTMLContentLoader {
             return nil
         }
 
-        return WrappedHTMLResult(html: wrapped, shouldCache: shouldCache)
+        return .html(WrappedHTMLResult(html: wrapped, shouldCache: shouldCache))
     }
 
     private func warmRemoteImageAttachmentFallback(in html: String, messageId: String, senderEmail: String?) {
@@ -405,6 +600,12 @@ final class HTMLContentLoader {
         guard !text.isEmpty else { return false }
         let nonWhitespace = text.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
         return !nonWhitespace.isEmpty
+    }
+
+    private func normalizedMeaningfulPlainText(from text: String?) -> String? {
+        guard let text, !text.isEmpty else { return nil }
+        let normalized = normalizedPlainTextFallback(from: text)
+        return hasMeaningfulPlainText(normalized) ? normalized : nil
     }
 
     private func looksQuotedPrintable(_ text: String) -> Bool {
