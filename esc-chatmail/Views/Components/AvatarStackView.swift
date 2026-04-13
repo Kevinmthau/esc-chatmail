@@ -5,6 +5,17 @@ import SwiftUI
 struct AvatarStackView: View {
     let avatarPhotos: [ProfilePhoto]
     let participants: [String]
+    let fallbackDisplayText: String?
+
+    init(
+        avatarPhotos: [ProfilePhoto],
+        participants: [String],
+        fallbackDisplayText: String? = nil
+    ) {
+        self.avatarPhotos = avatarPhotos
+        self.participants = participants
+        self.fallbackDisplayText = fallbackDisplayText
+    }
 
     var body: some View {
         if participants.count > 1 {
@@ -12,7 +23,11 @@ struct AvatarStackView: View {
             GroupAvatarView(avatarPhotos: avatarPhotos, participants: participants)
         } else {
             // Single conversation - show single large avatar
-            SingleAvatarView(avatarPhoto: avatarPhotos.first, participant: participants.first)
+            SingleAvatarView(
+                avatarPhoto: avatarPhotos.first,
+                participant: participants.first,
+                fallbackDisplayText: fallbackDisplayText
+            )
         }
     }
 }
@@ -22,24 +37,41 @@ struct AvatarStackView: View {
 struct SingleAvatarView: View {
     let avatarPhoto: ProfilePhoto?
     let participant: String?
+    let fallbackDisplayText: String?
+
+    init(
+        avatarPhoto: ProfilePhoto?,
+        participant: String?,
+        fallbackDisplayText: String? = nil
+    ) {
+        self.avatarPhoto = avatarPhoto
+        self.participant = participant
+        self.fallbackDisplayText = fallbackDisplayText
+    }
 
     var body: some View {
+        let initialsSource = Self.initialsSource(
+            participant: participant,
+            fallbackDisplayText: fallbackDisplayText
+        )
+
         if let photo = avatarPhoto {
             CachedAsyncImage(
                 imageData: photo.imageData,
                 imageURL: photo.url,
                 size: 44
             ) {
-                if let participant = participant {
-                    InitialsAvatarView(name: participant, style: .standard)
-                } else {
-                    Image(systemName: "person.circle.fill")
-                        .resizable()
-                        .foregroundColor(.gray)
-                }
+                fallbackAvatarView(initialsSource: initialsSource)
             }
-        } else if let participant = participant {
-            InitialsAvatarView(name: participant, style: .standard)
+        } else {
+            fallbackAvatarView(initialsSource: initialsSource)
+        }
+    }
+
+    @ViewBuilder
+    private func fallbackAvatarView(initialsSource: String?) -> some View {
+        if let initialsSource {
+            InitialsAvatarView(name: initialsSource, style: .standard)
         } else {
             Image(systemName: "person.circle.fill")
                 .resizable()
@@ -47,6 +79,78 @@ struct SingleAvatarView: View {
                 .foregroundColor(.gray)
         }
     }
+}
+
+extension SingleAvatarView {
+    enum AvatarContent: Equatable {
+        case photo
+        case initials(String)
+        case genericIcon
+    }
+
+    static func resolvedContent(
+        avatarPhoto: ProfilePhoto?,
+        participant: String?,
+        fallbackDisplayText: String?
+    ) -> AvatarContent {
+        if avatarPhoto != nil {
+            return .photo
+        }
+
+        if let initialsSource = initialsSource(
+            participant: participant,
+            fallbackDisplayText: fallbackDisplayText
+        ) {
+            return .initials(initialsSource)
+        }
+
+        return .genericIcon
+    }
+
+    static func initialsSource(
+        participant: String?,
+        fallbackDisplayText: String?
+    ) -> String? {
+        [participant, fallbackDisplayText]
+            .compactMap(usableIdentityText(from:))
+            .first
+    }
+
+    static func usableIdentityText(from rawValue: String?) -> String? {
+        guard let rawValue else { return nil }
+
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let normalizedWhitespace = trimmed.replacingOccurrences(
+            of: #"\s+"#,
+            with: " ",
+            options: .regularExpression
+        )
+
+        guard !placeholderDisplayNames.contains(normalizedWhitespace.lowercased()) else {
+            return nil
+        }
+
+        if let displayName = EmailNormalizer.extractDisplayName(from: normalizedWhitespace)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !displayName.isEmpty {
+            return displayName
+        }
+
+        if let email = EmailNormalizer.extractEmail(from: normalizedWhitespace)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !email.isEmpty {
+            return email
+        }
+
+        return normalizedWhitespace
+    }
+
+    private static let placeholderDisplayNames: Set<String> = [
+        "no participants",
+        "unknown"
+    ]
 }
 
 // MARK: - Group Avatar View (iMessage style)

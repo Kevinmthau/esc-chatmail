@@ -65,7 +65,11 @@ struct ConversationRowView: View {
             .frame(width: 10, height: 10)
 
             // Avatar stack
-            AvatarStackView(avatarPhotos: avatarPhotos, participants: participantNames)
+            AvatarStackView(
+                avatarPhotos: avatarPhotos,
+                participants: participantNames,
+                fallbackDisplayText: snapshot.displayNameHint
+            )
                 .frame(width: 44, height: 44)
 
             VStack(alignment: .leading, spacing: 3) {

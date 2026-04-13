@@ -34,7 +34,11 @@ struct OptimizedConversationRow: View {
     var body: some View {
         HStack(spacing: 16) {
             // Avatar stack with photo support
-            AvatarStackView(avatarPhotos: avatarPhotos, participants: participantNames)
+            AvatarStackView(
+                avatarPhotos: avatarPhotos,
+                participants: participantNames,
+                fallbackDisplayText: fallbackDisplayName
+            )
                 .frame(width: 44, height: 44)
 
             VStack(alignment: .leading, spacing: 4) {
