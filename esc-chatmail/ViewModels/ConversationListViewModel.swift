@@ -32,7 +32,7 @@ final class ConversationListViewModel: ObservableObject {
 
     @Published var showingComposer = false
     @Published var showingSettings = false
-    @Published private(set) var filteredConversations: [Conversation] = []
+    @Published private(set) var filteredConversationItems: [ConversationListItem] = []
 
     // MARK: - Dependencies
 
@@ -45,8 +45,10 @@ final class ConversationListViewModel: ObservableObject {
     private let personCache: PersonCache
     private let profilePhotoResolver: ProfilePhotoResolver
     private var cancellables = Set<AnyCancellable>()
+    private var conversationChangesCancellable: AnyCancellable?
     private let taskManager = ViewModelTaskManager()
-    private var sourceConversations: [Conversation] = []
+    private var listStore = ConversationListStore()
+    private weak var observedConversationContext: NSManagedObjectContext?
 
     // MARK: - Initialization
 
@@ -108,6 +110,10 @@ final class ConversationListViewModel: ObservableObject {
         set { selectionService.selectedConversationIDs = newValue }
     }
 
+    var filteredConversations: [Conversation] {
+        filteredConversationItems.compactMap { listStore.conversation(for: $0.id) }
+    }
+
     /// Cached contact emails for filtering
     var contactEmailsCache: Set<String> {
         filterService.contactEmailsCache
@@ -129,8 +135,16 @@ final class ConversationListViewModel: ObservableObject {
         selectionService.toggleSelection(for: conversation)
     }
 
+    func toggleSelection(for objectID: NSManagedObjectID) {
+        selectionService.toggleSelection(for: objectID)
+    }
+
     func selectAll(from conversations: [Conversation]) {
         selectionService.selectAll(from: conversations)
+    }
+
+    func selectAllVisibleConversations() {
+        selectionService.selectAll(conversationIDs: filteredConversationItems.map(\.id))
     }
 
     func cancelSelection() {
@@ -144,6 +158,15 @@ final class ConversationListViewModel: ObservableObject {
     // MARK: - Conversation Actions
 
     func archiveConversation(_ conversation: Conversation) {
+        archiveConversation(withID: conversation.objectID)
+    }
+
+    func archiveConversation(withID objectID: NSManagedObjectID) {
+        guard let conversation = listStore.conversation(for: objectID) ??
+                (try? conversationContext.existingObject(with: objectID) as? Conversation) else {
+            return
+        }
+
         let convID = conversation.objectID
         taskManager.run("archive-\(convID)") { [weak self] in
             guard let self = self else { return }
@@ -152,6 +175,15 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     func toggleConversationReadState(_ conversation: Conversation) {
+        toggleConversationReadState(withID: conversation.objectID)
+    }
+
+    func toggleConversationReadState(withID objectID: NSManagedObjectID) {
+        guard let conversation = listStore.conversation(for: objectID) ??
+                (try? conversationContext.existingObject(with: objectID) as? Conversation) else {
+            return
+        }
+
         let convID = conversation.objectID
         taskManager.run("toggleRead-\(convID)") { [weak self] in
             guard let self = self else { return }
@@ -174,8 +206,28 @@ final class ConversationListViewModel: ObservableObject {
     // MARK: - Filtering (Delegate to Service)
 
     func refreshConversations(_ conversations: [Conversation]) {
-        sourceConversations = conversations
-        recomputeFilteredConversations()
+        listStore.replaceAll(with: conversations, matchesVisibility: matchesVisibleConversation(_:))
+        publishVisibleItems()
+    }
+
+    func applyConversationChanges(
+        updatedConversations: [Conversation] = [],
+        deletedIDs: Set<NSManagedObjectID> = []
+    ) {
+        guard !updatedConversations.isEmpty || !deletedIDs.isEmpty else { return }
+
+        let removedIDs = listStore.applyChanges(
+            updatedConversations: updatedConversations,
+            deletedIDs: deletedIDs,
+            isSourceConversation: isSourceConversation(_:),
+            matchesVisibility: matchesVisibleConversation(_:)
+        )
+
+        if !removedIDs.isEmpty {
+            selectionService.selectedConversationIDs.subtract(removedIDs)
+        }
+
+        publishVisibleItems()
     }
 
     func isConversationWithContact(_ conversation: Conversation) -> Bool {
@@ -227,7 +279,8 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     /// Called when view appears - performs initial setup
-    func onAppear(conversations: [Conversation]) {
+    func onAppear(conversations: [Conversation], in context: NSManagedObjectContext) {
+        startObservingConversationChanges(in: context)
         refreshConversations(conversations)
 
         // Prefetch photos immediately to avoid slow avatar loading in rows
@@ -247,6 +300,9 @@ final class ConversationListViewModel: ObservableObject {
 
     /// Called when view disappears
     func onDisappear() {
+        conversationChangesCancellable?.cancel()
+        conversationChangesCancellable = nil
+        observedConversationContext = nil
         searchService.cleanup()
         selectionService.cancelTasks()
         filterService.cancelTasks()
@@ -264,9 +320,83 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     private func recomputeFilteredConversations() {
-        filteredConversations = filterService.filteredConversations(
-            from: sourceConversations,
-            searchText: searchService.debouncedSearchText
+        listStore.recomputeVisibleItems(matchesVisibility: matchesVisibleConversation(_:))
+        publishVisibleItems()
+    }
+
+    private func publishVisibleItems() {
+        let visibleItems = listStore.visibleItems
+        guard visibleItems != filteredConversationItems else { return }
+        filteredConversationItems = visibleItems
+    }
+
+    private var conversationContext: NSManagedObjectContext {
+        observedConversationContext ?? coreDataStack.viewContext
+    }
+
+    private func isSourceConversation(_ conversation: Conversation) -> Bool {
+        conversation.archivedAt == nil
+    }
+
+    private func matchesVisibleConversation(_ conversation: Conversation) -> Bool {
+        filterService.matches(conversation, searchText: searchService.debouncedSearchText)
+    }
+
+    private func startObservingConversationChanges(in context: NSManagedObjectContext) {
+        guard observedConversationContext !== context || conversationChangesCancellable == nil else {
+            return
+        }
+
+        conversationChangesCancellable?.cancel()
+        observedConversationContext = context
+        conversationChangesCancellable = NotificationCenter.default.publisher(
+            for: .NSManagedObjectContextObjectsDidChange,
+            object: context
         )
+        .sink { [weak self] notification in
+            self?.handleConversationContextChange(notification)
+        }
+    }
+
+    private func handleConversationContextChange(_ notification: Notification) {
+        guard notification.userInfo?[NSInvalidatedAllObjectsKey] == nil else {
+            listStore.removeAll()
+            selectionService.selectedConversationIDs.removeAll()
+            publishVisibleItems()
+            return
+        }
+
+        let inserted = conversationObjects(forKey: NSInsertedObjectsKey, in: notification)
+        let updated = conversationObjects(forKey: NSUpdatedObjectsKey, in: notification)
+        let refreshed = conversationObjects(forKey: NSRefreshedObjectsKey, in: notification)
+        let invalidatedIDs = conversationObjectIDs(forKey: NSInvalidatedObjectsKey, in: notification)
+        let deletedIDs = conversationObjectIDs(forKey: NSDeletedObjectsKey, in: notification)
+        let updatedConversations = uniqueConversations(from: inserted + updated + refreshed)
+        let removedIDs = deletedIDs.union(invalidatedIDs)
+
+        applyConversationChanges(updatedConversations: updatedConversations, deletedIDs: removedIDs)
+    }
+
+    private func conversationObjects(forKey key: String, in notification: Notification) -> [Conversation] {
+        let objects = notification.userInfo?[key] as? Set<NSManagedObject> ?? []
+        return objects.compactMap { $0 as? Conversation }
+    }
+
+    private func conversationObjectIDs(forKey key: String, in notification: Notification) -> Set<NSManagedObjectID> {
+        let objects = notification.userInfo?[key] as? Set<NSManagedObject> ?? []
+        return Set(objects.compactMap { object in
+            guard object is Conversation else { return nil }
+            return object.objectID
+        })
+    }
+
+    private func uniqueConversations(from conversations: [Conversation]) -> [Conversation] {
+        var uniqueByID: [NSManagedObjectID: Conversation] = [:]
+
+        for conversation in conversations {
+            uniqueByID[conversation.objectID] = conversation
+        }
+
+        return Array(uniqueByID.values)
     }
 }

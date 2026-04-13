@@ -38,27 +38,27 @@ struct ConversationListView: View {
 
     private var conversationList: some View {
         List {
-            ForEach(Array(viewModel.filteredConversations.enumerated()), id: \.element.objectID) { index, conversation in
+            ForEach(Array(viewModel.filteredConversationItems.enumerated()), id: \.element.id) { index, item in
                 if viewModel.isSelecting {
                     HStack(spacing: 0) {
-                        selectionButton(for: conversation)
-                        ConversationRowView(conversation: conversation, deps: deps)
+                        selectionButton(for: item.id)
+                        conversationRow(for: item)
                             .contentShape(Rectangle())
-                            .onTapGesture { viewModel.toggleSelection(for: conversation) }
+                            .onTapGesture { viewModel.toggleSelection(for: item.id) }
                     }
                     .listRowInsets(EdgeInsets())
                     .listRowSeparator(index == 0 ? .hidden : .visible, edges: .top)
                 } else {
-                    ConversationRowView(conversation: conversation, deps: deps)
+                    conversationRow(for: item)
                         .contentShape(Rectangle())
                         .onTapGesture {
-                            selectedConversation = conversation
+                            selectedConversation = resolveConversation(with: item.id)
                         }
                         .listRowInsets(EdgeInsets())
                         .listRowSeparator(index == 0 ? .hidden : .visible, edges: .top)
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button(role: .destructive) {
-                                viewModel.archiveConversation(conversation)
+                                viewModel.archiveConversation(withID: item.id)
                             } label: {
                                 SwiftUI.Label("Archive", systemImage: "archivebox")
                             }
@@ -66,9 +66,9 @@ struct ConversationListView: View {
                         }
                         .swipeActions(edge: .leading, allowsFullSwipe: true) {
                             Button {
-                                viewModel.toggleConversationReadState(conversation)
+                                viewModel.toggleConversationReadState(withID: item.id)
                             } label: {
-                                if conversation.inboxUnreadCount > 0 {
+                                if item.snapshot.inboxUnreadCount > 0 {
                                     SwiftUI.Label("Read", systemImage: "envelope.open")
                                 } else {
                                     SwiftUI.Label("Unread", systemImage: "envelope.badge")
@@ -80,7 +80,7 @@ struct ConversationListView: View {
             }
         }
         .listStyle(.plain)
-        .animation(nil, value: viewModel.filteredConversations.count)
+        .animation(nil, value: viewModel.filteredConversationItems.count)
         .scrollDismissesKeyboard(.interactively)
         .navigationTitle(viewModel.isSelecting ? "\(viewModel.selectedConversationIDs.count) Selected" : "Chats")
         .navigationDestination(item: $selectedConversation) { conversation in
@@ -104,23 +104,29 @@ struct ConversationListView: View {
         }
         .onAppear {
             AppPrewarmer.prewarmAll()  // Safe to call repeatedly; each prewarm runs only once per launch.
-            viewModel.onAppear(conversations: Array(conversations))
+            viewModel.onAppear(conversations: Array(conversations), in: viewContext)
         }
         .onDisappear {
             viewModel.onDisappear()
         }
-        .onChange(of: conversationSnapshots) { _, _ in
-            viewModel.refreshConversations(Array(conversations))
-        }
     }
 
-    private func selectionButton(for conversation: Conversation) -> some View {
+    private func conversationRow(for item: ConversationListItem) -> some View {
+        ConversationRowView(
+            snapshot: item.snapshot,
+            conversationObjectID: item.id,
+            conversationContext: viewContext,
+            deps: deps
+        )
+    }
+
+    private func selectionButton(for objectID: NSManagedObjectID) -> some View {
         Button {
-            viewModel.toggleSelection(for: conversation)
+            viewModel.toggleSelection(for: objectID)
         } label: {
-            Image(systemName: viewModel.selectedConversationIDs.contains(conversation.objectID) ? "checkmark.circle.fill" : "circle")
+            Image(systemName: viewModel.selectedConversationIDs.contains(objectID) ? "checkmark.circle.fill" : "circle")
                 .font(.system(size: 22))
-                .foregroundColor(viewModel.selectedConversationIDs.contains(conversation.objectID) ? .blue : .gray)
+                .foregroundColor(viewModel.selectedConversationIDs.contains(objectID) ? .blue : .gray)
         }
         .buttonStyle(.plain)
         .padding(.leading, 16)
@@ -133,8 +139,8 @@ struct ConversationListView: View {
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .navigationBarLeading) {
             if viewModel.isSelecting {
-                Button(viewModel.selectedConversationIDs.count == viewModel.filteredConversations.count ? "Deselect All" : "Select All") {
-                    viewModel.selectAll(from: viewModel.filteredConversations)
+                Button(viewModel.selectedConversationIDs.count == viewModel.filteredConversationItems.count ? "Deselect All" : "Select All") {
+                    viewModel.selectAllVisibleConversations()
                 }
             } else {
                 Button(action: { viewModel.showingSettings = true }) {
@@ -281,10 +287,6 @@ struct ConversationListView: View {
         .accessibilityIdentifier("ComposeNewMessageButton")
     }
 
-    private var conversationSnapshots: [ConversationSnapshot] {
-        conversations.map(ConversationSnapshot.init(from:))
-    }
-
     @MainActor
     private func handleComposerDismiss() {
         guard let conversationReference = pendingConversationReference else { return }
@@ -314,6 +316,10 @@ struct ConversationListView: View {
         }
 
         pendingConversationReference = conversationReference
+    }
+
+    private func resolveConversation(with objectID: NSManagedObjectID) -> Conversation? {
+        try? viewContext.existingObject(with: objectID) as? Conversation
     }
 
     private func circleButton(icon: String) -> some View {

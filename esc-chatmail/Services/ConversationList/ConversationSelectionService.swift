@@ -27,19 +27,29 @@ final class ConversationSelectionService: ObservableObject {
 
     /// Toggles selection state for a conversation
     func toggleSelection(for conversation: Conversation) {
-        if selectedConversationIDs.contains(conversation.objectID) {
-            selectedConversationIDs.remove(conversation.objectID)
+        toggleSelection(for: conversation.objectID)
+    }
+
+    /// Toggles selection state for a conversation by object identifier.
+    func toggleSelection(for objectID: NSManagedObjectID) {
+        if selectedConversationIDs.contains(objectID) {
+            selectedConversationIDs.remove(objectID)
         } else {
-            selectedConversationIDs.insert(conversation.objectID)
+            selectedConversationIDs.insert(objectID)
         }
     }
 
     /// Selects or deselects all conversations in the list
     func selectAll(from conversations: [Conversation]) {
-        if selectedConversationIDs.count == conversations.count {
+        selectAll(conversationIDs: conversations.map(\.objectID))
+    }
+
+    /// Selects or deselects all conversations in the list by identifier.
+    func selectAll(conversationIDs: [NSManagedObjectID]) {
+        if selectedConversationIDs.count == conversationIDs.count {
             selectedConversationIDs.removeAll()
         } else {
-            selectedConversationIDs = Set(conversations.map { $0.objectID })
+            selectedConversationIDs = Set(conversationIDs)
         }
     }
 
@@ -65,6 +75,11 @@ final class ConversationSelectionService: ObservableObject {
     /// Checks if a conversation is selected
     func isSelected(_ conversation: Conversation) -> Bool {
         selectedConversationIDs.contains(conversation.objectID)
+    }
+
+    /// Checks if a conversation identifier is selected
+    func isSelected(_ objectID: NSManagedObjectID) -> Bool {
+        selectedConversationIDs.contains(objectID)
     }
 
     // MARK: - Batch Operations

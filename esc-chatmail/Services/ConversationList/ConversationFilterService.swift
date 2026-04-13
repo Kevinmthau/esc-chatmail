@@ -62,28 +62,13 @@ final class ConversationFilterService: ObservableObject {
         from conversations: [Conversation],
         searchText: String
     ) -> [Conversation] {
-        var result = conversations
+        conversations.filter { matches($0, searchText: searchText) }
+    }
 
-        // Apply search filter
-        if !searchText.isEmpty {
-            let lowercasedQuery = searchText.lowercased()
-            result = result.filter { conversation in
-                conversation.displayName?.lowercased().contains(lowercasedQuery) ?? false ||
-                conversation.snippet?.lowercased().contains(lowercasedQuery) ?? false
-            }
-        }
-
-        // Apply type filter
-        switch currentFilter {
-        case .all:
-            break
-        case .contacts:
-            result = result.filter { isConversationWithContact($0) }
-        case .other:
-            result = result.filter { !isConversationWithContact($0) }
-        }
-
-        return result
+    /// Returns true when the conversation should be visible for the current filter state.
+    func matches(_ conversation: Conversation, searchText: String) -> Bool {
+        matchesSearch(conversation, searchText: searchText) &&
+        matchesCurrentFilter(conversation)
     }
 
     /// Checks if a conversation includes a participant from the user's contacts
@@ -144,5 +129,24 @@ final class ConversationFilterService: ObservableObject {
     func cancelTasks() {
         contactsLoadTask?.cancel()
         contactsLoadTask = nil
+    }
+
+    private func matchesSearch(_ conversation: Conversation, searchText: String) -> Bool {
+        guard !searchText.isEmpty else { return true }
+
+        let lowercasedQuery = searchText.lowercased()
+        return conversation.displayName?.lowercased().contains(lowercasedQuery) ?? false ||
+            conversation.snippet?.lowercased().contains(lowercasedQuery) ?? false
+    }
+
+    private func matchesCurrentFilter(_ conversation: Conversation) -> Bool {
+        switch currentFilter {
+        case .all:
+            return true
+        case .contacts:
+            return isConversationWithContact(conversation)
+        case .other:
+            return !isConversationWithContact(conversation)
+        }
     }
 }

@@ -29,20 +29,25 @@ struct ConversationRowView: View {
     private let currentUserEmail: String
     private let participantLoader: ParticipantLoader
     private let conversationObjectID: NSManagedObjectID
-    private let conversationContext: NSManagedObjectContext?
+    private let conversationContext: NSManagedObjectContext
 
     @State private var displayName: String
     @State private var avatarPhotos: [ProfilePhoto] = []
     @State private var participantNames: [String] = []
 
     @MainActor
-    init(conversation: Conversation, deps: Dependencies? = nil) {
+    init(
+        snapshot: ConversationSnapshot,
+        conversationObjectID: NSManagedObjectID,
+        conversationContext: NSManagedObjectContext,
+        deps: Dependencies? = nil
+    ) {
         let resolvedDeps = deps ?? Dependencies.shared
-        self.snapshot = ConversationSnapshot(from: conversation)
+        self.snapshot = snapshot
         self.currentUserEmail = resolvedDeps.authSession.userEmail ?? ""
         self.participantLoader = resolvedDeps.participantLoader
-        self.conversationObjectID = conversation.objectID
-        self.conversationContext = conversation.managedObjectContext
+        self.conversationObjectID = conversationObjectID
+        self.conversationContext = conversationContext
         self._displayName = State(initialValue: snapshot.displayNameHint ?? "")
     }
 
@@ -107,10 +112,6 @@ struct ConversationRowView: View {
     }
 
     private func loadContactInfo() async {
-        guard let conversationContext else {
-            return
-        }
-
         let info = await participantLoader.loadParticipants(
             from: conversationObjectID,
             in: conversationContext,

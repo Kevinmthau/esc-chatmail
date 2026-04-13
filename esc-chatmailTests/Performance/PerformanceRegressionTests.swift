@@ -44,12 +44,56 @@ final class PerformanceRegressionTests: XCTestCase {
 
             MainActor.assumeIsolated {
                 viewModel.refreshConversations(fetched)
-                XCTAssertEqual(viewModel.filteredConversations.count, conversations.count)
+                XCTAssertEqual(viewModel.filteredConversationItems.count, conversations.count)
             }
 
             XCTAssertEqual(fetched.count, conversations.count)
             XCTAssertEqual(snapshots.count, conversations.count)
             XCTAssertFalse(newsletterSubset.isEmpty)
+        }
+    }
+
+    /// Protects the hot inbox-update path so small batches of changed conversations can update
+    /// row snapshots and ordering without rebuilding the whole visible list model.
+    func testPerformance_conversationListIncrementalRefresh_smallChangedSubset_largeInboxDataset() throws {
+        let seededConversations = try PerformanceFixtureFactory.seedConversationList(
+            in: context,
+            conversationCount: 220
+        )
+        let request = Self.makeConversationFetchRequest()
+        let fetched = try context.fetch(request)
+        let changedObjectIDs = Array(seededConversations.prefix(8)).map(\.objectID)
+        let searchService = ConversationSearchService(debounceInterval: 60_000_000_000)
+        let filterService = ConversationFilterService(contactsService: ContactsService())
+        let viewModel = ConversationListViewModel(
+            searchService: searchService,
+            filterService: filterService
+        )
+        let options = makePerformanceOptions(iterationCount: 5)
+
+        viewModel.refreshConversations(fetched)
+        XCTAssertEqual(viewModel.filteredConversationItems.count, seededConversations.count)
+
+        var iteration = 0
+        measure(metrics: [XCTClockMetric(), XCTCPUMetric()], options: options) {
+            iteration += 1
+            let changedConversations = changedObjectIDs.compactMap { objectID in
+                try? context.existingObject(with: objectID) as? Conversation
+            }
+
+            for (offset, conversation) in changedConversations.enumerated() {
+                conversation.snippet = "Incremental update \(iteration)-\(offset)"
+                conversation.inboxUnreadCount = Int32(iteration + offset)
+            }
+
+            changedConversations.first?.lastMessageDate = Date(
+                timeIntervalSince1970: 10_000 + Double(iteration)
+            )
+
+            MainActor.assumeIsolated {
+                viewModel.applyConversationChanges(updatedConversations: changedConversations)
+                XCTAssertEqual(viewModel.filteredConversationItems.count, seededConversations.count)
+            }
         }
     }
 
