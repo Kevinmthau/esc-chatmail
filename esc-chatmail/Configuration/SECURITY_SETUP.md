@@ -1,21 +1,12 @@
 # Security Configuration Setup
 
 ## Overview
-This project uses a secure configuration system to protect sensitive API keys and credentials. Follow these steps to set up your development environment.
+This project keeps user credentials and tokens out of source control, while shipping shared Google OAuth app configuration in tracked xcconfig files. Follow these steps to set up your development environment.
 
 ## Initial Setup
 
-### 1. Create Configuration Files
-Copy the template configuration file for your environment:
-
-```bash
-cd esc-chatmail/Configuration
-cp Config.xcconfig.template Debug.xcconfig
-cp Config.xcconfig.template Release.xcconfig
-```
-
-### 2. Fill in Your Credentials
-Edit `Debug.xcconfig` and `Release.xcconfig` with your actual Google OAuth credentials:
+### 1. Verify Shared Google Configuration
+The repository includes `Debug.xcconfig` and `Release.xcconfig` with the Google OAuth values required for the standard app build:
 
 ```
 GOOGLE_CLIENT_ID = your-actual-client-id
@@ -25,7 +16,9 @@ GOOGLE_PROJECT_ID = your-project-id
 GOOGLE_REDIRECT_URI = com.googleusercontent.apps.your-client-id
 ```
 
-### 3. Configure Xcode Project
+Only replace those values if you intentionally want to build against a different Google project.
+
+### 2. Configure Xcode Project
 1. Open the project in Xcode
 2. Select the project in the navigator
 3. Go to the project settings (not target)
@@ -36,7 +29,7 @@ GOOGLE_REDIRECT_URI = com.googleusercontent.apps.your-client-id
 ## Security Architecture
 
 ### Configuration Management
-- **xcconfig files**: Store sensitive configuration values outside of code
+- **xcconfig files**: Store build-time configuration values outside of code
 - **Info.plist**: References configuration values using `$(VARIABLE_NAME)`
 - **Constants.swift**: Reads values from Info.plist at runtime
 - **Git**: Configuration files are excluded from version control
@@ -92,7 +85,7 @@ let token = try await tokenManager.withTokenRetry { token in
 
 ## Security Best Practices
 
-1. **Never commit** `Debug.xcconfig` or `Release.xcconfig` files
+1. **Do not commit** user credentials, tokens, or other server-side secrets
 2. **Always use** KeychainService for sensitive data storage
 3. **Never log** tokens or sensitive information
 4. **Use** TokenManager for all OAuth token operations
@@ -102,7 +95,7 @@ let token = try await tokenManager.withTokenRetry { token in
 ## Troubleshooting
 
 ### "GOOGLE_CLIENT_ID not configured" Error
-- Ensure xcconfig files are created and filled with actual values
+- Ensure `Debug.xcconfig` and `Release.xcconfig` are present with actual values
 - Verify Xcode project is configured to use the xcconfig files
 - Clean build folder and rebuild
 

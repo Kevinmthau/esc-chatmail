@@ -1,0 +1,8 @@
+// Shared release configuration.
+// These values are shipped in the client bundle and are required for local and Xcode Cloud builds.
+
+GOOGLE_CLIENT_ID = 999923476073-b4m4r3o96gv30rqmo71qo210oa46au74.apps.googleusercontent.com
+GOOGLE_API_KEY = AIzaSyAnVWdfhCGB0raSuwStoMl6U3368E9-gxk
+GOOGLE_PROJECT_NUMBER = 999923476073
+GOOGLE_PROJECT_ID = esc-gmail-client
+GOOGLE_REDIRECT_URI = com.googleusercontent.apps.999923476073-b4m4r3o96gv30rqmo71qo210oa46au74

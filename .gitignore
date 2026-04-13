@@ -121,9 +121,6 @@ GoogleService-Info.plist
 *.p12
 *.mobileprovision
 
-# Configuration Files (DO NOT COMMIT)
-esc-chatmail/Configuration/Debug.xcconfig
-esc-chatmail/Configuration/Release.xcconfig
 # Keep the template file
 !esc-chatmail/Configuration/Config.xcconfig.template
 

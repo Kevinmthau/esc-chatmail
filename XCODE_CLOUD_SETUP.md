@@ -3,7 +3,7 @@
 This repository now includes the project-side requirements to build and distribute `esc-chatmail` with Xcode Cloud:
 
 - A shared `esc-chatmail` scheme at `esc-chatmail.xcodeproj/xcshareddata/xcschemes/esc-chatmail.xcscheme`
-- `ci_scripts/ci_post_clone.sh` to generate the gitignored `Debug.xcconfig` and `Release.xcconfig` files from Xcode Cloud environment variables
+- `ci_scripts/ci_post_clone.sh` to generate `Debug.xcconfig` and `Release.xcconfig` from Xcode Cloud environment variables when you need to override the repository defaults
 - `ci_scripts/ci_post_xcodebuild.sh` to generate TestFlight "What to Test" notes from the triggering commit message
 - `Info.plist` wired to `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` so TestFlight uploads use the target version/build settings instead of hardcoded values
 
@@ -15,9 +15,11 @@ Before creating the workflow, make sure:
 2. Your Apple Developer team has accepted all current agreements in App Store Connect.
 3. Automatic signing works for the `esc-chatmail` target with the intended team and distribution certificates/profiles.
 
-## 2. Add Xcode Cloud environment variables
+## 2. Optional: add Xcode Cloud environment variables
 
-`ci_scripts/ci_post_clone.sh` expects these variables in Xcode Cloud:
+The repository now includes shared `Debug.xcconfig` and `Release.xcconfig` files, so Xcode Cloud can build without additional configuration.
+
+If you need Xcode Cloud to override those values, `ci_scripts/ci_post_clone.sh` supports these variables:
 
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_API_KEY`
@@ -25,7 +27,7 @@ Before creating the workflow, make sure:
 - `GOOGLE_PROJECT_ID`
 - `GOOGLE_REDIRECT_URI`
 
-Add them as Xcode Cloud environment variables and mark the sensitive ones as secret. Use the same values you already keep in your local `Debug.xcconfig` and `Release.xcconfig`.
+Add them as Xcode Cloud environment variables and mark the sensitive ones as secret. Use the same values as the checked-in `Debug.xcconfig` and `Release.xcconfig` unless you intentionally want Cloud to build against a different Google project.
 
 ## 3. Create the workflow in Xcode
 
@@ -50,7 +52,7 @@ If you want a faster internal-only lane, create a second workflow that distribut
 After saving the workflow:
 
 1. Run a manual build from Xcode Cloud.
-2. Confirm the `ci_post_clone.sh` step generated both xcconfig files.
+2. Confirm the `ci_post_clone.sh` step either used the repository xcconfig files or generated replacements from your environment variables.
 3. Confirm the archive uploads to TestFlight successfully.
 4. In App Store Connect, add the new build to your internal testing group and verify the generated "What to Test" note.
 
