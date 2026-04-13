@@ -14,8 +14,22 @@ if [[ -z "${DESTINATION}" ]]; then
   DESTINATION="platform=iOS Simulator,id=${DEVICE_ID}"
 fi
 
+ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --performance)
+      ARGS+=("-only-testing:esc-chatmailTests/PerformanceRegressionTests")
+      shift
+      ;;
+    *)
+      ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
 xcodebuild test \
   -scheme "${SCHEME}" \
   -configuration "${CONFIGURATION}" \
   -destination "${DESTINATION}" \
-  "$@"
+  "${ARGS[@]}"

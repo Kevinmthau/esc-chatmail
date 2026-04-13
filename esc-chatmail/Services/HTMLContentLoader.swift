@@ -376,6 +376,20 @@ final class HTMLContentLoader {
         }
     }
 
+#if DEBUG
+    func debugCachedVariantCount(for messageId: String) -> Int {
+        htmlCacheKeyLock.lock()
+        defer { htmlCacheKeyLock.unlock() }
+        return htmlCacheKeysByMessageID[messageId]?.count ?? 0
+    }
+
+    func debugTotalCachedVariantCount() -> Int {
+        htmlCacheKeyLock.lock()
+        defer { htmlCacheKeyLock.unlock() }
+        return htmlCacheKeysByMessageID.values.reduce(0) { $0 + $1.count }
+    }
+#endif
+
     private func cacheKey(
         messageId: String,
         plainText: String?,

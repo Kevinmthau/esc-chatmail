@@ -15,15 +15,24 @@ final class ParticipantLoader {
     private let personCache: PersonCache
     private let photoResolver: ProfilePhotoResolver
     private let contactsResolver: any ContactsResolving
+    private let prefetchDisplayNames: (@Sendable ([String]) async -> Void)?
+    private let cachedDisplayNameProvider: (@Sendable (String) async -> String?)?
+    private let photoLoader: (@Sendable ([String]) async -> [ProfilePhoto])?
 
     init(
         personCache: PersonCache = .shared,
         photoResolver: ProfilePhotoResolver = .shared,
-        contactsResolver: any ContactsResolving = ContactsResolver.shared
+        contactsResolver: any ContactsResolving = ContactsResolver.shared,
+        prefetchDisplayNames: (@Sendable ([String]) async -> Void)? = nil,
+        cachedDisplayNameProvider: (@Sendable (String) async -> String?)? = nil,
+        photoLoader: (@Sendable ([String]) async -> [ProfilePhoto])? = nil
     ) {
         self.personCache = personCache
         self.photoResolver = photoResolver
         self.contactsResolver = contactsResolver
+        self.prefetchDisplayNames = prefetchDisplayNames
+        self.cachedDisplayNameProvider = cachedDisplayNameProvider
+        self.photoLoader = photoLoader
     }
 
     // MARK: - Public Types
@@ -53,7 +62,8 @@ final class ParticipantLoader {
     func loadParticipants(
         from conversation: Conversation,
         currentUserEmail: String,
-        maxParticipants: Int = 4
+        maxParticipants: Int = 4,
+        includePhotos: Bool = true
     ) async -> ParticipantInfo {
         guard let context = conversation.managedObjectContext else {
             let participants = extractNonMeParticipants(
@@ -64,7 +74,8 @@ final class ParticipantLoader {
             return await buildParticipantInfo(
                 emails: participants,
                 fallbackDisplayName: conversation.displayName,
-                maxParticipants: maxParticipants
+                maxParticipants: maxParticipants,
+                includePhotos: includePhotos
             )
         }
 
@@ -73,7 +84,8 @@ final class ParticipantLoader {
             in: context,
             currentUserEmail: currentUserEmail,
             maxParticipants: maxParticipants,
-            fallbackDisplayName: conversation.displayName
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: includePhotos
         )
     }
 
@@ -84,7 +96,8 @@ final class ParticipantLoader {
         in context: NSManagedObjectContext,
         currentUserEmail: String,
         maxParticipants: Int = 4,
-        fallbackDisplayName: String? = nil
+        fallbackDisplayName: String? = nil,
+        includePhotos: Bool = true
     ) async -> ParticipantInfo {
         let snapshot = await fetchConversationParticipantSnapshot(
             conversationObjectID: conversationObjectID,
@@ -96,7 +109,8 @@ final class ParticipantLoader {
         return await buildParticipantInfo(
             emails: snapshot.emails,
             fallbackDisplayName: snapshot.fallbackDisplayName,
-            maxParticipants: maxParticipants
+            maxParticipants: maxParticipants,
+            includePhotos: includePhotos
         )
     }
 
@@ -239,7 +253,8 @@ final class ParticipantLoader {
     private func buildParticipantInfo(
         emails: [String],
         fallbackDisplayName: String?,
-        maxParticipants: Int
+        maxParticipants: Int,
+        includePhotos: Bool
     ) async -> ParticipantInfo {
         let resolvedParticipants = await resolveParticipants(for: emails)
         let topParticipants = Array(resolvedParticipants.prefix(maxParticipants))
@@ -249,7 +264,7 @@ final class ParticipantLoader {
             totalCount: resolvedParticipants.count,
             fallback: fallbackDisplayName
         )
-        let photos = await loadPhotos(for: topParticipants.map(\.email))
+        let photos = includePhotos ? await loadPhotos(for: topParticipants.map(\.email)) : []
 
         return ParticipantInfo(
             emails: topParticipants.map(\.email),
@@ -261,6 +276,11 @@ final class ParticipantLoader {
     }
 
     private func prefetchNamesIfNeeded(for emails: [String]) async {
+        if let prefetchDisplayNames {
+            await prefetchDisplayNames(emails)
+            return
+        }
+
         // Prefetch all emails - the cache will filter internally
         await personCache.prefetch(emails: emails)
     }
@@ -271,7 +291,12 @@ final class ParticipantLoader {
             return trimmedContactName
         }
 
-        let cachedName = await personCache.getCachedDisplayName(for: email)
+        let cachedName: String?
+        if let cachedDisplayNameProvider {
+            cachedName = await cachedDisplayNameProvider(email)
+        } else {
+            cachedName = await personCache.getCachedDisplayName(for: email)
+        }
         let trimmedCachedName = cachedName?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let trimmedCachedName, !trimmedCachedName.isEmpty {
             return trimmedCachedName
@@ -285,6 +310,10 @@ final class ParticipantLoader {
     }
 
     private func loadPhotos(for emails: [String]) async -> [ProfilePhoto] {
+        if let photoLoader {
+            return await photoLoader(emails)
+        }
+
         let photoResults = await photoResolver.resolvePhotos(for: emails)
         return emails.compactMap { email in
             photoResults[EmailNormalizer.normalize(email)]

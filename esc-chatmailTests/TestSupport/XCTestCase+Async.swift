@@ -89,4 +89,33 @@ extension XCTestCase {
 
         wait(for: [expectation], timeout: timeout)
     }
+
+    /// Measures an async operation using XCTest performance metrics.
+    /// Keeps the call sites concise for service-level async benchmarks.
+    func measureAsync(
+        metrics: [XCTMetric],
+        options: XCTMeasureOptions,
+        timeout: TimeInterval = 10.0,
+        _ operation: @escaping () async throws -> Void
+    ) {
+        measure(metrics: metrics, options: options) {
+            let expectation = expectation(description: "Measured async operation")
+            var operationError: Error?
+
+            Task {
+                do {
+                    try await operation()
+                } catch {
+                    operationError = error
+                }
+                expectation.fulfill()
+            }
+
+            wait(for: [expectation], timeout: timeout)
+
+            if let operationError {
+                XCTFail("Measured async operation failed with error: \(operationError)")
+            }
+        }
+    }
 }
