@@ -37,6 +37,7 @@ struct OptimizedConversationRow: View {
             AvatarStackView(
                 avatarPhotos: avatarPhotos,
                 participants: participantNames,
+                showsGroupAvatar: snapshot.showsGroupAvatar,
                 fallbackDisplayText: fallbackDisplayName
             )
                 .frame(width: 44, height: 44)

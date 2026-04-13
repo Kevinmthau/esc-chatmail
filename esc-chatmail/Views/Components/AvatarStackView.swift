@@ -5,20 +5,26 @@ import SwiftUI
 struct AvatarStackView: View {
     let avatarPhotos: [ProfilePhoto]
     let participants: [String]
+    let showsGroupAvatar: Bool
     let fallbackDisplayText: String?
 
     init(
         avatarPhotos: [ProfilePhoto],
         participants: [String],
+        showsGroupAvatar: Bool = false,
         fallbackDisplayText: String? = nil
     ) {
         self.avatarPhotos = avatarPhotos
         self.participants = participants
+        self.showsGroupAvatar = showsGroupAvatar
         self.fallbackDisplayText = fallbackDisplayText
     }
 
     var body: some View {
-        if participants.count > 1 {
+        if Self.resolvedLayout(
+            participantCount: participants.count,
+            showsGroupAvatar: showsGroupAvatar
+        ) == .group {
             // Group conversation - show multiple small avatars in a circle
             GroupAvatarView(avatarPhotos: avatarPhotos, participants: participants)
         } else {
@@ -29,6 +35,24 @@ struct AvatarStackView: View {
                 fallbackDisplayText: fallbackDisplayText
             )
         }
+    }
+}
+
+extension AvatarStackView {
+    enum Layout: Equatable {
+        case single
+        case group
+    }
+
+    static func resolvedLayout(
+        participantCount: Int,
+        showsGroupAvatar: Bool
+    ) -> Layout {
+        if showsGroupAvatar || participantCount > 1 {
+            return .group
+        }
+
+        return .single
     }
 }
 

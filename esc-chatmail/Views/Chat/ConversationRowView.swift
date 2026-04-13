@@ -12,6 +12,7 @@ struct ConversationSnapshot: Equatable {
     let lastMessageDate: Date?
     let displayNameHint: String?
     let participantHash: String?
+    let showsGroupAvatar: Bool
 
     init(from conversation: Conversation) {
         self.objectID = conversation.objectID
@@ -21,6 +22,7 @@ struct ConversationSnapshot: Equatable {
         self.lastMessageDate = conversation.lastMessageDate
         self.displayNameHint = conversation.displayName
         self.participantHash = conversation.participantHash
+        self.showsGroupAvatar = conversation.conversationType != .oneToOne
     }
 }
 
@@ -68,6 +70,7 @@ struct ConversationRowView: View {
             AvatarStackView(
                 avatarPhotos: avatarPhotos,
                 participants: participantNames,
+                showsGroupAvatar: snapshot.showsGroupAvatar,
                 fallbackDisplayText: snapshot.displayNameHint
             )
                 .frame(width: 44, height: 44)

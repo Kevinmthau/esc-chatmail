@@ -3,6 +3,24 @@ import XCTest
 
 final class AvatarStackViewTests: XCTestCase {
 
+    func testResolvedLayout_withGroupConversationAndNoParticipants_usesGroupAvatar() {
+        let result = AvatarStackView.resolvedLayout(
+            participantCount: 0,
+            showsGroupAvatar: true
+        )
+
+        XCTAssertEqual(result, .group)
+    }
+
+    func testResolvedLayout_withoutGroupConversationAndNoParticipants_usesSingleAvatar() {
+        let result = AvatarStackView.resolvedLayout(
+            participantCount: 0,
+            showsGroupAvatar: false
+        )
+
+        XCTAssertEqual(result, .single)
+    }
+
     func testResolvedContent_withPhoto_prefersPhoto() {
         let photo = ProfilePhoto(
             source: .contacts,
