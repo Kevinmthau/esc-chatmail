@@ -46,10 +46,23 @@ struct HTMLLoadResult {
 }
 
 private final class CachedHTMLLoadResultBox {
+    let cacheKey: String
+    let messageId: String
     let result: HTMLLoadResult
 
-    init(_ result: HTMLLoadResult) {
+    init(_ result: HTMLLoadResult, cacheKey: String, messageId: String) {
+        self.cacheKey = cacheKey
+        self.messageId = messageId
         self.result = result
+    }
+}
+
+private final class HTMLContentCacheDelegate: NSObject, NSCacheDelegate {
+    weak var owner: HTMLContentLoader?
+
+    func cache(_ cache: NSCache<AnyObject, AnyObject>, willEvictObject obj: Any) {
+        guard let box = obj as? CachedHTMLLoadResultBox else { return }
+        owner?.removeTrackedCacheKey(box.cacheKey, for: box.messageId)
     }
 }
 
@@ -86,6 +99,7 @@ final class HTMLContentLoader {
     /// In-memory cache for wrapped HTML content to avoid repeated disk I/O.
     /// Keys include the display variant plus automatic original-view evaluator inputs when needed.
     private let htmlCache = NSCache<NSString, CachedHTMLLoadResultBox>()
+    private let htmlCacheDelegate: HTMLContentCacheDelegate
     private let htmlCacheKeyLock = NSLock()
     private var htmlCacheKeysByMessageID: [String: Set<String>] = [:]
 
@@ -99,9 +113,12 @@ final class HTMLContentLoader {
         self.sanitizer = sanitizer
         self.remoteImageAttachmentFallback = remoteImageAttachmentFallback
         self.qualityEvaluator = qualityEvaluator
+        self.htmlCacheDelegate = HTMLContentCacheDelegate()
         // Limit cache to ~50MB with both count and cost limits for proper memory pressure response
         htmlCache.countLimit = 1000
         htmlCache.totalCostLimit = 50 * 1024 * 1024 // 50 MB
+        htmlCache.delegate = htmlCacheDelegate
+        htmlCacheDelegate.owner = self
     }
 
     /// Loads HTML content for a message, trying multiple sources
@@ -380,13 +397,14 @@ final class HTMLContentLoader {
     func debugCachedVariantCount(for messageId: String) -> Int {
         htmlCacheKeyLock.lock()
         defer { htmlCacheKeyLock.unlock() }
-        return htmlCacheKeysByMessageID[messageId]?.count ?? 0
+        return syncTrackedCacheKeysWithLiveCache(for: messageId)
     }
 
     func debugTotalCachedVariantCount() -> Int {
         htmlCacheKeyLock.lock()
         defer { htmlCacheKeyLock.unlock() }
-        return htmlCacheKeysByMessageID.values.reduce(0) { $0 + $1.count }
+        let messageIDs = Array(htmlCacheKeysByMessageID.keys)
+        return messageIDs.reduce(0) { $0 + syncTrackedCacheKeysWithLiveCache(for: $1) }
     }
 #endif
 
@@ -441,14 +459,54 @@ final class HTMLContentLoader {
         }
 
         let cost = html.utf8.count
-        htmlCache.setObject(CachedHTMLLoadResultBox(result), forKey: cacheKey, cost: cost)
-
-        htmlCacheKeyLock.lock()
-        htmlCacheKeysByMessageID[messageId, default: []].insert(cacheKey as String)
-        htmlCacheKeyLock.unlock()
+        let trackedCacheKey = cacheKey as String
+        trackCacheKey(trackedCacheKey, for: messageId)
+        htmlCache.setObject(
+            CachedHTMLLoadResultBox(result, cacheKey: trackedCacheKey, messageId: messageId),
+            forKey: cacheKey,
+            cost: cost
+        )
 
         return result
     }
+
+    private func trackCacheKey(_ cacheKey: String, for messageId: String) {
+        htmlCacheKeyLock.lock()
+        htmlCacheKeysByMessageID[messageId, default: []].insert(cacheKey)
+        htmlCacheKeyLock.unlock()
+    }
+
+    fileprivate func removeTrackedCacheKey(_ cacheKey: String, for messageId: String) {
+        htmlCacheKeyLock.lock()
+        defer { htmlCacheKeyLock.unlock() }
+
+        guard var trackedKeys = htmlCacheKeysByMessageID[messageId] else { return }
+        trackedKeys.remove(cacheKey)
+
+        if trackedKeys.isEmpty {
+            htmlCacheKeysByMessageID.removeValue(forKey: messageId)
+        } else {
+            htmlCacheKeysByMessageID[messageId] = trackedKeys
+        }
+    }
+
+#if DEBUG
+    private func syncTrackedCacheKeysWithLiveCache(for messageId: String) -> Int {
+        guard let trackedKeys = htmlCacheKeysByMessageID[messageId] else { return 0 }
+
+        let liveKeys = Set(trackedKeys.filter { htmlCache.object(forKey: $0 as NSString) != nil })
+        if liveKeys.isEmpty {
+            htmlCacheKeysByMessageID.removeValue(forKey: messageId)
+            return 0
+        }
+
+        if liveKeys != trackedKeys {
+            htmlCacheKeysByMessageID[messageId] = liveKeys
+        }
+
+        return liveKeys.count
+    }
+#endif
 
     private func qualityFallbackResult(_ text: String) -> HTMLLoadResult {
         HTMLLoadResult(

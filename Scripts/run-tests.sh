@@ -15,10 +15,11 @@ if [[ -z "${DESTINATION}" ]]; then
 fi
 
 ARGS=()
+RUN_PERFORMANCE_TESTS=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --performance)
-      ARGS+=("-only-testing:esc-chatmailTests/PerformanceRegressionTests")
+      RUN_PERFORMANCE_TESTS=true
       shift
       ;;
     *)
@@ -27,6 +28,12 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "${RUN_PERFORMANCE_TESTS}" == "true" ]]; then
+  ARGS+=("-only-testing:esc-chatmailTests/PerformanceRegressionTests")
+else
+  ARGS+=("-skip-testing:esc-chatmailTests/PerformanceRegressionTests")
+fi
 
 xcodebuild test \
   -scheme "${SCHEME}" \

@@ -239,7 +239,8 @@ final class PerformanceRegressionTests: XCTestCase {
             )
 
             XCTAssertNotNil(preview.html)
-            XCTAssertTrue(original.html != nil || original.nativeText != nil)
+            XCTAssertEqual(original.presentation, .html)
+            XCTAssertNotNil(original.html)
         }
     }
 
