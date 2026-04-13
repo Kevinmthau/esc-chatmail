@@ -393,6 +393,20 @@ final class EmailContentSectionTests: XCTestCase {
         XCTAssertNotEqual(initialKey, updatedKey)
     }
 
+    func testMakeLoadKeyIncludesDarkMode() {
+        let context = testStack.viewContext
+        let message = MessageBuilder()
+            .withId("message-id")
+            .withSubject("Subject")
+            .withSender(email: "sender@example.com", name: "Sender")
+            .build(in: context)
+
+        let lightKey = EmailContentSection.makeLoadKey(for: message, isDarkMode: false)
+        let darkKey = EmailContentSection.makeLoadKey(for: message, isDarkMode: true)
+
+        XCTAssertNotEqual(lightKey, darkKey)
+    }
+
     func testShouldUseTransactionalPreviewCard_forwardedMessage_returnsFalse() {
         XCTAssertFalse(EmailContentSection.shouldUseTransactionalPreviewCard(isForwardedEmail: true))
     }

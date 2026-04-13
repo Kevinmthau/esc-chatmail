@@ -65,7 +65,8 @@ struct HTMLPreviewView: View {
             bodyStorageURI: message.bodyStorageURI,
             senderEmail: message.senderEmail,
             isDarkMode: colorScheme == .dark,
-            cleanupMode: message.htmlDisplayCleanupMode
+            cleanupMode: message.htmlDisplayCleanupMode,
+            displayPurpose: .preview
         )
 
         guard !Task.isCancelled else {

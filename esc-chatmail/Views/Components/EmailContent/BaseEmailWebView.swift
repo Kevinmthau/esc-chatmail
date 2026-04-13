@@ -30,7 +30,7 @@ enum EmailWebViewMode {
 struct BaseEmailWebView: UIViewRepresentable {
     let htmlContent: String
     let mode: EmailWebViewMode
-    var isDarkMode: Bool = false
+    var isDarkMode: Bool? = nil
     /// Optional message for resolving cid: URLs to inline attachments
     var message: Message?
     /// Optional callback for non-interactive previews that need their rendered height.
@@ -68,9 +68,6 @@ struct BaseEmailWebView: UIViewRepresentable {
             // Match Apple Mail's WebView behavior
             webView.scrollView.contentInsetAdjustmentBehavior = .never
             webView.scrollView.automaticallyAdjustsScrollIndicatorInsets = true
-            webView.isOpaque = false
-            webView.backgroundColor = .clear
-            webView.scrollView.backgroundColor = .clear
             // Use mobile user agent to trigger responsive media queries
             webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
             // Prevent automatic font size adjustment that can break layouts
@@ -79,22 +76,19 @@ struct BaseEmailWebView: UIViewRepresentable {
             webView.scrollView.isScrollEnabled = false
             webView.scrollView.bounces = false
             webView.isUserInteractionEnabled = false
-            webView.isOpaque = false
-            webView.backgroundColor = .secondarySystemBackground
-            webView.scrollView.backgroundColor = .secondarySystemBackground
         case .simplePreview:
             webView.scrollView.isScrollEnabled = false
             webView.scrollView.bounces = false
             webView.isUserInteractionEnabled = false
-            webView.isOpaque = false
-            webView.backgroundColor = .clear
-            webView.scrollView.backgroundColor = .clear
         }
+
+        context.coordinator.applyBackgroundAppearance(to: webView)
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.parent = self
+        context.coordinator.applyBackgroundAppearance(to: webView)
         context.coordinator.loadContentIfReady(in: webView)
     }
 
@@ -131,11 +125,7 @@ struct BaseEmailWebView: UIViewRepresentable {
             let htmlToLoad: String
             switch parent.mode {
             case .scaledPreview(let scale):
-                htmlToLoad = wrapWithScale(
-                    parent.htmlContent,
-                    scale: scale,
-                    isDarkMode: parent.isDarkMode
-                )
+                htmlToLoad = wrapWithScale(parent.htmlContent, scale: scale)
                 let estimatedWidth = Int((HTMLPreviewScaleCalculator.estimatedLayoutWidth(from: parent.htmlContent) ?? 0).rounded())
                 let scaleMilli = Int((scale * 1000).rounded())
                 Log.diagnostic(
@@ -168,8 +158,24 @@ struct BaseEmailWebView: UIViewRepresentable {
             loadContent(in: webView)
         }
 
+        func applyBackgroundAppearance(to webView: WKWebView) {
+            webView.isOpaque = false
+            let backgroundColor = nativeBackgroundColor(for: parent.mode) ?? .clear
+            webView.backgroundColor = backgroundColor
+            webView.scrollView.backgroundColor = backgroundColor
+            webView.underPageBackgroundColor = backgroundColor
+        }
+
         private func modeSignature(for mode: EmailWebViewMode) -> String {
-            let colorSchemeSignature = parent.isDarkMode ? "dark" : "light"
+            let colorSchemeSignature: String
+            switch parent.isDarkMode {
+            case true:
+                colorSchemeSignature = "dark"
+            case false:
+                colorSchemeSignature = "light"
+            case nil:
+                colorSchemeSignature = "unspecified"
+            }
             switch mode {
             case .fullInteractive:
                 return "fullInteractive:\(colorSchemeSignature)"
@@ -182,35 +188,53 @@ struct BaseEmailWebView: UIViewRepresentable {
             }
         }
 
+        private func displayPurpose(for mode: EmailWebViewMode) -> HTMLDisplayPurpose {
+            switch mode {
+            case .fullInteractive:
+                return .original
+            case .scaledPreview, .simplePreview:
+                return .preview
+            }
+        }
+
+        private func nativeBackgroundColor(for mode: EmailWebViewMode) -> UIColor? {
+            if case .simplePreview = mode, parent.isDarkMode == nil {
+                // Preserve the old transparent simple-preview surface unless the caller opts into theming.
+                return .clear
+            }
+
+            let theme = HTMLDisplayWrapper.theme(
+                isDarkMode: parent.isDarkMode ?? false,
+                displayPurpose: displayPurpose(for: mode)
+            )
+            return UIColor(hex: theme.backgroundColorHex) ?? .systemBackground
+        }
+
         /// Derives a baseURL from the sender's email domain for proper Referer headers
         private func deriveBaseURL(from message: Message?) -> URL? {
             EmailSenderBaseURLResolver.baseURL(from: message?.senderEmail)
         }
 
-        private func wrapWithScale(_ html: String, scale: CGFloat, isDarkMode: Bool) -> String {
-            let bgColor = backgroundColorHex(isDarkMode: isDarkMode)
-
+        private func wrapWithScale(_ html: String, scale: CGFloat) -> String {
             // Avoid nesting full HTML documents inside another <html> wrapper; that can produce blank
             // previews or render only partial/head content. Instead, inject a tiny stylesheet that scales
             // the existing document when the input already contains <html>/<doctype>.
             if html.range(of: "<!doctype", options: .caseInsensitive) != nil ||
                 html.range(of: "<html", options: .caseInsensitive) != nil {
-                return injectScaleStyles(into: html, scale: scale, isDarkMode: isDarkMode)
+                return injectScaleStyles(into: html, scale: scale)
             }
 
-            // Partial fragments (no document structure): wrap in our own container.
-            return wrapPartialHTMLWithScale(html, scale: scale, backgroundColor: bgColor)
+            // Partial fragments (no document structure): wrap in our own container without adding theme CSS.
+            return wrapPartialHTMLWithScale(html, scale: scale)
         }
 
-        private func injectScaleStyles(into html: String, scale: CGFloat, isDarkMode: Bool) -> String {
+        private func injectScaleStyles(into html: String, scale: CGFloat) -> String {
             // Scale the rendered page without touching the email's DOM structure.
             // Keep rules minimal to avoid overriding the email's own layout/CSS.
-            let backgroundColor = backgroundColorHex(isDarkMode: isDarkMode)
             let injected = """
             <style id="esc-preview-scale">
                 html, body {
                     overflow: hidden !important;
-                    background-color: \(backgroundColor) !important;
                     min-height: 1px !important;
                 }
                 /* Use higher specificity + !important so template body rules don't override preview scaling. */
@@ -256,15 +280,10 @@ struct BaseEmailWebView: UIViewRepresentable {
             }
 
             // Worst-case fallback: wrap as a fragment.
-            let bgColor = backgroundColorHex(isDarkMode: isDarkMode)
-            return wrapPartialHTMLWithScale(result, scale: scale, backgroundColor: bgColor)
+            return wrapPartialHTMLWithScale(result, scale: scale)
         }
 
-        private func backgroundColorHex(isDarkMode: Bool) -> String {
-            isDarkMode ? "#1c1c1e" : "#f2f2f7"
-        }
-
-        private func wrapPartialHTMLWithScale(_ html: String, scale: CGFloat, backgroundColor: String) -> String {
+        private func wrapPartialHTMLWithScale(_ html: String, scale: CGFloat) -> String {
             return """
             <!DOCTYPE html>
             <html>
@@ -276,7 +295,6 @@ struct BaseEmailWebView: UIViewRepresentable {
                     html, body {
                         margin: 0;
                         padding: 0;
-                        background-color: \(backgroundColor);
                         overflow: hidden;
                         -webkit-text-size-adjust: 100%;
                         min-height: 1px;
@@ -475,5 +493,20 @@ struct BaseEmailWebView: UIViewRepresentable {
                 callback?(roundedHeight)
             }
         }
+    }
+}
+
+private extension UIColor {
+    convenience init?(hex: String) {
+        let trimmed = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        guard trimmed.count == 6, let value = Int(trimmed, radix: 16) else {
+            return nil
+        }
+
+        let red = CGFloat((value >> 16) & 0xFF) / 255
+        let green = CGFloat((value >> 8) & 0xFF) / 255
+        let blue = CGFloat(value & 0xFF) / 255
+
+        self.init(red: red, green: green, blue: blue, alpha: 1)
     }
 }

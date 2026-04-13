@@ -138,6 +138,7 @@ struct EmailContentSection: View {
             senderEmail: message.senderEmail,
             isDarkMode: colorScheme == .dark,
             cleanupMode: message.htmlDisplayCleanupMode,
+            displayPurpose: .preview,
             timeout: 5.0
         )
 

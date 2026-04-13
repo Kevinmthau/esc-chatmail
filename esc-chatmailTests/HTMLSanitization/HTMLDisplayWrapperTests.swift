@@ -24,8 +24,19 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertFalse(result.contains("font-family: -apple-system"))
         XCTAssertFalse(result.contains("font-size: 16px"))
         XCTAssertFalse(result.contains("line-height: 1.5"))
-        XCTAssertTrue(result.contains("background-color: #ffffff"))
+        XCTAssertTrue(result.contains("background-color: #f2f2f7"))
         XCTAssertTrue(result.contains("word-wrap: break-word"))
+    }
+
+    func testWrapHTMLForDisplay_partialHTML_previewUsesPreviewSurfaceForLightAndDarkModes() {
+        let html = "<div>Hello from preview</div>"
+
+        let lightResult = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .preview)
+        let darkResult = sut.wrapHTMLForDisplay(html, isDarkMode: true, displayPurpose: .preview)
+
+        XCTAssertTrue(lightResult.contains("background-color: #f2f2f7"))
+        XCTAssertTrue(darkResult.contains("background-color: #1c1c1e"))
+        XCTAssertTrue(darkResult.contains("color: #ffffff"))
     }
 
     func testWrapHTMLForDisplay_existingDocument_keepsAuthorBodyStyles() {
@@ -47,6 +58,23 @@ final class HTMLDisplayWrapperTests: XCTestCase {
 
         XCTAssertTrue(result.contains("body { font-family: Georgia, serif; font-size: 19px; }"))
         XCTAssertFalse(result.contains("font-family: -apple-system"))
+    }
+
+    func testWrapHTMLForDisplay_existingDocument_usesDifferentSurfacesForPreviewAndOriginalDarkMode() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <p>Hello</p>
+        </body>
+        </html>
+        """
+
+        let preview = sut.wrapHTMLForDisplay(html, isDarkMode: true, displayPurpose: .preview)
+        let original = sut.wrapHTMLForDisplay(html, isDarkMode: true, displayPurpose: .original)
+
+        XCTAssertTrue(preview.contains("background-color: #1c1c1e;"))
+        XCTAssertTrue(original.contains("background-color: #000000;"))
     }
 
     func testWrapHTMLForDisplay_originalPurpose_preservesDefaultLinkStyling() {

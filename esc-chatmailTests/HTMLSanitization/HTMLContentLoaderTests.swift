@@ -104,6 +104,43 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertFalse(original.html?.contains("text-decoration: inherit") == true)
     }
 
+    func testLoadContent_cacheSeparatesLightAndDarkPreviewVariants() async {
+        let messageId = "html-loader-theme-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let html = """
+        <p>Theme-sensitive preview</p>
+        """
+        _ = contentHandler.saveHTML(html, for: messageId)
+
+        let light = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .preview
+        )
+        let dark = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            isDarkMode: true,
+            cleanupMode: .none,
+            displayPurpose: .preview
+        )
+        let lightReload = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .preview
+        )
+
+        XCTAssertTrue(light.html?.contains("background-color: #f2f2f7") == true)
+        XCTAssertTrue(dark.html?.contains("background-color: #1c1c1e") == true)
+        XCTAssertTrue(lightReload.html?.contains("background-color: #f2f2f7") == true)
+        XCTAssertFalse(lightReload.html?.contains("background-color: #1c1c1e") == true)
+    }
+
     func testLoadContent_cleanupModeQuotedOnlyPreservesSignatureBlock() async {
         let messageId = "html-loader-signature-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }

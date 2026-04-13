@@ -8,6 +8,27 @@ enum HTMLDisplayPurpose: String, CaseIterable, Sendable {
 /// Wraps HTML content for display in WebView with proper styling and security
 /// Designed to match Apple Mail's rendering behavior as closely as possible
 struct HTMLDisplayWrapper {
+    struct Theme: Equatable, Sendable {
+        let backgroundColorHex: String
+        let textColorHex: String
+    }
+
+    static func theme(
+        isDarkMode: Bool,
+        displayPurpose: HTMLDisplayPurpose
+    ) -> Theme {
+        switch (displayPurpose, isDarkMode) {
+        case (.preview, false):
+            return Theme(backgroundColorHex: "#f2f2f7", textColorHex: "#000000")
+        case (.preview, true):
+            return Theme(backgroundColorHex: "#1c1c1e", textColorHex: "#ffffff")
+        case (.original, false):
+            return Theme(backgroundColorHex: "#ffffff", textColorHex: "#000000")
+        case (.original, true):
+            return Theme(backgroundColorHex: "#000000", textColorHex: "#ffffff")
+        }
+    }
+
     /// Wraps HTML content with full HTML document structure and styling
     /// Note: HTML should already be sanitized by HTMLSanitizerService.sanitize() before calling this
     func wrapHTMLForDisplay(
@@ -17,9 +38,7 @@ struct HTMLDisplayWrapper {
     ) -> String {
         // Content is pre-sanitized by HTMLSanitizerService, so we just wrap it
         let sanitized = html
-
-        let backgroundColor = isDarkMode ? "#1c1c1e" : "#ffffff"
-        let textColor = isDarkMode ? "#ffffff" : "#000000"
+        let theme = Self.theme(isDarkMode: isDarkMode, displayPurpose: displayPurpose)
 
         // Check if HTML already has a complete document structure
         let hasDoctype = html.lowercased().contains("<!doctype")
@@ -30,8 +49,7 @@ struct HTMLDisplayWrapper {
             return wrapExistingDocument(
                 sanitized,
                 isDarkMode: isDarkMode,
-                backgroundColor: backgroundColor,
-                textColor: textColor,
+                theme: theme,
                 displayPurpose: displayPurpose
             )
         }
@@ -40,8 +58,7 @@ struct HTMLDisplayWrapper {
         return wrapPartialHTML(
             sanitized,
             isDarkMode: isDarkMode,
-            backgroundColor: backgroundColor,
-            textColor: textColor,
+            theme: theme,
             displayPurpose: displayPurpose
         )
     }
@@ -50,8 +67,7 @@ struct HTMLDisplayWrapper {
     private func wrapExistingDocument(
         _ html: String,
         isDarkMode: Bool,
-        backgroundColor: String,
-        textColor: String,
+        theme: Theme,
         displayPurpose: HTMLDisplayPurpose
     ) -> String {
         // Inject our viewport meta, CSP, and minimal styles into the existing document
@@ -64,11 +80,12 @@ struct HTMLDisplayWrapper {
             /* Minimal resets - don't override email's own styles */
             html {
                 -webkit-text-size-adjust: 100%;
+                background-color: \(theme.backgroundColorHex);
             }
             body {
                 margin: 0;
                 padding: 8px;
-                background-color: \(backgroundColor);
+                background-color: \(theme.backgroundColorHex);
             }
             /* Only constrain images that would overflow */
             img {
@@ -80,7 +97,7 @@ struct HTMLDisplayWrapper {
                 max-width: 100%;
             }
             \(linkCSS(for: displayPurpose))
-            \(isDarkMode ? darkModeCSS(textColor: textColor) : "")
+            \(isDarkMode ? darkModeCSS(textColor: theme.textColorHex) : "")
         </style>
         """
 
@@ -115,8 +132,7 @@ struct HTMLDisplayWrapper {
     private func wrapPartialHTML(
         _ html: String,
         isDarkMode: Bool,
-        backgroundColor: String,
-        textColor: String,
+        theme: Theme,
         displayPurpose: HTMLDisplayPurpose
     ) -> String {
         return """
@@ -132,10 +148,11 @@ struct HTMLDisplayWrapper {
                 }
                 html {
                     -webkit-text-size-adjust: 100%;
+                    background-color: \(theme.backgroundColorHex);
                 }
                 body {
-                    color: \(textColor);
-                    background-color: \(backgroundColor);
+                    color: \(theme.textColorHex);
+                    background-color: \(theme.backgroundColorHex);
                     padding: 8px;
                     margin: 0;
                     word-wrap: break-word;
@@ -160,7 +177,7 @@ struct HTMLDisplayWrapper {
                 td, th {
                     vertical-align: top;
                 }
-                \(isDarkMode ? darkModeCSS(textColor: textColor) : "")
+                \(isDarkMode ? darkModeCSS(textColor: theme.textColorHex) : "")
             </style>
         </head>
         <body>
