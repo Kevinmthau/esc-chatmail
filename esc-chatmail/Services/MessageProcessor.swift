@@ -351,8 +351,24 @@ class MessageProcessor {
             var html: String? = nil
             var plainText: String? = nil
 
-            func setHTML(_ value: String?) { html = value }
-            func setPlainText(_ value: String?) { plainText = value }
+            func setHTML(_ value: String?) {
+                guard let value,
+                      value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+                    return
+                }
+
+                html = value
+            }
+
+            func setPlainText(_ value: String?) {
+                guard let value,
+                      value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+                    return
+                }
+
+                plainText = value
+            }
+
             func getHTML() -> String? { html }
             func getPlainText() -> String? { plainText }
         }
