@@ -1,117 +1,157 @@
 # AGENTS.md
 
-## Purpose
-This repository is an iOS app focused on making email feel like chat while preserving message fidelity where it matters.
-When making changes, optimize for:
+## Repo Overview
+
+`esc-chatmail` is an iOS app that makes email feel like chat while preserving original-message fidelity where it matters.
+
+Optimize for:
 1. correctness
 2. readability
 3. minimal diffs
-4. preserving existing architecture unless there is a clear improvement
+4. preserving the existing architecture unless there is a clear improvement
 
-## Repo-specific priorities
-Important areas include:
-- HTMLContentLoader
-- HTMLSanitizerService
-- HTMLDisplayWrapper
-- BaseEmailWebView
+The repo uses:
+- project: `esc-chatmail.xcodeproj`
+- scheme: `esc-chatmail`
+- deployment target: iOS `17.6`
+- package dependencies resolved through SwiftPM in the project
+
+## Default Build And Test Commands
+
+Use the Xcode app toolchain explicitly. Plain `xcodebuild` will otherwise point at Command Line Tools on this machine.
+
+Default simulator:
+- `platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4`
+
+Exact build command:
+
+```bash
+DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4' \
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+xcodebuild build \
+  -project esc-chatmail.xcodeproj \
+  -scheme esc-chatmail \
+  -configuration Debug \
+  -destination "$DESTINATION"
+```
+
+Exact full test command:
+
+```bash
+DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4' \
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+bash Scripts/run-tests.sh
+```
+
+Narrow test pattern:
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+bash Scripts/run-tests.sh -only-testing 'esc-chatmailTests/<SuiteName>'
+```
+
+Notes:
+- `Scripts/run-tests.sh` uses scheme `esc-chatmail`, configuration `Debug`, and skips `PerformanceRegressionTests` unless `--performance` is passed.
+- If `DESTINATION` is omitted, the script picks the first available iPhone simulator. Prefer setting it explicitly for reproducible Codex runs.
+
+## Key Architecture Notes
+
+App flow:
+- `esc-chatmail/App/esc_chatmailApp.swift` boots the app, initializes `Dependencies.shared`, restores auth, waits for Core Data, and prewarms WebKit.
+- `esc-chatmail/App/ContentView.swift` gates between sign-in and the main conversation UI.
+- Main user surfaces live in:
+  - `esc-chatmail/Views/Main/ConversationListView.swift`
+  - `esc-chatmail/Views/Main/InboxListView.swift`
+  - `esc-chatmail/Views/Chat/ChatView.swift`
+  - `esc-chatmail/Views/Compose/ComposeView.swift`
+
+State management:
+- Shared app services come from `esc-chatmail/Services/Dependencies.swift` via `@EnvironmentObject`.
+- Screen state is usually owned by `@StateObject` view models such as `ConversationListViewModel`, `ChatViewModel`, and `ComposeViewModel`.
+- View models compose smaller services instead of pushing logic into the view layer.
+- `ViewModelTaskManager` is the common pattern for cancelling or deduplicating async UI work.
+
+Email rendering pipeline:
+1. source selection and recovery: `HTMLContentLoader`, `HTMLContentHandler`, `HTMLContentRecoveryService`
+2. sanitization and safety: `HTMLSanitizerService`, `HTMLRemoteImageAttachmentFallback`, URL/CSS sanitizers
+3. presentation wrapping: `HTMLDisplayWrapper`
+4. rendering surfaces:
+   - full message: `HTMLMessageView` -> `HTMLWebView` -> `BaseEmailWebView(.fullInteractive)`
+   - preview routing: `EmailContentSection`, `NewsletterPreviewBuilder`, `TransactionalPreviewBuilder`, `MiniEmailWebView`
+
+Important rule:
+- Do not mix preview-specific transformations into the full-message rendering path unless required.
+
+## Repo-Specific Priorities
+
+Be especially careful in:
+- `esc-chatmail/Services/HTMLContentLoader.swift`
+- `esc-chatmail/Services/HTMLSanitizerService.swift`
+- `esc-chatmail/Services/HTMLSanitization/HTMLDisplayWrapper.swift`
+- `esc-chatmail/Views/Components/EmailContent/BaseEmailWebView.swift`
 - preview rendering in chat/thread UI
 
-Be especially careful when changing code that affects both preview rendering and full-message rendering.
-Default to separating those paths rather than sharing a single transformed HTML pipeline.
-
-## Product principles
+Product principles:
 - Full message view should prioritize fidelity to the original email.
-- Chat previews are allowed to be derived representations optimized for speed, clarity, and stable layout.
-- Do not use preview-specific transformations to degrade the full message rendering path.
+- Chat previews may use derived representations optimized for speed, clarity, and stable layout.
+- Do not degrade the full-message path to make previews easier.
 - Prefer predictable UI over clever rendering tricks.
-- Avoid fragile solutions that depend on scaling full email HTML documents.
+- Avoid fragile solutions that depend on scaling full email HTML documents in scrolling lists.
 
-## How to work
-- Start by reading the relevant code paths before editing.
-- Prefer small, reviewable commits.
-- Reuse existing patterns and naming conventions in the repo.
-- Do not introduce broad rewrites unless they are necessary to complete the task.
-- Do not add dependencies unless absolutely necessary.
-- Prefer native SwiftUI/UIKit solutions over adding complex parsing frameworks.
-- Prefer simple heuristics and maintainable code over overfitting edge cases.
+## Performance Guardrails
 
-## Architecture guidance
-When working on email rendering or previews, keep these concerns separated:
-1. source selection
-2. canonical normalization
-3. safety sanitization
-4. presentation
+- Preserve Core Data batching and prefetching in inbox/chat list fetch requests.
+- Treat `ChatMessagesView` scroll timing as delicate. It has staged initial, follow-up, and stabilization scroll tasks for a reason.
+- Avoid introducing view-driven N+1 work when loaders/caches already exist.
+- Repeated HTML sanitization, wrapping, or recovery passes are a regression risk.
+- `MiniEmailWebView` height changes can destabilize scrolling. Keep preview heights predictable.
+- `WebKitPrewarmer` exists because first-use `WKWebView` startup is expensive.
 
-Do not mix preview logic into the full-message rendering path unless required.
+## UI And UX Guardrails
 
-## Rendering guidance
-### Full message rendering
-- Preserve original HTML as much as possible.
-- Keep sanitization and security protections intact.
-- Minimize layout-altering wrapper CSS.
-- Avoid destructive transformations unless clearly required for safety or rendering.
+- Always inspect the relevant implementation before editing.
+- Prefer small, reviewable diffs.
+- Do not break visible behavior unless explicitly asked.
+- Preserve navigation identity and sheet presentation behavior.
+- Keep personal email in lightweight chat bubbles and reserve rich preview cards for the existing HTML-preview routing.
+- Prefer native SwiftUI/UIKit presentation over brittle WebView hacks when possible.
+- For email HTML changes, be conservative:
+  - avoid repeated sanitization
+  - avoid mutating canonical content just to improve a preview
+  - separate preview behavior from full-message fidelity
 
-### Chat previews
-- For newsletter-like messages, prefer a derived preview model or preview-specific fragment.
-- Do not render the full original email HTML at a reduced scale for chat previews unless explicitly requested.
-- Favor stable card-like previews with predictable height and fast scrolling.
-- Regular conversational email should keep lightweight text-style previews.
+## Testing Expectations
 
-## Code style
-- Keep code straightforward and readable.
-- Prefer explicit names over clever abstractions.
-- Avoid unnecessary indirection.
-- Keep functions focused and single-purpose.
-- Add comments only where they clarify intent or non-obvious tradeoffs.
-- Avoid “AI-sounding” abstractions and boilerplate-heavy code.
-
-## Testing
 Before finishing:
 - Run the narrowest relevant tests first.
-- Then run broader tests if the change touches shared infrastructure.
-- Do not claim something works unless you ran the relevant checks or clearly state what was not run.
-- If tests fail, diagnose whether the failure is caused by your change or is pre-existing.
+- Run broader tests if the change touches shared infrastructure.
+- Do not claim success without running the relevant build/test commands or clearly stating what was not run.
+- If tests fail, determine whether the issue is caused by the change or is pre-existing.
 
-## Expected workflow for tasks
-1. Inspect the current implementation.
-2. Identify the minimum set of files to change.
-3. Make the smallest clean change that satisfies the task.
-4. Run relevant tests or build checks.
-5. Summarize:
-   - what changed
-   - why it changed
-   - what was validated
-   - any follow-up opportunities
+Good default targeted suites:
+- HTML/rendering: `HTMLContentLoaderTests`, `HTMLDisplayWrapperTests`, `HTMLSanitizerServiceTests`, `HTMLRemoteImageAttachmentFallbackTests`, `HTMLPreviewScaleCalculatorTests`
+- Preview classification/cards: `NewsletterPreviewBuilderTests`, `TransactionalPreviewBuilderTests`, `EmailPreviewClassifierTests`
+- Compose: `ComposeViewModelTests`, `ComposeSendOrchestratorTests`
+- Chat bubble loading: `MessageBubbleLoaderTests`, `MessageBubbleViewModelTests`
 
-## For UI changes
-- Keep visual output intentional and polished.
-- Prefer consistency with iOS conventions.
-- Avoid unstable WebView hacks when a simpler native UI would work.
-- Preserve scrolling performance.
+## Refactor Rules
 
-## For email HTML changes
-- Be conservative.
-- Assume email HTML is fragile.
-- Avoid repeated sanitization or repeated transformation passes.
-- Avoid mutating canonical content just to improve a preview.
-- If preview behavior and fidelity conflict, separate the paths.
-
-## For refactors
 - Do not refactor unrelated code while implementing a feature.
 - If a refactor is necessary, keep it tightly scoped to the task.
 - Preserve public behavior unless the task explicitly changes it.
+- Avoid new dependencies unless absolutely necessary.
 
-## Communication in task summaries
-At the end of the task, report:
-- files changed
-- key decisions
-- tests run
-- known limitations
-- suggested next steps only if genuinely useful
+## Definition Of Done
 
-## Good defaults
-If the task is ambiguous, prefer:
-- smaller change
-- clearer code
-- preserving current behavior
-- native rendering over fragile HTML tricks
+A task is done when:
+- the relevant code paths were inspected before editing
+- the smallest clean change was made
+- the app builds successfully or the build status is explicitly stated
+- relevant tests pass or the exact gap is stated
+- no new warnings were introduced in the touched scope
+- the summary clearly reports:
+  - files changed
+  - key decisions
+  - tests run
+  - known limitations
+  - next steps only if genuinely useful
