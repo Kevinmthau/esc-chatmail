@@ -60,7 +60,7 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertFalse(result.contains("font-family: -apple-system"))
     }
 
-    func testWrapHTMLForDisplay_existingDocument_usesDifferentSurfacesForPreviewAndOriginalDarkMode() {
+    func testWrapHTMLForDisplay_existingDocument_usesDarkPreviewSurfaceButLightOriginalSurface() {
         let html = """
         <!DOCTYPE html>
         <html>
@@ -74,7 +74,26 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         let original = sut.wrapHTMLForDisplay(html, isDarkMode: true, displayPurpose: .original)
 
         XCTAssertTrue(preview.contains("background-color: #1c1c1e;"))
-        XCTAssertTrue(original.contains("background-color: #000000;"))
+        XCTAssertTrue(original.contains("background-color: #ffffff;"))
+        XCTAssertFalse(original.contains("background-color: #000000;"))
+    }
+
+    func testWrapHTMLForDisplay_existingDocument_originalDarkModeDoesNotInjectPreviewTextOverrides() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <p style="color: rgb(54,55,55);">Authored text color</p>
+            <p>Unstyled text</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: true, displayPurpose: .original)
+
+        XCTAssertFalse(result.contains("p:not([style*=\"color\"])"))
+        XCTAssertFalse(result.contains("li:not([style*=\"color\"])"))
+        XCTAssertTrue(result.contains("color: rgb(54,55,55);"))
     }
 
     func testWrapHTMLForDisplay_originalPurpose_preservesDefaultLinkStyling() {
