@@ -76,6 +76,8 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertTrue(preview.contains("background-color: #1c1c1e;"))
         XCTAssertTrue(original.contains("background-color: #ffffff;"))
         XCTAssertFalse(original.contains("background-color: #000000;"))
+        XCTAssertTrue(original.contains("<meta name=\"color-scheme\" content=\"light\">"))
+        XCTAssertTrue(original.contains("color-scheme: light;"))
     }
 
     func testWrapHTMLForDisplay_existingDocument_originalDarkModeDoesNotInjectPreviewTextOverrides() {

@@ -88,3 +88,16 @@ struct TransactionalPreviewModel: Equatable, Sendable {
     let sourceLabel: String?
     let sourceDomain: String?
 }
+
+struct CalendarInvitePreviewModel: Equatable, Sendable {
+    let title: String
+    let monthSymbol: String
+    let dayNumber: String
+    let weekdaySymbol: String
+    let dateTimeLine: String
+    let locationLine: String?
+    let organizerLine: String?
+    let status: String?
+    let actionLabel: String
+    let sourceLabel: String?
+}

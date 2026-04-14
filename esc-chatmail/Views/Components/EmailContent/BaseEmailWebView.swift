@@ -68,6 +68,9 @@ struct BaseEmailWebView: UIViewRepresentable {
             // Match Apple Mail's WebView behavior
             webView.scrollView.contentInsetAdjustmentBehavior = .never
             webView.scrollView.automaticallyAdjustsScrollIndicatorInsets = true
+            // Keep full-message documents on a light trait environment so authored
+            // dark-mode CSS doesn't render low-contrast text against our light surface.
+            webView.overrideUserInterfaceStyle = .light
             // Use mobile user agent to trigger responsive media queries
             webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
             // Prevent automatic font size adjustment that can break layouts
@@ -160,6 +163,12 @@ struct BaseEmailWebView: UIViewRepresentable {
 
         func applyBackgroundAppearance(to webView: WKWebView) {
             webView.isOpaque = false
+            switch parent.mode {
+            case .fullInteractive:
+                webView.overrideUserInterfaceStyle = .light
+            case .scaledPreview, .simplePreview:
+                webView.overrideUserInterfaceStyle = .unspecified
+            }
             let backgroundColor = nativeBackgroundColor(for: parent.mode) ?? .clear
             webView.backgroundColor = backgroundColor
             webView.scrollView.backgroundColor = backgroundColor

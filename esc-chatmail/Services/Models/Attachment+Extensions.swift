@@ -49,6 +49,21 @@ extension Attachment {
         mimeType
     }
 
+    var isCalendarInviteAttachment: Bool {
+        let normalizedMimeType = mimeType
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let normalizedFilename = filename
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        return normalizedMimeType.hasPrefix("text/calendar") ||
+            normalizedMimeType == "application/ics" ||
+            normalizedMimeType == "application/ical" ||
+            normalizedMimeType == "application/x-ical" ||
+            normalizedFilename.hasSuffix(".ics")
+    }
+
     /// Whether this attachment is marked as downloaded but the file is missing from disk
     var needsRedownload: Bool {
         guard state == .downloaded || state == .uploaded else { return false }
