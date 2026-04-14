@@ -30,14 +30,15 @@ actor GoogleDriveSharedFileMetadataProvider {
         }
 
         let session = self.session
-        let fetchedMetadata = await requestManager.deduplicatedWithFailureTracking(key: cacheKey) {
+        let requestKey = link.url.absoluteString
+        let fetchedMetadata = await requestManager.deduplicated(key: requestKey) {
             await Self.fetchMetadata(for: link, session: session)
         }
 
         let resolvedMetadata = fetchedMetadata ?? Self.fallbackMetadata(for: link)
 
-        if fetchedMetadata != nil {
-            cachedMetadata[cacheKey] = resolvedMetadata
+        if let fetchedMetadata {
+            cachedMetadata[cacheKey] = fetchedMetadata
         }
 
         return resolvedMetadata
@@ -54,12 +55,16 @@ actor GoogleDriveSharedFileMetadataProvider {
         from html: String,
         link: SharedDocumentLink
     ) -> GoogleDriveSharedFileMetadata? {
-        let resolvedTitle = normalizedTitle(
+        let rawTitle =
             extractMetaContent(named: "og:title", from: html) ??
             extractMetaContent(named: "twitter:title", from: html) ??
-            extractTitleTag(from: html),
-            link: link
-        ) ?? link.kind.title
+            extractTitleTag(from: html)
+
+        if isBlockedDocumentPageTitle(rawTitle) {
+            return nil
+        }
+
+        let resolvedTitle = normalizedTitle(rawTitle, link: link) ?? link.kind.title
 
         let resolvedThumbnailURL =
             normalizedURLString(
@@ -218,6 +223,35 @@ actor GoogleDriveSharedFileMetadataProvider {
         }
 
         return title.isEmpty ? link.kind.title : title
+    }
+
+    private static func isBlockedDocumentPageTitle(_ rawTitle: String?) -> Bool {
+        guard let rawTitle = rawTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawTitle.isEmpty else {
+            return false
+        }
+
+        var normalizedTitle = HTMLEntityDecoder.decode(rawTitle)
+        normalizedTitle = normalizedTitle.replacingOccurrences(
+            of: "\\s+",
+            with: " ",
+            options: .regularExpression
+        )
+        normalizedTitle = normalizedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let lowercasedTitle = normalizedTitle.lowercased()
+        let blockedTitles = Set([
+            "access denied - google docs",
+            "sign in - google accounts",
+            "google docs: sign-in",
+            "google drive: sign-in",
+        ])
+
+        if blockedTitles.contains(lowercasedTitle) {
+            return true
+        }
+
+        return lowercasedTitle.hasPrefix("sign in") || lowercasedTitle.hasPrefix("access denied")
     }
 
     private static func normalizedURLString(_ rawURL: String?) -> String? {
