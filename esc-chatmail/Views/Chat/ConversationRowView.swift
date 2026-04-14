@@ -37,7 +37,6 @@ struct ConversationRowView: View {
 
     @State private var uncachedParticipantInfo: ParticipantLoader.ParticipantInfo?
     @State private var uncachedParticipantInfoKey: String?
-    @State private var cacheRefreshToken = 0
 
     @MainActor
     init(
@@ -55,7 +54,6 @@ struct ConversationRowView: View {
     }
 
     var body: some View {
-        let _ = cacheRefreshToken
         let rowContent = HStack(spacing: 12) {
             // Unread indicator with fixed width container
             ZStack {
@@ -157,9 +155,11 @@ struct ConversationRowView: View {
     }
 
     private var effectiveParticipantInfo: ParticipantLoader.ParticipantInfo? {
-        cachedFullParticipantInfo
-            ?? cachedBaseParticipantInfo
-            ?? currentUncachedParticipantInfo
+        Self.resolvedParticipantInfo(
+            cachedFull: cachedFullParticipantInfo,
+            cachedBase: cachedBaseParticipantInfo,
+            uncached: currentUncachedParticipantInfo
+        )
     }
 
     private var currentUncachedParticipantInfo: ParticipantLoader.ParticipantInfo? {
@@ -190,6 +190,32 @@ struct ConversationRowView: View {
         return currentUncachedParticipantInfo == nil
     }
 
+    static func resolvedParticipantInfo(
+        cachedFull: ParticipantLoader.ParticipantInfo?,
+        cachedBase: ParticipantLoader.ParticipantInfo?,
+        uncached: ParticipantLoader.ParticipantInfo?
+    ) -> ParticipantLoader.ParticipantInfo? {
+        if let cachedFull {
+            return cachedFull
+        }
+
+        guard let cachedBase else {
+            return uncached
+        }
+
+        guard let uncached, !uncached.photos.isEmpty else {
+            return cachedBase
+        }
+
+        return ParticipantLoader.ParticipantInfo(
+            emails: cachedBase.emails,
+            displayNames: cachedBase.displayNames,
+            photos: uncached.photos,
+            formattedDisplayName: cachedBase.formattedDisplayName,
+            totalUniqueParticipants: cachedBase.totalUniqueParticipants
+        )
+    }
+
     private func loadContactInfo(for participantInfoKey: String) async {
         let info = await participantLoader.loadParticipants(
             from: conversationObjectID,
@@ -201,13 +227,6 @@ struct ConversationRowView: View {
         )
 
         guard participantInfoKey == self.participantInfoKey else { return }
-
-        if snapshot.participantHash?.isEmpty == false {
-            uncachedParticipantInfo = nil
-            uncachedParticipantInfoKey = nil
-            cacheRefreshToken &+= 1
-            return
-        }
 
         uncachedParticipantInfo = info
         uncachedParticipantInfoKey = participantInfoKey
