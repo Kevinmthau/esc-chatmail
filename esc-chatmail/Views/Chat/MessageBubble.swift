@@ -79,6 +79,7 @@ struct MessageBubble: View {
                     style: style,
                     showHTMLPreview: showHTMLPreview,
                     fullTextContent: viewModel.fullTextContent,
+                    sharedDocumentLinks: viewModel.sharedDocumentLinks,
                     hasLoadedContent: viewModel.hasLoadedContent,
                     forwardedDisplayContent: outgoingForwardedDisplayContent,
                     onOpenFullMessage: openFullMessage
@@ -172,15 +173,6 @@ struct MessageBubble: View {
             } else {
                 AttachmentIndicator(count: displayable.count)
             }
-        }
-
-        if !viewModel.sharedDocumentLinks.isEmpty {
-            VStack(spacing: 8) {
-                ForEach(viewModel.sharedDocumentLinks) { link in
-                    SharedDocumentLinkCard(link: link)
-                }
-            }
-            .frame(maxWidth: style.maxBubbleWidth)
         }
     }
 

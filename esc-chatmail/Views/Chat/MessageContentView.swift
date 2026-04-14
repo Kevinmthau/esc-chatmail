@@ -7,21 +7,37 @@ struct MessageContentView: View {
     let style: MessageBubbleStyle
     let showHTMLPreview: Bool
     let fullTextContent: String?
+    let sharedDocumentLinks: [SharedDocumentLink]
     let hasLoadedContent: Bool
     let forwardedDisplayContent: ForwardedMessageDisplayContent?
     let onOpenFullMessage: () -> Void
 
     var body: some View {
         if showHTMLPreview {
-            // Preview-card mode is reserved for forwarded, newsletter, and rich transactional HTML.
+            htmlPreviewContent
+                .frame(maxWidth: style.maxBubbleWidth, alignment: message.isFromMe ? .trailing : .leading)
+        } else {
+            // Personal emails: Show as chat bubbles with text
+            textContent
+        }
+    }
+
+    @ViewBuilder
+    private var htmlPreviewContent: some View {
+        // Keep shared document cards visible even when the message routes through HTML preview mode.
+        if sharedDocumentLinks.isEmpty {
             EmailContentSection(
                 message: message,
                 onOpenFullMessage: onOpenFullMessage
             )
-            .frame(maxWidth: style.maxBubbleWidth, alignment: message.isFromMe ? .trailing : .leading)
         } else {
-            // Personal emails: Show as chat bubbles with text
-            textContent
+            VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 10) {
+                EmailContentSection(
+                    message: message,
+                    onOpenFullMessage: onOpenFullMessage
+                )
+                sharedDocumentCards
+            }
         }
     }
 
@@ -33,14 +49,10 @@ struct MessageContentView: View {
             // Avoid flashing raw/partial HTML-derived text while async content detection is still running.
             loadingPlaceholder
         } else {
-            // Fallback chain:
-            // 1. fullTextContent - Async-loaded processed text (best quality, but may not be ready on first render)
-            // 2. processedText(bodyText) - Full body text with processing (immediate, full content)
-            // 3. processedText(snippet) - Gmail API snippet with processing (truncated, rarely used)
-            // 4. message.snippet - Raw truncated snippet (last resort)
-            // Note: We skip message.cleanedSnippet because TextSnippetCreator destroys all newlines
-            if let text = fullTextContent ?? cachedProcessedText ?? message.snippet, !text.isEmpty {
-                textBubble(text: text)
+            if let text = resolvedVisibleText, !text.isEmpty {
+                textAndSharedDocumentContent(text: text)
+            } else if !sharedDocumentLinks.isEmpty {
+                sharedDocumentCards
             } else if message.hasHTMLSource {
                 // No text content but HTML exists - show a tappable bubble to open full email
                 openEmailBubble
@@ -50,6 +62,27 @@ struct MessageContentView: View {
             }
             // If message has attachments but no text, show nothing (attachments are the content)
         }
+    }
+
+    @ViewBuilder
+    private func textAndSharedDocumentContent(text: String) -> some View {
+        if sharedDocumentLinks.isEmpty {
+            textBubble(text: text)
+        } else {
+            VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 8) {
+                textBubble(text: text)
+                sharedDocumentCards
+            }
+        }
+    }
+
+    private var sharedDocumentCards: some View {
+        VStack(spacing: 10) {
+            ForEach(sharedDocumentLinks) { link in
+                SharedDocumentLinkCard(link: link)
+            }
+        }
+        .frame(maxWidth: style.maxBubbleWidth, alignment: message.isFromMe ? .trailing : .leading)
     }
 
     private var loadingPlaceholder: some View {
@@ -172,6 +205,11 @@ struct MessageContentView: View {
     /// Avoids calling processedText() multiple times during view body evaluation.
     private var cachedProcessedText: String? {
         Self.resolvedProcessedText(bodyText: message.bodyText, snippet: message.snippet)
+    }
+
+    private var resolvedVisibleText: String? {
+        let sourceText = fullTextContent ?? cachedProcessedText ?? message.snippet
+        return SharedDocumentLinkExtractor.removingLinks(from: sourceText, matching: sharedDocumentLinks)
     }
 
     private var resolvedForwardedDisplayContent: ForwardedMessageDisplayContent? {

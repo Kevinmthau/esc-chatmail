@@ -2,6 +2,20 @@ import SwiftUI
 
 struct SharedDocumentLinkCard: View {
     let link: SharedDocumentLink
+
+    var body: some View {
+        Group {
+            if link.supportsAttachmentPreviewCard {
+                GoogleDriveSharedFileCardView(link: link)
+            } else {
+                LegacySharedDocumentLinkCard(link: link)
+            }
+        }
+    }
+}
+
+private struct LegacySharedDocumentLinkCard: View {
+    let link: SharedDocumentLink
     @Environment(\.openURL) private var openURL
 
     var body: some View {

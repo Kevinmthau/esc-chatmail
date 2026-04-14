@@ -66,4 +66,30 @@ final class SharedDocumentLinkExtractorTests: XCTestCase {
         XCTAssertEqual(links.count, 1)
         XCTAssertEqual(links[0].kind, .googleDriveFolder)
     }
+
+    func testRemovingLinks_removesSharedDocumentURLsAndKeepsSurroundingText() {
+        let text = """
+        Daily special overview.
+        https://docs.google.com/document/d/doc123/edit?usp=sharing
+
+        MOTD not yet tackled.
+        """
+        let links = SharedDocumentLinkExtractor.extract(from: [text])
+
+        let cleaned = SharedDocumentLinkExtractor.removingLinks(from: text, matching: links)
+
+        XCTAssertEqual(cleaned, "Daily special overview.\n\nMOTD not yet tackled.")
+    }
+
+    func testRemovingLinks_returnsNilWhenMessageContainsOnlySharedDocumentURLs() {
+        let text = """
+        https://docs.google.com/document/d/doc123/edit
+        https://docs.google.com/spreadsheets/d/sheet123/edit
+        """
+        let links = SharedDocumentLinkExtractor.extract(from: [text])
+
+        let cleaned = SharedDocumentLinkExtractor.removingLinks(from: text, matching: links)
+
+        XCTAssertNil(cleaned)
+    }
 }

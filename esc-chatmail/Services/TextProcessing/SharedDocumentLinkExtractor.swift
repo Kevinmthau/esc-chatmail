@@ -22,6 +22,15 @@ struct SharedDocumentLink: Identifiable, Equatable, Sendable {
                 return "Google Drive Folder"
             }
         }
+
+        var supportsAttachmentPreviewCard: Bool {
+            switch self {
+            case .googleSheet, .googleDoc, .googleSlides:
+                return true
+            case .googleDriveFile, .googleDriveFolder:
+                return false
+            }
+        }
     }
 
     let id: String
@@ -30,6 +39,18 @@ struct SharedDocumentLink: Identifiable, Equatable, Sendable {
 
     var hostDisplay: String {
         url.host?.lowercased() ?? url.absoluteString
+    }
+
+    var sourceLabel: String {
+        kind.supportsAttachmentPreviewCard ? "docs.google.com" : hostDisplay
+    }
+
+    var resourceID: String? {
+        SharedDocumentLinkExtractor.googleResourceId(from: url)
+    }
+
+    var supportsAttachmentPreviewCard: Bool {
+        kind.supportsAttachmentPreviewCard
     }
 }
 
@@ -77,7 +98,74 @@ enum SharedDocumentLinkExtractor {
         return links
     }
 
-    private static func normalizedHTTPURL(from url: URL) -> URL? {
+    static func removingLinks(from text: String?, matching links: [SharedDocumentLink]) -> String? {
+        guard let detector = linkDetector else {
+            return text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty,
+              !links.isEmpty else {
+            return text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        let removableIDs = Set(links.map(\.id))
+        let range = NSRange(text.startIndex..., in: text)
+        var removableRanges: [NSRange] = []
+
+        for match in detector.matches(in: text, options: [], range: range) {
+            guard let rawURL = match.url,
+                  let normalizedURL = normalizedHTTPURL(from: rawURL),
+                  let kind = googleWorkspaceKind(for: normalizedURL) else {
+                continue
+            }
+
+            let dedupeKey = dedupeKey(for: normalizedURL, kind: kind)
+            guard removableIDs.contains(dedupeKey) else {
+                continue
+            }
+
+            removableRanges.append(match.range)
+        }
+
+        guard !removableRanges.isEmpty else {
+            return text
+        }
+
+        var cleanedText = text
+        for removableRange in removableRanges.sorted(by: { $0.location > $1.location }) {
+            guard let swiftRange = Range(removableRange, in: cleanedText) else {
+                continue
+            }
+            cleanedText.removeSubrange(swiftRange)
+        }
+
+        cleanedText = cleanedText.replacingOccurrences(
+            of: "[ \\t]{2,}",
+            with: " ",
+            options: .regularExpression
+        )
+        cleanedText = cleanedText.replacingOccurrences(
+            of: "\\n[ \\t]+",
+            with: "\n",
+            options: .regularExpression
+        )
+        cleanedText = cleanedText.replacingOccurrences(
+            of: "[ \\t]+\\n",
+            with: "\n",
+            options: .regularExpression
+        )
+        cleanedText = cleanedText.replacingOccurrences(
+            of: "(\\n\\s*){3,}",
+            with: "\n\n",
+            options: .regularExpression
+        )
+
+        let trimmed = cleanedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    static func normalizedHTTPURL(from url: URL) -> URL? {
         guard let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
               url.host != nil else {
@@ -91,7 +179,7 @@ enum SharedDocumentLinkExtractor {
         return components.url ?? url
     }
 
-    private static func googleWorkspaceKind(for url: URL) -> SharedDocumentLink.Kind? {
+    static func googleWorkspaceKind(for url: URL) -> SharedDocumentLink.Kind? {
         guard let host = url.host?.lowercased() else {
             return nil
         }
@@ -127,7 +215,7 @@ enum SharedDocumentLinkExtractor {
         }
     }
 
-    private static func dedupeKey(for url: URL, kind: SharedDocumentLink.Kind) -> String {
+    static func dedupeKey(for url: URL, kind: SharedDocumentLink.Kind) -> String {
         if let resourceId = googleResourceId(from: url) {
             return "\(kind)|\(resourceId.lowercased())"
         }
@@ -140,7 +228,7 @@ enum SharedDocumentLinkExtractor {
         return "\(kind)|\(host)\(path)"
     }
 
-    private static func googleResourceId(from url: URL) -> String? {
+    static func googleResourceId(from url: URL) -> String? {
         let components = url.pathComponents.filter { $0 != "/" }
 
         if let dIndex = components.firstIndex(of: "d"),
