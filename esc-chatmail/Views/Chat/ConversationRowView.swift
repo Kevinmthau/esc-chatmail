@@ -55,6 +55,7 @@ struct ConversationRowView: View {
     }
 
     var body: some View {
+        let _ = cacheRefreshToken
         let rowContent = HStack(spacing: 12) {
             // Unread indicator with fixed width container
             ZStack {
