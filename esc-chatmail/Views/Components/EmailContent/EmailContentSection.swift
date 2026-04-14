@@ -13,6 +13,7 @@ struct EmailContentSection: View {
     @State private var loadGeneration = 0
     private let htmlContentLoader = HTMLContentLoader.shared
     private let previewClassifier = EmailPreviewClassifier()
+    private let calendarInvitePreviewBuilder = CalendarInvitePreviewBuilder()
     private let newsletterPreviewBuilder = NewsletterPreviewBuilder()
     private let transactionalPreviewBuilder = TransactionalPreviewBuilder()
 
@@ -86,6 +87,19 @@ struct EmailContentSection: View {
                 "EmailContentSection classified message \(message.id): \(classification.diagnosticSummary)",
                 category: .ui
             )
+
+            if !message.isForwardedEmail,
+               let model = calendarInvitePreviewBuilder.buildPreview(
+                canonicalHTML: canonicalHTML,
+                bodyText: message.bodyText,
+                cleanedSnippet: message.cleanedSnippet,
+                senderName: message.senderName,
+                senderEmail: message.senderEmail,
+                subject: message.subject
+               ) {
+                await finishLoad(with: .calendarInvite(model), generation: generation)
+                return
+            }
 
             switch classification.kind {
             case .newsletter:
@@ -167,6 +181,13 @@ struct EmailContentSection: View {
     @ViewBuilder
     private func previewView(for renderedPreview: LoadedPreview) -> some View {
         switch renderedPreview {
+        case .calendarInvite(let model):
+            Button(action: onOpenFullMessage) {
+                CalendarInvitePreviewCard(model: model)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Calendar invite: \(model.title)")
+            .accessibilityHint("Opens the full original email")
         case .newsletter(let model):
             Button(action: onOpenFullMessage) {
                 NewsletterPreviewCard(model: model)
@@ -207,6 +228,7 @@ struct EmailContentSection: View {
 }
 
 private enum LoadedPreview: Equatable {
+    case calendarInvite(CalendarInvitePreviewModel)
     case newsletter(NewsletterPreviewModel)
     case transactional(TransactionalPreviewModel)
     case transactionalHTML(String)

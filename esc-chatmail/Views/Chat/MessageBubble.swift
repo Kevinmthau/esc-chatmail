@@ -134,7 +134,7 @@ struct MessageBubble: View {
     @ViewBuilder
     private var subjectView: some View {
         if outgoingForwardedDisplayContent == nil,
-           !(showHTMLPreview && message.isNewsletter),
+           !(showHTMLPreview && (message.isNewsletter || message.isLikelyCalendarInvite)),
            let subject = message.subject, !subject.isEmpty {
             Text(subject)
                 .font(.footnote)

@@ -71,6 +71,38 @@ extension Message {
         }
     }
 
+    var isLikelyCalendarInvite: Bool {
+        let normalizedSubject = normalizedCalendarInviteSignalText(subject).lowercased()
+        let normalizedSnippet = normalizedCalendarInviteSignalText(cleanedSnippet ?? snippet).lowercased()
+        let normalizedBody = normalizedCalendarInviteSignalText(
+            bodyText.map { RawEmailSourceSanitizer.extractDisplayText(from: $0) }
+        ).lowercased()
+        let combinedText = [normalizedSubject, normalizedSnippet, normalizedBody]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+
+        let hasCalendarAttachment = attachmentsArray.contains { $0.isCalendarInviteAttachment }
+        let hasGoogleCalendarMarker = Self.calendarInviteGoogleMarkers.contains { combinedText.contains($0) }
+        let hasInviteSubjectPrefix = Self.calendarInviteSubjectPrefixes.contains { normalizedSubject.hasPrefix($0) }
+        let hasCalendarStructure =
+            Self.calendarInviteStructuralMarkers.filter { combinedText.contains($0) }.count >= 2
+        let hasDateSignal =
+            combinedText.range(
+                of: Self.calendarInviteDatePattern,
+                options: [.regularExpression, .caseInsensitive]
+            ) != nil
+
+        if hasGoogleCalendarMarker {
+            return true
+        }
+
+        if hasCalendarAttachment && (hasInviteSubjectPrefix || hasCalendarStructure || hasDateSignal) {
+            return true
+        }
+
+        return hasInviteSubjectPrefix && hasCalendarStructure && hasDateSignal
+    }
+
     /// Attachments suitable for display (excludes signature images and inline images already shown in HTML)
     var displayableAttachments: [Attachment] {
         displayableAttachments(hidingInlineReferencedInHTML: true)
@@ -108,17 +140,24 @@ extension Message {
 
         // If message has HTML content, filter out attachments that are displayed inline via cid: URLs.
         let referencedCIDs = extractReferencedContentIDs(from: html)
-        guard !referencedCIDs.isEmpty else {
-            return allAttachments
+        let cidFilteredAttachments: [Attachment]
+        if referencedCIDs.isEmpty {
+            cidFilteredAttachments = allAttachments
+        } else {
+            cidFilteredAttachments = allAttachments.filter { attachment in
+                guard let contentId = normalizedContentID(from: attachment.contentId) else {
+                    return true // No Content-ID, always show
+                }
+                // Hide if this Content-ID is referenced in the HTML body.
+                return !referencedCIDs.contains(contentId)
+            }
         }
 
-        return allAttachments.filter { attachment in
-            guard let contentId = normalizedContentID(from: attachment.contentId) else {
-                return true // No Content-ID, always show
-            }
-            // Hide if this Content-ID is referenced in the HTML body.
-            return !referencedCIDs.contains(contentId)
+        guard isLikelyCalendarInvite else {
+            return cidFilteredAttachments
         }
+
+        return cidFilteredAttachments.filter { !$0.isCalendarInviteAttachment }
     }
 
     /// Returns one canonical attachment per repeated Content-ID or repeated file fingerprint.
@@ -204,6 +243,19 @@ extension Message {
         }
 
         return html
+    }
+
+    private func normalizedCalendarInviteSignalText(_ text: String?) -> String {
+        guard let text else {
+            return ""
+        }
+
+        return HTMLEntityDecoder.decode(text)
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+            .replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Extracts Content-IDs referenced via cid: URLs in HTML.
@@ -373,6 +425,31 @@ extension Message {
         "realtor",
         "membership"
     ]
+
+    private static let calendarInviteGoogleMarkers = [
+        "google calendar",
+        "calendar.google.com",
+        "meet.google.com",
+        "reply for ",
+        "view all guest info"
+    ]
+
+    private static let calendarInviteSubjectPrefixes = [
+        "invitation:",
+        "updated invitation:",
+        "canceled:",
+        "cancelled:"
+    ]
+
+    private static let calendarInviteStructuralMarkers = [
+        "\nwhen\n",
+        "\nwhere\n",
+        "\nguests\n",
+        "\nmore options\n",
+        "yes no maybe"
+    ]
+
+    private static let calendarInviteDatePattern = #"\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b[\w\s,.:()\-–•]*\b\d{1,2}:\d{2}\s*(?:am|pm)\b"#
 
     private func normalizedContentID(from rawValue: String?) -> String? {
         guard let rawValue else { return nil }

@@ -366,6 +366,51 @@ final class AttachmentDownloaderTests: XCTestCase {
         handler.deleteHTML(for: messageId)
     }
 
+    func testMessage_displayableAttachments_hidesCalendarInviteFilesOnlyInPreviewMode() throws {
+        let message = MessageBuilder()
+            .withSubject("Invitation: Board sync @ Mon May 5, 2026 9:00am - 9:30am (EDT)")
+            .withSnippet("Invitation from Google Calendar")
+            .withBody(
+                """
+                Invitation from Google Calendar
+                Board sync
+                When
+                Monday May 5, 2026 • 9:00am – 9:30am (Eastern Time - New York)
+                Guests
+                brynn@example.com
+                Reply for kmthau@gmail.com
+                """
+            )
+            .withAttachments()
+            .build(in: context)
+
+        let _ = AttachmentBuilder()
+            .withId("att-calendar")
+            .withFilename("invite.ics")
+            .withMimeType("text/calendar")
+            .withByteSize(2_048)
+            .forMessage(message)
+            .build(in: context)
+
+        let _ = AttachmentBuilder()
+            .withId("att-notes")
+            .withFilename("notes.pdf")
+            .asPDF()
+            .withByteSize(45_000)
+            .forMessage(message)
+            .build(in: context)
+
+        try testStack.saveViewContext()
+
+        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
+
+        let previewAttachments = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: true) ?? []
+        XCTAssertEqual(previewAttachments.compactMap { $0.id }, ["att-notes"])
+
+        let bubbleAttachments = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: false) ?? []
+        XCTAssertEqual(bubbleAttachments.compactMap { $0.id }.sorted(), ["att-calendar", "att-notes"])
+    }
+
     func testMessage_displayableAttachments_plainBubble_hidesSignatureOnlyCIDInlineImages() throws {
         let messageId = "msg-inline-signature-\(UUID().uuidString)"
         let message = MessageBuilder()
