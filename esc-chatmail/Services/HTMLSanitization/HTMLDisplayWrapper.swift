@@ -25,7 +25,9 @@ struct HTMLDisplayWrapper {
         case (.original, false):
             return Theme(backgroundColorHex: "#ffffff", textColorHex: "#000000")
         case (.original, true):
-            return Theme(backgroundColorHex: "#000000", textColorHex: "#ffffff")
+            // Full-message rendering should preserve authored colors instead of forcing
+            // the document onto a dark surface that many emails were never designed for.
+            return Theme(backgroundColorHex: "#ffffff", textColorHex: "#000000")
         }
     }
 
@@ -73,6 +75,8 @@ struct HTMLDisplayWrapper {
         // Inject our viewport meta, CSP, and minimal styles into the existing document
         // This preserves the email's original <style> tags and media queries
 
+        let shouldApplyDarkModeFallbackText = isDarkMode && displayPurpose == .preview
+
         let injectedHead = """
         <meta name="viewport" content="width=device-width, initial-scale=1.0, shrink-to-fit=no, user-scalable=yes">
         <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none';">
@@ -97,7 +101,7 @@ struct HTMLDisplayWrapper {
                 max-width: 100%;
             }
             \(linkCSS(for: displayPurpose))
-            \(isDarkMode ? darkModeCSS(textColor: theme.textColorHex) : "")
+            \(shouldApplyDarkModeFallbackText ? darkModeCSS(textColor: theme.textColorHex) : "")
         </style>
         """
 
@@ -135,6 +139,8 @@ struct HTMLDisplayWrapper {
         theme: Theme,
         displayPurpose: HTMLDisplayPurpose
     ) -> String {
+        let shouldApplyDarkModeFallbackText = isDarkMode && displayPurpose == .preview
+
         return """
         <!DOCTYPE html>
         <html>
@@ -177,7 +183,7 @@ struct HTMLDisplayWrapper {
                 td, th {
                     vertical-align: top;
                 }
-                \(isDarkMode ? darkModeCSS(textColor: theme.textColorHex) : "")
+                \(shouldApplyDarkModeFallbackText ? darkModeCSS(textColor: theme.textColorHex) : "")
             </style>
         </head>
         <body>

@@ -623,7 +623,9 @@ final class HTMLContentLoader {
 
     private func warmRemoteImageAttachmentFallback(in html: String, messageId: String, senderEmail: String?) {
         let remoteImageAttachmentFallback = self.remoteImageAttachmentFallback
-        Task.detached(priority: .utility) {
+        // Warm rewritten image data promptly so a near-immediate reopen can pick up the cached
+        // result instead of waiting behind low-priority detached work.
+        Task(priority: .userInitiated) {
             let rewrittenHTML = await remoteImageAttachmentFallback.inlineAttachmentStyleImages(
                 in: html,
                 senderEmail: senderEmail
