@@ -19,9 +19,10 @@ enum TextSnippetCreator {
         guard let text = text, !text.isEmpty else { return "" }
 
         let sourceText = RawEmailSourceSanitizer.extractDisplayText(from: text)
+        let decodedSourceText = HTMLEntityDecoder.decode(sourceText)
 
         // Clean the text by removing quotes
-        let cleanedText = PlainTextQuoteRemover.removeQuotes(from: sourceText) ?? sourceText
+        let cleanedText = PlainTextQuoteRemover.removeQuotes(from: decodedSourceText) ?? decodedSourceText
 
         // Remove excessive whitespace and newlines
         let condensed = cleanedText

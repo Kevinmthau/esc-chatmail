@@ -780,6 +780,110 @@ final class MessageProcessorTests: XCTestCase {
         XCTAssertTrue(processed?.htmlBody?.contains("cid:\(contentID)") == true)
     }
 
+    func testProcessGmailMessage_appleMailMultipartMixed_trailingEmptyPlainTextDoesNotOverrideBody() async {
+        let quotedPrintableBody = "Let=E2=80=99s gooooi"
+        let inlineJPEGData = Data([0xFF, 0xD8, 0xFF, 0xD9]).base64EncodedString()
+
+        let message = GmailMessage(
+            id: "apple-mail-trailing-empty-plain-text",
+            threadId: "apple-mail-trailing-empty-plain-text-thread",
+            labelIds: ["INBOX"],
+            snippet: "Let&#39;s gooooi",
+            historyId: "123",
+            internalDate: "1776181859209",
+            payload: MessagePart(
+                partId: "0",
+                mimeType: "multipart/mixed",
+                filename: nil,
+                headers: baseHeaders(id: "apple-mail-trailing-empty-plain-text"),
+                body: nil,
+                parts: [
+                    MessagePart(
+                        partId: "0.0",
+                        mimeType: "text/plain",
+                        filename: nil,
+                        headers: [
+                            MessageHeader(name: "Content-Type", value: "text/plain; charset=utf-8"),
+                            MessageHeader(name: "Content-Transfer-Encoding", value: "quoted-printable")
+                        ],
+                        body: MessageBody(
+                            size: quotedPrintableBody.count,
+                            data: quotedPrintableBody.data(using: .utf8)?.base64EncodedString(),
+                            attachmentId: nil
+                        ),
+                        parts: nil
+                    ),
+                    MessagePart(
+                        partId: "0.1",
+                        mimeType: "image/jpeg",
+                        filename: "image0.jpeg",
+                        headers: [
+                            MessageHeader(name: "Content-Disposition", value: "inline; filename=\"image0.jpeg\"")
+                        ],
+                        body: MessageBody(
+                            size: 4,
+                            data: inlineJPEGData,
+                            attachmentId: nil
+                        ),
+                        parts: nil
+                    ),
+                    MessagePart(
+                        partId: "0.2",
+                        mimeType: "text/plain",
+                        filename: nil,
+                        headers: [
+                            MessageHeader(name: "Content-Type", value: "text/plain; charset=us-ascii"),
+                            MessageHeader(name: "Content-Transfer-Encoding", value: "7bit")
+                        ],
+                        body: MessageBody(
+                            size: 0,
+                            data: Data().base64EncodedString(),
+                            attachmentId: nil
+                        ),
+                        parts: nil
+                    )
+                ]
+            ),
+            sizeEstimate: quotedPrintableBody.count + 4
+        )
+
+        let processed = await processor.processGmailMessage(
+            message,
+            myAliases: []
+        )
+
+        XCTAssertEqual(processed?.plainTextBody, "Let’s gooooi")
+        XCTAssertEqual(processed?.cleanedSnippet, "Let’s gooooi")
+    }
+
+    func testProcessGmailMessage_snippetFallback_decodesHTMLEntities() async {
+        let message = GmailMessage(
+            id: "snippet-entity-fallback-message",
+            threadId: "snippet-entity-fallback-thread",
+            labelIds: ["INBOX"],
+            snippet: "Tom &amp; Jerry says Let&#39;s go",
+            historyId: "123",
+            internalDate: "1704067200000",
+            payload: MessagePart(
+                partId: "0",
+                mimeType: "text/plain",
+                filename: nil,
+                headers: baseHeaders(id: "snippet-entity-fallback-message"),
+                body: nil,
+                parts: nil
+            ),
+            sizeEstimate: 0
+        )
+
+        let processed = await processor.processGmailMessage(
+            message,
+            myAliases: []
+        )
+
+        XCTAssertNil(processed?.plainTextBody)
+        XCTAssertEqual(processed?.cleanedSnippet, "Tom & Jerry says Let's go")
+    }
+
     func testProcessGmailMessage_doesNotTreatHTMLBodyAsAttachment() async {
         let htmlBody = "<div>Body only</div>"
         let message = GmailMessage(
