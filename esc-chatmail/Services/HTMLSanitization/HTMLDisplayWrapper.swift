@@ -76,15 +76,19 @@ struct HTMLDisplayWrapper {
         // This preserves the email's original <style> tags and media queries
 
         let shouldApplyDarkModeFallbackText = isDarkMode && displayPurpose == .preview
+        let originalColorSchemeHead = colorSchemeHead(for: displayPurpose)
+        let originalColorSchemeCSS = colorSchemeCSS(for: displayPurpose)
 
         let injectedHead = """
         <meta name="viewport" content="width=device-width, initial-scale=1.0, shrink-to-fit=no, user-scalable=yes">
+        \(originalColorSchemeHead)
         <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none';">
         <style id="esc-mail-styles">
             /* Minimal resets - don't override email's own styles */
             html {
                 -webkit-text-size-adjust: 100%;
                 background-color: \(theme.backgroundColorHex);
+                \(originalColorSchemeCSS)
             }
             body {
                 margin: 0;
@@ -140,6 +144,8 @@ struct HTMLDisplayWrapper {
         displayPurpose: HTMLDisplayPurpose
     ) -> String {
         let shouldApplyDarkModeFallbackText = isDarkMode && displayPurpose == .preview
+        let originalColorSchemeHead = colorSchemeHead(for: displayPurpose)
+        let originalColorSchemeCSS = colorSchemeCSS(for: displayPurpose)
 
         return """
         <!DOCTYPE html>
@@ -147,6 +153,7 @@ struct HTMLDisplayWrapper {
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0, shrink-to-fit=no, user-scalable=yes">
+            \(originalColorSchemeHead)
             <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none';">
             <style>
                 * {
@@ -155,6 +162,7 @@ struct HTMLDisplayWrapper {
                 html {
                     -webkit-text-size-adjust: 100%;
                     background-color: \(theme.backgroundColorHex);
+                    \(originalColorSchemeCSS)
                 }
                 body {
                     color: \(theme.textColorHex);
@@ -191,6 +199,25 @@ struct HTMLDisplayWrapper {
         </body>
         </html>
         """
+    }
+
+    private func colorSchemeHead(for displayPurpose: HTMLDisplayPurpose) -> String {
+        guard displayPurpose == .original else {
+            return ""
+        }
+
+        return """
+        <meta name="color-scheme" content="light">
+        <meta name="supported-color-schemes" content="light">
+        """
+    }
+
+    private func colorSchemeCSS(for displayPurpose: HTMLDisplayPurpose) -> String {
+        guard displayPurpose == .original else {
+            return ""
+        }
+
+        return "color-scheme: light;"
     }
 
     private func linkCSS(for displayPurpose: HTMLDisplayPurpose) -> String {

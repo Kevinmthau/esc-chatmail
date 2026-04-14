@@ -411,6 +411,47 @@ final class AttachmentDownloaderTests: XCTestCase {
         XCTAssertEqual(bubbleAttachments.compactMap { $0.id }.sorted(), ["att-calendar", "att-notes"])
     }
 
+    func testMessage_displayableAttachments_keepsCalendarInviteFileWhenPreviewCardIsUnsupported() throws {
+        let messageId = "msg-calendar-unsupported-\(UUID().uuidString)"
+        let message = MessageBuilder()
+            .withId(messageId)
+            .withSubject("Invitation: Vendor sync @ Mon May 5, 2026 9:00am - 9:30am (EDT)")
+            .withSnippet("Please review the attached invite")
+            .withBody("Please review the attached invite.")
+            .withAttachments()
+            .build(in: context)
+
+        let _ = AttachmentBuilder()
+            .withId("att-calendar")
+            .withFilename("invite.ics")
+            .withMimeType("text/calendar")
+            .withByteSize(2_048)
+            .forMessage(message)
+            .build(in: context)
+
+        let _ = AttachmentBuilder()
+            .withId("att-notes")
+            .withFilename("notes.pdf")
+            .asPDF()
+            .withByteSize(45_000)
+            .forMessage(message)
+            .build(in: context)
+
+        let handler = HTMLContentHandler.shared
+        _ = handler.saveHTML("<html><body><div>Please review the attached invite.</div></body></html>", for: messageId)
+        defer { handler.deleteHTML(for: messageId) }
+
+        try testStack.saveViewContext()
+
+        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
+
+        XCTAssertEqual(fetchedMessage?.isLikelyCalendarInvite, true)
+        XCTAssertEqual(fetchedMessage?.supportsCalendarInvitePreviewCard, false)
+
+        let previewAttachments = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: true) ?? []
+        XCTAssertEqual(previewAttachments.compactMap { $0.id }.sorted(), ["att-calendar", "att-notes"])
+    }
+
     func testMessage_displayableAttachments_plainBubble_hidesSignatureOnlyCIDInlineImages() throws {
         let messageId = "msg-inline-signature-\(UUID().uuidString)"
         let message = MessageBuilder()

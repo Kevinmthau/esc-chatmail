@@ -16,7 +16,8 @@ enum MessageDisplayPolicy {
         isFromMe: Bool,
         isOneToOneConversation: Bool,
         subject: String?,
-        senderEmail: String?
+        senderEmail: String?,
+        isLikelyCalendarInvite: Bool = false
     ) -> Bool {
         let trustedTransactionalSender = isTrustedTransactionalSender(senderEmail)
         // Allow newsletter and rich-content preview routing even if the local HTML file/URI metadata is missing.
@@ -62,6 +63,10 @@ enum MessageDisplayPolicy {
         }
 
         if isNewsletter {
+            return true
+        }
+
+        if isLikelyCalendarInvite {
             return true
         }
 

@@ -105,7 +105,14 @@ extension Message {
 
     /// Attachments suitable for display (excludes signature images and inline images already shown in HTML)
     var displayableAttachments: [Attachment] {
-        displayableAttachments(hidingInlineReferencedInHTML: true)
+        displayableAttachments(
+            hidingInlineReferencedInHTML: true,
+            hidingCalendarInviteAttachments: supportsCalendarInvitePreviewCard
+        )
+    }
+
+    var supportsCalendarInvitePreviewCard: Bool {
+        supportsCalendarInvitePreviewCard(canonicalHTML: loadHTMLSource())
     }
 
     /// Attachments suitable for display in the chat UI.
@@ -113,7 +120,10 @@ extension Message {
     ///   - hidingInlineReferencedInHTML: When true, hides inline `cid:` images that are referenced by the message HTML
     ///     (to avoid duplicating what the HTML renderer already shows). When false, keeps plain-text bubble behavior
     ///     but still hides signature/quoted-history inline images removed by HTML cleanup.
-    func displayableAttachments(hidingInlineReferencedInHTML: Bool) -> [Attachment] {
+    func displayableAttachments(
+        hidingInlineReferencedInHTML: Bool,
+        hidingCalendarInviteAttachments: Bool? = nil
+    ) -> [Attachment] {
         let html = loadHTMLSource()
         let nonDisplayableInlineContentIDs = extractNonDisplayableInlineContentIDs(from: html)
         let allAttachments = deduplicatedAttachments(in: attachmentsArray.filter { attachment in
@@ -153,7 +163,10 @@ extension Message {
             }
         }
 
-        guard isLikelyCalendarInvite else {
+        let shouldHideCalendarInviteAttachments =
+            hidingCalendarInviteAttachments ?? supportsCalendarInvitePreviewCard(canonicalHTML: html)
+
+        guard shouldHideCalendarInviteAttachments else {
             return cidFilteredAttachments
         }
 
@@ -228,6 +241,22 @@ extension Message {
         }
 
         return handler.loadHTML(from: resolvedURL)
+    }
+
+    private func supportsCalendarInvitePreviewCard(canonicalHTML: String?) -> Bool {
+        guard !isForwardedEmail, isLikelyCalendarInvite else {
+            return false
+        }
+
+        let previewBuilder = CalendarInvitePreviewBuilder()
+        return previewBuilder.buildPreview(
+            canonicalHTML: canonicalHTML ?? "",
+            bodyText: bodyText,
+            cleanedSnippet: cleanedSnippet,
+            senderName: senderName,
+            senderEmail: senderEmail,
+            subject: subject
+        ) != nil
     }
 
     private func cleanedHTMLForAttachmentFiltering(from html: String) -> String {

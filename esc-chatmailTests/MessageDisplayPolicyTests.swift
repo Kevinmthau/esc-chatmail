@@ -92,6 +92,22 @@ final class MessageDisplayPolicyTests: XCTestCase {
         XCTAssertTrue(shouldShow)
     }
 
+    func testShouldShowHTMLPreview_calendarInviteWithoutRichHTML_returnsTrue() {
+        let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
+            hasHTMLSource: true,
+            isForwardedEmail: false,
+            isNewsletter: false,
+            hasRichHTMLContent: false,
+            isFromMe: false,
+            isOneToOneConversation: true,
+            subject: "Invitation: Board sync @ Mon May 5, 2026 9:00am - 9:30am (EDT)",
+            senderEmail: "calendar-notification@google.com",
+            isLikelyCalendarInvite: true
+        )
+
+        XCTAssertTrue(shouldShow)
+    }
+
     func testShouldShowHTMLPreview_richTransactionalHTML_groupConversation_returnsTrue() {
         let shouldShow = MessageDisplayPolicy.shouldShowHTMLPreview(
             hasHTMLSource: true,

@@ -27,7 +27,8 @@ struct MessageBubble: View {
             isFromMe: message.isFromMe,
             isOneToOneConversation: effectiveIsOneToOneConversation,
             subject: message.subject,
-            senderEmail: effectiveSenderEmail
+            senderEmail: effectiveSenderEmail,
+            isLikelyCalendarInvite: message.isLikelyCalendarInvite
         )
     }
 
@@ -60,6 +61,8 @@ struct MessageBubble: View {
     }
 
     var body: some View {
+        let showsCalendarInvitePreviewCard = showHTMLPreview && message.supportsCalendarInvitePreviewCard
+
         HStack(alignment: .bottom, spacing: 8) {
             if !message.isFromMe {
                 leadingContent
@@ -70,9 +73,9 @@ struct MessageBubble: View {
             VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 4) {
                 senderNameView
 
-                subjectView
+                subjectView(showsCalendarInvitePreviewCard: showsCalendarInvitePreviewCard)
 
-                attachmentsView
+                attachmentsView(hidingCalendarInviteAttachments: showsCalendarInvitePreviewCard)
 
                 MessageContentView(
                     message: message,
@@ -132,9 +135,9 @@ struct MessageBubble: View {
     }
 
     @ViewBuilder
-    private var subjectView: some View {
+    private func subjectView(showsCalendarInvitePreviewCard: Bool) -> some View {
         if outgoingForwardedDisplayContent == nil,
-           !(showHTMLPreview && (message.isNewsletter || message.isLikelyCalendarInvite)),
+           !(showHTMLPreview && (message.isNewsletter || showsCalendarInvitePreviewCard)),
            let subject = message.subject, !subject.isEmpty {
             Text(subject)
                 .font(.footnote)
@@ -156,8 +159,11 @@ struct MessageBubble: View {
     }
 
     @ViewBuilder
-    private var attachmentsView: some View {
-        let displayable = message.displayableAttachments(hidingInlineReferencedInHTML: showHTMLPreview)
+    private func attachmentsView(hidingCalendarInviteAttachments: Bool) -> some View {
+        let displayable = message.displayableAttachments(
+            hidingInlineReferencedInHTML: showHTMLPreview,
+            hidingCalendarInviteAttachments: hidingCalendarInviteAttachments
+        )
         #if DEBUG
         let _ = {
             if message.hasAttachments {
