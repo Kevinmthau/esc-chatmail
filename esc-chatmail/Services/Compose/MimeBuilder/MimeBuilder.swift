@@ -18,6 +18,21 @@ struct QuotedMessage: Sendable {
     let senderEmail: String
     let date: Date
     let body: String?
+    let originalHTML: String?
+
+    init(
+        senderName: String?,
+        senderEmail: String,
+        date: Date,
+        body: String?,
+        originalHTML: String? = nil
+    ) {
+        self.senderName = senderName
+        self.senderEmail = senderEmail
+        self.date = date
+        self.body = body
+        self.originalHTML = originalHTML
+    }
 }
 
 struct MimeBuilder {

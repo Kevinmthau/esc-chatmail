@@ -10,7 +10,9 @@ final class ChatViewModel: ObservableObject {
     @Published var replyText = ""
     @Published var replyingTo: Message? {
         didSet {
-            replyingToSnapshot = replyingTo.map { ReplyTargetSnapshot(message: $0) }
+            replyingToSnapshot = replyingTo.map {
+                ReplyTargetSnapshot(message: $0, originalHTML: loadOriginalHTML(for: $0))
+            }
         }
     }
     @Published var forwardComposeContext: ComposeForwardModeContext?
@@ -299,7 +301,7 @@ final class ChatViewModel: ObservableObject {
             isFromMe: message.isFromMe,
             bodyText: message.bodyTextValue,
             snippet: message.snippet,
-            originalHTML: loadForwardOriginalHTML(for: message),
+            originalHTML: loadOriginalHTML(for: message),
             participants: Array(message.conversation?.participants ?? []).compactMap { participant in
                 guard let person = participant.person else { return nil }
                 return .init(
@@ -310,7 +312,7 @@ final class ChatViewModel: ObservableObject {
         )
     }
 
-    private func loadForwardOriginalHTML(for message: Message) -> String? {
+    private func loadOriginalHTML(for message: Message) -> String? {
         if let html = htmlContentHandler.loadHTML(for: message.id) {
             return html
         }

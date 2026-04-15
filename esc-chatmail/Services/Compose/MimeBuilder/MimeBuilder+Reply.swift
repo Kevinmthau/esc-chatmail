@@ -57,13 +57,23 @@ extension MimeBuilder {
             return wrapReplyHTMLDocument(contentHTML: convertPlainTextToReplyHTML(body))
         }
 
-        let originalBodyForQuote = prepareOriginalBodyForQuote(originalMessage.body)
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM d, yyyy 'at' h:mm a"
         formatter.timeZone = TimeZone.current
         let dateString = formatter.string(from: originalMessage.date)
         let senderDisplay = originalMessage.senderName ?? originalMessage.senderEmail
 
+        if let originalHTML = originalMessage.originalHTML?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !originalHTML.isEmpty {
+            return buildReplyHTMLWithOriginalDocument(
+                body: body,
+                originalHTML: originalHTML,
+                dateString: dateString,
+                senderDisplay: senderDisplay
+            )
+        }
+
+        let originalBodyForQuote = prepareOriginalBodyForQuote(originalMessage.body)
         let newMessageHTML = convertPlainTextToReplyHTML(body)
         let quoteContentHTML = convertPlainTextToReplyHTML(originalBodyForQuote ?? "[Original message text not available]")
         let attributionHTML = "<div style=\"margin: 14px 0 6px 0; color: #666;\">On \(escapeHTML(dateString)), \(escapeHTML(senderDisplay)) wrote:</div>"
@@ -77,6 +87,47 @@ extension MimeBuilder {
         }
 
         return wrapReplyHTMLDocument(contentHTML: combinedHTML)
+    }
+
+    private static func buildReplyHTMLWithOriginalDocument(
+        body: String,
+        originalHTML: String,
+        dateString: String,
+        senderDisplay: String
+    ) -> String {
+        let userMessageHTML = body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? ""
+            : "\(convertPlainTextToReplyHTML(body))<div style=\"height: 10px;\"></div>"
+        let gmailQuotePrefix = """
+        \(userMessageHTML)<div class="gmail_quote gmail_quote_container"><div dir="ltr" class="gmail_attr">On \(escapeHTML(dateString)), \(escapeHTML(senderDisplay)) wrote:<br></div><blockquote class="gmail_quote" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex;">
+        """
+        let gmailQuoteSuffix = "</blockquote></div>"
+
+        if let bodyTagRange = firstBodyTagRange(in: originalHTML) {
+            let prefixInsertionOffset = originalHTML.distance(
+                from: originalHTML.startIndex,
+                to: bodyTagRange.upperBound
+            )
+            var modifiedHTML = originalHTML
+            let prefixInsertionIndex = modifiedHTML.index(
+                modifiedHTML.startIndex,
+                offsetBy: prefixInsertionOffset
+            )
+            modifiedHTML.insert(contentsOf: gmailQuotePrefix, at: prefixInsertionIndex)
+            if let closingBodyRange = modifiedHTML.range(
+                of: "</body>",
+                options: [.caseInsensitive, .backwards]
+            ) {
+                modifiedHTML.insert(contentsOf: gmailQuoteSuffix, at: closingBodyRange.lowerBound)
+            } else {
+                modifiedHTML.append(gmailQuoteSuffix)
+            }
+            return modifiedHTML
+        }
+
+        return wrapReplyHTMLDocument(
+            contentHTML: "\(gmailQuotePrefix)\(originalHTML)\(gmailQuoteSuffix)"
+        )
     }
 
     private static func prepareOriginalBodyForQuote(_ body: String?) -> String? {
@@ -111,6 +162,16 @@ extension MimeBuilder {
 
         let withBreaks = normalized.replacingOccurrences(of: "\n", with: "<br>\n")
         return "<div style=\"margin: 0;\">\(withBreaks)</div>"
+    }
+
+    private static func firstBodyTagRange(in html: String) -> Range<String.Index>? {
+        guard let bodyTagPattern = try? NSRegularExpression(pattern: "<body[^>]*>", options: .caseInsensitive),
+              let match = bodyTagPattern.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+              let range = Range(match.range, in: html) else {
+            return nil
+        }
+
+        return range
     }
 
     private static func wrapReplyHTMLDocument(contentHTML: String) -> String {
