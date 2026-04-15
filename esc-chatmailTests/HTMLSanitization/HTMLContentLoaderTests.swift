@@ -429,6 +429,36 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertTrue(result.nativeText?.contains("https://example.com/open") == true)
     }
 
+    func testLoadReplyQuotedOriginalHTML_returnsSanitizedHTML() {
+        let messageId = "html-loader-reply-sanitized-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <img src="https://track.example.com/open.php?message=123" width="1" height="1" alt="">
+          <p>Visible body text</p>
+          <script>alert('xss')</script>
+        </body>
+        </html>
+        """
+        _ = contentHandler.saveHTML(html, for: messageId)
+
+        let result = loader.loadReplyQuotedOriginalHTML(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "Visible body text",
+            senderEmail: "sender@example.com",
+            subject: "Hello"
+        )
+
+        XCTAssertNotNil(result)
+        XCTAssertTrue(result?.contains("Visible body text") == true)
+        XCTAssertFalse(result?.contains("track.example.com") == true)
+        XCTAssertFalse(result?.lowercased().contains("<script") == true)
+    }
+
     func testLoadContent_previewDisplay_keepsTransactionalHTMLWhenOriginalDisplayFallsBack() async {
         let messageId = "html-loader-degraded-preview-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }

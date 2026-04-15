@@ -381,6 +381,63 @@ final class HTMLContentLoader {
         return nil
     }
 
+    /// Returns canonical stored HTML only when the original-reader heuristics would keep HTML.
+    /// Reply quoting uses this to preserve document styling without bypassing the meaningful-content
+    /// and quality-fallback checks that protect the full-message path.
+    func loadReplyQuotedOriginalHTML(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String? = nil,
+        senderEmail: String? = nil,
+        subject: String? = nil
+    ) -> String? {
+        let normalizedFallbackText = normalizedMeaningfulPlainText(from: bodyText)
+
+        if let replyHTML = approvedReplyQuotedHTML(
+            from: contentHandler.loadHTML(for: messageId),
+            plainText: normalizedFallbackText,
+            senderEmail: senderEmail,
+            subject: subject
+        ) {
+            return replyHTML
+        }
+
+        if let bodyStorageURI,
+           contentHandler.migrateIfNeeded(from: bodyStorageURI),
+           let replyHTML = approvedReplyQuotedHTML(
+               from: contentHandler.loadHTML(for: messageId),
+               plainText: normalizedFallbackText,
+               senderEmail: senderEmail,
+               subject: subject
+           ) {
+            return replyHTML
+        }
+
+        if let bodyStorageURI,
+           let resolvedURL = StorageURIResolver.resolve(bodyStorageURI),
+           FileManager.default.fileExists(atPath: resolvedURL.path),
+           let replyHTML = approvedReplyQuotedHTML(
+               from: contentHandler.loadHTML(from: resolvedURL),
+               plainText: normalizedFallbackText,
+               senderEmail: senderEmail,
+               subject: subject
+           ) {
+            return replyHTML
+        }
+
+        if let bodyText,
+           let replyHTML = approvedReplyQuotedHTML(
+               from: RawEmailSourceSanitizer.extractHTMLText(from: bodyText),
+               plainText: normalizedFallbackText,
+               senderEmail: senderEmail,
+               subject: subject
+           ) {
+            return replyHTML
+        }
+
+        return nil
+    }
+
     /// Invalidates cached HTML content for a message (both light/dark variants).
     func invalidate(messageId: String) {
         let keys: [String]
@@ -516,6 +573,37 @@ final class HTMLContentLoader {
             nativeText: text,
             canViewOriginalHTML: true
         )
+    }
+
+    private func approvedReplyQuotedHTML(
+        from html: String?,
+        plainText: String?,
+        senderEmail: String?,
+        subject: String?
+    ) -> String? {
+        guard let canonicalHTML = canonicalHTMLSource(from: html) else {
+            return nil
+        }
+
+        let sanitizedHTML = sanitizer.sanitize(
+            canonicalHTML,
+            rewriteModernImageFormatHints: false
+        )
+        guard HTMLMeaningfulContentChecker.hasMeaningfulContent(sanitizedHTML) else {
+            return nil
+        }
+
+        let evaluation = qualityEvaluator.evaluate(
+            html: sanitizedHTML,
+            plainText: plainText,
+            senderEmail: senderEmail,
+            subject: subject
+        )
+        guard evaluation.presentation == .html else {
+            return nil
+        }
+
+        return sanitizedHTML
     }
 
     private func canonicalHTMLSource(from html: String?) -> String? {

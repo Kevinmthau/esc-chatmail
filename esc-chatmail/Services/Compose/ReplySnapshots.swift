@@ -45,7 +45,7 @@ struct ReplyTargetSnapshot: Sendable {
     }
 
     @MainActor
-    init(message: Message) {
+    init(message: Message, originalHTML: String? = nil) {
         self.subject = message.subject
         self.threadId = message.gmThreadId
         self.messageId = message.messageIdValue
@@ -56,7 +56,24 @@ struct ReplyTargetSnapshot: Sendable {
             senderName: message.senderNameValue,
             senderEmail: message.senderEmailValue ?? "",
             date: message.internalDate,
-            body: message.bodyTextValue
+            body: message.bodyTextValue,
+            originalHTML: originalHTML
+        )
+    }
+
+    func withOriginalHTML(_ originalHTML: String?) -> ReplyTargetSnapshot {
+        ReplyTargetSnapshot(
+            subject: subject,
+            threadId: threadId,
+            messageId: messageId,
+            references: references,
+            originalMessage: QuotedMessage(
+                senderName: originalMessage.senderName,
+                senderEmail: originalMessage.senderEmail,
+                date: originalMessage.date,
+                body: originalMessage.body,
+                originalHTML: originalHTML
+            )
         )
     }
 }
