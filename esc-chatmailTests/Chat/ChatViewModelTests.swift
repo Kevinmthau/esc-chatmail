@@ -311,6 +311,77 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(request.context.metadata.originalMessage?.body, "Original body")
     }
 
+    func testSendReply_loadsOriginalHTMLLazilyAtSendTime() async {
+        let authSession = makeTestAuthSession(userEmail: "me@example.com")
+        let coordinator = MockChatOutboundMessageCoordinator()
+        let tokenManager = MockTokenManager()
+        let deps = Dependencies(
+            authSession: authSession,
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        let context = deps.viewContext
+        let conversation = ConversationBuilder()
+            .withDisplayName("Reply Thread")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+
+        let me = Person(context: context)
+        me.id = UUID()
+        me.email = "me@example.com"
+
+        let friend = Person(context: context)
+        friend.id = UUID()
+        friend.email = "friend@example.com"
+        friend.displayName = "Friend"
+
+        let meParticipant = ConversationParticipant(context: context)
+        meParticipant.id = UUID()
+        meParticipant.person = me
+        meParticipant.participantRole = .normal
+        meParticipant.conversation = conversation
+
+        let friendParticipant = ConversationParticipant(context: context)
+        friendParticipant.id = UUID()
+        friendParticipant.person = friend
+        friendParticipant.participantRole = .normal
+        friendParticipant.conversation = conversation
+
+        let replyTarget = MessageBuilder()
+            .withId("message-lazy-html")
+            .withThreadId("thread-123")
+            .withSubject("Original Subject")
+            .withSender(email: "friend@example.com", name: "Friend")
+            .withBody("Original body")
+            .inConversation(conversation)
+            .build(in: context)
+        replyTarget.messageId = "<message-1@example.com>"
+        replyTarget.references = "<older@example.com>"
+        _ = deps.htmlContentHandler.saveHTML(
+            "<html><body><p>Initial HTML</p></body></html>",
+            for: replyTarget.id
+        )
+
+        let viewModel = ChatViewModel(conversation: conversation, deps: deps)
+        viewModel.replyingTo = replyTarget
+        viewModel.replyText = "Reply body"
+
+        _ = deps.htmlContentHandler.saveHTML(
+            "<html><body><p>Updated HTML</p></body></html>",
+            for: replyTarget.id
+        )
+
+        await viewModel.sendReply(with: [])
+
+        guard case .reply(let request)? = coordinator.lastRequest else {
+            return XCTFail("Expected reply request")
+        }
+        XCTAssertTrue(request.context.metadata.originalMessage?.originalHTML?.contains("Updated HTML") == true)
+        XCTAssertFalse(request.context.metadata.originalMessage?.originalHTML?.contains("Initial HTML") == true)
+    }
+
     func testSendReply_doesNotCaptureOriginalHTMLWhenOriginalDisplayWouldFallbackToPlainText() async {
         let authSession = makeTestAuthSession(userEmail: "me@example.com")
         let coordinator = MockChatOutboundMessageCoordinator()

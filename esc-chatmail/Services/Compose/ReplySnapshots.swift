@@ -60,4 +60,20 @@ struct ReplyTargetSnapshot: Sendable {
             originalHTML: originalHTML
         )
     }
+
+    func withOriginalHTML(_ originalHTML: String?) -> ReplyTargetSnapshot {
+        ReplyTargetSnapshot(
+            subject: subject,
+            threadId: threadId,
+            messageId: messageId,
+            references: references,
+            originalMessage: QuotedMessage(
+                senderName: originalMessage.senderName,
+                senderEmail: originalMessage.senderEmail,
+                date: originalMessage.date,
+                body: originalMessage.body,
+                originalHTML: originalHTML
+            )
+        )
+    }
 }

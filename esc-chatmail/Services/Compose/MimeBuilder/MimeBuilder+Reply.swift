@@ -63,7 +63,7 @@ extension MimeBuilder {
         let dateString = formatter.string(from: originalMessage.date)
         let senderDisplay = originalMessage.senderName ?? originalMessage.senderEmail
 
-        if let originalHTML = originalMessage.originalHTML?.trimmingCharacters(in: .whitespacesAndNewlines),
+        if let originalHTML = prepareOriginalHTMLForQuote(originalMessage.originalHTML),
            canQuoteOriginalHTMLDocument(originalHTML) {
             return buildReplyHTMLWithOriginalDocument(
                 body: body,
@@ -138,6 +138,17 @@ extension MimeBuilder {
         }
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func prepareOriginalHTMLForQuote(_ html: String?) -> String? {
+        guard let trimmed = html?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty,
+              let stripped = HTMLQuoteRemover.removeQuotes(from: trimmed)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !stripped.isEmpty else {
+            return nil
+        }
+
+        return stripped
     }
 
     private static func convertPlainTextToReplyHTML(_ text: String) -> String {

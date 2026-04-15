@@ -603,7 +603,7 @@ final class HTMLContentLoader {
             return nil
         }
 
-        return canonicalHTML
+        return sanitizedHTML
     }
 
     private func canonicalHTMLSource(from html: String?) -> String? {

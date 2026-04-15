@@ -10,9 +10,7 @@ final class ChatViewModel: ObservableObject {
     @Published var replyText = ""
     @Published var replyingTo: Message? {
         didSet {
-            replyingToSnapshot = replyingTo.map {
-                ReplyTargetSnapshot(message: $0, originalHTML: loadOriginalReplyHTML(for: $0))
-            }
+            replyingToSnapshot = replyingTo.map { ReplyTargetSnapshot(message: $0) }
         }
     }
     @Published var forwardComposeContext: ComposeForwardModeContext?
@@ -209,12 +207,13 @@ final class ChatViewModel: ObservableObject {
             let attachmentContexts = try outboundAttachmentContextBuilder.buildSendAttachments(
                 from: attachments
             )
+            let replyTargetSnapshot = prepareReplyTargetSnapshotForSend()
             result = try await outboundMessageCoordinator.send(
                 .reply(
                     .init(
                         context: outboundReplyContextBuilder.build(
                             conversation: ReplyConversationSnapshot(conversation: conversation),
-                            replyingTo: replyingToSnapshot,
+                            replyingTo: replyTargetSnapshot,
                             optimisticConversation: replyOptimisticConversation
                         ),
                         body: trimmedReplyText,
@@ -325,6 +324,22 @@ final class ChatViewModel: ObservableObject {
             senderEmail: message.senderEmailValue,
             subject: message.subject
         )
+    }
+
+    private func prepareReplyTargetSnapshotForSend() -> ReplyTargetSnapshot? {
+        let baseSnapshot = replyingToSnapshot ?? replyingTo.map { ReplyTargetSnapshot(message: $0) }
+        guard let baseSnapshot else {
+            return nil
+        }
+
+        guard baseSnapshot.originalMessage.originalHTML == nil,
+              let replyingTo else {
+            return baseSnapshot
+        }
+
+        let enrichedSnapshot = baseSnapshot.withOriginalHTML(loadOriginalReplyHTML(for: replyingTo))
+        replyingToSnapshot = enrichedSnapshot
+        return enrichedSnapshot
     }
 
     private func loadOriginalHTML(for message: Message) -> String? {
