@@ -49,14 +49,32 @@ extension MessagePersister {
             let previousSnippet = existingMessage.snippet
             let previousBodyText = existingMessage.bodyText
             let previousBodyStorageURI = existingMessage.bodyStorageURI
+            let shouldPreserveLocalMailboxState = HistoryProcessor.hasPendingLocalModification(message: existingMessage)
             let savedBodyStorageURI = processedMessage.htmlBody.flatMap {
                 saveHTML($0, processedMessage.id)?.absoluteString
             }
 
-            existingMessage.isUnread = processedMessage.isUnread
+            existingMessage.gmThreadId = processedMessage.gmThreadId
+            existingMessage.subject = processedMessage.headers.subject
+            existingMessage.isFromMe = processedMessage.headers.isFromMe
             existingMessage.isNewsletter = processedMessage.isNewsletter
+            existingMessage.hasAttachments = processedMessage.hasAttachments
             existingMessage.snippet = processedMessage.snippet
             existingMessage.cleanedSnippet = processedMessage.cleanedSnippet
+            existingMessage.setValue(processedMessage.headers.messageId, forKey: "messageId")
+            existingMessage.setValue(
+                processedMessage.headers.references.isEmpty ? nil : processedMessage.headers.references.joined(separator: " "),
+                forKey: "references"
+            )
+
+            if let from = processedMessage.headers.from {
+                if let email = EmailNormalizer.extractEmail(from: from) {
+                    existingMessage.setValue(email, forKey: "senderEmail")
+                }
+                if let displayName = EmailNormalizer.extractDisplayName(from: from) {
+                    existingMessage.setValue(displayName, forKey: "senderName")
+                }
+            }
 
             if let plainText = processedMessage.plainTextBody, !plainText.isEmpty {
                 existingMessage.bodyText = plainText
@@ -67,15 +85,23 @@ extension MessagePersister {
             }
 
             let messageLabelIds = Set(processedMessage.labelIds)
-            let currentHasInboxLabel = messageLabelIds.contains("INBOX")
-            existingMessage.labels = nil
-            let availableLabelIds = labelIds.map { messageLabelIds.intersection($0) } ?? messageLabelIds
-            let effectiveLabelCache = self.fetchLabelsByIds(availableLabelIds, in: context)
-            for labelId in processedMessage.labelIds {
-                if let label = effectiveLabelCache[labelId] {
-                    existingMessage.addToLabels(label)
+            if shouldPreserveLocalMailboxState {
+                Log.debug(
+                    "Preserving local mailbox state for message \(processedMessage.id) while pending action exists",
+                    category: .sync
+                )
+            } else {
+                existingMessage.isUnread = processedMessage.isUnread
+                existingMessage.labels = nil
+                let availableLabelIds = labelIds.map { messageLabelIds.intersection($0) } ?? messageLabelIds
+                let effectiveLabelCache = self.fetchLabelsByIds(availableLabelIds, in: context)
+                for labelId in processedMessage.labelIds {
+                    if let label = effectiveLabelCache[labelId] {
+                        existingMessage.addToLabels(label)
+                    }
                 }
             }
+            let currentHasInboxLabel = existingMessage.labels?.contains { $0.id == "INBOX" } ?? false
 
             var existingAttachmentIds = Set(existingMessage.attachmentsArray.compactMap(\.id))
             var existingContentIds = Set(
@@ -143,6 +169,7 @@ extension MessagePersister {
                 }
                 if let incomingFP { existingInlineFingerprints.insert(incomingFP) }
             }
+            existingMessage.hasAttachments = !existingMessage.attachmentsArray.isEmpty || processedMessage.hasAttachments
 
             var modifiedConversationID: NSManagedObjectID?
             if let conversation = existingMessage.conversation {
@@ -152,7 +179,7 @@ extension MessagePersister {
                     previousHadInboxLabel: previousHadInboxLabel,
                     previousWasUnread: previousWasUnread,
                     currentHasInboxLabel: currentHasInboxLabel,
-                    currentIsUnread: processedMessage.isUnread
+                    currentIsUnread: existingMessage.isUnread
                 )
                 modifiedConversationID = conversation.objectID
             }

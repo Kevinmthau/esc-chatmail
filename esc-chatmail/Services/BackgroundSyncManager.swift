@@ -285,11 +285,11 @@ final class BackgroundSyncManager {
             let query: String
             if installTimestamp > 0 {
                 let cutoffTimestamp = Int(installTimestamp) - 300 // 5 min buffer
-                query = "after:\(cutoffTimestamp) -label:spam -label:drafts"
+                query = "after:\(cutoffTimestamp) -label:spam -label:drafts -label:trash"
             } else {
                 // Fallback: only fetch messages from last 24 hours
                 let oneDayAgo = Int(Date().timeIntervalSince1970) - (24 * 60 * 60)
-                query = "after:\(oneDayAgo) -label:spam -label:drafts"
+                query = "after:\(oneDayAgo) -label:spam -label:drafts -label:trash"
             }
 
             var allMessageIds: Set<String> = []

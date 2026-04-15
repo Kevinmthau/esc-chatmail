@@ -61,15 +61,10 @@ actor MessagePersister {
         myAliases: Set<String>,
         in context: NSManagedObjectContext
     ) async {
-        // Skip messages in SPAM folder
-        if let labelIds = gmailMessage.labelIds, labelIds.contains("SPAM") {
-            Log.debug("Skipping spam message: \(gmailMessage.id)", category: .sync)
-            return
-        }
-
-        // Skip draft messages
-        if let labelIds = gmailMessage.labelIds, labelIds.contains("DRAFT") {
-            Log.debug("Skipping draft message: \(gmailMessage.id)", category: .sync)
+        if let messageLabelIds = gmailMessage.labelIds,
+           let excludedMailboxLabel = messageLabelIds.first(where: Self.excludedMailboxLabelIDs.contains) {
+            await deleteExistingMessageIfPresent(id: gmailMessage.id, in: context)
+            Log.debug("Skipping \(excludedMailboxLabel.lowercased()) message: \(gmailMessage.id)", category: .sync)
             return
         }
 
@@ -99,4 +94,8 @@ actor MessagePersister {
             Log.error("Failed to create message \(gmailMessage.id): \(error)", category: .sync)
         }
     }
+}
+
+extension MessagePersister {
+    static let excludedMailboxLabelIDs: Set<String> = ["SPAM", "DRAFT", "TRASH"]
 }

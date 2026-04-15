@@ -109,6 +109,15 @@ struct LabelOperationProcessor {
                     continue
                 }
 
+                if operation == .add,
+                   labelIds.contains(where: MessagePersister.excludedMailboxLabelIDs.contains) {
+                    if let conversation = message.conversation {
+                        modifiedIDs.append(conversation.objectID)
+                    }
+                    context.delete(message)
+                    continue
+                }
+
                 let previousHasInboxLabel = message.labels?.contains(where: { $0.id == "INBOX" }) ?? false
                 let previousUnread = message.isUnread
 

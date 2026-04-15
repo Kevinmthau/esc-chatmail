@@ -32,8 +32,8 @@ final class ForegroundSyncCoordinator {
     init(
         syncEngine: (any ForegroundSyncPerforming)? = nil,
         authSession: (any ForegroundSyncAuthenticationProviding)? = nil,
-        periodicInterval: TimeInterval = 120,
-        minimumSyncGap: TimeInterval = 90
+        periodicInterval: TimeInterval = 60,
+        minimumSyncGap: TimeInterval = 30
     ) {
         self.syncEngine = syncEngine ?? SyncEngine.shared
         self.authSession = authSession ?? AuthSession.shared
@@ -74,7 +74,7 @@ final class ForegroundSyncCoordinator {
         periodicTask = Task { [weak self] in
             while !Task.isCancelled {
                 do {
-                    try await Task.sleep(nanoseconds: UInt64((self?.periodicInterval ?? 120) * 1_000_000_000))
+                    try await Task.sleep(nanoseconds: UInt64((self?.periodicInterval ?? 60) * 1_000_000_000))
                 } catch {
                     break
                 }

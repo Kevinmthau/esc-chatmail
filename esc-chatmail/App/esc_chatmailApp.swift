@@ -170,7 +170,16 @@ struct esc_chatmailApp: App {
                     triggerImmediateSync: true
                 )
                 Task {
+                    let hadPendingActions = await dependencies.pendingActionsManager.pendingActionCount() > 0
                     await dependencies.pendingActionsManager.processAllPendingActions()
+                    if hadPendingActions {
+                        await MainActor.run {
+                            dependencies.foregroundSyncCoordinator.triggerSync(
+                                reason: "sceneActivePostPendingActions",
+                                force: true
+                            )
+                        }
+                    }
                 }
             }
         case .inactive:

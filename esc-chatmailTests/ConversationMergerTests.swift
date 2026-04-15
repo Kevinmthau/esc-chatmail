@@ -264,7 +264,7 @@ final class ConversationMergerTests: XCTestCase {
         XCTAssertEqual(msg1.conversation?.objectID, msg2.conversation?.objectID, "Messages in the same thread should share a conversation after merge")
     }
 
-    func testMergeConversationsByGmThreadId_preservesSplitWhenParticipantHashDiffers() async throws {
+    func testMergeConversationsByGmThreadId_mergesSameThreadWhenParticipantHashDiffers() async throws {
         let threadId = "gm-thread-participant-split"
 
         let directConversation = ConversationBuilder()
@@ -297,11 +297,11 @@ final class ConversationMergerTests: XCTestCase {
         try testStack.saveViewContext()
 
         let mergedCount = await merger.mergeConversationsByGmThreadId(in: context, mergeChangesInto: [])
-        XCTAssertEqual(mergedCount, 0, "Cleanup merge should not collapse distinct participant groups that share a Gmail thread")
+        XCTAssertEqual(mergedCount, 1, "Cleanup merge should collapse non-forwarded Gmail thread splits even when participant hashes differ")
 
         let conversationCount = try context.count(for: Conversation.fetchRequest())
-        XCTAssertEqual(conversationCount, 2)
-        XCTAssertNotEqual(directMessage.conversation?.objectID, expandedMessage.conversation?.objectID)
+        XCTAssertEqual(conversationCount, 1)
+        XCTAssertEqual(directMessage.conversation?.objectID, expandedMessage.conversation?.objectID)
     }
 
     func testMergeConversationsByGmThreadId_preservesForwardedConversationSplit() async throws {

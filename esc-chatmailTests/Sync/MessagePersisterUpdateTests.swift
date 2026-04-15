@@ -206,7 +206,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertFalse(saved.isUnread)
     }
 
-    func testCreateNewMessage_createsNewConversationForSameGmThreadId_whenParticipantsDiffer() async throws {
+    func testCreateNewMessage_sameGmThreadIdWithParticipantDrift_reusesExistingConversation() async throws {
         let threadId = "thread-join-123"
         let existingConversation = ConversationBuilder()
             .withParticipantHash(calculateParticipantHash(from: ["rirc@advantagetennisclubs.com"]))
@@ -221,12 +221,12 @@ final class MessagePersisterUpdateTests: XCTestCase {
 
         var headers = ProcessedHeaders()
         headers.subject = "Re: private lesson"
-        headers.from = "Kevin Thau <kmthau@gmail.com>"
+        headers.from = "RIRC <RIRC@advantagetennisclubs.com>"
         headers.to = [
-            EmailAddress(email: "RIRC@advantagetennisclubs.com", displayName: nil),
+            EmailAddress(email: "kmthau@gmail.com", displayName: nil),
             EmailAddress(email: "assistant@advantagetennisclubs.com", displayName: nil)
         ]
-        headers.isFromMe = true
+        headers.isFromMe = false
 
         let processedMessage = ProcessedMessage(
             id: "new-message",
@@ -237,8 +237,8 @@ final class MessagePersisterUpdateTests: XCTestCase {
             headers: headers,
             htmlBody: nil,
             plainTextBody: "Wonderful. Thank you so much.",
-            labelIds: [],
-            isUnread: false,
+            labelIds: ["INBOX", "UNREAD"],
+            isUnread: true,
             isNewsletter: false,
             hasAttachments: false,
             attachmentInfo: []
@@ -252,21 +252,14 @@ final class MessagePersisterUpdateTests: XCTestCase {
         )
 
         let conversationCount = try context.count(for: Conversation.fetchRequest())
-        XCTAssertEqual(conversationCount, 2, "Participant changes should create a new conversation even when the Gmail thread matches")
+        XCTAssertEqual(conversationCount, 1, "Non-forwarded Gmail mail should stay attached to the existing same-thread conversation")
 
         let fetch = Message.fetchRequest()
         fetch.predicate = NSPredicate(format: "id == %@", "new-message")
         fetch.fetchLimit = 1
         let saved = try XCTUnwrap(context.fetch(fetch).first)
 
-        XCTAssertNotEqual(saved.conversation?.objectID, existingConversation.objectID)
-        XCTAssertEqual(
-            saved.conversation?.participantHash,
-            calculateParticipantHash(from: [
-                "assistant@advantagetennisclubs.com",
-                "rirc@advantagetennisclubs.com"
-            ])
-        )
+        XCTAssertEqual(saved.conversation?.objectID, existingConversation.objectID)
     }
 
     func testCreateNewMessage_forwardedSubject_createsNewConversationEvenWhenThreadMatches() async throws {
@@ -546,6 +539,68 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(savedMessage.conversation?.objectID, archivedConversation.objectID)
     }
 
+    func testCreateNewMessage_sentOnlyMessageWithParticipantDrift_reusesExistingThreadConversation() async throws {
+        let threadId = "thread-sent-participant-drift"
+        let archivedConversation = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: ["friend@example.com"]))
+            .withSnippet("Archived snippet")
+            .withLastMessageDate(Date(timeIntervalSince1970: 1_700_210_000))
+            .archived()
+            .setHidden()
+            .build(in: context)
+
+        _ = MessageBuilder()
+            .withId("seed-thread-message")
+            .withThreadId(threadId)
+            .inConversation(archivedConversation)
+            .build(in: context)
+
+        try testStack.saveViewContext()
+
+        var headers = ProcessedHeaders()
+        headers.subject = "Re: Archived thread"
+        headers.from = "Me <me@example.com>"
+        headers.to = [
+            EmailAddress(email: "friend@example.com", displayName: nil),
+            EmailAddress(email: "assistant@example.com", displayName: nil)
+        ]
+        headers.isFromMe = true
+
+        let processedMessage = ProcessedMessage(
+            id: "sent-participant-drift-message",
+            gmThreadId: threadId,
+            snippet: "Outbound from another client",
+            cleanedSnippet: "Outbound from another client",
+            internalDate: Date(timeIntervalSince1970: 1_700_210_120),
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: "Outbound from another client",
+            labelIds: ["SENT"],
+            isUnread: false,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        try await persister.createNewMessage(
+            processedMessage,
+            labelIds: nil,
+            myAliases: [normalizedEmail("me@example.com")],
+            in: context
+        )
+
+        let conversationCount = try context.count(for: Conversation.fetchRequest())
+        XCTAssertEqual(conversationCount, 1, "Sent-only sync should not spawn a new active conversation for the same Gmail thread")
+        XCTAssertNotNil(archivedConversation.archivedAt)
+        XCTAssertTrue(archivedConversation.hidden)
+
+        let fetch = Message.fetchRequest()
+        fetch.predicate = NSPredicate(format: "id == %@", "sent-participant-drift-message")
+        fetch.fetchLimit = 1
+        let savedMessage = try XCTUnwrap(context.fetch(fetch).first)
+        XCTAssertEqual(savedMessage.conversation?.objectID, archivedConversation.objectID)
+    }
+
     func testCreateNewMessage_updatesConversationListIndicatorsImmediately() async throws {
         _ = LabelBuilder.inboxLabel(in: context)
         _ = LabelBuilder.unreadLabel(in: context)
@@ -606,6 +661,73 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(existingConversation.snippet, "Clean incoming snippet")
         XCTAssertNil(existingConversation.archivedAt)
         XCTAssertFalse(existingConversation.hidden)
+    }
+
+    func testUpdateExistingMessage_preservesPendingLocalMailboxStateWhileRefreshingCanonicalMetadata() async throws {
+        let inboxLabel = LabelBuilder.inboxLabel(in: context)
+        let unreadLabel = LabelBuilder.unreadLabel(in: context)
+
+        let conversation = ConversationBuilder()
+            .withSnippet("Local snippet")
+            .withLastMessageDate(Date(timeIntervalSince1970: 1_700_300_000))
+            .withUnreadCount(1)
+            .hasInboxMessages(true)
+            .visible()
+            .build(in: context)
+        let existingMessage = MessageBuilder()
+            .withId("pending-local-state-message")
+            .withThreadId("old-thread-id")
+            .withSubject("Old subject")
+            .withSender(email: "old@example.com", name: "Old Sender")
+            .withSnippet("Local snippet")
+            .inConversation(conversation)
+            .build(in: context)
+        existingMessage.addToLabels(inboxLabel)
+        existingMessage.addToLabels(unreadLabel)
+        existingMessage.isUnread = true
+        existingMessage.isFromMe = false
+        existingMessage.localModifiedAt = Date()
+
+        var headers = ProcessedHeaders()
+        headers.subject = "Updated subject"
+        headers.from = "Me <me@example.com>"
+        headers.to = [EmailAddress(email: "friend@example.com", displayName: nil)]
+        headers.isFromMe = true
+        headers.messageId = "<server-message-id@example.com>"
+        headers.references = ["<ref-1@example.com>", "<ref-2@example.com>"]
+
+        let processedMessage = ProcessedMessage(
+            id: existingMessage.id,
+            gmThreadId: "new-thread-id",
+            snippet: "Server snippet",
+            cleanedSnippet: "Server snippet",
+            internalDate: existingMessage.internalDate,
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: "Updated body",
+            labelIds: ["SENT"],
+            isUnread: false,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertTrue(existingMessage.isUnread, "Pending local read/unread changes should win over server state")
+        XCTAssertTrue(existingMessage.labels?.contains(where: { $0.id == "INBOX" }) ?? false)
+        XCTAssertEqual(existingMessage.gmThreadId, "new-thread-id")
+        XCTAssertEqual(existingMessage.subject, "Updated subject")
+        XCTAssertTrue(existingMessage.isFromMe)
+        XCTAssertEqual(existingMessage.messageIdValue, "<server-message-id@example.com>")
+        XCTAssertEqual(existingMessage.referencesValue, "<ref-1@example.com> <ref-2@example.com>")
+        XCTAssertEqual(existingMessage.senderEmailValue, "me@example.com")
+        XCTAssertEqual(existingMessage.senderNameValue, "Me")
     }
 
     func testUpdateExistingMessage_updatesConversationUnreadIndicatorsImmediately() async {

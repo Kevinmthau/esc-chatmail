@@ -39,14 +39,12 @@ actor HistoryProcessor {
             if let messagesAdded = record.messagesAdded {
                 Log.debug("History record \(record.id): \(messagesAdded.count) new messages", category: .sync)
                 for added in messagesAdded {
-                    // Skip spam messages
-                    if let labelIds = added.message.labelIds, labelIds.contains("SPAM") {
-                        Log.debug("Skipping spam: \(added.message.id)", category: .sync)
-                        continue
-                    }
-                    // Skip draft messages
-                    if let labelIds = added.message.labelIds, labelIds.contains("DRAFT") {
-                        Log.debug("Skipping draft: \(added.message.id)", category: .sync)
+                    if let labelIds = added.message.labelIds,
+                       let excludedMailboxLabel = labelIds.first(where: MessagePersister.excludedMailboxLabelIDs.contains) {
+                        Log.debug(
+                            "Skipping \(excludedMailboxLabel.lowercased()): \(added.message.id)",
+                            category: .sync
+                        )
                         continue
                     }
                     Log.debug("Will fetch: \(added.message.id)", category: .sync)

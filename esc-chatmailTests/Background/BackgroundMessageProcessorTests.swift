@@ -32,11 +32,31 @@ final class BackgroundMessageProcessorTests: XCTestCase {
         XCTAssertTrue(changeSet.messageIdsToDelete.isEmpty)
     }
 
-    func testBuildChangeSet_skipsSpamMessagesAdded() {
+    func testBuildChangeSet_skipsExcludedMailboxMessagesAdded() {
         let spamMessage = GmailMessage(
             id: "m-spam",
             threadId: nil,
             labelIds: ["SPAM"],
+            snippet: nil,
+            historyId: nil,
+            internalDate: nil,
+            payload: nil,
+            sizeEstimate: nil
+        )
+        let draftMessage = GmailMessage(
+            id: "m-draft",
+            threadId: nil,
+            labelIds: ["DRAFT"],
+            snippet: nil,
+            historyId: nil,
+            internalDate: nil,
+            payload: nil,
+            sizeEstimate: nil
+        )
+        let trashMessage = GmailMessage(
+            id: "m-trash",
+            threadId: nil,
+            labelIds: ["TRASH"],
             snippet: nil,
             historyId: nil,
             internalDate: nil,
@@ -59,6 +79,8 @@ final class BackgroundMessageProcessorTests: XCTestCase {
             messages: nil,
             messagesAdded: [
                 HistoryMessageAdded(message: spamMessage),
+                HistoryMessageAdded(message: draftMessage),
+                HistoryMessageAdded(message: trashMessage),
                 HistoryMessageAdded(message: normalMessage)
             ],
             messagesDeleted: nil,
@@ -70,6 +92,8 @@ final class BackgroundMessageProcessorTests: XCTestCase {
 
         XCTAssertEqual(changeSet.messageIdsToFetch, Set(["m-normal"]))
         XCTAssertFalse(changeSet.messageIdsToFetch.contains("m-spam"))
+        XCTAssertFalse(changeSet.messageIdsToFetch.contains("m-draft"))
+        XCTAssertFalse(changeSet.messageIdsToFetch.contains("m-trash"))
     }
 
     func testBuildChangeSet_deletionsTakePrecedenceOverFetches() {
@@ -422,6 +446,47 @@ final class LabelOperationProcessorTests: XCTestCase {
         XCTAssertFalse(conversation.hasInbox)
         XCTAssertEqual(conversation.inboxUnreadCount, 0)
         XCTAssertNil(conversation.latestInboxDate)
+    }
+
+    func testProcess_addTrashLabelDeletesLocalMessage() async throws {
+        let stack = TestCoreDataStack()
+        let context = stack.viewContext
+
+        let conversation = ConversationBuilder()
+            .hasInboxMessages(true)
+            .withUnreadCount(0)
+            .recentlyActive()
+            .build(in: context)
+        let message = MessageBuilder()
+            .withId("message-trash-1")
+            .withThreadId("thread-trash-1")
+            .inConversation(conversation)
+            .build(in: context)
+
+        _ = LabelBuilder().trash().build(in: context)
+        try stack.saveViewContext()
+
+        let modifiedIDs = await LabelOperationProcessor.process(
+            items: [
+                HistoryLabelAdded(
+                    message: MessageListItem(id: "message-trash-1", threadId: nil),
+                    labelIds: ["TRASH"]
+                )
+            ],
+            operation: .add,
+            in: context,
+            syncStartTime: nil
+        )
+
+        XCTAssertEqual(modifiedIDs, [conversation.objectID])
+        XCTAssertTrue(message.isDeleted)
+        try stack.saveViewContext()
+
+        let fetchRequest = Message.fetchRequest()
+        fetchRequest.predicate = NSPredicate(format: "id == %@", "message-trash-1")
+        fetchRequest.fetchLimit = 1
+        let remaining = try context.fetch(fetchRequest).first
+        XCTAssertNil(remaining)
     }
 }
 

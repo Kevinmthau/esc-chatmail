@@ -232,27 +232,16 @@ struct ConversationMerger: Sendable {
                 }
                 guard conversations.count > 1 else { continue }
 
-                // Sub-group by participantHash so conversations with different
-                // participant sets (e.g. someone was CC'd mid-thread) stay separate.
-                var byParticipantHash: [String: [Conversation]] = [:]
-                for conv in conversations {
-                    let hash = conv.participantHash ?? ""
-                    byParticipantHash[hash, default: []].append(conv)
-                }
+                guard let winner = self.selectWinner(from: conversations) else { continue }
+                let losers = conversations.filter { $0 != winner }
 
-                for (_, group) in byParticipantHash {
-                    guard group.count > 1 else { continue }
-                    guard let winner = self.selectWinner(from: group) else { continue }
-                    let losers = group.filter { $0 != winner }
+                Log.debug("Merging \(losers.count) conversation(s) for gmThreadId: \(threadId.prefix(16))...", category: .conversation)
 
-                    Log.debug("Merging \(losers.count) conversation(s) for gmThreadId: \(threadId.prefix(16))...", category: .conversation)
-
-                    for loser in losers {
-                        self.merge(from: loser, into: winner)
-                        deletedObjectIDs.append(loser.objectID)
-                        context.delete(loser)
-                        mergedCount += 1
-                    }
+                for loser in losers {
+                    self.merge(from: loser, into: winner)
+                    deletedObjectIDs.append(loser.objectID)
+                    context.delete(loser)
+                    mergedCount += 1
                 }
             }
 

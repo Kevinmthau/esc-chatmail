@@ -204,7 +204,7 @@ final class SyncTimeCalculatorTests: XCTestCase {
         )
 
         let expectedTimestamp = Int(installTime - SyncConfig.timestampBufferSeconds)
-        XCTAssertEqual(result, "after:\(expectedTimestamp) -label:spam -label:drafts")
+        XCTAssertEqual(result, "after:\(expectedTimestamp) -label:spam -label:drafts -label:trash")
     }
 
     func testBuildSyncQuery_containsRequiredExclusions() {
@@ -215,6 +215,7 @@ final class SyncTimeCalculatorTests: XCTestCase {
 
         XCTAssertTrue(result.contains("-label:spam"))
         XCTAssertTrue(result.contains("-label:drafts"))
+        XCTAssertTrue(result.contains("-label:trash"))
         XCTAssertTrue(result.hasPrefix("after:"))
     }
 

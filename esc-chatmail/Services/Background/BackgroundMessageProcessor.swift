@@ -116,9 +116,12 @@ final class BackgroundMessageProcessor {
         for history in histories {
             if let messagesAdded = history.messagesAdded {
                 for messageAdded in messagesAdded {
-                    // Skip spam messages
-                    if let labelIds = messageAdded.message.labelIds, labelIds.contains("SPAM") {
-                        Log.debug("Skipping spam message from history: \(messageAdded.message.id)", category: .background)
+                    if let labelIds = messageAdded.message.labelIds,
+                       let excludedMailboxLabel = labelIds.first(where: MessagePersister.excludedMailboxLabelIDs.contains) {
+                        Log.debug(
+                            "Skipping \(excludedMailboxLabel.lowercased()) message from history: \(messageAdded.message.id)",
+                            category: .background
+                        )
                         continue
                     }
                     messagesToFetch.insert(messageAdded.message.id)

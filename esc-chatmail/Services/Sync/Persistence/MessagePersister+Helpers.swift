@@ -5,6 +5,32 @@ import CoreData
 
 extension MessagePersister {
 
+    func deleteExistingMessageIfPresent(id: String, in context: NSManagedObjectContext) async {
+        let modifiedConversationID: NSManagedObjectID? = await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = MessagePredicates.id(id)
+            request.fetchLimit = 1
+            request.relationshipKeyPathsForPrefetching = ["conversation"]
+
+            do {
+                guard let message = try context.fetch(request).first else {
+                    return nil
+                }
+
+                let conversationID = message.conversation?.objectID
+                context.delete(message)
+                return conversationID
+            } catch {
+                Log.error("Failed to delete excluded mailbox message \(id)", category: .coreData, error: error)
+                return nil
+            }
+        }
+
+        if let modifiedConversationID {
+            await ModificationTracker.shared.trackModifiedConversation(modifiedConversationID)
+        }
+    }
+
     /// Creates an attachment entity using AttachmentFactory.
     nonisolated func createAttachment(
         _ info: AttachmentInfo,

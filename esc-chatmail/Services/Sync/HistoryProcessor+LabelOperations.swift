@@ -44,26 +44,29 @@ extension HistoryProcessor {
 
     /// Check if a message has local modifications that haven't been synced yet
     /// Note: This method is kept for use by other components (e.g., SyncReconciliation, LabelOperationProcessor)
-    nonisolated static func hasConflict(message: Message, syncStartTime: Date?) -> Bool {
-        guard let syncStartTime = syncStartTime else { return false }
+    nonisolated static func hasPendingLocalModification(message: Message) -> Bool {
         guard let localModifiedAt = message.localModifiedAtValue else { return false }
 
-        // If the message was modified locally after the sync started,
-        // it means there's a pending local change that should take precedence
-        let hasPendingChange = localModifiedAt > syncStartTime
-
-        // However, if the local modification is too old, consider it stale
-        // This prevents local changes from blocking server updates indefinitely
-        // This can happen if the action failed to sync to the server
         let now = Date()
         let modificationAge = now.timeIntervalSince(localModifiedAt)
         let isStaleModification = modificationAge > Self.maxLocalModificationAge
 
-        if hasPendingChange && isStaleModification {
-            Log.warning("Local modification is stale (age: \(Int(modificationAge))s), allowing server update", category: .sync)
+        if isStaleModification {
+            Log.warning(
+                "Local modification is stale (age: \(Int(modificationAge))s), allowing server update",
+                category: .sync
+            )
             return false
         }
 
-        return hasPendingChange
+        return true
+    }
+
+    /// Check if a message has local modifications that haven't been synced yet
+    /// Note: `syncStartTime` is retained for call-site compatibility, but any fresh pending
+    /// local mutation should block server label/unread writes until it is synced or expires.
+    nonisolated static func hasConflict(message: Message, syncStartTime: Date?) -> Bool {
+        _ = syncStartTime
+        return hasPendingLocalModification(message: message)
     }
 }

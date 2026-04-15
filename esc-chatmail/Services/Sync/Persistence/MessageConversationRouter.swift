@@ -84,6 +84,7 @@ final class MessageConversationRouter {
         return await context.perform {
             let request = Message.fetchRequest()
             request.predicate = NSPredicate(format: "gmThreadId == %@ AND conversation != nil", gmThreadId)
+            request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: false)]
             request.fetchLimit = 1
             request.fetchBatchSize = 1
             request.returnsObjectsAsFaults = true
@@ -100,7 +101,10 @@ final class MessageConversationRouter {
                 if existingParticipantHash.isEmpty {
                     existingConversation.participantHash = participantHash
                 } else if existingParticipantHash != participantHash {
-                    return nil
+                    Log.info(
+                        "Reusing gmThreadId conversation despite participantHash mismatch for non-forwarded message",
+                        category: .conversation
+                    )
                 }
 
                 if reactivateArchivedIfNeeded, existingConversation.archivedAt != nil {

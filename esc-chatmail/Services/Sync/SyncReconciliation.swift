@@ -36,7 +36,7 @@ final class SyncReconciliation: Sendable {
             let reconciliationStartTime = calculateReconciliationStartTime(installTimestamp: installTimestamp)
             let epochSeconds = Int(reconciliationStartTime.timeIntervalSince1970)
 
-            let query = "after:\(epochSeconds) -label:spam -label:drafts"
+            let query = "after:\(epochSeconds) -label:spam -label:drafts -label:trash"
 
             // Scale max results based on time since last sync
             let timeSinceStart = Date().timeIntervalSince(reconciliationStartTime)
@@ -135,7 +135,7 @@ final class SyncReconciliation: Sendable {
             // Query recent messages (last 24 hours)
             let oneDayAgo = Date().addingTimeInterval(-86400)
             let epochSeconds = Int(oneDayAgo.timeIntervalSince1970)
-            let query = "after:\(epochSeconds) -label:spam -label:drafts"
+            let query = "after:\(epochSeconds) -label:spam -label:drafts -label:trash"
 
             let (recentMessageIds, _) = try await messageFetcher.listMessages(
                 query: query,
@@ -324,9 +324,8 @@ final class SyncReconciliation: Sendable {
                     continue
                 }
 
-                // Skip if message has pending local changes (modified in last 30 minutes)
-                if let localModifiedAt = localMessage.localModifiedAtValue,
-                   localModifiedAt > Date().addingTimeInterval(-1800) {
+                // Skip if message has pending local changes that have not yet been synced.
+                if HistoryProcessor.hasPendingLocalModification(message: localMessage) {
                     continue
                 }
 

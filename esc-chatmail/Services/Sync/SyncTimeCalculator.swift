@@ -133,7 +133,7 @@ struct SyncTimeCalculator {
 
     /// Builds a Gmail API query string with the calculated start time
     ///
-    /// Query format: `after:{timestamp} -label:spam -label:drafts`
+    /// Query format: `after:{timestamp} -label:spam -label:drafts -label:trash`
     ///
     /// - Parameters:
     ///   - config: Configuration for time calculation
@@ -144,6 +144,6 @@ struct SyncTimeCalculator {
         installTimestamp: TimeInterval? = nil
     ) -> String {
         let startTime = Int(calculateStartTime(config: config, installTimestamp: installTimestamp))
-        return "after:\(startTime) -label:spam -label:drafts"
+        return "after:\(startTime) -label:spam -label:drafts -label:trash"
     }
 }

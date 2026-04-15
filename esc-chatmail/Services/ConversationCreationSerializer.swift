@@ -3,14 +3,15 @@ import CoreData
 
 /// Serializes conversation creation to prevent duplicate conversations.
 ///
-/// Uses an actor to ensure only one conversation can be created at a time,
-/// regardless of which Core Data context is being used.
+/// Uses an actor to ensure only one conversation per participant hash can be
+/// resolved at a time, regardless of which Core Data context is being used.
 actor ConversationCreationSerializer {
     static let shared = ConversationCreationSerializer()
 
-    /// Recently created conversation hashes - prevents duplicates across contexts
-    /// before Core Data has a chance to propagate changes
-    private var recentlyCreatedHashes: Set<String> = []
+    /// Participant hashes currently being resolved.
+    /// Later callers wait for the active creator instead of racing through their own fetch/create.
+    private var activeParticipantHashes: Set<String> = []
+    private var waitingContinuations: [String: [CheckedContinuation<Void, Never>]] = [:]
 
     /// Finds or creates a conversation, ensuring no duplicates are created.
     /// - Parameters:
@@ -25,12 +26,8 @@ actor ConversationCreationSerializer {
     ) async throws -> NSManagedObjectID {
         let participantHash = identity.participantHash
 
-        // Pre-register this hash to prevent concurrent creation attempts
-        // This is the key fix: register BEFORE we start the Core Data transaction
-        // The actor ensures only one call executes at a time, so if we see the hash
-        // already registered, a previous call already created the conversation
-        let isNewRegistration = !recentlyCreatedHashes.contains(participantHash)
-        recentlyCreatedHashes.insert(participantHash)
+        await claimTurn(for: participantHash)
+        defer { releaseTurn(for: participantHash) }
 
         // Use NSManagedObjectID (which is Sendable) to avoid capturing non-Sendable Conversation
         // Use Result type since context.perform can't throw
@@ -85,20 +82,31 @@ actor ConversationCreationSerializer {
         }
 
         let resultObjectID = try result.get()
-
-        // Schedule cleanup after 30 seconds (only if we registered it)
-        if isNewRegistration {
-            let hashToRemove = participantHash
-            Task { [weak self] in
-                try? await Task.sleep(for: .seconds(30))
-                await self?.removeFromCache(hashToRemove)
-            }
-        }
-
         return resultObjectID
     }
 
-    private func removeFromCache(_ hash: String) {
-        recentlyCreatedHashes.remove(hash)
+    private func claimTurn(for hash: String) async {
+        if !activeParticipantHashes.contains(hash) {
+            activeParticipantHashes.insert(hash)
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            waitingContinuations[hash, default: []].append(continuation)
+        }
+    }
+
+    private func releaseTurn(for hash: String) {
+        if var continuations = waitingContinuations[hash], !continuations.isEmpty {
+            let next = continuations.removeFirst()
+            if continuations.isEmpty {
+                waitingContinuations.removeValue(forKey: hash)
+            } else {
+                waitingContinuations[hash] = continuations
+            }
+            next.resume()
+        } else {
+            activeParticipantHashes.remove(hash)
+        }
     }
 }

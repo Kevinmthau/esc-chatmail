@@ -142,7 +142,7 @@ extension DataCleanupService {
     /// This most commonly happens when the `Reply-To` address differs from the `From` address, causing
     /// participant-based grouping to create multiple conversations for one Gmail thread.
     func mergeConversationsSplitByGmThreadIdIfNeeded(in context: NSManagedObjectContext) async {
-        let hasDoneMerge = UserDefaults.standard.bool(forKey: "hasDoneGmThreadConversationMergeV1")
+        let hasDoneMerge = UserDefaults.standard.bool(forKey: "hasDoneGmThreadConversationMergeV2")
         guard !hasDoneMerge else { return }
 
         Log.info("Starting gmThreadId conversation merge...", category: .coreData)
@@ -153,6 +153,6 @@ extension DataCleanupService {
         let duration = CFAbsoluteTimeGetCurrent() - startTime
         Log.info("gmThreadId conversation merge complete in \(String(format: "%.3f", duration))s (merged=\(mergedCount))", category: .coreData)
 
-        UserDefaults.standard.set(true, forKey: "hasDoneGmThreadConversationMergeV1")
+        UserDefaults.standard.set(true, forKey: "hasDoneGmThreadConversationMergeV2")
     }
 }

@@ -22,8 +22,8 @@ struct ConversationRollupUpdater: Sendable {
         guard let messages = conversation.messages else { return }
 
         // Phase 1: Filter draft messages and update metadata
-        let nonDraftMessages = filterNonDraftMessages(messages)
-        updateLastMessageMetadata(for: conversation, from: nonDraftMessages)
+        let visibleMessages = filterVisibleMessages(messages)
+        updateLastMessageMetadata(for: conversation, from: visibleMessages)
 
         // Phase 2: Update inbox status
         let (inboxMessages, hasInbox) = calculateInboxStatus(from: messages)
@@ -147,18 +147,18 @@ struct ConversationRollupUpdater: Sendable {
 
     // MARK: - Private Helper Methods
 
-    /// Filters out draft messages from the message set.
-    private func filterNonDraftMessages(_ messages: Set<Message>) -> [Message] {
+    /// Filters out mailbox states that should not drive visible thread metadata.
+    private func filterVisibleMessages(_ messages: Set<Message>) -> [Message] {
         messages.filter { message in
             guard let labels = message.labels else { return true }
-            let isDraft = labels.contains { $0.id == "DRAFT" }
-            return !isDraft
+            let excludedLabelIDs = MessagePersister.excludedMailboxLabelIDs
+            return !labels.contains { excludedLabelIDs.contains($0.id) }
         }
     }
 
     /// Updates last message date and snippet from sorted messages.
-    private func updateLastMessageMetadata(for conversation: Conversation, from nonDraftMessages: [Message]) {
-        let sortedMessages = nonDraftMessages.sorted { $0.internalDate < $1.internalDate }
+    private func updateLastMessageMetadata(for conversation: Conversation, from visibleMessages: [Message]) {
+        let sortedMessages = visibleMessages.sorted { $0.internalDate < $1.internalDate }
         if let latestMessage = sortedMessages.last {
             conversation.lastMessageDate = latestMessage.internalDate
             conversation.snippet = latestMessage.conversationPreviewText
