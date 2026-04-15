@@ -11,7 +11,7 @@ final class ChatViewModel: ObservableObject {
     @Published var replyingTo: Message? {
         didSet {
             replyingToSnapshot = replyingTo.map {
-                ReplyTargetSnapshot(message: $0, originalHTML: loadOriginalHTML(for: $0))
+                ReplyTargetSnapshot(message: $0, originalHTML: loadOriginalReplyHTML(for: $0))
             }
         }
     }
@@ -35,6 +35,7 @@ final class ChatViewModel: ObservableObject {
 
     private let authSession: AuthSession
     private let htmlContentHandler: HTMLContentHandler
+    private let replyHTMLContentLoader: HTMLContentLoader
     private let participantLoader: ParticipantLoader
     private let conversationObjectID: NSManagedObjectID
     private let conversationContext: NSManagedObjectContext?
@@ -66,6 +67,10 @@ final class ChatViewModel: ObservableObject {
         self.conversation = conversation
         self.authSession = dependencies.authSession
         self.htmlContentHandler = dependencies.htmlContentHandler
+        self.replyHTMLContentLoader = HTMLContentLoader(
+            contentHandler: dependencies.htmlContentHandler,
+            sanitizer: .shared
+        )
         self.participantLoader = dependencies.participantLoader
         self.conversationObjectID = conversation.objectID
         self.conversationContext = conversation.managedObjectContext
@@ -309,6 +314,16 @@ final class ChatViewModel: ObservableObject {
                     displayName: person.displayName
                 )
             }
+        )
+    }
+
+    private func loadOriginalReplyHTML(for message: Message) -> String? {
+        replyHTMLContentLoader.loadReplyQuotedOriginalHTML(
+            messageId: message.id,
+            bodyStorageURI: message.bodyStorageURI,
+            bodyText: message.bodyTextValue,
+            senderEmail: message.senderEmailValue,
+            subject: message.subject
         )
     }
 

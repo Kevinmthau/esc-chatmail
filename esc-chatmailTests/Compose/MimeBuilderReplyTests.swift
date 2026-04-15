@@ -47,4 +47,28 @@ final class MimeBuilderReplyTests: XCTestCase {
         XCTAssertTrue(result.contains("Original body"))
         XCTAssertFalse(result.contains("gmail_quote gmail_quote_container"))
     }
+
+    func testFormatReplyHTMLBody_withCIDOriginalHTMLFallsBackToPlainTextQuote() {
+        let originalMessage = QuotedMessage(
+            senderName: "Friend",
+            senderEmail: "friend@example.com",
+            date: Date(timeIntervalSince1970: 1_700_000_000),
+            body: "Original body",
+            originalHTML: """
+            <html>
+            <body>
+            <p><img src="cid:logo@example.com" alt="Logo"></p>
+            <p>Original HTML body</p>
+            </body>
+            </html>
+            """
+        )
+
+        let result = MimeBuilder.formatReplyHTMLBody(body: "Thanks!", originalMessage: originalMessage)
+
+        XCTAssertTrue(result.contains("Thanks!"))
+        XCTAssertTrue(result.contains("Original body"))
+        XCTAssertFalse(result.contains("cid:logo@example.com"))
+        XCTAssertFalse(result.contains("gmail_quote gmail_quote_container"))
+    }
 }

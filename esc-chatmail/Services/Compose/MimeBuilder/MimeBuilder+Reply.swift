@@ -64,7 +64,7 @@ extension MimeBuilder {
         let senderDisplay = originalMessage.senderName ?? originalMessage.senderEmail
 
         if let originalHTML = originalMessage.originalHTML?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !originalHTML.isEmpty {
+           canQuoteOriginalHTMLDocument(originalHTML) {
             return buildReplyHTMLWithOriginalDocument(
                 body: body,
                 originalHTML: originalHTML,
@@ -172,6 +172,16 @@ extension MimeBuilder {
         }
 
         return range
+    }
+
+    private static func canQuoteOriginalHTMLDocument(_ html: String) -> Bool {
+        guard !html.isEmpty else {
+            return false
+        }
+
+        // Replies do not currently carry the original message's inline CID parts.
+        // Falling back to text quoting is safer than emitting broken cid: placeholders.
+        return html.range(of: "cid:", options: .caseInsensitive) == nil
     }
 
     private static func wrapReplyHTMLDocument(contentHTML: String) -> String {
