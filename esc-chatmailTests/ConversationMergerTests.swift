@@ -84,6 +84,44 @@ final class ConversationMergerTests: XCTestCase {
         XCTAssertEqual(winner?.displayName, "New Conv", "Should select more recent conversation")
     }
 
+    func testSelectWinner_prefersVisibleConversationOverArchivedConversation() throws {
+        let visibleConversation = ConversationBuilder()
+            .withKeyHash("visible")
+            .withDisplayName("Visible Conv")
+            .withLastMessageDate(Date(timeIntervalSince1970: 1))
+            .visible()
+            .build(in: context)
+
+        let archivedConversation = ConversationBuilder()
+            .withKeyHash("archived")
+            .withDisplayName("Archived Conv")
+            .withLastMessageDate(Date(timeIntervalSince1970: 2))
+            .archived()
+            .setHidden()
+            .build(in: context)
+
+        let _ = MessageBuilder()
+            .withId("visible-msg")
+            .inConversation(visibleConversation)
+            .build(in: context)
+
+        let _ = MessageBuilder()
+            .withId("archived-msg-1")
+            .inConversation(archivedConversation)
+            .build(in: context)
+
+        let _ = MessageBuilder()
+            .withId("archived-msg-2")
+            .inConversation(archivedConversation)
+            .build(in: context)
+
+        try testStack.saveViewContext()
+
+        let winner = merger.selectWinner(from: [visibleConversation, archivedConversation])
+
+        XCTAssertEqual(winner?.objectID, visibleConversation.objectID)
+    }
+
     // MARK: - Merge Logic Tests
 
     func testMerge_reassignsMessages() throws {
@@ -193,6 +231,26 @@ final class ConversationMergerTests: XCTestCase {
         XCTAssertTrue(winner.hasInbox, "Winner should have inbox if either had inbox")
     }
 
+    func testMerge_reactivatesWinnerWhenLoserIsVisible() throws {
+        let winner = ConversationBuilder()
+            .withKeyHash("winner")
+            .archived()
+            .setHidden()
+            .build(in: context)
+
+        let loser = ConversationBuilder()
+            .withKeyHash("loser")
+            .visible()
+            .build(in: context)
+
+        try testStack.saveViewContext()
+
+        merger.merge(from: loser, into: winner)
+
+        XCTAssertNil(winner.archivedAt)
+        XCTAssertFalse(winner.hidden)
+    }
+
     // MARK: - Duplicate Detection Tests
 
     func testRemoveDuplicates_detectsDuplicateKeyHashes() throws {
@@ -262,6 +320,56 @@ final class ConversationMergerTests: XCTestCase {
         XCTAssertEqual(conversationCount, 1, "After merge there should be a single conversation for the thread")
 
         XCTAssertEqual(msg1.conversation?.objectID, msg2.conversation?.objectID, "Messages in the same thread should share a conversation after merge")
+    }
+
+    func testMergeConversationsByGmThreadId_prefersVisibleConversationOverArchivedConversation() async throws {
+        let threadId = "gm-thread-visible-winner"
+
+        let visibleConversation = ConversationBuilder()
+            .withKeyHash("thread-visible")
+            .withLastMessageDate(Date(timeIntervalSince1970: 1))
+            .visible()
+            .build(in: context)
+
+        let archivedConversation = ConversationBuilder()
+            .withKeyHash("thread-archived")
+            .withLastMessageDate(Date(timeIntervalSince1970: 2))
+            .archived()
+            .setHidden()
+            .build(in: context)
+
+        let visibleMessage = MessageBuilder()
+            .withId("msg-thread-visible")
+            .withThreadId(threadId)
+            .withSubject("Re: Project plan")
+            .inConversation(visibleConversation)
+            .build(in: context)
+
+        let archivedMessage1 = MessageBuilder()
+            .withId("msg-thread-archived-1")
+            .withThreadId(threadId)
+            .withSubject("Re: Project plan")
+            .inConversation(archivedConversation)
+            .build(in: context)
+
+        let archivedMessage2 = MessageBuilder()
+            .withId("msg-thread-archived-2")
+            .withThreadId(threadId)
+            .withSubject("Re: Project plan")
+            .inConversation(archivedConversation)
+            .build(in: context)
+
+        try testStack.saveViewContext()
+
+        let mergedCount = await merger.mergeConversationsByGmThreadId(in: context, mergeChangesInto: [])
+        XCTAssertEqual(mergedCount, 1)
+
+        XCTAssertEqual(visibleMessage.conversation?.objectID, visibleConversation.objectID)
+        XCTAssertEqual(archivedMessage1.conversation?.objectID, visibleConversation.objectID)
+        XCTAssertEqual(archivedMessage2.conversation?.objectID, visibleConversation.objectID)
+        XCTAssertNil(visibleConversation.archivedAt)
+        XCTAssertFalse(visibleConversation.hidden)
+        XCTAssertEqual(try context.count(for: Conversation.fetchRequest()), 1)
     }
 
     func testMergeConversationsByGmThreadId_mergesSameThreadWhenParticipantHashDiffers() async throws {

@@ -262,6 +262,75 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(saved.conversation?.objectID, existingConversation.objectID)
     }
 
+    func testCreateNewMessage_nonForwardedReplyReusesRegularConversationWhenForwardedSplitIsNewest() async throws {
+        let threadId = "thread-forwarded-split-newest"
+        let regularConversation = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: ["friend@example.com"]))
+            .build(in: context)
+        let forwardedConversation = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: [
+                "friend@example.com",
+                "teammate@example.com"
+            ]))
+            .build(in: context)
+
+        _ = MessageBuilder()
+            .withId("regular-thread-message")
+            .withThreadId(threadId)
+            .withSubject("Re: Team dinner")
+            .withDate(Date(timeIntervalSince1970: 1_700_000_000))
+            .inConversation(regularConversation)
+            .build(in: context)
+
+        _ = MessageBuilder()
+            .withId("forwarded-thread-message")
+            .withThreadId(threadId)
+            .withSubject("Fwd: Team dinner")
+            .withDate(Date(timeIntervalSince1970: 1_700_000_120))
+            .inConversation(forwardedConversation)
+            .build(in: context)
+
+        try testStack.saveViewContext()
+
+        var headers = ProcessedHeaders()
+        headers.subject = "Re: Team dinner"
+        headers.from = "Friend <friend@example.com>"
+        headers.to = [EmailAddress(email: "me@example.com", displayName: nil)]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: "new-regular-reply",
+            gmThreadId: threadId,
+            snippet: "Sounds good to me.",
+            cleanedSnippet: "Sounds good to me.",
+            internalDate: Date(timeIntervalSince1970: 1_700_000_240),
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: "Sounds good to me.",
+            labelIds: ["INBOX"],
+            isUnread: true,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        try await persister.createNewMessage(
+            processedMessage,
+            labelIds: nil,
+            myAliases: [normalizedEmail("me@example.com")],
+            in: context
+        )
+
+        let fetch = Message.fetchRequest()
+        fetch.predicate = NSPredicate(format: "id == %@", processedMessage.id)
+        fetch.fetchLimit = 1
+        let saved = try XCTUnwrap(context.fetch(fetch).first)
+
+        XCTAssertEqual(saved.conversation?.objectID, regularConversation.objectID)
+        XCTAssertNotEqual(saved.conversation?.objectID, forwardedConversation.objectID)
+        XCTAssertEqual(try context.count(for: Conversation.fetchRequest()), 2)
+    }
+
     func testCreateNewMessage_forwardedSubject_createsNewConversationEvenWhenThreadMatches() async throws {
         let threadId = "thread-forward-123"
         let existingConversation = ConversationBuilder.simple(in: context)

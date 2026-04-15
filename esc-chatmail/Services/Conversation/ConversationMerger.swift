@@ -273,7 +273,7 @@ struct ConversationMerger: Sendable {
     // MARK: - Winner Selection
 
     /// Selects the winner conversation from a group of duplicates.
-    /// Winner is the one with most messages, or if equal, the most recent.
+    /// Winner prefers visible conversations, then the one with most messages, or if equal, the most recent.
     /// Returns nil if the group is empty (logs error instead of crashing).
     func selectWinner(from group: [Conversation]) -> Conversation? {
         guard let first = group.first else {
@@ -282,6 +282,10 @@ struct ConversationMerger: Sendable {
         }
 
         let winner = group.max { (a, b) in
+            let aVisibilityRank = visibilityRank(for: a)
+            let bVisibilityRank = visibilityRank(for: b)
+            if aVisibilityRank != bVisibilityRank { return aVisibilityRank < bVisibilityRank }
+
             let aCount = a.messages?.count ?? 0
             let bCount = b.messages?.count ?? 0
             if aCount != bCount { return aCount < bCount }
@@ -320,7 +324,19 @@ struct ConversationMerger: Sendable {
             winner.latestInboxDate = max(winnerLatestInboxDate, loserLatestInboxDate)
         }
 
+        if winner.archivedAt == nil || loser.archivedAt == nil {
+            winner.archivedAt = nil
+        }
+        winner.hidden = winner.hidden && loser.hidden
+
         // Preserve pinned status
         winner.pinned = winner.pinned || loser.pinned
+    }
+
+    private func visibilityRank(for conversation: Conversation) -> Int {
+        if conversation.archivedAt == nil && !conversation.hidden { return 3 }
+        if conversation.archivedAt == nil { return 2 }
+        if !conversation.hidden { return 1 }
+        return 0
     }
 }

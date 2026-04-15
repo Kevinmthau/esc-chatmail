@@ -9,6 +9,11 @@ import CoreData
 /// - archived conversation reactivation
 /// - participant-based fallback identity
 final class MessageConversationRouter {
+    private struct ThreadConversationCandidate {
+        let conversation: Conversation
+        var containsForwardedMessage: Bool
+    }
+
     private let conversationManager: ConversationManager
     private let forwardingDetector: @Sendable (_ subject: String?, _ contentCandidates: [String?]) -> Bool
 
@@ -80,23 +85,59 @@ final class MessageConversationRouter {
         in context: NSManagedObjectContext
     ) async -> NSManagedObjectID? {
         guard !gmThreadId.isEmpty else { return nil }
+        let forwardingDetector = self.forwardingDetector
 
         return await context.perform {
             let request = Message.fetchRequest()
             request.predicate = NSPredicate(format: "gmThreadId == %@ AND conversation != nil", gmThreadId)
             request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: false)]
-            request.fetchLimit = 1
-            request.fetchBatchSize = 1
+            request.fetchBatchSize = 50
             request.returnsObjectsAsFaults = true
             request.relationshipKeyPathsForPrefetching = ["conversation"]
 
             do {
-                guard let existingConversation = try context.fetch(request).first?.conversation else {
+                let messages = try context.fetch(request)
+                guard !messages.isEmpty else {
                     return nil
                 }
 
-                let existingParticipantHash = existingConversation.participantHash?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                var orderedConversationIDs: [NSManagedObjectID] = []
+                var candidatesByID: [NSManagedObjectID: ThreadConversationCandidate] = [:]
+                orderedConversationIDs.reserveCapacity(4)
+                candidatesByID.reserveCapacity(4)
+
+                for message in messages {
+                    guard let conversation = message.conversation else { continue }
+
+                    let conversationID = conversation.objectID
+                    let containsForwardedMessage = forwardingDetector(
+                        message.subject,
+                        [message.bodyText, message.cleanedSnippet, message.snippet]
+                    )
+
+                    if var existingCandidate = candidatesByID[conversationID] {
+                        existingCandidate.containsForwardedMessage =
+                            existingCandidate.containsForwardedMessage || containsForwardedMessage
+                        candidatesByID[conversationID] = existingCandidate
+                        continue
+                    }
+
+                    orderedConversationIDs.append(conversationID)
+                    candidatesByID[conversationID] = ThreadConversationCandidate(
+                        conversation: conversation,
+                        containsForwardedMessage: containsForwardedMessage
+                    )
+                }
+
+                let orderedCandidates = orderedConversationIDs.compactMap { candidatesByID[$0] }
+                guard let existingConversation = Self.selectConversationForNonForwardedMessage(
+                    from: orderedCandidates,
+                    participantHash: participantHash
+                ) else {
+                    return nil
+                }
+
+                let existingParticipantHash = Self.trimmedParticipantHash(existingConversation.participantHash)
 
                 if existingParticipantHash.isEmpty {
                     existingConversation.participantHash = participantHash
@@ -122,5 +163,35 @@ final class MessageConversationRouter {
                 return nil
             }
         }
+    }
+
+    private static func selectConversationForNonForwardedMessage(
+        from candidates: [ThreadConversationCandidate],
+        participantHash: String
+    ) -> Conversation? {
+        let nonForwardedCandidates = candidates.filter { !$0.containsForwardedMessage }
+        guard !nonForwardedCandidates.isEmpty else { return nil }
+
+        if let exactMatch = nonForwardedCandidates.first(where: {
+            trimmedParticipantHash($0.conversation.participantHash) == participantHash
+        }) {
+            return exactMatch.conversation
+        }
+
+        if let candidateMissingHash = nonForwardedCandidates.first(where: {
+            trimmedParticipantHash($0.conversation.participantHash).isEmpty
+        }) {
+            return candidateMissingHash.conversation
+        }
+
+        guard nonForwardedCandidates.count == 1 else {
+            return nil
+        }
+
+        return nonForwardedCandidates[0].conversation
+    }
+
+    private static func trimmedParticipantHash(_ participantHash: String?) -> String {
+        participantHash?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 }
