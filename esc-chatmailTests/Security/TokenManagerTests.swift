@@ -39,6 +39,32 @@ final class TokenManagerTests: XCTestCase {
         try await super.tearDown()
     }
 
+    private func waitForAccessToken(
+        _ expected: String?,
+        timeout: TimeInterval = 1.0,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while Date() < deadline {
+            if authSession.accessToken == expected {
+                return
+            }
+
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        let expectedDescription = expected.map { String(reflecting: $0) } ?? "nil"
+        let actualDescription = authSession.accessToken.map { String(reflecting: $0) } ?? "nil"
+        XCTFail(
+            "Timed out waiting for authSession.accessToken to become \(expectedDescription); current value was \(actualDescription)",
+            file: file,
+            line: line
+        )
+    }
+
     // MARK: - saveTokens
 
     func testSaveTokens_persistsAccessTokenToKeychain() async throws {
@@ -70,9 +96,7 @@ final class TokenManagerTests: XCTestCase {
     func testSaveTokens_updatesInMemoryAuthSessionAccessToken() async throws {
         try sut.saveTokens(access: "memory-cached", refresh: nil, expirationDate: Date().addingTimeInterval(3600))
 
-        // saveTokens updates memory cache via a fire-and-forget Task { @MainActor }.
-        // Spin the runloop briefly to allow the hop.
-        try await Task.sleep(nanoseconds: 50_000_000)
+        await waitForAccessToken("memory-cached")
         XCTAssertEqual(authSession.accessToken, "memory-cached")
     }
 
@@ -90,11 +114,11 @@ final class TokenManagerTests: XCTestCase {
     func testClearTokens_clearsInMemoryAuthSessionAccessToken() async throws {
         authSession.accessToken = "cached"
         try sut.saveTokens(access: "cached", refresh: nil, expirationDate: Date().addingTimeInterval(3600))
-        try await Task.sleep(nanoseconds: 50_000_000)
+        await waitForAccessToken("cached")
 
         try sut.clearTokens()
 
-        try await Task.sleep(nanoseconds: 50_000_000)
+        await waitForAccessToken(nil)
         XCTAssertNil(authSession.accessToken)
     }
 
@@ -118,6 +142,7 @@ final class TokenManagerTests: XCTestCase {
 
     func testGetCurrentToken_freshKeychainToken_returnsItWithoutRefresh() async throws {
         try sut.saveTokens(access: "stored", refresh: nil, expirationDate: Date().addingTimeInterval(3600))
+        await waitForAccessToken("stored")
 
         // Clear in-memory cache so getCurrentToken has to read keychain
         authSession.accessToken = nil
@@ -209,8 +234,13 @@ final class TokenManagerTests: XCTestCase {
         do {
             _ = try await sut.refreshToken()
             XCTFail("Expected throw")
+        } catch let error as TokenManagerError {
+            guard case .noValidToken = error else {
+                return XCTFail("Expected .noValidToken, got \(error)")
+            }
+            XCTAssertEqual(mockRefresher.callCount, 1, "Non-retryable errors should not retry")
         } catch {
-            XCTAssertEqual(mockRefresher.callCount, 1)
+            XCTFail("Unexpected error type: \(error)")
         }
     }
 

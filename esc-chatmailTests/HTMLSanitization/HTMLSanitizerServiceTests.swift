@@ -693,9 +693,9 @@ final class HTMLSanitizerServiceTests: XCTestCase {
     }
 }
 
-// MARK: - HTMLURLSanitizer Tests
+// MARK: - HTMLURLSanitizer Regression Tests
 
-final class HTMLURLSanitizerTests: XCTestCase {
+final class HTMLSanitizerServiceHTMLURLSanitizerTests: XCTestCase {
 
     let sut = HTMLURLSanitizer()
 
@@ -882,9 +882,9 @@ final class HTMLURLSanitizerTests: XCTestCase {
     }
 }
 
-// MARK: - HTMLTrackingRemover Tests
+// MARK: - HTMLTrackingRemover Regression Tests
 
-final class HTMLTrackingRemoverTests: XCTestCase {
+final class HTMLSanitizerServiceHTMLTrackingRemoverTests: XCTestCase {
 
     let sut = HTMLTrackingRemover()
 
