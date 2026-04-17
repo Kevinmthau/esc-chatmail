@@ -234,6 +234,7 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
             bodyText: sharedPrefix + " tail-one",
             snippet: "Snippet",
             hasHTMLSource: false,
+            htmlFileSignature: "missing",
             contactRefreshToken: 0
         )
         let secondSignature = MessageBubble.contentSignature(
@@ -241,6 +242,36 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
             bodyText: sharedPrefix + " tail-two",
             snippet: "Snippet",
             hasHTMLSource: false,
+            htmlFileSignature: "missing",
+            contactRefreshToken: 0
+        )
+
+        XCTAssertNotEqual(firstSignature, secondSignature)
+    }
+
+    func testContentSignature_changesWhenCanonicalHTMLFileChangesWithoutBodyStorageURIChange() {
+        let messageId = "bubble-signature-\(UUID().uuidString)"
+        let handler = HTMLContentHandler.shared
+        handler.deleteHTML(for: messageId)
+        defer { handler.deleteHTML(for: messageId) }
+
+        let firstSignature = MessageBubble.contentSignature(
+            bodyStorageURI: "file:///tmp/stale-fallback.html",
+            bodyText: "Body",
+            snippet: "Snippet",
+            hasHTMLSource: true,
+            htmlFileSignature: handler.htmlFileSignature(for: messageId),
+            contactRefreshToken: 0
+        )
+
+        _ = handler.saveHTML("<html><body>Recovered</body></html>", for: messageId)
+
+        let secondSignature = MessageBubble.contentSignature(
+            bodyStorageURI: "file:///tmp/stale-fallback.html",
+            bodyText: "Body",
+            snippet: "Snippet",
+            hasHTMLSource: true,
+            htmlFileSignature: handler.htmlFileSignature(for: messageId),
             contactRefreshToken: 0
         )
 

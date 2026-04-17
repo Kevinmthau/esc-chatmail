@@ -135,7 +135,7 @@ final class VirtualScrollState: ObservableObject {
             )
 
             self.totalMessageCount = page.totalCount
-            self.scrollPosition = max(initialRange.lowerBound, endIndex - 1)
+            self.scrollPosition = initialRange.lowerBound
             self.setMessageWindow(window)
             self.visibleMessages = messages
             self.isLoadingMore = false

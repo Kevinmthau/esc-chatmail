@@ -97,6 +97,18 @@ final class HTMLContentHandler {
         return FileManager.default.fileExists(atPath: fileURL.path)
     }
 
+    func htmlFileSignature(for messageId: String) -> String {
+        let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            return "missing"
+        }
+
+        let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        let timestamp = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+        let fileSize = values?.fileSize ?? 0
+        return "\(timestamp)|\(fileSize)"
+    }
+
     func calculateStorageSize() -> Int64 {
         var totalSize: Int64 = 0
 

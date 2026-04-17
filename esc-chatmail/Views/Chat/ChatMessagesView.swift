@@ -64,7 +64,10 @@ struct ChatMessagesView: View {
                 LazyVStack(spacing: 8) {
                     ForEach(Array(displayedMessages.enumerated()), id: \.element.objectID) { index, message in
                         let absoluteIndex = scrollState.absoluteIndex(forVisibleIndex: index) ?? index
-                        let nextMessage = index + 1 < displayedMessages.count ? displayedMessages[index + 1] : nil
+                        let nextMessage =
+                            absoluteIndex + 1 < messages.count
+                            ? messages[absoluteIndex + 1]
+                            : nil
                         let isLastFromSender = nextMessage == nil ||
                             senderRunKey(for: nextMessage) != senderRunKey(for: message) ||
                             nextMessage?.isFromMe != message.isFromMe

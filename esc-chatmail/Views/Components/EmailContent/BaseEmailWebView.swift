@@ -433,15 +433,15 @@ struct BaseEmailWebView: UIViewRepresentable {
                 return
             }
 
-            // One settled measurement keeps preview heights predictable without repeatedly
-            // invalidating chat layout as remote assets finish loading.
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self, weak webView] in
-                guard let self,
-                      let webView,
-                      generation == self.previewMeasurementGeneration else {
-                    return
+            for delay in [DispatchTimeInterval.milliseconds(250), .seconds(1)] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak webView] in
+                    guard let self,
+                          let webView,
+                          generation == self.previewMeasurementGeneration else {
+                        return
+                    }
+                    self.measurePreviewHeight(in: webView, generation: generation)
                 }
-                self.measurePreviewHeight(in: webView, generation: generation)
             }
         }
 
