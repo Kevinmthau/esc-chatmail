@@ -58,6 +58,81 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertTrue(state.visibleMessages.allSatisfy { $0.managedObjectContext === self.viewContext })
     }
 
+    func testInitialLoadFromEnd_publishesNewestMessagesOnViewContext() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        let expectedIDs = Array(messages.suffix(4)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == expectedIDs && !state.isLoadingMore
+        }
+
+        XCTAssertEqual(state.visibleRangeStartIndex, 4)
+        XCTAssertEqual(state.absoluteIndex(forVisibleIndex: 0), 4)
+        XCTAssertEqual(state.absoluteIndex(forVisibleIndex: 3), 7)
+        XCTAssertEqual(state.scrollPosition, 4)
+        XCTAssertTrue(state.visibleMessages.allSatisfy { $0.managedObjectContext === self.viewContext })
+    }
+
+    func testInitialLoadFromEnd_doesNotLoadOlderWindowWhenTopOfTailFirstAppears() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+        let requestedRanges = RangeRecorder()
+
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+            await requestedRanges.record(range)
+            return await VirtualScrollState.loadMessagePage(
+                conversationId: conversationId,
+                range: range,
+                in: context
+            )
+        }
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            pageLoader: loader
+        )
+        defer { state.cleanup() }
+
+        let expectedIDs = Array(messages.suffix(4)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == expectedIDs && !state.isLoadingMore
+        }
+
+        let initialRanges = await requestedRanges.snapshot()
+        state.markIndexVisible(4)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        let rangesAfterMarkVisible = await requestedRanges.snapshot()
+        XCTAssertEqual(rangesAfterMarkVisible, initialRanges)
+        XCTAssertEqual(state.visibleMessages.map(\.objectID), expectedIDs)
+    }
+
     func testRapidOverlappingWindowLoads_keepPublishedMessagesOnViewContext() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 24)
         let configuration = VirtualScrollConfiguration(
@@ -146,5 +221,17 @@ final class VirtualScrollStateTests: XCTestCase {
         }
 
         XCTFail("Timed out waiting for condition", file: file, line: line)
+    }
+}
+
+private actor RangeRecorder {
+    private var ranges: [Range<Int>] = []
+
+    func record(_ range: Range<Int>) {
+        ranges.append(range)
+    }
+
+    func snapshot() -> [Range<Int>] {
+        ranges
     }
 }

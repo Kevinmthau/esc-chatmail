@@ -381,6 +381,44 @@ final class HTMLContentLoader {
         return nil
     }
 
+    /// Wraps already-loaded canonical HTML for chat preview rendering without reloading the
+    /// original source from disk or recovery services again.
+    func preparePreviewHTML(
+        fromCanonicalHTML canonicalHTML: String,
+        messageId: String,
+        bodyText: String? = nil,
+        senderEmail: String? = nil,
+        subject: String? = nil,
+        isDarkMode: Bool,
+        cleanupMode: HTMLContentCleanupMode = .none
+    ) async -> String? {
+        guard let normalizedCanonicalHTML = canonicalHTMLSource(from: canonicalHTML) else {
+            return nil
+        }
+
+        let normalizedFallbackText = normalizedMeaningfulPlainText(from: bodyText)
+        guard let prepared = await wrappedHTMLIfMeaningful(
+            normalizedCanonicalHTML,
+            messageId: messageId,
+            plainText: normalizedFallbackText,
+            senderEmail: senderEmail,
+            subject: subject,
+            isDarkMode: isDarkMode,
+            cleanupMode: cleanupMode,
+            displayPurpose: .preview,
+            originalHTMLPreference: .automatic
+        ) else {
+            return nil
+        }
+
+        switch prepared {
+        case .html(let wrapped):
+            return wrapped.html
+        case .nativePlainText:
+            return nil
+        }
+    }
+
     /// Returns canonical stored HTML only when the original-reader heuristics would keep HTML.
     /// Reply quoting uses this to preserve document styling without bypassing the meaningful-content
     /// and quality-fallback checks that protect the full-message path.

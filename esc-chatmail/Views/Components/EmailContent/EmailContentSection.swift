@@ -65,12 +65,13 @@ struct EmailContentSection: View {
     }
 
     private func loadHTML(generation: Int) async {
-
-        if let canonicalHTML = await htmlContentLoader.loadCanonicalHTML(
+        let canonicalHTML = await htmlContentLoader.loadCanonicalHTML(
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
             bodyText: message.bodyText
-        ) {
+        )
+
+        if let canonicalHTML {
             guard !Task.isCancelled else {
                 return
             }
@@ -142,6 +143,19 @@ struct EmailContentSection: View {
                 )
             case .transactional, .personToPerson:
                 break
+            }
+
+            if let previewHTML = await htmlContentLoader.preparePreviewHTML(
+                fromCanonicalHTML: canonicalHTML,
+                messageId: message.id,
+                bodyText: message.bodyText,
+                senderEmail: message.senderEmail,
+                subject: message.subject,
+                isDarkMode: colorScheme == .dark,
+                cleanupMode: message.htmlDisplayCleanupMode
+            ) {
+                await finishLoad(with: .transactionalHTML(previewHTML), generation: generation)
+                return
             }
         }
 

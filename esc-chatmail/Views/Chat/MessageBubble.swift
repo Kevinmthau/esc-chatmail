@@ -20,7 +20,7 @@ struct MessageBubble: View {
 
     private var showHTMLPreview: Bool {
         MessageDisplayPolicy.shouldShowHTMLPreview(
-            hasHTMLSource: message.hasHTMLSource,
+            hasHTMLSource: viewModel.htmlAnalysis.hasHTMLSource,
             isForwardedEmail: message.isForwardedEmail,
             isNewsletter: message.isNewsletter,
             hasRichHTMLContent: viewModel.hasRichHTMLContent,
@@ -61,7 +61,8 @@ struct MessageBubble: View {
     }
 
     var body: some View {
-        let showsCalendarInvitePreviewCard = showHTMLPreview && message.supportsCalendarInvitePreviewCard
+        let htmlAnalysis = viewModel.htmlAnalysis
+        let showsCalendarInvitePreviewCard = showHTMLPreview && htmlAnalysis.supportsCalendarInvitePreviewCard
 
         HStack(alignment: .bottom, spacing: 8) {
             if !message.isFromMe {
@@ -81,7 +82,9 @@ struct MessageBubble: View {
                     message: message,
                     style: style,
                     showHTMLPreview: showHTMLPreview,
+                    hasHTMLSource: htmlAnalysis.hasHTMLSource,
                     fullTextContent: viewModel.fullTextContent,
+                    fallbackPreviewText: message.cleanedSnippet ?? message.snippet,
                     sharedDocumentLinks: viewModel.sharedDocumentLinks,
                     hasLoadedContent: viewModel.hasLoadedContent,
                     forwardedDisplayContent: outgoingForwardedDisplayContent,
@@ -161,6 +164,7 @@ struct MessageBubble: View {
     @ViewBuilder
     private func attachmentsView(hidingCalendarInviteAttachments: Bool) -> some View {
         let displayable = message.displayableAttachments(
+            using: viewModel.htmlAnalysis,
             hidingInlineReferencedInHTML: showHTMLPreview,
             hidingCalendarInviteAttachments: hidingCalendarInviteAttachments
         )
@@ -230,12 +234,17 @@ struct MessageBubble: View {
                 messageID: message.id,
                 bodyText: message.bodyTextValue,
                 bodyStorageURI: message.bodyStorageURI,
+                cleanedSnippet: message.cleanedSnippet,
                 snippet: message.snippet,
+                subject: message.subject,
+                senderName: message.senderName,
                 hasHTMLSource: message.hasHTMLSource,
                 hasAttachments: message.hasAttachments,
                 isFromMe: message.isFromMe,
                 isForwardedEmail: message.isForwardedEmail,
-                effectiveSenderEmail: effectiveSenderEmail
+                isLikelyCalendarInvite: message.isLikelyCalendarInvite,
+                effectiveSenderEmail: effectiveSenderEmail,
+                attachmentSnapshots: message.attachmentsArray.map(\.bubbleSnapshot)
             )
         )
     }
@@ -246,6 +255,7 @@ struct MessageBubble: View {
             bodyText: message.bodyTextValue,
             snippet: message.snippet,
             hasHTMLSource: message.hasHTMLSource,
+            htmlFileSignature: HTMLContentHandler.shared.htmlFileSignature(for: message.id),
             contactRefreshToken: contactRefreshToken
         )
     }
@@ -259,9 +269,10 @@ struct MessageBubble: View {
         bodyText: String?,
         snippet: String?,
         hasHTMLSource: Bool,
+        htmlFileSignature: String,
         contactRefreshToken: Int
     ) -> String {
-        "\(bodyStorageURI ?? "")|\(contentFingerprint(for: bodyText))|\(contentFingerprint(for: snippet))|\(hasHTMLSource)|contacts:\(contactRefreshToken)"
+        "\(bodyStorageURI ?? "")|\(contentFingerprint(for: bodyText))|\(contentFingerprint(for: snippet))|\(hasHTMLSource)|html:\(htmlFileSignature)|contacts:\(contactRefreshToken)"
     }
 
     private static func contentFingerprint(for text: String?) -> String {

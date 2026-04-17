@@ -22,7 +22,8 @@ final class MessageBubbleViewModelTests: XCTestCase {
                     fullTextContent: "Project update",
                     hasRichHTMLContent: true,
                     sharedDocumentLinks: [expectedLink],
-                    forwardedDisplayContent: nil
+                    forwardedDisplayContent: nil,
+                    htmlAnalysis: .placeholder(hasHTMLSource: true)
                 )
             ]
         )
@@ -38,6 +39,7 @@ final class MessageBubbleViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.hasLoadedContent)
         XCTAssertEqual(viewModel.sharedDocumentLinks, [expectedLink])
         XCTAssertNil(viewModel.forwardedDisplayContent)
+        XCTAssertTrue(viewModel.htmlAnalysis.hasHTMLSource)
     }
 
     func testLoadIfNeeded_skipsReloadForSameSignature() async {
@@ -50,7 +52,8 @@ final class MessageBubbleViewModelTests: XCTestCase {
                     fullTextContent: "First load",
                     hasRichHTMLContent: false,
                     sharedDocumentLinks: [],
-                    forwardedDisplayContent: nil
+                    forwardedDisplayContent: nil,
+                    htmlAnalysis: .empty
                 )
             ]
         )
@@ -78,13 +81,15 @@ final class MessageBubbleViewModelTests: XCTestCase {
                     fullTextContent: "First load",
                     hasRichHTMLContent: false,
                     sharedDocumentLinks: [],
-                    forwardedDisplayContent: nil
+                    forwardedDisplayContent: nil,
+                    htmlAnalysis: .empty
                 ),
                 MessageBubbleContentResult(
                     fullTextContent: "Second load",
                     hasRichHTMLContent: true,
                     sharedDocumentLinks: [],
-                    forwardedDisplayContent: nil
+                    forwardedDisplayContent: nil,
+                    htmlAnalysis: .placeholder(hasHTMLSource: true)
                 )
             ]
         )
@@ -113,13 +118,15 @@ final class MessageBubbleViewModelTests: XCTestCase {
                     fullTextContent: "Same body",
                     hasRichHTMLContent: false,
                     sharedDocumentLinks: [],
-                    forwardedDisplayContent: nil
+                    forwardedDisplayContent: nil,
+                    htmlAnalysis: .empty
                 ),
                 MessageBubbleContentResult(
                     fullTextContent: "Same body",
                     hasRichHTMLContent: false,
                     sharedDocumentLinks: [],
-                    forwardedDisplayContent: nil
+                    forwardedDisplayContent: nil,
+                    htmlAnalysis: .empty
                 )
             ]
         )
@@ -153,12 +160,17 @@ final class MessageBubbleViewModelTests: XCTestCase {
                 messageID: messageID,
                 bodyText: "Body",
                 bodyStorageURI: nil,
+                cleanedSnippet: "Cleaned snippet",
                 snippet: "Snippet",
+                subject: "Subject",
+                senderName: "Alice Example",
                 hasHTMLSource: false,
                 hasAttachments: false,
                 isFromMe: false,
                 isForwardedEmail: false,
-                effectiveSenderEmail: senderEmail
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: senderEmail,
+                attachmentSnapshots: []
             )
         )
     }
@@ -199,7 +211,8 @@ actor MockMessageBubbleLoader: MessageBubbleLoading {
             fullTextContent: request.bodyText,
             hasRichHTMLContent: false,
             sharedDocumentLinks: [],
-            forwardedDisplayContent: nil
+            forwardedDisplayContent: nil,
+            htmlAnalysis: .placeholder(hasHTMLSource: request.hasHTMLSource)
         )
     }
 
@@ -221,6 +234,7 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
             bodyText: sharedPrefix + " tail-one",
             snippet: "Snippet",
             hasHTMLSource: false,
+            htmlFileSignature: "missing",
             contactRefreshToken: 0
         )
         let secondSignature = MessageBubble.contentSignature(
@@ -228,6 +242,36 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
             bodyText: sharedPrefix + " tail-two",
             snippet: "Snippet",
             hasHTMLSource: false,
+            htmlFileSignature: "missing",
+            contactRefreshToken: 0
+        )
+
+        XCTAssertNotEqual(firstSignature, secondSignature)
+    }
+
+    func testContentSignature_changesWhenCanonicalHTMLFileChangesWithoutBodyStorageURIChange() {
+        let messageId = "bubble-signature-\(UUID().uuidString)"
+        let handler = HTMLContentHandler.shared
+        handler.deleteHTML(for: messageId)
+        defer { handler.deleteHTML(for: messageId) }
+
+        let firstSignature = MessageBubble.contentSignature(
+            bodyStorageURI: "file:///tmp/stale-fallback.html",
+            bodyText: "Body",
+            snippet: "Snippet",
+            hasHTMLSource: true,
+            htmlFileSignature: handler.htmlFileSignature(for: messageId),
+            contactRefreshToken: 0
+        )
+
+        _ = handler.saveHTML("<html><body>Recovered</body></html>", for: messageId)
+
+        let secondSignature = MessageBubble.contentSignature(
+            bodyStorageURI: "file:///tmp/stale-fallback.html",
+            bodyText: "Body",
+            snippet: "Snippet",
+            hasHTMLSource: true,
+            htmlFileSignature: handler.htmlFileSignature(for: messageId),
             contactRefreshToken: 0
         )
 

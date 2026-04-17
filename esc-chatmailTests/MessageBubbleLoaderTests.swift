@@ -83,17 +83,23 @@ final class MessageBubbleLoaderTests: XCTestCase {
                 messageID: messageId,
                 bodyText: rawSource,
                 bodyStorageURI: nil,
+                cleanedSnippet: "Tickets are now on sale for the Spring Documentary Festival",
                 snippet: "Tickets are now on sale for the Spring Documentary Festival",
+                subject: "Spring Documentary Festival",
+                senderName: "Example Museum",
                 hasHTMLSource: false,
                 hasAttachments: false,
                 isFromMe: false,
                 isForwardedEmail: false,
-                effectiveSenderEmail: "newsletter@example.com"
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "newsletter@example.com",
+                attachmentSnapshots: []
             )
         )
 
         XCTAssertTrue(result.hasRichHTMLContent)
         XCTAssertTrue(result.fullTextContent?.contains("Tickets are now on sale for the Spring Documentary Festival") == true)
+        XCTAssertFalse(result.htmlAnalysis.hasHTMLSource)
     }
 
     func testLoadContent_staleNewsletterFallbackText_recoversRichHTML() async throws {
@@ -162,17 +168,23 @@ final class MessageBubbleLoaderTests: XCTestCase {
                 https://e.wordfly.com/privacy?sid=abc123
                 """,
                 bodyStorageURI: staleFallbackURL.absoluteString,
+                cleanedSnippet: "Tickets Now On Sale for the Margaret Mead Film Festival",
                 snippet: "Tickets Now On Sale for the Margaret Mead Film Festival",
+                subject: "Tickets Now On Sale",
+                senderName: "American Museum of Natural History",
                 hasHTMLSource: true,
                 hasAttachments: false,
                 isFromMe: false,
                 isForwardedEmail: false,
-                effectiveSenderEmail: "publicprograms@email.amnh.org"
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "publicprograms@email.amnh.org",
+                attachmentSnapshots: []
             )
         )
 
         XCTAssertTrue(result.hasRichHTMLContent)
         XCTAssertTrue(result.fullTextContent?.contains("Tickets are now on sale for the 2026 Margaret Mead Film Festival") == true)
+        XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)
     }
 
     func testLoadContent_outgoingForwardedMessage_returnsStructuredForwardPreview() async {
@@ -198,12 +210,17 @@ final class MessageBubbleLoaderTests: XCTestCase {
                 Looking forward to seeing you there.
                 """,
                 bodyStorageURI: nil,
+                cleanedSnippet: "FYI",
                 snippet: "FYI ---------- Forwarded message --------- From: Jane Example",
+                subject: "Fwd: Spring plans",
+                senderName: "Me",
                 hasHTMLSource: false,
                 hasAttachments: false,
                 isFromMe: true,
                 isForwardedEmail: true,
-                effectiveSenderEmail: "me@example.com"
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "me@example.com",
+                attachmentSnapshots: []
             )
         )
 
@@ -238,12 +255,17 @@ final class MessageBubbleLoaderTests: XCTestCase {
                 Looking forward to seeing you there.
                 """,
                 bodyStorageURI: nil,
+                cleanedSnippet: nil,
                 snippet: "---------- Forwarded message --------- From: Jane Example",
+                subject: "Fwd: Spring plans",
+                senderName: "Me",
                 hasHTMLSource: false,
                 hasAttachments: false,
                 isFromMe: true,
                 isForwardedEmail: true,
-                effectiveSenderEmail: "me@example.com"
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "me@example.com",
+                attachmentSnapshots: []
             )
         )
 
@@ -268,12 +290,17 @@ final class MessageBubbleLoaderTests: XCTestCase {
                 messageID: messageId,
                 bodyText: nil,
                 bodyStorageURI: nil,
+                cleanedSnippet: "FYI",
                 snippet: "FYI ---------- Forwarded message --------- From: Jane Example <jane@example.com> Date: Mon, Feb 16, 2026 at 5:56 PM Subject: Spring plans To: me@example.com, friend@example.com Looking forward to seeing you there.",
+                subject: "Fwd: Spring plans",
+                senderName: "Me",
                 hasHTMLSource: true,
                 hasAttachments: false,
                 isFromMe: true,
                 isForwardedEmail: true,
-                effectiveSenderEmail: "me@example.com"
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "me@example.com",
+                attachmentSnapshots: []
             )
         )
 
@@ -285,6 +312,53 @@ final class MessageBubbleLoaderTests: XCTestCase {
             result.forwardedDisplayContent?.previewSnippet,
             "Looking forward to seeing you there."
         )
+    }
+
+    func testLoadContent_resolvesHTMLAnalysisFromStoredHTMLSource() async throws {
+        let messageId = "bubble-html-analysis-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let htmlURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bubble-html-analysis-\(UUID().uuidString).html")
+        defer {
+            try? FileManager.default.removeItem(at: htmlURL)
+        }
+
+        try """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <img src="cid:hero-image">
+          <p>Hello world</p>
+        </body>
+        </html>
+        """.write(to: htmlURL, atomically: true, encoding: .utf8)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: nil,
+                bodyStorageURI: htmlURL.absoluteString,
+                cleanedSnippet: "Hello world",
+                snippet: "Hello world",
+                subject: "Hello world",
+                senderName: "Alice Example",
+                hasHTMLSource: true,
+                hasAttachments: true,
+                isFromMe: false,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)
+        XCTAssertEqual(result.htmlAnalysis.referencedInlineContentIDs, ["hero-image"])
     }
 }
 
