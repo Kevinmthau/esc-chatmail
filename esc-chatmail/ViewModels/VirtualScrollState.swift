@@ -11,6 +11,11 @@ struct VirtualScrollMessagePage: @unchecked Sendable {
 // MARK: - Virtual Scroll State
 @MainActor
 final class VirtualScrollState: ObservableObject {
+    enum InitialWindowPosition {
+        case beginning
+        case end
+    }
+
     typealias MessagePageLoader = (
         _ conversationId: String,
         _ range: Range<Int>,
@@ -24,6 +29,7 @@ final class VirtualScrollState: ObservableObject {
     @Published var placeholderIndices: Set<Int> = []
 
     private let configuration: VirtualScrollConfiguration
+    private let initialWindowPosition: InitialWindowPosition
     private var messageWindow: MessageWindow?
     private let conversationId: String
     private let viewContext: NSManagedObjectContext
@@ -37,9 +43,14 @@ final class VirtualScrollState: ObservableObject {
     // Task tracking to prevent orphaned tasks during rapid scrolling
     private let taskManager = ViewModelTaskManager()
 
-    init(conversationId: String, configuration: VirtualScrollConfiguration = .default) {
+    init(
+        conversationId: String,
+        configuration: VirtualScrollConfiguration = .default,
+        initialWindowPosition: InitialWindowPosition = .beginning
+    ) {
         self.conversationId = conversationId
         self.configuration = configuration
+        self.initialWindowPosition = initialWindowPosition
         self.viewContext = CoreDataStack.shared.viewContext
         self.makeBackgroundContext = { CoreDataStack.shared.newBackgroundContext() }
         self.pageLoader = VirtualScrollState.loadMessagePage
@@ -49,6 +60,7 @@ final class VirtualScrollState: ObservableObject {
     init(
         conversationId: String,
         configuration: VirtualScrollConfiguration = .default,
+        initialWindowPosition: InitialWindowPosition = .beginning,
         viewContext: NSManagedObjectContext,
         makeBackgroundContext: @escaping () -> NSManagedObjectContext,
         pageLoader: @escaping MessagePageLoader = VirtualScrollState.loadMessagePage,
@@ -56,6 +68,7 @@ final class VirtualScrollState: ObservableObject {
     ) {
         self.conversationId = conversationId
         self.configuration = configuration
+        self.initialWindowPosition = initialWindowPosition
         self.viewContext = viewContext
         self.makeBackgroundContext = makeBackgroundContext
         self.pageLoader = pageLoader
@@ -77,15 +90,33 @@ final class VirtualScrollState: ObservableObject {
         preloadIfNeeded()
     }
 
+    var visibleRangeStartIndex: Int {
+        messageWindow?.startIndex ?? 0
+    }
+
+    var isShowingLatestWindow: Bool {
+        guard let messageWindow else { return false }
+        return messageWindow.endIndex >= totalMessageCount
+    }
+
+    func absoluteIndex(forVisibleIndex index: Int) -> Int? {
+        guard index >= 0, index < visibleMessages.count else {
+            return nil
+        }
+
+        return visibleRangeStartIndex + index
+    }
+
     private func loadInitialMessages() {
         isLoadingMore = true
 
         taskManager.run("loadInitial") { [weak self] in
             guard let self = self else { return }
 
+            let initialRange = await self.initialMessageRange()
             let page = await self.pageLoader(
                 self.conversationId,
-                0..<self.configuration.visibleItemCount,
+                initialRange,
                 self.makeBackgroundContext()
             )
 
@@ -95,19 +126,35 @@ final class VirtualScrollState: ObservableObject {
 
             guard !Task.isCancelled else { return }
 
-            let endIndex = min(page.totalCount, page.messageIDs.count)
+            let endIndex = initialRange.lowerBound + page.messageIDs.count
             let window = MessageWindow(
-                startIndex: 0,
+                startIndex: initialRange.lowerBound,
                 endIndex: endIndex,
                 messageIDs: page.messageIDs,
                 isLoading: false
             )
 
             self.totalMessageCount = page.totalCount
+            self.scrollPosition = max(initialRange.lowerBound, endIndex - 1)
             self.setMessageWindow(window)
             self.visibleMessages = messages
             self.isLoadingMore = false
         }
+    }
+
+    func loadLatestWindowIfNeeded() async {
+        guard !isShowingLatestWindow || visibleMessages.isEmpty else {
+            return
+        }
+
+        await loadLatestWindow()
+    }
+
+    func loadLatestWindow() async {
+        let totalCount = await loadTotalMessageCount()
+        let startIndex = max(0, totalCount - configuration.visibleItemCount)
+        await loadWindow(startIndex: startIndex, endIndex: totalCount)
+        scrollPosition = max(startIndex, totalCount - 1)
     }
 
     private func updateVisibleMessages() {
@@ -117,52 +164,75 @@ final class VirtualScrollState: ObservableObject {
         let endIndex = min(totalMessageCount, scrollPosition + configuration.visibleItemCount + configuration.bufferSize)
 
         if window.contains(index: startIndex) && window.contains(index: endIndex - 1) {
-            // Current window is sufficient.
-            let windowStart = startIndex - window.startIndex
-            let windowEnd = endIndex - window.startIndex
-            let visibleIDs = Array(window.messageIDs[windowStart..<windowEnd])
-            visibleMessages = resolveCachedMessages(for: visibleIDs)
+            // Current window already covers the requested range.
+            // Keep rendering the whole window so the user can continue scrolling
+            // through the buffered messages without the view pruning rows away.
+            visibleMessages = resolveCachedMessages(for: window.messageIDs)
         } else {
             // Need to load a new window.
-            loadWindow(startIndex: startIndex, endIndex: endIndex)
+            taskManager.run("loadWindow") { [weak self] in
+                guard let self = self else { return }
+                await self.loadWindow(startIndex: startIndex, endIndex: endIndex)
+            }
         }
     }
 
-    private func loadWindow(startIndex: Int, endIndex: Int) {
+    private func loadWindow(startIndex: Int, endIndex: Int) async {
+        guard startIndex >= 0, endIndex >= startIndex else {
+            return
+        }
+
         isLoadingMore = true
 
         // Show placeholders while loading
         placeholderIndices = Set(startIndex..<endIndex)
 
-        taskManager.run("loadWindow") { [weak self] in
-            guard let self = self else { return }
+        let page = await pageLoader(
+            conversationId,
+            startIndex..<endIndex,
+            makeBackgroundContext()
+        )
 
-            let page = await self.pageLoader(
-                self.conversationId,
-                startIndex..<endIndex,
-                self.makeBackgroundContext()
-            )
+        guard !Task.isCancelled else { return }
 
-            guard !Task.isCancelled else { return }
+        let messages = await resolveMessagesOnViewContext(for: page.messageIDs)
 
-            let messages = await self.resolveMessagesOnViewContext(for: page.messageIDs)
+        guard !Task.isCancelled else { return }
 
-            guard !Task.isCancelled else { return }
+        let loadedEndIndex = startIndex + page.messageIDs.count
+        let window = MessageWindow(
+            startIndex: startIndex,
+            endIndex: loadedEndIndex,
+            messageIDs: page.messageIDs,
+            isLoading: false
+        )
 
-            let loadedEndIndex = startIndex + page.messageIDs.count
-            let window = MessageWindow(
-                startIndex: startIndex,
-                endIndex: loadedEndIndex,
-                messageIDs: page.messageIDs,
-                isLoading: false
-            )
+        totalMessageCount = page.totalCount
+        setMessageWindow(window)
+        visibleMessages = messages
+        placeholderIndices.removeAll()
+        isLoadingMore = false
+    }
 
-            self.totalMessageCount = page.totalCount
-            self.setMessageWindow(window)
-            self.visibleMessages = messages
-            self.placeholderIndices.removeAll()
-            self.isLoadingMore = false
+    private func initialMessageRange() async -> Range<Int> {
+        switch initialWindowPosition {
+        case .beginning:
+            return 0..<configuration.visibleItemCount
+        case .end:
+            let totalCount = await loadTotalMessageCount()
+            let startIndex = max(0, totalCount - configuration.visibleItemCount)
+            return startIndex..<totalCount
         }
+    }
+
+    private func loadTotalMessageCount() async -> Int {
+        let metadataPage = await pageLoader(
+            conversationId,
+            0..<0,
+            makeBackgroundContext()
+        )
+
+        return metadataPage.totalCount
     }
 
     private func preloadIfNeeded() {
@@ -201,7 +271,12 @@ final class VirtualScrollState: ObservableObject {
 
             guard !Task.isCancelled else { return }
 
-            guard var currentWindow = self.messageWindow else { return }
+            guard var currentWindow = self.messageWindow,
+                  currentWindow.startIndex == window.startIndex,
+                  currentWindow.endIndex == window.endIndex,
+                  currentWindow.messageIDs == window.messageIDs else {
+                return
+            }
 
             currentWindow.messageIDs.append(contentsOf: page.messageIDs)
             currentWindow = MessageWindow(
@@ -213,6 +288,7 @@ final class VirtualScrollState: ObservableObject {
 
             self.totalMessageCount = page.totalCount
             self.setMessageWindow(currentWindow)
+            self.visibleMessages = self.resolveCachedMessages(for: currentWindow.messageIDs)
         }
     }
 
@@ -238,7 +314,12 @@ final class VirtualScrollState: ObservableObject {
 
             guard !Task.isCancelled else { return }
 
-            guard var currentWindow = self.messageWindow else { return }
+            guard var currentWindow = self.messageWindow,
+                  currentWindow.startIndex == window.startIndex,
+                  currentWindow.endIndex == window.endIndex,
+                  currentWindow.messageIDs == window.messageIDs else {
+                return
+            }
 
             currentWindow.messageIDs = page.messageIDs + currentWindow.messageIDs
             currentWindow = MessageWindow(
@@ -250,6 +331,7 @@ final class VirtualScrollState: ObservableObject {
 
             self.totalMessageCount = page.totalCount
             self.setMessageWindow(currentWindow)
+            self.visibleMessages = self.resolveCachedMessages(for: currentWindow.messageIDs)
         }
     }
 

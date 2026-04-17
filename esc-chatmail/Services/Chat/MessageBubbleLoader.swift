@@ -12,16 +12,61 @@ struct MessageBubbleSenderResult: Sendable, Equatable {
     let imageData: Data?
 }
 
+struct MessageBubbleAttachmentSnapshot: Sendable, Equatable {
+    let contentId: String?
+    let filename: String
+    let mimeType: String
+    let stateRaw: String
+    let localURL: String?
+    let byteSize: Int64
+    let pageCount: Int16
+    let width: Int16
+    let height: Int16
+
+    var isReady: Bool {
+        stateRaw == Attachment.State.downloaded.rawValue ||
+        stateRaw == Attachment.State.uploaded.rawValue
+    }
+}
+
+struct MessageBubbleHTMLAnalysis: Sendable, Equatable {
+    let hasHTMLSource: Bool
+    let referencedInlineContentIDs: Set<String>
+    let nonDisplayableInlineContentIDs: Set<String>
+    let supportsCalendarInvitePreviewCard: Bool
+
+    static let empty = MessageBubbleHTMLAnalysis(
+        hasHTMLSource: false,
+        referencedInlineContentIDs: [],
+        nonDisplayableInlineContentIDs: [],
+        supportsCalendarInvitePreviewCard: false
+    )
+
+    static func placeholder(hasHTMLSource: Bool) -> MessageBubbleHTMLAnalysis {
+        MessageBubbleHTMLAnalysis(
+            hasHTMLSource: hasHTMLSource,
+            referencedInlineContentIDs: [],
+            nonDisplayableInlineContentIDs: [],
+            supportsCalendarInvitePreviewCard: false
+        )
+    }
+}
+
 struct MessageBubbleContentRequest: Sendable {
     let messageID: String
     let bodyText: String?
     let bodyStorageURI: String?
+    let cleanedSnippet: String?
     let snippet: String?
+    let subject: String?
+    let senderName: String?
     let hasHTMLSource: Bool
     let hasAttachments: Bool
     let isFromMe: Bool
     let isForwardedEmail: Bool
+    let isLikelyCalendarInvite: Bool
     let effectiveSenderEmail: String?
+    let attachmentSnapshots: [MessageBubbleAttachmentSnapshot]
 }
 
 struct MessageBubbleContentResult: Sendable, Equatable {
@@ -29,6 +74,7 @@ struct MessageBubbleContentResult: Sendable, Equatable {
     let hasRichHTMLContent: Bool
     let sharedDocumentLinks: [SharedDocumentLink]
     let forwardedDisplayContent: ForwardedMessageDisplayContent?
+    let htmlAnalysis: MessageBubbleHTMLAnalysis
 }
 
 struct MessageBubbleLoadContext: Sendable {
@@ -42,6 +88,327 @@ struct MessageBubbleLoadContext: Sendable {
 protocol MessageBubbleLoading: Sendable {
     func loadSenderInfo(from request: MessageBubbleSenderRequest) async -> MessageBubbleSenderResult
     func loadContent(from request: MessageBubbleContentRequest) async -> MessageBubbleContentResult
+}
+
+enum MessageBubbleHTMLAnalysisBuilder {
+    static func build(
+        messageID: String,
+        bodyStorageURI: String?,
+        hasHTMLSourceHint: Bool,
+        isForwardedEmail: Bool,
+        isLikelyCalendarInvite: Bool,
+        bodyText: String?,
+        cleanedSnippet: String?,
+        senderName: String?,
+        senderEmail: String?,
+        subject: String?,
+        attachmentSnapshots: [MessageBubbleAttachmentSnapshot],
+        handler: HTMLContentHandler
+    ) -> MessageBubbleHTMLAnalysis {
+        let canonicalHTML = loadHTML(
+            messageID: messageID,
+            bodyStorageURI: bodyStorageURI,
+            handler: handler
+        )
+        let hasHTMLSource = hasHTMLSourceHint || canonicalHTML != nil
+
+        guard let canonicalHTML else {
+            return .placeholder(hasHTMLSource: hasHTMLSource)
+        }
+
+        return MessageBubbleHTMLAnalysis(
+            hasHTMLSource: hasHTMLSource,
+            referencedInlineContentIDs: extractReferencedContentIDs(from: canonicalHTML),
+            nonDisplayableInlineContentIDs: extractNonDisplayableInlineContentIDs(
+                from: canonicalHTML,
+                attachments: attachmentSnapshots
+            ),
+            supportsCalendarInvitePreviewCard: supportsCalendarInvitePreviewCard(
+                canonicalHTML: canonicalHTML,
+                isForwardedEmail: isForwardedEmail,
+                isLikelyCalendarInvite: isLikelyCalendarInvite,
+                bodyText: bodyText,
+                cleanedSnippet: cleanedSnippet,
+                senderName: senderName,
+                senderEmail: senderEmail,
+                subject: subject
+            )
+        )
+    }
+
+    static func normalizedContentID(from rawValue: String?) -> String? {
+        guard let rawValue else { return nil }
+
+        var normalized = rawValue
+            .trimmingCharacters(in: CharacterSet(charactersIn: "<> \t\r\n"))
+
+        while normalized.hasPrefix("/") {
+            normalized.removeFirst()
+        }
+
+        normalized = normalized.removingPercentEncoding ?? normalized
+        normalized = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !normalized.isEmpty else { return nil }
+        return normalized.lowercased()
+    }
+
+    private static func loadHTML(
+        messageID: String,
+        bodyStorageURI: String?,
+        handler: HTMLContentHandler
+    ) -> String? {
+        if let html = handler.loadHTML(for: messageID) {
+            return html
+        }
+
+        guard let bodyStorageURI else {
+            return nil
+        }
+
+        if handler.migrateIfNeeded(from: bodyStorageURI),
+           let migratedHTML = handler.loadHTML(for: messageID) {
+            return migratedHTML
+        }
+
+        guard let resolvedURL = StorageURIResolver.resolve(bodyStorageURI),
+              FileManager.default.fileExists(atPath: resolvedURL.path) else {
+            return nil
+        }
+
+        return handler.loadHTML(from: resolvedURL)
+    }
+
+    private static func extractNonDisplayableInlineContentIDs(
+        from html: String?,
+        attachments: [MessageBubbleAttachmentSnapshot]
+    ) -> Set<String> {
+        guard let html else { return [] }
+
+        let originalReferenced = extractReferencedContentIDs(from: html)
+        guard !originalReferenced.isEmpty else { return [] }
+
+        let cleaned = cleanedHTMLForAttachmentFiltering(from: html)
+        let cleanedReferenced = extractReferencedContentIDs(from: cleaned)
+        let removedByHTMLCleanup = originalReferenced.subtracting(cleanedReferenced)
+        let likelySignatureInline = extractLikelySignatureInlineContentIDs(
+            from: html,
+            attachments: attachments
+        )
+
+        return removedByHTMLCleanup.union(likelySignatureInline)
+    }
+
+    private static func cleanedHTMLForAttachmentFiltering(from html: String) -> String {
+        let quotedAndSignature = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
+        if HTMLMeaningfulContentChecker.hasMeaningfulContent(quotedAndSignature) {
+            return quotedAndSignature
+        }
+
+        let quotedOnly = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedOnly) ?? html
+        if HTMLMeaningfulContentChecker.hasMeaningfulContent(quotedOnly) {
+            return quotedOnly
+        }
+
+        return html
+    }
+
+    private static func extractReferencedContentIDs(from html: String?) -> Set<String> {
+        guard let html else { return [] }
+
+        var referencedCIDs = Set<String>()
+        let cidPrefix = "cid:"
+        var searchRange = html.startIndex..<html.endIndex
+
+        while let cidRange = html.range(of: cidPrefix, options: .caseInsensitive, range: searchRange) {
+            let startOfCID = cidRange.upperBound
+            var endOfCID = startOfCID
+            while endOfCID < html.endIndex {
+                let char = html[endOfCID]
+                if char == "\"" || char == "'" || char == " " || char == ">" || char == "<" {
+                    break
+                }
+                endOfCID = html.index(after: endOfCID)
+            }
+
+            if startOfCID < endOfCID {
+                let contentId = String(html[startOfCID..<endOfCID])
+                if let normalizedContentId = normalizedContentID(from: contentId) {
+                    referencedCIDs.insert(normalizedContentId)
+                }
+            }
+
+            searchRange = endOfCID..<html.endIndex
+        }
+
+        return referencedCIDs
+    }
+
+    private static func extractLikelySignatureInlineContentIDs(
+        from html: String,
+        attachments: [MessageBubbleAttachmentSnapshot]
+    ) -> Set<String> {
+        let lowercasedHTML = html.lowercased()
+        guard lowercasedHTML.contains("cid:") else {
+            return []
+        }
+
+        let trailingWindow = String(lowercasedHTML.suffix(6_000))
+        let hasSignatureSectionSignals =
+            signatureSignOffMarkers.contains { trailingWindow.contains($0) } &&
+            (
+                signatureContactMarkers.contains { trailingWindow.contains($0) } ||
+                signatureRoleMarkers.contains { trailingWindow.contains($0) }
+            )
+
+        guard hasSignatureSectionSignals else {
+            return []
+        }
+
+        let cidPrefix = "cid:"
+        var nonDisplayable = Set<String>()
+        var searchRange = html.startIndex..<html.endIndex
+
+        while let cidRange = html.range(of: cidPrefix, options: .caseInsensitive, range: searchRange) {
+            let startOfCID = cidRange.upperBound
+            var endOfCID = startOfCID
+
+            while endOfCID < html.endIndex {
+                let char = html[endOfCID]
+                if char == "\"" || char == "'" || char == " " || char == ">" || char == "<" {
+                    break
+                }
+                endOfCID = html.index(after: endOfCID)
+            }
+
+            defer {
+                searchRange = endOfCID..<html.endIndex
+            }
+
+            guard startOfCID < endOfCID else { continue }
+            guard let normalizedCID = normalizedContentID(from: String(html[startOfCID..<endOfCID])) else {
+                continue
+            }
+
+            let cidOffset = html.distance(from: html.startIndex, to: startOfCID)
+            let trailingThreshold = Int(Double(html.count) * 0.45)
+            guard cidOffset >= trailingThreshold else {
+                continue
+            }
+
+            guard isLikelySignatureInlineAttachment(
+                contentID: normalizedCID,
+                attachments: attachments
+            ) else {
+                continue
+            }
+
+            nonDisplayable.insert(normalizedCID)
+        }
+
+        return nonDisplayable
+    }
+
+    private static func isLikelySignatureInlineAttachment(
+        contentID: String,
+        attachments: [MessageBubbleAttachmentSnapshot]
+    ) -> Bool {
+        guard let attachment = attachments.first(where: { normalizedContentID(from: $0.contentId) == contentID }) else {
+            return false
+        }
+
+        guard attachment.mimeType.hasPrefix("image/") else {
+            return false
+        }
+
+        let filename = attachment.filename.lowercased()
+        let hasSignatureKeyword =
+            filename.contains("logo") ||
+            filename.contains("signature") ||
+            filename.contains("footer")
+
+        let isGeneratedInlineName = filename.range(
+            of: #"^(?:image|img)\d{2,}(?:[_-]\d+)?\.[a-z0-9]{2,5}$"#,
+            options: .regularExpression
+        ) != nil
+
+        let contentIDLocalPart = contentID
+            .split(separator: "@", maxSplits: 1, omittingEmptySubsequences: true)
+            .first
+            .map(String.init) ?? contentID
+        let isGeneratedInlineContentID = contentIDLocalPart.range(
+            of: #"^(?:image|img)\d{2,}(?:[_-]\d+)?(?:\.[a-z0-9]{2,5})?$"#,
+            options: .regularExpression
+        ) != nil
+
+        let hasLogoLikeDimensions =
+            attachment.width > 0 &&
+            attachment.height > 0 &&
+            attachment.width >= attachment.height &&
+            attachment.width <= 320 &&
+            attachment.height <= 120
+
+        let looksLikeGeneratedInlineAsset = isGeneratedInlineName || isGeneratedInlineContentID
+        return hasSignatureKeyword || (looksLikeGeneratedInlineAsset && hasLogoLikeDimensions)
+    }
+
+    private static func supportsCalendarInvitePreviewCard(
+        canonicalHTML: String,
+        isForwardedEmail: Bool,
+        isLikelyCalendarInvite: Bool,
+        bodyText: String?,
+        cleanedSnippet: String?,
+        senderName: String?,
+        senderEmail: String?,
+        subject: String?
+    ) -> Bool {
+        guard !isForwardedEmail, isLikelyCalendarInvite else {
+            return false
+        }
+
+        let previewBuilder = CalendarInvitePreviewBuilder()
+        return previewBuilder.buildPreview(
+            canonicalHTML: canonicalHTML,
+            bodyText: bodyText,
+            cleanedSnippet: cleanedSnippet,
+            senderName: senderName,
+            senderEmail: senderEmail,
+            subject: subject
+        ) != nil
+    }
+
+    private static let signatureSignOffMarkers = [
+        "warmly",
+        "best regards",
+        "kind regards",
+        "regards,",
+        "sincerely",
+        "thanks,",
+        "thank you,",
+        "cheers,"
+    ]
+
+    private static let signatureContactMarkers = [
+        "mailto:",
+        "tel:",
+        "mobile",
+        "phone",
+        "www.",
+        "linkedin",
+        "instagram",
+        "twitter"
+    ]
+
+    private static let signatureRoleMarkers = [
+        "manager",
+        "director",
+        "president",
+        "founder",
+        "advisor",
+        "broker",
+        "realtor",
+        "membership"
+    ]
 }
 
 actor MessageBubbleLoader: MessageBubbleLoading {
@@ -88,13 +455,30 @@ actor MessageBubbleLoader: MessageBubbleLoading {
     }
 
     func loadContent(from request: MessageBubbleContentRequest) async -> MessageBubbleContentResult {
+        let htmlAnalysis = MessageBubbleHTMLAnalysisBuilder.build(
+            messageID: request.messageID,
+            bodyStorageURI: request.bodyStorageURI,
+            hasHTMLSourceHint: request.hasHTMLSource,
+            isForwardedEmail: request.isForwardedEmail,
+            isLikelyCalendarInvite: request.isLikelyCalendarInvite,
+            bodyText: request.bodyText,
+            cleanedSnippet: request.cleanedSnippet,
+            senderName: request.senderName,
+            senderEmail: request.effectiveSenderEmail,
+            subject: request.subject,
+            attachmentSnapshots: request.attachmentSnapshots,
+            handler: htmlContentHandler
+        )
         let forwardedDisplayContent =
             request.isFromMe && request.isForwardedEmail
             ? ForwardedMessageDisplayParser.parseOutgoingForward(
                 from: request.bodyText ?? request.snippet
             )
             : nil
-        let loadedContent = await loadProcessedContent(from: request)
+        let loadedContent = await loadProcessedContent(
+            from: request,
+            resolvedHasHTMLSource: htmlAnalysis.hasHTMLSource
+        )
 
         let fullTextContent =
             forwardedDisplayContent != nil
@@ -111,23 +495,25 @@ actor MessageBubbleLoader: MessageBubbleLoading {
                 bodyText: sharedDocumentLinkBodyText,
                 snippet: sharedDocumentLinkSnippet
             ),
-            forwardedDisplayContent: forwardedDisplayContent
+            forwardedDisplayContent: forwardedDisplayContent,
+            htmlAnalysis: htmlAnalysis
         )
     }
 
     private func loadProcessedContent(
-        from request: MessageBubbleContentRequest
+        from request: MessageBubbleContentRequest,
+        resolvedHasHTMLSource: Bool
     ) async -> (plainText: String?, hasRichContent: Bool) {
         if let cached = await processedTextCache.get(messageId: request.messageID) {
             let hasHTMLFile = htmlContentHandler.htmlFileExists(for: request.messageID)
             let requiresURIRecompute =
-                request.hasHTMLSource &&
+                resolvedHasHTMLSource &&
                 cached.plainText == nil &&
                 request.bodyStorageURI != nil &&
                 !hasHTMLFile
             let shouldBypassCachedNewsletterFallback =
                 !request.isFromMe &&
-                request.hasHTMLSource &&
+                resolvedHasHTMLSource &&
                 !cached.hasRichContent &&
                 looksLikeNewsletterFallbackText(cached.plainText ?? request.bodyText ?? request.snippet)
 
@@ -148,15 +534,15 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             result.plainText == nil &&
             missingBodyText &&
             !request.isFromMe &&
-            (request.bodyStorageURI != nil || request.hasAttachments || request.hasHTMLSource)
+            (request.bodyStorageURI != nil || request.hasAttachments || resolvedHasHTMLSource)
         let shouldAttemptTrustedSenderRecovery =
             !request.isFromMe &&
-            !request.hasHTMLSource &&
+            !resolvedHasHTMLSource &&
             !result.hasRichContent &&
             isTrustedTransactionalSender
         let shouldAttemptNewsletterFallbackRecovery =
             !request.isFromMe &&
-            request.hasHTMLSource &&
+            resolvedHasHTMLSource &&
             !result.hasRichContent &&
             looksLikeNewsletterFallbackText(request.bodyText ?? result.plainText ?? request.snippet)
 

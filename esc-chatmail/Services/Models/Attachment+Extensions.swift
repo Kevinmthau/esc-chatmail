@@ -90,4 +90,18 @@ extension Attachment {
 
         return false
     }
+
+    var bubbleSnapshot: MessageBubbleAttachmentSnapshot {
+        MessageBubbleAttachmentSnapshot(
+            contentId: contentId,
+            filename: filename,
+            mimeType: mimeType,
+            stateRaw: stateRaw,
+            localURL: localURL,
+            byteSize: byteSize,
+            pageCount: pageCount,
+            width: width,
+            height: height
+        )
+    }
 }

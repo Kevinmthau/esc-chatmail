@@ -6,7 +6,9 @@ struct MessageContentView: View {
     let message: Message
     let style: MessageBubbleStyle
     let showHTMLPreview: Bool
+    let hasHTMLSource: Bool
     let fullTextContent: String?
+    let fallbackPreviewText: String?
     let sharedDocumentLinks: [SharedDocumentLink]
     let hasLoadedContent: Bool
     let forwardedDisplayContent: ForwardedMessageDisplayContent?
@@ -45,7 +47,7 @@ struct MessageContentView: View {
     private var textContent: some View {
         if let forwardedDisplay = resolvedForwardedDisplayContent {
             forwardedTextContent(for: forwardedDisplay)
-        } else if message.hasHTMLSource && !hasLoadedContent {
+        } else if hasHTMLSource && !hasLoadedContent {
             // Avoid flashing raw/partial HTML-derived text while async content detection is still running.
             loadingPlaceholder
         } else {
@@ -53,7 +55,7 @@ struct MessageContentView: View {
                 textAndSharedDocumentContent(text: text)
             } else if !sharedDocumentLinks.isEmpty {
                 sharedDocumentCards
-            } else if message.hasHTMLSource {
+            } else if hasHTMLSource {
                 // No text content but HTML exists - show a tappable bubble to open full email
                 openEmailBubble
             } else if message.typedAttachments.isEmpty {
@@ -201,14 +203,8 @@ struct MessageContentView: View {
         onOpenFullMessage()
     }
 
-    /// Pre-computes the fallback processed text from bodyText or snippet.
-    /// Avoids calling processedText() multiple times during view body evaluation.
-    private var cachedProcessedText: String? {
-        Self.resolvedProcessedText(bodyText: message.bodyText, snippet: message.snippet)
-    }
-
     private var resolvedVisibleText: String? {
-        let sourceText = fullTextContent ?? cachedProcessedText ?? message.snippet
+        let sourceText = fullTextContent ?? fallbackPreviewText
         return SharedDocumentLinkExtractor.removingLinks(from: sourceText, matching: sharedDocumentLinks)
     }
 

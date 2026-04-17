@@ -141,6 +141,28 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertFalse(lightReload.html?.contains("background-color: #1c1c1e") == true)
     }
 
+    func testPreparePreviewHTML_wrapsKnownCanonicalHTMLWithoutReloadingSources() async {
+        let previewHTML = await loader.preparePreviewHTML(
+            fromCanonicalHTML: """
+            <html>
+            <body>
+              <p>Canonical preview body</p>
+            </body>
+            </html>
+            """,
+            messageId: "html-loader-known-canonical-\(UUID().uuidString)",
+            bodyText: nil,
+            senderEmail: "sender@example.com",
+            subject: "Subject",
+            isDarkMode: false,
+            cleanupMode: .none
+        )
+
+        XCTAssertNotNil(previewHTML)
+        XCTAssertTrue(previewHTML?.contains("Canonical preview body") == true)
+        XCTAssertTrue(previewHTML?.contains("background-color: #f2f2f7") == true)
+    }
+
     func testLoadContent_cleanupModeQuotedOnlyPreservesSignatureBlock() async {
         let messageId = "html-loader-signature-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }

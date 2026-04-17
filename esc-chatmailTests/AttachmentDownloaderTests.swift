@@ -366,6 +366,63 @@ final class AttachmentDownloaderTests: XCTestCase {
         handler.deleteHTML(for: messageId)
     }
 
+    func testMessage_displayableAttachments_usingPrecomputedHTMLAnalysis_filtersCIDReferencedInlineImages() throws {
+        let messageId = "msg-inline-analysis-\(UUID().uuidString)"
+        let message = MessageBuilder()
+            .withId(messageId)
+            .withAttachments()
+            .build(in: context)
+
+        let _ = AttachmentBuilder()
+            .withId("att-inline")
+            .withFilename("inline.jpg")
+            .withContentId("CID_INLINE")
+            .asImage(width: 800, height: 600)
+            .withByteSize(100000)
+            .forMessage(message)
+            .build(in: context)
+
+        let _ = AttachmentBuilder()
+            .withId("att-regular")
+            .withFilename("regular.jpg")
+            .withContentId("CID_OTHER")
+            .asImage(width: 800, height: 600)
+            .withByteSize(100000)
+            .forMessage(message)
+            .build(in: context)
+
+        let handler = HTMLContentHandler.shared
+        _ = handler.saveHTML("<html><body><img src=\"cid:CID_INLINE\"></body></html>", for: messageId)
+        defer { handler.deleteHTML(for: messageId) }
+
+        try testStack.saveViewContext()
+
+        let fetchedMessage = try XCTUnwrap(
+            context.existingObject(with: message.objectID) as? Message
+        )
+        let htmlAnalysis = MessageBubbleHTMLAnalysisBuilder.build(
+            messageID: fetchedMessage.id,
+            bodyStorageURI: fetchedMessage.bodyStorageURI,
+            hasHTMLSourceHint: fetchedMessage.bodyStorageURI != nil,
+            isForwardedEmail: fetchedMessage.isForwardedEmail,
+            isLikelyCalendarInvite: fetchedMessage.isLikelyCalendarInvite,
+            bodyText: fetchedMessage.bodyText,
+            cleanedSnippet: fetchedMessage.cleanedSnippet,
+            senderName: fetchedMessage.senderName,
+            senderEmail: fetchedMessage.senderEmail,
+            subject: fetchedMessage.subject,
+            attachmentSnapshots: fetchedMessage.attachmentsArray.map(\.bubbleSnapshot),
+            handler: handler
+        )
+
+        let displayable = fetchedMessage.displayableAttachments(
+            using: htmlAnalysis,
+            hidingInlineReferencedInHTML: true
+        )
+
+        XCTAssertEqual(displayable.compactMap { $0.id }.sorted(), ["att-regular"])
+    }
+
     func testMessage_displayableAttachments_hidesCalendarInviteFilesOnlyInPreviewMode() throws {
         let message = MessageBuilder()
             .withSubject("Invitation: Board sync @ Mon May 5, 2026 9:00am - 9:30am (EDT)")

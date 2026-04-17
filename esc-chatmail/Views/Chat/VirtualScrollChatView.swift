@@ -13,7 +13,10 @@ struct VirtualScrollChatView: View {
     init(conversation: Conversation) {
         self.conversation = conversation
         self._scrollState = StateObject(
-            wrappedValue: VirtualScrollState(conversationId: conversation.id.uuidString)
+            wrappedValue: VirtualScrollState(
+                conversationId: conversation.id.uuidString,
+                initialWindowPosition: .end
+            )
         )
     }
 
@@ -22,8 +25,9 @@ struct VirtualScrollChatView: View {
             ScrollView {
                 LazyVStack(spacing: 8) {
                     ForEach(Array(scrollState.visibleMessages.enumerated()), id: \.element.objectID) { index, message in
+                        let absoluteIndex = scrollState.absoluteIndex(forVisibleIndex: index) ?? index
                         Group {
-                            if scrollState.placeholderIndices.contains(index) {
+                            if scrollState.placeholderIndices.contains(absoluteIndex) {
                                 MessageSkeletonView()
                             } else {
                                 MessageBubble(
@@ -39,7 +43,7 @@ struct VirtualScrollChatView: View {
                         }
                         .id(message.objectID) // Use stable objectID instead of volatile index
                         .onAppear {
-                            scrollState.markIndexVisible(index)
+                            scrollState.markIndexVisible(absoluteIndex)
                         }
                     }
 

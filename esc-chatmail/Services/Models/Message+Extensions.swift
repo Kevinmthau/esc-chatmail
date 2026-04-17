@@ -173,6 +173,51 @@ extension Message {
         return cidFilteredAttachments.filter { !$0.isCalendarInviteAttachment }
     }
 
+    func displayableAttachments(
+        using htmlAnalysis: MessageBubbleHTMLAnalysis,
+        hidingInlineReferencedInHTML: Bool,
+        hidingCalendarInviteAttachments: Bool? = nil
+    ) -> [Attachment] {
+        let allAttachments = deduplicatedAttachments(in: attachmentsArray.filter { attachment in
+            guard !attachment.isLikelySignatureImage else { return false }
+
+            guard let contentId = normalizedContentID(from: attachment.contentId) else {
+                return true
+            }
+
+            return !htmlAnalysis.nonDisplayableInlineContentIDs.contains(contentId)
+        })
+
+        guard hidingInlineReferencedInHTML else {
+            return allAttachments
+        }
+
+        guard !isFromMe else {
+            return allAttachments
+        }
+
+        let cidFilteredAttachments: [Attachment]
+        if htmlAnalysis.referencedInlineContentIDs.isEmpty {
+            cidFilteredAttachments = allAttachments
+        } else {
+            cidFilteredAttachments = allAttachments.filter { attachment in
+                guard let contentId = normalizedContentID(from: attachment.contentId) else {
+                    return true
+                }
+                return !htmlAnalysis.referencedInlineContentIDs.contains(contentId)
+            }
+        }
+
+        let shouldHideCalendarInviteAttachments =
+            hidingCalendarInviteAttachments ?? htmlAnalysis.supportsCalendarInvitePreviewCard
+
+        guard shouldHideCalendarInviteAttachments else {
+            return cidFilteredAttachments
+        }
+
+        return cidFilteredAttachments.filter { !$0.isCalendarInviteAttachment }
+    }
+
     /// Returns one canonical attachment per repeated Content-ID or repeated file fingerprint.
     /// This protects the UI and forward-compose flow from Gmail messages that repeat the same
     /// attachment part multiple times.

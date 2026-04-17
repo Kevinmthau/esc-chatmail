@@ -107,6 +107,7 @@ struct BaseEmailWebView: UIViewRepresentable {
         var lastLoadedModeSignature: String = ""
         private var isLoading = false
         private var lastDeliveredPreviewHeight: CGFloat = 0
+        private var previewMeasurementGeneration = 0
         /// Holds strong reference to the cid: scheme handler
         var cidHandler: CIDSchemeHandler?
 
@@ -122,6 +123,7 @@ struct BaseEmailWebView: UIViewRepresentable {
             guard !isLoading else { return }
             isLoading = true
             lastDeliveredPreviewHeight = 0
+            previewMeasurementGeneration &+= 1
             lastLoadedContent = parent.htmlContent
             lastLoadedModeSignature = modeSignature(for: parent.mode)
 
@@ -406,7 +408,10 @@ struct BaseEmailWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             isLoading = false
-            schedulePreviewHeightMeasurements(in: webView)
+            schedulePreviewHeightMeasurement(
+                in: webView,
+                generation: previewMeasurementGeneration
+            )
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -419,22 +424,31 @@ struct BaseEmailWebView: UIViewRepresentable {
             Log.debug("WebView provisional navigation failed: \(error)", category: .ui)
         }
 
-        private func schedulePreviewHeightMeasurements(in webView: WKWebView) {
-            guard case .scaledPreview = parent.mode else {
+        private func schedulePreviewHeightMeasurement(
+            in webView: WKWebView,
+            generation: Int
+        ) {
+            guard case .scaledPreview = parent.mode,
+                  parent.onPreviewHeightChange != nil else {
                 return
             }
 
-            for delayMilliseconds in [0, 250, 750] {
-                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(delayMilliseconds)) { [weak self, weak webView] in
-                    guard let self, let webView else {
-                        return
-                    }
-                    self.measurePreviewHeight(in: webView)
+            // One settled measurement keeps preview heights predictable without repeatedly
+            // invalidating chat layout as remote assets finish loading.
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self, weak webView] in
+                guard let self,
+                      let webView,
+                      generation == self.previewMeasurementGeneration else {
+                    return
                 }
+                self.measurePreviewHeight(in: webView, generation: generation)
             }
         }
 
-        private func measurePreviewHeight(in webView: WKWebView) {
+        private func measurePreviewHeight(
+            in webView: WKWebView,
+            generation: Int
+        ) {
             guard case .scaledPreview(let scale) = parent.mode else {
                 return
             }
@@ -473,6 +487,9 @@ struct BaseEmailWebView: UIViewRepresentable {
 
             webView.evaluateJavaScript(measurementScript) { [weak self] result, error in
                 guard let self else {
+                    return
+                }
+                guard generation == self.previewMeasurementGeneration else {
                     return
                 }
 

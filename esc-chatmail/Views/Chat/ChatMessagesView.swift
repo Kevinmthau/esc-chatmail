@@ -12,6 +12,7 @@ struct ChatMessagesView: View {
     let deps: Dependencies
     var isTextFieldFocused: FocusState<Bool>.Binding
     let onOpenFullMessage: (Message) -> Void
+    @StateObject private var scrollState: VirtualScrollState
 
     @ObservedObject private var keyboard = KeyboardResponder.shared
 
@@ -28,12 +29,42 @@ struct ChatMessagesView: View {
 
     private var shouldUseBottomAnchoring: Bool { messages.count > 1 }
 
+    @MainActor
+    init(
+        conversation: Conversation,
+        messages: FetchedResults<Message>,
+        viewModel: ChatViewModel,
+        deps: Dependencies,
+        isTextFieldFocused: FocusState<Bool>.Binding,
+        onOpenFullMessage: @escaping (Message) -> Void
+    ) {
+        self.conversation = conversation
+        self.messages = messages
+        self.viewModel = viewModel
+        self.deps = deps
+        self.isTextFieldFocused = isTextFieldFocused
+        self.onOpenFullMessage = onOpenFullMessage
+        let viewContext = deps.viewContext
+        let coreDataStack = deps.coreDataStack
+        _scrollState = StateObject(
+            wrappedValue: VirtualScrollState(
+                conversationId: conversation.id.uuidString,
+                initialWindowPosition: .end,
+                viewContext: viewContext,
+                makeBackgroundContext: { coreDataStack.newBackgroundContext() }
+            )
+        )
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
+            let displayedMessages = scrollState.visibleMessages
+
             ScrollView {
                 LazyVStack(spacing: 8) {
-                    ForEach(Array(messages.enumerated()), id: \.element.objectID) { index, message in
-                        let nextMessage = index + 1 < messages.count ? messages[index + 1] : nil
+                    ForEach(Array(displayedMessages.enumerated()), id: \.element.objectID) { index, message in
+                        let absoluteIndex = scrollState.absoluteIndex(forVisibleIndex: index) ?? index
+                        let nextMessage = index + 1 < displayedMessages.count ? displayedMessages[index + 1] : nil
                         let isLastFromSender = nextMessage == nil ||
                             senderRunKey(for: nextMessage) != senderRunKey(for: message) ||
                             nextMessage?.isFromMe != message.isFromMe
@@ -47,13 +78,16 @@ struct ChatMessagesView: View {
                             isLastFromSender: isLastFromSender,
                             onOpenFullMessage: onOpenFullMessage
                         )
-                        .id(message.id)
+                        .id(message.objectID)
                         .contentShape(Rectangle())
                         .contextMenu {
                             messageContextMenu(for: message)
                         } preview: {
                             // Lightweight preview - just show the text content without triggering loads
                             MessageContextMenuPreview(message: message)
+                        }
+                        .onAppear {
+                            scrollState.markIndexVisible(absoluteIndex)
                         }
                     }
 
@@ -88,32 +122,20 @@ struct ChatMessagesView: View {
                         category: .ui
                     )
                 }
-                let unreadMessages = messages.filter { $0.isUnread }
-                let unreadMessageIDs = unreadMessages.map { $0.objectID }
-                viewModel.markConversationAsRead(messageObjectIDs: unreadMessageIDs)
+                markConversationAsReadIfNeeded()
                 viewModel.initializeReplyingTo(lastMessage: messages.last)
 
-                // If messages already loaded (Core Data cache), trigger initial scroll
-                if !isReadyToShow && !messages.isEmpty {
+                // If the newest window is already loaded (e.g. warm navigation), trigger initial scroll.
+                if !isReadyToShow && !scrollState.visibleMessages.isEmpty {
                     performInitialScroll(proxy: proxy)
-                } else if messages.isEmpty {
+                } else if messages.isEmpty && scrollState.totalMessageCount == 0 {
                     // Avoid a permanently blank thread if there are no messages yet.
                     isReadyToShow = true
                 }
 
-                // Limit prefetch to visible + buffer messages (not all)
-                let config = VirtualScrollConfiguration.default
-                let prefetchLimit = config.visibleItemCount + config.bufferSize  // 30 messages
-
-                // Collect data on MainActor (FetchedResults is not thread-safe)
-                let recentMessages = messages.suffix(prefetchLimit)
-                let messageIds = recentMessages.map { $0.id }
-                let senderEmails = recentMessages.compactMap { $0.senderEmail }
-
-                // Delegate prefetching to ViewModel
-                viewModel.prefetchRecentContent(messageIds: messageIds, senderEmails: senderEmails)
                 viewModel.loadResolvedDisplayName()
-                refreshSenderGroupingKeys()
+                prefetchVisibleContent()
+                refreshSenderGroupingKeys(using: scrollState.visibleMessages)
             }
             .onDisappear {
                 // Cancel view-scoped scroll/prefetch work when leaving chat.
@@ -124,10 +146,23 @@ struct ChatMessagesView: View {
                 senderGroupingTask?.cancel()
                 viewModel.cancelPrefetch()
             }
+            .onChange(of: displayedMessages.map(\.objectID)) { oldIDs, newIDs in
+                if !isReadyToShow && !newIDs.isEmpty {
+                    performInitialScroll(proxy: proxy)
+                }
+
+                if oldIDs != newIDs {
+                    prefetchVisibleContent()
+                    refreshSenderGroupingKeys(using: displayedMessages)
+                }
+            }
             .onChange(of: messages.count) { oldCount, newCount in
                 if !isReadyToShow && newCount > 0 {
-                    // Initial load: trigger scroll with task tracking to prevent race conditions
-                    performInitialScroll(proxy: proxy)
+                    scrollTask?.cancel()
+                    scrollTask = Task { @MainActor in
+                        await scrollState.loadLatestWindowIfNeeded()
+                        performInitialScroll(proxy: proxy)
+                    }
                 } else if isReadyToShow && newCount > oldCount {
                     // New message arrived: animate the scroll
                     viewModel.updateReplyingToIfNewSubject(lastMessage: messages.last)
@@ -135,7 +170,6 @@ struct ChatMessagesView: View {
                 }
 
                 viewModel.loadResolvedDisplayName()
-                refreshSenderGroupingKeys()
             }
             .onChange(of: keyboard.currentHeight) { oldHeight, newHeight in
                 if newHeight > 0 || (oldHeight > 0 && newHeight == 0) {
@@ -154,7 +188,7 @@ struct ChatMessagesView: View {
                     await MainActor.run {
                         contactRefreshToken &+= 1
                         viewModel.loadResolvedDisplayName()
-                        refreshSenderGroupingKeys()
+                        refreshSenderGroupingKeys(using: scrollState.visibleMessages)
                     }
                 }
             }
@@ -193,12 +227,39 @@ struct ChatMessagesView: View {
 
     // MARK: - Scroll Helpers
 
-    private func refreshSenderGroupingKeys() {
+    private func markConversationAsReadIfNeeded() {
+        guard conversation.inboxUnreadCount > 0 else { return }
+
+        let context = conversation.managedObjectContext ?? deps.viewContext
+        let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
+        request.resultType = .managedObjectIDResultType
+        request.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: true)]
+        request.predicate = NSPredicate(
+            format: "conversation == %@ AND isUnread == YES AND NONE labels.id IN %@",
+            conversation,
+            ["DRAFT", "SPAM", "TRASH"]
+        )
+
+        let unreadMessageIDs = (try? context.fetch(request)) ?? []
+        viewModel.markConversationAsRead(messageObjectIDs: unreadMessageIDs)
+    }
+
+    private func prefetchVisibleContent() {
+        let config = VirtualScrollConfiguration.default
+        let prefetchLimit = config.visibleItemCount + config.bufferSize
+        let recentMessages = scrollState.visibleMessages.suffix(prefetchLimit)
+        let messageIds = recentMessages.map(\.id)
+        let senderEmails = recentMessages.compactMap(\.senderEmail)
+
+        viewModel.prefetchRecentContent(messageIds: messageIds, senderEmails: senderEmails)
+    }
+
+    private func refreshSenderGroupingKeys(using visibleMessages: [Message]) {
         senderGroupingTask?.cancel()
 
         var uniqueSenderEmails: [String] = []
         var seenEmails = Set<String>()
-        for message in messages {
+        for message in visibleMessages {
             guard let email = senderEmail(for: message) else { continue }
             let normalizedEmail = EmailNormalizer.normalize(email)
             guard !normalizedEmail.isEmpty,
@@ -254,6 +315,7 @@ struct ChatMessagesView: View {
         // Cancel any existing initial scroll task to prevent race conditions
         initialScrollTask?.cancel()
         initialScrollTask = Task { @MainActor in
+            await scrollState.loadLatestWindowIfNeeded()
             // Wait for layout to complete before scrolling
             try? await Task.sleep(nanoseconds: UInt64(UIConfig.contentChangeScrollDelay * 1_000_000_000))
             guard !Task.isCancelled else { return }
@@ -268,6 +330,7 @@ struct ChatMessagesView: View {
         // Cancel any existing scroll task to prevent accumulation from multiple onChange handlers
         scrollTask?.cancel()
         scrollTask = Task { @MainActor in
+            await scrollState.loadLatestWindowIfNeeded()
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled else { return }
             withAnimation(.easeOut(duration: UIConfig.scrollAnimationDuration)) {
@@ -284,6 +347,7 @@ struct ChatMessagesView: View {
         }
         followUpScrollTask?.cancel()
         followUpScrollTask = Task { @MainActor in
+            await scrollState.loadLatestWindowIfNeeded()
             try? await Task.sleep(nanoseconds: UInt64(UIConfig.initialScrollDelay * 1_000_000_000))
             guard !Task.isCancelled else { return }
             Log.diagnostic(.chatView, level: .info, "ChatView follow-up scroll -> bottom anchor", category: .ui)
@@ -301,6 +365,7 @@ struct ChatMessagesView: View {
         guard shouldUseBottomAnchoring else { return }
         stabilizationScrollTask?.cancel()
         stabilizationScrollTask = Task { @MainActor in
+            await scrollState.loadLatestWindowIfNeeded()
             let delays: [TimeInterval] = [0.25, 0.75, 1.5]
             for delay in delays {
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))

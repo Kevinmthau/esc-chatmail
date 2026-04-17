@@ -469,12 +469,17 @@ final class PerformanceRegressionTests: XCTestCase {
             messageID: message.id,
             bodyText: message.bodyTextValue,
             bodyStorageURI: message.bodyStorageURI,
+            cleanedSnippet: message.cleanedSnippet,
             snippet: message.snippet,
+            subject: message.subject,
+            senderName: message.senderName,
             hasHTMLSource: message.hasHTMLSource,
             hasAttachments: message.hasAttachments,
             isFromMe: message.isFromMe,
             isForwardedEmail: message.isForwardedEmail,
-            effectiveSenderEmail: message.senderEmailValue
+            isLikelyCalendarInvite: message.isLikelyCalendarInvite,
+            effectiveSenderEmail: message.senderEmailValue,
+            attachmentSnapshots: message.attachmentsArray.map(\.bubbleSnapshot)
         )
     }
 }

@@ -58,6 +58,36 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertTrue(state.visibleMessages.allSatisfy { $0.managedObjectContext === self.viewContext })
     }
 
+    func testInitialLoadFromEnd_publishesNewestMessagesOnViewContext() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        let expectedIDs = Array(messages.suffix(4)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == expectedIDs && !state.isLoadingMore
+        }
+
+        XCTAssertEqual(state.visibleRangeStartIndex, 4)
+        XCTAssertEqual(state.absoluteIndex(forVisibleIndex: 0), 4)
+        XCTAssertEqual(state.absoluteIndex(forVisibleIndex: 3), 7)
+        XCTAssertTrue(state.visibleMessages.allSatisfy { $0.managedObjectContext === self.viewContext })
+    }
+
     func testRapidOverlappingWindowLoads_keepPublishedMessagesOnViewContext() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 24)
         let configuration = VirtualScrollConfiguration(
