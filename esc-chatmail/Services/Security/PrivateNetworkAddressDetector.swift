@@ -30,6 +30,14 @@ enum PrivateNetworkAddressDetector {
             return isPrivateIPv4(ipv4)
         }
 
+        // Scoped IPv6 literals include a zone identifier (for example
+        // "%en0"). `inet_pton` rejects that syntax, so fail closed instead of
+        // falling through to "public" for local-only addresses like
+        // "[fe80::1%25en0]" or "[::1%25lo0]".
+        if host.contains(":") && host.contains("%") {
+            return true
+        }
+
         if let ipv6 = ipv6AddressBytes(host) {
             return isPrivateIPv6(ipv6)
         }

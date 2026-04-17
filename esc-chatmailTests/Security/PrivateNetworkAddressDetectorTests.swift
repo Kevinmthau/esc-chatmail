@@ -109,6 +109,11 @@ final class PrivateNetworkAddressDetectorTests: XCTestCase {
         assertBlocked("http://[fe80::abcd:1234]/")
     }
 
+    func testIPv6_scopedLiterals_areBlocked() {
+        assertBlocked("http://[::1%25lo0]/")
+        assertBlocked("http://[fe80::1%25en0]/")
+    }
+
     func testIPv6_uniqueLocal_isBlocked() {
         assertBlocked("http://[fc00::1]/")
         assertBlocked("http://[fd12:3456:789a::1]/")
