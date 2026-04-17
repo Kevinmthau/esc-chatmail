@@ -14,9 +14,18 @@ actor GoogleDriveSharedFileMetadataProvider {
     )
     private var cachedMetadata: [String: GoogleDriveSharedFileMetadata] = [:]
 
-    init(session: URLSession = .shared) {
+    init(session: URLSession = SSRFGuardingURLSession.shared) {
         self.session = session
     }
+
+    /// Hosts allowed to be fetched for shared-file metadata. Defense-in-depth:
+    /// `SharedDocumentLinkExtractor.googleWorkspaceKind(for:)` already restricts
+    /// what becomes a `SharedDocumentLink`, but anchoring the allowlist here
+    /// keeps the fetcher safe if the extractor ever loosens.
+    private static let allowedHosts: Set<String> = [
+        "drive.google.com",
+        "docs.google.com"
+    ]
 
     func metadata(for link: SharedDocumentLink) async -> GoogleDriveSharedFileMetadata {
         let cacheKey = link.id
@@ -84,6 +93,12 @@ actor GoogleDriveSharedFileMetadataProvider {
         session: URLSession
     ) async -> GoogleDriveSharedFileMetadata? {
         guard link.supportsAttachmentPreviewCard else {
+            return nil
+        }
+
+        guard let host = link.url.host?.lowercased(),
+              allowedHosts.contains(host),
+              !PrivateNetworkAddressDetector.isPrivateOrReserved(link.url) else {
             return nil
         }
 

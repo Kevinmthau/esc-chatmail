@@ -125,7 +125,7 @@ actor HTMLRemoteImageAttachmentFallback {
 
     init(
         requestExecutor: @escaping RequestExecutor = { request in
-            try await URLSession.shared.data(for: request)
+            try await SSRFGuardingURLSession.shared.data(for: request)
         },
         rewrittenDataURLCacheMaxEntries: Int = 32,
         rewrittenDataURLCacheMaxBytes: Int = 8 * 1024 * 1024
@@ -406,6 +406,14 @@ actor HTMLRemoteImageAttachmentFallback {
               (scheme == "http" || scheme == "https"),
               let host = url.host?.lowercased(),
               !host.isEmpty else {
+            return false
+        }
+
+        // SSRF guard: never fetch URLs from email HTML that target private,
+        // loopback, link-local, or reserved addresses. Pairs with the
+        // redirect-blocking delegate in SSRFGuardingURLSession so an attacker
+        // can't bypass via public-looking host → 302 → internal IP.
+        if PrivateNetworkAddressDetector.isPrivateOrReserved(url) {
             return false
         }
 
