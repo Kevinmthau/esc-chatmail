@@ -60,8 +60,8 @@ struct ChatView: View {
             viewModel: viewModel,
             chatDependencies: chatDependencies,
             isTextFieldFocused: $isTextFieldFocused,
-            onOpenFullMessage: { message in
-                viewModel.openFullMessage(message)
+            onOpenFullMessage: { messageObjectID in
+                viewModel.openFullMessage(messageObjectID: messageObjectID)
             }
         )
         .navigationTitle(viewModel.resolvedDisplayName ?? conversation.displayName ?? "Chat")

@@ -67,7 +67,7 @@ final class VirtualScrollStateTests: XCTestCase {
         }
 
         XCTAssertEqual(state.totalMessageCount, 8)
-        XCTAssertTrue(state.visibleMessages.allSatisfy { $0.managedObjectContext === self.viewContext })
+        XCTAssertEqual(state.visibleMessages.map(\.id), Array(messages.prefix(4)).map(\.id))
     }
 
     func testInitialLoadFromEnd_publishesNewestMessagesOnViewContext() async throws {
@@ -98,7 +98,7 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertEqual(state.absoluteIndex(forVisibleIndex: 0), 4)
         XCTAssertEqual(state.absoluteIndex(forVisibleIndex: 3), 7)
         XCTAssertEqual(state.scrollPosition, 4)
-        XCTAssertTrue(state.visibleMessages.allSatisfy { $0.managedObjectContext === self.viewContext })
+        XCTAssertEqual(state.visibleMessages.map(\.id), Array(messages.suffix(4)).map(\.id))
     }
 
     func testInitialLoadFromEnd_includesPendingOptimisticMessageFromViewContext() async throws {
@@ -227,7 +227,7 @@ final class VirtualScrollStateTests: XCTestCase {
             state.visibleMessages.map(\.objectID) == expectedFinalWindowIDs && !state.isLoadingMore
         }
 
-        XCTAssertTrue(state.visibleMessages.allSatisfy { $0.managedObjectContext === self.viewContext })
+        XCTAssertEqual(state.visibleMessages.map(\.id), Array(messages[13..<19]).map(\.id))
     }
 
     func testLoadLatestWindowIfNeeded_refreshesForPendingOptimisticMessage() async throws {

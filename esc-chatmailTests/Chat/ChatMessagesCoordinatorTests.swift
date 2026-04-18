@@ -25,6 +25,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             "alice@example.com",
             "bob@example.com"
         ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
 
         var loadLatestWindowCount = 0
         var markConversationAsReadCount = 0
@@ -74,7 +75,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         coordinator.handleAppear(
             messageCount: messages.count,
             lastMessage: messages.last,
-            visibleMessages: messages,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
             totalMessageCount: messages.count
         ) { step in
             anchorSteps.append(step)
@@ -129,14 +131,14 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
         XCTAssertEqual(
             coordinator.senderRunKey(
-                for: messages[0],
+                for: rows[0],
                 isEffectivelyOneToOneConversation: true
             ),
             "group:alice@example.com"
         )
         XCTAssertEqual(
             coordinator.senderRunKey(
-                for: messages[0],
+                for: rows[0],
                 isEffectivelyOneToOneConversation: false
             ),
             "email:alice@example.com"
@@ -148,6 +150,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             "sender-\(index)@example.com"
         }
         let (_, messages) = try makeConversationWithMessages(senderEmails: senderEmails)
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
 
         var prefetchedMessageBatches: [[String]] = []
         var prefetchedSenderEmailBatches: [[String]] = []
@@ -172,8 +175,9 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
         coordinator.handleDisplayedMessagesChange(
             oldIDs: [],
-            newIDs: messages.map(\.objectID),
-            visibleMessages: messages,
+            newIDs: rows.map(\.objectID),
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
             messageCount: messages.count
         ) { step in
             anchorSteps.append(step)
@@ -188,11 +192,72 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         XCTAssertEqual(prefetchedSenderEmailBatches, [expectedPrefetchMessages.compactMap(\.senderEmail)])
     }
 
+    func testHandleAppear_refreshesGroupingAcrossVisibleWindowBoundary() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "alice+work@example.com",
+            "alice+personal@example.com",
+            "alice@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var groupingRequests: [[String]] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: {},
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { senderEmails in
+                groupingRequests.append(senderEmails)
+                return [
+                    "alice+work@example.com": "group:alice@example.com",
+                    "alice+personal@example.com": "group:alice@example.com",
+                    "alice@example.com": "group:alice@example.com"
+                ]
+            },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: rows.count,
+            lastMessage: messages.last,
+            visibleMessages: Array(rows.prefix(2)),
+            senderGroupingMessages: Array(rows.prefix(3)),
+            totalMessageCount: rows.count
+        ) { _ in }
+
+        await waitUntil {
+            groupingRequests.count == 1
+        }
+
+        XCTAssertEqual(
+            groupingRequests,
+            [["alice+work@example.com", "alice+personal@example.com", "alice@example.com"]]
+        )
+        XCTAssertFalse(
+            ChatMessageRowGrouping.isLastFromSender(
+                current: rows[1],
+                next: rows[2],
+                senderRunKey: { message in
+                    coordinator.senderRunKey(
+                        for: message,
+                        isEffectivelyOneToOneConversation: true
+                    )
+                }
+            )
+        )
+    }
+
     func testHandleMessageCountChange_afterReadyRequestsAnimatedBottomAnchor() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",
             "second@example.com"
         ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
 
         var loadLatestWindowCount = 0
         var updatedReplyTargets: [String?] = []
@@ -222,7 +287,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         coordinator.handleAppear(
             messageCount: 1,
             lastMessage: messages.first,
-            visibleMessages: [messages.first].compactMap { $0 },
+            visibleMessages: [rows.first].compactMap { $0 },
+            senderGroupingMessages: [rows.first].compactMap { $0 },
             totalMessageCount: 1
         ) { _ in
             XCTFail("Single-message appear should not schedule bottom anchoring")
@@ -363,6 +429,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             "first@example.com",
             "second@example.com"
         ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
 
         var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
 
@@ -385,7 +452,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         coordinator.handleAppear(
             messageCount: messages.count,
             lastMessage: messages.last,
-            visibleMessages: messages,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
             totalMessageCount: messages.count
         ) { step in
             anchorSteps.append(step)
@@ -431,6 +499,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             "alice@example.com",
             "bob@example.com"
         ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
 
         var invalidateContactsCacheCount = 0
         var clearPersonCacheCount = 0
@@ -465,7 +534,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             sleep: { _ in }
         )
 
-        coordinator.handleContactStoreDidChange(visibleMessages: messages)
+        coordinator.handleContactStoreDidChange(senderGroupingMessages: rows)
 
         await waitUntil {
             coordinator.contactRefreshToken == 1 &&
@@ -478,7 +547,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         XCTAssertEqual(groupingRequests, [["Alice@Example.com", "bob@example.com"]])
         XCTAssertEqual(
             coordinator.senderRunKey(
-                for: messages[0],
+                for: rows[0],
                 isEffectivelyOneToOneConversation: true
             ),
             "group:alice@example.com"

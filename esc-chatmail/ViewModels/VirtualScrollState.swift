@@ -22,7 +22,7 @@ final class VirtualScrollState: ObservableObject {
         _ context: NSManagedObjectContext
     ) async -> VirtualScrollMessagePage
 
-    @Published var visibleMessages: [Message] = []
+    @Published var visibleMessages: [ChatMessageRowModel] = []
     @Published var totalMessageCount = 0
     @Published var scrollPosition: Int = 0
     @Published var isLoadingMore = false
@@ -36,9 +36,9 @@ final class VirtualScrollState: ObservableObject {
     private let makeBackgroundContext: () -> NSManagedObjectContext
     private let pageLoader: MessagePageLoader
 
-    // Cache only view-context messages for the current window. Background contexts
-    // fetch IDs, and the UI never stores those background `Message` instances.
-    private var resolvedMessagesByID: [NSManagedObjectID: Message] = [:]
+    // Cache only lightweight row snapshots for the current window. Background
+    // contexts fetch IDs, and the UI never stores `Message` instances here.
+    private var resolvedRowsByID: [NSManagedObjectID: ChatMessageRowModel] = [:]
 
     // Task tracking to prevent orphaned tasks during rapid scrolling
     private let taskManager = ViewModelTaskManager()
@@ -134,7 +134,7 @@ final class VirtualScrollState: ObservableObject {
 
             guard !Task.isCancelled else { return }
 
-            let messages = await self.resolveMessagesOnViewContext(for: page.messageIDs)
+            let messages = await self.resolveRowsOnViewContext(for: page.messageIDs)
 
             guard !Task.isCancelled else { return }
 
@@ -186,7 +186,7 @@ final class VirtualScrollState: ObservableObject {
             // Current window already covers the requested range.
             // Keep rendering the whole window so the user can continue scrolling
             // through the buffered messages without the view pruning rows away.
-            visibleMessages = resolveCachedMessages(for: window.messageIDs)
+            visibleMessages = resolveCachedRows(for: window.messageIDs)
         } else {
             // Need to load a new window.
             let preferPendingConversationMessages = hasPendingInsertedMessagesInConversation
@@ -222,7 +222,7 @@ final class VirtualScrollState: ObservableObject {
 
         guard !Task.isCancelled else { return }
 
-        let messages = await resolveMessagesOnViewContext(for: page.messageIDs)
+        let messages = await resolveRowsOnViewContext(for: page.messageIDs)
 
         guard !Task.isCancelled else { return }
 
@@ -314,7 +314,7 @@ final class VirtualScrollState: ObservableObject {
 
             guard !Task.isCancelled else { return }
 
-            _ = await self.resolveMessagesOnViewContext(for: page.messageIDs)
+            _ = await self.resolveRowsOnViewContext(for: page.messageIDs)
 
             guard !Task.isCancelled else { return }
 
@@ -335,7 +335,7 @@ final class VirtualScrollState: ObservableObject {
 
             self.totalMessageCount = page.totalCount
             self.setMessageWindow(currentWindow)
-            self.visibleMessages = self.resolveCachedMessages(for: currentWindow.messageIDs)
+            self.visibleMessages = self.resolveCachedRows(for: currentWindow.messageIDs)
         }
     }
 
@@ -357,7 +357,7 @@ final class VirtualScrollState: ObservableObject {
 
             guard !Task.isCancelled else { return }
 
-            _ = await self.resolveMessagesOnViewContext(for: page.messageIDs)
+            _ = await self.resolveRowsOnViewContext(for: page.messageIDs)
 
             guard !Task.isCancelled else { return }
 
@@ -378,7 +378,7 @@ final class VirtualScrollState: ObservableObject {
 
             self.totalMessageCount = page.totalCount
             self.setMessageWindow(currentWindow)
-            self.visibleMessages = self.resolveCachedMessages(for: currentWindow.messageIDs)
+            self.visibleMessages = self.resolveCachedRows(for: currentWindow.messageIDs)
         }
     }
 
@@ -391,62 +391,87 @@ final class VirtualScrollState: ObservableObject {
         messageWindow = window
 
         let allowedIDs = Set(window.messageIDs)
-        resolvedMessagesByID = resolvedMessagesByID.filter { allowedIDs.contains($0.key) }
+        resolvedRowsByID = resolvedRowsByID.filter { allowedIDs.contains($0.key) }
     }
 
     // The original bug was caused by fetching `Message` instances in a background
     // context and then storing those managed objects on `@MainActor` state. We now
-    // re-resolve background-fetched object IDs on the viewContext before caching or
-    // publishing them so SwiftUI only ever sees main-context `Message` objects.
-    private func resolveMessagesOnViewContext(for messageIDs: [NSManagedObjectID]) async -> [Message] {
+    // re-resolve background-fetched object IDs on the viewContext before mapping
+    // them into lightweight row snapshots for SwiftUI.
+    private func resolveRowsOnViewContext(
+        for messageIDs: [NSManagedObjectID]
+    ) async -> [ChatMessageRowModel] {
         guard !messageIDs.isEmpty else { return [] }
 
-        let resolvedMessages: [NSManagedObjectID: Message] = await viewContext.perform { [viewContext] in
+        let resolvedRows: [NSManagedObjectID: ChatMessageRowModel] = await viewContext.perform { [viewContext] in
             let request = NSFetchRequest<Message>(entityName: "Message")
             request.predicate = NSPredicate(format: "SELF IN %@", messageIDs)
             request.fetchBatchSize = messageIDs.count
+            request.relationshipKeyPathsForPrefetching = ["participants", "participants.person", "attachments"]
 
             let fetchedMessages = (try? viewContext.fetch(request)) ?? []
             return Dictionary(
                 uniqueKeysWithValues: fetchedMessages.compactMap { message in
                     guard !message.isDeleted else { return nil }
-                    return (message.objectID, message)
+                    return (message.objectID, ChatMessageRowModelMapper.map(message))
                 }
             )
         }
 
         for objectID in messageIDs {
-            if let message = resolvedMessages[objectID] {
-                resolvedMessagesByID[objectID] = message
+            if let row = resolvedRows[objectID] {
+                resolvedRowsByID[objectID] = row
             } else {
-                resolvedMessagesByID.removeValue(forKey: objectID)
+                resolvedRowsByID.removeValue(forKey: objectID)
             }
         }
 
-        return messageIDs.compactMap { resolvedMessages[$0] }
+        return messageIDs.compactMap { resolvedRows[$0] }
     }
 
-    private func resolveCachedMessages(for messageIDs: [NSManagedObjectID]) -> [Message] {
-        messageIDs.compactMap { objectID in
-            if let cached = resolvedMessagesByID[objectID],
-               cached.managedObjectContext === viewContext,
-               !cached.isDeleted {
-                return cached
-            }
+    func row(atAbsoluteIndex index: Int) -> ChatMessageRowModel? {
+        guard let window = messageWindow,
+              window.contains(index: index) else {
+            return nil
+        }
 
-            do {
-                guard let resolved = try viewContext.existingObject(with: objectID) as? Message,
-                      !resolved.isDeleted else {
-                    resolvedMessagesByID.removeValue(forKey: objectID)
-                    return nil
-                }
+        let relativeIndex = index - window.startIndex
+        guard relativeIndex >= 0, relativeIndex < window.messageIDs.count else {
+            return nil
+        }
 
-                resolvedMessagesByID[objectID] = resolved
-                return resolved
-            } catch {
-                resolvedMessagesByID.removeValue(forKey: objectID)
+        return resolveCachedRow(for: window.messageIDs[relativeIndex])
+    }
+
+    private func resolveCachedRows(for messageIDs: [NSManagedObjectID]) -> [ChatMessageRowModel] {
+        messageIDs.compactMap(resolveCachedRow)
+    }
+
+    private func resolveCachedRow(for objectID: NSManagedObjectID) -> ChatMessageRowModel? {
+        if let cached = resolvedRowsByID[objectID] {
+            return cached
+        }
+
+        if let registered = viewContext.registeredObject(for: objectID) as? Message,
+           !registered.isDeleted {
+            let row = ChatMessageRowModelMapper.map(registered)
+            resolvedRowsByID[objectID] = row
+            return row
+        }
+
+        do {
+            guard let resolved = try viewContext.existingObject(with: objectID) as? Message,
+                  !resolved.isDeleted else {
+                resolvedRowsByID.removeValue(forKey: objectID)
                 return nil
             }
+
+            let row = ChatMessageRowModelMapper.map(resolved)
+            resolvedRowsByID[objectID] = row
+            return row
+        } catch {
+            resolvedRowsByID.removeValue(forKey: objectID)
+            return nil
         }
     }
 

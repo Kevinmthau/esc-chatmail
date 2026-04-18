@@ -31,6 +31,7 @@ struct BaseEmailWebView: UIViewRepresentable {
     let htmlContent: String
     let mode: EmailWebViewMode
     var isDarkMode: Bool? = nil
+    var senderEmail: String? = nil
     /// Optional message for resolving cid: URLs to inline attachments
     var message: Message?
     /// Optional callback for non-interactive previews that need their rendered height.
@@ -145,7 +146,7 @@ struct BaseEmailWebView: UIViewRepresentable {
             // Use sender domain as baseURL to provide correct Referer header for CDN images
             // (e.g., Beehiiv CDN checks Referer for hotlink protection)
             // Falls back to about:blank if no sender information available
-            let baseURL = deriveBaseURL(from: parent.message) ?? URL(string: "about:blank")
+            let baseURL = deriveBaseURL(from: parent.message, senderEmail: parent.senderEmail) ?? URL(string: "about:blank")
             webView.loadHTMLString(htmlToLoad, baseURL: baseURL)
         }
 
@@ -222,8 +223,8 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
 
         /// Derives a baseURL from the sender's email domain for proper Referer headers
-        private func deriveBaseURL(from message: Message?) -> URL? {
-            EmailSenderBaseURLResolver.baseURL(from: message?.senderEmail)
+        private func deriveBaseURL(from message: Message?, senderEmail: String?) -> URL? {
+            EmailSenderBaseURLResolver.baseURL(from: message?.senderEmail ?? senderEmail)
         }
 
         private func wrapWithScale(_ html: String, scale: CGFloat) -> String {

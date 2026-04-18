@@ -8,6 +8,7 @@ struct MiniEmailWebView: View {
     let previewCacheKey: String?
     var scale: CGFloat = 0.5
     var isDarkMode: Bool = false
+    var senderEmail: String? = nil
     /// Optional message for resolving cid: URLs to inline attachments
     var message: Message?
     @State private var measuredHeight: CGFloat
@@ -24,12 +25,14 @@ struct MiniEmailWebView: View {
         previewCacheKey: String? = nil,
         scale: CGFloat = 0.5,
         isDarkMode: Bool = false,
+        senderEmail: String? = nil,
         message: Message? = nil
     ) {
         self.htmlContent = htmlContent
         self.previewCacheKey = previewCacheKey
         self.scale = scale
         self.isDarkMode = isDarkMode
+        self.senderEmail = senderEmail
         self.message = message
         self.previewHeightCacheKey = previewCacheKey ?? Self.previewHeightCacheKey(
             messageID: message?.id,
@@ -52,6 +55,7 @@ struct MiniEmailWebView: View {
                 htmlContent: htmlContent,
                 mode: .scaledPreview(scale: adaptiveScale),
                 isDarkMode: isDarkMode,
+                senderEmail: senderEmail,
                 message: message,
                 onPreviewHeightChange: updateMeasuredHeight
             )

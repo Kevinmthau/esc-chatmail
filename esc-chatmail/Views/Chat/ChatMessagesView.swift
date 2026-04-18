@@ -11,7 +11,7 @@ struct ChatMessagesView: View {
     @ObservedObject var viewModel: ChatViewModel
     let chatDependencies: ChatDependencies
     var isTextFieldFocused: FocusState<Bool>.Binding
-    let onOpenFullMessage: (Message) -> Void
+    let onOpenFullMessage: (NSManagedObjectID) -> Void
     @StateObject private var scrollState: VirtualScrollState
     @StateObject private var coordinator: ChatMessagesCoordinator
 
@@ -26,7 +26,7 @@ struct ChatMessagesView: View {
         viewModel: ChatViewModel,
         chatDependencies: ChatDependencies,
         isTextFieldFocused: FocusState<Bool>.Binding,
-        onOpenFullMessage: @escaping (Message) -> Void
+        onOpenFullMessage: @escaping (NSManagedObjectID) -> Void
     ) {
         self.conversation = conversation
         self.messages = messages
@@ -61,17 +61,15 @@ struct ChatMessagesView: View {
                 LazyVStack(spacing: 8) {
                     ForEach(Array(displayedMessages.enumerated()), id: \.element.objectID) { index, message in
                         let absoluteIndex = scrollState.absoluteIndex(forVisibleIndex: index) ?? index
-                        let nextMessage =
-                            absoluteIndex + 1 < messages.count
-                            ? messages[absoluteIndex + 1]
-                            : nil
-                        let isLastFromSender = nextMessage == nil ||
-                            senderRunKey(for: nextMessage) != senderRunKey(for: message) ||
-                            nextMessage?.isFromMe != message.isFromMe
+                        let nextMessage = messageRow(atAbsoluteIndex: absoluteIndex + 1)
+                        let isLastFromSender = ChatMessageRowGrouping.isLastFromSender(
+                            current: message,
+                            next: nextMessage,
+                            senderRunKey: senderRunKey(for:)
+                        )
 
                         MessageBubble(
                             message: message,
-                            conversation: conversation,
                             messageBubbleLoader: chatDependencies.makeMessageBubbleLoader(),
                             htmlContentHandler: chatDependencies.htmlContentHandler,
                             isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
@@ -127,6 +125,7 @@ struct ChatMessagesView: View {
                     messageCount: messages.count,
                     lastMessage: messages.last,
                     visibleMessages: scrollState.visibleMessages,
+                    senderGroupingMessages: senderGroupingMessages(for: scrollState.visibleMessages),
                     totalMessageCount: scrollState.totalMessageCount
                 ) { step in
                     performBottomAnchor(step, proxy: proxy)
@@ -135,11 +134,12 @@ struct ChatMessagesView: View {
             .onDisappear {
                 coordinator.handleDisappear()
             }
-            .onChange(of: displayedMessages.map(\.objectID)) { oldIDs, newIDs in
+            .onChange(of: senderGroupingMessages(for: displayedMessages).map(\.objectID)) { oldIDs, newIDs in
                 coordinator.handleDisplayedMessagesChange(
                     oldIDs: oldIDs,
                     newIDs: newIDs,
                     visibleMessages: displayedMessages,
+                    senderGroupingMessages: senderGroupingMessages(for: displayedMessages),
                     messageCount: messages.count
                 ) { step in
                     performBottomAnchor(step, proxy: proxy)
@@ -172,7 +172,9 @@ struct ChatMessagesView: View {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .CNContactStoreDidChange)) { _ in
-                coordinator.handleContactStoreDidChange(visibleMessages: scrollState.visibleMessages)
+                coordinator.handleContactStoreDidChange(
+                    senderGroupingMessages: senderGroupingMessages(for: scrollState.visibleMessages)
+                )
             }
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 0) {
@@ -193,25 +195,61 @@ struct ChatMessagesView: View {
     }
 
     @ViewBuilder
-    private func messageContextMenu(for message: Message) -> some View {
+    private func messageContextMenu(for message: ChatMessageRowModel) -> some View {
         Button(action: {
-            viewModel.setReplyingTo(message)
+            viewModel.setReplyingTo(messageObjectID: message.messageObjectID)
         }) {
             SwiftUI.Label("Reply", systemImage: "arrow.turn.up.left")
         }
 
         Button(action: {
-            viewModel.setMessageToForward(message)
+            viewModel.setMessageToForward(messageObjectID: message.messageObjectID)
         }) {
             SwiftUI.Label("Forward", systemImage: "arrow.turn.up.right")
         }
     }
 
-    private func senderRunKey(for message: Message?) -> String? {
+    private func senderRunKey(for message: ChatMessageRowModel?) -> String? {
         coordinator.senderRunKey(
             for: message,
             isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation
         )
+    }
+
+    private func senderGroupingMessages(
+        for displayedMessages: [ChatMessageRowModel]
+    ) -> [ChatMessageRowModel] {
+        guard !displayedMessages.isEmpty else {
+            return displayedMessages
+        }
+
+        guard let boundaryMessage = messageRow(atAbsoluteIndex: visibleRangeEndIndex(for: displayedMessages) + 1) else {
+            return displayedMessages
+        }
+
+        guard displayedMessages.last?.objectID != boundaryMessage.objectID else {
+            return displayedMessages
+        }
+
+        return displayedMessages + [boundaryMessage]
+    }
+
+    private func visibleRangeEndIndex(
+        for displayedMessages: [ChatMessageRowModel]
+    ) -> Int {
+        guard !displayedMessages.isEmpty else {
+            return -1
+        }
+
+        return scrollState.visibleRangeStartIndex + displayedMessages.count - 1
+    }
+
+    private func messageRow(atAbsoluteIndex index: Int) -> ChatMessageRowModel? {
+        guard index >= 0, index < messages.count else {
+            return nil
+        }
+
+        return scrollState.row(atAbsoluteIndex: index) ?? ChatMessageRowModelMapper.map(messages[index])
     }
 
     private func performBottomAnchor(

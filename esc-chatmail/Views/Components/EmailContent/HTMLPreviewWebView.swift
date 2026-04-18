@@ -6,6 +6,7 @@ struct HTMLPreviewWebView: View {
     let htmlContent: String
     let isDarkMode: Bool
     let maxHeight: CGFloat
+    var senderEmail: String? = nil
     /// Optional message for resolving cid: URLs to inline attachments
     var message: Message?
 
@@ -14,6 +15,7 @@ struct HTMLPreviewWebView: View {
             htmlContent: htmlContent,
             mode: .simplePreview,
             isDarkMode: isDarkMode,
+            senderEmail: senderEmail,
             message: message
         )
         .frame(maxHeight: maxHeight)

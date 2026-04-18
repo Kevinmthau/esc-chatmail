@@ -105,7 +105,8 @@ final class ChatMessagesCoordinator: ObservableObject {
     func handleAppear(
         messageCount: Int,
         lastMessage: Message?,
-        visibleMessages: [Message],
+        visibleMessages: [ChatMessageRowModel],
+        senderGroupingMessages: [ChatMessageRowModel],
         totalMessageCount: Int,
         scrollAction: @escaping BottomAnchorAction
     ) {
@@ -120,7 +121,7 @@ final class ChatMessagesCoordinator: ObservableObject {
 
         loadResolvedDisplayName()
         prefetchVisibleContent(from: visibleMessages)
-        refreshSenderGroupingKeys(using: visibleMessages)
+        refreshSenderGroupingKeys(using: senderGroupingMessages)
     }
 
     func handleDisappear() {
@@ -131,7 +132,8 @@ final class ChatMessagesCoordinator: ObservableObject {
     func handleDisplayedMessagesChange(
         oldIDs: [NSManagedObjectID],
         newIDs: [NSManagedObjectID],
-        visibleMessages: [Message],
+        visibleMessages: [ChatMessageRowModel],
+        senderGroupingMessages: [ChatMessageRowModel],
         messageCount: Int,
         scrollAction: @escaping BottomAnchorAction
     ) {
@@ -141,7 +143,7 @@ final class ChatMessagesCoordinator: ObservableObject {
 
         if oldIDs != newIDs {
             prefetchVisibleContent(from: visibleMessages)
-            refreshSenderGroupingKeys(using: visibleMessages)
+            refreshSenderGroupingKeys(using: senderGroupingMessages)
         }
     }
 
@@ -194,7 +196,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
     }
 
-    func handleContactStoreDidChange(visibleMessages: [Message]) {
+    func handleContactStoreDidChange(senderGroupingMessages: [ChatMessageRowModel]) {
         taskManager.run("contactRefresh") { [invalidateContactsCache, clearPersonCache] in
             await invalidateContactsCache()
             await clearPersonCache()
@@ -203,12 +205,12 @@ final class ChatMessagesCoordinator: ObservableObject {
 
             self.contactRefreshToken &+= 1
             self.loadResolvedDisplayName()
-            self.refreshSenderGroupingKeys(using: visibleMessages)
+            self.refreshSenderGroupingKeys(using: senderGroupingMessages)
         }
     }
 
     func senderRunKey(
-        for message: Message?,
+        for message: ChatMessageRowModel?,
         isEffectivelyOneToOneConversation: Bool
     ) -> String? {
         guard let message else { return nil }
@@ -223,7 +225,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         return "email:\(normalizedEmail)"
     }
 
-    private func prefetchVisibleContent(from visibleMessages: [Message]) {
+    private func prefetchVisibleContent(from visibleMessages: [ChatMessageRowModel]) {
         let config = VirtualScrollConfiguration.default
         let prefetchLimit = config.visibleItemCount + config.bufferSize
         let recentMessages = visibleMessages.suffix(prefetchLimit)
@@ -233,7 +235,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         prefetchRecentContent(messageIds, senderEmails)
     }
 
-    private func refreshSenderGroupingKeys(using visibleMessages: [Message]) {
+    private func refreshSenderGroupingKeys(using visibleMessages: [ChatMessageRowModel]) {
         var uniqueSenderEmails: [String] = []
         var seenEmails = Set<String>()
         for message in visibleMessages {
@@ -253,17 +255,14 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
     }
 
-    private func senderEmail(for message: Message) -> String? {
-        if let senderEmail = message.senderEmail?
+    private func senderEmail(for message: ChatMessageRowModel) -> String? {
+        if let senderEmail = message.senderGroupingKeyInput?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !senderEmail.isEmpty {
             return senderEmail
         }
 
-        return message.participants?
-            .first(where: { $0.participantKind == .from })?
-            .person?
-            .email
+        return nil
     }
 
     private func performInitialScroll(

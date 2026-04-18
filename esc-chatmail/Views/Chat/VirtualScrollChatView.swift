@@ -1,6 +1,5 @@
 import SwiftUI
 import CoreData
-import Combine
 
 // MARK: - Virtual Scroll Chat View
 struct VirtualScrollChatView: View {
@@ -35,12 +34,12 @@ struct VirtualScrollChatView: View {
                             } else {
                                 MessageBubble(
                                     message: message,
-                                    conversation: conversation,
                                     messageBubbleLoader: chatDependencies.makeMessageBubbleLoader(),
                                     htmlContentHandler: chatDependencies.htmlContentHandler,
+                                    isEffectivelyOneToOneConversation: conversation.conversationType == .oneToOne,
                                     style: .compact,
-                                    onOpenFullMessage: { selectedMessage in
-                                        messageToViewInFull = selectedMessage
+                                    onOpenFullMessage: { messageObjectID in
+                                        messageToViewInFull = resolveMessage(with: messageObjectID)
                                     }
                                 )
                             }
@@ -69,5 +68,20 @@ struct VirtualScrollChatView: View {
                 HTMLMessageView(message: message)
             }
         }
+    }
+
+    private func resolveMessage(with objectID: NSManagedObjectID) -> Message? {
+        let viewContext = chatDependencies.viewContext
+        if let registered = viewContext.registeredObject(for: objectID) as? Message,
+           !registered.isDeleted {
+            return registered
+        }
+
+        guard let resolved = try? viewContext.existingObject(with: objectID) as? Message,
+              !resolved.isDeleted else {
+            return nil
+        }
+
+        return resolved
     }
 }

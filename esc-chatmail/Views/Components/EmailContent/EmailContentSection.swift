@@ -1,13 +1,15 @@
 import SwiftUI
+import CoreData
 
 /// Container view that routes chat previews by content type.
 /// Newsletter and strongly-structured transactional emails render as derived native cards.
 /// Other rich HTML still falls back to the existing scaled WebView preview.
 struct EmailContentSection: View {
-    let message: Message
+    let message: ChatMessageRowModel
     let onOpenFullMessage: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.managedObjectContext) private var viewContext
     @State private var renderedPreview: LoadedPreview?
     @State private var isLoading = true
     @State private var loadGeneration = 0
@@ -25,7 +27,7 @@ struct EmailContentSection: View {
         "\(loadKey)|html:\(HTMLContentHandler.shared.htmlFileSignature(for: message.id))"
     }
 
-    static func makeLoadKey(for message: Message, isDarkMode: Bool) -> String {
+    static func makeLoadKey(for message: ChatMessageRowModel, isDarkMode: Bool) -> String {
         let bodyTextHash = message.bodyText?.hashValue ?? 0
         let cleanedSnippetHash = message.cleanedSnippet?.hashValue ?? 0
         let subjectHash = message.subject?.hashValue ?? 0
@@ -226,7 +228,8 @@ struct EmailContentSection: View {
                     htmlContent: html,
                     previewCacheKey: previewHeightCacheKey,
                     isDarkMode: colorScheme == .dark,
-                    message: message
+                    senderEmail: message.senderEmail,
+                    message: resolvedMessageForInlineAttachments
                 )
                     .allowsHitTesting(false)
                     .emailPreviewCardChrome()
@@ -243,6 +246,20 @@ struct EmailContentSection: View {
         }
 
         return "Email preview"
+    }
+
+    private var resolvedMessageForInlineAttachments: Message? {
+        if let registered = viewContext.registeredObject(for: message.messageObjectID) as? Message,
+           !registered.isDeleted {
+            return registered
+        }
+
+        guard let resolved = try? viewContext.existingObject(with: message.messageObjectID) as? Message,
+              !resolved.isDeleted else {
+            return nil
+        }
+
+        return resolved
     }
 }
 

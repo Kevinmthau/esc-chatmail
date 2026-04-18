@@ -30,6 +30,7 @@ final class ChatViewModel: ObservableObject {
     private let authSession: AuthSession
     private let htmlContentHandler: HTMLContentHandler
     private let participantLoader: ParticipantLoader
+    private let viewContext: NSManagedObjectContext
     private let conversationObjectID: NSManagedObjectID
     private let conversationContext: NSManagedObjectContext?
     private let conversationDisplayNameHint: String?
@@ -58,6 +59,7 @@ final class ChatViewModel: ObservableObject {
         self.authSession = chatDependencies.authSession
         self.htmlContentHandler = chatDependencies.htmlContentHandler
         self.participantLoader = chatDependencies.participantLoader
+        self.viewContext = chatDependencies.viewContext
         self.conversationObjectID = conversation.objectID
         self.conversationContext = conversation.managedObjectContext
         self.conversationDisplayNameHint = conversation.displayName
@@ -152,6 +154,11 @@ final class ChatViewModel: ObservableObject {
         replyingTo = message
     }
 
+    func setReplyingTo(messageObjectID: NSManagedObjectID) {
+        guard let message = resolveMessage(with: messageObjectID) else { return }
+        setReplyingTo(message)
+    }
+
     /// Sets the initial replyingTo message when the conversation loads
     func initializeReplyingTo(lastMessage: Message?) {
         guard replyingTo == nil, let lastMessage = lastMessage else { return }
@@ -184,9 +191,19 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    func setMessageToForward(messageObjectID: NSManagedObjectID) {
+        guard let message = resolveMessage(with: messageObjectID) else { return }
+        setMessageToForward(message)
+    }
+
     func openFullMessage(_ message: Message) {
         Log.info("Opening full message for \(message.id)", category: .ui)
         messageToViewInFull = message
+    }
+
+    func openFullMessage(messageObjectID: NSManagedObjectID) {
+        guard let message = resolveMessage(with: messageObjectID) else { return }
+        openFullMessage(message)
     }
 
     func dismissFullMessage() {
@@ -369,5 +386,19 @@ final class ChatViewModel: ObservableObject {
     private struct ForwardAttachmentPayload {
         let inlineAttachmentInfos: [GmailSendService.AttachmentInfo]
         let regularAttachments: [ForwardAttachmentSnapshot]
+    }
+
+    private func resolveMessage(with objectID: NSManagedObjectID) -> Message? {
+        if let registered = viewContext.registeredObject(for: objectID) as? Message,
+           !registered.isDeleted {
+            return registered
+        }
+
+        guard let resolved = try? viewContext.existingObject(with: objectID) as? Message,
+              !resolved.isDeleted else {
+            return nil
+        }
+
+        return resolved
     }
 }

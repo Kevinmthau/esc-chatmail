@@ -1,13 +1,13 @@
 import SwiftUI
+import CoreData
 import CryptoKit
 
 struct MessageBubble: View {
-    let message: Message
-    let conversation: Conversation
+    let message: ChatMessageRowModel
     /// Pre-loaded sender names from batch fetch (avoids N+1 queries)
     var prefetchedSenderName: String?
-    /// Optional presentation override for threads that collapse multiple emails into one contact.
-    var isEffectivelyOneToOneConversation: Bool?
+    /// Presentation mode for threads that collapse multiple emails into one contact.
+    var isEffectivelyOneToOneConversation: Bool
     /// Bumps when local contact data changes so sender labels/avatars reload in-place.
     var contactRefreshToken: Int = 0
     /// Whether this is the last message from this sender before a different sender (for avatar grouping)
@@ -17,7 +17,7 @@ struct MessageBubble: View {
     private let htmlContentHandler: HTMLContentHandler
 
     @StateObject private var viewModel: MessageBubbleViewModel
-    let onOpenFullMessage: (Message) -> Void
+    let onOpenFullMessage: (NSManagedObjectID) -> Void
 
     private var showHTMLPreview: Bool {
         MessageDisplayPolicy.shouldShowHTMLPreview(
@@ -26,9 +26,9 @@ struct MessageBubble: View {
             isNewsletter: message.isNewsletter,
             hasRichHTMLContent: viewModel.hasRichHTMLContent,
             isFromMe: message.isFromMe,
-            isOneToOneConversation: effectiveIsOneToOneConversation,
+            isOneToOneConversation: isEffectivelyOneToOneConversation,
             subject: message.subject,
-            senderEmail: effectiveSenderEmail,
+            senderEmail: message.effectiveSenderEmail,
             isLikelyCalendarInvite: message.isLikelyCalendarInvite
         )
     }
@@ -39,19 +39,17 @@ struct MessageBubble: View {
 
     @MainActor
     init(
-        message: Message,
-        conversation: Conversation,
+        message: ChatMessageRowModel,
         messageBubbleLoader: any MessageBubbleLoading,
         htmlContentHandler: HTMLContentHandler,
         prefetchedSenderName: String? = nil,
-        isEffectivelyOneToOneConversation: Bool? = nil,
+        isEffectivelyOneToOneConversation: Bool,
         contactRefreshToken: Int = 0,
         isLastFromSender: Bool = true,
         style: MessageBubbleStyle = .standard,
-        onOpenFullMessage: @escaping (Message) -> Void
+        onOpenFullMessage: @escaping (NSManagedObjectID) -> Void
     ) {
         self.message = message
-        self.conversation = conversation
         self.htmlContentHandler = htmlContentHandler
         self.prefetchedSenderName = prefetchedSenderName
         self.isEffectivelyOneToOneConversation = isEffectivelyOneToOneConversation
@@ -86,7 +84,7 @@ struct MessageBubble: View {
                     showHTMLPreview: showHTMLPreview,
                     hasHTMLSource: htmlAnalysis.hasHTMLSource,
                     fullTextContent: viewModel.fullTextContent,
-                    fallbackPreviewText: message.cleanedSnippet ?? message.snippet,
+                    fallbackPreviewText: message.fallbackPreviewText,
                     sharedDocumentLinks: viewModel.sharedDocumentLinks,
                     hasLoadedContent: viewModel.hasLoadedContent,
                     forwardedDisplayContent: outgoingForwardedDisplayContent,
@@ -173,8 +171,13 @@ struct MessageBubble: View {
         #if DEBUG
         let _ = {
             if message.hasAttachments {
-                let attachmentDetails = message.attachmentsArray.map { "[\($0.filename), cid:\($0.contentId ?? "nil")]" }.joined(separator: ", ")
-                Log.warning("UI_DEBUG msg=\(message.id) hasAttachments=\(message.hasAttachments) attachmentsArray=\(message.attachmentsArray.count) displayable=\(displayable.count) showHTMLPreview=\(showHTMLPreview) attachments=\(attachmentDetails)", category: .ui)
+                let attachmentDetails = message.attachments
+                    .map { "[\($0.filename), cid:\($0.contentId ?? "nil")]" }
+                    .joined(separator: ", ")
+                Log.warning(
+                    "UI_DEBUG msg=\(message.id) hasAttachments=\(message.hasAttachments) attachmentsArray=\(message.attachments.count) displayable=\(displayable.count) showHTMLPreview=\(showHTMLPreview) attachments=\(attachmentDetails)",
+                    category: .ui
+                )
             }
         }()
         #endif
@@ -191,39 +194,11 @@ struct MessageBubble: View {
     // MARK: - Helpers
 
     private var isGroupConversation: Bool {
-        !effectiveIsOneToOneConversation
-    }
-
-    private var effectiveIsOneToOneConversation: Bool {
-        isEffectivelyOneToOneConversation ?? (conversation.conversationType == .oneToOne)
-    }
-
-    private var effectiveSenderEmail: String? {
-        if let senderEmail = message.senderEmail?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !senderEmail.isEmpty {
-            return senderEmail
-        }
-
-        return message.participants?
-            .first(where: { $0.participantKind == .from })?
-            .person?
-            .email
+        !isEffectivelyOneToOneConversation
     }
 
     private var senderRequest: MessageBubbleSenderRequest? {
-        guard !message.isFromMe,
-              let senderParticipant = message.participants?
-                .first(where: { $0.participantKind == .from }),
-              let person = senderParticipant.person else {
-            return nil
-        }
-
-        return MessageBubbleSenderRequest(
-            email: person.email,
-            personDisplayName: person.displayName,
-            personAvatarURL: person.avatarURL
-        )
+        message.makeSenderRequest()
     }
 
     private var loadContext: MessageBubbleLoadContext {
@@ -232,29 +207,14 @@ struct MessageBubble: View {
             contentSignature: loadSignature,
             prefetchedSenderName: prefetchedSenderName,
             senderRequest: senderRequest,
-            contentRequest: MessageBubbleContentRequest(
-                messageID: message.id,
-                bodyText: message.bodyTextValue,
-                bodyStorageURI: message.bodyStorageURI,
-                cleanedSnippet: message.cleanedSnippet,
-                snippet: message.snippet,
-                subject: message.subject,
-                senderName: message.senderName,
-                hasHTMLSource: message.hasHTMLSource,
-                hasAttachments: message.hasAttachments,
-                isFromMe: message.isFromMe,
-                isForwardedEmail: message.isForwardedEmail,
-                isLikelyCalendarInvite: message.isLikelyCalendarInvite,
-                effectiveSenderEmail: effectiveSenderEmail,
-                attachmentSnapshots: message.attachmentsArray.map(\.bubbleSnapshot)
-            )
+            contentRequest: message.makeContentRequest()
         )
     }
 
     private var loadSignature: String {
         Self.contentSignature(
             bodyStorageURI: message.bodyStorageURI,
-            bodyText: message.bodyTextValue,
+            bodyText: message.bodyText,
             snippet: message.snippet,
             hasHTMLSource: message.hasHTMLSource,
             htmlFileSignature: htmlContentHandler.htmlFileSignature(for: message.id),
@@ -263,7 +223,7 @@ struct MessageBubble: View {
     }
 
     private func openFullMessage() {
-        onOpenFullMessage(message)
+        onOpenFullMessage(message.messageObjectID)
     }
 
     static func contentSignature(

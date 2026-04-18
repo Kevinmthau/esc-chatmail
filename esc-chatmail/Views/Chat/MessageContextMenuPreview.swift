@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Lightweight preview for context menu - avoids triggering expensive loads
 struct MessageContextMenuPreview: View {
-    let message: Message
+    let message: ChatMessageRowModel
 
     var body: some View {
         VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 4) {

@@ -3,7 +3,7 @@ import SwiftUI
 /// Displays the content portion of a message bubble.
 /// Handles rich HTML, plain text, attachments, and empty states.
 struct MessageContentView: View {
-    let message: Message
+    let message: ChatMessageRowModel
     let style: MessageBubbleStyle
     let showHTMLPreview: Bool
     let hasHTMLSource: Bool
@@ -58,7 +58,7 @@ struct MessageContentView: View {
             } else if hasHTMLSource {
                 // No text content but HTML exists - show a tappable bubble to open full email
                 openEmailBubble
-            } else if message.typedAttachments.isEmpty {
+            } else if message.attachments.isEmpty {
                 // No content and no attachments - show placeholder
                 noContentPlaceholder
             }

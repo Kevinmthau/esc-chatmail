@@ -363,6 +363,7 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
     }
 }
 
+@MainActor
 final class EmailContentSectionTests: XCTestCase {
     private var testStack: TestCoreDataStack!
 
@@ -385,10 +386,16 @@ final class EmailContentSectionTests: XCTestCase {
             .build(in: context)
 
         message.cleanedSnippet = "Original cleaned snippet"
-        let initialKey = EmailContentSection.makeLoadKey(for: message, isDarkMode: false)
+        let initialKey = EmailContentSection.makeLoadKey(
+            for: ChatMessageRowModelMapper.map(message),
+            isDarkMode: false
+        )
 
         message.cleanedSnippet = "Updated cleaned snippet"
-        let updatedKey = EmailContentSection.makeLoadKey(for: message, isDarkMode: false)
+        let updatedKey = EmailContentSection.makeLoadKey(
+            for: ChatMessageRowModelMapper.map(message),
+            isDarkMode: false
+        )
 
         XCTAssertNotEqual(initialKey, updatedKey)
     }
@@ -401,8 +408,9 @@ final class EmailContentSectionTests: XCTestCase {
             .withSender(email: "sender@example.com", name: "Sender")
             .build(in: context)
 
-        let lightKey = EmailContentSection.makeLoadKey(for: message, isDarkMode: false)
-        let darkKey = EmailContentSection.makeLoadKey(for: message, isDarkMode: true)
+        let row = ChatMessageRowModelMapper.map(message)
+        let lightKey = EmailContentSection.makeLoadKey(for: row, isDarkMode: false)
+        let darkKey = EmailContentSection.makeLoadKey(for: row, isDarkMode: true)
 
         XCTAssertNotEqual(lightKey, darkKey)
     }
