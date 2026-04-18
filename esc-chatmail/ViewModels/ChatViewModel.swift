@@ -8,11 +8,7 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Published State
 
     @Published var replyText = ""
-    @Published var replyingTo: Message? {
-        didSet {
-            replyingToSnapshot = replyingTo.map { ReplyTargetSnapshot(message: $0) }
-        }
-    }
+    @Published var replyingTo: Message?
     @Published var forwardComposeContext: ComposeForwardModeContext?
     @Published var messageToViewInFull: Message?
     @Published var resolvedDisplayName: String?
@@ -33,7 +29,6 @@ final class ChatViewModel: ObservableObject {
 
     private let authSession: AuthSession
     private let htmlContentHandler: HTMLContentHandler
-    private let replyHTMLContentLoader: HTMLContentLoader
     private let participantLoader: ParticipantLoader
     private let conversationObjectID: NSManagedObjectID
     private let conversationContext: NSManagedObjectContext?
@@ -41,7 +36,6 @@ final class ChatViewModel: ObservableObject {
     private let replyOptimisticConversation: OptimisticConversationReference
     private let processedTextCache: ProcessedTextCache
     private let contactsResolver: any ContactsResolving
-    private var replyingToSnapshot: ReplyTargetSnapshot?
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Task Management
@@ -65,10 +59,6 @@ final class ChatViewModel: ObservableObject {
         self.conversation = conversation
         self.authSession = dependencies.authSession
         self.htmlContentHandler = dependencies.htmlContentHandler
-        self.replyHTMLContentLoader = HTMLContentLoader(
-            contentHandler: dependencies.htmlContentHandler,
-            sanitizer: .shared
-        )
         self.participantLoader = dependencies.participantLoader
         self.conversationObjectID = conversation.objectID
         self.conversationContext = conversation.managedObjectContext
@@ -207,13 +197,12 @@ final class ChatViewModel: ObservableObject {
             let attachmentContexts = try outboundAttachmentContextBuilder.buildSendAttachments(
                 from: attachments
             )
-            let replyTargetSnapshot = prepareReplyTargetSnapshotForSend()
             result = try await outboundMessageCoordinator.send(
                 .reply(
                     .init(
                         context: outboundReplyContextBuilder.build(
-                            conversation: ReplyConversationSnapshot(conversation: conversation),
-                            replyingTo: replyTargetSnapshot,
+                            conversationObjectID: conversation.objectID,
+                            replyingToMessageObjectID: replyingTo?.objectID,
                             optimisticConversation: replyOptimisticConversation
                         ),
                         body: trimmedReplyText,
@@ -314,32 +303,6 @@ final class ChatViewModel: ObservableObject {
                 )
             }
         )
-    }
-
-    private func loadOriginalReplyHTML(for message: Message) -> String? {
-        replyHTMLContentLoader.loadReplyQuotedOriginalHTML(
-            messageId: message.id,
-            bodyStorageURI: message.bodyStorageURI,
-            bodyText: message.bodyTextValue,
-            senderEmail: message.senderEmailValue,
-            subject: message.subject
-        )
-    }
-
-    private func prepareReplyTargetSnapshotForSend() -> ReplyTargetSnapshot? {
-        let baseSnapshot = replyingToSnapshot ?? replyingTo.map { ReplyTargetSnapshot(message: $0) }
-        guard let baseSnapshot else {
-            return nil
-        }
-
-        guard baseSnapshot.originalMessage.originalHTML == nil,
-              let replyingTo else {
-            return baseSnapshot
-        }
-
-        let enrichedSnapshot = baseSnapshot.withOriginalHTML(loadOriginalReplyHTML(for: replyingTo))
-        replyingToSnapshot = enrichedSnapshot
-        return enrichedSnapshot
     }
 
     private func loadOriginalHTML(for message: Message) -> String? {

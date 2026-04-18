@@ -1,4 +1,5 @@
 import Foundation
+import CoreData
 
 enum OutboundMessageRequest {
     case compose(Compose)
@@ -20,7 +21,8 @@ enum OutboundMessageRequest {
     }
 
     struct ReplyContext {
-        let metadata: ReplyMetadata
+        let conversationObjectID: NSManagedObjectID
+        let replyingToMessageObjectID: NSManagedObjectID?
         let optimisticConversation: OptimisticConversationReference?
     }
 
@@ -157,6 +159,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
     private let sendService: any OutboundMessageSendServicing
     private let syncPerformer: IncrementalSyncPerforming
     private let messageFormatBuilder: MessageFormatBuilder
+    private let outboundReplyContextBuilder: OutboundReplyContextBuilder
     private let mutationTracker: any OutboundSendMutationTracking
     private var backgroundSendTasks: [String: Task<Void, Never>] = [:]
 
@@ -164,11 +167,13 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         sendService: any OutboundMessageSendServicing,
         syncPerformer: IncrementalSyncPerforming,
         messageFormatBuilder: MessageFormatBuilder,
+        outboundReplyContextBuilder: OutboundReplyContextBuilder,
         mutationTracker: any OutboundSendMutationTracking
     ) {
         self.sendService = sendService
         self.syncPerformer = syncPerformer
         self.messageFormatBuilder = messageFormatBuilder
+        self.outboundReplyContextBuilder = outboundReplyContextBuilder
         self.mutationTracker = mutationTracker
     }
 
@@ -288,17 +293,20 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
 
         case .reply(let reply):
             let body = normalizedBody(reply.body)
+            let metadata = try outboundReplyContextBuilder.buildReplyMetadata(
+                reply.context
+            )
 
             return PreparedSend(
-                recipientEmails: reply.context.metadata.recipientEmails,
+                recipientEmails: metadata.recipientEmails,
                 body: body,
-                subject: reply.context.metadata.subject,
+                subject: metadata.subject,
                 htmlBody: nil,
-                threadId: reply.context.metadata.threadId,
+                threadId: metadata.threadId,
                 attachments: reply.attachments,
                 inlineAttachmentInfos: [],
                 optimisticConversation: reply.context.optimisticConversation,
-                replyMetadata: reply.context.metadata
+                replyMetadata: metadata
             )
         }
     }

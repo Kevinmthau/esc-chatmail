@@ -132,12 +132,20 @@ final class Dependencies: ObservableObject {
             sendService: makeSendService(),
             syncPerformer: syncEngine,
             messageFormatBuilder: makeMessageFormatBuilder(),
+            outboundReplyContextBuilder: makeOutboundReplyContextBuilder(),
             mutationTracker: outboundSendMutationTracker
         )
     }
 
     func makeOutboundReplyContextBuilder() -> OutboundReplyContextBuilder {
-        OutboundReplyContextBuilder(replyMetadataBuilder: makeReplyMetadataBuilder())
+        OutboundReplyContextBuilder(
+            viewContext: viewContext,
+            replyMetadataBuilder: makeReplyMetadataBuilder(),
+            replyHTMLContentLoader: HTMLContentLoader(
+                contentHandler: htmlContentHandler,
+                sanitizer: .shared
+            )
+        )
     }
 
     func makeComposeReplyModeContextBuilder() -> ComposeReplyModeContextBuilder {

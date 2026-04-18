@@ -1,18 +1,32 @@
 import XCTest
+import CoreData
 @testable import esc_chatmail
 
 @MainActor
 final class ComposeReplyModeContextBuilderTests: XCTestCase {
-    func testBuild_usesProvidedInitialRecipientsAndReplySnapshots() {
+    func testBuild_usesProvidedInitialRecipientsAndStableReplyIdentifiers() throws {
+        let coreDataStack = TestCoreDataStack()
         let builder = ComposeReplyModeContextBuilder(
             outboundReplyContextBuilder: OutboundReplyContextBuilder(
+                viewContext: coreDataStack.viewContext,
                 replyMetadataBuilder: ReplyMetadataBuilder(
                     authSession: makeTestAuthSession(userEmail: "me@example.com")
-                )
+                ),
+                replyHTMLContentLoader: HTMLContentLoader()
             )
         )
+        let context = coreDataStack.viewContext
+        let conversation = ConversationBuilder()
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let replyingTo = MessageBuilder()
+            .withId("message-1")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.obtainPermanentIDs(for: [conversation, replyingTo])
         let conversationReference = ConversationReference(
-            persistentStoreURI: URL(string: "x-coredata://conversation/123")!
+            objectID: conversation.objectID
         )
 
         let result = builder.build(
@@ -20,33 +34,16 @@ final class ComposeReplyModeContextBuilderTests: XCTestCase {
                 initialRecipients: [
                     Recipient(email: "friend@example.com", displayName: "Friend")
                 ],
-                conversation: .init(
-                    participantEmails: ["me@example.com", "friend@example.com"],
-                    latestThreadId: "thread-123"
-                ),
-                replyingTo: .init(
-                    subject: "Original Subject",
-                    threadId: "thread-123",
-                    messageId: "<message-1@example.com>",
-                    references: ["<older@example.com>"],
-                    originalMessage: QuotedMessage(
-                        senderName: "Friend",
-                        senderEmail: "friend@example.com",
-                        date: Date(timeIntervalSince1970: 1_700_000_000),
-                        body: "Original body"
-                    )
-                ),
+                conversationObjectID: conversation.objectID,
+                replyingToMessageObjectID: replyingTo.objectID,
                 optimisticConversation: .existingConversation(conversationReference)
             )
         )
 
         XCTAssertEqual(result.initialRecipients.map(\.email), ["friend@example.com"])
         XCTAssertEqual(result.initialRecipients.first?.displayName, "Friend")
-        XCTAssertEqual(result.outboundRequestContext.metadata.recipientEmails, ["friend@example.com"])
-        XCTAssertEqual(result.outboundRequestContext.metadata.subject, "Re: Original Subject")
-        XCTAssertEqual(result.outboundRequestContext.metadata.threadId, "thread-123")
-        XCTAssertEqual(result.outboundRequestContext.metadata.inReplyTo, "<message-1@example.com>")
-        XCTAssertEqual(result.outboundRequestContext.metadata.references, ["<older@example.com>", "<message-1@example.com>"])
+        XCTAssertEqual(result.outboundRequestContext.conversationObjectID, conversation.objectID)
+        XCTAssertEqual(result.outboundRequestContext.replyingToMessageObjectID, replyingTo.objectID)
         XCTAssertEqual(result.outboundRequestContext.optimisticConversation?.existingConversationReference, conversationReference)
     }
 
