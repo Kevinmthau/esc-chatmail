@@ -36,7 +36,7 @@ struct VirtualScrollChatView: View {
                                 MessageBubble(
                                     message: message,
                                     conversation: conversation,
-                                    messageBubbleLoader: chatDependencies.messageBubbleLoader,
+                                    messageBubbleLoader: chatDependencies.makeMessageBubbleLoader(),
                                     htmlContentHandler: chatDependencies.htmlContentHandler,
                                     style: .compact,
                                     onOpenFullMessage: { selectedMessage in

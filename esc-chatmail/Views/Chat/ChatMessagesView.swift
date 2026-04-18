@@ -72,7 +72,7 @@ struct ChatMessagesView: View {
                         MessageBubble(
                             message: message,
                             conversation: conversation,
-                            messageBubbleLoader: chatDependencies.messageBubbleLoader,
+                            messageBubbleLoader: chatDependencies.makeMessageBubbleLoader(),
                             htmlContentHandler: chatDependencies.htmlContentHandler,
                             isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
                             contactRefreshToken: coordinator.contactRefreshToken,

@@ -191,6 +191,17 @@ final class Dependencies: ObservableObject {
     func makeChatDependencies() -> ChatDependencies {
         let contactsResolver = self.contactsResolver
         let personCache = self.personCache
+        let processedTextCache = self.processedTextCache
+        let htmlContentHandler = self.htmlContentHandler
+        let htmlContentRecoveryService = self.htmlContentRecoveryService
+        let makeMessageBubbleLoader = {
+            MessageBubbleLoader(
+                contactsResolver: contactsResolver,
+                processedTextCache: processedTextCache,
+                htmlContentHandler: htmlContentHandler,
+                htmlContentRecoveryService: htmlContentRecoveryService
+            )
+        }
 
         return ChatDependencies(
             authSession: authSession,
@@ -203,7 +214,7 @@ final class Dependencies: ObservableObject {
             outboundAttachmentContextBuilder: makeOutboundAttachmentContextBuilder(),
             outboundReplyContextBuilder: makeOutboundReplyContextBuilder(),
             composeForwardModeContextBuilder: makeComposeForwardModeContextBuilder(),
-            messageBubbleLoader: makeMessageBubbleLoader(),
+            makeMessageBubbleLoader: makeMessageBubbleLoader,
             viewContext: viewContext,
             makeBackgroundContext: { [coreDataStack] in
                 coreDataStack.newBackgroundContext()

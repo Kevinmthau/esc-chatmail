@@ -12,7 +12,8 @@ struct ChatDependencies {
     let outboundAttachmentContextBuilder: OutboundAttachmentContextBuilder
     let outboundReplyContextBuilder: OutboundReplyContextBuilder
     let composeForwardModeContextBuilder: ComposeForwardModeContextBuilder
-    let messageBubbleLoader: any MessageBubbleLoading
+    /// Use a factory so visible bubbles do not serialize through one shared actor.
+    let makeMessageBubbleLoader: () -> MessageBubbleLoader
     let viewContext: NSManagedObjectContext
     let makeBackgroundContext: () -> NSManagedObjectContext
     let makeChatContactManager: @MainActor () -> ChatContactManager
