@@ -8,6 +8,8 @@ enum HTMLDisplayPurpose: String, CaseIterable, Sendable {
 /// Wraps HTML content for display in WebView with proper styling and security
 /// Designed to match Apple Mail's rendering behavior as closely as possible
 struct HTMLDisplayWrapper {
+    private static let appleMailFallbackFontStack = "-apple-system, BlinkMacSystemFont, \"Helvetica Neue\", Helvetica, Arial, sans-serif"
+
     struct Theme: Equatable, Sendable {
         let backgroundColorHex: String
         let textColorHex: String
@@ -94,6 +96,7 @@ struct HTMLDisplayWrapper {
                 margin: 0;
                 padding: 8px;
                 background-color: \(theme.backgroundColorHex);
+                \(originalFallbackTypographyCSSIfNeeded(for: html, displayPurpose: displayPurpose))
             }
             /* Only constrain images that would overflow */
             img {
@@ -170,7 +173,7 @@ struct HTMLDisplayWrapper {
                     padding: 8px;
                     margin: 0;
                     word-wrap: break-word;
-                    \(partialOriginalTypographyCSS(for: displayPurpose))
+                    \(originalFallbackTypographyCSSIfNeeded(for: html, displayPurpose: displayPurpose))
                 }
                 /* Constrain images without breaking layout */
                 img {
@@ -202,8 +205,11 @@ struct HTMLDisplayWrapper {
         """
     }
 
-    private func partialOriginalTypographyCSS(for displayPurpose: HTMLDisplayPurpose) -> String {
-        guard displayPurpose == .original else {
+    private func originalFallbackTypographyCSSIfNeeded(
+        for html: String,
+        displayPurpose: HTMLDisplayPurpose
+    ) -> String {
+        guard shouldApplyOriginalFallbackTypography(to: html, displayPurpose: displayPurpose) else {
             return ""
         }
 
@@ -211,8 +217,31 @@ struct HTMLDisplayWrapper {
         // default body typography. Match Apple Mail more closely here instead of falling back
         // to WKWebView's default serif font.
         return """
-        font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
+        font-family: \(Self.appleMailFallbackFontStack);
         """
+    }
+
+    private func shouldApplyOriginalFallbackTypography(
+        to html: String,
+        displayPurpose: HTMLDisplayPurpose
+    ) -> Bool {
+        guard displayPurpose == .original else {
+            return false
+        }
+
+        return !documentDefinesOriginalTypography(in: html)
+    }
+
+    private func documentDefinesOriginalTypography(in html: String) -> Bool {
+        let inlineDocumentFontPattern = #"<(?:html|body)\b[^>]*\bstyle\s*=\s*(['"]).*?\bfont(?:-family)?\s*:[\s\S]*?\1"#
+        let styleBlockDocumentFontPattern = #"<style\b[^>]*>[\s\S]*?(?:\bhtml\b|\bbody\b|:root)\b[^{]*\{[^}]*\bfont(?:-family)?\s*:"#
+
+        return matches(pattern: inlineDocumentFontPattern, in: html)
+            || matches(pattern: styleBlockDocumentFontPattern, in: html)
+    }
+
+    private func matches(pattern: String, in html: String) -> Bool {
+        html.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     private func colorSchemeHead(for displayPurpose: HTMLDisplayPurpose) -> String {

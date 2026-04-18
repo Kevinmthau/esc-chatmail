@@ -2,6 +2,7 @@ import XCTest
 @testable import esc_chatmail
 
 final class HTMLDisplayWrapperTests: XCTestCase {
+    private let appleMailFallbackFontStack = "font-family: -apple-system, BlinkMacSystemFont, \"Helvetica Neue\", Helvetica, Arial, sans-serif;"
     private var sut: HTMLDisplayWrapper!
 
     override func setUp() {
@@ -21,7 +22,7 @@ final class HTMLDisplayWrapperTests: XCTestCase {
 
         let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
 
-        XCTAssertTrue(result.contains("font-family: -apple-system, BlinkMacSystemFont, \"Helvetica Neue\", Helvetica, Arial, sans-serif;"))
+        XCTAssertTrue(result.contains(appleMailFallbackFontStack))
         XCTAssertTrue(result.contains("background-color: #ffffff"))
         XCTAssertTrue(result.contains("word-wrap: break-word"))
     }
@@ -35,7 +36,23 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertTrue(lightResult.contains("background-color: #f2f2f7"))
         XCTAssertTrue(darkResult.contains("background-color: #1c1c1e"))
         XCTAssertTrue(darkResult.contains("color: #ffffff"))
-        XCTAssertFalse(lightResult.contains("font-family: -apple-system, BlinkMacSystemFont, \"Helvetica Neue\", Helvetica, Arial, sans-serif;"))
+        XCTAssertFalse(lightResult.contains(appleMailFallbackFontStack))
+    }
+
+    func testWrapHTMLForDisplay_existingDocumentWithoutFontStyling_usesAppleMailFallbackTypography() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <p>Hello</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(appleMailFallbackFontStack))
+        XCTAssertEqual(result.components(separatedBy: appleMailFallbackFontStack).count - 1, 1)
     }
 
     func testWrapHTMLForDisplay_existingDocument_keepsAuthorBodyStyles() {
@@ -56,7 +73,23 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         let result = sut.wrapHTMLForDisplay(html, isDarkMode: false)
 
         XCTAssertTrue(result.contains("body { font-family: Georgia, serif; font-size: 19px; }"))
-        XCTAssertFalse(result.contains("font-family: -apple-system"))
+        XCTAssertFalse(result.contains(appleMailFallbackFontStack))
+    }
+
+    func testWrapHTMLForDisplay_existingDocumentWithInlineDocumentFont_keepsAuthorTypography() {
+        let html = """
+        <!DOCTYPE html>
+        <html style="font: 16px Georgia, serif;">
+        <body>
+            <p>Hello</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains("font: 16px Georgia, serif;"))
+        XCTAssertFalse(result.contains(appleMailFallbackFontStack))
     }
 
     func testWrapHTMLForDisplay_existingDocument_usesDarkPreviewSurfaceButLightOriginalSurface() {
@@ -107,5 +140,21 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertFalse(result.contains("text-decoration: inherit"))
         XCTAssertFalse(result.contains("color: inherit"))
         XCTAssertTrue(result.contains("https://example.com/file.pdf"))
+    }
+
+    func testWrapHTMLForDisplay_equivalentFragmentAndDocumentInputs_shareFallbackTypographyBehavior() {
+        let fragmentHTML = "<div>Hello</div>"
+        let documentHTML = """
+        <!DOCTYPE html>
+        <html>
+        <body><div>Hello</div></body>
+        </html>
+        """
+
+        let fragmentResult = sut.wrapHTMLForDisplay(fragmentHTML, isDarkMode: false, displayPurpose: .original)
+        let documentResult = sut.wrapHTMLForDisplay(documentHTML, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertEqual(fragmentResult.components(separatedBy: appleMailFallbackFontStack).count - 1, 1)
+        XCTAssertEqual(documentResult.components(separatedBy: appleMailFallbackFontStack).count - 1, 1)
     }
 }
