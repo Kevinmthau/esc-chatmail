@@ -52,24 +52,25 @@ final class ComposeViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.attachments.first?.id, attachment.id)
     }
 
-    func testSetupForMode_replyIsIdempotent() {
+    func testSetupForMode_replyIsIdempotent() throws {
         let authSession = makeTestAuthSession(userEmail: "me@example.com")
         let deps = makeDependencies(authSession: authSession)
+        let context = deps.viewContext
+        let conversation = ConversationBuilder()
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        try context.obtainPermanentIDs(for: [conversation])
 
         let replyModeContext = deps.makeComposeReplyModeContextBuilder().build(
             input: .init(
                 initialRecipients: [
                     Recipient(email: "friend@example.com", displayName: "Friend")
                 ],
-                conversation: .init(
-                    participantEmails: ["me@example.com", "friend@example.com"],
-                    latestThreadId: "thread-123"
-                ),
-                replyingTo: nil,
+                conversationObjectID: conversation.objectID,
+                replyingToMessageObjectID: nil,
                 optimisticConversation: .existingConversation(
-                    ConversationReference(
-                        persistentStoreURI: URL(string: "x-coredata://conversation/123")!
-                    )
+                    ConversationReference(objectID: conversation.objectID)
                 )
             )
         )

@@ -1,4 +1,5 @@
 import Foundation
+import CoreData
 
 struct ComposeReplyModeContext {
     let initialRecipients: [Recipient]
@@ -11,8 +12,8 @@ struct ComposeReplyModeContextBuilder {
 
     struct Input {
         let initialRecipients: [Recipient]
-        let conversation: ReplyConversationSnapshot
-        let replyingTo: ReplyTargetSnapshot?
+        let conversationObjectID: NSManagedObjectID
+        let replyingToMessageObjectID: NSManagedObjectID?
         let optimisticConversation: OptimisticConversationReference?
     }
 
@@ -20,8 +21,8 @@ struct ComposeReplyModeContextBuilder {
         return ComposeReplyModeContext(
             initialRecipients: input.initialRecipients,
             outboundRequestContext: outboundReplyContextBuilder.build(
-                conversation: input.conversation,
-                replyingTo: input.replyingTo,
+                conversationObjectID: input.conversationObjectID,
+                replyingToMessageObjectID: input.replyingToMessageObjectID,
                 optimisticConversation: input.optimisticConversation
             )
         )

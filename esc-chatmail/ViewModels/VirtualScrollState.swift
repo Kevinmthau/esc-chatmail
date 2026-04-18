@@ -99,6 +99,15 @@ final class VirtualScrollState: ObservableObject {
         return messageWindow.endIndex >= totalMessageCount
     }
 
+    private var hasPendingInsertedMessagesInConversation: Bool {
+        guard let conversationUUID = UUID(uuidString: conversationId) else { return false }
+
+        return viewContext.insertedObjects.contains { object in
+            guard let message = object as? Message else { return false }
+            return message.conversation?.id == conversationUUID
+        }
+    }
+
     func absoluteIndex(forVisibleIndex index: Int) -> Int? {
         guard index >= 0, index < visibleMessages.count else {
             return nil
@@ -113,11 +122,14 @@ final class VirtualScrollState: ObservableObject {
         taskManager.run("loadInitial") { [weak self] in
             guard let self = self else { return }
 
-            let initialRange = await self.initialMessageRange()
-            let page = await self.pageLoader(
-                self.conversationId,
+            let preferPendingConversationMessages =
+                self.initialWindowPosition == .end && self.hasPendingInsertedMessagesInConversation
+            let initialRange = await self.initialMessageRange(
+                preferPendingConversationMessages: preferPendingConversationMessages
+            )
+            let page = await self.loadPage(
                 initialRange,
-                self.makeBackgroundContext()
+                preferPendingConversationMessages: preferPendingConversationMessages
             )
 
             guard !Task.isCancelled else { return }
@@ -143,7 +155,7 @@ final class VirtualScrollState: ObservableObject {
     }
 
     func loadLatestWindowIfNeeded() async {
-        guard !isShowingLatestWindow || visibleMessages.isEmpty else {
+        guard !isShowingLatestWindow || visibleMessages.isEmpty || hasPendingInsertedMessagesInConversation else {
             return
         }
 
@@ -151,9 +163,16 @@ final class VirtualScrollState: ObservableObject {
     }
 
     func loadLatestWindow() async {
-        let totalCount = await loadTotalMessageCount()
+        let preferPendingConversationMessages = hasPendingInsertedMessagesInConversation
+        let totalCount = await loadTotalMessageCount(
+            preferPendingConversationMessages: preferPendingConversationMessages
+        )
         let startIndex = max(0, totalCount - configuration.visibleItemCount)
-        await loadWindow(startIndex: startIndex, endIndex: totalCount)
+        await loadWindow(
+            startIndex: startIndex,
+            endIndex: totalCount,
+            preferPendingConversationMessages: preferPendingConversationMessages
+        )
         scrollPosition = max(startIndex, totalCount - 1)
     }
 
@@ -177,7 +196,11 @@ final class VirtualScrollState: ObservableObject {
         }
     }
 
-    private func loadWindow(startIndex: Int, endIndex: Int) async {
+    private func loadWindow(
+        startIndex: Int,
+        endIndex: Int,
+        preferPendingConversationMessages: Bool = false
+    ) async {
         guard startIndex >= 0, endIndex >= startIndex else {
             return
         }
@@ -187,10 +210,9 @@ final class VirtualScrollState: ObservableObject {
         // Show placeholders while loading
         placeholderIndices = Set(startIndex..<endIndex)
 
-        let page = await pageLoader(
-            conversationId,
+        let page = await loadPage(
             startIndex..<endIndex,
-            makeBackgroundContext()
+            preferPendingConversationMessages: preferPendingConversationMessages
         )
 
         guard !Task.isCancelled else { return }
@@ -214,25 +236,45 @@ final class VirtualScrollState: ObservableObject {
         isLoadingMore = false
     }
 
-    private func initialMessageRange() async -> Range<Int> {
+    private func initialMessageRange(
+        preferPendingConversationMessages: Bool = false
+    ) async -> Range<Int> {
         switch initialWindowPosition {
         case .beginning:
             return 0..<configuration.visibleItemCount
         case .end:
-            let totalCount = await loadTotalMessageCount()
+            let totalCount = await loadTotalMessageCount(
+                preferPendingConversationMessages: preferPendingConversationMessages
+            )
             let startIndex = max(0, totalCount - configuration.visibleItemCount)
             return startIndex..<totalCount
         }
     }
 
-    private func loadTotalMessageCount() async -> Int {
-        let metadataPage = await pageLoader(
-            conversationId,
+    private func loadTotalMessageCount(
+        preferPendingConversationMessages: Bool = false
+    ) async -> Int {
+        let metadataPage = await loadPage(
             0..<0,
-            makeBackgroundContext()
+            preferPendingConversationMessages: preferPendingConversationMessages
         )
 
         return metadataPage.totalCount
+    }
+
+    private func loadPage(
+        _ range: Range<Int>,
+        preferPendingConversationMessages: Bool = false
+    ) async -> VirtualScrollMessagePage {
+        if preferPendingConversationMessages {
+            return await Self.loadPendingMessagePage(
+                conversationId: conversationId,
+                range: range,
+                in: viewContext
+            )
+        }
+
+        return await pageLoader(conversationId, range, makeBackgroundContext())
     }
 
     private func preloadIfNeeded() {
@@ -422,6 +464,7 @@ final class VirtualScrollState: ObservableObject {
             request.fetchOffset = range.lowerBound
             request.fetchLimit = range.count
             request.fetchBatchSize = 20
+            request.includesPendingChanges = true
             request.resultType = .managedObjectIDResultType
 
             let messageIDs = (try? context.fetch(request)) ?? []
@@ -430,9 +473,45 @@ final class VirtualScrollState: ObservableObject {
             // the main actor only resolves the IDs it actually needs to render.
             let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
             countRequest.predicate = safePredicate
+            countRequest.includesPendingChanges = true
             let totalCount = (try? context.count(for: countRequest)) ?? 0
 
             return VirtualScrollMessagePage(messageIDs: messageIDs, totalCount: totalCount)
+        }
+    }
+
+    nonisolated private static func loadPendingMessagePage(
+        conversationId: String,
+        range: Range<Int>,
+        in context: NSManagedObjectContext
+    ) async -> VirtualScrollMessagePage {
+        guard let conversationUUID = UUID(uuidString: conversationId) else {
+            return VirtualScrollMessagePage(messageIDs: [], totalCount: 0)
+        }
+
+        let predicate = NSPredicate(format: "conversation.id == %@", conversationUUID as CVarArg)
+        nonisolated(unsafe) let safePredicate = predicate
+
+        return await context.perform {
+            let request = NSFetchRequest<Message>(entityName: "Message")
+            request.predicate = safePredicate
+            request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: true)]
+            request.fetchOffset = range.lowerBound
+            request.fetchLimit = range.count
+            request.fetchBatchSize = 20
+            request.includesPendingChanges = true
+
+            let messages = (try? context.fetch(request)) ?? []
+
+            let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
+            countRequest.predicate = safePredicate
+            countRequest.includesPendingChanges = true
+            let totalCount = (try? context.count(for: countRequest)) ?? 0
+
+            return VirtualScrollMessagePage(
+                messageIDs: messages.map(\.objectID),
+                totalCount: totalCount
+            )
         }
     }
 }

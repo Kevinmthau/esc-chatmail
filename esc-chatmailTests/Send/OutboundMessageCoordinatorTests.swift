@@ -5,13 +5,16 @@ import CoreData
 @MainActor
 final class OutboundMessageCoordinatorTests: XCTestCase {
     private var coreDataStack: TestCoreDataStack!
+    private var htmlContentHandler: HTMLContentHandler!
 
     override func setUp() {
         super.setUp()
         coreDataStack = TestCoreDataStack()
+        htmlContentHandler = HTMLContentHandler()
     }
 
     override func tearDown() {
+        htmlContentHandler = nil
         coreDataStack = nil
         super.tearDown()
     }
@@ -75,29 +78,29 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         let completionExpectation = expectation(description: "reply send completes")
 
         let context = coreDataStack.viewContext
-        let conversation = ConversationBuilder()
-            .withDisplayName("Reply Thread")
-            .visible()
-            .recentlyActive()
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        let replyingTo = MessageBuilder()
+            .withId("message-1")
+            .withThreadId("thread-123")
+            .withSubject("Original Subject")
+            .withSender(email: "friend@example.com", name: "Friend")
+            .withBody("Original body")
+            .inConversation(conversation)
             .build(in: context)
+        try context.obtainPermanentIDs(for: [conversation, replyingTo])
+        replyingTo.messageId = "<message-1@example.com>"
+        replyingTo.references = "<older@example.com>"
+        _ = htmlContentHandler.saveHTML(
+            "<html><body><p>Original <strong>HTML</strong></p></body></html>",
+            for: replyingTo.id
+        )
 
         let submission = try await coordinator.send(
             .reply(
                 .init(
                     context: .init(
-                        metadata: .init(
-                            recipientEmails: ["friend@example.com"],
-                            subject: "Re: Original Subject",
-                            threadId: "thread-123",
-                            inReplyTo: "<message-1@example.com>",
-                            references: ["<older@example.com>", "<message-1@example.com>"],
-                            originalMessage: QuotedMessage(
-                                senderName: "Friend",
-                                senderEmail: "friend@example.com",
-                                date: Date(timeIntervalSince1970: 1_700_000_000),
-                                body: "Original body"
-                            )
-                        ),
+                        conversationObjectID: conversation.objectID,
+                        replyingToMessageObjectID: replyingTo.objectID,
                         optimisticConversation: .existingConversation(
                             ConversationReference(objectID: conversation.objectID)
                         )
@@ -133,10 +136,99 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.sendReplyCalls.first?.threadId, "thread-123")
         XCTAssertEqual(snapshot.sendReplyCalls.first?.inReplyTo, "<message-1@example.com>")
         XCTAssertEqual(snapshot.sendReplyCalls.first?.references, ["<older@example.com>", "<message-1@example.com>"])
+        XCTAssertEqual(snapshot.sendReplyCalls.first?.originalMessage?.senderEmail, "friend@example.com")
+        XCTAssertEqual(snapshot.sendReplyCalls.first?.originalMessage?.body, "Original body")
+        XCTAssertTrue(snapshot.sendReplyCalls.first?.originalMessage?.originalHTML?.contains("Original <strong>HTML</strong>") == true)
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
         XCTAssertEqual(mutationTracker.pendingMutationIDs, [queuedSubmission.optimisticMessageID])
         XCTAssertEqual(mutationTracker.trackedConversationReferences, [queuedSubmission.conversationReference])
         XCTAssertEqual(mutationTracker.successfulMutationIDs, [queuedSubmission.optimisticMessageID])
+    }
+
+    func testSend_replyUsesLatestConversationAndMessageValuesAfterRequestCreation() async throws {
+        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let syncPerformer = MockCoordinatorSyncPerformer()
+        let coordinator = makeCoordinator(sendService: sendService, syncPerformer: syncPerformer)
+        let completionExpectation = expectation(description: "reply send completes")
+
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "before@example.com")
+        let replyingTo = MessageBuilder()
+            .withId("message-1")
+            .withThreadId("thread-before")
+            .withSubject("Before Subject")
+            .withSender(email: "before@example.com", name: "Before Friend")
+            .withBody("Before body")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.obtainPermanentIDs(for: [conversation, replyingTo])
+        replyingTo.messageId = "<before@example.com>"
+        replyingTo.references = "<ref-before@example.com>"
+        _ = htmlContentHandler.saveHTML(
+            "<html><body><p>Before HTML</p></body></html>",
+            for: replyingTo.id
+        )
+
+        let request = OutboundMessageRequest.reply(
+            .init(
+                context: .init(
+                    conversationObjectID: conversation.objectID,
+                    replyingToMessageObjectID: replyingTo.objectID,
+                    optimisticConversation: .existingConversation(
+                        ConversationReference(objectID: conversation.objectID)
+                    )
+                ),
+                body: " Reply body ",
+                attachments: []
+            )
+        )
+
+        let updatedFriend = try XCTUnwrap(
+            Array(conversation.participants ?? [])
+                .compactMap(\.person)
+                .first { $0.email == "before@example.com" }
+        )
+        updatedFriend.email = "after@example.com"
+        updatedFriend.displayName = "After Friend"
+        replyingTo.gmThreadId = "thread-after"
+        replyingTo.subject = "After Subject"
+        replyingTo.messageId = "<after@example.com>"
+        replyingTo.references = "<ref-after@example.com>"
+        replyingTo.bodyText = "After body"
+        replyingTo.senderName = "After Friend"
+        replyingTo.senderEmail = "after@example.com"
+        _ = htmlContentHandler.saveHTML(
+            "<html><body><p>After HTML</p></body></html>",
+            for: replyingTo.id
+        )
+
+        let submission = try await coordinator.send(
+            request,
+            reconciliationHooks: .init(
+                onSuccess: { _ in completionExpectation.fulfill() },
+                onFailure: nil
+            )
+        )
+
+        let queuedSubmission = try XCTUnwrap(submission)
+        await fulfillment(of: [completionExpectation], timeout: 1.0)
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.createOptimisticCalls.first?.recipients, ["after@example.com"])
+        XCTAssertEqual(snapshot.createOptimisticCalls.first?.subject, "Re: After Subject")
+        XCTAssertEqual(snapshot.createOptimisticCalls.first?.threadId, "thread-after")
+        XCTAssertEqual(snapshot.sendReplyCalls.first?.recipients, ["after@example.com"])
+        XCTAssertEqual(snapshot.sendReplyCalls.first?.subject, "Re: After Subject")
+        XCTAssertEqual(snapshot.sendReplyCalls.first?.threadId, "thread-after")
+        XCTAssertEqual(snapshot.sendReplyCalls.first?.inReplyTo, "<after@example.com>")
+        XCTAssertEqual(snapshot.sendReplyCalls.first?.references, ["<ref-after@example.com>", "<after@example.com>"])
+        XCTAssertEqual(snapshot.sendReplyCalls.first?.originalMessage?.senderName, "After Friend")
+        XCTAssertEqual(snapshot.sendReplyCalls.first?.originalMessage?.senderEmail, "after@example.com")
+        XCTAssertEqual(snapshot.sendReplyCalls.first?.originalMessage?.body, "After body")
+        XCTAssertTrue(snapshot.sendReplyCalls.first?.originalMessage?.originalHTML?.contains("After HTML") == true)
+        XCTAssertFalse(snapshot.sendReplyCalls.first?.originalMessage?.originalHTML?.contains("Before HTML") == true)
+        XCTAssertEqual(snapshot.createOptimisticCalls.first?.optimisticConversation?.existingConversationReference, ConversationReference(objectID: conversation.objectID))
+        XCTAssertEqual(queuedSubmission.conversationReference, ConversationReference(objectID: conversation.objectID))
     }
 
     func testSend_forwardBuildsCombinedBodiesUsesInlineSnapshotsAndRunsSendNew() async throws {
@@ -275,8 +367,50 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
             sendService: sendService,
             syncPerformer: syncPerformer,
             messageFormatBuilder: MessageFormatBuilder(authSession: resolvedAuthSession),
+            outboundReplyContextBuilder: OutboundReplyContextBuilder(
+                viewContext: coreDataStack.viewContext,
+                replyMetadataBuilder: ReplyMetadataBuilder(authSession: resolvedAuthSession),
+                replyHTMLContentLoader: HTMLContentLoader(
+                    contentHandler: htmlContentHandler,
+                    sanitizer: .shared
+                )
+            ),
             mutationTracker: mutationTracker ?? MockOutboundSendMutationTracker()
         )
+    }
+
+    private func makeReplyConversation(
+        in context: NSManagedObjectContext,
+        friendEmail: String
+    ) -> Conversation {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Reply Thread")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+
+        let me = Person(context: context)
+        me.id = UUID()
+        me.email = "me@example.com"
+
+        let friend = Person(context: context)
+        friend.id = UUID()
+        friend.email = friendEmail
+        friend.displayName = "Friend"
+
+        let meParticipant = ConversationParticipant(context: context)
+        meParticipant.id = UUID()
+        meParticipant.person = me
+        meParticipant.participantRole = .normal
+        meParticipant.conversation = conversation
+
+        let friendParticipant = ConversationParticipant(context: context)
+        friendParticipant.id = UUID()
+        friendParticipant.person = friend
+        friendParticipant.participantRole = .normal
+        friendParticipant.conversation = conversation
+
+        return conversation
     }
 
     private func makeTestAuthSession(userEmail: String? = nil) -> AuthSession {
@@ -328,6 +462,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         let threadId: String
         let inReplyTo: String?
         let references: [String]
+        let originalMessage: QuotedMessage?
     }
 
     struct Snapshot {
@@ -437,7 +572,8 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
                     subject: subject,
                     threadId: threadId,
                     inReplyTo: inReplyTo,
-                    references: references
+                    references: references,
+                    originalMessage: originalMessage
                 )
             )
         }
