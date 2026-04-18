@@ -300,9 +300,8 @@ final class ConversationListViewModel: ObservableObject {
 
     /// Called when view disappears
     func onDisappear() {
-        conversationChangesCancellable?.cancel()
-        conversationChangesCancellable = nil
-        observedConversationContext = nil
+        // Keep observing Core Data changes across transient SwiftUI disappearances
+        // caused by sheets and navigation pushes so optimistic send updates are not missed.
         searchService.cleanup()
         selectionService.cancelTasks()
         filterService.cancelTasks()

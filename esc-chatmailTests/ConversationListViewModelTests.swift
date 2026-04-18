@@ -141,6 +141,25 @@ final class ConversationListViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.filteredConversationItems[1], initialItems[2])
     }
 
+    func testOnDisappear_keepsObservingConversationChangesForTransientNavigation() async throws {
+        let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
+        let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
+        try context.save()
+
+        let viewModel = ConversationListViewModel()
+        viewModel.onAppear(conversations: [alice, bob], in: context)
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID, bob.objectID])
+
+        viewModel.onDisappear()
+
+        bob.lastMessageDate = Date(timeIntervalSince1970: 400)
+        bob.snippet = "newest message"
+        context.processPendingChanges()
+
+        await waitForFilteredConversationIDs([bob.objectID, alice.objectID], in: viewModel)
+        XCTAssertEqual(viewModel.filteredConversationItems.first?.snapshot.snippet, "newest message")
+    }
+
     private func waitForFilteredConversationIDs(
         _ expectedIDs: [NSManagedObjectID],
         in viewModel: ConversationListViewModel,
