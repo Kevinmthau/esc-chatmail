@@ -89,6 +89,41 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertTrue(state.visibleMessages.allSatisfy { $0.managedObjectContext === self.viewContext })
     }
 
+    func testInitialLoadFromEnd_includesPendingOptimisticMessageFromViewContext() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+        let pendingMessage = try makePendingMessage(
+            id: "virtual-scroll-pending",
+            date: Date(timeIntervalSince1970: 8),
+            conversation: conversation
+        )
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        let expectedIDs = Array(messages.suffix(3)).map(\.objectID) + [pendingMessage.objectID]
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == expectedIDs &&
+                state.totalMessageCount == 9 &&
+                !state.isLoadingMore
+        }
+
+        XCTAssertEqual(state.visibleRangeStartIndex, 5)
+        XCTAssertEqual(state.scrollPosition, 5)
+    }
+
     func testInitialLoadFromEnd_doesNotLoadOlderWindowWhenTopOfTailFirstAppears() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 8)
         let configuration = VirtualScrollConfiguration(
@@ -183,6 +218,46 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertTrue(state.visibleMessages.allSatisfy { $0.managedObjectContext === self.viewContext })
     }
 
+    func testLoadLatestWindowIfNeeded_refreshesForPendingOptimisticMessage() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        let initialIDs = Array(messages.suffix(4)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
+        }
+
+        let pendingMessage = try makePendingMessage(
+            id: "virtual-scroll-pending-latest",
+            date: Date(timeIntervalSince1970: 8),
+            conversation: conversation
+        )
+
+        await state.loadLatestWindowIfNeeded()
+
+        let expectedIDs = Array(messages.suffix(3)).map(\.objectID) + [pendingMessage.objectID]
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == expectedIDs &&
+                state.totalMessageCount == 9 &&
+                !state.isLoadingMore
+        }
+    }
+
     private func makeConversationWithMessages(count: Int) throws -> (Conversation, [Message]) {
         let conversation = ConversationBuilder()
             .visible()
@@ -202,6 +277,23 @@ final class VirtualScrollStateTests: XCTestCase {
 
         try viewContext.save()
         return (conversation, messages)
+    }
+
+    private func makePendingMessage(
+        id: String,
+        date: Date,
+        conversation: Conversation
+    ) throws -> Message {
+        let message = MessageBuilder()
+            .withId(id)
+            .withSubject(id)
+            .withDate(date)
+            .inConversation(conversation)
+            .build(in: viewContext)
+
+        try viewContext.obtainPermanentIDs(for: [message])
+        viewContext.processPendingChanges()
+        return message
     }
 
     private func waitUntil(
