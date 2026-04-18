@@ -70,9 +70,30 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         </html>
         """
 
-        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false)
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
 
         XCTAssertTrue(result.contains("body { font-family: Georgia, serif; font-size: 19px; }"))
+        XCTAssertFalse(result.contains(appleMailFallbackFontStack))
+    }
+
+    func testWrapHTMLForDisplay_existingDocumentWithMultilineBodyStyle_keepsAuthorTypography() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body
+            style="
+                color: #222222;
+                font-family: Georgia, serif;
+            "
+        >
+            <p>Hello</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains("font-family: Georgia, serif;"))
         XCTAssertFalse(result.contains(appleMailFallbackFontStack))
     }
 
@@ -89,6 +110,76 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
 
         XCTAssertTrue(result.contains("font: 16px Georgia, serif;"))
+        XCTAssertFalse(result.contains(appleMailFallbackFontStack))
+    }
+
+    func testWrapHTMLForDisplay_existingDocumentWithMultilineHTMLStyleFontShorthand_keepsAuthorTypography() {
+        let html = """
+        <!DOCTYPE html>
+        <html
+            style="
+                color: #111111;
+                font: italic 17px Georgia, serif;
+            "
+        >
+        <body>
+            <p>Hello</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains("font: italic 17px Georgia, serif;"))
+        XCTAssertFalse(result.contains(appleMailFallbackFontStack))
+    }
+
+    func testWrapHTMLForDisplay_existingDocumentWithOnlyRootCustomProperties_usesAppleMailFallbackTypography() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                :root {
+                    --body-font: Georgia, serif;
+                    --font-family: "Avenir Next", sans-serif;
+                }
+            </style>
+        </head>
+        <body>
+            <p>Hello</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(appleMailFallbackFontStack))
+        XCTAssertEqual(result.components(separatedBy: appleMailFallbackFontStack).count - 1, 1)
+    }
+
+    func testWrapHTMLForDisplay_existingDocumentWithRootStylesheetFontRule_keepsAuthorTypography() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                html,
+                body {
+                    color: #111111;
+                    font-family: Georgia, serif;
+                }
+            </style>
+        </head>
+        <body>
+            <p>Hello</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains("font-family: Georgia, serif;"))
         XCTAssertFalse(result.contains(appleMailFallbackFontStack))
     }
 
@@ -156,5 +247,35 @@ final class HTMLDisplayWrapperTests: XCTestCase {
 
         XCTAssertEqual(fragmentResult.components(separatedBy: appleMailFallbackFontStack).count - 1, 1)
         XCTAssertEqual(documentResult.components(separatedBy: appleMailFallbackFontStack).count - 1, 1)
+    }
+
+    func testWrapHTMLForDisplay_equivalentFragmentAndDocumentInputsWithAuthoredRootTypography_shareBehavior() {
+        let fragmentHTML = """
+        <style>
+            body {
+                font-family: Georgia, serif;
+            }
+        </style>
+        <div>Hello</div>
+        """
+        let documentHTML = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {
+                    font-family: Georgia, serif;
+                }
+            </style>
+        </head>
+        <body><div>Hello</div></body>
+        </html>
+        """
+
+        let fragmentResult = sut.wrapHTMLForDisplay(fragmentHTML, isDarkMode: false, displayPurpose: .original)
+        let documentResult = sut.wrapHTMLForDisplay(documentHTML, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertFalse(fragmentResult.contains(appleMailFallbackFontStack))
+        XCTAssertFalse(documentResult.contains(appleMailFallbackFontStack))
     }
 }

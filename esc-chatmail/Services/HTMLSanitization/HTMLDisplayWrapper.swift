@@ -9,6 +9,413 @@ enum HTMLDisplayPurpose: String, CaseIterable, Sendable {
 /// Designed to match Apple Mail's rendering behavior as closely as possible
 struct HTMLDisplayWrapper {
     private static let appleMailFallbackFontStack = "-apple-system, BlinkMacSystemFont, \"Helvetica Neue\", Helvetica, Arial, sans-serif"
+    private struct RootTypographyDetector {
+        // swiftlint:disable:next force_try
+        private static let rootElementTagRegex = try! NSRegularExpression(
+            pattern: #"<(html|body)\b([^>]*)>"#,
+            options: .caseInsensitive
+        )
+
+        // swiftlint:disable:next force_try
+        private static let styleAttributeRegex = try! NSRegularExpression(
+            pattern: #"\bstyle\s*=\s*(?:"([\s\S]*?)"|'([\s\S]*?)')"#,
+            options: .caseInsensitive
+        )
+
+        // swiftlint:disable:next force_try
+        private static let styleTagRegex = try! NSRegularExpression(
+            pattern: #"<style\b[^>]*>([\s\S]*?)</style>"#,
+            options: .caseInsensitive
+        )
+
+        // swiftlint:disable:next force_try
+        private static let rootTypeSelectorRegex = try! NSRegularExpression(
+            pattern: #"^(?:[A-Za-z_][A-Za-z0-9_-]*\|)?(?:html|body)(?=$|[.#\[:])"#,
+            options: .caseInsensitive
+        )
+
+        static func containsAuthoredTypography(in html: String) -> Bool {
+            containsRootInlineTypography(in: html) || containsRootStylesheetTypography(in: html)
+        }
+
+        private static func containsRootInlineTypography(in html: String) -> Bool {
+            let range = NSRange(html.startIndex..., in: html)
+            let matches = rootElementTagRegex.matches(in: html, range: range)
+
+            for match in matches {
+                guard let attributesRange = Range(match.range(at: 2), in: html) else {
+                    continue
+                }
+
+                let attributes = String(html[attributesRange])
+                if let inlineStyle = styleAttribute(in: attributes),
+                   containsTypographyDeclaration(in: inlineStyle) {
+                    return true
+                }
+            }
+
+            return false
+        }
+
+        private static func containsRootStylesheetTypography(in html: String) -> Bool {
+            let range = NSRange(html.startIndex..., in: html)
+            let matches = styleTagRegex.matches(in: html, range: range)
+
+            for match in matches {
+                guard let cssRange = Range(match.range(at: 1), in: html) else {
+                    continue
+                }
+
+                let css = stripComments(from: String(html[cssRange]))
+                if containsRootTypographyRule(in: css) {
+                    return true
+                }
+            }
+
+            return false
+        }
+
+        private static func styleAttribute(in attributes: String) -> String? {
+            let range = NSRange(attributes.startIndex..., in: attributes)
+            guard let match = styleAttributeRegex.firstMatch(in: attributes, range: range) else {
+                return nil
+            }
+
+            if let doubleQuotedRange = Range(match.range(at: 1), in: attributes) {
+                return String(attributes[doubleQuotedRange])
+            }
+
+            if let singleQuotedRange = Range(match.range(at: 2), in: attributes) {
+                return String(attributes[singleQuotedRange])
+            }
+
+            return nil
+        }
+
+        private static func containsRootTypographyRule(in css: String) -> Bool {
+            var currentIndex = css.startIndex
+
+            while let block = nextCSSBlock(in: css, from: currentIndex) {
+                let prelude = block.prelude.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !prelude.isEmpty {
+                    if prelude.hasPrefix("@") {
+                        if nextCSSBlock(in: block.body, from: block.body.startIndex) != nil,
+                           containsRootTypographyRule(in: block.body) {
+                            return true
+                        }
+                    } else if selectorsTargetRoot(prelude),
+                              containsTypographyDeclaration(in: block.body) {
+                        return true
+                    }
+                }
+
+                currentIndex = block.nextIndex
+            }
+
+            return false
+        }
+
+        private static func selectorsTargetRoot(_ selectors: String) -> Bool {
+            splitTopLevel(selectors, on: ",").contains { selector in
+                let compound = lastCompoundSelector(in: selector)
+                return compoundTargetsRoot(compound)
+            }
+        }
+
+        private static func compoundTargetsRoot(_ compound: String) -> Bool {
+            let trimmed = compound.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                return false
+            }
+
+            // Pseudo-elements do not set typography on the root element itself.
+            guard !trimmed.contains("::") else {
+                return false
+            }
+
+            let lowercased = trimmed.lowercased()
+            if lowercased.hasPrefix(":root") || lowercased.hasPrefix("*:root") {
+                return true
+            }
+
+            let range = NSRange(trimmed.startIndex..., in: trimmed)
+            return rootTypeSelectorRegex.firstMatch(in: trimmed, range: range) != nil
+        }
+
+        private static func containsTypographyDeclaration(in declarations: String) -> Bool {
+            splitTopLevel(declarations, on: ";").contains { declaration in
+                guard let separatorIndex = firstTopLevelColon(in: declaration) else {
+                    return false
+                }
+
+                let property = declaration[..<separatorIndex]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                let value = declaration[declaration.index(after: separatorIndex)...]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                guard !value.isEmpty else {
+                    return false
+                }
+
+                return property == "font" || property == "font-family"
+            }
+        }
+
+        private static func splitTopLevel(_ text: String, on separator: Character) -> [String] {
+            var segments: [String] = []
+            var segmentStart = text.startIndex
+            var index = text.startIndex
+            var quoteCharacter: Character?
+            var parenthesesDepth = 0
+            var bracketDepth = 0
+
+            while index < text.endIndex {
+                let character = text[index]
+
+                if let activeQuote = quoteCharacter {
+                    if character == "\\" {
+                        index = text.index(after: index)
+                    } else if character == activeQuote {
+                        quoteCharacter = nil
+                    }
+                } else {
+                    switch character {
+                    case "\"", "'":
+                        quoteCharacter = character
+                    case "(":
+                        parenthesesDepth += 1
+                    case ")":
+                        parenthesesDepth = max(0, parenthesesDepth - 1)
+                    case "[":
+                        bracketDepth += 1
+                    case "]":
+                        bracketDepth = max(0, bracketDepth - 1)
+                    default:
+                        if character == separator && parenthesesDepth == 0 && bracketDepth == 0 {
+                            segments.append(String(text[segmentStart..<index]))
+                            segmentStart = text.index(after: index)
+                        }
+                    }
+                }
+
+                index = text.index(after: index)
+            }
+
+            segments.append(String(text[segmentStart...]))
+            return segments
+        }
+
+        private static func firstTopLevelColon(in text: String) -> String.Index? {
+            var index = text.startIndex
+            var quoteCharacter: Character?
+            var parenthesesDepth = 0
+            var bracketDepth = 0
+
+            while index < text.endIndex {
+                let character = text[index]
+
+                if let activeQuote = quoteCharacter {
+                    if character == "\\" {
+                        index = text.index(after: index)
+                    } else if character == activeQuote {
+                        quoteCharacter = nil
+                    }
+                } else {
+                    switch character {
+                    case "\"", "'":
+                        quoteCharacter = character
+                    case "(":
+                        parenthesesDepth += 1
+                    case ")":
+                        parenthesesDepth = max(0, parenthesesDepth - 1)
+                    case "[":
+                        bracketDepth += 1
+                    case "]":
+                        bracketDepth = max(0, bracketDepth - 1)
+                    case ":" where parenthesesDepth == 0 && bracketDepth == 0:
+                        return index
+                    default:
+                        break
+                    }
+                }
+
+                index = text.index(after: index)
+            }
+
+            return nil
+        }
+
+        private static func lastCompoundSelector(in selector: String) -> String {
+            var compounds: [String] = []
+            var current = ""
+            var index = selector.startIndex
+            var quoteCharacter: Character?
+            var parenthesesDepth = 0
+            var bracketDepth = 0
+
+            while index < selector.endIndex {
+                let character = selector[index]
+
+                if let activeQuote = quoteCharacter {
+                    current.append(character)
+
+                    if character == "\\" {
+                        index = selector.index(after: index)
+                        if index < selector.endIndex {
+                            current.append(selector[index])
+                        }
+                    } else if character == activeQuote {
+                        quoteCharacter = nil
+                    }
+                } else {
+                    switch character {
+                    case "\"", "'":
+                        quoteCharacter = character
+                        current.append(character)
+                    case "(":
+                        parenthesesDepth += 1
+                        current.append(character)
+                    case ")":
+                        parenthesesDepth = max(0, parenthesesDepth - 1)
+                        current.append(character)
+                    case "[":
+                        bracketDepth += 1
+                        current.append(character)
+                    case "]":
+                        bracketDepth = max(0, bracketDepth - 1)
+                        current.append(character)
+                    default:
+                        if (character == ">" || character == "+" || character == "~")
+                            && parenthesesDepth == 0
+                            && bracketDepth == 0 {
+                            flushSelectorCompound(&compounds, current: &current)
+                        } else if character.isWhitespace && parenthesesDepth == 0 && bracketDepth == 0 {
+                            flushSelectorCompound(&compounds, current: &current)
+                        } else {
+                            current.append(character)
+                        }
+                    }
+                }
+
+                index = selector.index(after: index)
+            }
+
+            flushSelectorCompound(&compounds, current: &current)
+            return compounds.last ?? selector
+        }
+
+        private static func flushSelectorCompound(_ compounds: inout [String], current: inout String) {
+            let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                compounds.append(trimmed)
+            }
+            current.removeAll(keepingCapacity: true)
+        }
+
+        private static func stripComments(from css: String) -> String {
+            var result = ""
+            var index = css.startIndex
+            var quoteCharacter: Character?
+
+            while index < css.endIndex {
+                let character = css[index]
+
+                if let activeQuote = quoteCharacter {
+                    result.append(character)
+                    if character == "\\" {
+                        index = css.index(after: index)
+                        if index < css.endIndex {
+                            result.append(css[index])
+                        }
+                    } else if character == activeQuote {
+                        quoteCharacter = nil
+                    }
+                    index = css.index(after: index)
+                    continue
+                }
+
+                if character == "/" {
+                    let nextIndex = css.index(after: index)
+                    if nextIndex < css.endIndex && css[nextIndex] == "*" {
+                        index = css.index(after: nextIndex)
+                        while index < css.endIndex {
+                            if css[index] == "*" {
+                                let possibleEnd = css.index(after: index)
+                                if possibleEnd < css.endIndex && css[possibleEnd] == "/" {
+                                    index = css.index(after: possibleEnd)
+                                    break
+                                }
+                            }
+                            index = css.index(after: index)
+                        }
+                        continue
+                    }
+                }
+
+                if character == "\"" || character == "'" {
+                    quoteCharacter = character
+                }
+
+                result.append(character)
+                index = css.index(after: index)
+            }
+
+            return result
+        }
+
+        private static func nextCSSBlock(
+            in css: String,
+            from startIndex: String.Index
+        ) -> (prelude: String, body: String, nextIndex: String.Index)? {
+            var index = startIndex
+            var quoteCharacter: Character?
+            var braceDepth = 0
+            let preludeStart = startIndex
+            var preludeEnd: String.Index?
+            var blockStart: String.Index?
+
+            while index < css.endIndex {
+                let character = css[index]
+
+                if let activeQuote = quoteCharacter {
+                    if character == "\\" {
+                        index = css.index(after: index)
+                    } else if character == activeQuote {
+                        quoteCharacter = nil
+                    }
+                } else {
+                    switch character {
+                    case "\"", "'":
+                        quoteCharacter = character
+                    case "{":
+                        if braceDepth == 0 {
+                            preludeEnd = index
+                            blockStart = css.index(after: index)
+                        }
+                        braceDepth += 1
+                    case "}":
+                        guard braceDepth > 0, let blockStart else {
+                            break
+                        }
+
+                        braceDepth -= 1
+                        if braceDepth == 0, let preludeEnd {
+                            let prelude = String(css[preludeStart..<preludeEnd]).trimmingCharacters(in: .whitespacesAndNewlines)
+                            let body = String(css[blockStart..<index])
+                            return (prelude, body, css.index(after: index))
+                        }
+                    default:
+                        break
+                    }
+                }
+
+                index = css.index(after: index)
+            }
+
+            return nil
+        }
+    }
 
     struct Theme: Equatable, Sendable {
         let backgroundColorHex: String
@@ -43,6 +450,10 @@ struct HTMLDisplayWrapper {
         // Content is pre-sanitized by HTMLSanitizerService, so we just wrap it
         let sanitized = html
         let theme = Self.theme(isDarkMode: isDarkMode, displayPurpose: displayPurpose)
+        let fallbackTypographyCSS = originalFallbackTypographyCSSIfNeeded(
+            for: sanitized,
+            displayPurpose: displayPurpose
+        )
 
         // Check if HTML already has a complete document structure
         let hasDoctype = html.lowercased().contains("<!doctype")
@@ -54,7 +465,8 @@ struct HTMLDisplayWrapper {
                 sanitized,
                 isDarkMode: isDarkMode,
                 theme: theme,
-                displayPurpose: displayPurpose
+                displayPurpose: displayPurpose,
+                fallbackTypographyCSS: fallbackTypographyCSS
             )
         }
 
@@ -63,7 +475,8 @@ struct HTMLDisplayWrapper {
             sanitized,
             isDarkMode: isDarkMode,
             theme: theme,
-            displayPurpose: displayPurpose
+            displayPurpose: displayPurpose,
+            fallbackTypographyCSS: fallbackTypographyCSS
         )
     }
 
@@ -72,7 +485,8 @@ struct HTMLDisplayWrapper {
         _ html: String,
         isDarkMode: Bool,
         theme: Theme,
-        displayPurpose: HTMLDisplayPurpose
+        displayPurpose: HTMLDisplayPurpose,
+        fallbackTypographyCSS: String
     ) -> String {
         // Inject our viewport meta, CSP, and minimal styles into the existing document
         // This preserves the email's original <style> tags and media queries
@@ -96,7 +510,7 @@ struct HTMLDisplayWrapper {
                 margin: 0;
                 padding: 8px;
                 background-color: \(theme.backgroundColorHex);
-                \(originalFallbackTypographyCSSIfNeeded(for: html, displayPurpose: displayPurpose))
+                \(fallbackTypographyCSS)
             }
             /* Only constrain images that would overflow */
             img {
@@ -144,7 +558,8 @@ struct HTMLDisplayWrapper {
         _ html: String,
         isDarkMode: Bool,
         theme: Theme,
-        displayPurpose: HTMLDisplayPurpose
+        displayPurpose: HTMLDisplayPurpose,
+        fallbackTypographyCSS: String
     ) -> String {
         let shouldApplyDarkModeFallbackText = isDarkMode && displayPurpose == .preview
         let originalColorSchemeHead = colorSchemeHead(for: displayPurpose)
@@ -173,7 +588,7 @@ struct HTMLDisplayWrapper {
                     padding: 8px;
                     margin: 0;
                     word-wrap: break-word;
-                    \(originalFallbackTypographyCSSIfNeeded(for: html, displayPurpose: displayPurpose))
+                    \(fallbackTypographyCSS)
                 }
                 /* Constrain images without breaking layout */
                 img {
@@ -233,15 +648,7 @@ struct HTMLDisplayWrapper {
     }
 
     private func documentDefinesOriginalTypography(in html: String) -> Bool {
-        let inlineDocumentFontPattern = #"<(?:html|body)\b[^>]*\bstyle\s*=\s*(['"]).*?\bfont(?:-family)?\s*:[\s\S]*?\1"#
-        let styleBlockDocumentFontPattern = #"<style\b[^>]*>[\s\S]*?(?:\bhtml\b|\bbody\b|:root)\b[^{]*\{[^}]*\bfont(?:-family)?\s*:"#
-
-        return matches(pattern: inlineDocumentFontPattern, in: html)
-            || matches(pattern: styleBlockDocumentFontPattern, in: html)
-    }
-
-    private func matches(pattern: String, in html: String) -> Bool {
-        html.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+        RootTypographyDetector.containsAuthoredTypography(in: html)
     }
 
     private func colorSchemeHead(for displayPurpose: HTMLDisplayPurpose) -> String {
