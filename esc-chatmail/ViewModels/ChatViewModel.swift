@@ -53,27 +53,25 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Initialization
 
-    /// Primary initializer using Dependencies container
-    init(conversation: Conversation, deps: Dependencies? = nil) {
-        let dependencies = deps ?? .shared
+    init(conversation: Conversation, chatDependencies: ChatDependencies) {
         self.conversation = conversation
-        self.authSession = dependencies.authSession
-        self.htmlContentHandler = dependencies.htmlContentHandler
-        self.participantLoader = dependencies.participantLoader
+        self.authSession = chatDependencies.authSession
+        self.htmlContentHandler = chatDependencies.htmlContentHandler
+        self.participantLoader = chatDependencies.participantLoader
         self.conversationObjectID = conversation.objectID
         self.conversationContext = conversation.managedObjectContext
         self.conversationDisplayNameHint = conversation.displayName
         self.replyOptimisticConversation = .existingConversation(
             ConversationReference(objectID: conversation.objectID)
         )
-        self.processedTextCache = dependencies.processedTextCache
-        self.contactsResolver = dependencies.contactsResolver
-        self.messageActions = dependencies.makeMessageActions()
-        self.outboundMessageCoordinator = dependencies.makeOutboundMessageCoordinator()
-        self.outboundAttachmentContextBuilder = dependencies.makeOutboundAttachmentContextBuilder()
-        self.outboundReplyContextBuilder = dependencies.makeOutboundReplyContextBuilder()
-        self.composeForwardModeContextBuilder = dependencies.makeComposeForwardModeContextBuilder()
-        self.contactManager = dependencies.makeChatContactManager()
+        self.processedTextCache = chatDependencies.processedTextCache
+        self.contactsResolver = chatDependencies.contactsResolver
+        self.messageActions = chatDependencies.messageActions
+        self.outboundMessageCoordinator = chatDependencies.outboundMessageCoordinator
+        self.outboundAttachmentContextBuilder = chatDependencies.outboundAttachmentContextBuilder
+        self.outboundReplyContextBuilder = chatDependencies.outboundReplyContextBuilder
+        self.composeForwardModeContextBuilder = chatDependencies.composeForwardModeContextBuilder
+        self.contactManager = chatDependencies.makeChatContactManager()
 
         // Forward child observable changes to trigger view updates
         forwardChanges(from: contactManager, storing: &cancellables)

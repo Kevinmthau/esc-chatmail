@@ -42,13 +42,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     init(
         scrollState: VirtualScrollState,
         viewModel: ChatViewModel,
-        participantLoader: ParticipantLoader,
-        invalidateContactsCache: @escaping AsyncAction = {
-            await ContactsResolver.shared.invalidateAllCache()
-        },
-        clearPersonCache: @escaping AsyncAction = {
-            await PersonCache.shared.clearCache()
-        },
+        chatDependencies: ChatDependencies,
         sleep: @escaping Sleep = { nanoseconds in
             try? await Task.sleep(nanoseconds: nanoseconds)
         }
@@ -75,10 +69,10 @@ final class ChatMessagesCoordinator: ObservableObject {
             viewModel.cancelPrefetch()
         }
         self.loadSenderGroupingKeys = { senderEmails in
-            await participantLoader.senderGroupingKeys(for: senderEmails)
+            await chatDependencies.participantLoader.senderGroupingKeys(for: senderEmails)
         }
-        self.invalidateContactsCache = invalidateContactsCache
-        self.clearPersonCache = clearPersonCache
+        self.invalidateContactsCache = chatDependencies.invalidateContactsCache
+        self.clearPersonCache = chatDependencies.clearPersonCache
         self.sleep = sleep
     }
 

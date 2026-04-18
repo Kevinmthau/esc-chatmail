@@ -43,12 +43,12 @@ struct ConversationRowView: View {
         snapshot: ConversationSnapshot,
         conversationObjectID: NSManagedObjectID,
         conversationContext: NSManagedObjectContext,
-        deps: Dependencies? = nil
+        currentUserEmail: String,
+        participantLoader: ParticipantLoader
     ) {
-        let resolvedDeps = deps ?? Dependencies.shared
         self.snapshot = snapshot
-        self.currentUserEmail = resolvedDeps.authSession.userEmail ?? ""
-        self.participantLoader = resolvedDeps.participantLoader
+        self.currentUserEmail = currentUserEmail
+        self.participantLoader = participantLoader
         self.conversationObjectID = conversationObjectID
         self.conversationContext = conversationContext
     }

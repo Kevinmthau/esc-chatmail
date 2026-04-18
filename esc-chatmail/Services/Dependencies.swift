@@ -188,6 +188,38 @@ final class Dependencies: ObservableObject {
         ChatContactManager()
     }
 
+    func makeChatDependencies() -> ChatDependencies {
+        let contactsResolver = self.contactsResolver
+        let personCache = self.personCache
+
+        return ChatDependencies(
+            authSession: authSession,
+            participantLoader: participantLoader,
+            htmlContentHandler: htmlContentHandler,
+            processedTextCache: processedTextCache,
+            contactsResolver: contactsResolver,
+            messageActions: makeMessageActions(),
+            outboundMessageCoordinator: makeOutboundMessageCoordinator(),
+            outboundAttachmentContextBuilder: makeOutboundAttachmentContextBuilder(),
+            outboundReplyContextBuilder: makeOutboundReplyContextBuilder(),
+            composeForwardModeContextBuilder: makeComposeForwardModeContextBuilder(),
+            messageBubbleLoader: makeMessageBubbleLoader(),
+            viewContext: viewContext,
+            makeBackgroundContext: { [coreDataStack] in
+                coreDataStack.newBackgroundContext()
+            },
+            makeChatContactManager: { ChatContactManager() },
+            invalidateContactsCache: {
+                if let contactsResolver = contactsResolver as? ContactsResolver {
+                    await contactsResolver.invalidateAllCache()
+                }
+            },
+            clearPersonCache: {
+                await personCache.clearCache()
+            }
+        )
+    }
+
     func makeRecipientManager() -> RecipientManager {
         RecipientManager()
     }

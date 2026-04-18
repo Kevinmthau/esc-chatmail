@@ -6,8 +6,8 @@ struct OptimizedConversationRow: View {
     let snapshot: ConversationSnapshot
     let onAppear: () -> Void
 
-    private let authSession = AuthSession.shared
-    private let participantLoader = ParticipantLoader.shared
+    private let currentUserEmail: String
+    private let participantLoader: ParticipantLoader
     private let conversationObjectID: NSManagedObjectID
     private let conversationContext: NSManagedObjectContext?
     private let fallbackDisplayName: String?
@@ -17,8 +17,15 @@ struct OptimizedConversationRow: View {
     @State private var participantNames: [String] = []
 
     @MainActor
-    init(conversation: Conversation, onAppear: @escaping () -> Void) {
+    init(
+        conversation: Conversation,
+        currentUserEmail: String,
+        participantLoader: ParticipantLoader,
+        onAppear: @escaping () -> Void
+    ) {
         self.snapshot = ConversationSnapshot(from: conversation)
+        self.currentUserEmail = currentUserEmail
+        self.participantLoader = participantLoader
         self.onAppear = onAppear
         self.conversationObjectID = conversation.objectID
         self.conversationContext = conversation.managedObjectContext
@@ -88,13 +95,12 @@ struct OptimizedConversationRow: View {
     }
 
     private func loadContactInfo() async {
-        let myEmail = authSession.userEmail ?? ""
         guard let conversationContext else { return }
 
         let info = await participantLoader.loadParticipants(
             from: conversationObjectID,
             in: conversationContext,
-            currentUserEmail: myEmail,
+            currentUserEmail: currentUserEmail,
             maxParticipants: 4,
             fallbackDisplayName: fallbackDisplayName
         )

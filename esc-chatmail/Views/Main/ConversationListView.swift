@@ -84,8 +84,15 @@ struct ConversationListView: View {
         .scrollDismissesKeyboard(.interactively)
         .navigationTitle(viewModel.isSelecting ? "\(viewModel.selectedConversationIDs.count) Selected" : "Chats")
         .navigationDestination(item: $selectedConversation) { conversation in
-            ChatView(conversation: conversation, deps: deps)
-                .id(conversation.objectID)
+            let chatDependencies = deps.makeChatDependencies()
+            ChatView(
+                conversation: conversation,
+                chatDependencies: chatDependencies,
+                makeForwardComposeView: { context in
+                    ComposeView(mode: .forward(context), deps: deps)
+                }
+            )
+            .id(conversation.objectID)
         }
         .toolbar { toolbarContent }
         .refreshable { await viewModel.performSync() }
@@ -116,7 +123,8 @@ struct ConversationListView: View {
             snapshot: item.snapshot,
             conversationObjectID: item.id,
             conversationContext: viewContext,
-            deps: deps
+            currentUserEmail: deps.authSession.userEmail ?? "",
+            participantLoader: deps.participantLoader
         )
     }
 

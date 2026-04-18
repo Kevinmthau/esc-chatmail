@@ -6,7 +6,8 @@ import UIKit
 struct ChatView: View {
     @ObservedObject var conversation: Conversation
     @StateObject private var viewModel: ChatViewModel
-    @EnvironmentObject private var deps: Dependencies
+    private let chatDependencies: ChatDependencies
+    private let makeForwardComposeView: @MainActor (ComposeForwardModeContext) -> ComposeView
 
     @FetchRequest private var messages: FetchedResults<Message>
     @FocusState private var isTextFieldFocused: Bool
@@ -14,10 +15,19 @@ struct ChatView: View {
     @Environment(\.openURL) private var openURL
 
     @MainActor
-    init(conversation: Conversation, deps: Dependencies? = nil) {
-        let resolvedDeps = deps ?? Dependencies.shared
+    init(
+        conversation: Conversation,
+        chatDependencies: ChatDependencies,
+        makeForwardComposeView: @escaping @MainActor (ComposeForwardModeContext) -> ComposeView = { context in
+            ComposeView(mode: .forward(context))
+        }
+    ) {
         self.conversation = conversation
-        self._viewModel = StateObject(wrappedValue: ChatViewModel(conversation: conversation, deps: resolvedDeps))
+        self.chatDependencies = chatDependencies
+        self.makeForwardComposeView = makeForwardComposeView
+        self._viewModel = StateObject(
+            wrappedValue: ChatViewModel(conversation: conversation, chatDependencies: chatDependencies)
+        )
 
         let request = NSFetchRequest<Message>(entityName: "Message")
         request.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: true)]
@@ -47,7 +57,7 @@ struct ChatView: View {
             conversation: conversation,
             messages: messages,
             viewModel: viewModel,
-            deps: deps,
+            chatDependencies: chatDependencies,
             isTextFieldFocused: $isTextFieldFocused,
             onOpenFullMessage: { message in
                 viewModel.openFullMessage(message)
@@ -88,7 +98,7 @@ struct ChatView: View {
             }
         }
         .sheet(item: $viewModel.forwardComposeContext) { context in
-            ComposeView(mode: .forward(context), deps: deps)
+            makeForwardComposeView(context)
         }
         .sheet(item: $viewModel.messageToViewInFull, onDismiss: {
             viewModel.dismissFullMessage()
@@ -113,7 +123,7 @@ struct ChatView: View {
         .sheet(isPresented: $viewModel.contactManager.showingParticipantsList) {
             ParticipantsListView(
                 conversation: conversation,
-                deps: deps,
+                chatDependencies: chatDependencies,
                 onCreateNewContact: { person in
                     viewModel.contactManager.createNewContact(for: person)
                 },

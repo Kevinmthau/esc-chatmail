@@ -14,6 +14,7 @@ struct MessageBubble: View {
     var isLastFromSender: Bool = true
     /// Display style configuration
     var style: MessageBubbleStyle = .standard
+    private let htmlContentHandler: HTMLContentHandler
 
     @StateObject private var viewModel: MessageBubbleViewModel
     let onOpenFullMessage: (Message) -> Void
@@ -40,7 +41,8 @@ struct MessageBubble: View {
     init(
         message: Message,
         conversation: Conversation,
-        deps: Dependencies? = nil,
+        messageBubbleLoader: any MessageBubbleLoading,
+        htmlContentHandler: HTMLContentHandler,
         prefetchedSenderName: String? = nil,
         isEffectivelyOneToOneConversation: Bool? = nil,
         contactRefreshToken: Int = 0,
@@ -48,16 +50,16 @@ struct MessageBubble: View {
         style: MessageBubbleStyle = .standard,
         onOpenFullMessage: @escaping (Message) -> Void
     ) {
-        let resolvedDeps = deps ?? Dependencies.shared
         self.message = message
         self.conversation = conversation
+        self.htmlContentHandler = htmlContentHandler
         self.prefetchedSenderName = prefetchedSenderName
         self.isEffectivelyOneToOneConversation = isEffectivelyOneToOneConversation
         self.contactRefreshToken = contactRefreshToken
         self.isLastFromSender = isLastFromSender
         self.style = style
         self.onOpenFullMessage = onOpenFullMessage
-        self._viewModel = StateObject(wrappedValue: MessageBubbleViewModel(deps: resolvedDeps))
+        self._viewModel = StateObject(wrappedValue: MessageBubbleViewModel(loader: messageBubbleLoader))
     }
 
     var body: some View {
@@ -255,7 +257,7 @@ struct MessageBubble: View {
             bodyText: message.bodyTextValue,
             snippet: message.snippet,
             hasHTMLSource: message.hasHTMLSource,
-            htmlFileSignature: HTMLContentHandler.shared.htmlFileSignature(for: message.id),
+            htmlFileSignature: htmlContentHandler.htmlFileSignature(for: message.id),
             contactRefreshToken: contactRefreshToken
         )
     }
