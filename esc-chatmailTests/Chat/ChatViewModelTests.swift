@@ -41,7 +41,10 @@ final class ChatViewModelTests: XCTestCase {
             .inConversation(conversation)
             .build(in: context)
 
-        let viewModel = ChatViewModel(conversation: conversation, deps: deps)
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies()
+        )
 
         viewModel.openFullMessage(message)
 
@@ -63,7 +66,10 @@ final class ChatViewModelTests: XCTestCase {
             .inConversation(conversation)
             .build(in: context)
 
-        let viewModel = ChatViewModel(conversation: conversation, deps: deps)
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies()
+        )
         viewModel.openFullMessage(message)
 
         viewModel.dismissFullMessage()
@@ -151,7 +157,10 @@ final class ChatViewModelTests: XCTestCase {
             .forMessage(message)
             .build(in: context)
 
-        let viewModel = ChatViewModel(conversation: conversation, deps: deps)
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies()
+        )
 
         viewModel.setMessageToForward(message)
 
@@ -218,7 +227,10 @@ final class ChatViewModelTests: XCTestCase {
             for: replyTarget.id
         )
 
-        let viewModel = ChatViewModel(conversation: conversation, deps: deps)
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies()
+        )
         viewModel.replyText = "Reply body"
         viewModel.replyingTo = replyTarget
 
@@ -287,7 +299,10 @@ final class ChatViewModelTests: XCTestCase {
         replyTarget.messageId = "<message-1@example.com>"
         replyTarget.references = "<older@example.com>"
 
-        let viewModel = ChatViewModel(conversation: conversation, deps: deps)
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies()
+        )
         viewModel.replyingTo = replyTarget
         viewModel.replyText = "Reply body"
 

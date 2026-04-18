@@ -6,16 +6,19 @@ import Combine
 struct VirtualScrollChatView: View {
     @ObservedObject var conversation: Conversation
     @StateObject private var scrollState: VirtualScrollState
-    @EnvironmentObject private var deps: Dependencies
     @State private var scrollViewReader: ScrollViewProxy?
     @State private var messageToViewInFull: Message?
+    private let chatDependencies: ChatDependencies
 
-    init(conversation: Conversation) {
+    init(conversation: Conversation, chatDependencies: ChatDependencies) {
         self.conversation = conversation
+        self.chatDependencies = chatDependencies
         self._scrollState = StateObject(
             wrappedValue: VirtualScrollState(
                 conversationId: conversation.id.uuidString,
-                initialWindowPosition: .end
+                initialWindowPosition: .end,
+                viewContext: chatDependencies.viewContext,
+                makeBackgroundContext: chatDependencies.makeBackgroundContext
             )
         )
     }
@@ -33,7 +36,8 @@ struct VirtualScrollChatView: View {
                                 MessageBubble(
                                     message: message,
                                     conversation: conversation,
-                                    deps: deps,
+                                    messageBubbleLoader: chatDependencies.makeMessageBubbleLoader(),
+                                    htmlContentHandler: chatDependencies.htmlContentHandler,
                                     style: .compact,
                                     onOpenFullMessage: { selectedMessage in
                                         messageToViewInFull = selectedMessage

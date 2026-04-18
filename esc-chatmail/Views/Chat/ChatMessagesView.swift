@@ -9,7 +9,7 @@ struct ChatMessagesView: View {
     let messages: FetchedResults<Message>
 
     @ObservedObject var viewModel: ChatViewModel
-    let deps: Dependencies
+    let chatDependencies: ChatDependencies
     var isTextFieldFocused: FocusState<Bool>.Binding
     let onOpenFullMessage: (Message) -> Void
     @StateObject private var scrollState: VirtualScrollState
@@ -24,23 +24,22 @@ struct ChatMessagesView: View {
         conversation: Conversation,
         messages: FetchedResults<Message>,
         viewModel: ChatViewModel,
-        deps: Dependencies,
+        chatDependencies: ChatDependencies,
         isTextFieldFocused: FocusState<Bool>.Binding,
         onOpenFullMessage: @escaping (Message) -> Void
     ) {
         self.conversation = conversation
         self.messages = messages
         self.viewModel = viewModel
-        self.deps = deps
+        self.chatDependencies = chatDependencies
         self.isTextFieldFocused = isTextFieldFocused
         self.onOpenFullMessage = onOpenFullMessage
-        let viewContext = deps.viewContext
-        let coreDataStack = deps.coreDataStack
+        let viewContext = chatDependencies.viewContext
         let scrollState = VirtualScrollState(
             conversationId: conversation.id.uuidString,
             initialWindowPosition: .end,
             viewContext: viewContext,
-            makeBackgroundContext: { coreDataStack.newBackgroundContext() }
+            makeBackgroundContext: chatDependencies.makeBackgroundContext
         )
         _scrollState = StateObject(
             wrappedValue: scrollState
@@ -49,7 +48,7 @@ struct ChatMessagesView: View {
             wrappedValue: ChatMessagesCoordinator(
                 scrollState: scrollState,
                 viewModel: viewModel,
-                participantLoader: deps.participantLoader
+                chatDependencies: chatDependencies
             )
         )
     }
@@ -73,7 +72,8 @@ struct ChatMessagesView: View {
                         MessageBubble(
                             message: message,
                             conversation: conversation,
-                            deps: deps,
+                            messageBubbleLoader: chatDependencies.makeMessageBubbleLoader(),
+                            htmlContentHandler: chatDependencies.htmlContentHandler,
                             isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
                             contactRefreshToken: coordinator.contactRefreshToken,
                             isLastFromSender: isLastFromSender,

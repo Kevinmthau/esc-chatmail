@@ -9,6 +9,8 @@ struct ParticipantsListView: View {
     @Environment(\.dismiss) private var dismiss
     private let participantLoader: ParticipantLoader
     private let currentUserEmail: String
+    private let invalidateContactsCache: () async -> Void
+    private let clearPersonCache: () async -> Void
 
     /// Cached list of other participants to avoid recomputation on every render.
     @State private var cachedOtherParticipants: [ParticipantListItem] = []
@@ -16,18 +18,19 @@ struct ParticipantsListView: View {
     @MainActor
     init(
         conversation: Conversation,
-        deps: Dependencies? = nil,
+        chatDependencies: ChatDependencies,
         onCreateNewContact: @escaping (Person) -> Void,
         onAddToExistingContact: @escaping (Person) -> Void,
         onEditContact: @escaping (String) -> Void
     ) {
-        let resolvedDeps = deps ?? Dependencies.shared
         self.conversation = conversation
         self.onCreateNewContact = onCreateNewContact
         self.onAddToExistingContact = onAddToExistingContact
         self.onEditContact = onEditContact
-        self.participantLoader = resolvedDeps.participantLoader
-        self.currentUserEmail = resolvedDeps.authSession.userEmail ?? ""
+        self.participantLoader = chatDependencies.participantLoader
+        self.currentUserEmail = chatDependencies.authSession.userEmail ?? ""
+        self.invalidateContactsCache = chatDependencies.invalidateContactsCache
+        self.clearPersonCache = chatDependencies.clearPersonCache
     }
 
     var body: some View {
@@ -67,8 +70,8 @@ struct ParticipantsListView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .CNContactStoreDidChange)) { _ in
                 Task {
-                    await ContactsResolver.shared.invalidateAllCache()
-                    await PersonCache.shared.clearCache()
+                    await invalidateContactsCache()
+                    await clearPersonCache()
                     await updateOtherParticipants()
                 }
             }
