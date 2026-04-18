@@ -19,7 +19,7 @@ struct ComposeView: View {
     private let onSendConversation: ((ConversationReference) -> Void)?
 
     private var iMessageCanvasColor: Color {
-        Color(uiColor: UIColor(red: 239/255, green: 239/255, blue: 244/255, alpha: 1))
+        Color(.systemGroupedBackground)
     }
 
     enum FocusField {
@@ -195,8 +195,7 @@ struct ComposeView: View {
                         .frame(width: 50, height: 50)
                         .background(
                             Circle()
-                                .fill(Color(uiColor: UIColor(red: 226/255, green: 226/255, blue: 232/255, alpha: 1))
-                                )
+                                .fill(Color(.systemGray5))
                         )
                 }
                 .buttonStyle(.plain)

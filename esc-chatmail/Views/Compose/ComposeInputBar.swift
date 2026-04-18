@@ -23,7 +23,7 @@ struct ComposeInputBar: View {
 
     private let maxAttachmentSize: Int64 = 25 * 1024 * 1024 // 25 MB
     private var iMessageButtonBackground: Color {
-        Color(uiColor: UIColor(red: 242/255, green: 242/255, blue: 247/255, alpha: 1))
+        Color(.systemGray6)
     }
 
     private var iMessageBorderColor: Color {
@@ -31,7 +31,7 @@ struct ComposeInputBar: View {
     }
 
     private var iMessageFieldBackground: Color {
-        Color(uiColor: UIColor(red: 241/255, green: 241/255, blue: 246/255, alpha: 1))
+        Color(.systemGray6)
     }
 
     private var hasTypedContent: Bool {

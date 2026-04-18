@@ -82,7 +82,7 @@ struct RecipientInputSection: View {
         .padding(.trailing, 8)
         .background(
             Capsule()
-                .fill(Color(uiColor: UIColor(red: 244/255, green: 244/255, blue: 248/255, alpha: 1)))
+                .fill(Color(.systemGray6))
         )
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -147,7 +147,7 @@ struct RecipientInputSection: View {
                 .frame(width: 36, height: 36)
                 .background(
                     Circle()
-                        .fill(Color(uiColor: UIColor(red: 226/255, green: 226/255, blue: 232/255, alpha: 1)))
+                        .fill(Color(.systemGray5))
                 )
         }
         .buttonStyle(.plain)
