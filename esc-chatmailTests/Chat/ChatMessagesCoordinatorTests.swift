@@ -358,6 +358,73 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
+    func testKeyboardChangeDuringInitialLoad_doesNotBlockReadyStateOrFutureAnimatedScrolls() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: {},
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { nanoseconds in
+                try? await Task.sleep(nanoseconds: nanoseconds)
+            }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: messages,
+            totalMessageCount: messages.count
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        coordinator.handleKeyboardHeightChange(
+            oldHeight: 0,
+            newHeight: 240,
+            messageCount: messages.count
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await waitUntil(timeout: 1.0) {
+            coordinator.isReadyToShow
+        }
+
+        XCTAssertTrue(
+            anchorSteps.contains { $0.logMessage == "ChatView follow-up scroll -> bottom anchor" }
+        )
+
+        let animatedScrollCount = anchorSteps.filter {
+            $0.logMessage == "ChatView animated scroll -> bottom anchor"
+        }.count
+
+        coordinator.handleMessageCountChange(
+            oldCount: messages.count,
+            newCount: messages.count + 1,
+            lastMessage: messages.last
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await waitUntil(timeout: 1.0) {
+            anchorSteps.filter { $0.logMessage == "ChatView animated scroll -> bottom anchor" }.count
+                == animatedScrollCount + 1
+        }
+    }
+
     func testHandleContactStoreDidChange_refreshesCachesAndSenderGrouping() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "Alice@Example.com",

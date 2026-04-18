@@ -5,6 +5,11 @@ import Combine
 
 @MainActor
 final class ChatMessagesCoordinator: ObservableObject {
+    private enum TaskKey {
+        static let bottomAnchor = "bottomAnchor"
+        static let initialBottomAnchor = "initialBottomAnchor"
+    }
+
     struct BottomAnchorStep: Equatable {
         let delay: TimeInterval
         let animated: Bool
@@ -277,6 +282,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
 
         scheduleBottomAnchor(
+            taskKey: TaskKey.initialBottomAnchor,
             steps: [
                 BottomAnchorStep(
                     delay: UIConfig.contentChangeScrollDelay,
@@ -317,6 +323,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         guard shouldUseBottomAnchoring(for: messageCount) else { return }
 
         scheduleBottomAnchor(
+            taskKey: TaskKey.bottomAnchor,
             steps: [
                 BottomAnchorStep(
                     delay: delay,
@@ -329,10 +336,11 @@ final class ChatMessagesCoordinator: ObservableObject {
     }
 
     private func scheduleBottomAnchor(
+        taskKey: String,
         steps: [BottomAnchorStep],
         scrollAction: @escaping BottomAnchorAction
     ) {
-        taskManager.run("bottomAnchor") { [loadLatestWindowIfNeeded, sleep] in
+        taskManager.run(taskKey) { [loadLatestWindowIfNeeded, sleep] in
             await loadLatestWindowIfNeeded()
 
             for step in steps {
