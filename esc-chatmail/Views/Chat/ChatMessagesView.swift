@@ -13,18 +13,11 @@ struct ChatMessagesView: View {
     var isTextFieldFocused: FocusState<Bool>.Binding
     let onOpenFullMessage: (Message) -> Void
     @StateObject private var scrollState: VirtualScrollState
+    @StateObject private var coordinator: ChatMessagesCoordinator
 
     @ObservedObject private var keyboard = KeyboardResponder.shared
 
     @Namespace private var bottomID
-    @State private var isReadyToShow = false
-    @State private var contactRefreshToken = 0
-    @State private var senderGroupingKeysByEmail: [String: String] = [:]
-
-    @State private var bottomAnchorTask: Task<Void, Never>?
-    @State private var senderGroupingTask: Task<Void, Never>?
-
-    private var shouldUseBottomAnchoring: Bool { messages.count > 1 }
 
     @MainActor
     init(
@@ -43,12 +36,20 @@ struct ChatMessagesView: View {
         self.onOpenFullMessage = onOpenFullMessage
         let viewContext = deps.viewContext
         let coreDataStack = deps.coreDataStack
+        let scrollState = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { coreDataStack.newBackgroundContext() }
+        )
         _scrollState = StateObject(
-            wrappedValue: VirtualScrollState(
-                conversationId: conversation.id.uuidString,
-                initialWindowPosition: .end,
-                viewContext: viewContext,
-                makeBackgroundContext: { coreDataStack.newBackgroundContext() }
+            wrappedValue: scrollState
+        )
+        _coordinator = StateObject(
+            wrappedValue: ChatMessagesCoordinator(
+                scrollState: scrollState,
+                viewModel: viewModel,
+                participantLoader: deps.participantLoader
             )
         )
     }
@@ -74,7 +75,7 @@ struct ChatMessagesView: View {
                             conversation: conversation,
                             deps: deps,
                             isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
-                            contactRefreshToken: contactRefreshToken,
+                            contactRefreshToken: coordinator.contactRefreshToken,
                             isLastFromSender: isLastFromSender,
                             onOpenFullMessage: onOpenFullMessage
                         )
@@ -122,68 +123,56 @@ struct ChatMessagesView: View {
                         category: .ui
                     )
                 }
-                viewModel.markConversationAsReadIfNeeded()
-                viewModel.initializeReplyingTo(lastMessage: messages.last)
-
-                // If the newest window is already loaded (e.g. warm navigation), trigger initial scroll.
-                if !isReadyToShow && !scrollState.visibleMessages.isEmpty {
-                    performInitialScroll(proxy: proxy)
-                } else if messages.isEmpty && scrollState.totalMessageCount == 0 {
-                    // Avoid a permanently blank thread if there are no messages yet.
-                    isReadyToShow = true
+                coordinator.handleAppear(
+                    messageCount: messages.count,
+                    lastMessage: messages.last,
+                    visibleMessages: scrollState.visibleMessages,
+                    totalMessageCount: scrollState.totalMessageCount
+                ) { step in
+                    performBottomAnchor(step, proxy: proxy)
                 }
-
-                viewModel.loadResolvedDisplayName()
-                prefetchVisibleContent()
-                refreshSenderGroupingKeys(using: scrollState.visibleMessages)
             }
             .onDisappear {
-                // Cancel view-scoped scroll/prefetch work when leaving chat.
-                bottomAnchorTask?.cancel()
-                senderGroupingTask?.cancel()
-                viewModel.cancelPrefetch()
+                coordinator.handleDisappear()
             }
             .onChange(of: displayedMessages.map(\.objectID)) { oldIDs, newIDs in
-                if !isReadyToShow && !newIDs.isEmpty {
-                    performInitialScroll(proxy: proxy)
-                }
-
-                if oldIDs != newIDs {
-                    prefetchVisibleContent()
-                    refreshSenderGroupingKeys(using: displayedMessages)
+                coordinator.handleDisplayedMessagesChange(
+                    oldIDs: oldIDs,
+                    newIDs: newIDs,
+                    visibleMessages: displayedMessages,
+                    messageCount: messages.count
+                ) { step in
+                    performBottomAnchor(step, proxy: proxy)
                 }
             }
             .onChange(of: messages.count) { oldCount, newCount in
-                if !isReadyToShow && newCount > 0 {
-                    performInitialScroll(proxy: proxy)
-                } else if isReadyToShow && newCount > oldCount {
-                    // New message arrived: animate the scroll
-                    viewModel.updateReplyingToIfNewSubject(lastMessage: messages.last)
-                    scrollToBottom(proxy: proxy, delay: UIConfig.contentChangeScrollDelay)
+                coordinator.handleMessageCountChange(
+                    oldCount: oldCount,
+                    newCount: newCount,
+                    lastMessage: messages.last
+                ) { step in
+                    performBottomAnchor(step, proxy: proxy)
                 }
-
-                viewModel.loadResolvedDisplayName()
             }
             .onChange(of: keyboard.currentHeight) { oldHeight, newHeight in
-                if newHeight > 0 || (oldHeight > 0 && newHeight == 0) {
-                    scrollToBottom(proxy: proxy, delay: UIConfig.contentChangeScrollDelay)
+                coordinator.handleKeyboardHeightChange(
+                    oldHeight: oldHeight,
+                    newHeight: newHeight,
+                    messageCount: messages.count
+                ) { step in
+                    performBottomAnchor(step, proxy: proxy)
                 }
             }
             .onChange(of: isTextFieldFocused.wrappedValue) { _, isFocused in
-                if !isFocused {
-                    scrollToBottom(proxy: proxy, delay: UIConfig.initialScrollDelay)
+                coordinator.handleTextFieldFocusChange(
+                    isFocused: isFocused,
+                    messageCount: messages.count
+                ) { step in
+                    performBottomAnchor(step, proxy: proxy)
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .CNContactStoreDidChange)) { _ in
-                Task {
-                    await ContactsResolver.shared.invalidateAllCache()
-                    await PersonCache.shared.clearCache()
-                    await MainActor.run {
-                        contactRefreshToken &+= 1
-                        viewModel.loadResolvedDisplayName()
-                        refreshSenderGroupingKeys(using: scrollState.visibleMessages)
-                    }
-                }
+                coordinator.handleContactStoreDidChange(visibleMessages: scrollState.visibleMessages)
             }
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 0) {
@@ -218,158 +207,25 @@ struct ChatMessagesView: View {
         }
     }
 
-    // MARK: - Scroll Helpers
-
-    private func prefetchVisibleContent() {
-        let config = VirtualScrollConfiguration.default
-        let prefetchLimit = config.visibleItemCount + config.bufferSize
-        let recentMessages = scrollState.visibleMessages.suffix(prefetchLimit)
-        let messageIds = recentMessages.map(\.id)
-        let senderEmails = recentMessages.compactMap(\.senderEmail)
-
-        viewModel.prefetchRecentContent(messageIds: messageIds, senderEmails: senderEmails)
-    }
-
-    private func refreshSenderGroupingKeys(using visibleMessages: [Message]) {
-        senderGroupingTask?.cancel()
-
-        var uniqueSenderEmails: [String] = []
-        var seenEmails = Set<String>()
-        for message in visibleMessages {
-            guard let email = senderEmail(for: message) else { continue }
-            let normalizedEmail = EmailNormalizer.normalize(email)
-            guard !normalizedEmail.isEmpty,
-                  seenEmails.insert(normalizedEmail).inserted else {
-                continue
-            }
-            uniqueSenderEmails.append(email)
-        }
-        let participantLoader = deps.participantLoader
-
-        senderGroupingTask = Task {
-            let groupingKeys = await participantLoader.senderGroupingKeys(for: uniqueSenderEmails)
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                senderGroupingKeysByEmail = groupingKeys
-            }
-        }
-    }
-
     private func senderRunKey(for message: Message?) -> String? {
-        guard let message else { return nil }
-        guard !message.isFromMe else { return "me" }
-        guard let senderEmail = senderEmail(for: message) else { return "email:" }
-
-        let normalizedEmail = EmailNormalizer.normalize(senderEmail)
-        if viewModel.isEffectivelyOneToOneConversation {
-            return senderGroupingKeysByEmail[normalizedEmail] ?? "email:\(normalizedEmail)"
-        }
-
-        return "email:\(normalizedEmail)"
-    }
-
-    private func senderEmail(for message: Message) -> String? {
-        if let senderEmail = message.senderEmail?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !senderEmail.isEmpty {
-            return senderEmail
-        }
-
-        return message.participants?
-            .first(where: { $0.participantKind == .from })?
-            .person?
-            .email
-    }
-
-    /// Performs the initial scroll to bottom with task tracking to prevent race conditions
-    /// when both onAppear and onChange fire for cached data
-    private func performInitialScroll(proxy: ScrollViewProxy) {
-        guard shouldUseBottomAnchoring else {
-            isReadyToShow = true
-            return
-        }
-        scheduleBottomAnchor(
-            proxy: proxy,
-            steps: [
-                BottomAnchorStep(
-                    delay: UIConfig.contentChangeScrollDelay,
-                    animated: false,
-                    logMessage: "ChatView initial scroll -> bottom anchor"
-                ),
-                BottomAnchorStep(
-                    delay: UIConfig.initialScrollDelay,
-                    animated: false,
-                    logMessage: "ChatView follow-up scroll -> bottom anchor",
-                    marksReady: true
-                ),
-                BottomAnchorStep(
-                    delay: 0.25,
-                    animated: false,
-                    logMessage: "ChatView stabilization scroll (0.25s) -> bottom anchor"
-                ),
-                BottomAnchorStep(
-                    delay: 0.75,
-                    animated: false,
-                    logMessage: "ChatView stabilization scroll (0.75s) -> bottom anchor"
-                ),
-                BottomAnchorStep(
-                    delay: 1.5,
-                    animated: false,
-                    logMessage: "ChatView stabilization scroll (1.5s) -> bottom anchor"
-                )
-            ]
+        coordinator.senderRunKey(
+            for: message,
+            isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation
         )
     }
 
-    private func scrollToBottom(proxy: ScrollViewProxy, delay: TimeInterval) {
-        guard shouldUseBottomAnchoring else { return }
-        scheduleBottomAnchor(
-            proxy: proxy,
-            steps: [
-                BottomAnchorStep(
-                    delay: delay,
-                    animated: true,
-                    logMessage: "ChatView animated scroll -> bottom anchor"
-                )
-            ]
-        )
-    }
-
-    private func scheduleBottomAnchor(
-        proxy: ScrollViewProxy,
-        steps: [BottomAnchorStep]
+    private func performBottomAnchor(
+        _ step: ChatMessagesCoordinator.BottomAnchorStep,
+        proxy: ScrollViewProxy
     ) {
-        bottomAnchorTask?.cancel()
-        bottomAnchorTask = Task { @MainActor in
-            await scrollState.loadLatestWindowIfNeeded()
-
-            for step in steps {
-                if step.delay > 0 {
-                    try? await Task.sleep(nanoseconds: UInt64(step.delay * 1_000_000_000))
-                }
-                guard !Task.isCancelled else { return }
-
-                if step.animated {
-                    withAnimation(.easeOut(duration: UIConfig.scrollAnimationDuration)) {
-                        Log.diagnostic(.chatView, level: .info, step.logMessage, category: .ui)
-                        proxy.scrollTo(bottomID, anchor: .bottom)
-                    }
-                } else {
-                    Log.diagnostic(.chatView, level: .info, step.logMessage, category: .ui)
-                    proxy.scrollTo(bottomID, anchor: .bottom)
-                }
-
-                if step.marksReady {
-                    isReadyToShow = true
-                }
+        if step.animated {
+            withAnimation(.easeOut(duration: UIConfig.scrollAnimationDuration)) {
+                Log.diagnostic(.chatView, level: .info, step.logMessage, category: .ui)
+                proxy.scrollTo(bottomID, anchor: .bottom)
             }
+        } else {
+            Log.diagnostic(.chatView, level: .info, step.logMessage, category: .ui)
+            proxy.scrollTo(bottomID, anchor: .bottom)
         }
     }
-}
-
-private struct BottomAnchorStep {
-    let delay: TimeInterval
-    let animated: Bool
-    let logMessage: String
-    var marksReady: Bool = false
 }
