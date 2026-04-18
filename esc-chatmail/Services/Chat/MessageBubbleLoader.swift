@@ -1,5 +1,31 @@
 import Foundation
 
+private final class CachedMessageBubbleHTMLAnalysisBox {
+    let value: MessageBubbleHTMLAnalysis
+
+    init(_ value: MessageBubbleHTMLAnalysis) {
+        self.value = value
+    }
+}
+
+final class MessageBubbleHTMLAnalysisCache {
+    static let shared = MessageBubbleHTMLAnalysisCache()
+
+    private let cache = NSCache<NSString, CachedMessageBubbleHTMLAnalysisBox>()
+
+    init() {
+        cache.countLimit = 512
+    }
+
+    func value(forKey key: String) -> MessageBubbleHTMLAnalysis? {
+        cache.object(forKey: key as NSString)?.value
+    }
+
+    func setValue(_ value: MessageBubbleHTMLAnalysis, forKey key: String) {
+        cache.setObject(CachedMessageBubbleHTMLAnalysisBox(value), forKey: key as NSString)
+    }
+}
+
 struct MessageBubbleSenderRequest: Sendable {
     let email: String
     let personDisplayName: String?
@@ -416,17 +442,20 @@ actor MessageBubbleLoader: MessageBubbleLoading {
     private let processedTextCache: ProcessedTextCache
     private let htmlContentHandler: HTMLContentHandler
     private let htmlContentRecoveryService: any HTMLContentRecovering
+    private let htmlAnalysisCache: MessageBubbleHTMLAnalysisCache
 
     init(
         contactsResolver: any ContactsResolving = ContactsResolver.shared,
         processedTextCache: ProcessedTextCache = .shared,
         htmlContentHandler: HTMLContentHandler = .shared,
-        htmlContentRecoveryService: any HTMLContentRecovering = HTMLContentRecoveryService.shared
+        htmlContentRecoveryService: any HTMLContentRecovering = HTMLContentRecoveryService.shared,
+        htmlAnalysisCache: MessageBubbleHTMLAnalysisCache = .shared
     ) {
         self.contactsResolver = contactsResolver
         self.processedTextCache = processedTextCache
         self.htmlContentHandler = htmlContentHandler
         self.htmlContentRecoveryService = htmlContentRecoveryService
+        self.htmlAnalysisCache = htmlAnalysisCache
     }
 
     func loadSenderInfo(from request: MessageBubbleSenderRequest) async -> MessageBubbleSenderResult {
@@ -455,20 +484,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
     }
 
     func loadContent(from request: MessageBubbleContentRequest) async -> MessageBubbleContentResult {
-        let htmlAnalysis = MessageBubbleHTMLAnalysisBuilder.build(
-            messageID: request.messageID,
-            bodyStorageURI: request.bodyStorageURI,
-            hasHTMLSourceHint: request.hasHTMLSource,
-            isForwardedEmail: request.isForwardedEmail,
-            isLikelyCalendarInvite: request.isLikelyCalendarInvite,
-            bodyText: request.bodyText,
-            cleanedSnippet: request.cleanedSnippet,
-            senderName: request.senderName,
-            senderEmail: request.effectiveSenderEmail,
-            subject: request.subject,
-            attachmentSnapshots: request.attachmentSnapshots,
-            handler: htmlContentHandler
-        )
+        let htmlAnalysis = cachedHTMLAnalysis(for: request)
         let forwardedDisplayContent =
             request.isFromMe && request.isForwardedEmail
             ? ForwardedMessageDisplayParser.parseOutgoingForward(
@@ -498,6 +514,74 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             forwardedDisplayContent: forwardedDisplayContent,
             htmlAnalysis: htmlAnalysis
         )
+    }
+
+    private func cachedHTMLAnalysis(for request: MessageBubbleContentRequest) -> MessageBubbleHTMLAnalysis {
+        let cacheKey = htmlAnalysisCacheKey(for: request)
+        if let cached = htmlAnalysisCache.value(forKey: cacheKey) {
+            return cached
+        }
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            messageID: request.messageID,
+            bodyStorageURI: request.bodyStorageURI,
+            hasHTMLSourceHint: request.hasHTMLSource,
+            isForwardedEmail: request.isForwardedEmail,
+            isLikelyCalendarInvite: request.isLikelyCalendarInvite,
+            bodyText: request.bodyText,
+            cleanedSnippet: request.cleanedSnippet,
+            senderName: request.senderName,
+            senderEmail: request.effectiveSenderEmail,
+            subject: request.subject,
+            attachmentSnapshots: request.attachmentSnapshots,
+            handler: htmlContentHandler
+        )
+        htmlAnalysisCache.setValue(analysis, forKey: cacheKey)
+        return analysis
+    }
+
+    private func htmlAnalysisCacheKey(for request: MessageBubbleContentRequest) -> String {
+        let htmlSourceSignature = htmlContentHandler.htmlSourceSignature(
+            messageId: request.messageID,
+            bodyStorageURI: request.bodyStorageURI
+        )
+        return [
+            request.messageID,
+            request.bodyStorageURI ?? "storage:nil",
+            "html:\(htmlSourceSignature)",
+            "body:\(cacheFingerprint(for: request.bodyText))",
+            "snippet:\(cacheFingerprint(for: request.cleanedSnippet))",
+            "subject:\(cacheFingerprint(for: request.subject))",
+            "sender:\(cacheFingerprint(for: request.senderName))",
+            "email:\(cacheFingerprint(for: request.effectiveSenderEmail))",
+            "flags:\(request.hasHTMLSource)-\(request.isForwardedEmail)-\(request.isLikelyCalendarInvite)",
+            "attachments:\(attachmentFingerprint(for: request.attachmentSnapshots))"
+        ].joined(separator: "|")
+    }
+
+    private func cacheFingerprint(for text: String?) -> String {
+        guard let text = text?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !text.isEmpty else {
+            return "nil"
+        }
+
+        return String(text.hashValue)
+    }
+
+    private func attachmentFingerprint(for attachments: [MessageBubbleAttachmentSnapshot]) -> String {
+        guard !attachments.isEmpty else { return "none" }
+
+        return attachments
+            .map { attachment in
+                [
+                    MessageBubbleHTMLAnalysisBuilder.normalizedContentID(from: attachment.contentId) ?? "cid:nil",
+                    attachment.filename.lowercased(),
+                    attachment.mimeType.lowercased(),
+                    "\(attachment.width)x\(attachment.height)"
+                ].joined(separator: "~")
+            }
+            .joined(separator: ";")
     }
 
     private func loadProcessedContent(

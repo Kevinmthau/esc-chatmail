@@ -31,6 +31,18 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertEqual(page.messageIDs, Array(messages[1..<4]).map(\.objectID))
     }
 
+    func testLoadMessagePage_emptyRangeReturnsCountWithoutFetchingMessageIDs() async throws {
+        let (conversation, _) = try makeConversationWithMessages(count: 6)
+        let page = await VirtualScrollState.loadMessagePage(
+            conversationId: conversation.id.uuidString,
+            range: 0..<0,
+            in: stack.newBackgroundContext()
+        )
+
+        XCTAssertEqual(page.totalCount, 6)
+        XCTAssertTrue(page.messageIDs.isEmpty)
+    }
+
     func testInitialLoad_publishesOnlyViewContextMessages() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 8)
         let configuration = VirtualScrollConfiguration(

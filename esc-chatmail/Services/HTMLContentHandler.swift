@@ -10,11 +10,16 @@ final class HTMLContentHandler {
 
     /// Serial queue for exclusive directory operations like deleteAllHTML
     private let exclusiveQueue = DispatchQueue(label: "com.esc.htmlcontent.exclusive")
+    private let htmlContentCache = NSCache<NSString, NSString>()
+    private let fileSignatureCache = NSCache<NSString, NSString>()
 
     init() {
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         self.messagesDirectory = documentsPath.appendingPathComponent("Messages")
+        htmlContentCache.countLimit = 128
+        htmlContentCache.totalCostLimit = 15 * 1024 * 1024
+        fileSignatureCache.countLimit = 1024
         createMessagesDirectoryIfNeeded()
     }
 
@@ -34,6 +39,8 @@ final class HTMLContentHandler {
 
         do {
             try html.write(to: fileURL, atomically: true, encoding: .utf8)
+            cacheHTML(html, for: fileURL)
+            refreshSignatureCache(for: fileURL)
             return fileURL
         } catch {
             Log.error("Failed to save HTML for message \(messageId)", category: .general, error: error)
@@ -42,14 +49,22 @@ final class HTMLContentHandler {
     }
 
     func loadHTML(from url: URL) -> String? {
+        if let cached = cachedHTML(for: url) {
+            return cached
+        }
+
         guard FileManager.default.fileExists(atPath: url.path) else {
             return nil
         }
 
         do {
-            return try String(contentsOf: url, encoding: .utf8)
+            let html = try String(contentsOf: url, encoding: .utf8)
+            cacheHTML(html, for: url)
+            refreshSignatureCache(for: url)
+            return html
         } catch {
             if isMissingFileError(error) {
+                invalidateCaches(for: url)
                 return nil
             }
             Log.error("Failed to load HTML from \(url)", category: .general, error: error)
@@ -69,6 +84,7 @@ final class HTMLContentHandler {
     func deleteHTML(for messageId: String, bodyStorageURI: String?) {
         let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
         FileSystemErrorHandler.removeItem(at: fileURL, category: .general)
+        invalidateCaches(for: fileURL)
 
         guard let bodyStorageURI,
               let resolvedURL = StorageURIResolver.resolve(bodyStorageURI),
@@ -77,6 +93,7 @@ final class HTMLContentHandler {
         }
 
         FileSystemErrorHandler.removeItem(at: resolvedURL, category: .general)
+        invalidateCaches(for: resolvedURL)
     }
 
     func deleteAllHTML() {
@@ -90,23 +107,33 @@ final class HTMLContentHandler {
                 FileSystemErrorHandler.removeItem(at: fileURL, category: .general)
             }
         }
+        clearCaches()
     }
 
     func htmlFileExists(for messageId: String) -> Bool {
         let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
-        return FileManager.default.fileExists(atPath: fileURL.path)
+        return cachedFileSignature(for: fileURL, cacheMissing: true) != "missing"
     }
 
     func htmlFileSignature(for messageId: String) -> String {
         let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            return "missing"
+        return cachedFileSignature(for: fileURL, cacheMissing: true)
+    }
+
+    func htmlSourceSignature(messageId: String, bodyStorageURI: String?) -> String {
+        let primaryFileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
+        let primarySignature = cachedFileSignature(for: primaryFileURL, cacheMissing: true)
+        if primarySignature != "missing" {
+            return primarySignature
         }
 
-        let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
-        let timestamp = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
-        let fileSize = values?.fileSize ?? 0
-        return "\(timestamp)|\(fileSize)"
+        guard let bodyStorageURI,
+              let resolvedURL = StorageURIResolver.resolve(bodyStorageURI),
+              resolvedURL.path != primaryFileURL.path else {
+            return primarySignature
+        }
+
+        return cachedFileSignature(for: resolvedURL, cacheMissing: false)
     }
 
     func calculateStorageSize() -> Int64 {
@@ -136,6 +163,7 @@ final class HTMLContentHandler {
                     let values = try fileURL.resourceValues(forKeys: [.creationDateKey])
                     if let creationDate = values.creationDate, creationDate < cutoffDate {
                         FileSystemErrorHandler.removeItem(at: fileURL, category: .general)
+                        invalidateCaches(for: fileURL)
                     }
                 } catch {
                     Log.debug("Failed to read creation date for \(fileURL.lastPathComponent)", category: .general)
@@ -152,6 +180,7 @@ final class HTMLContentHandler {
                 guard !messageId.isEmpty else { continue }
                 if !validMessageIds.contains(messageId) {
                     FileSystemErrorHandler.removeItem(at: fileURL, category: .general)
+                    invalidateCaches(for: fileURL)
                 }
             }
         }
@@ -190,5 +219,76 @@ final class HTMLContentHandler {
         }
 
         return nsError.domain == NSPOSIXErrorDomain && nsError.code == ENOENT
+    }
+
+    private func cacheKey(for fileURL: URL) -> NSString {
+        fileURL.standardizedFileURL.path as NSString
+    }
+
+    private func cachedHTML(for fileURL: URL) -> String? {
+        guard let cached = htmlContentCache.object(forKey: cacheKey(for: fileURL)) else {
+            return nil
+        }
+        return String(cached)
+    }
+
+    private func cacheHTML(_ html: String, for fileURL: URL) {
+        htmlContentCache.setObject(
+            html as NSString,
+            forKey: cacheKey(for: fileURL),
+            cost: html.utf8.count
+        )
+    }
+
+    private func refreshSignatureCache(for fileURL: URL) {
+        guard let signature = uncachedFileSignature(for: fileURL) else {
+            invalidateSignatureCache(for: fileURL)
+            return
+        }
+
+        fileSignatureCache.setObject(signature as NSString, forKey: cacheKey(for: fileURL))
+    }
+
+    private func cachedFileSignature(for fileURL: URL, cacheMissing: Bool) -> String {
+        let cacheKey = cacheKey(for: fileURL)
+        if let cached = fileSignatureCache.object(forKey: cacheKey) {
+            return String(cached)
+        }
+
+        guard let signature = uncachedFileSignature(for: fileURL) else {
+            if cacheMissing {
+                fileSignatureCache.setObject("missing" as NSString, forKey: cacheKey)
+            }
+            return "missing"
+        }
+
+        fileSignatureCache.setObject(signature as NSString, forKey: cacheKey)
+        return signature
+    }
+
+    private func uncachedFileSignature(for fileURL: URL) -> String? {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            return nil
+        }
+
+        let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        let timestamp = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+        let fileSize = values?.fileSize ?? 0
+        return "\(timestamp)|\(fileSize)"
+    }
+
+    private func invalidateCaches(for fileURL: URL) {
+        let cacheKey = cacheKey(for: fileURL)
+        htmlContentCache.removeObject(forKey: cacheKey)
+        fileSignatureCache.removeObject(forKey: cacheKey)
+    }
+
+    private func invalidateSignatureCache(for fileURL: URL) {
+        fileSignatureCache.removeObject(forKey: cacheKey(for: fileURL))
+    }
+
+    private func clearCaches() {
+        htmlContentCache.removeAllObjects()
+        fileSignatureCache.removeAllObjects()
     }
 }

@@ -21,6 +21,10 @@ struct EmailContentSection: View {
         Self.makeLoadKey(for: message, isDarkMode: colorScheme == .dark)
     }
 
+    private var previewHeightCacheKey: String {
+        "\(loadKey)|html:\(HTMLContentHandler.shared.htmlFileSignature(for: message.id))"
+    }
+
     static func makeLoadKey(for message: Message, isDarkMode: Bool) -> String {
         let bodyTextHash = message.bodyText?.hashValue ?? 0
         let cleanedSnippetHash = message.cleanedSnippet?.hashValue ?? 0
@@ -220,6 +224,7 @@ struct EmailContentSection: View {
             Button(action: onOpenFullMessage) {
                 MiniEmailWebView(
                     htmlContent: html,
+                    previewCacheKey: previewHeightCacheKey,
                     isDarkMode: colorScheme == .dark,
                     message: message
                 )

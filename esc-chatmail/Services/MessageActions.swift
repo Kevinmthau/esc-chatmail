@@ -153,6 +153,56 @@ final class MessageActions: ObservableObject {
         }
     }
 
+    /// Finds unread inbox messages for the conversation in a background context and marks them
+    /// as read in a single transaction. This keeps chat-open work off the main thread.
+    func markConversationAsReadIfNeeded(conversationID: UUID, conversationObjectID: NSManagedObjectID) async {
+        let context = coreDataStack.newBackgroundContext()
+
+        let gmailMessageIds: [String] = await context.perform {
+            let request = NSFetchRequest<Message>(entityName: "Message")
+            request.predicate = NSPredicate(
+                format: "conversation.id == %@ AND isUnread == YES AND NONE labels.id IN %@",
+                conversationID as CVarArg,
+                ["DRAFT", "SPAM", "TRASH"]
+            )
+            request.fetchBatchSize = 50
+            request.includesPendingChanges = false
+
+            let unreadMessages = (try? context.fetch(request)) ?? []
+            guard !unreadMessages.isEmpty else {
+                if let conversation = try? context.existingObject(with: conversationObjectID) as? Conversation,
+                   conversation.inboxUnreadCount != 0 {
+                    conversation.inboxUnreadCount = 0
+                    context.saveOrLog(operation: "clear conversation unread count")
+                }
+                return []
+            }
+
+            let modificationDate = Date()
+            let gmailMessageIds = unreadMessages.compactMap { message -> String? in
+                guard message.isUnread else { return nil }
+                message.isUnread = false
+                message.localModifiedAt = modificationDate
+                return message.id.isEmpty ? nil : message.id
+            }
+
+            if let conversation = try? context.existingObject(with: conversationObjectID) as? Conversation {
+                conversation.inboxUnreadCount = 0
+            }
+
+            context.saveOrLog(operation: "mark conversation as read if needed")
+            return gmailMessageIds
+        }
+
+        for messageId in gmailMessageIds {
+            await pendingActionsManager.queueAction(
+                type: .markRead,
+                messageId: messageId,
+                payload: nil
+            )
+        }
+    }
+
     // MARK: - Archive
 
     func archive(message: Message) async {

@@ -80,6 +80,61 @@ final class MessageActionsTests: XCTestCase {
         let queuedActions = await pendingActionsManager.queuedSingleActions
         XCTAssertTrue(queuedActions.isEmpty)
     }
+
+    func testMarkConversationAsReadIfNeeded_marksUnreadMessagesOffMainThread() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .withUnreadCount(2)
+            .build(in: context)
+        let includedMessage = MessageBuilder()
+            .withId("message-to-read")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        let excludedMessage = MessageBuilder()
+            .withId("draft-message")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        let draftLabel = LabelBuilder().draft().build(in: context)
+        excludedMessage.addToLabels(draftLabel)
+        try coreDataStack.saveViewContext()
+
+        await messageActions.markConversationAsReadIfNeeded(
+            conversationID: conversation.id,
+            conversationObjectID: conversation.objectID
+        )
+
+        await waitUntil {
+            self.context.refreshAllObjects()
+            return !includedMessage.isUnread &&
+                excludedMessage.isUnread &&
+                conversation.inboxUnreadCount == 0
+        }
+
+        let queuedActions = await pendingActionsManager.queuedSingleActions
+        XCTAssertEqual(queuedActions.map(\.messageId), ["message-to-read"])
+        XCTAssertEqual(queuedActions.map(\.type), [.markRead])
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval = 2.0,
+        pollIntervalNanoseconds: UInt64 = 20_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping @MainActor () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while Date() < deadline {
+            if condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+
+        XCTFail("Timed out waiting for condition", file: file, line: line)
+    }
 }
 
 actor MockPendingActionsManager: PendingActionsManagerProtocol {
