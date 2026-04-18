@@ -170,6 +170,7 @@ struct HTMLDisplayWrapper {
                     padding: 8px;
                     margin: 0;
                     word-wrap: break-word;
+                    \(partialOriginalTypographyCSS(for: displayPurpose))
                 }
                 /* Constrain images without breaking layout */
                 img {
@@ -198,6 +199,19 @@ struct HTMLDisplayWrapper {
             \(html)
         </body>
         </html>
+        """
+    }
+
+    private func partialOriginalTypographyCSS(for displayPurpose: HTMLDisplayPurpose) -> String {
+        guard displayPurpose == .original else {
+            return ""
+        }
+
+        // Fragment-style emails often omit any font declaration and rely on the mail client's
+        // default body typography. Match Apple Mail more closely here instead of falling back
+        // to WKWebView's default serif font.
+        return """
+        font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
         """
     }
 

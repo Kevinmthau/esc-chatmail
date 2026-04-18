@@ -14,17 +14,15 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         super.tearDown()
     }
 
-    func testWrapHTMLForDisplay_partialHTML_doesNotInjectFallbackTypography() {
+    func testWrapHTMLForDisplay_partialHTML_originalUsesAppleMailFallbackTypography() {
         let html = """
         <div>Hello from Apple Mail</div>
         """
 
-        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false)
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
 
-        XCTAssertFalse(result.contains("font-family: -apple-system"))
-        XCTAssertFalse(result.contains("font-size: 16px"))
-        XCTAssertFalse(result.contains("line-height: 1.5"))
-        XCTAssertTrue(result.contains("background-color: #f2f2f7"))
+        XCTAssertTrue(result.contains("font-family: -apple-system, BlinkMacSystemFont, \"Helvetica Neue\", Helvetica, Arial, sans-serif;"))
+        XCTAssertTrue(result.contains("background-color: #ffffff"))
         XCTAssertTrue(result.contains("word-wrap: break-word"))
     }
 
@@ -37,6 +35,7 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertTrue(lightResult.contains("background-color: #f2f2f7"))
         XCTAssertTrue(darkResult.contains("background-color: #1c1c1e"))
         XCTAssertTrue(darkResult.contains("color: #ffffff"))
+        XCTAssertFalse(lightResult.contains("font-family: -apple-system, BlinkMacSystemFont, \"Helvetica Neue\", Helvetica, Arial, sans-serif;"))
     }
 
     func testWrapHTMLForDisplay_existingDocument_keepsAuthorBodyStyles() {
