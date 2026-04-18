@@ -21,12 +21,13 @@ The repo uses:
 Use the Xcode app toolchain explicitly. Plain `xcodebuild` will otherwise point at Command Line Tools on this machine.
 
 Default simulator:
-- `platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4`
+- `platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4.1`
+- `26.4` is not currently installed on this machine. If a command still references `26.4`, update it to `26.4.1`.
 
 Exact build command:
 
 ```bash
-DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4' \
+DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4.1' \
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 xcodebuild build \
   -project esc-chatmail.xcodeproj \
@@ -38,7 +39,7 @@ xcodebuild build \
 Exact full test command:
 
 ```bash
-DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4' \
+DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4.1' \
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 bash Scripts/run-tests.sh
 ```
@@ -46,13 +47,14 @@ bash Scripts/run-tests.sh
 Narrow test pattern:
 
 ```bash
+DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4.1' \
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 bash Scripts/run-tests.sh -only-testing 'esc-chatmailTests/<SuiteName>'
 ```
 
 Notes:
 - `Scripts/run-tests.sh` uses scheme `esc-chatmail`, configuration `Debug`, and skips `PerformanceRegressionTests` unless `--performance` is passed.
-- If `DESTINATION` is omitted, the script picks the first available iPhone simulator. Prefer setting it explicitly for reproducible Codex runs.
+- If `DESTINATION` is omitted, the script picks the first available iPhone simulator. Prefer setting it explicitly for reproducible Codex runs and to avoid failures when a previously documented runtime is no longer installed.
 
 ## Key Architecture Notes
 
