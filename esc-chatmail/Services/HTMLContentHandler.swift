@@ -6,20 +6,30 @@ final class HTMLContentHandler {
     /// Shared singleton instance for efficient reuse across views
     static let shared = HTMLContentHandler()
 
+    // Multiple services instantiate handlers, but they all read and write the same
+    // on-disk Messages directory. Keep caches shared so saves and deletes stay coherent.
+    private static let htmlContentCache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 128
+        cache.totalCostLimit = 15 * 1024 * 1024
+        return cache
+    }()
+
+    private static let fileSignatureCache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 1024
+        return cache
+    }()
+
     private let messagesDirectory: URL
 
     /// Serial queue for exclusive directory operations like deleteAllHTML
     private let exclusiveQueue = DispatchQueue(label: "com.esc.htmlcontent.exclusive")
-    private let htmlContentCache = NSCache<NSString, NSString>()
-    private let fileSignatureCache = NSCache<NSString, NSString>()
 
     init() {
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         self.messagesDirectory = documentsPath.appendingPathComponent("Messages")
-        htmlContentCache.countLimit = 128
-        htmlContentCache.totalCostLimit = 15 * 1024 * 1024
-        fileSignatureCache.countLimit = 1024
         createMessagesDirectoryIfNeeded()
     }
 
@@ -226,14 +236,14 @@ final class HTMLContentHandler {
     }
 
     private func cachedHTML(for fileURL: URL) -> String? {
-        guard let cached = htmlContentCache.object(forKey: cacheKey(for: fileURL)) else {
+        guard let cached = Self.htmlContentCache.object(forKey: cacheKey(for: fileURL)) else {
             return nil
         }
         return String(cached)
     }
 
     private func cacheHTML(_ html: String, for fileURL: URL) {
-        htmlContentCache.setObject(
+        Self.htmlContentCache.setObject(
             html as NSString,
             forKey: cacheKey(for: fileURL),
             cost: html.utf8.count
@@ -246,23 +256,23 @@ final class HTMLContentHandler {
             return
         }
 
-        fileSignatureCache.setObject(signature as NSString, forKey: cacheKey(for: fileURL))
+        Self.fileSignatureCache.setObject(signature as NSString, forKey: cacheKey(for: fileURL))
     }
 
     private func cachedFileSignature(for fileURL: URL, cacheMissing: Bool) -> String {
         let cacheKey = cacheKey(for: fileURL)
-        if let cached = fileSignatureCache.object(forKey: cacheKey) {
+        if let cached = Self.fileSignatureCache.object(forKey: cacheKey) {
             return String(cached)
         }
 
         guard let signature = uncachedFileSignature(for: fileURL) else {
             if cacheMissing {
-                fileSignatureCache.setObject("missing" as NSString, forKey: cacheKey)
+                Self.fileSignatureCache.setObject("missing" as NSString, forKey: cacheKey)
             }
             return "missing"
         }
 
-        fileSignatureCache.setObject(signature as NSString, forKey: cacheKey)
+        Self.fileSignatureCache.setObject(signature as NSString, forKey: cacheKey)
         return signature
     }
 
@@ -279,16 +289,16 @@ final class HTMLContentHandler {
 
     private func invalidateCaches(for fileURL: URL) {
         let cacheKey = cacheKey(for: fileURL)
-        htmlContentCache.removeObject(forKey: cacheKey)
-        fileSignatureCache.removeObject(forKey: cacheKey)
+        Self.htmlContentCache.removeObject(forKey: cacheKey)
+        Self.fileSignatureCache.removeObject(forKey: cacheKey)
     }
 
     private func invalidateSignatureCache(for fileURL: URL) {
-        fileSignatureCache.removeObject(forKey: cacheKey(for: fileURL))
+        Self.fileSignatureCache.removeObject(forKey: cacheKey(for: fileURL))
     }
 
     private func clearCaches() {
-        htmlContentCache.removeAllObjects()
-        fileSignatureCache.removeAllObjects()
+        Self.htmlContentCache.removeAllObjects()
+        Self.fileSignatureCache.removeAllObjects()
     }
 }

@@ -59,6 +59,30 @@ final class StorageMaintenanceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: legacyURL.path))
     }
 
+    func testHTMLContentHandler_instancesShareCacheStateAcrossWritesAndDeletes() {
+        let messageId = "storage-shared-cache-\(UUID().uuidString)"
+        let writer = HTMLContentHandler()
+        let reader = HTMLContentHandler()
+
+        defer { writer.deleteHTML(for: messageId) }
+
+        XCTAssertEqual(reader.htmlFileSignature(for: messageId), "missing")
+
+        _ = writer.saveHTML("<p>first</p>", for: messageId)
+
+        XCTAssertEqual(reader.loadHTML(for: messageId), "<p>first</p>")
+        XCTAssertNotEqual(reader.htmlFileSignature(for: messageId), "missing")
+
+        _ = writer.saveHTML("<p>second</p>", for: messageId)
+
+        XCTAssertEqual(reader.loadHTML(for: messageId), "<p>second</p>")
+
+        writer.deleteHTML(for: messageId)
+
+        XCTAssertNil(reader.loadHTML(for: messageId))
+        XCTAssertEqual(reader.htmlFileSignature(for: messageId), "missing")
+    }
+
     func testHTMLContentHandler_cleanupOrphanedFiles_preservesValidMessageFiles() {
         let handler = HTMLContentHandler()
         let keepMessageId = "storage-keep-\(UUID().uuidString)"
