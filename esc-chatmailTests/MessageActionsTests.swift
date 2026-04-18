@@ -81,16 +81,18 @@ final class MessageActionsTests: XCTestCase {
         XCTAssertTrue(queuedActions.isEmpty)
     }
 
-    func testMarkConversationAsReadIfNeeded_marksUnreadMessagesOffMainThread() async throws {
+    func testMarkMessagesAsReadBatch_marksSnapshotUnreadMessagesOffMainThread() async throws {
         let conversation = ConversationBuilder()
             .visible()
             .withUnreadCount(2)
             .build(in: context)
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
         let includedMessage = MessageBuilder()
             .withId("message-to-read")
             .unread()
             .inConversation(conversation)
             .build(in: context)
+        includedMessage.addToLabels(inboxLabel)
         let excludedMessage = MessageBuilder()
             .withId("draft-message")
             .unread()
@@ -100,9 +102,13 @@ final class MessageActionsTests: XCTestCase {
         excludedMessage.addToLabels(draftLabel)
         try coreDataStack.saveViewContext()
 
-        await messageActions.markConversationAsReadIfNeeded(
-            conversationID: conversation.id,
-            conversationObjectID: conversation.objectID
+        let messageIDs = messageActions.snapshotUnreadConversationMessageObjectIDs(
+            conversationID: conversation.id
+        )
+
+        await messageActions.markMessagesAsReadBatch(
+            messageIDs: messageIDs,
+            conversationID: conversation.objectID
         )
 
         await waitUntil {
@@ -114,6 +120,50 @@ final class MessageActionsTests: XCTestCase {
 
         let queuedActions = await pendingActionsManager.queuedSingleActions
         XCTAssertEqual(queuedActions.map(\.messageId), ["message-to-read"])
+        XCTAssertEqual(queuedActions.map(\.type), [.markRead])
+    }
+
+    func testMarkMessagesAsReadBatch_keepsLaterUnreadInboxMessageUnreadAndCounted() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .withUnreadCount(1)
+            .build(in: context)
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
+        let initialMessage = MessageBuilder()
+            .withId("message-visible-at-open")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        initialMessage.addToLabels(inboxLabel)
+        try coreDataStack.saveViewContext()
+
+        let messageIDsAtOpen = messageActions.snapshotUnreadConversationMessageObjectIDs(
+            conversationID: conversation.id
+        )
+
+        let laterMessage = MessageBuilder()
+            .withId("message-arrived-later")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        laterMessage.addToLabels(inboxLabel)
+        conversation.inboxUnreadCount = 2
+        try coreDataStack.saveViewContext()
+
+        await messageActions.markMessagesAsReadBatch(
+            messageIDs: messageIDsAtOpen,
+            conversationID: conversation.objectID
+        )
+
+        await waitUntil {
+            self.context.refreshAllObjects()
+            return !initialMessage.isUnread &&
+                laterMessage.isUnread &&
+                conversation.inboxUnreadCount == 1
+        }
+
+        let queuedActions = await pendingActionsManager.queuedSingleActions
+        XCTAssertEqual(queuedActions.map(\.messageId), ["message-visible-at-open"])
         XCTAssertEqual(queuedActions.map(\.type), [.markRead])
     }
 

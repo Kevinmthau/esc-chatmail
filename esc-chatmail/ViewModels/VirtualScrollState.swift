@@ -189,9 +189,14 @@ final class VirtualScrollState: ObservableObject {
             visibleMessages = resolveCachedMessages(for: window.messageIDs)
         } else {
             // Need to load a new window.
+            let preferPendingConversationMessages = hasPendingInsertedMessagesInConversation
             taskManager.run("loadWindow") { [weak self] in
                 guard let self = self else { return }
-                await self.loadWindow(startIndex: startIndex, endIndex: endIndex)
+                await self.loadWindow(
+                    startIndex: startIndex,
+                    endIndex: endIndex,
+                    preferPendingConversationMessages: preferPendingConversationMessages
+                )
             }
         }
     }
@@ -297,14 +302,14 @@ final class VirtualScrollState: ObservableObject {
 
         let startIndex = window.endIndex
         let endIndex = min(totalMessageCount, startIndex + configuration.pageSize)
+        let preferPendingConversationMessages = hasPendingInsertedMessagesInConversation
 
         taskManager.run("preloadNext") { [weak self] in
             guard let self = self else { return }
 
-            let page = await self.pageLoader(
-                self.conversationId,
+            let page = await self.loadPage(
                 startIndex..<endIndex,
-                self.makeBackgroundContext()
+                preferPendingConversationMessages: preferPendingConversationMessages
             )
 
             guard !Task.isCancelled else { return }
@@ -340,14 +345,14 @@ final class VirtualScrollState: ObservableObject {
 
         let endIndex = window.startIndex
         let startIndex = max(0, endIndex - configuration.pageSize)
+        let preferPendingConversationMessages = hasPendingInsertedMessagesInConversation
 
         taskManager.run("preloadPrevious") { [weak self] in
             guard let self = self else { return }
 
-            let page = await self.pageLoader(
-                self.conversationId,
+            let page = await self.loadPage(
                 startIndex..<endIndex,
-                self.makeBackgroundContext()
+                preferPendingConversationMessages: preferPendingConversationMessages
             )
 
             guard !Task.isCancelled else { return }
