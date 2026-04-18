@@ -28,6 +28,7 @@ struct ChatView: View {
         )
         request.fetchBatchSize = CoreDataConfig.fetchBatchSize
         request.relationshipKeyPathsForPrefetching = ["participants", "participants.person", "attachments", "labels"]
+        request.includesPendingChanges = true
         self._messages = FetchRequest(fetchRequest: request)
     }
 
