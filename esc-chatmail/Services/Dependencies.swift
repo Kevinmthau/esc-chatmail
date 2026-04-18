@@ -13,11 +13,10 @@ import CoreData
 /// @EnvironmentObject private var deps: Dependencies
 /// ```
 ///
-/// Usage in ViewModels/Services:
+/// Usage in feature wiring:
 /// ```swift
-/// init(deps: Dependencies = .shared) {
-///     self.coreDataStack = deps.coreDataStack
-/// }
+/// let composeDependencies = deps.makeComposeDependencies()
+/// let viewModel = ComposeViewModel(mode: .newMessage, dependencies: composeDependencies)
 /// ```
 @MainActor
 final class Dependencies: ObservableObject {
@@ -188,6 +187,77 @@ final class Dependencies: ObservableObject {
         ChatContactManager()
     }
 
+    func makeStorageDependencies() -> StorageDependencies {
+        StorageDependencies(
+            viewContext: viewContext,
+            makeBackgroundContext: { [coreDataStack] in
+                coreDataStack.newBackgroundContext()
+            },
+            saveIfNeeded: { [coreDataStack] context in
+                coreDataStack.saveIfNeeded(context: context)
+            },
+            personCache: personCache,
+            profilePhotoResolver: profilePhotoResolver
+        )
+    }
+
+    func makeMessagingDependencies() -> MessagingDependencies {
+        MessagingDependencies(
+            makeMessageActions: { [self] in
+                makeMessageActions()
+            },
+            makeOutboundMessageCoordinator: { [self] in
+                makeOutboundMessageCoordinator()
+            },
+            makeOutboundReplyContextBuilder: { [self] in
+                makeOutboundReplyContextBuilder()
+            },
+            makeComposeReplyModeContextBuilder: { [self] in
+                makeComposeReplyModeContextBuilder()
+            },
+            makeComposeForwardModeContextBuilder: { [self] in
+                makeComposeForwardModeContextBuilder()
+            },
+            makeOutboundAttachmentContextBuilder: { [self] in
+                makeOutboundAttachmentContextBuilder()
+            }
+        )
+    }
+
+    func makeComposeDependencies() -> ComposeDependencies {
+        ComposeDependencies(
+            storage: makeStorageDependencies(),
+            messaging: makeMessagingDependencies(),
+            makeRecipientManager: { [self] in
+                makeRecipientManager()
+            },
+            makeContactAutocompleteService: { [self] in
+                makeContactAutocompleteService()
+            },
+            makeComposeAttachmentManager: { [self] in
+                makeComposeAttachmentManager()
+            }
+        )
+    }
+
+    func makeConversationListDependencies() -> ConversationListDependencies {
+        ConversationListDependencies(
+            storage: makeStorageDependencies(),
+            messaging: makeMessagingDependencies(),
+            syncEngine: syncEngine,
+            conversationManager: conversationManager,
+            makeConversationSearchService: { [self] in
+                makeConversationSearchService()
+            },
+            makeConversationSelectionService: { [self] in
+                makeConversationSelectionService()
+            },
+            makeConversationFilterService: { [self] in
+                makeConversationFilterService()
+            }
+        )
+    }
+
     func makeChatDependencies() -> ChatDependencies {
         let contactsResolver = self.contactsResolver
         let personCache = self.personCache
@@ -281,7 +351,8 @@ final class Dependencies: ObservableObject {
     ///     keychainService: MockKeychainService(),
     ///     // ... other mocks
     /// )
-    /// let viewModel = ChatViewModel(deps: deps)
+    /// let composeDependencies = deps.makeComposeDependencies()
+    /// let viewModel = ComposeViewModel(dependencies: composeDependencies)
     /// ```
     init(
         coreDataStack: CoreDataStack = CoreDataStack.shared,

@@ -38,12 +38,9 @@ final class ConversationListViewModel: ObservableObject {
 
     let messageActions: MessageActions
     let syncEngine: SyncEngine
-    let contactsService: ContactsService
     let conversationManager: ConversationManager
 
-    private let coreDataStack: CoreDataStack
-    private let personCache: PersonCache
-    private let profilePhotoResolver: ProfilePhotoResolver
+    private let storage: StorageDependencies
     private var cancellables = Set<AnyCancellable>()
     private var conversationChangesCancellable: AnyCancellable?
     private let taskManager = ViewModelTaskManager()
@@ -52,26 +49,23 @@ final class ConversationListViewModel: ObservableObject {
 
     // MARK: - Initialization
 
-    /// Primary initializer using Dependencies container
+    /// Primary initializer using the narrowed conversation-list bundle.
     init(
-        deps: Dependencies? = nil,
+        dependencies: ConversationListDependencies? = nil,
         searchService: ConversationSearchService? = nil,
         selectionService: ConversationSelectionService? = nil,
         filterService: ConversationFilterService? = nil
     ) {
-        let dependencies = deps ?? .shared
-        self.coreDataStack = dependencies.coreDataStack
-        self.syncEngine = dependencies.syncEngine
-        self.personCache = dependencies.personCache
-        self.profilePhotoResolver = dependencies.profilePhotoResolver
-        self.messageActions = dependencies.makeMessageActions()
-        self.contactsService = dependencies.makeContactsService()
-        self.conversationManager = dependencies.conversationManager
+        let resolvedDependencies = dependencies ?? Dependencies.shared.makeConversationListDependencies()
+        self.storage = resolvedDependencies.storage
+        self.syncEngine = resolvedDependencies.syncEngine
+        self.messageActions = resolvedDependencies.messaging.makeMessageActions()
+        self.conversationManager = resolvedDependencies.conversationManager
 
         // Initialize composed services
-        let resolvedSearchService = searchService ?? dependencies.makeConversationSearchService()
-        let resolvedSelectionService = selectionService ?? dependencies.makeConversationSelectionService()
-        let resolvedFilterService = filterService ?? dependencies.makeConversationFilterService()
+        let resolvedSearchService = searchService ?? resolvedDependencies.makeConversationSearchService()
+        let resolvedSelectionService = selectionService ?? resolvedDependencies.makeConversationSelectionService()
+        let resolvedFilterService = filterService ?? resolvedDependencies.makeConversationFilterService()
         self.searchService = resolvedSearchService
         self.selectionService = resolvedSelectionService
         self.filterService = resolvedFilterService
@@ -237,8 +231,8 @@ final class ConversationListViewModel: ObservableObject {
     // MARK: - Data Loading
 
     func prefetchPersonData(from conversations: [Conversation]) {
-        let personCache = self.personCache
-        let profilePhotoResolver = self.profilePhotoResolver
+        let personCache = storage.personCache
+        let profilePhotoResolver = storage.profilePhotoResolver
 
         // Extract emails on MainActor before entering detached task
         // (NSManagedObjects are not Sendable)
@@ -270,9 +264,9 @@ final class ConversationListViewModel: ObservableObject {
 
         taskManager.run("refreshNames") { [weak self] in
             guard let self = self else { return }
-            let context = coreDataStack.newBackgroundContext()
+            let context = storage.makeBackgroundContext()
             await conversationManager.updateAllConversationRollups(in: context)
-            coreDataStack.saveIfNeeded(context: context)
+            storage.saveIfNeeded(context)
             UserDefaults.standard.set(true, forKey: hasRefreshedKey)
             Log.info("Refreshed all conversation names (V2: full names for single participants)", category: .conversation)
         }
@@ -330,7 +324,7 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     private var conversationContext: NSManagedObjectContext {
-        observedConversationContext ?? coreDataStack.viewContext
+        observedConversationContext ?? storage.viewContext
     }
 
     private func isSourceConversation(_ conversation: Conversation) -> Bool {

@@ -29,7 +29,10 @@ final class ComposeViewModelTests: XCTestCase {
 
     func testAddAttachment_forwardsAttachmentManagerChanges() {
         let deps = makeDependencies(authSession: makeTestAuthSession())
-        let viewModel = ComposeViewModel(mode: .newMessage, deps: deps)
+        let viewModel = ComposeViewModel(
+            mode: .newMessage,
+            dependencies: deps.makeComposeDependencies()
+        )
         let attachment = Attachment(context: deps.viewContext)
         attachment.id = "local_\(UUID().uuidString)"
         attachment.filename = "photo.jpg"
@@ -74,7 +77,10 @@ final class ComposeViewModelTests: XCTestCase {
                 )
             )
         )
-        let viewModel = ComposeViewModel(mode: .reply(replyModeContext), deps: deps)
+        let viewModel = ComposeViewModel(
+            mode: .reply(replyModeContext),
+            dependencies: deps.makeComposeDependencies()
+        )
 
         viewModel.setupForMode()
         viewModel.setupForMode()
@@ -119,7 +125,10 @@ final class ComposeViewModelTests: XCTestCase {
                 )
             ]
         )
-        let viewModel = ComposeViewModel(mode: .forward(forwardModeContext), deps: deps)
+        let viewModel = ComposeViewModel(
+            mode: .forward(forwardModeContext),
+            dependencies: deps.makeComposeDependencies()
+        )
         defer { viewModel.attachmentManager.clear() }
 
         viewModel.setupForMode()
@@ -141,7 +150,10 @@ final class ComposeViewModelTests: XCTestCase {
             gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
             outboundMessageCoordinator: coordinator
         )
-        let viewModel = ComposeViewModel(mode: .newMessage, deps: deps)
+        let viewModel = ComposeViewModel(
+            mode: .newMessage,
+            dependencies: deps.makeComposeDependencies()
+        )
         viewModel.addRecipient(email: "Friend@example.com")
         viewModel.body = "Hello"
 

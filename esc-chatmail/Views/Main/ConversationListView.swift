@@ -10,7 +10,11 @@ struct ConversationListView: View {
     @MainActor
     init(deps: Dependencies? = nil) {
         let resolvedDeps = deps ?? Dependencies.shared
-        _viewModel = StateObject(wrappedValue: ConversationListViewModel(deps: resolvedDeps))
+        _viewModel = StateObject(
+            wrappedValue: ConversationListViewModel(
+                dependencies: resolvedDeps.makeConversationListDependencies()
+            )
+        )
         let request = NSFetchRequest<Conversation>(entityName: "Conversation")
         request.sortDescriptors = [
             NSSortDescriptor(keyPath: \Conversation.pinned, ascending: false),

@@ -67,7 +67,7 @@ final class ComposeViewModel: ObservableObject {
     // MARK: - Dependencies
 
     let mode: Mode
-    private let dependencies: Dependencies
+    private let storage: StorageDependencies
 
     // MARK: - Computed Properties
 
@@ -115,17 +115,17 @@ final class ComposeViewModel: ObservableObject {
 
     // MARK: - Initialization
 
-    init(mode: Mode = .newMessage, deps: Dependencies? = nil) {
-        let resolvedDeps = deps ?? .shared
+    init(mode: Mode = .newMessage, dependencies: ComposeDependencies? = nil) {
+        let resolvedDependencies = dependencies ?? Dependencies.shared.makeComposeDependencies()
         self.mode = mode
-        self.dependencies = resolvedDeps
+        self.storage = resolvedDependencies.storage
 
         // Initialize composed services
-        self.recipientManager = resolvedDeps.makeRecipientManager()
-        self.autocompleteService = resolvedDeps.makeContactAutocompleteService()
-        self.attachmentManager = resolvedDeps.makeComposeAttachmentManager()
-        self.outboundMessageCoordinator = resolvedDeps.makeOutboundMessageCoordinator()
-        self.outboundAttachmentContextBuilder = resolvedDeps.makeOutboundAttachmentContextBuilder()
+        self.recipientManager = resolvedDependencies.makeRecipientManager()
+        self.autocompleteService = resolvedDependencies.makeContactAutocompleteService()
+        self.attachmentManager = resolvedDependencies.makeComposeAttachmentManager()
+        self.outboundMessageCoordinator = resolvedDependencies.messaging.makeOutboundMessageCoordinator()
+        self.outboundAttachmentContextBuilder = resolvedDependencies.messaging.makeOutboundAttachmentContextBuilder()
 
         // Forward child observable changes to trigger view updates
         forwardChanges(from: autocompleteService, storing: &cancellables)
@@ -205,7 +205,7 @@ final class ComposeViewModel: ObservableObject {
     }
 
     func findActiveConversation(forRecipients recipients: [String]) -> Conversation? {
-        ConversationLookupService(context: dependencies.coreDataStack.viewContext)
+        ConversationLookupService(context: storage.viewContext)
             .findActiveConversation(forRecipients: recipients)
     }
 

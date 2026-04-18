@@ -54,10 +54,13 @@ struct ComposeView: View {
         onSendConversation: ((ConversationReference) -> Void)? = nil
     ) {
         let resolvedDeps = deps ?? Dependencies.shared
+        let composeDependencies = resolvedDeps.makeComposeDependencies()
         self.presentationStyle = presentationStyle
         self.onOpenConversation = onOpenConversation
         self.onSendConversation = onSendConversation
-        _viewModel = StateObject(wrappedValue: ComposeViewModel(mode: mode, deps: resolvedDeps))
+        _viewModel = StateObject(
+            wrappedValue: ComposeViewModel(mode: mode, dependencies: composeDependencies)
+        )
     }
 
     private var recipientSection: RecipientInputSection {
