@@ -189,9 +189,14 @@ final class VirtualScrollState: ObservableObject {
             visibleMessages = resolveCachedMessages(for: window.messageIDs)
         } else {
             // Need to load a new window.
+            let preferPendingConversationMessages = hasPendingInsertedMessagesInConversation
             taskManager.run("loadWindow") { [weak self] in
                 guard let self = self else { return }
-                await self.loadWindow(startIndex: startIndex, endIndex: endIndex)
+                await self.loadWindow(
+                    startIndex: startIndex,
+                    endIndex: endIndex,
+                    preferPendingConversationMessages: preferPendingConversationMessages
+                )
             }
         }
     }
@@ -297,14 +302,14 @@ final class VirtualScrollState: ObservableObject {
 
         let startIndex = window.endIndex
         let endIndex = min(totalMessageCount, startIndex + configuration.pageSize)
+        let preferPendingConversationMessages = hasPendingInsertedMessagesInConversation
 
         taskManager.run("preloadNext") { [weak self] in
             guard let self = self else { return }
 
-            let page = await self.pageLoader(
-                self.conversationId,
+            let page = await self.loadPage(
                 startIndex..<endIndex,
-                self.makeBackgroundContext()
+                preferPendingConversationMessages: preferPendingConversationMessages
             )
 
             guard !Task.isCancelled else { return }
@@ -340,14 +345,14 @@ final class VirtualScrollState: ObservableObject {
 
         let endIndex = window.startIndex
         let startIndex = max(0, endIndex - configuration.pageSize)
+        let preferPendingConversationMessages = hasPendingInsertedMessagesInConversation
 
         taskManager.run("preloadPrevious") { [weak self] in
             guard let self = self else { return }
 
-            let page = await self.pageLoader(
-                self.conversationId,
+            let page = await self.loadPage(
                 startIndex..<endIndex,
-                self.makeBackgroundContext()
+                preferPendingConversationMessages: preferPendingConversationMessages
             )
 
             guard !Task.isCancelled else { return }
@@ -458,22 +463,26 @@ final class VirtualScrollState: ObservableObject {
         nonisolated(unsafe) let safePredicate = predicate
 
         return await context.perform {
-            let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
-            request.predicate = safePredicate
-            request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: true)]
-            request.fetchOffset = range.lowerBound
-            request.fetchLimit = range.count
-            request.fetchBatchSize = 20
-            request.includesPendingChanges = true
-            request.resultType = .managedObjectIDResultType
-
-            let messageIDs = (try? context.fetch(request)) ?? []
+            let messageIDs: [NSManagedObjectID]
+            if range.isEmpty {
+                messageIDs = []
+            } else {
+                let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
+                request.predicate = safePredicate
+                request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: true)]
+                request.fetchOffset = range.lowerBound
+                request.fetchLimit = range.count
+                request.fetchBatchSize = 20
+                request.includesPendingChanges = false
+                request.resultType = .managedObjectIDResultType
+                messageIDs = (try? context.fetch(request)) ?? []
+            }
 
             // Keep count() on the background context so window sizing stays cheap and
             // the main actor only resolves the IDs it actually needs to render.
             let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
             countRequest.predicate = safePredicate
-            countRequest.includesPendingChanges = true
+            countRequest.includesPendingChanges = false
             let totalCount = (try? context.count(for: countRequest)) ?? 0
 
             return VirtualScrollMessagePage(messageIDs: messageIDs, totalCount: totalCount)
@@ -493,15 +502,19 @@ final class VirtualScrollState: ObservableObject {
         nonisolated(unsafe) let safePredicate = predicate
 
         return await context.perform {
-            let request = NSFetchRequest<Message>(entityName: "Message")
-            request.predicate = safePredicate
-            request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: true)]
-            request.fetchOffset = range.lowerBound
-            request.fetchLimit = range.count
-            request.fetchBatchSize = 20
-            request.includesPendingChanges = true
-
-            let messages = (try? context.fetch(request)) ?? []
+            let messages: [Message]
+            if range.isEmpty {
+                messages = []
+            } else {
+                let request = NSFetchRequest<Message>(entityName: "Message")
+                request.predicate = safePredicate
+                request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: true)]
+                request.fetchOffset = range.lowerBound
+                request.fetchLimit = range.count
+                request.fetchBatchSize = 20
+                request.includesPendingChanges = true
+                messages = (try? context.fetch(request)) ?? []
+            }
 
             let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
             countRequest.predicate = safePredicate

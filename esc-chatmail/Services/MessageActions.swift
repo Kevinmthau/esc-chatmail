@@ -62,6 +62,22 @@ final class MessageActions: ObservableObject {
         }
     }
 
+    /// Snapshots the unread message IDs that should be cleared when a chat opens.
+    /// Capturing these IDs on the main context avoids racing newer arrivals.
+    func snapshotUnreadConversationMessageObjectIDs(conversationID: UUID) -> [NSManagedObjectID] {
+        let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
+        request.predicate = NSPredicate(
+            format: "conversation.id == %@ AND isUnread == YES AND NONE labels.id IN %@",
+            conversationID as CVarArg,
+            ["DRAFT", "SPAM", "TRASH"]
+        )
+        request.fetchBatchSize = 50
+        request.includesPendingChanges = false
+        request.resultType = .managedObjectIDResultType
+
+        return (try? coreDataStack.viewContext.fetch(request)) ?? []
+    }
+
     /// Core method for updating message read state - eliminates duplication between markAsRead/markAsUnread
     private func updateReadState(message: Message, isUnread: Bool, actionType: PendingAction.ActionType) async {
         // Skip if already in desired state
@@ -114,8 +130,6 @@ final class MessageActions: ObservableObject {
     /// Batch mark messages as read - prevents race condition with new messages
     /// Uses a single transaction to ensure atomic update of conversation unread count
     func markMessagesAsReadBatch(messageIDs: [NSManagedObjectID], conversationID: NSManagedObjectID) async {
-        guard !messageIDs.isEmpty else { return }
-
         let context = coreDataStack.newBackgroundContext()
 
         let gmailMessageIds: [String] = await context.perform {
@@ -136,7 +150,13 @@ final class MessageActions: ObservableObject {
 
             // Update conversation unread count atomically
             if let conv = try? context.existingObject(with: conversationID) as? Conversation {
-                conv.inboxUnreadCount = 0
+                let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
+                countRequest.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+                    NSPredicate(format: "conversation == %@", conv),
+                    NSPredicate(format: "ANY labels.id == %@", "INBOX"),
+                    NSPredicate(format: "isUnread == YES")
+                ])
+                conv.inboxUnreadCount = Int32((try? context.count(for: countRequest)) ?? 0)
             }
 
             context.saveOrLog(operation: "batch mark messages as read")

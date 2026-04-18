@@ -21,10 +21,7 @@ struct ChatMessagesView: View {
     @State private var contactRefreshToken = 0
     @State private var senderGroupingKeysByEmail: [String: String] = [:]
 
-    @State private var initialScrollTask: Task<Void, Never>?
-    @State private var scrollTask: Task<Void, Never>?
-    @State private var followUpScrollTask: Task<Void, Never>?
-    @State private var stabilizationScrollTask: Task<Void, Never>?
+    @State private var bottomAnchorTask: Task<Void, Never>?
     @State private var senderGroupingTask: Task<Void, Never>?
 
     private var shouldUseBottomAnchoring: Bool { messages.count > 1 }
@@ -125,7 +122,7 @@ struct ChatMessagesView: View {
                         category: .ui
                     )
                 }
-                markConversationAsReadIfNeeded()
+                viewModel.markConversationAsReadIfNeeded()
                 viewModel.initializeReplyingTo(lastMessage: messages.last)
 
                 // If the newest window is already loaded (e.g. warm navigation), trigger initial scroll.
@@ -142,10 +139,7 @@ struct ChatMessagesView: View {
             }
             .onDisappear {
                 // Cancel view-scoped scroll/prefetch work when leaving chat.
-                initialScrollTask?.cancel()
-                scrollTask?.cancel()
-                followUpScrollTask?.cancel()
-                stabilizationScrollTask?.cancel()
+                bottomAnchorTask?.cancel()
                 senderGroupingTask?.cancel()
                 viewModel.cancelPrefetch()
             }
@@ -161,11 +155,7 @@ struct ChatMessagesView: View {
             }
             .onChange(of: messages.count) { oldCount, newCount in
                 if !isReadyToShow && newCount > 0 {
-                    scrollTask?.cancel()
-                    scrollTask = Task { @MainActor in
-                        await scrollState.loadLatestWindowIfNeeded()
-                        performInitialScroll(proxy: proxy)
-                    }
+                    performInitialScroll(proxy: proxy)
                 } else if isReadyToShow && newCount > oldCount {
                     // New message arrived: animate the scroll
                     viewModel.updateReplyingToIfNewSubject(lastMessage: messages.last)
@@ -229,23 +219,6 @@ struct ChatMessagesView: View {
     }
 
     // MARK: - Scroll Helpers
-
-    private func markConversationAsReadIfNeeded() {
-        guard conversation.inboxUnreadCount > 0 else { return }
-
-        let context = conversation.managedObjectContext ?? deps.viewContext
-        let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
-        request.resultType = .managedObjectIDResultType
-        request.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: true)]
-        request.predicate = NSPredicate(
-            format: "conversation == %@ AND isUnread == YES AND NONE labels.id IN %@",
-            conversation,
-            ["DRAFT", "SPAM", "TRASH"]
-        )
-
-        let unreadMessageIDs = (try? context.fetch(request)) ?? []
-        viewModel.markConversationAsRead(messageObjectIDs: unreadMessageIDs)
-    }
 
     private func prefetchVisibleContent() {
         let config = VirtualScrollConfiguration.default
@@ -315,72 +288,88 @@ struct ChatMessagesView: View {
             isReadyToShow = true
             return
         }
-        // Cancel any existing initial scroll task to prevent race conditions
-        initialScrollTask?.cancel()
-        initialScrollTask = Task { @MainActor in
-            await scrollState.loadLatestWindowIfNeeded()
-            // Wait for layout to complete before scrolling
-            try? await Task.sleep(nanoseconds: UInt64(UIConfig.contentChangeScrollDelay * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            Log.diagnostic(.chatView, level: .info, "ChatView initial scroll -> bottom anchor", category: .ui)
-            proxy.scrollTo(bottomID, anchor: .bottom)
-            await performFollowUpBottomScroll(proxy: proxy)
-        }
+        scheduleBottomAnchor(
+            proxy: proxy,
+            steps: [
+                BottomAnchorStep(
+                    delay: UIConfig.contentChangeScrollDelay,
+                    animated: false,
+                    logMessage: "ChatView initial scroll -> bottom anchor"
+                ),
+                BottomAnchorStep(
+                    delay: UIConfig.initialScrollDelay,
+                    animated: false,
+                    logMessage: "ChatView follow-up scroll -> bottom anchor",
+                    marksReady: true
+                ),
+                BottomAnchorStep(
+                    delay: 0.25,
+                    animated: false,
+                    logMessage: "ChatView stabilization scroll (0.25s) -> bottom anchor"
+                ),
+                BottomAnchorStep(
+                    delay: 0.75,
+                    animated: false,
+                    logMessage: "ChatView stabilization scroll (0.75s) -> bottom anchor"
+                ),
+                BottomAnchorStep(
+                    delay: 1.5,
+                    animated: false,
+                    logMessage: "ChatView stabilization scroll (1.5s) -> bottom anchor"
+                )
+            ]
+        )
     }
 
     private func scrollToBottom(proxy: ScrollViewProxy, delay: TimeInterval) {
         guard shouldUseBottomAnchoring else { return }
-        // Cancel any existing scroll task to prevent accumulation from multiple onChange handlers
-        scrollTask?.cancel()
-        scrollTask = Task { @MainActor in
-            await scrollState.loadLatestWindowIfNeeded()
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            withAnimation(.easeOut(duration: UIConfig.scrollAnimationDuration)) {
-                Log.diagnostic(.chatView, level: .info, "ChatView animated scroll -> bottom anchor", category: .ui)
-                proxy.scrollTo(bottomID, anchor: .bottom)
-            }
-        }
-    }
-
-    private func performFollowUpBottomScroll(proxy: ScrollViewProxy) async {
-        guard shouldUseBottomAnchoring else {
-            isReadyToShow = true
-            return
-        }
-        followUpScrollTask?.cancel()
-        followUpScrollTask = Task { @MainActor in
-            await scrollState.loadLatestWindowIfNeeded()
-            try? await Task.sleep(nanoseconds: UInt64(UIConfig.initialScrollDelay * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            Log.diagnostic(.chatView, level: .info, "ChatView follow-up scroll -> bottom anchor", category: .ui)
-            proxy.scrollTo(bottomID, anchor: .bottom)
-            isReadyToShow = true
-            scheduleStabilizationBottomScrolls(proxy: proxy)
-        }
-        await followUpScrollTask?.value
-    }
-
-    /// Message rows can change height asynchronously (HTML/text processing),
-    /// which can leave the viewport below content on some devices.
-    /// Re-assert bottom anchoring briefly after initial load.
-    private func scheduleStabilizationBottomScrolls(proxy: ScrollViewProxy) {
-        guard shouldUseBottomAnchoring else { return }
-        stabilizationScrollTask?.cancel()
-        stabilizationScrollTask = Task { @MainActor in
-            await scrollState.loadLatestWindowIfNeeded()
-            let delays: [TimeInterval] = [0.25, 0.75, 1.5]
-            for delay in delays {
-                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                guard !Task.isCancelled else { return }
-                Log.diagnostic(
-                    .chatView,
-                    level: .info,
-                    "ChatView stabilization scroll (\(delay)s) -> bottom anchor",
-                    category: .ui
+        scheduleBottomAnchor(
+            proxy: proxy,
+            steps: [
+                BottomAnchorStep(
+                    delay: delay,
+                    animated: true,
+                    logMessage: "ChatView animated scroll -> bottom anchor"
                 )
-                proxy.scrollTo(bottomID, anchor: .bottom)
+            ]
+        )
+    }
+
+    private func scheduleBottomAnchor(
+        proxy: ScrollViewProxy,
+        steps: [BottomAnchorStep]
+    ) {
+        bottomAnchorTask?.cancel()
+        bottomAnchorTask = Task { @MainActor in
+            await scrollState.loadLatestWindowIfNeeded()
+
+            for step in steps {
+                if step.delay > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(step.delay * 1_000_000_000))
+                }
+                guard !Task.isCancelled else { return }
+
+                if step.animated {
+                    withAnimation(.easeOut(duration: UIConfig.scrollAnimationDuration)) {
+                        Log.diagnostic(.chatView, level: .info, step.logMessage, category: .ui)
+                        proxy.scrollTo(bottomID, anchor: .bottom)
+                    }
+                } else {
+                    Log.diagnostic(.chatView, level: .info, step.logMessage, category: .ui)
+                    proxy.scrollTo(bottomID, anchor: .bottom)
+                }
+
+                if step.marksReady {
+                    isReadyToShow = true
+                }
             }
         }
     }
+}
+
+private struct BottomAnchorStep {
+    let delay: TimeInterval
+    let animated: Bool
+    let logMessage: String
+    var marksReady: Bool = false
 }

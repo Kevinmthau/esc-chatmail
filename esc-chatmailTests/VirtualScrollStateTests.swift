@@ -31,6 +31,18 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertEqual(page.messageIDs, Array(messages[1..<4]).map(\.objectID))
     }
 
+    func testLoadMessagePage_emptyRangeReturnsCountWithoutFetchingMessageIDs() async throws {
+        let (conversation, _) = try makeConversationWithMessages(count: 6)
+        let page = await VirtualScrollState.loadMessagePage(
+            conversationId: conversation.id.uuidString,
+            range: 0..<0,
+            in: stack.newBackgroundContext()
+        )
+
+        XCTAssertEqual(page.totalCount, 6)
+        XCTAssertTrue(page.messageIDs.isEmpty)
+    }
+
     func testInitialLoad_publishesOnlyViewContextMessages() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 8)
         let configuration = VirtualScrollConfiguration(
@@ -251,6 +263,87 @@ final class VirtualScrollStateTests: XCTestCase {
         await state.loadLatestWindowIfNeeded()
 
         let expectedIDs = Array(messages.suffix(3)).map(\.objectID) + [pendingMessage.objectID]
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == expectedIDs &&
+                state.totalMessageCount == 9 &&
+                !state.isLoadingMore
+        }
+    }
+
+    func testReloadedWindow_keepsPendingOptimisticMessageVisible() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 3,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+        let pendingMessage = try makePendingMessage(
+            id: "virtual-scroll-pending-reload",
+            date: Date(timeIntervalSince1970: 8),
+            conversation: conversation
+        )
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        let initialIDs = Array(messages.suffix(3)).map(\.objectID) + [pendingMessage.objectID]
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
+        }
+
+        state.markIndexVisible(2)
+
+        let expectedIDs = messages.map(\.objectID) + [pendingMessage.objectID]
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == expectedIDs &&
+                state.totalMessageCount == 9 &&
+                !state.isLoadingMore
+        }
+    }
+
+    func testPreloadPrevious_preservesPendingOptimisticMessageCount() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 3,
+            bufferSize: 0,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+        let pendingMessage = try makePendingMessage(
+            id: "virtual-scroll-pending-preload-previous",
+            date: Date(timeIntervalSince1970: 8),
+            conversation: conversation
+        )
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        let initialIDs = Array(messages[6...7]).map(\.objectID) + [pendingMessage.objectID]
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs &&
+                state.totalMessageCount == 9 &&
+                !state.isLoadingMore
+        }
+
+        state.scrollPosition = 9
+        state.markIndexVisible(6)
+
+        let expectedIDs = Array(messages[3...7]).map(\.objectID) + [pendingMessage.objectID]
         await waitUntil {
             state.visibleMessages.map(\.objectID) == expectedIDs &&
                 state.totalMessageCount == 9 &&

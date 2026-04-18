@@ -95,6 +95,15 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    func markConversationAsReadIfNeeded() {
+        guard conversation.inboxUnreadCount > 0 else { return }
+
+        let unreadMessageIDs = messageActions.snapshotUnreadConversationMessageObjectIDs(
+            conversationID: conversation.id
+        )
+        markConversationAsRead(messageObjectIDs: unreadMessageIDs)
+    }
+
     func toggleMessageRead(_ message: Message) {
         let messageID = message.objectID
         taskManager.run("toggleRead-\(messageID)") { [weak self] in

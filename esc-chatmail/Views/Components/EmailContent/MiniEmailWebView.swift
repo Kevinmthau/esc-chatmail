@@ -5,6 +5,7 @@ import SwiftUI
 /// Keep newsletter chat previews out of this path; they should use the derived native preview card.
 struct MiniEmailWebView: View {
     let htmlContent: String
+    let previewCacheKey: String?
     var scale: CGFloat = 0.5
     var isDarkMode: Bool = false
     /// Optional message for resolving cid: URLs to inline attachments
@@ -20,15 +21,17 @@ struct MiniEmailWebView: View {
 
     init(
         htmlContent: String,
+        previewCacheKey: String? = nil,
         scale: CGFloat = 0.5,
         isDarkMode: Bool = false,
         message: Message? = nil
     ) {
         self.htmlContent = htmlContent
+        self.previewCacheKey = previewCacheKey
         self.scale = scale
         self.isDarkMode = isDarkMode
         self.message = message
-        self.previewHeightCacheKey = Self.previewHeightCacheKey(
+        self.previewHeightCacheKey = previewCacheKey ?? Self.previewHeightCacheKey(
             messageID: message?.id,
             htmlContent: htmlContent
         )
