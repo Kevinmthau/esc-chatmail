@@ -70,6 +70,26 @@ final class RawEmailSourceSanitizerTests: XCTestCase {
         )
     }
 
+    func testExtractDisplayText_repeatedSignatureSeparator_isNotInferredAsBoundary() {
+        let extracted = RawEmailSourceSanitizer.extractDisplayText(from: rawMultipartEmailWithRepeatedSignatureSeparator)
+
+        XCTAssertEqual(
+            extracted,
+            """
+            Hi Kevin,
+
+            We can do Tuesday.
+
+            --Thanks,
+            Barbara
+
+            P.S. Repeating the sign-off should stay in the body.
+            --Thanks,
+            Barbara
+            """
+        )
+    }
+
     func testExtractHTMLText_newsletterRawSource_extractsHTMLBody() {
         let extracted = RawEmailSourceSanitizer.extractHTMLText(from: rawNewsletterMultipartEmail)
 
@@ -237,6 +257,43 @@ final class RawEmailSourceSanitizerTests: XCTestCase {
         <html><body><div>Hi team</div></body></html>
 
         --mixed-boundary-12345--
+        """
+    }
+
+    private var rawMultipartEmailWithRepeatedSignatureSeparator: String {
+        """
+        Delivered-To: kmthau@gmail.com
+        Received: by 2002:a05:6e04:108f:b0:3ac:63b9:5e27 with SMTP id u15csp476934imc;
+                Tue, 24 Feb 2026 14:02:53 -0800 (PST)
+        X-Received: by 2002:a05:7022:6899:b0:123:35c4:f39c with SMTP id a92af1059eb24;
+                Tue, 24 Feb 2026 14:02:53 -0800 (PST)
+        Return-Path: <sender@example.com>
+        MIME-Version: 1.0
+        Subject: Schedule
+        Content-Type: multipart/alternative; boundary="fallback-boundary-12345"
+
+        --fallback-boundary-12345
+        Content-Type: text/plain; charset="UTF-8"
+        Content-Transfer-Encoding: 8bit
+
+        Hi Kevin,
+
+        We can do Tuesday.
+
+        --Thanks,
+        Barbara
+
+        P.S. Repeating the sign-off should stay in the body.
+        --Thanks,
+        Barbara
+
+        --fallback-boundary-12345
+        Content-Type: text/html; charset="UTF-8"
+        Content-Transfer-Encoding: 8bit
+
+        <html><body><div>Hi Kevin</div></body></html>
+
+        --fallback-boundary-12345--
         """
     }
 

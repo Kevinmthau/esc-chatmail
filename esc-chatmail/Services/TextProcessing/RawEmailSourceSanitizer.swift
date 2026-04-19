@@ -344,8 +344,10 @@ enum RawEmailSourceSanitizer {
         // Fallback for raw-source blobs where top-level Content-Type headers were stripped.
         // Real MIME boundaries repeat multiple times; body separators usually do not.
         var boundaryCounts: [String: Int] = [:]
-        for line in lines.prefix(320) {
-            guard let token = boundaryToken(from: line.trimmingCharacters(in: .whitespaces)) else {
+        for (index, line) in lines.prefix(320).enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard let token = boundaryToken(from: trimmed),
+                  isLikelyFallbackBoundaryLine(at: index, in: lines, token: token) else {
                 continue
             }
             boundaryCounts[token, default: 0] += 1
@@ -384,11 +386,39 @@ enum RawEmailSourceSanitizer {
         }
 
         guard token.count >= 6 else { return nil }
-        guard token.allSatisfy(isValidBoundaryCharacter(_:)) else {
+        guard token.allSatisfy(isValidFallbackBoundaryCharacter(_:)) else {
             return nil
         }
 
         return token
+    }
+
+    private static func isLikelyFallbackBoundaryLine(
+        at index: Int,
+        in lines: [String],
+        token: String
+    ) -> Bool {
+        let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+        if trimmed == "--\(token)--" {
+            return true
+        }
+
+        var cursor = index + 1
+        while cursor < lines.count {
+            let nextLine = lines[cursor]
+            if nextLine.isEmpty {
+                cursor += 1
+                continue
+            }
+
+            return isHeaderLine(nextLine)
+        }
+
+        return false
+    }
+
+    private static func isValidFallbackBoundaryCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || "()+_-./:=?".contains(character)
     }
 
     private static func isValidBoundaryCharacter(_ character: Character) -> Bool {
