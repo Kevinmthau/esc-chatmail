@@ -2,7 +2,7 @@ import XCTest
 @testable import esc_chatmail
 
 final class InitialSyncOrchestratorTests: XCTestCase {
-    func testCompletionDisposition_warnedInitialSyncStillAdvancesHistoryId() {
+    func testCompletionDisposition_warnedInitialSyncKeepsHistoryIdUnset() {
         let disposition = InitialSyncOrchestrator.completionDisposition(
             hadInitialFailures: true,
             permanentlyFailedCount: 1
@@ -11,7 +11,7 @@ final class InitialSyncOrchestratorTests: XCTestCase {
         XCTAssertEqual(
             disposition,
             InitialSyncCompletionDisposition(
-                shouldAdvanceHistoryId: true,
+                shouldAdvanceHistoryId: false,
                 hadWarnings: true
             )
         )

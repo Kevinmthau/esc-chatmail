@@ -125,44 +125,64 @@ final class BackgroundSyncManager {
         do {
             let authSession = await MainActor.run { authSessionProvider() }
             _ = try await authSession.withFreshToken()
+            let currentAccountEmail = await MainActor.run { authSession.userEmail }
+            let historyId = await stateManager.getStoredHistoryId()
 
             if let continuationState = stateManager.getContinuationState() {
-                switch continuationState.mode {
-                case .history:
-                    guard let startHistoryId = continuationState.startHistoryId else {
-                        stateManager.clearContinuationState()
-                        Log.warning("Cleared invalid background history continuation state", category: .background)
-                        break
-                    }
-
-                    return await performHistorySync(
-                        startHistoryId: startHistoryId,
-                        initialPageToken: continuationState.pageToken,
-                        isProcessingTask: isProcessingTask
+                if !continuationState.isCompatible(
+                    storedHistoryId: historyId,
+                    currentAccountEmail: currentAccountEmail
+                ) {
+                    stateManager.clearContinuationState()
+                    Log.warning(
+                        "Cleared stale background sync continuation state because the stored account or history cursor changed",
+                        category: .background
                     )
+                } else {
+                    switch continuationState.mode {
+                    case .history:
+                        guard let startHistoryId = continuationState.startHistoryId else {
+                            stateManager.clearContinuationState()
+                            Log.warning("Cleared invalid background history continuation state", category: .background)
+                            break
+                        }
 
-                case .partial:
-                    guard let query = continuationState.query, let maxResults = continuationState.maxResults else {
-                        stateManager.clearContinuationState()
-                        Log.warning("Cleared invalid background partial continuation state", category: .background)
-                        break
+                        return await performHistorySync(
+                            startHistoryId: startHistoryId,
+                            initialPageToken: continuationState.pageToken,
+                            isProcessingTask: isProcessingTask,
+                            accountEmail: currentAccountEmail
+                        )
+
+                    case .partial:
+                        guard let query = continuationState.query, let maxResults = continuationState.maxResults else {
+                            stateManager.clearContinuationState()
+                            Log.warning("Cleared invalid background partial continuation state", category: .background)
+                            break
+                        }
+
+                        return await performPartialSync(
+                            query: query,
+                            initialPageToken: continuationState.pageToken,
+                            maxResults: maxResults,
+                            isProcessingTask: isProcessingTask,
+                            accountEmail: currentAccountEmail
+                        )
                     }
-
-                    return await performPartialSync(
-                        query: query,
-                        initialPageToken: continuationState.pageToken,
-                        maxResults: maxResults,
-                        isProcessingTask: isProcessingTask
-                    )
                 }
             }
 
-            let historyId = await stateManager.getStoredHistoryId()
-
             if let historyId = historyId {
-                return await performHistorySync(startHistoryId: historyId, isProcessingTask: isProcessingTask)
+                return await performHistorySync(
+                    startHistoryId: historyId,
+                    isProcessingTask: isProcessingTask,
+                    accountEmail: currentAccountEmail
+                )
             } else {
-                return await performPartialSync(isProcessingTask: isProcessingTask)
+                return await performPartialSync(
+                    isProcessingTask: isProcessingTask,
+                    accountEmail: currentAccountEmail
+                )
             }
         } catch {
             Log.error("Background sync error", category: .background, error: error)
@@ -174,7 +194,8 @@ final class BackgroundSyncManager {
     private func performHistorySync(
         startHistoryId: String,
         initialPageToken: String? = nil,
-        isProcessingTask: Bool
+        isProcessingTask: Bool,
+        accountEmail: String?
     ) async -> Bool {
         do {
             let apiClient = await MainActor.run { apiClientProvider() }
@@ -211,7 +232,11 @@ final class BackgroundSyncManager {
             }
 
             let continuationState = didTruncateHistoryPagination && !processingResult.hadFetchFailures && pageToken != nil
-                ? BackgroundSyncContinuationState.history(startHistoryId: startHistoryId, pageToken: pageToken!)
+                ? BackgroundSyncContinuationState.history(
+                    startHistoryId: startHistoryId,
+                    pageToken: pageToken!,
+                    accountEmail: accountEmail
+                )
                 : nil
             let disposition = Self.completionDisposition(
                 catchUpState: continuationState,
@@ -245,7 +270,8 @@ final class BackgroundSyncManager {
                 error,
                 startHistoryId: startHistoryId,
                 initialPageToken: initialPageToken,
-                isProcessingTask: isProcessingTask
+                isProcessingTask: isProcessingTask,
+                accountEmail: accountEmail
             )
         }
     }
@@ -254,7 +280,8 @@ final class BackgroundSyncManager {
         _ error: Error,
         startHistoryId: String,
         initialPageToken: String?,
-        isProcessingTask: Bool
+        isProcessingTask: Bool,
+        accountEmail: String?
     ) async -> Bool {
         let action = errorHandler.handleError(error)
 
@@ -265,7 +292,10 @@ final class BackgroundSyncManager {
 
         case .partialSync:
             stateManager.clearContinuationState()
-            return await performPartialSync(isProcessingTask: isProcessingTask)
+            return await performPartialSync(
+                isProcessingTask: isProcessingTask,
+                accountEmail: accountEmail
+            )
 
         case .tokenRefreshAndRetry:
             do {
@@ -274,7 +304,8 @@ final class BackgroundSyncManager {
                 return await performHistorySync(
                     startHistoryId: startHistoryId,
                     initialPageToken: initialPageToken,
-                    isProcessingTask: isProcessingTask
+                    isProcessingTask: isProcessingTask,
+                    accountEmail: accountEmail
                 )
             } catch {
                 Log.error("Token refresh failed", category: .background, error: error)
@@ -295,7 +326,8 @@ final class BackgroundSyncManager {
         query: String? = nil,
         initialPageToken: String? = nil,
         maxResults: Int? = nil,
-        isProcessingTask: Bool
+        isProcessingTask: Bool,
+        accountEmail: String?
     ) async -> Bool {
         do {
             let apiClient = await MainActor.run { apiClientProvider() }
@@ -330,7 +362,12 @@ final class BackgroundSyncManager {
 
             let didTruncateMessagePagination = pageToken != nil
             let continuationState = didTruncateMessagePagination && !processingResult.hadFetchFailures && pageToken != nil
-                ? BackgroundSyncContinuationState.partial(query: query, pageToken: pageToken!, maxResults: maxResults)
+                ? BackgroundSyncContinuationState.partial(
+                    query: query,
+                    pageToken: pageToken!,
+                    maxResults: maxResults,
+                    accountEmail: accountEmail
+                )
                 : nil
             let profile = continuationState != nil || processingResult.hadFetchFailures
                 ? nil
@@ -362,7 +399,7 @@ final class BackgroundSyncManager {
 
             return await finalizeBackgroundSync(
                 disposition,
-                accountEmail: profile?.emailAddress
+                accountEmail: profile?.emailAddress ?? accountEmail
             )
         } catch {
             Log.error("Partial sync error", category: .background, error: error)

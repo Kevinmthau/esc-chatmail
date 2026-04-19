@@ -268,7 +268,7 @@ final class InitialSyncOrchestrator {
             }
 
             if disposition.hadWarnings {
-                log.warning("\(stillFailedIds.count) messages permanently failed - advancing historyId so future syncs can continue incrementally")
+                log.warning("\(stillFailedIds.count) messages permanently failed - keeping historyId unset so initial sync can retry safely")
                 await failureTracker.recordFailure(failedIds: stillFailedIds)
             } else {
                 log.info("All failed messages recovered on retry - advancing historyId")
@@ -295,7 +295,7 @@ final class InitialSyncOrchestrator {
         }
 
         return InitialSyncCompletionDisposition(
-            shouldAdvanceHistoryId: true,
+            shouldAdvanceHistoryId: permanentlyFailedCount == 0,
             hadWarnings: permanentlyFailedCount > 0
         )
     }

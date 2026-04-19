@@ -13,25 +13,41 @@ struct BackgroundSyncContinuationState: Codable, Equatable {
     let startHistoryId: String?
     let query: String?
     let maxResults: Int?
+    let accountEmail: String?
 
-    static func history(startHistoryId: String, pageToken: String) -> Self {
+    static func history(startHistoryId: String, pageToken: String, accountEmail: String? = nil) -> Self {
         Self(
             mode: .history,
             pageToken: pageToken,
             startHistoryId: startHistoryId,
             query: nil,
-            maxResults: nil
+            maxResults: nil,
+            accountEmail: accountEmail
         )
     }
 
-    static func partial(query: String, pageToken: String, maxResults: Int) -> Self {
+    static func partial(query: String, pageToken: String, maxResults: Int, accountEmail: String? = nil) -> Self {
         Self(
             mode: .partial,
             pageToken: pageToken,
             startHistoryId: nil,
             query: query,
-            maxResults: maxResults
+            maxResults: maxResults,
+            accountEmail: accountEmail
         )
+    }
+
+    func isCompatible(storedHistoryId: String?, currentAccountEmail: String?) -> Bool {
+        guard let accountEmail, accountEmail == currentAccountEmail else {
+            return false
+        }
+
+        switch mode {
+        case .history:
+            return startHistoryId == storedHistoryId
+        case .partial:
+            return storedHistoryId == nil
+        }
     }
 }
 

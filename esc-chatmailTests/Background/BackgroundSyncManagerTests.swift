@@ -57,4 +57,74 @@ final class BackgroundSyncManagerTests: XCTestCase {
             )
         )
     }
+
+    func testHistoryContinuationCompatibility_requiresMatchingAccountAndCursor() {
+        let continuationState = BackgroundSyncContinuationState.history(
+            startHistoryId: "history-100",
+            pageToken: "page-2",
+            accountEmail: "user@example.com"
+        )
+
+        XCTAssertTrue(
+            continuationState.isCompatible(
+                storedHistoryId: "history-100",
+                currentAccountEmail: "user@example.com"
+            )
+        )
+        XCTAssertFalse(
+            continuationState.isCompatible(
+                storedHistoryId: "history-101",
+                currentAccountEmail: "user@example.com"
+            )
+        )
+        XCTAssertFalse(
+            continuationState.isCompatible(
+                storedHistoryId: "history-100",
+                currentAccountEmail: "other@example.com"
+            )
+        )
+    }
+
+    func testPartialContinuationCompatibility_requiresSameAccountAndNoStoredCursor() {
+        let continuationState = BackgroundSyncContinuationState.partial(
+            query: "after:123 -label:spam",
+            pageToken: "page-2",
+            maxResults: 50,
+            accountEmail: "user@example.com"
+        )
+
+        XCTAssertTrue(
+            continuationState.isCompatible(
+                storedHistoryId: nil,
+                currentAccountEmail: "user@example.com"
+            )
+        )
+        XCTAssertFalse(
+            continuationState.isCompatible(
+                storedHistoryId: "history-123",
+                currentAccountEmail: "user@example.com"
+            )
+        )
+        XCTAssertFalse(
+            continuationState.isCompatible(
+                storedHistoryId: nil,
+                currentAccountEmail: "other@example.com"
+            )
+        )
+    }
+
+    func testContinuationCompatibility_rejectsLegacyUnscopedState() {
+        let continuationState = BackgroundSyncContinuationState.partial(
+            query: "after:123 -label:spam",
+            pageToken: "page-2",
+            maxResults: 50
+        )
+
+        XCTAssertFalse(
+            continuationState.isCompatible(
+                storedHistoryId: nil,
+                currentAccountEmail: "user@example.com"
+            )
+        )
+    }
 }

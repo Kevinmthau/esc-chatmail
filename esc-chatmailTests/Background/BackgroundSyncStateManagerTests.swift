@@ -59,7 +59,8 @@ final class BackgroundSyncStateManagerTests: XCTestCase {
         let continuationState = BackgroundSyncContinuationState.partial(
             query: "after:123 -label:spam",
             pageToken: "page-2",
-            maxResults: 50
+            maxResults: 50,
+            accountEmail: "test@example.com"
         )
 
         try stateManager.storeContinuationState(continuationState)
