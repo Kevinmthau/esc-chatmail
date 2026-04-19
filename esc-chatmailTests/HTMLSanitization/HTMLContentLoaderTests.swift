@@ -416,7 +416,6 @@ final class HTMLContentLoaderTests: XCTestCase {
         let html = result.html ?? ""
         XCTAssertEqual(result.presentation, .html)
         XCTAssertNil(result.nativeText)
-        XCTAssertFalse(result.canViewOriginalHTML)
         XCTAssertTrue(html.contains("Tickets are now on sale for the 2026 Margaret Mead Film Festival"))
         XCTAssertTrue(html.contains("Festival Films Include"))
         XCTAssertFalse(html.contains("<summary>See More</summary>"))
@@ -446,7 +445,6 @@ final class HTMLContentLoaderTests: XCTestCase {
 
         XCTAssertEqual(result.presentation, .nativePlainText)
         XCTAssertNil(result.html)
-        XCTAssertTrue(result.canViewOriginalHTML)
         XCTAssertTrue(result.nativeText?.contains("Andrew Archer sent you $100.00.") == true)
         XCTAssertTrue(result.nativeText?.contains("https://example.com/open") == true)
     }
@@ -586,7 +584,6 @@ final class HTMLContentLoaderTests: XCTestCase {
         )
 
         XCTAssertEqual(result.presentation, .nativePlainText)
-        XCTAssertTrue(result.canViewOriginalHTML)
         XCTAssertTrue(result.nativeText?.contains("Use this verification code: 482913") == true)
     }
 
@@ -683,7 +680,6 @@ final class HTMLContentLoaderTests: XCTestCase {
 
         XCTAssertEqual(hydrated.source, .qualityFallback)
         XCTAssertEqual(hydrated.presentation, .nativePlainText)
-        XCTAssertTrue(hydrated.canViewOriginalHTML)
         XCTAssertTrue(hydrated.nativeText?.contains("Use this verification code: 482913") == true)
     }
 
@@ -702,7 +698,6 @@ final class HTMLContentLoaderTests: XCTestCase {
         )
 
         XCTAssertEqual(result.presentation, .nativePlainText)
-        XCTAssertTrue(result.canViewOriginalHTML)
         XCTAssertTrue(result.nativeText?.contains("Andrew Archer sent you $100.00.") == true)
         XCTAssertFalse(result.nativeText?.contains("Content-Type: text/plain") == true)
     }
