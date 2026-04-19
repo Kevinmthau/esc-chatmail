@@ -68,6 +68,77 @@ final class AuthSessionTests: XCTestCase {
         )
     }
 
+    func testPersistSessionForBackgroundAccess_migratesLegacyTokensToBackgroundReadableAccess() throws {
+        let keychain = MockKeychainService()
+        var tokenManager: TokenManager!
+        let session = makeAuthSession(
+            tokenManagerProvider: { tokenManager },
+            keychainService: keychain
+        )
+        tokenManager = TokenManager(
+            keychainService: keychain,
+            authSession: session,
+            tokenRefresher: MockTokenRefresher()
+        )
+
+        let legacyExpiration = Date().addingTimeInterval(300)
+        try keychain.saveCodable(
+            TokenInfo(
+                accessToken: "legacy-access",
+                refreshToken: "legacy-refresh",
+                expirationDate: legacyExpiration,
+                scope: GoogleConfig.scopes.joined(separator: " ")
+            ),
+            for: KeychainService.Key.googleAccessToken.rawValue,
+            withAccess: .whenUnlockedThisDeviceOnly
+        )
+        try keychain.saveString(
+            "legacy-refresh",
+            for: KeychainService.Key.googleRefreshToken.rawValue,
+            withAccess: .whenUnlockedThisDeviceOnly
+        )
+
+        let migratedExpiration = Date().addingTimeInterval(3600)
+        try session.persistSessionForBackgroundAccess(
+            accessToken: "restored-access",
+            refreshToken: "restored-refresh",
+            expirationDate: migratedExpiration,
+            email: "stored@example.com"
+        )
+
+        let storedToken = try keychain.loadCodable(
+            TokenInfo.self,
+            for: KeychainService.Key.googleAccessToken.rawValue
+        )
+        XCTAssertEqual(storedToken.accessToken, "restored-access")
+        XCTAssertEqual(storedToken.refreshToken, "restored-refresh")
+        XCTAssertEqual(
+            storedToken.expirationDate.timeIntervalSince1970,
+            migratedExpiration.timeIntervalSince1970,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            keychain.accessLevel(for: KeychainService.Key.googleAccessToken.rawValue),
+            .afterFirstUnlockThisDeviceOnly
+        )
+        XCTAssertEqual(
+            try keychain.loadString(for: KeychainService.Key.googleRefreshToken.rawValue),
+            "restored-refresh"
+        )
+        XCTAssertEqual(
+            keychain.accessLevel(for: KeychainService.Key.googleRefreshToken.rawValue),
+            .afterFirstUnlockThisDeviceOnly
+        )
+        XCTAssertEqual(
+            try keychain.loadString(for: KeychainService.Key.googleUserEmail.rawValue),
+            "stored@example.com"
+        )
+        XCTAssertEqual(
+            keychain.accessLevel(for: KeychainService.Key.googleUserEmail.rawValue),
+            .afterFirstUnlockThisDeviceOnly
+        )
+    }
+
     private func makeAuthSession(
         tokenManagerProvider: @escaping @MainActor @Sendable () -> TokenManagerProtocol = { MockTokenManager() },
         keychainService: KeychainServiceProtocol = MockKeychainService()

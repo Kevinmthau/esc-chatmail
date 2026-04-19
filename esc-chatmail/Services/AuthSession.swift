@@ -81,9 +81,14 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                         self?.isAuthenticated = true
                         self?.accessToken = user.accessToken.tokenString
                         do {
-                            try self?.persistUserEmailForBackgroundAccess(user.profile?.email)
+                            try self?.persistSessionForBackgroundAccess(
+                                accessToken: user.accessToken.tokenString,
+                                refreshToken: user.refreshToken.tokenString,
+                                expirationDate: user.accessToken.expirationDate ?? Date().addingTimeInterval(3600),
+                                email: user.profile?.email
+                            )
                         } catch {
-                            Log.error("Failed to migrate persisted user email for background access", category: .auth, error: error)
+                            Log.error("Failed to migrate restored session for background access", category: .auth, error: error)
                         }
                     }
                     continuation.resume()
@@ -130,17 +135,15 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                     self.userName = result.user.profile?.name
                     self.accessToken = result.user.accessToken.tokenString
 
-                    // Save tokens securely using TokenManager
                     do {
-                        try self.tokenManager.saveTokens(
-                            access: result.user.accessToken.tokenString,
-                            refresh: result.user.refreshToken.tokenString,
-                            expirationDate: result.user.accessToken.expirationDate ?? Date().addingTimeInterval(3600)
+                        // Save tokens and account email with background-readable access so
+                        // BGTask cold starts can recover legacy sessions before Sign-In restore runs.
+                        try self.persistSessionForBackgroundAccess(
+                            accessToken: result.user.accessToken.tokenString,
+                            refreshToken: result.user.refreshToken.tokenString,
+                            expirationDate: result.user.accessToken.expirationDate ?? Date().addingTimeInterval(3600),
+                            email: result.user.profile?.email
                         )
-
-                        // Save user email with background-readable access so BGTask cold starts
-                        // can recover the account scope before GoogleSignIn restoration runs.
-                        try self.persistUserEmailForBackgroundAccess(result.user.profile?.email)
 
                         // Only mark as authenticated after tokens are successfully saved
                         self.isAuthenticated = true
@@ -155,6 +158,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                         // Clear auth state since tokens weren't persisted
                         self.clearAuthState()
                         continuation.resume(throwing: AuthError.tokenPersistenceFailed(error))
+                        return
                     }
                 }
             }
@@ -342,6 +346,20 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             Log.error("Failed to load persisted user email", category: .auth, error: error)
             return nil
         }
+    }
+
+    func persistSessionForBackgroundAccess(
+        accessToken: String,
+        refreshToken: String?,
+        expirationDate: Date,
+        email: String?
+    ) throws {
+        try tokenManager.saveTokens(
+            access: accessToken,
+            refresh: refreshToken,
+            expirationDate: expirationDate
+        )
+        try persistUserEmailForBackgroundAccess(email)
     }
 
     func persistUserEmailForBackgroundAccess(_ email: String?) throws {
