@@ -78,7 +78,12 @@ final class InitialSyncOrchestrator {
             let (profile, aliases) = try await fetchProfileAndAliases()
             myAliases = Set(([profile.emailAddress] + aliases).map(normalizedEmail))
             await AliasManager.shared.setAliases(myAliases)
-            try await messagePersister.saveAccount(profile: profile, aliases: aliases, in: context)
+            try await messagePersister.saveAccount(
+                profile: profile,
+                aliases: aliases,
+                in: context,
+                saveHistoryId: false
+            )
 
             // Phase 2: Fetch and save labels
             progressHandler(0.1, "Fetching labels...")

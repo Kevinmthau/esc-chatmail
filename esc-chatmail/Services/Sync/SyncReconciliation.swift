@@ -38,13 +38,21 @@ final class SyncReconciliation: Sendable {
 
             let query = "after:\(epochSeconds) -label:spam -label:drafts -label:trash"
 
-            // Scale max results based on time since last sync
+            // Scale the reconciliation budget based on time since last sync and
+            // page through results up to a bounded cap so we can recover missed
+            // mail beyond the first results page on busy accounts.
             let timeSinceStart = Date().timeIntervalSince(reconciliationStartTime)
-            let maxResults = min(200, max(50, Int(timeSinceStart / 3600) * 20))
+            let maxMessagesToCheck = min(
+                SyncConfig.maxReconciliationMessages,
+                max(
+                    SyncConfig.minimumReconciliationMessages,
+                    Int(timeSinceStart / 3600) * 50
+                )
+            )
 
-            let (recentMessageIds, _) = try await messageFetcher.listMessages(
+            let recentMessageIds = try await fetchRecentMessageIds(
                 query: query,
-                maxResults: maxResults
+                maxCount: maxMessagesToCheck
             )
 
             guard !recentMessageIds.isEmpty else {
@@ -65,6 +73,40 @@ final class SyncReconciliation: Sendable {
             log.error("Reconciliation check failed", error: error)
             return []
         }
+    }
+
+    private func fetchRecentMessageIds(query: String, maxCount: Int) async throws -> [String] {
+        guard maxCount > 0 else { return [] }
+
+        var pageToken: String? = nil
+        var collectedIds: [String] = []
+        var seenIds = Set<String>()
+
+        repeat {
+            let remaining = maxCount - collectedIds.count
+            guard remaining > 0 else { break }
+
+            let pageSize = min(SyncConfig.reconciliationPageSize, remaining)
+            let (messageIds, nextPageToken) = try await messageFetcher.listMessages(
+                query: query,
+                pageToken: pageToken,
+                maxResults: pageSize
+            )
+
+            for id in messageIds where seenIds.insert(id).inserted {
+                collectedIds.append(id)
+            }
+
+            pageToken = nextPageToken
+        } while pageToken != nil && collectedIds.count < maxCount
+
+        if pageToken != nil {
+            log.warning(
+                "Reconciliation capped at \(collectedIds.count) recent messages; newer pages will be checked on a later sync"
+            )
+        }
+
+        return collectedIds
     }
 
     /// Calculates the start time for reconciliation window

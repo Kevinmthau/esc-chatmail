@@ -3,9 +3,23 @@ import BackgroundTasks
 import CoreData
 import os
 
+enum BackgroundSyncRetryAction: Equatable {
+    case none
+    case failureBackoff
+    case catchUp
+}
+
+struct BackgroundSyncCompletionDisposition: Equatable {
+    let historyIdToStore: String?
+    let retryAction: BackgroundSyncRetryAction
+    let shouldResetRetryState: Bool
+}
+
 /// Main orchestrator for background sync operations
 final class BackgroundSyncManager {
     static let shared = BackgroundSyncManager()
+
+    static let catchUpRetryDelay: TimeInterval = 5 * 60
 
     // MARK: - Components
 
@@ -160,6 +174,12 @@ final class BackgroundSyncManager {
                 processingResult = .empty
             }
 
+            let disposition = Self.completionDisposition(
+                didTruncatePagination: didTruncateHistoryPagination,
+                hadFetchFailures: processingResult.hadFetchFailures,
+                latestHistoryId: latestHistoryId
+            )
+
             if didTruncateHistoryPagination {
                 Log.warning(
                     "Background history sync reached page limit (\(maxPages)); keeping stored historyId to avoid data loss",
@@ -170,14 +190,9 @@ final class BackgroundSyncManager {
                     "Background history sync had \(processingResult.failedFetchCount) message fetch failures; keeping stored historyId and scheduling retry",
                     category: .background
                 )
-                handleSyncError()
-                return false
-            } else if let latestHistoryId = latestHistoryId {
-                try await stateManager.storeHistoryId(latestHistoryId)
             }
 
-            stateManager.resetRetryCount()
-            return true
+            return await finalizeBackgroundSync(disposition)
 
         } catch {
             return await handleHistorySyncError(error, startHistoryId: startHistoryId, isProcessingTask: isProcessingTask)
@@ -248,6 +263,12 @@ final class BackgroundSyncManager {
                 processingResult = .empty
             }
 
+            let disposition = Self.completionDisposition(
+                didTruncatePagination: didTruncateHistoryPagination,
+                hadFetchFailures: processingResult.hadFetchFailures,
+                latestHistoryId: latestHistoryId
+            )
+
             if didTruncateHistoryPagination {
                 Log.warning(
                     "Background history retry reached page limit (\(maxPages)); keeping stored historyId to avoid data loss",
@@ -258,14 +279,9 @@ final class BackgroundSyncManager {
                     "Background history retry had \(processingResult.failedFetchCount) message fetch failures; keeping stored historyId and scheduling retry",
                     category: .background
                 )
-                handleSyncError()
-                return false
-            } else if let latestHistoryId = latestHistoryId {
-                try await stateManager.storeHistoryId(latestHistoryId)
             }
 
-            stateManager.resetRetryCount()
-            return true
+            return await finalizeBackgroundSync(disposition)
 
         } catch {
             Log.error("History sync retry failed", category: .background, error: error)
@@ -317,6 +333,15 @@ final class BackgroundSyncManager {
             }
 
             let didTruncateMessagePagination = pageToken != nil
+            let profile = didTruncateMessagePagination || processingResult.hadFetchFailures
+                ? nil
+                : try await apiClient.getProfile()
+            let disposition = Self.completionDisposition(
+                didTruncatePagination: didTruncateMessagePagination,
+                hadFetchFailures: processingResult.hadFetchFailures,
+                latestHistoryId: profile?.historyId
+            )
+
             if didTruncateMessagePagination {
                 Log.warning(
                     "Background partial sync reached page limit (\(maxPages)); skipping historyId advance to avoid missing messages",
@@ -327,18 +352,12 @@ final class BackgroundSyncManager {
                     "Background partial sync had \(processingResult.failedFetchCount) message fetch failures; keeping stored historyId and scheduling retry",
                     category: .background
                 )
-                handleSyncError()
-                return false
-            } else {
-                let profile = try await apiClient.getProfile()
-                try await stateManager.storeHistoryId(
-                    profile.historyId,
-                    accountEmail: profile.emailAddress
-                )
             }
 
-            stateManager.resetRetryCount()
-            return true
+            return await finalizeBackgroundSync(
+                disposition,
+                accountEmail: profile?.emailAddress
+            )
         } catch {
             Log.error("Partial sync error", category: .background, error: error)
             handleSyncError()
@@ -352,5 +371,68 @@ final class BackgroundSyncManager {
         if let backoff = stateManager.incrementRetryAndGetBackoff() {
             taskScheduler.scheduleRetryAfterBackoff(backoff)
         }
+    }
+
+    private func scheduleCatchUpRetry() {
+        taskScheduler.scheduleRetryAfterBackoff(Self.catchUpRetryDelay)
+    }
+
+    private func finalizeBackgroundSync(
+        _ disposition: BackgroundSyncCompletionDisposition,
+        accountEmail: String? = nil
+    ) async -> Bool {
+        switch disposition.retryAction {
+        case .none:
+            if let historyId = disposition.historyIdToStore {
+                do {
+                    try await stateManager.storeHistoryId(historyId, accountEmail: accountEmail)
+                } catch {
+                    Log.error("Failed to store background sync historyId", category: .background, error: error)
+                    handleSyncError()
+                    return false
+                }
+            }
+
+            if disposition.shouldResetRetryState {
+                stateManager.resetRetryCount()
+            }
+            return true
+
+        case .failureBackoff:
+            handleSyncError()
+            return false
+
+        case .catchUp:
+            scheduleCatchUpRetry()
+            return false
+        }
+    }
+
+    static func completionDisposition(
+        didTruncatePagination: Bool,
+        hadFetchFailures: Bool,
+        latestHistoryId: String?
+    ) -> BackgroundSyncCompletionDisposition {
+        if didTruncatePagination {
+            return BackgroundSyncCompletionDisposition(
+                historyIdToStore: nil,
+                retryAction: .catchUp,
+                shouldResetRetryState: false
+            )
+        }
+
+        if hadFetchFailures {
+            return BackgroundSyncCompletionDisposition(
+                historyIdToStore: nil,
+                retryAction: .failureBackoff,
+                shouldResetRetryState: false
+            )
+        }
+
+        return BackgroundSyncCompletionDisposition(
+            historyIdToStore: latestHistoryId,
+            retryAction: .none,
+            shouldResetRetryState: true
+        )
     }
 }

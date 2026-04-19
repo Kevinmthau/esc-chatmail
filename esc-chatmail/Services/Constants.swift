@@ -143,6 +143,15 @@ struct SyncConfig {
     /// Maximum reconciliation window to prevent excessive API calls (24 hours)
     static let maxReconciliationWindow: TimeInterval = 86400
 
+    /// Number of recent messages to request per reconciliation page
+    static let reconciliationPageSize = 100
+
+    /// Minimum number of recent messages to inspect during reconciliation
+    static let minimumReconciliationMessages = 100
+
+    /// Maximum number of recent messages to inspect during reconciliation
+    static let maxReconciliationMessages = 500
+
     /// Fallback window when no sync history exists - initial sync (30 days)
     static let initialSyncFallbackWindow: TimeInterval = 30 * 24 * 60 * 60
 

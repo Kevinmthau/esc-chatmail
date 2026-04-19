@@ -30,7 +30,8 @@ extension MessagePersister {
     func saveAccount(
         profile: GmailProfile,
         aliases: [String],
-        in context: NSManagedObjectContext
+        in context: NSManagedObjectContext,
+        saveHistoryId: Bool = true
     ) async throws {
         try await context.perform {
             let request = Account.fetchRequest()
@@ -39,7 +40,9 @@ extension MessagePersister {
             do {
                 if let existing = try context.fetch(request).first {
                     existing.aliasesArray = aliases
-                    existing.historyId = profile.historyId
+                    if saveHistoryId {
+                        existing.historyId = profile.historyId
+                    }
                     Log.debug("Updated existing account: \(profile.emailAddress)", category: .sync)
                     return
                 }
@@ -57,9 +60,10 @@ extension MessagePersister {
             }
             account.id = profile.emailAddress
             account.email = profile.emailAddress
-            account.historyId = profile.historyId
+            account.historyId = saveHistoryId ? profile.historyId : nil
             account.aliasesArray = aliases
-            Log.info("Created new account: \(profile.emailAddress) with historyId: \(profile.historyId)", category: .sync)
+            let savedHistoryId = saveHistoryId ? profile.historyId : "nil"
+            Log.info("Created new account: \(profile.emailAddress) with historyId: \(savedHistoryId)", category: .sync)
         }
     }
 
