@@ -25,6 +25,7 @@ struct ConversationListView: View {
         request.predicate = NSPredicate(format: "archivedAt == nil")
         request.fetchBatchSize = 20
         request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
+        request.includesPendingChanges = true
         _conversations = FetchRequest(fetchRequest: request)
     }
 

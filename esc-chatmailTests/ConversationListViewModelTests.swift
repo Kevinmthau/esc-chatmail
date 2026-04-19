@@ -141,6 +141,64 @@ final class ConversationListViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.filteredConversationItems[1], initialItems[2])
     }
 
+    func testOptimisticUnsavedConversation_survivesReAppear() async throws {
+        let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
+        let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
+        try context.save()
+
+        // Mirror ConversationListView.init's fetch request exactly: sort by pinned desc,
+        // lastMessageDate desc, predicate archivedAt == nil, includesPendingChanges = true.
+        // Anything less and this test is not validating the production code path.
+        func listFetchRequest() -> NSFetchRequest<Conversation> {
+            let request = NSFetchRequest<Conversation>(entityName: "Conversation")
+            request.sortDescriptors = [
+                NSSortDescriptor(keyPath: \Conversation.pinned, ascending: false),
+                NSSortDescriptor(keyPath: \Conversation.lastMessageDate, ascending: false)
+            ]
+            request.predicate = NSPredicate(format: "archivedAt == nil")
+            request.fetchBatchSize = 20
+            request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
+            request.includesPendingChanges = true
+            return request
+        }
+
+        let viewModel = ConversationListViewModel()
+        let initialFetch = try context.fetch(listFetchRequest())
+        viewModel.onAppear(conversations: initialFetch, in: context)
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID, bob.objectID])
+
+        // Optimistic insert: a brand-new Conversation created in the view context but
+        // intentionally NOT saved (matches GmailSendService.createOptimisticMessage which
+        // calls processPendingChanges() without save() to keep the main thread responsive).
+        let carol = ConversationBuilder()
+            .withDisplayName("Carol")
+            .withSnippet("newest optimistic")
+            .visible()
+            .withLastMessageDate(Date(timeIntervalSince1970: 400))
+            .hasInboxMessages(false)
+            .build(in: context)
+        context.processPendingChanges()
+
+        await waitForFilteredConversationIDs(
+            [carol.objectID, alice.objectID, bob.objectID],
+            in: viewModel
+        )
+
+        // Simulate the View re-appearing (e.g. nav pop from ChatView, sheet dismiss).
+        // With includesPendingChanges = true, the refetched snapshot includes the unsaved
+        // optimistic row; refreshConversations/replaceAll must therefore preserve it.
+        // Without the flag, `carol` would be missing from the fetch and dropped here.
+        let refetched = try context.fetch(listFetchRequest())
+        XCTAssertTrue(refetched.contains(carol), "Fetch with includesPendingChanges=true must include the unsaved optimistic conversation")
+        viewModel.onAppear(conversations: refetched, in: context)
+
+        XCTAssertEqual(
+            filteredConversationIDs(in: viewModel),
+            [carol.objectID, alice.objectID, bob.objectID]
+        )
+        XCTAssertEqual(viewModel.filteredConversationItems.first?.snapshot.snippet, "newest optimistic")
+    }
+
     func testOnDisappear_keepsObservingConversationChangesForTransientNavigation() async throws {
         let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
         let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
