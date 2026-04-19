@@ -93,12 +93,10 @@ struct HTMLMessageView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var loadedContent: OriginalEmailLoadedContent?
     @State private var isLoading = true
-    @State private var preferHTMLVersion = false
-    @State private var canToggleReadableVersion = false
 
     private let htmlContentLoader = HTMLContentLoader.shared
     private var loadKey: String {
-        "\(message.id)|\(message.bodyStorageURI ?? "")|\(message.bodyText?.hashValue ?? 0)|\(message.subject?.hashValue ?? 0)|\(message.senderEmail?.hashValue ?? 0)|\(colorScheme == .dark)|\(preferHTMLVersion)"
+        "\(message.id)|\(message.bodyStorageURI ?? "")|\(message.bodyText?.hashValue ?? 0)|\(message.subject?.hashValue ?? 0)|\(message.senderEmail?.hashValue ?? 0)|\(colorScheme == .dark)"
     }
 
     var body: some View {
@@ -130,13 +128,6 @@ struct HTMLMessageView: View {
             .navigationTitle("Original Email")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                if canToggleReadableVersion || preferHTMLVersion {
-                    ToolbarItem(placement: .navigationBarLeading) {
-                        Button(preferHTMLVersion ? "Readable View" : "View HTML") {
-                            preferHTMLVersion.toggle()
-                        }
-                    }
-                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Done") {
                         dismiss()
@@ -164,7 +155,7 @@ struct HTMLMessageView: View {
             isDarkMode: colorScheme == .dark,
             cleanupMode: .none,
             displayPurpose: .original,
-            originalHTMLPreference: preferHTMLVersion ? .preferHTML : .automatic,
+            originalHTMLPreference: .preferHTML,
             timeout: 5.0
         )
 
@@ -198,9 +189,6 @@ struct HTMLMessageView: View {
                 self.loadedContent = result.html.map(OriginalEmailLoadedContent.html)
             case .nativePlainText:
                 self.loadedContent = result.nativeText.map(OriginalEmailLoadedContent.plainText)
-            }
-            if !preferHTMLVersion {
-                self.canToggleReadableVersion = result.canViewOriginalHTML
             }
             self.isLoading = false
         }
