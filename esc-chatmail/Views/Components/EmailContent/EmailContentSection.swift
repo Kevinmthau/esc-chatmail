@@ -112,9 +112,6 @@ struct EmailContentSection: View {
             if !message.isForwardedEmail,
                let model = netlifyDeployPreviewBuilder.buildPreview(
                 canonicalHTML: canonicalHTML,
-                bodyText: message.bodyText,
-                cleanedSnippet: message.cleanedSnippet,
-                senderName: message.senderName,
                 senderEmail: message.senderEmail,
                 subject: message.subject
                ) {

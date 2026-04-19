@@ -18,7 +18,6 @@ struct HTMLLoadResult {
     let source: HTMLLoadSource
     let presentation: HTMLLoadPresentation
     let nativeText: String?
-    let canViewOriginalHTML: Bool
 
     enum HTMLLoadSource: Equatable {
         case messageId
@@ -34,14 +33,12 @@ struct HTMLLoadResult {
         html: String?,
         source: HTMLLoadSource,
         presentation: HTMLLoadPresentation = .html,
-        nativeText: String? = nil,
-        canViewOriginalHTML: Bool = false
+        nativeText: String? = nil
     ) {
         self.html = html
         self.source = source
         self.presentation = presentation
         self.nativeText = nativeText
-        self.canViewOriginalHTML = canViewOriginalHTML
     }
 }
 
@@ -608,8 +605,7 @@ final class HTMLContentLoader {
             html: nil,
             source: .qualityFallback,
             presentation: .nativePlainText,
-            nativeText: text,
-            canViewOriginalHTML: true
+            nativeText: text
         )
     }
 

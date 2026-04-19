@@ -27,8 +27,6 @@ final class NetlifyDeployPreviewBuilderTests: XCTestCase {
 
         let result = sut.buildPreview(
             canonicalHTML: html,
-            bodyText: nil,
-            senderName: "netlify",
             senderEmail: "notifications@github.com",
             subject: "Re: [Kevinmthau/boardgpt] Re-run deploy preview (PR #10)"
         )
@@ -46,7 +44,7 @@ final class NetlifyDeployPreviewBuilderTests: XCTestCase {
         XCTAssertEqual(result?.sourceLabel, "Netlify")
     }
 
-    func testBuildPreview_processing_tolaratesMissingLogURL() {
+    func testBuildPreview_processing_toleratesMissingLogURL() {
         let html = """
         <html><body>
         <p>netlify[bot] left a comment (Kevinmthau/boardgpt#10)</p>
@@ -63,7 +61,6 @@ final class NetlifyDeployPreviewBuilderTests: XCTestCase {
 
         let result = sut.buildPreview(
             canonicalHTML: html,
-            bodyText: nil,
             senderEmail: "notifications@github.com",
             subject: "[Kevinmthau/boardgpt] Re-run deploy preview"
         )
@@ -84,7 +81,6 @@ final class NetlifyDeployPreviewBuilderTests: XCTestCase {
 
         let result = sut.buildPreview(
             canonicalHTML: html,
-            bodyText: nil,
             senderEmail: "notifications@github.com",
             subject: "[Kevinmthau/boardgpt] Build failed"
         )
@@ -102,7 +98,6 @@ final class NetlifyDeployPreviewBuilderTests: XCTestCase {
 
         let result = sut.buildPreview(
             canonicalHTML: html,
-            bodyText: nil,
             senderEmail: "notifications@github.com",
             subject: nil
         )
@@ -120,7 +115,6 @@ final class NetlifyDeployPreviewBuilderTests: XCTestCase {
 
         let result = sut.buildPreview(
             canonicalHTML: html,
-            bodyText: nil,
             senderEmail: "notifications@github.com",
             subject: nil
         )
@@ -141,7 +135,6 @@ final class NetlifyDeployPreviewBuilderTests: XCTestCase {
 
         let result = sut.buildPreview(
             canonicalHTML: html,
-            bodyText: nil,
             senderEmail: "someone@example.com",
             subject: "[Kevinmthau/boardgpt] whatever"
         )
@@ -159,7 +152,6 @@ final class NetlifyDeployPreviewBuilderTests: XCTestCase {
 
         let result = sut.buildPreview(
             canonicalHTML: html,
-            bodyText: nil,
             senderEmail: "notifications@github.com",
             subject: "[Kevinmthau/boardgpt] Looks good"
         )
@@ -177,7 +169,6 @@ final class NetlifyDeployPreviewBuilderTests: XCTestCase {
 
         let result = sut.buildPreview(
             canonicalHTML: html,
-            bodyText: nil,
             senderEmail: "notifications@github.com",
             subject: nil
         )

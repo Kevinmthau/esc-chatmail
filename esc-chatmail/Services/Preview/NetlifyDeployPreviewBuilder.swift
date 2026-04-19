@@ -7,9 +7,6 @@ import Foundation
 struct NetlifyDeployPreviewBuilder {
     func buildPreview(
         canonicalHTML: String,
-        bodyText: String?,
-        cleanedSnippet: String? = nil,
-        senderName: String? = nil,
         senderEmail: String?,
         subject: String? = nil
     ) -> NetlifyDeployPreviewModel? {
