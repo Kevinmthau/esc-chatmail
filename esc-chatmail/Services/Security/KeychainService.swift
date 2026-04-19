@@ -31,7 +31,7 @@ protocol KeychainServiceProtocol {
     func load(for key: String) throws -> Data
     func delete(for key: String) throws
     func exists(for key: String) -> Bool
-    func update(_ data: Data, for key: String) throws
+    func update(_ data: Data, for key: String, withAccess access: KeychainService.AccessLevel?) throws
     func clearAll() throws
     func saveString(_ string: String, for key: String, withAccess access: KeychainService.AccessLevel) throws
     func loadString(for key: String) throws -> String
@@ -47,7 +47,7 @@ final class KeychainService: KeychainServiceProtocol {
     private let accessGroup: String?
 
     // MARK: - Access Levels
-    enum AccessLevel {
+    enum AccessLevel: Equatable {
         case whenUnlocked
         case whenUnlockedThisDeviceOnly
         case afterFirstUnlock
@@ -108,7 +108,7 @@ final class KeychainService: KeychainServiceProtocol {
         case errSecSuccess:
             return
         case errSecDuplicateItem:
-            try update(data, for: key)
+            try update(data, for: key, withAccess: access)
         default:
             throw KeychainError.unhandledError(status: status)
         }
@@ -156,9 +156,12 @@ final class KeychainService: KeychainServiceProtocol {
         return status == errSecSuccess
     }
 
-    func update(_ data: Data, for key: String) throws {
+    func update(_ data: Data, for key: String, withAccess access: AccessLevel? = nil) throws {
         let query = baseQuery(for: key)
-        let attributes: [String: Any] = [kSecValueData as String: data]
+        var attributes: [String: Any] = [kSecValueData as String: data]
+        if let access {
+            attributes[kSecAttrAccessible as String] = access.attribute
+        }
 
         let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
 

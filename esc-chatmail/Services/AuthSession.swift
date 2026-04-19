@@ -80,6 +80,11 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                         self?.userName = user.profile?.name
                         self?.isAuthenticated = true
                         self?.accessToken = user.accessToken.tokenString
+                        do {
+                            try self?.persistUserEmailForBackgroundAccess(user.profile?.email)
+                        } catch {
+                            Log.error("Failed to migrate persisted user email for background access", category: .auth, error: error)
+                        }
                     }
                     continuation.resume()
                 }
@@ -135,13 +140,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
                         // Save user email with background-readable access so BGTask cold starts
                         // can recover the account scope before GoogleSignIn restoration runs.
-                        if let email = result.user.profile?.email {
-                            try self.keychainService.saveString(
-                                email,
-                                for: KeychainService.Key.googleUserEmail.rawValue,
-                                withAccess: .afterFirstUnlockThisDeviceOnly
-                            )
-                        }
+                        try self.persistUserEmailForBackgroundAccess(result.user.profile?.email)
 
                         // Only mark as authenticated after tokens are successfully saved
                         self.isAuthenticated = true
@@ -343,6 +342,18 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             Log.error("Failed to load persisted user email", category: .auth, error: error)
             return nil
         }
+    }
+
+    func persistUserEmailForBackgroundAccess(_ email: String?) throws {
+        guard let email else {
+            return
+        }
+
+        try keychainService.saveString(
+            email,
+            for: KeychainService.Key.googleUserEmail.rawValue,
+            withAccess: .afterFirstUnlockThisDeviceOnly
+        )
     }
 
     private func hasRequiredGmailScope(_ user: GIDGoogleUser) -> Bool {

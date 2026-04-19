@@ -7,6 +7,7 @@ final class MockKeychainService: KeychainServiceProtocol {
 
     /// In-memory storage for keychain items
     private var storage: [String: Data] = [:]
+    private var accessLevels: [String: KeychainService.AccessLevel] = [:]
 
     /// Tracks method calls for verification in tests
     private(set) var saveCallCount = 0
@@ -19,6 +20,7 @@ final class MockKeychainService: KeychainServiceProtocol {
     /// Clears all stored data and resets call counts
     func reset() {
         storage.removeAll()
+        accessLevels.removeAll()
         saveCallCount = 0
         loadCallCount = 0
         deleteCallCount = 0
@@ -34,6 +36,7 @@ final class MockKeychainService: KeychainServiceProtocol {
             throw error
         }
         storage[key] = data
+        accessLevels[key] = access
     }
 
     func load(for key: String) throws -> Data {
@@ -55,13 +58,14 @@ final class MockKeychainService: KeychainServiceProtocol {
             throw error
         }
         storage.removeValue(forKey: key)
+        accessLevels.removeValue(forKey: key)
     }
 
     func exists(for key: String) -> Bool {
         storage[key] != nil
     }
 
-    func update(_ data: Data, for key: String) throws {
+    func update(_ data: Data, for key: String, withAccess access: KeychainService.AccessLevel?) throws {
         if let error = errorToThrow {
             errorToThrow = nil
             throw error
@@ -70,6 +74,9 @@ final class MockKeychainService: KeychainServiceProtocol {
             throw KeychainError.itemNotFound
         }
         storage[key] = data
+        if let access {
+            accessLevels[key] = access
+        }
     }
 
     func clearAll() throws {
@@ -78,6 +85,7 @@ final class MockKeychainService: KeychainServiceProtocol {
             throw error
         }
         storage.removeAll()
+        accessLevels.removeAll()
     }
 
     func saveString(_ string: String, for key: String, withAccess access: KeychainService.AccessLevel) throws {
@@ -133,5 +141,9 @@ extension MockKeychainService {
     /// Returns raw storage for inspection
     var allStoredData: [String: Data] {
         storage
+    }
+
+    func accessLevel(for key: String) -> KeychainService.AccessLevel? {
+        accessLevels[key]
     }
 }

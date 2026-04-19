@@ -52,6 +52,22 @@ final class AuthSessionTests: XCTestCase {
         XCTAssertNil(session.currentOrPersistedUserEmail())
     }
 
+    func testPersistUserEmailForBackgroundAccess_usesBackgroundReadableAccess() throws {
+        let keychain = MockKeychainService()
+        let session = makeAuthSession(keychainService: keychain)
+
+        try session.persistUserEmailForBackgroundAccess("stored@example.com")
+
+        XCTAssertEqual(
+            keychain.accessLevel(for: KeychainService.Key.googleUserEmail.rawValue),
+            .afterFirstUnlockThisDeviceOnly
+        )
+        XCTAssertEqual(
+            try keychain.loadString(for: KeychainService.Key.googleUserEmail.rawValue),
+            "stored@example.com"
+        )
+    }
+
     private func makeAuthSession(
         tokenManagerProvider: @escaping @MainActor @Sendable () -> TokenManagerProtocol = { MockTokenManager() },
         keychainService: KeychainServiceProtocol = MockKeychainService()
