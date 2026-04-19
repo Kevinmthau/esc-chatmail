@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreData
+import Combine
 
 // `NSManagedObjectID` is the cross-context token Core Data intends us to pass
 // between queues, so this payload is safe to move across task boundaries.
@@ -39,6 +40,7 @@ final class VirtualScrollState: ObservableObject {
     // Cache only lightweight row snapshots for the current window. Background
     // contexts fetch IDs, and the UI never stores `Message` instances here.
     private var resolvedRowsByID: [NSManagedObjectID: ChatMessageRowModel] = [:]
+    private var viewContextChangesCancellable: AnyCancellable?
 
     // Task tracking to prevent orphaned tasks during rapid scrolling
     private let taskManager = ViewModelTaskManager()
@@ -54,6 +56,7 @@ final class VirtualScrollState: ObservableObject {
         self.viewContext = CoreDataStack.shared.viewContext
         self.makeBackgroundContext = { CoreDataStack.shared.newBackgroundContext() }
         self.pageLoader = VirtualScrollState.loadMessagePage
+        startObservingViewContextChanges()
         loadInitialMessages()
     }
 
@@ -72,6 +75,7 @@ final class VirtualScrollState: ObservableObject {
         self.viewContext = viewContext
         self.makeBackgroundContext = makeBackgroundContext
         self.pageLoader = pageLoader
+        startObservingViewContextChanges()
 
         if autoLoad {
             loadInitialMessages()
@@ -385,6 +389,85 @@ final class VirtualScrollState: ObservableObject {
     /// Cancels all pending tasks when the scroll state is no longer needed
     func cleanup() {
         taskManager.cancelAll()
+        viewContextChangesCancellable?.cancel()
+        viewContextChangesCancellable = nil
+    }
+
+    private func startObservingViewContextChanges() {
+        guard viewContextChangesCancellable == nil else { return }
+
+        viewContextChangesCancellable = NotificationCenter.default.publisher(
+            for: .NSManagedObjectContextObjectsDidChange,
+            object: viewContext
+        )
+        .sink { [weak self] notification in
+            self?.handleViewContextChange(notification)
+        }
+    }
+
+    private func handleViewContextChange(_ notification: Notification) {
+        guard let window = messageWindow,
+              !window.messageIDs.isEmpty else { return }
+
+        let visibleMessageIDs = Set(window.messageIDs)
+        let affectedMessageIDs = refreshedVisibleMessageIDs(
+            in: notification,
+            visibleMessageIDs: visibleMessageIDs
+        )
+
+        guard !affectedMessageIDs.isEmpty else { return }
+
+        for objectID in affectedMessageIDs {
+            resolvedRowsByID.removeValue(forKey: objectID)
+        }
+
+        let refreshedRows = resolveCachedRows(for: window.messageIDs)
+        guard refreshedRows != visibleMessages else { return }
+        visibleMessages = refreshedRows
+    }
+
+    private func refreshedVisibleMessageIDs(
+        in notification: Notification,
+        visibleMessageIDs: Set<NSManagedObjectID>
+    ) -> Set<NSManagedObjectID> {
+        var affectedMessageIDs = Set<NSManagedObjectID>()
+
+        for object in contextObjects(
+            forKeys: [NSUpdatedObjectsKey, NSRefreshedObjectsKey],
+            in: notification
+        ) {
+            guard let message = object as? Message,
+                  visibleMessageIDs.contains(message.objectID) else {
+                continue
+            }
+
+            affectedMessageIDs.insert(message.objectID)
+        }
+
+        for object in contextObjects(
+            forKeys: [NSInsertedObjectsKey, NSUpdatedObjectsKey, NSRefreshedObjectsKey, NSDeletedObjectsKey],
+            in: notification
+        ) {
+            guard let attachment = object as? Attachment,
+                  let messageID = attachment.message?.objectID,
+                  visibleMessageIDs.contains(messageID) else {
+                continue
+            }
+
+            affectedMessageIDs.insert(messageID)
+        }
+
+        return affectedMessageIDs
+    }
+
+    private func contextObjects(
+        forKeys keys: [String],
+        in notification: Notification
+    ) -> Set<NSManagedObject> {
+        keys.reduce(into: Set<NSManagedObject>()) { result, key in
+            let objects = notification.userInfo?[key] as? Set<NSManagedObject> ?? []
+            result.formUnion(objects)
+        }
     }
 
     private func setMessageWindow(_ window: MessageWindow) {

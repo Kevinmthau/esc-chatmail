@@ -270,6 +270,102 @@ final class VirtualScrollStateTests: XCTestCase {
         }
     }
 
+    func testVisibleMessages_refreshWhenVisibleMessageReadStateChanges() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .recentlyActive()
+            .build(in: viewContext)
+        let message = MessageBuilder()
+            .withId("virtual-scroll-read-state")
+            .withSubject("Unread message")
+            .withDate(Date(timeIntervalSince1970: 1))
+            .unread()
+            .inConversation(conversation)
+            .build(in: viewContext)
+
+        try viewContext.save()
+
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: VirtualScrollConfiguration(
+                visibleItemCount: 1,
+                bufferSize: 0,
+                pageSize: 1,
+                preloadThreshold: 1
+            ),
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil {
+            state.visibleMessages.count == 1 &&
+                state.visibleMessages.first?.objectID == message.objectID &&
+                state.visibleMessages.first?.isUnread == true &&
+                !state.isLoadingMore
+        }
+
+        message.isUnread = false
+        try viewContext.save()
+
+        await waitUntil {
+            state.visibleMessages.first?.isUnread == false
+        }
+    }
+
+    func testVisibleMessages_refreshWhenVisibleAttachmentStateChanges() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .recentlyActive()
+            .build(in: viewContext)
+        let message = MessageBuilder()
+            .withId("virtual-scroll-attachment-state")
+            .withSubject("Attachment message")
+            .withDate(Date(timeIntervalSince1970: 1))
+            .withAttachments()
+            .inConversation(conversation)
+            .build(in: viewContext)
+        let attachment = AttachmentBuilder()
+            .withId("virtual-scroll-attachment")
+            .asPDF()
+            .queued()
+            .forMessage(message)
+            .build(in: viewContext)
+
+        try viewContext.save()
+
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: VirtualScrollConfiguration(
+                visibleItemCount: 1,
+                bufferSize: 0,
+                pageSize: 1,
+                preloadThreshold: 1
+            ),
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil {
+            state.visibleMessages.count == 1 &&
+                state.visibleMessages.first?.objectID == message.objectID &&
+                state.visibleMessages.first?.attachments.first?.stateRaw == Attachment.State.queued.rawValue &&
+                !state.isLoadingMore
+        }
+
+        attachment.stateRaw = Attachment.State.downloaded.rawValue
+        attachment.localURL = "Attachments/virtual-scroll-attachment.pdf"
+        try viewContext.save()
+
+        await waitUntil {
+            state.visibleMessages.first?.attachments.first?.stateRaw == Attachment.State.downloaded.rawValue &&
+                state.visibleMessages.first?.attachments.first?.localURL == "Attachments/virtual-scroll-attachment.pdf"
+        }
+    }
+
     func testReloadedWindow_keepsPendingOptimisticMessageVisible() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 8)
         let configuration = VirtualScrollConfiguration(
