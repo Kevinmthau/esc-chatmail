@@ -642,7 +642,7 @@ extension Message {
     /// Forwarded messages use subject-based preview for better readability.
     var conversationPreviewText: String? {
         if let forwardedDisplaySubject {
-            return "fwd: \"\(forwardedDisplaySubject)\""
+            return "Fwd: \"\(forwardedDisplaySubject)\""
         }
 
         if isNewsletter, let subject = subject, !subject.isEmpty {

@@ -24,7 +24,7 @@ final class MessageExtensionsTests: XCTestCase {
             .withSnippet("Body snippet")
             .build(in: context)
 
-        XCTAssertEqual(message.conversationPreviewText, "fwd: \"An exceptional chalet in Val d'Isere\"")
+        XCTAssertEqual(message.conversationPreviewText, "Fwd: \"An exceptional chalet in Val d'Isere\"")
     }
 
     func testConversationPreviewText_forwardedMessage_stripsMultipleForwardPrefixes() {
@@ -32,7 +32,7 @@ final class MessageExtensionsTests: XCTestCase {
             .withSubject("FW: Fwd: Weekly update")
             .build(in: context)
 
-        XCTAssertEqual(message.conversationPreviewText, "fwd: \"Weekly update\"")
+        XCTAssertEqual(message.conversationPreviewText, "Fwd: \"Weekly update\"")
     }
 
     func testConversationPreviewText_newsletter_usesSubject() {

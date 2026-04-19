@@ -258,8 +258,9 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     func refreshConversationNames() {
-        // V2: Fix single-participant names to use full name instead of first name only
-        let hasRefreshedKey = "hasRefreshedConversationNamesV2"
+        // V3: recompute stored rollups so display-name fixes and preview formatting updates
+        // are applied to existing conversations after shipping.
+        let hasRefreshedKey = "hasRefreshedConversationNamesV3"
         guard !UserDefaults.standard.bool(forKey: hasRefreshedKey) else { return }
 
         taskManager.run("refreshNames") { [weak self] in
@@ -268,7 +269,7 @@ final class ConversationListViewModel: ObservableObject {
             await conversationManager.updateAllConversationRollups(in: context)
             storage.saveIfNeeded(context)
             UserDefaults.standard.set(true, forKey: hasRefreshedKey)
-            Log.info("Refreshed all conversation names (V2: full names for single participants)", category: .conversation)
+            Log.info("Refreshed all conversation rollups (V3)", category: .conversation)
         }
     }
 
