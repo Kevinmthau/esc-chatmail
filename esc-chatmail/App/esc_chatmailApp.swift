@@ -108,9 +108,10 @@ struct esc_chatmailApp: App {
         // Start app-scoped foreground sync as soon as auth is available.
         // Scene callbacks may not fire during cold-start when already active.
         if dependencies.authSession.isAuthenticated && !isRunningUITests {
-            dependencies.foregroundSyncCoordinator.start(
+            startForegroundSyncSession(
                 reason: "appInitialized",
-                triggerImmediateSync: true
+                triggerImmediateSync: true,
+                processPendingActionsIfStarted: true
             )
         }
 
@@ -165,25 +166,13 @@ struct esc_chatmailApp: App {
             // Foreground sync is now app-scoped (independent of the conversation list lifecycle).
             // Also process pending actions and duplicate cleanup.
             if dependencies.authSession.isAuthenticated {
-                dependencies.foregroundSyncCoordinator.start(
+                startForegroundSyncSession(
                     reason: "sceneActive",
-                    triggerImmediateSync: true
+                    triggerImmediateSync: true,
+                    processPendingActionsIfStarted: true
                 )
-                Task {
-                    let hadPendingActions = await dependencies.pendingActionsManager.pendingActionCount() > 0
-                    await dependencies.pendingActionsManager.processAllPendingActions()
-                    if hadPendingActions {
-                        await MainActor.run {
-                            dependencies.foregroundSyncCoordinator.triggerSync(
-                                reason: "sceneActivePostPendingActions",
-                                force: true
-                            )
-                        }
-                    }
-                }
             }
         case .inactive:
-            dependencies.foregroundSyncCoordinator.stop(reason: "sceneInactive")
             break
         @unknown default:
             break
@@ -194,12 +183,41 @@ struct esc_chatmailApp: App {
         if isRunningUITests { return }
 
         if isAuthenticated && scenePhase == .active {
-            dependencies.foregroundSyncCoordinator.start(
+            startForegroundSyncSession(
                 reason: "authBecameAuthenticated",
-                triggerImmediateSync: true
+                triggerImmediateSync: true,
+                processPendingActionsIfStarted: true
             )
         } else if !isAuthenticated {
             dependencies.foregroundSyncCoordinator.stop(reason: "authBecameUnauthenticated")
+        }
+    }
+
+    private func startForegroundSyncSession(
+        reason: String,
+        triggerImmediateSync: Bool,
+        processPendingActionsIfStarted: Bool
+    ) {
+        let startedSession = dependencies.foregroundSyncCoordinator.start(
+            reason: reason,
+            triggerImmediateSync: triggerImmediateSync
+        )
+
+        guard processPendingActionsIfStarted, startedSession else {
+            return
+        }
+
+        Task {
+            let hadPendingActions = await dependencies.pendingActionsManager.pendingActionCount() > 0
+            await dependencies.pendingActionsManager.processAllPendingActions()
+            if hadPendingActions {
+                await MainActor.run {
+                    dependencies.foregroundSyncCoordinator.triggerSync(
+                        reason: "\(reason)PostPendingActions",
+                        force: true
+                    )
+                }
+            }
         }
     }
 

@@ -41,11 +41,12 @@ final class ForegroundSyncCoordinator {
         self.minimumSyncGap = minimumSyncGap
     }
 
-    func start(reason: String, triggerImmediateSync: Bool) {
+    @discardableResult
+    func start(reason: String, triggerImmediateSync: Bool) -> Bool {
         guard authSession.isAuthenticated else {
             log.debug("Foreground sync not started (\(reason)): user not authenticated")
             stop(reason: "notAuthenticated")
-            return
+            return false
         }
 
         let startedPeriodicLoop = startPeriodicLoopIfNeeded()
@@ -56,6 +57,8 @@ final class ForegroundSyncCoordinator {
             // respect the minimum gap to avoid duplicate launch syncs.
             triggerSyncIfNeeded(reason: reason, force: startedPeriodicLoop)
         }
+
+        return startedPeriodicLoop
     }
 
     func stop(reason: String) {

@@ -11,6 +11,9 @@ final class ConversationFilterService: ObservableObject {
     @Published var currentFilter: ConversationFilter = .all {
         didSet {
             guard currentFilter != oldValue else { return }
+            if currentFilter != .all {
+                loadContactsCache(requestAccessIfNeeded: true)
+            }
             onFilterStateChange?()
         }
     }
@@ -88,7 +91,7 @@ final class ConversationFilterService: ObservableObject {
     // MARK: - Contact Cache Loading
 
     /// Loads all contact emails into cache for filtering
-    func loadContactsCache() {
+    func loadContactsCache(requestAccessIfNeeded: Bool = false) {
         contactsLoadTask?.cancel()
         contactsLoadTask = Task.detached { [contactsService, weak self] in
             let authStatus = await MainActor.run { contactsService.authorizationStatus }
@@ -99,6 +102,7 @@ final class ConversationFilterService: ObservableObject {
             }()
 
             if !hasAccess {
+                guard requestAccessIfNeeded else { return }
                 let granted = await contactsService.requestAccess()
                 if !granted { return }
             }

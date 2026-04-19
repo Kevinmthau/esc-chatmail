@@ -387,8 +387,14 @@ struct BaseEmailWebView: UIViewRepresentable {
                     return
                 }
 
-                // Don't open localhost links
-                if url.host != "localhost" && UIApplication.shared.canOpenURL(url) {
+                if (scheme == "http" || scheme == "https") &&
+                    PrivateNetworkAddressDetector.isPrivateOrReserved(url) {
+                    Log.warning("Blocked private/reserved email link: \(url.absoluteString)", category: .ui)
+                    decisionHandler(.cancel)
+                    return
+                }
+
+                if UIApplication.shared.canOpenURL(url) {
                     UIApplication.shared.open(url)
                 }
                 decisionHandler(.cancel)

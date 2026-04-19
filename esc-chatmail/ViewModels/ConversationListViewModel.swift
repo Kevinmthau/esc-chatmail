@@ -253,8 +253,8 @@ final class ConversationListViewModel: ObservableObject {
         }
     }
 
-    func loadContactsCache() {
-        filterService.loadContactsCache()
+    func loadContactsCache(requestAccessIfNeeded: Bool = false) {
+        filterService.loadContactsCache(requestAccessIfNeeded: requestAccessIfNeeded)
     }
 
     func refreshConversationNames() {
@@ -286,7 +286,7 @@ final class ConversationListViewModel: ObservableObject {
             try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
             await MainActor.run { [weak self] in
                 guard let self = self else { return }
-                self.loadContactsCache()
+                self.loadContactsCache(requestAccessIfNeeded: false)
                 self.refreshConversationNames()
             }
         }
