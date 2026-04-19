@@ -37,7 +37,7 @@ struct ConversationRollupUpdater: Sendable {
         updateInboxMetrics(for: conversation, inboxMessages: inboxMessages, previousHasInbox: previousHasInbox, totalCount: messages.count)
 
         // Phase 5: Update display name
-        updateDisplayName(for: conversation, myEmail: myEmail)
+        updateDisplayNameOnly(for: conversation, myEmail: myEmail)
     }
 
     // MARK: - Batch Rollup Operations
@@ -141,6 +141,34 @@ struct ConversationRollupUpdater: Sendable {
 
             for conversation in conversations {
                 self.updateRollups(for: conversation, myEmail: myEmail)
+            }
+        }
+    }
+
+    /// Refreshes stored conversation display names without recomputing any other rollup fields.
+    @MainActor
+    func updateDisplayNamesForAllConversations(
+        in context: NSManagedObjectContext,
+        myEmail: String
+    ) async {
+        await context.perform {
+            let request = Conversation.fetchRequest()
+            request.fetchBatchSize = 50
+            request.relationshipKeyPathsForPrefetching = [
+                "participants",
+                "participants.person"
+            ]
+
+            let conversations: [Conversation]
+            do {
+                conversations = try context.fetch(request)
+            } catch {
+                Log.error("Failed to fetch conversations for display-name refresh", category: .conversation, error: error)
+                return
+            }
+
+            for conversation in conversations {
+                self.updateDisplayNameOnly(for: conversation, myEmail: myEmail)
             }
         }
     }
@@ -263,8 +291,8 @@ struct ConversationRollupUpdater: Sendable {
         }
     }
 
-    /// Updates display name from participants, excluding the current user.
-    private func updateDisplayName(for conversation: Conversation, myEmail: String) {
+    /// Updates only the stored display name from participants, excluding the current user.
+    func updateDisplayNameOnly(for conversation: Conversation, myEmail: String) {
         guard let participants = conversation.participants else { return }
 
         let normalizedMyEmail = EmailNormalizer.normalize(myEmail)
@@ -329,6 +357,8 @@ struct ConversationRollupUpdater: Sendable {
             category: .conversation
         )
         // Ensure we never set an empty display name
-        conversation.displayName = finalDisplayName.isEmpty ? "Unknown" : finalDisplayName
+        let resolvedDisplayName = finalDisplayName.isEmpty ? "Unknown" : finalDisplayName
+        guard conversation.displayName != resolvedDisplayName else { return }
+        conversation.displayName = resolvedDisplayName
     }
 }

@@ -22,6 +22,8 @@ enum ConversationFilter: String, CaseIterable {
 /// Composes specialized services for search, selection, and filtering
 @MainActor
 final class ConversationListViewModel: ObservableObject {
+    static let conversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV3"
+
     // MARK: - Composed Services
 
     let searchService: ConversationSearchService
@@ -258,18 +260,21 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     func refreshConversationNames() {
-        // V3: recompute stored rollups so display-name fixes and preview formatting updates
-        // are applied to existing conversations after shipping.
-        let hasRefreshedKey = "hasRefreshedConversationNamesV3"
+        // V3: refresh stored conversation display names only. Rollup metadata stays sync-owned.
+        let hasRefreshedKey = Self.conversationNameRefreshMigrationKey
         guard !UserDefaults.standard.bool(forKey: hasRefreshedKey) else { return }
+        guard hasExistingConversationsForNameRefresh() else {
+            UserDefaults.standard.set(true, forKey: hasRefreshedKey)
+            return
+        }
 
         taskManager.run("refreshNames") { [weak self] in
             guard let self = self else { return }
             let context = storage.makeBackgroundContext()
-            await conversationManager.updateAllConversationRollups(in: context)
-            storage.saveIfNeeded(context)
+            await conversationManager.updateAllConversationDisplayNames(in: context)
+            guard storage.saveIfNeeded(context) else { return }
             UserDefaults.standard.set(true, forKey: hasRefreshedKey)
-            Log.info("Refreshed all conversation rollups (V3)", category: .conversation)
+            Log.info("Refreshed conversation display names (V3)", category: .conversation)
         }
     }
 
@@ -326,6 +331,18 @@ final class ConversationListViewModel: ObservableObject {
 
     private var conversationContext: NSManagedObjectContext {
         observedConversationContext ?? storage.viewContext
+    }
+
+    private func hasExistingConversationsForNameRefresh() -> Bool {
+        let request = Conversation.fetchRequest()
+        request.includesPendingChanges = false
+
+        do {
+            return try storage.viewContext.count(for: request) > 0
+        } catch {
+            Log.error("Failed to count conversations for display-name refresh migration", category: .conversation, error: error)
+            return false
+        }
     }
 
     private func isSourceConversation(_ conversation: Conversation) -> Bool {
