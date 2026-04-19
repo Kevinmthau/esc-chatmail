@@ -16,6 +16,12 @@ The repo uses:
 - deployment target: iOS `17.6`
 - package dependencies resolved through SwiftPM in the project
 
+## Git Workflow
+
+- Work on `main` by default.
+- Do not create new branches or worktrees for routine work unless the user explicitly asks for one.
+- After branch-specific work is finished, return the repo to `main` unless the user asks to stay on a different branch.
+
 ## Default Build And Test Commands
 
 Use the Xcode app toolchain explicitly. Plain `xcodebuild` will otherwise point at Command Line Tools on this machine.
