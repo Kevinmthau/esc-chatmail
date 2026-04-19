@@ -11,6 +11,7 @@ enum BackgroundSyncRetryAction: Equatable {
 
 struct BackgroundSyncCompletionDisposition: Equatable {
     let historyIdToStore: String?
+    let continuationState: BackgroundSyncContinuationState?
     let retryAction: BackgroundSyncRetryAction
     let shouldResetRetryState: Bool
 }
@@ -125,6 +126,37 @@ final class BackgroundSyncManager {
             let authSession = await MainActor.run { authSessionProvider() }
             _ = try await authSession.withFreshToken()
 
+            if let continuationState = stateManager.getContinuationState() {
+                switch continuationState.mode {
+                case .history:
+                    guard let startHistoryId = continuationState.startHistoryId else {
+                        stateManager.clearContinuationState()
+                        Log.warning("Cleared invalid background history continuation state", category: .background)
+                        break
+                    }
+
+                    return await performHistorySync(
+                        startHistoryId: startHistoryId,
+                        initialPageToken: continuationState.pageToken,
+                        isProcessingTask: isProcessingTask
+                    )
+
+                case .partial:
+                    guard let query = continuationState.query, let maxResults = continuationState.maxResults else {
+                        stateManager.clearContinuationState()
+                        Log.warning("Cleared invalid background partial continuation state", category: .background)
+                        break
+                    }
+
+                    return await performPartialSync(
+                        query: query,
+                        initialPageToken: continuationState.pageToken,
+                        maxResults: maxResults,
+                        isProcessingTask: isProcessingTask
+                    )
+                }
+            }
+
             let historyId = await stateManager.getStoredHistoryId()
 
             if let historyId = historyId {
@@ -139,11 +171,15 @@ final class BackgroundSyncManager {
         }
     }
 
-    private func performHistorySync(startHistoryId: String, isProcessingTask: Bool) async -> Bool {
+    private func performHistorySync(
+        startHistoryId: String,
+        initialPageToken: String? = nil,
+        isProcessingTask: Bool
+    ) async -> Bool {
         do {
             let apiClient = await MainActor.run { apiClientProvider() }
             var allHistories: [HistoryRecord] = []
-            var pageToken: String? = nil
+            var pageToken: String? = initialPageToken
             let maxPages = isProcessingTask ? 10 : 3
             var pageCount = 0
             var latestHistoryId: String? = nil
@@ -174,18 +210,28 @@ final class BackgroundSyncManager {
                 processingResult = .empty
             }
 
+            let continuationState = didTruncateHistoryPagination && !processingResult.hadFetchFailures && pageToken != nil
+                ? BackgroundSyncContinuationState.history(startHistoryId: startHistoryId, pageToken: pageToken!)
+                : nil
             let disposition = Self.completionDisposition(
-                didTruncatePagination: didTruncateHistoryPagination,
+                catchUpState: continuationState,
                 hadFetchFailures: processingResult.hadFetchFailures,
                 latestHistoryId: latestHistoryId
             )
 
-            if didTruncateHistoryPagination {
+            if continuationState != nil, didTruncateHistoryPagination {
                 Log.warning(
-                    "Background history sync reached page limit (\(maxPages)); keeping stored historyId to avoid data loss",
+                    "Background history sync reached page limit (\(maxPages)); stored continuation page token for catch-up retry",
                     category: .background
                 )
-            } else if processingResult.hadFetchFailures {
+            } else if didTruncateHistoryPagination {
+                Log.warning(
+                    "Background history sync reached page limit (\(maxPages)) but had fetch failures; retrying before advancing continuation",
+                    category: .background
+                )
+            }
+
+            if processingResult.hadFetchFailures {
                 Log.warning(
                     "Background history sync had \(processingResult.failedFetchCount) message fetch failures; keeping stored historyId and scheduling retry",
                     category: .background
@@ -195,11 +241,21 @@ final class BackgroundSyncManager {
             return await finalizeBackgroundSync(disposition)
 
         } catch {
-            return await handleHistorySyncError(error, startHistoryId: startHistoryId, isProcessingTask: isProcessingTask)
+            return await handleHistorySyncError(
+                error,
+                startHistoryId: startHistoryId,
+                initialPageToken: initialPageToken,
+                isProcessingTask: isProcessingTask
+            )
         }
     }
 
-    private func handleHistorySyncError(_ error: Error, startHistoryId: String, isProcessingTask: Bool) async -> Bool {
+    private func handleHistorySyncError(
+        _ error: Error,
+        startHistoryId: String,
+        initialPageToken: String?,
+        isProcessingTask: Bool
+    ) async -> Bool {
         let action = errorHandler.handleError(error)
 
         switch action {
@@ -208,13 +264,18 @@ final class BackgroundSyncManager {
             return false
 
         case .partialSync:
+            stateManager.clearContinuationState()
             return await performPartialSync(isProcessingTask: isProcessingTask)
 
         case .tokenRefreshAndRetry:
             do {
                 let authSession = await MainActor.run { authSessionProvider() }
                 _ = try await authSession.withFreshToken()
-                return await performHistorySyncRetry(startHistoryId: startHistoryId, isProcessingTask: isProcessingTask)
+                return await performHistorySync(
+                    startHistoryId: startHistoryId,
+                    initialPageToken: initialPageToken,
+                    isProcessingTask: isProcessingTask
+                )
             } catch {
                 Log.error("Token refresh failed", category: .background, error: error)
                 handleSyncError()
@@ -230,86 +291,21 @@ final class BackgroundSyncManager {
         }
     }
 
-    private func performHistorySyncRetry(startHistoryId: String, isProcessingTask: Bool) async -> Bool {
+    private func performPartialSync(
+        query: String? = nil,
+        initialPageToken: String? = nil,
+        maxResults: Int? = nil,
+        isProcessingTask: Bool
+    ) async -> Bool {
         do {
             let apiClient = await MainActor.run { apiClientProvider() }
-            var allHistories: [HistoryRecord] = []
-            var pageToken: String? = nil
-            let maxPages = isProcessingTask ? 10 : 3
-            var pageCount = 0
-            var latestHistoryId: String? = nil
-
-            repeat {
-                let historyResponse = try await apiClient.listHistory(startHistoryId: startHistoryId, pageToken: pageToken)
-
-                if let histories = historyResponse.history {
-                    allHistories.append(contentsOf: histories)
-                }
-
-                pageToken = historyResponse.nextPageToken
-                pageCount += 1
-
-                if let newHistoryId = historyResponse.historyId {
-                    latestHistoryId = newHistoryId
-                }
-            } while pageToken != nil && pageCount < maxPages
-
-            let didTruncateHistoryPagination = pageToken != nil
-
-            let processingResult: BackgroundMessageProcessingResult
-            if !allHistories.isEmpty {
-                processingResult = await messageProcessor.processHistoryChanges(histories: allHistories)
-            } else {
-                processingResult = .empty
-            }
-
-            let disposition = Self.completionDisposition(
-                didTruncatePagination: didTruncateHistoryPagination,
-                hadFetchFailures: processingResult.hadFetchFailures,
-                latestHistoryId: latestHistoryId
-            )
-
-            if didTruncateHistoryPagination {
-                Log.warning(
-                    "Background history retry reached page limit (\(maxPages)); keeping stored historyId to avoid data loss",
-                    category: .background
-                )
-            } else if processingResult.hadFetchFailures {
-                Log.warning(
-                    "Background history retry had \(processingResult.failedFetchCount) message fetch failures; keeping stored historyId and scheduling retry",
-                    category: .background
-                )
-            }
-
-            return await finalizeBackgroundSync(disposition)
-
-        } catch {
-            Log.error("History sync retry failed", category: .background, error: error)
-            handleSyncError()
-            return false
-        }
-    }
-
-    private func performPartialSync(isProcessingTask: Bool) async -> Bool {
-        do {
-            let apiClient = await MainActor.run { apiClientProvider() }
-            let maxResults = isProcessingTask ? 100 : 50
+            let maxResults = maxResults ?? (isProcessingTask ? 100 : 50)
             let maxPages = isProcessingTask ? 10 : 3
 
-            // Use install timestamp to only fetch messages from install time forward
-            let installTimestamp = UserDefaults.standard.double(forKey: "installTimestamp")
-            let query: String
-            if installTimestamp > 0 {
-                let cutoffTimestamp = Int(installTimestamp) - 300 // 5 min buffer
-                query = "after:\(cutoffTimestamp) -label:spam -label:drafts -label:trash"
-            } else {
-                // Fallback: only fetch messages from last 24 hours
-                let oneDayAgo = Int(Date().timeIntervalSince1970) - (24 * 60 * 60)
-                query = "after:\(oneDayAgo) -label:spam -label:drafts -label:trash"
-            }
+            let query = query ?? buildPartialSyncQuery()
 
             var allMessageIds: Set<String> = []
-            var pageToken: String? = nil
+            var pageToken: String? = initialPageToken
             var pageCount = 0
 
             repeat {
@@ -333,21 +329,31 @@ final class BackgroundSyncManager {
             }
 
             let didTruncateMessagePagination = pageToken != nil
-            let profile = didTruncateMessagePagination || processingResult.hadFetchFailures
+            let continuationState = didTruncateMessagePagination && !processingResult.hadFetchFailures && pageToken != nil
+                ? BackgroundSyncContinuationState.partial(query: query, pageToken: pageToken!, maxResults: maxResults)
+                : nil
+            let profile = continuationState != nil || processingResult.hadFetchFailures
                 ? nil
                 : try await apiClient.getProfile()
             let disposition = Self.completionDisposition(
-                didTruncatePagination: didTruncateMessagePagination,
+                catchUpState: continuationState,
                 hadFetchFailures: processingResult.hadFetchFailures,
                 latestHistoryId: profile?.historyId
             )
 
-            if didTruncateMessagePagination {
+            if continuationState != nil, didTruncateMessagePagination {
                 Log.warning(
-                    "Background partial sync reached page limit (\(maxPages)); skipping historyId advance to avoid missing messages",
+                    "Background partial sync reached page limit (\(maxPages)); stored continuation page token for catch-up retry",
                     category: .background
                 )
-            } else if processingResult.hadFetchFailures {
+            } else if didTruncateMessagePagination {
+                Log.warning(
+                    "Background partial sync reached page limit (\(maxPages)) but had fetch failures; retrying before advancing continuation",
+                    category: .background
+                )
+            }
+
+            if processingResult.hadFetchFailures {
                 Log.warning(
                     "Background partial sync had \(processingResult.failedFetchCount) message fetch failures; keeping stored historyId and scheduling retry",
                     category: .background
@@ -363,6 +369,18 @@ final class BackgroundSyncManager {
             handleSyncError()
             return false
         }
+    }
+
+    private func buildPartialSyncQuery() -> String {
+        let installTimestamp = UserDefaults.standard.double(forKey: "installTimestamp")
+
+        if installTimestamp > 0 {
+            let cutoffTimestamp = Int(installTimestamp) - 300 // 5 min buffer
+            return "after:\(cutoffTimestamp) -label:spam -label:drafts -label:trash"
+        }
+
+        let oneDayAgo = Int(Date().timeIntervalSince1970) - (24 * 60 * 60)
+        return "after:\(oneDayAgo) -label:spam -label:drafts -label:trash"
     }
 
     // MARK: - Error Handling
@@ -383,14 +401,15 @@ final class BackgroundSyncManager {
     ) async -> Bool {
         switch disposition.retryAction {
         case .none:
-            if let historyId = disposition.historyIdToStore {
-                do {
+            do {
+                if let historyId = disposition.historyIdToStore {
                     try await stateManager.storeHistoryId(historyId, accountEmail: accountEmail)
-                } catch {
-                    Log.error("Failed to store background sync historyId", category: .background, error: error)
-                    handleSyncError()
-                    return false
                 }
+                stateManager.clearContinuationState()
+            } catch {
+                Log.error("Failed to store background sync state", category: .background, error: error)
+                handleSyncError()
+                return false
             }
 
             if disposition.shouldResetRetryState {
@@ -403,34 +422,51 @@ final class BackgroundSyncManager {
             return false
 
         case .catchUp:
+            do {
+                guard let continuationState = disposition.continuationState else {
+                    Log.warning("Background catch-up retry requested without continuation state", category: .background)
+                    handleSyncError()
+                    return false
+                }
+
+                try stateManager.storeContinuationState(continuationState)
+            } catch {
+                Log.error("Failed to store background sync continuation state", category: .background, error: error)
+                handleSyncError()
+                return false
+            }
+
             scheduleCatchUpRetry()
             return false
         }
     }
 
     static func completionDisposition(
-        didTruncatePagination: Bool,
+        catchUpState: BackgroundSyncContinuationState? = nil,
         hadFetchFailures: Bool,
         latestHistoryId: String?
     ) -> BackgroundSyncCompletionDisposition {
-        if didTruncatePagination {
+        if hadFetchFailures {
             return BackgroundSyncCompletionDisposition(
                 historyIdToStore: nil,
-                retryAction: .catchUp,
+                continuationState: nil,
+                retryAction: .failureBackoff,
                 shouldResetRetryState: false
             )
         }
 
-        if hadFetchFailures {
+        if let catchUpState {
             return BackgroundSyncCompletionDisposition(
                 historyIdToStore: nil,
-                retryAction: .failureBackoff,
+                continuationState: catchUpState,
+                retryAction: .catchUp,
                 shouldResetRetryState: false
             )
         }
 
         return BackgroundSyncCompletionDisposition(
             historyIdToStore: latestHistoryId,
+            continuationState: nil,
             retryAction: .none,
             shouldResetRetryState: true
         )

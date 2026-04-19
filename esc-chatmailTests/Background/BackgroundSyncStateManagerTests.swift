@@ -4,13 +4,20 @@ import CoreData
 
 final class BackgroundSyncStateManagerTests: XCTestCase {
     private var testStack: TestCoreDataStack!
+    private var defaults: UserDefaults!
+    private var suiteName: String!
 
     override func setUp() {
         super.setUp()
         testStack = TestCoreDataStack()
+        suiteName = "BackgroundSyncStateManagerTests-\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
     }
 
     override func tearDown() {
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults = nil
+        suiteName = nil
         testStack = nil
         super.tearDown()
     }
@@ -47,6 +54,23 @@ final class BackgroundSyncStateManagerTests: XCTestCase {
         XCTAssertEqual(accountCount, 1)
     }
 
+    func testContinuationState_roundTripsThroughDefaults() throws {
+        let stateManager = makeStateManager()
+        let continuationState = BackgroundSyncContinuationState.partial(
+            query: "after:123 -label:spam",
+            pageToken: "page-2",
+            maxResults: 50
+        )
+
+        try stateManager.storeContinuationState(continuationState)
+
+        XCTAssertEqual(stateManager.getContinuationState(), continuationState)
+
+        stateManager.clearContinuationState()
+
+        XCTAssertNil(stateManager.getContinuationState())
+    }
+
     private func makeStateManager() -> BackgroundSyncStateManager {
         let stack = testStack!
 
@@ -60,7 +84,8 @@ final class BackgroundSyncStateManagerTests: XCTestCase {
             saveContext: { context in
                 guard context.hasChanges else { return }
                 try context.save()
-            }
+            },
+            defaults: defaults
         )
     }
 

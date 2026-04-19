@@ -9,6 +9,11 @@ struct InitialSyncResult {
     let hadWarnings: Bool
 }
 
+struct InitialSyncCompletionDisposition: Equatable {
+    let shouldAdvanceHistoryId: Bool
+    let hadWarnings: Bool
+}
+
 /// Orchestrates the initial full sync from Gmail
 ///
 /// Responsibilities:
@@ -254,14 +259,21 @@ final class InitialSyncOrchestrator {
                 )
             }
 
-            if stillFailedIds.isEmpty {
-                log.info("All failed messages recovered on retry - advancing historyId")
+            let disposition = Self.completionDisposition(
+                hadInitialFailures: true,
+                permanentlyFailedCount: stillFailedIds.count
+            )
+            if disposition.shouldAdvanceHistoryId {
                 await messagePersister.setAccountHistoryId(profile.historyId, in: context)
-                syncCompletedWithWarnings = false
-            } else {
-                log.warning("\(stillFailedIds.count) messages permanently failed - NOT advancing historyId")
-                await failureTracker.recordFailure(failedIds: stillFailedIds)
             }
+
+            if disposition.hadWarnings {
+                log.warning("\(stillFailedIds.count) messages permanently failed - advancing historyId so future syncs can continue incrementally")
+                await failureTracker.recordFailure(failedIds: stillFailedIds)
+            } else {
+                log.info("All failed messages recovered on retry - advancing historyId")
+            }
+            syncCompletedWithWarnings = disposition.hadWarnings
         } else {
             log.info("All messages fetched successfully - advancing historyId to \(profile.historyId)")
             await messagePersister.setAccountHistoryId(profile.historyId, in: context)
@@ -269,6 +281,23 @@ final class InitialSyncOrchestrator {
         }
 
         return syncCompletedWithWarnings
+    }
+
+    nonisolated static func completionDisposition(
+        hadInitialFailures: Bool,
+        permanentlyFailedCount: Int
+    ) -> InitialSyncCompletionDisposition {
+        guard hadInitialFailures else {
+            return InitialSyncCompletionDisposition(
+                shouldAdvanceHistoryId: true,
+                hadWarnings: false
+            )
+        }
+
+        return InitialSyncCompletionDisposition(
+            shouldAdvanceHistoryId: true,
+            hadWarnings: permanentlyFailedCount > 0
+        )
     }
 
     private func countConversations(in context: NSManagedObjectContext) async -> Int {

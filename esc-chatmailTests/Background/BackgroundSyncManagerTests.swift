@@ -2,9 +2,13 @@ import XCTest
 @testable import esc_chatmail
 
 final class BackgroundSyncManagerTests: XCTestCase {
-    func testCompletionDisposition_truncationSchedulesCatchUpRetry() {
+    func testCompletionDisposition_truncationStoresContinuationAndSchedulesCatchUpRetry() {
+        let continuationState = BackgroundSyncContinuationState.history(
+            startHistoryId: "history-100",
+            pageToken: "page-2"
+        )
         let disposition = BackgroundSyncManager.completionDisposition(
-            didTruncatePagination: true,
+            catchUpState: continuationState,
             hadFetchFailures: false,
             latestHistoryId: "history-123"
         )
@@ -13,6 +17,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
             disposition,
             BackgroundSyncCompletionDisposition(
                 historyIdToStore: nil,
+                continuationState: continuationState,
                 retryAction: .catchUp,
                 shouldResetRetryState: false
             )
@@ -21,7 +26,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
 
     func testCompletionDisposition_failuresUseFailureBackoff() {
         let disposition = BackgroundSyncManager.completionDisposition(
-            didTruncatePagination: false,
             hadFetchFailures: true,
             latestHistoryId: "history-123"
         )
@@ -30,6 +34,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
             disposition,
             BackgroundSyncCompletionDisposition(
                 historyIdToStore: nil,
+                continuationState: nil,
                 retryAction: .failureBackoff,
                 shouldResetRetryState: false
             )
@@ -38,7 +43,6 @@ final class BackgroundSyncManagerTests: XCTestCase {
 
     func testCompletionDisposition_successAdvancesHistoryIdAndResetsRetryState() {
         let disposition = BackgroundSyncManager.completionDisposition(
-            didTruncatePagination: false,
             hadFetchFailures: false,
             latestHistoryId: "history-123"
         )
@@ -47,6 +51,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
             disposition,
             BackgroundSyncCompletionDisposition(
                 historyIdToStore: "history-123",
+                continuationState: nil,
                 retryAction: .none,
                 shouldResetRetryState: true
             )

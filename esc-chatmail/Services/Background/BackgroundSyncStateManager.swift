@@ -2,6 +2,39 @@ import Foundation
 import CoreData
 import os
 
+struct BackgroundSyncContinuationState: Codable, Equatable {
+    enum Mode: String, Codable {
+        case history
+        case partial
+    }
+
+    let mode: Mode
+    let pageToken: String
+    let startHistoryId: String?
+    let query: String?
+    let maxResults: Int?
+
+    static func history(startHistoryId: String, pageToken: String) -> Self {
+        Self(
+            mode: .history,
+            pageToken: pageToken,
+            startHistoryId: startHistoryId,
+            query: nil,
+            maxResults: nil
+        )
+    }
+
+    static func partial(query: String, pageToken: String, maxResults: Int) -> Self {
+        Self(
+            mode: .partial,
+            pageToken: pageToken,
+            startHistoryId: nil,
+            query: query,
+            maxResults: maxResults
+        )
+    }
+}
+
 enum BackgroundSyncStateError: LocalizedError {
     case accountMissing
 
@@ -15,9 +48,14 @@ enum BackgroundSyncStateError: LocalizedError {
 
 /// Manages persistent state for background sync (historyId, retry logic)
 final class BackgroundSyncStateManager {
+    private enum DefaultsKeys {
+        static let continuationState = "backgroundSync.continuationState"
+    }
+
     private let makeBackgroundContext: () -> NSManagedObjectContext
     private let performBackgroundTask: (@escaping (NSManagedObjectContext) throws -> Void) async throws -> Void
     private let saveContext: (NSManagedObjectContext) throws -> Void
+    private let defaults: UserDefaults
 
     private struct RetryState {
         var retryCount = 0
@@ -31,6 +69,7 @@ final class BackgroundSyncStateManager {
 
     init(
         coreDataStack: CoreDataStack = .shared,
+        defaults: UserDefaults = .standard,
         maxRetries: Int = 3,
         initialBackoffSeconds: TimeInterval = 30,
         maxBackoffSeconds: TimeInterval = 3600
@@ -44,6 +83,7 @@ final class BackgroundSyncStateManager {
         self.saveContext = { context in
             try coreDataStack.save(context: context)
         }
+        self.defaults = defaults
         self.maxRetries = maxRetries
         self.initialBackoffSeconds = initialBackoffSeconds
         self.maxBackoffSeconds = maxBackoffSeconds
@@ -54,6 +94,7 @@ final class BackgroundSyncStateManager {
         makeBackgroundContext: @escaping () -> NSManagedObjectContext,
         performBackgroundTask: @escaping (@escaping (NSManagedObjectContext) throws -> Void) async throws -> Void,
         saveContext: @escaping (NSManagedObjectContext) throws -> Void,
+        defaults: UserDefaults = .standard,
         maxRetries: Int = 3,
         initialBackoffSeconds: TimeInterval = 30,
         maxBackoffSeconds: TimeInterval = 3600
@@ -61,6 +102,7 @@ final class BackgroundSyncStateManager {
         self.makeBackgroundContext = makeBackgroundContext
         self.performBackgroundTask = performBackgroundTask
         self.saveContext = saveContext
+        self.defaults = defaults
         self.maxRetries = maxRetries
         self.initialBackoffSeconds = initialBackoffSeconds
         self.maxBackoffSeconds = maxBackoffSeconds
@@ -118,6 +160,29 @@ final class BackgroundSyncStateManager {
             account.historyId = historyId
             try saveContext(context)
         }
+    }
+
+    func getContinuationState() -> BackgroundSyncContinuationState? {
+        guard let data = defaults.data(forKey: DefaultsKeys.continuationState) else {
+            return nil
+        }
+
+        do {
+            return try JSONDecoder().decode(BackgroundSyncContinuationState.self, from: data)
+        } catch {
+            defaults.removeObject(forKey: DefaultsKeys.continuationState)
+            Log.error("Failed to decode background sync continuation state", category: .background, error: error)
+            return nil
+        }
+    }
+
+    func storeContinuationState(_ continuationState: BackgroundSyncContinuationState) throws {
+        let data = try JSONEncoder().encode(continuationState)
+        defaults.set(data, forKey: DefaultsKeys.continuationState)
+    }
+
+    func clearContinuationState() {
+        defaults.removeObject(forKey: DefaultsKeys.continuationState)
     }
 
     /// Increments retry count and returns whether we should retry
