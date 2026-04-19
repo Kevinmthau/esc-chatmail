@@ -72,6 +72,20 @@ final class BackgroundSyncStateManagerTests: XCTestCase {
         XCTAssertNil(stateManager.getContinuationState())
     }
 
+    func testClearContinuationState_staticHelperRemovesPersistedContinuation() throws {
+        let continuationState = BackgroundSyncContinuationState.partial(
+            query: "after:123 -label:spam",
+            pageToken: "page-2",
+            maxResults: 50,
+            accountEmail: "test@example.com"
+        )
+        try makeStateManager().storeContinuationState(continuationState)
+
+        BackgroundSyncStateManager.clearContinuationState(in: defaults)
+
+        XCTAssertNil(makeStateManager().getContinuationState())
+    }
+
     private func makeStateManager() -> BackgroundSyncStateManager {
         let stack = testStack!
 

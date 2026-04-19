@@ -29,12 +29,36 @@ final class AuthSessionTests: XCTestCase {
         XCTAssertNil(AuthSession.normalizedLoginHint("   \n\t"))
     }
 
+    func testCurrentOrPersistedUserEmail_prefersInMemoryValue() {
+        let keychain = MockKeychainService()
+        keychain.preloadStrings([KeychainService.Key.googleUserEmail.rawValue: "stored@example.com"])
+        let session = makeAuthSession(keychainService: keychain)
+        session.userEmail = "memory@example.com"
+
+        XCTAssertEqual(session.currentOrPersistedUserEmail(), "memory@example.com")
+    }
+
+    func testCurrentOrPersistedUserEmail_fallsBackToPersistedValue() {
+        let keychain = MockKeychainService()
+        keychain.preloadStrings([KeychainService.Key.googleUserEmail.rawValue: "stored@example.com"])
+        let session = makeAuthSession(keychainService: keychain)
+
+        XCTAssertEqual(session.currentOrPersistedUserEmail(), "stored@example.com")
+    }
+
+    func testCurrentOrPersistedUserEmail_returnsNilWhenPersistedValueMissing() {
+        let session = makeAuthSession(keychainService: MockKeychainService())
+
+        XCTAssertNil(session.currentOrPersistedUserEmail())
+    }
+
     private func makeAuthSession(
-        tokenManagerProvider: @escaping @MainActor @Sendable () -> TokenManagerProtocol
+        tokenManagerProvider: @escaping @MainActor @Sendable () -> TokenManagerProtocol = { MockTokenManager() },
+        keychainService: KeychainServiceProtocol = MockKeychainService()
     ) -> AuthSession {
         AuthSession(
             tokenManagerProvider: tokenManagerProvider,
-            keychainService: MockKeychainService(),
+            keychainService: keychainService,
             userDefaults: UserDefaults(suiteName: "AuthSessionTests.\(UUID().uuidString)")!,
             clearConversationCaches: {},
             cleanupDownloads: {},

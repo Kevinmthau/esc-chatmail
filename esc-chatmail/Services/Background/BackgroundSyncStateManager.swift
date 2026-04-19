@@ -198,6 +198,10 @@ final class BackgroundSyncStateManager {
     }
 
     func clearContinuationState() {
+        Self.clearContinuationState(in: defaults)
+    }
+
+    static func clearContinuationState(in defaults: UserDefaults = .standard) {
         defaults.removeObject(forKey: DefaultsKeys.continuationState)
     }
 

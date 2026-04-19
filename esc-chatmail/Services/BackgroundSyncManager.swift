@@ -125,7 +125,7 @@ final class BackgroundSyncManager {
         do {
             let authSession = await MainActor.run { authSessionProvider() }
             _ = try await authSession.withFreshToken()
-            let currentAccountEmail = await MainActor.run { authSession.userEmail }
+            let currentAccountEmail = await MainActor.run { authSession.currentOrPersistedUserEmail() }
             let historyId = await stateManager.getStoredHistoryId()
 
             if let continuationState = stateManager.getContinuationState() {

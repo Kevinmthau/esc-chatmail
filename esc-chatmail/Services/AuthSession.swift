@@ -133,12 +133,13 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                             expirationDate: result.user.accessToken.expirationDate ?? Date().addingTimeInterval(3600)
                         )
 
-                        // Save user email to keychain
+                        // Save user email with background-readable access so BGTask cold starts
+                        // can recover the account scope before GoogleSignIn restoration runs.
                         if let email = result.user.profile?.email {
                             try self.keychainService.saveString(
                                 email,
                                 for: KeychainService.Key.googleUserEmail.rawValue,
-                                withAccess: .whenUnlockedThisDeviceOnly
+                                withAccess: .afterFirstUnlockThisDeviceOnly
                             )
                         }
 
@@ -180,6 +181,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
         // Clear the sign-in flag
         userDefaults.removeObject(forKey: "hasCompletedSignIn")
+        BackgroundSyncStateManager.clearContinuationState(in: userDefaults)
 
         // Clear conversation cache to prevent leaking previous user's data
         clearConversationCaches()
@@ -282,6 +284,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
         // Clear the sign-in flag
         userDefaults.removeObject(forKey: "hasCompletedSignIn")
+        BackgroundSyncStateManager.clearContinuationState(in: userDefaults)
 
         // Clear conversation cache to prevent leaking previous user's data
         clearConversationCaches()
@@ -320,6 +323,26 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
         let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedValue.isEmpty ? nil : trimmedValue
+    }
+
+    func currentOrPersistedUserEmail() -> String? {
+        if let userEmail {
+            return userEmail
+        }
+
+        do {
+            return try keychainService.loadString(for: KeychainService.Key.googleUserEmail.rawValue)
+        } catch let error as KeychainError {
+            if case .itemNotFound = error {
+                return nil
+            }
+
+            Log.error("Failed to load persisted user email", category: .auth, error: error)
+            return nil
+        } catch {
+            Log.error("Failed to load persisted user email", category: .auth, error: error)
+            return nil
+        }
     }
 
     private func hasRequiredGmailScope(_ user: GIDGoogleUser) -> Bool {
