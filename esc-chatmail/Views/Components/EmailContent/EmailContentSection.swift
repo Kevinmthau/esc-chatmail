@@ -18,6 +18,7 @@ struct EmailContentSection: View {
     private let calendarInvitePreviewBuilder = CalendarInvitePreviewBuilder()
     private let newsletterPreviewBuilder = NewsletterPreviewBuilder()
     private let transactionalPreviewBuilder = TransactionalPreviewBuilder()
+    private let netlifyDeployPreviewBuilder = NetlifyDeployPreviewBuilder()
 
     private var loadKey: String {
         Self.makeLoadKey(for: message, isDarkMode: colorScheme == .dark)
@@ -105,6 +106,19 @@ struct EmailContentSection: View {
                 subject: message.subject
                ) {
                 await finishLoad(with: .calendarInvite(model), generation: generation)
+                return
+            }
+
+            if !message.isForwardedEmail,
+               let model = netlifyDeployPreviewBuilder.buildPreview(
+                canonicalHTML: canonicalHTML,
+                bodyText: message.bodyText,
+                cleanedSnippet: message.cleanedSnippet,
+                senderName: message.senderName,
+                senderEmail: message.senderEmail,
+                subject: message.subject
+               ) {
+                await finishLoad(with: .netlifyDeploy(model), generation: generation)
                 return
             }
 
@@ -222,6 +236,13 @@ struct EmailContentSection: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Email preview: \(model.title)")
             .accessibilityHint("Opens the full original email")
+        case .netlifyDeploy(let model):
+            Button(action: onOpenFullMessage) {
+                NetlifyDeployPreviewCard(model: model)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Netlify deploy preview: \(model.title), \(model.status.displayText)")
+            .accessibilityHint("Opens the full original email")
         case .transactionalHTML(let html):
             Button(action: onOpenFullMessage) {
                 MiniEmailWebView(
@@ -267,5 +288,6 @@ private enum LoadedPreview: Equatable {
     case calendarInvite(CalendarInvitePreviewModel)
     case newsletter(NewsletterPreviewModel)
     case transactional(TransactionalPreviewModel)
+    case netlifyDeploy(NetlifyDeployPreviewModel)
     case transactionalHTML(String)
 }

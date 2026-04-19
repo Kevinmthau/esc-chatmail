@@ -101,3 +101,27 @@ struct CalendarInvitePreviewModel: Equatable, Sendable {
     let actionLabel: String
     let sourceLabel: String?
 }
+
+enum NetlifyDeployStatus: String, Equatable, Sendable {
+    case processing
+    case ready
+    case failed
+
+    var displayText: String {
+        switch self {
+        case .processing: return "Processing"
+        case .ready: return "Ready"
+        case .failed: return "Failed"
+        }
+    }
+}
+
+struct NetlifyDeployPreviewModel: Equatable, Sendable {
+    let title: String
+    let status: NetlifyDeployStatus
+    let project: String
+    let repoSlug: String?
+    let commitSHA: String?
+    let deployLogURL: String?
+    let sourceLabel: String
+}
