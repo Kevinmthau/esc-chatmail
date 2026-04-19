@@ -84,17 +84,60 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
 
         coordinator.stop(reason: "testCleanup")
     }
+
+    func testTriggerSyncAfterCurrent_waitsForInFlightSyncThenRunsForcedSync() async {
+        let syncEngine = MockForegroundSyncEngine()
+        let authSession = MockForegroundSyncAuthSession(isAuthenticated: true)
+        let coordinator = ForegroundSyncCoordinator(
+            syncEngine: syncEngine,
+            authSession: authSession,
+            periodicInterval: 3_600,
+            minimumSyncGap: 90
+        )
+
+        defer { coordinator.stop(reason: "testCleanup") }
+
+        let firstSyncStarted = expectation(description: "first sync started")
+        let secondSyncStarted = expectation(description: "second sync started")
+        let firstSyncCanFinish = AsyncGate()
+
+        syncEngine.onPerformIncrementalSync = {
+            if syncEngine.performIncrementalSyncCalls == 1 {
+                firstSyncStarted.fulfill()
+                await firstSyncCanFinish.wait()
+            } else {
+                secondSyncStarted.fulfill()
+            }
+        }
+
+        coordinator.start(reason: "appInitialized", triggerImmediateSync: true)
+        await fulfillment(of: [firstSyncStarted], timeout: 1.0)
+
+        coordinator.triggerSyncAfterCurrent(reason: "appInitializedPostPendingActions", force: true)
+
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(syncEngine.performIncrementalSyncCalls, 1)
+
+        await firstSyncCanFinish.open()
+
+        await fulfillment(of: [secondSyncStarted], timeout: 1.0)
+        XCTAssertEqual(syncEngine.performIncrementalSyncCalls, 2)
+    }
 }
 
 @MainActor
 private final class MockForegroundSyncEngine: ForegroundSyncPerforming {
     var isSyncing = false
-    var onPerformIncrementalSync: (() -> Void)?
+    var onPerformIncrementalSync: (() async -> Void)?
     private(set) var performIncrementalSyncCalls = 0
 
     func performIncrementalSync() async throws {
+        isSyncing = true
         performIncrementalSyncCalls += 1
-        onPerformIncrementalSync?()
+        if let onPerformIncrementalSync {
+            await onPerformIncrementalSync()
+        }
+        isSyncing = false
     }
 }
 
@@ -104,5 +147,25 @@ private final class MockForegroundSyncAuthSession: ForegroundSyncAuthenticationP
 
     init(isAuthenticated: Bool) {
         self.isAuthenticated = isAuthenticated
+    }
+}
+
+private actor AsyncGate {
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+    private var isOpen = false
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        let pendingContinuations = continuations
+        continuations.removeAll()
+        pendingContinuations.forEach { $0.resume() }
     }
 }

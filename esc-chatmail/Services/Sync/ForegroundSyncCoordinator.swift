@@ -27,6 +27,7 @@ final class ForegroundSyncCoordinator {
     private let log = LogCategory.sync.logger
 
     private var periodicTask: Task<Void, Never>?
+    private var deferredSyncTask: Task<Void, Never>?
     private var lastSyncTriggerAt: Date?
 
     init(
@@ -64,11 +65,31 @@ final class ForegroundSyncCoordinator {
     func stop(reason: String) {
         periodicTask?.cancel()
         periodicTask = nil
+        deferredSyncTask?.cancel()
+        deferredSyncTask = nil
         log.debug("Foreground sync stopped (\(reason))")
     }
 
     func triggerSync(reason: String, force: Bool = false) {
         triggerSyncIfNeeded(reason: reason, force: force)
+    }
+
+    func triggerSyncAfterCurrent(reason: String, force: Bool = false) {
+        deferredSyncTask?.cancel()
+        deferredSyncTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            while self.syncEngine.isSyncing {
+                do {
+                    try await Task.sleep(nanoseconds: 50_000_000)
+                } catch {
+                    return
+                }
+            }
+
+            self.deferredSyncTask = nil
+            self.triggerSyncIfNeeded(reason: reason, force: force)
+        }
     }
 
     private func startPeriodicLoopIfNeeded() -> Bool {

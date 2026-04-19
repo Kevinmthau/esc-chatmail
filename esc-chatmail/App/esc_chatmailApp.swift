@@ -212,7 +212,7 @@ struct esc_chatmailApp: App {
             await dependencies.pendingActionsManager.processAllPendingActions()
             if hadPendingActions {
                 await MainActor.run {
-                    dependencies.foregroundSyncCoordinator.triggerSync(
+                    dependencies.foregroundSyncCoordinator.triggerSyncAfterCurrent(
                         reason: "\(reason)PostPendingActions",
                         force: true
                     )

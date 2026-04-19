@@ -11,7 +11,7 @@ final class ConversationFilterService: ObservableObject {
     @Published var currentFilter: ConversationFilter = .all {
         didSet {
             guard currentFilter != oldValue else { return }
-            if currentFilter != .all {
+            if currentFilter != .all && !hasLoadedContactsCache && !isLoadingContactsCache {
                 loadContactsCache(requestAccessIfNeeded: true)
             }
             onFilterStateChange?()
@@ -32,6 +32,8 @@ final class ConversationFilterService: ObservableObject {
 
     private var contactsLoadTask: Task<Void, Never>?
     private var contactStoreDidChangeObserver: NSObjectProtocol?
+    private var isLoadingContactsCache = false
+    private var hasLoadedContactsCache = false
     var onFilterStateChange: (() -> Void)?
 
     // MARK: - Initialization
@@ -92,8 +94,17 @@ final class ConversationFilterService: ObservableObject {
 
     /// Loads all contact emails into cache for filtering
     func loadContactsCache(requestAccessIfNeeded: Bool = false) {
-        contactsLoadTask?.cancel()
+        guard !isLoadingContactsCache else { return }
+
+        isLoadingContactsCache = true
         contactsLoadTask = Task.detached { [contactsService, weak self] in
+            defer {
+                Task { @MainActor [weak self] in
+                    self?.isLoadingContactsCache = false
+                    self?.contactsLoadTask = nil
+                }
+            }
+
             let authStatus = await MainActor.run { contactsService.authorizationStatus }
             let hasAccess: Bool = {
                 if authStatus == .authorized { return true }
@@ -102,7 +113,7 @@ final class ConversationFilterService: ObservableObject {
             }()
 
             if !hasAccess {
-                guard requestAccessIfNeeded else { return }
+                guard requestAccessIfNeeded, authStatus == .notDetermined else { return }
                 let granted = await contactsService.requestAccess()
                 if !granted { return }
             }
@@ -122,6 +133,7 @@ final class ConversationFilterService: ObservableObject {
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     self.contactEmailsCache = finalEmails
+                    self.hasLoadedContactsCache = true
                 }
             } catch {
                 Log.error("Failed to load contacts", category: .general, error: error)
@@ -133,6 +145,7 @@ final class ConversationFilterService: ObservableObject {
     func cancelTasks() {
         contactsLoadTask?.cancel()
         contactsLoadTask = nil
+        isLoadingContactsCache = false
     }
 
     private func matchesSearch(_ conversation: Conversation, searchText: String) -> Bool {
