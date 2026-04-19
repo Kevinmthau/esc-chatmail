@@ -231,13 +231,16 @@ final class BackgroundSyncManager {
                 processingResult = .empty
             }
 
-            let continuationState = didTruncateHistoryPagination && !processingResult.hadFetchFailures && pageToken != nil
-                ? BackgroundSyncContinuationState.history(
+            let continuationState: BackgroundSyncContinuationState? = {
+                guard didTruncateHistoryPagination,
+                      !processingResult.hadFetchFailures,
+                      let pageToken else { return nil }
+                return .history(
                     startHistoryId: startHistoryId,
-                    pageToken: pageToken!,
+                    pageToken: pageToken,
                     accountEmail: accountEmail
                 )
-                : nil
+            }()
             let disposition = Self.completionDisposition(
                 catchUpState: continuationState,
                 hadFetchFailures: processingResult.hadFetchFailures,
@@ -361,14 +364,17 @@ final class BackgroundSyncManager {
             }
 
             let didTruncateMessagePagination = pageToken != nil
-            let continuationState = didTruncateMessagePagination && !processingResult.hadFetchFailures && pageToken != nil
-                ? BackgroundSyncContinuationState.partial(
+            let continuationState: BackgroundSyncContinuationState? = {
+                guard didTruncateMessagePagination,
+                      !processingResult.hadFetchFailures,
+                      let pageToken else { return nil }
+                return .partial(
                     query: query,
-                    pageToken: pageToken!,
+                    pageToken: pageToken,
                     maxResults: maxResults,
                     accountEmail: accountEmail
                 )
-                : nil
+            }()
             let profile = continuationState != nil || processingResult.hadFetchFailures
                 ? nil
                 : try await apiClient.getProfile()
@@ -429,6 +435,8 @@ final class BackgroundSyncManager {
     }
 
     private func scheduleCatchUpRetry() {
+        // Catch-up is progress, not failure, so bypass the exponential-backoff
+        // retry counter and reschedule on a short fixed delay instead.
         taskScheduler.scheduleRetryAfterBackoff(Self.catchUpRetryDelay)
     }
 
