@@ -372,10 +372,7 @@ enum RawEmailSourceSanitizer {
 
         guard token.count >= 12 else { return false }
 
-        return token.allSatisfy { character in
-            character.isLetter || character.isNumber || character == "_" || character == "-" ||
-            character == "." || character == ":" || character == "="
-        }
+        return token.allSatisfy(isValidBoundaryCharacter(_:))
     }
 
     private static func boundaryToken(from line: String) -> String? {
@@ -387,14 +384,15 @@ enum RawEmailSourceSanitizer {
         }
 
         guard token.count >= 6 else { return nil }
-        guard token.allSatisfy({ character in
-            character.isLetter || character.isNumber || character == "_" || character == "-" ||
-            character == "." || character == ":" || character == "="
-        }) else {
+        guard token.allSatisfy(isValidBoundaryCharacter(_:)) else {
             return nil
         }
 
         return token
+    }
+
+    private static func isValidBoundaryCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || "'()+_,-./:=?".contains(character)
     }
 
     private static func isAnyBoundaryLine(

@@ -80,6 +80,24 @@ final class RawEmailSourceSanitizerTests: XCTestCase {
         XCTAssertFalse(extracted?.contains("Content-Type: text/plain") == true)
     }
 
+    func testExtractDisplayText_rawMultipartSource_withQuestionMarkBoundary_extractsPlainTextBody() {
+        let extracted = RawEmailSourceSanitizer.extractDisplayText(from: rawMultipartEmailWithQuestionMarkBoundary)
+
+        XCTAssertTrue(extracted.contains("MRH"))
+        XCTAssertTrue(extracted.contains("https://example.com/plain"))
+        XCTAssertFalse(extracted.contains("HTML_TOKEN_BOUNDARY_QUESTION_MARK"))
+        XCTAssertFalse(extracted.contains("Content-Type: text/html"))
+    }
+
+    func testExtractHTMLText_rawMultipartSource_withQuestionMarkBoundary_extractsHTMLBody() {
+        let extracted = RawEmailSourceSanitizer.extractHTMLText(from: rawMultipartEmailWithQuestionMarkBoundary)
+
+        XCTAssertNotNil(extracted)
+        XCTAssertTrue(extracted?.contains("HTML_TOKEN_BOUNDARY_QUESTION_MARK") == true)
+        XCTAssertTrue(extracted?.contains("Nescens Retreats") == true)
+        XCTAssertFalse(extracted?.contains("Content-Type: text/plain") == true)
+    }
+
     func testExtractDisplayText_mimeOnlyMultipartSource_extractsPlainTextBody() {
         let extracted = RawEmailSourceSanitizer.extractDisplayText(from: mimeOnlyRawMultipartEmail)
 
@@ -276,6 +294,41 @@ final class RawEmailSourceSanitizerTests: XCTestCase {
         </html>
 
         --newsletter-boundary-123--
+        """
+    }
+
+    private var rawMultipartEmailWithQuestionMarkBoundary: String {
+        """
+        Delivered-To: person@example.com
+        Received: by 2002:ac0:e350:0:b0:3bc:5c5b:71d2 with SMTP id g16csp909309imn;
+                Sat, 18 Apr 2026 16:01:33 -0700 (PDT)
+        X-Received: by 2002:a05:6214:4f02:b0:8ae:652b:e3c4 with SMTP id 6a1803df08f44;
+                Sat, 18 Apr 2026 16:01:33 -0700 (PDT)
+        Return-Path: <bounce@example.com>
+        MIME-Version: 1.0
+        Subject: Nescens Retreats
+        Content-Type: multipart/alternative; boundary="vnPiSyJVkpSc=_?:"
+
+        --vnPiSyJVkpSc=_?:
+        Content-Type: text/plain; charset="utf-8"
+        Content-Transfer-Encoding: 8bit
+
+        MRH
+        https://example.com/plain
+
+        --vnPiSyJVkpSc=_?:
+        Content-Type: text/html; charset="utf-8"
+        Content-Transfer-Encoding: 8bit
+
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <h1>HTML_TOKEN_BOUNDARY_QUESTION_MARK</h1>
+          <p>Nescens Retreats</p>
+        </body>
+        </html>
+
+        --vnPiSyJVkpSc=_?:--
         """
     }
 
