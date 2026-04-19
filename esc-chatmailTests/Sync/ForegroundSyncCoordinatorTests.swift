@@ -16,14 +16,15 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
         defer { coordinator.stop(reason: "testCleanup") }
 
         let syncExpectation = expectation(description: "initial sync")
-        syncEngine.onPerformIncrementalSync = {
+        syncEngine.onTriggerIncrementalSyncIfPossible = {
             syncExpectation.fulfill()
+            return .started
         }
 
         coordinator.start(reason: "appInitialized", triggerImmediateSync: true)
 
         await fulfillment(of: [syncExpectation], timeout: 1.0)
-        XCTAssertEqual(syncEngine.performIncrementalSyncCalls, 1)
+        XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 1)
     }
 
     func testStart_triggerImmediateSyncWhileLoopRunning_isThrottled() async {
@@ -39,18 +40,19 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
         defer { coordinator.stop(reason: "testCleanup") }
 
         let firstSyncExpectation = expectation(description: "first sync")
-        syncEngine.onPerformIncrementalSync = {
+        syncEngine.onTriggerIncrementalSyncIfPossible = {
             firstSyncExpectation.fulfill()
+            return .started
         }
 
         coordinator.start(reason: "appInitialized", triggerImmediateSync: true)
         await fulfillment(of: [firstSyncExpectation], timeout: 1.0)
 
-        syncEngine.onPerformIncrementalSync = nil
+        syncEngine.onTriggerIncrementalSyncIfPossible = nil
         coordinator.start(reason: "sceneActive", triggerImmediateSync: true)
 
         try? await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertEqual(syncEngine.performIncrementalSyncCalls, 1)
+        XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 1)
     }
 
     func testStart_triggerImmediateSyncAfterStop_runsAgain() async {
@@ -64,8 +66,9 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
         )
 
         let firstSyncExpectation = expectation(description: "first sync")
-        syncEngine.onPerformIncrementalSync = {
+        syncEngine.onTriggerIncrementalSyncIfPossible = {
             firstSyncExpectation.fulfill()
+            return .started
         }
 
         coordinator.start(reason: "appInitialized", triggerImmediateSync: true)
@@ -74,18 +77,19 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
         coordinator.stop(reason: "sceneBackground")
 
         let secondSyncExpectation = expectation(description: "second sync")
-        syncEngine.onPerformIncrementalSync = {
+        syncEngine.onTriggerIncrementalSyncIfPossible = {
             secondSyncExpectation.fulfill()
+            return .started
         }
 
         coordinator.start(reason: "sceneActive", triggerImmediateSync: true)
         await fulfillment(of: [secondSyncExpectation], timeout: 1.0)
-        XCTAssertEqual(syncEngine.performIncrementalSyncCalls, 2)
+        XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 2)
 
         coordinator.stop(reason: "testCleanup")
     }
 
-    func testTriggerSyncAfterCurrent_waitsForInFlightSyncThenRunsForcedSync() async {
+    func testTriggerSyncAfterCurrent_waitsForRealSyncCompletionBoundaryBeforeRunningForcedSync() async {
         let syncEngine = MockForegroundSyncEngine()
         let authSession = MockForegroundSyncAuthSession(isAuthenticated: true)
         let coordinator = ForegroundSyncCoordinator(
@@ -97,47 +101,85 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
 
         defer { coordinator.stop(reason: "testCleanup") }
 
-        let firstSyncStarted = expectation(description: "first sync started")
-        let secondSyncStarted = expectation(description: "second sync started")
-        let firstSyncCanFinish = AsyncGate()
+        let deferredSyncStarted = expectation(description: "deferred sync started")
+        let syncCanFinish = AsyncGate()
 
-        syncEngine.onPerformIncrementalSync = {
-            if syncEngine.performIncrementalSyncCalls == 1 {
-                firstSyncStarted.fulfill()
-                await firstSyncCanFinish.wait()
-            } else {
-                secondSyncStarted.fulfill()
-            }
+        syncEngine.onWaitForCurrentSyncToComplete = {
+            await syncCanFinish.wait()
         }
-
-        coordinator.start(reason: "appInitialized", triggerImmediateSync: true)
-        await fulfillment(of: [firstSyncStarted], timeout: 1.0)
+        syncEngine.onTriggerIncrementalSyncIfPossible = {
+            deferredSyncStarted.fulfill()
+            return .started
+        }
 
         coordinator.triggerSyncAfterCurrent(reason: "appInitializedPostPendingActions", force: true)
 
         try? await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertEqual(syncEngine.performIncrementalSyncCalls, 1)
+        XCTAssertEqual(syncEngine.waitForCurrentSyncToCompleteCalls, 1)
+        XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 0)
 
-        await firstSyncCanFinish.open()
+        await syncCanFinish.open()
 
-        await fulfillment(of: [secondSyncStarted], timeout: 1.0)
-        XCTAssertEqual(syncEngine.performIncrementalSyncCalls, 2)
+        await fulfillment(of: [deferredSyncStarted], timeout: 1.0)
+        XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 1)
+    }
+
+    func testTriggerSyncAfterCurrent_retriesWhenAtomicStartStillReportsInProgress() async {
+        let syncEngine = MockForegroundSyncEngine()
+        let authSession = MockForegroundSyncAuthSession(isAuthenticated: true)
+        let coordinator = ForegroundSyncCoordinator(
+            syncEngine: syncEngine,
+            authSession: authSession,
+            periodicInterval: 3_600,
+            minimumSyncGap: 90
+        )
+
+        defer { coordinator.stop(reason: "testCleanup") }
+
+        let deferredSyncStarted = expectation(description: "deferred sync started")
+        syncEngine.requestResults = [.alreadyInProgress, .started]
+        syncEngine.onTriggerIncrementalSyncIfPossible = {
+            let result = syncEngine.requestResults.removeFirst()
+            if result == .started {
+                deferredSyncStarted.fulfill()
+            }
+            return result
+        }
+
+        coordinator.triggerSyncAfterCurrent(reason: "appInitializedPostPendingActions", force: true)
+
+        await fulfillment(of: [deferredSyncStarted], timeout: 1.0)
+        XCTAssertEqual(syncEngine.waitForCurrentSyncToCompleteCalls, 2)
+        XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 2)
     }
 }
 
 @MainActor
 private final class MockForegroundSyncEngine: ForegroundSyncPerforming {
-    var isSyncing = false
-    var onPerformIncrementalSync: (() async -> Void)?
-    private(set) var performIncrementalSyncCalls = 0
+    var requestResults: [ForegroundSyncRequestResult] = [.started]
+    var onWaitForCurrentSyncToComplete: (() async -> Void)?
+    var onTriggerIncrementalSyncIfPossible: (() async -> ForegroundSyncRequestResult)?
+    private(set) var waitForCurrentSyncToCompleteCalls = 0
+    private(set) var triggerIncrementalSyncIfPossibleCalls = 0
 
-    func performIncrementalSync() async throws {
-        isSyncing = true
-        performIncrementalSyncCalls += 1
-        if let onPerformIncrementalSync {
-            await onPerformIncrementalSync()
+    func waitForCurrentSyncToComplete() async {
+        waitForCurrentSyncToCompleteCalls += 1
+        if let onWaitForCurrentSyncToComplete {
+            await onWaitForCurrentSyncToComplete()
         }
-        isSyncing = false
+    }
+
+    func triggerIncrementalSyncIfPossible() async -> ForegroundSyncRequestResult {
+        triggerIncrementalSyncIfPossibleCalls += 1
+        if let onTriggerIncrementalSyncIfPossible {
+            return await onTriggerIncrementalSyncIfPossible()
+        }
+
+        if !requestResults.isEmpty {
+            return requestResults.removeFirst()
+        }
+
+        return .started
     }
 }
 

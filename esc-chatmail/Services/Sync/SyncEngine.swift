@@ -8,6 +8,12 @@ extension Notification.Name {
     static let syncMessagesAbandoned = Notification.Name("com.esc.inboxchat.syncMessagesAbandoned")
 }
 
+enum ForegroundSyncRequestResult {
+    case started
+    case alreadyInProgress
+    case skippedNoNetwork
+}
+
 // MARK: - Sync Engine
 
 /// Orchestrates email synchronization between Gmail API and local Core Data storage
@@ -122,31 +128,34 @@ final class SyncEngine: ObservableObject {
 
     /// Performs incremental sync using Gmail history API
     func performIncrementalSync() async throws {
-        guard await networkMonitor.isNetworkAvailable() else {
-            log.info("Network not available, skipping sync")
-            uiState.update(isSyncing: false, status: "Network unavailable")
-            return
-        }
-
-        // Use atomic beginSyncWithTask to prevent race conditions between
-        // beginSync() and setSyncTask() calls
-        let syncTask = await syncStateActor.beginSyncWithTask {
-            Task { [weak self] in
-                guard let self else {
-                    // This can happen if app is backgrounded/terminated during sync setup
-                    Log.warning("SyncEngine deallocated during incremental sync setup - sync will not complete", category: .sync)
-                    throw CancellationError()
-                }
-                try await self.performIncrementalSyncInternal()
-            }
-        }
-
-        guard let syncTask else {
+        switch await prepareIncrementalSync() {
+        case .started(let syncTask):
+            await runSyncTask(syncTask, syncType: "Incremental")
+        case .alreadyInProgress:
             log.debug("Sync already in progress, skipping incremental sync")
+        case .skippedNoNetwork:
             return
         }
+    }
 
-        await runSyncTask(syncTask, syncType: "Incremental")
+    func triggerIncrementalSyncIfPossible() async -> ForegroundSyncRequestResult {
+        switch await prepareIncrementalSync() {
+        case .started(let syncTask):
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.runSyncTask(syncTask, syncType: "Incremental")
+            }
+            return .started
+        case .alreadyInProgress:
+            log.debug("Sync already in progress, skipping incremental sync")
+            return .alreadyInProgress
+        case .skippedNoNetwork:
+            return .skippedNoNetwork
+        }
+    }
+
+    func waitForCurrentSyncToComplete() async {
+        await syncStateActor.waitUntilIdle()
     }
 
     /// Executes a sync task with unified error handling
@@ -247,6 +256,37 @@ final class SyncEngine: ObservableObject {
         Task {
             await attachmentDownloader.enqueueAllPendingAttachments()
         }
+    }
+
+    private enum IncrementalSyncPreparationResult {
+        case started(Task<Void, Error>)
+        case alreadyInProgress
+        case skippedNoNetwork
+    }
+
+    private func prepareIncrementalSync() async -> IncrementalSyncPreparationResult {
+        guard await networkMonitor.isNetworkAvailable() else {
+            log.info("Network not available, skipping sync")
+            uiState.update(isSyncing: false, status: "Network unavailable")
+            return .skippedNoNetwork
+        }
+
+        let syncTask = await syncStateActor.beginSyncWithTask {
+            Task { [weak self] in
+                guard let self else {
+                    // This can happen if app is backgrounded/terminated during incremental sync setup
+                    Log.warning("SyncEngine deallocated during incremental sync setup - sync will not complete", category: .sync)
+                    throw CancellationError()
+                }
+                try await self.performIncrementalSyncInternal()
+            }
+        }
+
+        guard let syncTask else {
+            return .alreadyInProgress
+        }
+
+        return .started(syncTask)
     }
 
     // MARK: - Error Formatting

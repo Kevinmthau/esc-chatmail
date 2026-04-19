@@ -2,8 +2,8 @@ import Foundation
 
 @MainActor
 protocol ForegroundSyncPerforming: AnyObject {
-    var isSyncing: Bool { get }
-    func performIncrementalSync() async throws
+    func triggerIncrementalSyncIfPossible() async -> ForegroundSyncRequestResult
+    func waitForCurrentSyncToComplete() async
 }
 
 @MainActor
@@ -28,6 +28,7 @@ final class ForegroundSyncCoordinator {
 
     private var periodicTask: Task<Void, Never>?
     private var deferredSyncTask: Task<Void, Never>?
+    private var deferredSyncTaskID: UUID?
     private var lastSyncTriggerAt: Date?
 
     init(
@@ -56,7 +57,7 @@ final class ForegroundSyncCoordinator {
             // Only force when we are starting a fresh foreground loop (e.g. cold launch or
             // returning from background). Repeated start() calls while already active should
             // respect the minimum gap to avoid duplicate launch syncs.
-            triggerSyncIfNeeded(reason: reason, force: startedPeriodicLoop)
+            triggerSync(reason: reason, force: startedPeriodicLoop)
         }
 
         return startedPeriodicLoop
@@ -67,28 +68,42 @@ final class ForegroundSyncCoordinator {
         periodicTask = nil
         deferredSyncTask?.cancel()
         deferredSyncTask = nil
+        deferredSyncTaskID = nil
         log.debug("Foreground sync stopped (\(reason))")
     }
 
     func triggerSync(reason: String, force: Bool = false) {
-        triggerSyncIfNeeded(reason: reason, force: force)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            _ = await self.requestSyncIfNeeded(reason: reason, force: force)
+        }
     }
 
     func triggerSyncAfterCurrent(reason: String, force: Bool = false) {
         deferredSyncTask?.cancel()
+        let taskID = UUID()
+        deferredSyncTaskID = taskID
         deferredSyncTask = Task { @MainActor [weak self] in
             guard let self else { return }
 
-            while self.syncEngine.isSyncing {
-                do {
-                    try await Task.sleep(nanoseconds: 50_000_000)
-                } catch {
-                    return
+            defer {
+                if self.deferredSyncTaskID == taskID {
+                    self.deferredSyncTask = nil
+                    self.deferredSyncTaskID = nil
                 }
             }
 
-            self.deferredSyncTask = nil
-            self.triggerSyncIfNeeded(reason: reason, force: force)
+            while !Task.isCancelled {
+                await self.syncEngine.waitForCurrentSyncToComplete()
+                if Task.isCancelled {
+                    return
+                }
+
+                let outcome = await self.requestSyncIfNeeded(reason: reason, force: force)
+                if outcome != .alreadyInProgress {
+                    return
+                }
+            }
         }
     }
 
@@ -112,33 +127,35 @@ final class ForegroundSyncCoordinator {
         return true
     }
 
-    private func triggerSyncIfNeeded(reason: String, force: Bool) {
+    private enum SyncTriggerOutcome: Equatable {
+        case started
+        case alreadyInProgress
+        case skipped
+    }
+
+    private func requestSyncIfNeeded(reason: String, force: Bool) async -> SyncTriggerOutcome {
         guard authSession.isAuthenticated else {
             log.debug("Skipping foreground sync (\(reason)): user not authenticated")
-            return
-        }
-
-        guard !syncEngine.isSyncing else {
-            log.debug("Skipping foreground sync (\(reason)): sync already in progress")
-            return
+            return .skipped
         }
 
         if !force,
            let lastSyncTriggerAt,
            Date().timeIntervalSince(lastSyncTriggerAt) < minimumSyncGap {
             log.debug("Skipping foreground sync (\(reason)): throttled")
-            return
+            return .skipped
         }
 
-        lastSyncTriggerAt = Date()
-
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await self.syncEngine.performIncrementalSync()
-            } catch {
-                self.log.error("Foreground sync failed (\(reason))", error: error)
-            }
+        switch await syncEngine.triggerIncrementalSyncIfPossible() {
+        case .started:
+            lastSyncTriggerAt = Date()
+            return .started
+        case .alreadyInProgress:
+            log.debug("Skipping foreground sync (\(reason)): sync already in progress")
+            return .alreadyInProgress
+        case .skippedNoNetwork:
+            log.debug("Skipping foreground sync (\(reason)): network unavailable")
+            return .skipped
         }
     }
 }

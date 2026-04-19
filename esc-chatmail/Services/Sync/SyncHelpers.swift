@@ -9,6 +9,7 @@ import os.signpost
 actor SyncStateActor {
     private var isCurrentlySyncing = false
     private var syncTask: Task<Void, Error>?
+    private var idleWaiters: [CheckedContinuation<Void, Never>] = []
 
     /// Atomically begins a sync and sets the task in a single operation.
     /// This prevents race conditions where beginSync() succeeds but setSyncTask()
@@ -38,6 +39,7 @@ actor SyncStateActor {
     func endSync() {
         isCurrentlySyncing = false
         syncTask = nil
+        resumeIdleWaiters()
     }
 
     /// Legacy method - prefer beginSyncWithTask for atomic sync+task creation
@@ -50,10 +52,27 @@ actor SyncStateActor {
         syncTask?.cancel()
         syncTask = nil
         isCurrentlySyncing = false
+        resumeIdleWaiters()
     }
 
     func isSyncing() -> Bool {
         return isCurrentlySyncing
+    }
+
+    func waitUntilIdle() async {
+        guard isCurrentlySyncing else { return }
+
+        await withCheckedContinuation { continuation in
+            idleWaiters.append(continuation)
+        }
+    }
+
+    private func resumeIdleWaiters() {
+        guard !idleWaiters.isEmpty else { return }
+
+        let waiters = idleWaiters
+        idleWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
     }
 }
 
