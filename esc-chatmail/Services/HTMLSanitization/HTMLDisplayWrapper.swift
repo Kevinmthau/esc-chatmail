@@ -494,9 +494,10 @@ struct HTMLDisplayWrapper {
         let shouldApplyDarkModeFallbackText = isDarkMode && displayPurpose == .preview
         let originalColorSchemeHead = colorSchemeHead(for: displayPurpose)
         let originalColorSchemeCSS = colorSchemeCSS(for: displayPurpose)
+        let viewportMetaTag = viewportMetaTag(for: displayPurpose)
 
         let injectedHead = """
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, shrink-to-fit=no, user-scalable=yes">
+        \(viewportMetaTag)
         \(originalColorSchemeHead)
         <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none';">
         <style id="esc-mail-styles">
@@ -564,13 +565,14 @@ struct HTMLDisplayWrapper {
         let shouldApplyDarkModeFallbackText = isDarkMode && displayPurpose == .preview
         let originalColorSchemeHead = colorSchemeHead(for: displayPurpose)
         let originalColorSchemeCSS = colorSchemeCSS(for: displayPurpose)
+        let viewportMetaTag = viewportMetaTag(for: displayPurpose)
 
         return """
         <!DOCTYPE html>
         <html>
         <head>
             <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0, shrink-to-fit=no, user-scalable=yes">
+            \(viewportMetaTag)
             \(originalColorSchemeHead)
             <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none';">
             <style>
@@ -668,6 +670,17 @@ struct HTMLDisplayWrapper {
         }
 
         return "color-scheme: light;"
+    }
+
+    private func viewportMetaTag(for displayPurpose: HTMLDisplayPurpose) -> String {
+        switch displayPurpose {
+        case .preview:
+            return #"<meta name="viewport" content="width=device-width, initial-scale=1.0, shrink-to-fit=no, user-scalable=yes">"#
+        case .original:
+            // Some marketing emails still rely on WebKit's initial shrink-to-fit behavior for
+            // legacy fixed-width sections that intentionally do not stack on mobile.
+            return #"<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">"#
+        }
     }
 
     private func linkCSS(for displayPurpose: HTMLDisplayPurpose) -> String {

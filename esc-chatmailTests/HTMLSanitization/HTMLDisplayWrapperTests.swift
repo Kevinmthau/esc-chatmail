@@ -221,6 +221,37 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertTrue(result.contains("color: rgb(54,55,55);"))
     }
 
+    func testWrapHTMLForDisplay_originalPurposeDoesNotDisableShrinkToFit() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table width="600"><tr><td>Legacy marketing layout</td></tr></table>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains("shrink-to-fit=no"))
+    }
+
+    func testWrapHTMLForDisplay_previewPurposeKeepsShrinkToFitDisabled() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table width="600"><tr><td>Preview layout</td></tr></table>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .preview)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=device-width, initial-scale=1.0, shrink-to-fit=no, user-scalable=yes">"#))
+    }
+
     func testWrapHTMLForDisplay_originalPurpose_preservesDefaultLinkStyling() {
         let html = """
         <p><a href="https://example.com/file.pdf">Open file</a></p>

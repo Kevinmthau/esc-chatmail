@@ -566,6 +566,38 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertTrue(result.html?.contains("Your monthly statement is ready.") == true)
     }
 
+    func testLoadContent_originalDisplay_garmentoryFixtureDoesNotDisableShrinkToFit() async throws {
+        let messageId = "html-loader-garmentory-original-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let garmentoryHTML = try loadFixture(named: "garmentory_lower_prices.html")
+        _ = contentHandler.saveHTML(garmentoryHTML, for: messageId)
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: nil,
+            senderEmail: "hello@m.garmentory.com",
+            subject: "NEW LOWER PRICES",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        guard case .messageId = result.source else {
+            XCTFail("Expected stored HTML source, got \(result.source)")
+            return
+        }
+
+        let html = try XCTUnwrap(result.html)
+        XCTAssertEqual(result.presentation, .html)
+        XCTAssertEqual(html.components(separatedBy: "<meta name=\"viewport\"").count - 1, 1)
+        XCTAssertFalse(html.contains("shrink-to-fit=no"))
+        XCTAssertTrue(html.contains("@media(max-width:620px){.mobile_hide{display:none}.row-content{width:100%!important}"))
+        XCTAssertTrue(html.contains("class=\"block-grid two-up no-stack\""))
+        XCTAssertTrue(html.contains("min-width: 300px; width: 300px;"))
+    }
+
     func testLoadContent_originalDisplay_hiddenCTAContentTriggersReadableFallback() async {
         let messageId = "html-loader-hidden-cta-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }
@@ -1172,6 +1204,17 @@ final class HTMLContentLoaderTests: XCTestCase {
         let snapshot = await recorder.snapshot()
         XCTAssertEqual(snapshot.methods, ["HEAD", "GET"])
         XCTAssertEqual(snapshot.referers, ["https://example.com/", "https://example.com/"])
+    }
+
+    private func loadFixture(named name: String) throws -> String {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("TestSupport")
+            .appendingPathComponent("Fixtures")
+            .appendingPathComponent(name)
+
+        return try String(contentsOf: fixtureURL, encoding: .utf8)
     }
 }
 
