@@ -151,6 +151,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         oldCount: Int,
         newCount: Int,
         lastMessage: Message?,
+        stabilizeBottomAnchor: Bool,
         scrollAction: @escaping BottomAnchorAction
     ) {
         if !isReadyToShow && newCount > 0 {
@@ -160,6 +161,7 @@ final class ChatMessagesCoordinator: ObservableObject {
             scrollToBottom(
                 messageCount: newCount,
                 delay: UIConfig.contentChangeScrollDelay,
+                includeStabilizationStep: stabilizeBottomAnchor,
                 scrollAction: scrollAction
             )
         }
@@ -311,19 +313,32 @@ final class ChatMessagesCoordinator: ObservableObject {
     private func scrollToBottom(
         messageCount: Int,
         delay: TimeInterval,
+        includeStabilizationStep: Bool = false,
         scrollAction: @escaping BottomAnchorAction
     ) {
         guard shouldUseBottomAnchoring(for: messageCount) else { return }
 
+        var steps = [
+            BottomAnchorStep(
+                delay: delay,
+                animated: true,
+                logMessage: "ChatView animated scroll -> bottom anchor"
+            )
+        ]
+
+        if includeStabilizationStep {
+            steps.append(
+                BottomAnchorStep(
+                    delay: UIConfig.initialScrollDelay,
+                    animated: false,
+                    logMessage: "ChatView stabilization scroll after content change -> bottom anchor"
+                )
+            )
+        }
+
         scheduleBottomAnchor(
             taskKey: TaskKey.bottomAnchor,
-            steps: [
-                BottomAnchorStep(
-                    delay: delay,
-                    animated: true,
-                    logMessage: "ChatView animated scroll -> bottom anchor"
-                )
-            ],
+            steps: steps,
             scrollAction: scrollAction
         )
     }

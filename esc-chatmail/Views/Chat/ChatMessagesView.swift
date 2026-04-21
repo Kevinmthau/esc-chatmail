@@ -149,7 +149,8 @@ struct ChatMessagesView: View {
                 coordinator.handleMessageCountChange(
                     oldCount: oldCount,
                     newCount: newCount,
-                    lastMessage: messages.last
+                    lastMessage: messages.last,
+                    stabilizeBottomAnchor: keyboard.currentHeight > 0 || isTextFieldFocused.wrappedValue
                 ) { step in
                     performBottomAnchor(step, proxy: proxy)
                 }

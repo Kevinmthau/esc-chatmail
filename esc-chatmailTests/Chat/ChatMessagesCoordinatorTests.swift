@@ -304,7 +304,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         coordinator.handleMessageCountChange(
             oldCount: 1,
             newCount: 2,
-            lastMessage: messages.last
+            lastMessage: messages.last,
+            stabilizeBottomAnchor: false
         ) { step in
             anchorSteps.append(step)
         }
@@ -323,6 +324,77 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
                     delay: UIConfig.contentChangeScrollDelay,
                     animated: true,
                     logMessage: "ChatView animated scroll -> bottom anchor"
+                )
+            ]
+        )
+    }
+
+    func testHandleMessageCountChange_withActiveComposerAddsStabilizationScroll() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+
+        var loadLatestWindowCount = 0
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: {
+                loadLatestWindowCount += 1
+            },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: 1,
+            lastMessage: messages.first,
+            visibleMessages: [rows.first].compactMap { $0 },
+            senderGroupingMessages: [rows.first].compactMap { $0 },
+            totalMessageCount: 1
+        ) { _ in
+            XCTFail("Single-message appear should not schedule bottom anchoring")
+        }
+
+        await waitUntil {
+            coordinator.isReadyToShow
+        }
+
+        coordinator.handleMessageCountChange(
+            oldCount: 1,
+            newCount: 2,
+            lastMessage: messages.last,
+            stabilizeBottomAnchor: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await waitUntil {
+            anchorSteps.count == 2
+        }
+
+        XCTAssertEqual(loadLatestWindowCount, 1)
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: UIConfig.contentChangeScrollDelay,
+                    animated: true,
+                    logMessage: "ChatView animated scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: UIConfig.initialScrollDelay,
+                    animated: false,
+                    logMessage: "ChatView stabilization scroll after content change -> bottom anchor"
                 )
             ]
         )
@@ -482,15 +554,22 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         coordinator.handleMessageCountChange(
             oldCount: messages.count,
             newCount: messages.count + 1,
-            lastMessage: messages.last
+            lastMessage: messages.last,
+            stabilizeBottomAnchor: true
         ) { step in
             anchorSteps.append(step)
         }
 
         await waitUntil(timeout: 1.0) {
-            anchorSteps.filter { $0.logMessage == "ChatView animated scroll -> bottom anchor" }.count
-                == animatedScrollCount + 1
+            anchorSteps.contains {
+                $0.logMessage == "ChatView stabilization scroll after content change -> bottom anchor"
+            }
         }
+
+        XCTAssertEqual(
+            anchorSteps.filter { $0.logMessage == "ChatView animated scroll -> bottom anchor" }.count,
+            animatedScrollCount + 1
+        )
     }
 
     func testHandleContactStoreDidChange_refreshesCachesAndSenderGrouping() async throws {
