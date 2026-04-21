@@ -329,7 +329,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         if includeStabilizationStep {
             steps.append(
                 BottomAnchorStep(
-                    delay: UIConfig.initialScrollDelay,
+                    delay: max(UIConfig.initialScrollDelay, UIConfig.scrollAnimationDuration),
                     animated: false,
                     logMessage: "ChatView stabilization scroll after content change -> bottom anchor"
                 )

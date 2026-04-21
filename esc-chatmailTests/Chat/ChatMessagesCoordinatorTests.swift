@@ -392,7 +392,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
                     logMessage: "ChatView animated scroll -> bottom anchor"
                 ),
                 .init(
-                    delay: UIConfig.initialScrollDelay,
+                    delay: max(UIConfig.initialScrollDelay, UIConfig.scrollAnimationDuration),
                     animated: false,
                     logMessage: "ChatView stabilization scroll after content change -> bottom anchor"
                 )
