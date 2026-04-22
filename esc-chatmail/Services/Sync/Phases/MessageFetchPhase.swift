@@ -43,6 +43,7 @@ struct MessageFetchPhase: SyncPhase {
                 message,
                 labelIds: context.labelIds,
                 myAliases: context.myAliases,
+                modificationTransaction: context.modificationTransaction,
                 in: context.coreDataContext
             )
         } batchCompletion: {

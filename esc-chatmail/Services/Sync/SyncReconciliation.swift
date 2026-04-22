@@ -171,7 +171,8 @@ final class SyncReconciliation: Sendable {
     ///   - labelIds: Pre-fetched label IDs (labels are fetched inside context.perform for thread safety)
     func reconcileLabelStates(
         in context: NSManagedObjectContext,
-        labelIds: Set<String>
+        labelIds: Set<String>,
+        modificationTransaction: ModificationTracker.Transaction?
     ) async {
         do {
             // Query recent messages (last 24 hours)
@@ -198,7 +199,8 @@ final class SyncReconciliation: Sendable {
             let stats = await processReconciliationMismatches(
                 gmailMetadata: gmailMetadata,
                 messageIds: recentMessageIds,
-                context: context
+                context: context,
+                modificationTransaction: modificationTransaction
             )
 
             if stats.labelMismatches > 0 {
@@ -307,7 +309,8 @@ final class SyncReconciliation: Sendable {
     private func processReconciliationMismatches(
         gmailMetadata: [String: GmailMetadata],
         messageIds: [String],
-        context: NSManagedObjectContext
+        context: NSManagedObjectContext,
+        modificationTransaction: ModificationTracker.Transaction?
     ) async -> ReconciliationStats {
         // Capture only Sendable data for the closure
         let gmailData = gmailMetadata
@@ -415,7 +418,10 @@ final class SyncReconciliation: Sendable {
 
         // Track modified conversations using ObjectIDs (actor-isolated)
         for objectID in conversationObjectIDs {
-            await ModificationTracker.shared.trackModifiedConversation(objectID)
+            await ModificationTracker.shared.trackModifiedConversation(
+                objectID,
+                in: modificationTransaction
+            )
         }
 
         return stats

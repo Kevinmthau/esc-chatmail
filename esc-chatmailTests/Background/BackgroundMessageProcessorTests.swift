@@ -276,8 +276,8 @@ final class BackgroundMessageProcessorTests: XCTestCase {
         XCTAssertEqual(saveRecorder.callCount, 2)
         XCTAssertEqual(syncCoordinator.prefetchContextIDs, [ObjectIdentifier(backgroundContext)])
         XCTAssertEqual(syncCoordinator.savedMessageContextIDs, [ObjectIdentifier(backgroundContext)])
-        XCTAssertEqual(syncCoordinator.rollupContextIDs, [ObjectIdentifier(backgroundContext)])
-        XCTAssertEqual(result, BackgroundMessageProcessingResult(fetchedCount: 1, failedFetchCount: 0))
+        XCTAssertTrue(syncCoordinator.rollupContextIDs.isEmpty)
+        XCTAssertEqual(result, BackgroundMessageProcessingResult(fetchedCount: 1, failedFetchCount: 1))
     }
 
     func testProcessHistoryChanges_returnsFailedFetchCountWhenMessageFetchFails() async throws {
@@ -381,14 +381,20 @@ final class BackgroundMessageProcessorTests: XCTestCase {
         )
 
         let backgroundContext = stack.newBackgroundContext()
-        await processor.deleteMessages(messageIds: ["delete-me"], in: backgroundContext)
+        let modificationTransaction = await ModificationTracker.shared.beginTransaction()
+        await processor.deleteMessages(
+            messageIds: ["delete-me"],
+            modificationTransaction: modificationTransaction,
+            in: backgroundContext
+        )
 
-        let modifiedIDs = await ModificationTracker.shared.getAndClearModifiedConversations()
+        let modifiedIDs = await ModificationTracker.shared.commitTransaction(modificationTransaction)
         let modifiedURIStrings = Set(modifiedIDs.map { $0.uriRepresentation().absoluteString })
 
         XCTAssertTrue(
             modifiedURIStrings.contains(conversation.objectID.uriRepresentation().absoluteString)
         )
+        await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
     }
 }
 
@@ -497,6 +503,7 @@ private final class MockBackgroundSyncCoordinator: @unchecked Sendable, Backgrou
     private(set) var prefetchContextIDs: [ObjectIdentifier] = []
     private(set) var savedMessageContextIDs: [ObjectIdentifier] = []
     private(set) var rollupContextIDs: [ObjectIdentifier] = []
+    private(set) var rollupConversationIDs: [Set<NSManagedObjectID>] = []
 
     init(seedConversationObjectID: NSManagedObjectID) {
         self.seedConversationObjectID = seedConversationObjectID
@@ -509,7 +516,12 @@ private final class MockBackgroundSyncCoordinator: @unchecked Sendable, Backgrou
         return ["INBOX"]
     }
 
-    func saveMessage(_ gmailMessage: GmailMessage, labelIds: Set<String>?, in context: NSManagedObjectContext) async {
+    func saveMessage(
+        _ gmailMessage: GmailMessage,
+        labelIds: Set<String>?,
+        modificationTransaction: ModificationTracker.Transaction,
+        in context: NSManagedObjectContext
+    ) async {
         lock.lock()
         savedMessageContextIDs.append(ObjectIdentifier(context))
         lock.unlock()
@@ -528,9 +540,13 @@ private final class MockBackgroundSyncCoordinator: @unchecked Sendable, Backgrou
         }
     }
 
-    func updateConversationRollups(in context: NSManagedObjectContext) async {
+    func updateConversationRollups(
+        conversationIDs: Set<NSManagedObjectID>,
+        in context: NSManagedObjectContext
+    ) async {
         lock.lock()
         rollupContextIDs.append(ObjectIdentifier(context))
+        rollupConversationIDs.append(conversationIDs)
         lock.unlock()
     }
 }

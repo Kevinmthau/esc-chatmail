@@ -16,6 +16,7 @@ extension MessagePersister {
     func updateExistingMessage(
         _ processedMessage: ProcessedMessage,
         labelIds: Set<String>?,
+        modificationTransaction: ModificationTracker.Transaction? = nil,
         in context: NSManagedObjectContext
     ) async -> Bool {
         let saveHTML = self.saveHTML
@@ -198,7 +199,10 @@ extension MessagePersister {
         }
 
         if let modifiedConversationID = result.modifiedConversationID {
-            await ModificationTracker.shared.trackModifiedConversation(modifiedConversationID)
+            await ModificationTracker.shared.trackModifiedConversation(
+                modifiedConversationID,
+                in: modificationTransaction
+            )
         }
 
         if result.shouldInvalidateRenderedContent {

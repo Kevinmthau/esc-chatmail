@@ -183,20 +183,17 @@ final class SyncEngine: ObservableObject {
         await historyProcessor.clearLocalModifications(for: messageIds)
     }
 
-    /// Updates conversation rollups for modified conversations only (more efficient).
-    /// Falls back to updating all rollups if no modifications were tracked.
-    nonisolated func updateConversationRollups(in context: NSManagedObjectContext) async {
-        // Use differential updates when possible (from shared tracker)
-        let modifiedConversations = await ModificationTracker.shared.getAndClearModifiedConversations()
-        if !modifiedConversations.isEmpty {
-            await conversationManager.updateRollupsForModifiedConversations(
-                conversationIDs: modifiedConversations,
-                in: context
-            )
-        } else {
-            // Fallback for cases where modifications weren't tracked
-            await conversationManager.updateAllConversationRollups(in: context)
-        }
+    /// Updates conversation rollups for the explicitly provided modified conversations.
+    nonisolated func updateConversationRollups(
+        conversationIDs: Set<NSManagedObjectID>,
+        in context: NSManagedObjectContext
+    ) async {
+        guard !conversationIDs.isEmpty else { return }
+
+        await conversationManager.updateRollupsForModifiedConversations(
+            conversationIDs: conversationIDs,
+            in: context
+        )
     }
 
     /// Prefetches label IDs for background sync
@@ -205,7 +202,12 @@ final class SyncEngine: ObservableObject {
     }
 
     /// Saves a message (used by BackgroundSyncManager)
-    func saveMessage(_ gmailMessage: GmailMessage, labelIds: Set<String>? = nil, in context: NSManagedObjectContext) async {
+    func saveMessage(
+        _ gmailMessage: GmailMessage,
+        labelIds: Set<String>? = nil,
+        modificationTransaction: ModificationTracker.Transaction,
+        in context: NSManagedObjectContext
+    ) async {
         // Use centralized AliasManager for alias resolution
         let myAliases = await AliasManager.shared.getAliases(from: context)
 
@@ -213,6 +215,7 @@ final class SyncEngine: ObservableObject {
             gmailMessage,
             labelIds: labelIds,
             myAliases: myAliases,
+            modificationTransaction: modificationTransaction,
             in: context
         )
     }

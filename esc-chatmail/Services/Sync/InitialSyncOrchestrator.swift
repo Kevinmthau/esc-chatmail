@@ -73,6 +73,8 @@ final class InitialSyncOrchestrator {
         let signpostID = performanceLogger.beginOperation("InitialSync")
 
         let context = coreDataStack.newBackgroundContext()
+        let modificationTransaction = await ModificationTracker.shared.beginTransaction()
+        var committedModificationTransaction = false
 
         // Run one-time cleanup
         await runInitialCleanupIfNeeded(in: context)
@@ -104,6 +106,7 @@ final class InitialSyncOrchestrator {
             let result = try await fetchAndProcessMessages(
                 query: query,
                 labelIds: labelIds,
+                modificationTransaction: modificationTransaction,
                 context: context,
                 progressHandler: { progress, status in
                     // Map 0-1 to 0.2-0.85
@@ -113,29 +116,34 @@ final class InitialSyncOrchestrator {
 
             log.info("Initial sync: processed=\(result.totalProcessed), success=\(result.successfulCount), failed=\(result.failedIds.count)")
 
-            // Phase 4: Update conversation rollups (only for modified conversations)
-            progressHandler(0.85, "Updating conversations...")
-            let modifiedConversations = await ModificationTracker.shared.getAndClearModifiedConversations()
+            // Phase 4: Handle failures and determine historyId advancement
+            let syncCompletedWithWarnings = await handleSyncCompletion(
+                result: result,
+                profile: profile,
+                labelIds: labelIds,
+                modificationTransaction: modificationTransaction,
+                context: context
+            )
+
+            // Phase 5: Save everything before rollups consume the modified conversation set
+            progressHandler(0.85, "Saving changes...")
+            try await coreDataStack.saveAsync(context: context)
+            log.info("Initial sync save successful")
+
+            let modifiedConversations = await ModificationTracker.shared.commitTransaction(modificationTransaction)
+            committedModificationTransaction = true
+
+            progressHandler(0.95, "Updating conversations...")
             if !modifiedConversations.isEmpty {
                 await conversationManager.updateRollupsForModifiedConversations(
                     conversationIDs: modifiedConversations,
                     in: context
                 )
+                try await coreDataStack.saveAsync(context: context)
             }
+            await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
+
             let conversationCount = await countConversations(in: context)
-
-            // Phase 5: Handle failures and determine historyId advancement
-            let syncCompletedWithWarnings = await handleSyncCompletion(
-                result: result,
-                profile: profile,
-                labelIds: labelIds,
-                context: context
-            )
-
-            // Phase 6: Save everything
-            progressHandler(0.95, "Saving changes...")
-            try await coreDataStack.saveAsync(context: context)
-            log.info("Initial sync save successful")
 
             // Record successful sync time
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
@@ -161,6 +169,9 @@ final class InitialSyncOrchestrator {
             )
 
         } catch {
+            if !committedModificationTransaction {
+                await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
+            }
             performanceLogger.endOperation("InitialSync", signpostID: signpostID)
             log.error("Initial sync failed", error: error)
             throw error
@@ -201,6 +212,7 @@ final class InitialSyncOrchestrator {
     private func fetchAndProcessMessages(
         query: String,
         labelIds: Set<String>,
+        modificationTransaction: ModificationTracker.Transaction,
         context: NSManagedObjectContext,
         progressHandler: @escaping (Double, String) -> Void
     ) async throws -> BatchProcessingResult {
@@ -228,6 +240,7 @@ final class InitialSyncOrchestrator {
                 message,
                 labelIds: labelIds,
                 myAliases: myAliases,
+                modificationTransaction: modificationTransaction,
                 in: context
             )
         }
@@ -237,6 +250,7 @@ final class InitialSyncOrchestrator {
         result: BatchProcessingResult,
         profile: GmailProfile,
         labelIds: Set<String>,
+        modificationTransaction: ModificationTracker.Transaction,
         context: NSManagedObjectContext
     ) async -> Bool {
         var syncCompletedWithWarnings = false
@@ -255,6 +269,7 @@ final class InitialSyncOrchestrator {
                     message,
                     labelIds: labelIds,
                     myAliases: myAliases,
+                    modificationTransaction: modificationTransaction,
                     in: context
                 )
             }

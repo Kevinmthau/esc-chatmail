@@ -15,6 +15,7 @@ extension MessagePersister {
         _ processedMessage: ProcessedMessage,
         labelIds: Set<String>?,
         myAliases: Set<String>,
+        modificationTransaction: ModificationTracker.Transaction? = nil,
         in context: NSManagedObjectContext
     ) async throws {
         let saveHTML = self.saveHTML
@@ -120,6 +121,9 @@ extension MessagePersister {
             }
         }
 
-        await ModificationTracker.shared.trackModifiedConversation(result.modifiedConversationID)
+        await ModificationTracker.shared.trackModifiedConversation(
+            result.modifiedConversationID,
+            in: modificationTransaction
+        )
     }
 }

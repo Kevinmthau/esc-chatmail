@@ -59,11 +59,16 @@ actor MessagePersister {
         _ gmailMessage: GmailMessage,
         labelIds: Set<String>? = nil,
         myAliases: Set<String>,
+        modificationTransaction: ModificationTracker.Transaction? = nil,
         in context: NSManagedObjectContext
     ) async {
         if let messageLabelIds = gmailMessage.labelIds,
            let excludedMailboxLabel = messageLabelIds.first(where: Self.excludedMailboxLabelIDs.contains) {
-            await deleteExistingMessageIfPresent(id: gmailMessage.id, in: context)
+            await deleteExistingMessageIfPresent(
+                id: gmailMessage.id,
+                modificationTransaction: modificationTransaction,
+                in: context
+            )
             Log.debug("Skipping \(excludedMailboxLabel.lowercased()) message: \(gmailMessage.id)", category: .sync)
             return
         }
@@ -83,13 +88,24 @@ actor MessagePersister {
         }
 
         // Check for existing message and update if needed
-        if await updateExistingMessage(processedMessage, labelIds: labelIds, in: context) {
+        if await updateExistingMessage(
+            processedMessage,
+            labelIds: labelIds,
+            modificationTransaction: modificationTransaction,
+            in: context
+        ) {
             return
         }
 
         // Create new message
         do {
-            try await createNewMessage(processedMessage, labelIds: labelIds, myAliases: myAliases, in: context)
+            try await createNewMessage(
+                processedMessage,
+                labelIds: labelIds,
+                myAliases: myAliases,
+                modificationTransaction: modificationTransaction,
+                in: context
+            )
         } catch {
             Log.error("Failed to create message \(gmailMessage.id): \(error)", category: .sync)
         }

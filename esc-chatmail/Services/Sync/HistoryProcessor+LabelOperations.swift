@@ -12,7 +12,8 @@ extension HistoryProcessor {
     func processLabelAdditions(
         _ labelsAdded: [HistoryLabelAdded]?,
         in context: NSManagedObjectContext,
-        syncStartTime: Date?
+        syncStartTime: Date?,
+        modificationTransaction: ModificationTracker.Transaction?
     ) async {
         let modifiedObjectIDs = await LabelOperationProcessor.process(
             items: labelsAdded,
@@ -22,14 +23,18 @@ extension HistoryProcessor {
         )
 
         // Track all modified conversations
-        await ModificationTracker.shared.trackModifiedConversations(modifiedObjectIDs)
+        await ModificationTracker.shared.trackModifiedConversations(
+            modifiedObjectIDs,
+            in: modificationTransaction
+        )
     }
 
     /// Processes label removals using the shared LabelOperationProcessor
     func processLabelRemovals(
         _ labelsRemoved: [HistoryLabelRemoved]?,
         in context: NSManagedObjectContext,
-        syncStartTime: Date?
+        syncStartTime: Date?,
+        modificationTransaction: ModificationTracker.Transaction?
     ) async {
         let modifiedObjectIDs = await LabelOperationProcessor.process(
             items: labelsRemoved,
@@ -39,7 +44,10 @@ extension HistoryProcessor {
         )
 
         // Track all modified conversations
-        await ModificationTracker.shared.trackModifiedConversations(modifiedObjectIDs)
+        await ModificationTracker.shared.trackModifiedConversations(
+            modifiedObjectIDs,
+            in: modificationTransaction
+        )
     }
 
     /// Check if a message has local modifications that haven't been synced yet

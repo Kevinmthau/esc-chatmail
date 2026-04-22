@@ -5,7 +5,11 @@ import CoreData
 
 extension MessagePersister {
 
-    func deleteExistingMessageIfPresent(id: String, in context: NSManagedObjectContext) async {
+    func deleteExistingMessageIfPresent(
+        id: String,
+        modificationTransaction: ModificationTracker.Transaction?,
+        in context: NSManagedObjectContext
+    ) async {
         let modifiedConversationID: NSManagedObjectID? = await context.perform {
             let request = Message.fetchRequest()
             request.predicate = MessagePredicates.id(id)
@@ -27,7 +31,10 @@ extension MessagePersister {
         }
 
         if let modifiedConversationID {
-            await ModificationTracker.shared.trackModifiedConversation(modifiedConversationID)
+            await ModificationTracker.shared.trackModifiedConversation(
+                modifiedConversationID,
+                in: modificationTransaction
+            )
         }
     }
 

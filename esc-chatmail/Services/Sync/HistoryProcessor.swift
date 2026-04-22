@@ -17,16 +17,31 @@ actor HistoryProcessor {
     func processLightweightOperations(
         _ record: HistoryRecord,
         in context: NSManagedObjectContext,
-        syncStartTime: Date? = nil
+        syncStartTime: Date? = nil,
+        modificationTransaction: ModificationTracker.Transaction?
     ) async {
         // Handle message deletions - always apply, deletions are authoritative
-        await processMessageDeletions(record.messagesDeleted, in: context)
+        await processMessageDeletions(
+            record.messagesDeleted,
+            modificationTransaction: modificationTransaction,
+            in: context
+        )
 
         // Handle label additions with conflict resolution
-        await processLabelAdditions(record.labelsAdded, in: context, syncStartTime: syncStartTime)
+        await processLabelAdditions(
+            record.labelsAdded,
+            in: context,
+            syncStartTime: syncStartTime,
+            modificationTransaction: modificationTransaction
+        )
 
         // Handle label removals with conflict resolution
-        await processLabelRemovals(record.labelsRemoved, in: context, syncStartTime: syncStartTime)
+        await processLabelRemovals(
+            record.labelsRemoved,
+            in: context,
+            syncStartTime: syncStartTime,
+            modificationTransaction: modificationTransaction
+        )
     }
 
     /// Extracts message IDs that need to be fetched from history records

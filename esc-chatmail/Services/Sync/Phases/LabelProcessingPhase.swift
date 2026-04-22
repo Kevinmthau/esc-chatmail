@@ -32,7 +32,8 @@ struct LabelProcessingPhase: SyncPhase {
             await historyProcessor.processLightweightOperations(
                 record,
                 in: context.coreDataContext,
-                syncStartTime: context.syncStartTime
+                syncStartTime: context.syncStartTime,
+                modificationTransaction: context.modificationTransaction
             )
 
             if index % 10 == 0 {

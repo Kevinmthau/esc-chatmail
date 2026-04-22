@@ -4,6 +4,7 @@ import CoreData
 extension HistoryProcessor {
     func processMessageDeletions(
         _ messagesDeleted: [HistoryMessageDeleted]?,
+        modificationTransaction: ModificationTracker.Transaction?,
         in context: NSManagedObjectContext
     ) async {
         guard let messagesDeleted = messagesDeleted, !messagesDeleted.isEmpty else { return }
@@ -37,7 +38,10 @@ extension HistoryProcessor {
 
         // Track modified conversations for rollup updates
         if !modifiedObjectIDs.isEmpty {
-            await ModificationTracker.shared.trackModifiedConversations(modifiedObjectIDs)
+            await ModificationTracker.shared.trackModifiedConversations(
+                modifiedObjectIDs,
+                in: modificationTransaction
+            )
         }
     }
 }

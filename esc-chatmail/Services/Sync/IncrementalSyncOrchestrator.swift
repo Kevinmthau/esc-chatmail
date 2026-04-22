@@ -103,6 +103,8 @@ final class IncrementalSyncOrchestrator {
         myAliases = await AliasManager.shared.getAliases(from: coreDataStack.newBackgroundContext())
 
         let context = coreDataStack.newBackgroundContext()
+        let modificationTransaction = await ModificationTracker.shared.beginTransaction()
+        var committedModificationTransaction = false
         let labelIds = await messagePersister.prefetchLabelIds(in: context)
 
         // Create shared context for all phases
@@ -110,6 +112,7 @@ final class IncrementalSyncOrchestrator {
             coreDataContext: context,
             labelIds: labelIds,
             myAliases: myAliases,
+            modificationTransaction: modificationTransaction,
             syncStartTime: syncStartTime,
             progressHandler: progressHandler,
             failureTracker: failureTracker
@@ -151,14 +154,8 @@ final class IncrementalSyncOrchestrator {
                 recordReconciliationTime()
             }
 
-            // Phase 5: Update rollups
-            try await conversationUpdatePhase.execute(
-                input: (),
-                context: phaseContext
-            )
-
-            // Phase 6: Atomic Save (historyId + all changes in single transaction)
-            progressHandler(0.95, "Saving changes...")
+            // Phase 5: Atomic Save (historyId + all changes in single transaction)
+            progressHandler(0.9, "Saving changes...")
 
             // Don't advance historyId if history collection was truncated - we need to
             // retry from the same point to get remaining pages
@@ -178,6 +175,17 @@ final class IncrementalSyncOrchestrator {
             let historyIdToSave = shouldAdvance ? historyResult.latestHistoryId : nil
             try await messagePersister.finalizeSync(historyId: historyIdToSave, in: context)
 
+            let modifiedConversations = await ModificationTracker.shared.commitTransaction(modificationTransaction)
+            committedModificationTransaction = true
+
+            // Phase 6: Update rollups only after message persistence succeeds
+            try await conversationUpdatePhase.execute(
+                input: modifiedConversations,
+                context: phaseContext
+            )
+            try await coreDataStack.saveAsync(context: context)
+            await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
+
             NotificationCenter.default.post(name: .syncCompleted, object: nil)
             await dataCleanupService.runIncrementalCleanup()
 
@@ -188,10 +196,18 @@ final class IncrementalSyncOrchestrator {
             )
 
         } catch let error as APIError {
+            if !committedModificationTransaction {
+                await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
+            }
             if case .historyIdExpired = error {
                 log.warning("History ID expired, performing recovery sync")
                 try await performHistoryRecoverySync(progressHandler: progressHandler)
                 return IncrementalSyncResult(newMessagesCount: 0, labelChangesProcessed: 0, hadWarnings: true)
+            }
+            throw error
+        } catch {
+            if !committedModificationTransaction {
+                await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
             }
             throw error
         }
@@ -206,6 +222,8 @@ final class IncrementalSyncOrchestrator {
         log.info("Starting history recovery sync")
 
         let context = coreDataStack.newBackgroundContext()
+        let modificationTransaction = await ModificationTracker.shared.beginTransaction()
+        var committedModificationTransaction = false
         let labelIds = await messagePersister.prefetchLabelIds(in: context)
 
         let query = SyncTimeCalculator.buildSyncQuery(config: .historyRecovery)
@@ -214,69 +232,80 @@ final class IncrementalSyncOrchestrator {
 
         progressHandler(0.1, "Recovering missed messages...")
 
-        // Collect all message IDs using shared paginator
-        let allMessageIds = try await MessageListPaginator.fetchAllMessageIds(
-            query: query,
-            using: messageFetcher
-        )
+        do {
+            // Collect all message IDs using shared paginator
+            let allMessageIds = try await MessageListPaginator.fetchAllMessageIds(
+                query: query,
+                using: messageFetcher
+            )
 
-        // Fetch messages
-        let result = try await BatchProcessor.processMessages(
-            messageIds: allMessageIds,
-            batchSize: SyncConfig.messageBatchSize,
-            messageFetcher: messageFetcher
-        ) { processed, total in
-            let progress = 0.1 + (Double(processed) / Double(max(total, 1))) * 0.7
-            await MainActor.run {
-                progressHandler(progress, "Recovering... \(processed)/\(total)")
+            // Fetch messages
+            let result = try await BatchProcessor.processMessages(
+                messageIds: allMessageIds,
+                batchSize: SyncConfig.messageBatchSize,
+                messageFetcher: messageFetcher
+            ) { processed, total in
+                let progress = 0.1 + (Double(processed) / Double(max(total, 1))) * 0.7
+                await MainActor.run {
+                    progressHandler(progress, "Recovering... \(processed)/\(total)")
+                }
+            } messageHandler: { [messagePersister, myAliases] message in
+                // Capture dependencies strongly to prevent message loss if orchestrator is deallocated
+                await messagePersister.saveMessage(
+                    message,
+                    labelIds: labelIds,
+                    myAliases: myAliases,
+                    modificationTransaction: modificationTransaction,
+                    in: context
+                )
             }
-        } messageHandler: { [messagePersister, myAliases] message in
-            // Capture dependencies strongly to prevent message loss if orchestrator is deallocated
-            await messagePersister.saveMessage(
-                message,
-                labelIds: labelIds,
-                myAliases: myAliases,
-                in: context
+
+            log.info(
+                "Recovery: processed=\(result.totalProcessed), success=\(result.successfulCount), failed=\(result.failedIds.count)"
             )
-        }
 
-        log.info(
-            "Recovery: processed=\(result.totalProcessed), success=\(result.successfulCount), failed=\(result.failedIds.count)"
-        )
+            if result.hasFailures {
+                await failureTracker.recordFailure(failedIds: result.failedIds)
+            }
 
-        if result.hasFailures {
-            await failureTracker.recordFailure(failedIds: result.failedIds)
-        }
-
-        // Update rollups only for modified conversations (more efficient than updating all)
-        let modifiedConversations = await ModificationTracker.shared.getAndClearModifiedConversations()
-        if !modifiedConversations.isEmpty {
-            await conversationManager.updateRollupsForModifiedConversations(
-                conversationIDs: modifiedConversations,
-                in: context
+            // Get current historyId from Gmail profile and only advance when failure policy allows it.
+            // This prevents data loss when recovery fetched only a partial set of messages.
+            let profile = try await messageFetcher.getProfile()
+            let shouldAdvanceHistoryId = await failureTracker.shouldAdvanceHistoryId(
+                hadFailures: result.hasFailures,
+                latestHistoryId: profile.historyId
             )
-        }
+            if shouldAdvanceHistoryId {
+                await messagePersister.setAccountHistoryId(profile.historyId, in: context)
+            } else {
+                log.warning("Recovery had fetch failures - keeping previous historyId to retry safely")
+            }
 
-        // Get current historyId from Gmail profile and only advance when failure policy allows it.
-        // This prevents data loss when recovery fetched only a partial set of messages.
-        let profile = try await messageFetcher.getProfile()
-        let shouldAdvanceHistoryId = await failureTracker.shouldAdvanceHistoryId(
-            hadFailures: result.hasFailures,
-            latestHistoryId: profile.historyId
-        )
-        if shouldAdvanceHistoryId {
-            await messagePersister.setAccountHistoryId(profile.historyId, in: context)
-        } else {
-            log.warning("Recovery had fetch failures - keeping previous historyId to retry safely")
-        }
+            // Save persisted message/history changes before consuming the modified conversation set.
+            try await coreDataStack.saveAsync(context: context)
 
-        // Save
-        try await coreDataStack.saveAsync(context: context)
+            let modifiedConversations = await ModificationTracker.shared.commitTransaction(modificationTransaction)
+            committedModificationTransaction = true
 
-        if shouldAdvanceHistoryId {
-            log.info("History recovery complete, new historyId: \(profile.historyId)")
-        } else {
-            log.info("History recovery complete with warnings; historyId not advanced")
+            if !modifiedConversations.isEmpty {
+                await conversationManager.updateRollupsForModifiedConversations(
+                    conversationIDs: modifiedConversations,
+                    in: context
+                )
+                try await coreDataStack.saveAsync(context: context)
+            }
+            await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
+
+            if shouldAdvanceHistoryId {
+                log.info("History recovery complete, new historyId: \(profile.historyId)")
+            } else {
+                log.info("History recovery complete with warnings; historyId not advanced")
+            }
+        } catch {
+            if !committedModificationTransaction {
+                await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
+            }
+            throw error
         }
     }
 

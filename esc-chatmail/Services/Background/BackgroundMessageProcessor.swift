@@ -3,8 +3,16 @@ import CoreData
 
 protocol BackgroundSyncMessageCoordinating: AnyObject, Sendable {
     func prefetchLabelIdsForBackground(in context: NSManagedObjectContext) async -> Set<String>
-    func saveMessage(_ gmailMessage: GmailMessage, labelIds: Set<String>?, in context: NSManagedObjectContext) async
-    func updateConversationRollups(in context: NSManagedObjectContext) async
+    func saveMessage(
+        _ gmailMessage: GmailMessage,
+        labelIds: Set<String>?,
+        modificationTransaction: ModificationTracker.Transaction,
+        in context: NSManagedObjectContext
+    ) async
+    func updateConversationRollups(
+        conversationIDs: Set<NSManagedObjectID>,
+        in context: NSManagedObjectContext
+    ) async
 }
 
 extension SyncEngine: BackgroundSyncMessageCoordinating {}
@@ -85,23 +93,50 @@ final class BackgroundMessageProcessor {
         let context = context ?? makeBackgroundContext()
         let changeSet = Self.buildChangeSet(from: histories)
         var fetchResult = BackgroundMessageProcessingResult.empty
+        let modificationTransaction = await ModificationTracker.shared.beginTransaction()
 
         if !changeSet.messageIdsToDelete.isEmpty {
-            await deleteMessages(messageIds: Array(changeSet.messageIdsToDelete), in: context)
+            await deleteMessages(
+                messageIds: Array(changeSet.messageIdsToDelete),
+                modificationTransaction: modificationTransaction,
+                in: context
+            )
             _ = saveContext(context)
         }
 
         if !changeSet.messageIdsToFetch.isEmpty {
             fetchResult = await fetchAndStoreMessages(
                 messageIds: Array(changeSet.messageIdsToFetch),
+                modificationTransaction: modificationTransaction,
                 in: context
             )
         }
 
         if !changeSet.messageIdsToDelete.isEmpty || !changeSet.messageIdsToFetch.isEmpty {
+            guard saveContext(context) else {
+                Log.error("Background history processing failed to save before rollups", category: .background)
+                await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
+                return BackgroundMessageProcessingResult(
+                    fetchedCount: fetchResult.fetchedCount,
+                    failedFetchCount: max(fetchResult.failedFetchCount, 1)
+                )
+            }
+
+            let modifiedConversationIDs = await ModificationTracker.shared.commitTransaction(modificationTransaction)
             let syncCoordinator = await MainActor.run { self.syncCoordinator }
-            await syncCoordinator.updateConversationRollups(in: context)
-            _ = saveContext(context)
+            await syncCoordinator.updateConversationRollups(
+                conversationIDs: modifiedConversationIDs,
+                in: context
+            )
+            if saveContext(context) {
+                await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
+            } else {
+                Log.error("Background history processing failed to save rollup updates", category: .background)
+                return BackgroundMessageProcessingResult(
+                    fetchedCount: fetchResult.fetchedCount,
+                    failedFetchCount: max(fetchResult.failedFetchCount, 1)
+                )
+            }
         }
 
         return fetchResult
@@ -157,12 +192,18 @@ final class BackgroundMessageProcessor {
     /// Fetches messages from the API and stores them in Core Data
     func fetchAndStoreMessages(
         messageIds: [String],
+        modificationTransaction: ModificationTracker.Transaction? = nil,
         in context: NSManagedObjectContext? = nil
     ) async -> BackgroundMessageProcessingResult {
         let ownsContext = context == nil
         let context = context ?? makeBackgroundContext()
         let syncCoordinator = await MainActor.run { self.syncCoordinator }
         let apiClient = await MainActor.run { self.apiClient }
+        let ownedTransaction = ownsContext ? await ModificationTracker.shared.beginTransaction() : nil
+        guard let transaction = modificationTransaction ?? ownedTransaction else {
+            Log.error("Background message fetch started without a modification transaction", category: .background)
+            return .empty
+        }
 
         // Prefetch label IDs for efficient lookups (IDs are Sendable, safe to pass across async boundaries)
         let labelIds = await syncCoordinator.prefetchLabelIdsForBackground(in: context)
@@ -187,7 +228,12 @@ final class BackgroundMessageProcessor {
                 for await (messageId, result) in group {
                     switch result {
                     case .success(let message):
-                        await syncCoordinator.saveMessage(message, labelIds: labelIds, in: context)
+                        await syncCoordinator.saveMessage(
+                            message,
+                            labelIds: labelIds,
+                            modificationTransaction: transaction,
+                            in: context
+                        )
                         successCount += 1
                     case .failure(let error):
                         failedCount += 1
@@ -202,8 +248,31 @@ final class BackgroundMessageProcessor {
         }
 
         if ownsContext {
-            await syncCoordinator.updateConversationRollups(in: context)
-            _ = saveContext(context)
+            guard saveContext(context) else {
+                if let ownedTransaction {
+                    Log.error("Background message fetch failed to save before rollups", category: .background)
+                    await ModificationTracker.shared.rollbackTransaction(ownedTransaction)
+                }
+                return BackgroundMessageProcessingResult(
+                    fetchedCount: successCount,
+                    failedFetchCount: max(failedCount, 1)
+                )
+            }
+
+            let modifiedConversationIDs = await ModificationTracker.shared.commitTransaction(ownedTransaction!)
+            await syncCoordinator.updateConversationRollups(
+                conversationIDs: modifiedConversationIDs,
+                in: context
+            )
+            if saveContext(context) {
+                await ModificationTracker.shared.consumeCommittedTransaction(ownedTransaction!)
+            } else {
+                Log.error("Background message fetch failed to save rollup updates", category: .background)
+                return BackgroundMessageProcessingResult(
+                    fetchedCount: successCount,
+                    failedFetchCount: max(failedCount, 1)
+                )
+            }
         }
 
         return BackgroundMessageProcessingResult(
@@ -213,7 +282,11 @@ final class BackgroundMessageProcessor {
     }
 
     /// Deletes messages from Core Data
-    func deleteMessages(messageIds: [String], in context: NSManagedObjectContext) async {
+    func deleteMessages(
+        messageIds: [String],
+        modificationTransaction: ModificationTracker.Transaction,
+        in context: NSManagedObjectContext
+    ) async {
         let modifiedConversationIDs: [NSManagedObjectID] = await context.perform {
             let fetchRequest: NSFetchRequest<Message> = Message.fetchRequest()
             fetchRequest.predicate = MessagePredicates.ids(messageIds)
@@ -240,7 +313,10 @@ final class BackgroundMessageProcessor {
         }
 
         if !modifiedConversationIDs.isEmpty {
-            await ModificationTracker.shared.trackModifiedConversations(modifiedConversationIDs)
+            await ModificationTracker.shared.trackModifiedConversations(
+                modifiedConversationIDs,
+                in: modificationTransaction
+            )
         }
     }
 }

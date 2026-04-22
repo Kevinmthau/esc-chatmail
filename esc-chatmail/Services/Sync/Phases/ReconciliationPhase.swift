@@ -59,6 +59,7 @@ struct ReconciliationPhase: SyncPhase {
                     message,
                     labelIds: context.labelIds,
                     myAliases: context.myAliases,
+                    modificationTransaction: context.modificationTransaction,
                     in: context.coreDataContext
                 )
             }
@@ -73,7 +74,11 @@ struct ReconciliationPhase: SyncPhase {
             log.debug("Skipping label reconciliation (no history changes)")
         } else {
             context.reportProgress(0.8, status: "Reconciling labels...", phase: self)
-            await reconciliation.reconcileLabelStates(in: context.coreDataContext, labelIds: context.labelIds)
+            await reconciliation.reconcileLabelStates(
+                in: context.coreDataContext,
+                labelIds: context.labelIds,
+                modificationTransaction: context.modificationTransaction
+            )
         }
 
         context.reportProgress(1.0, status: "Reconciliation complete", phase: self)
