@@ -197,7 +197,14 @@ final class BackgroundMessageProcessorTests: XCTestCase {
         XCTAssertEqual(apiClient.getMessageCalledIds, ["fetch-me"])
         XCTAssertEqual(syncCoordinator.prefetchContextIDs, [ObjectIdentifier(backgroundContext)])
         XCTAssertEqual(syncCoordinator.savedMessageContextIDs, [ObjectIdentifier(backgroundContext)])
-        XCTAssertEqual(syncCoordinator.rollupContextIDs, [ObjectIdentifier(backgroundContext)])
+        XCTAssertEqual(
+            syncCoordinator.rollupContextIDs,
+            [ObjectIdentifier(backgroundContext), ObjectIdentifier(backgroundContext)]
+        )
+        XCTAssertEqual(
+            syncCoordinator.rollupConversationIDs,
+            [Set([seedConversation.objectID]), Set([seedConversation.objectID])]
+        )
         XCTAssertEqual(result, BackgroundMessageProcessingResult(fetchedCount: 1, failedFetchCount: 0))
     }
 
@@ -276,7 +283,8 @@ final class BackgroundMessageProcessorTests: XCTestCase {
         XCTAssertEqual(saveRecorder.callCount, 2)
         XCTAssertEqual(syncCoordinator.prefetchContextIDs, [ObjectIdentifier(backgroundContext)])
         XCTAssertEqual(syncCoordinator.savedMessageContextIDs, [ObjectIdentifier(backgroundContext)])
-        XCTAssertTrue(syncCoordinator.rollupContextIDs.isEmpty)
+        XCTAssertEqual(syncCoordinator.rollupContextIDs, [ObjectIdentifier(backgroundContext)])
+        XCTAssertEqual(syncCoordinator.rollupConversationIDs, [Set([seedConversation.objectID])])
         XCTAssertEqual(result, BackgroundMessageProcessingResult(fetchedCount: 1, failedFetchCount: 1))
     }
 

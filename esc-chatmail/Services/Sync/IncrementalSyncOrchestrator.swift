@@ -154,9 +154,6 @@ final class IncrementalSyncOrchestrator {
                 recordReconciliationTime()
             }
 
-            // Phase 5: Atomic Save (historyId + all changes in single transaction)
-            progressHandler(0.9, "Saving changes...")
-
             // Don't advance historyId if history collection was truncated - we need to
             // retry from the same point to get remaining pages
             let shouldAdvance: Bool
@@ -170,20 +167,22 @@ final class IncrementalSyncOrchestrator {
                 )
             }
 
-            // Use atomic finalizeSync to prevent data loss if app crashes between
-            // setting historyId and saving messages
             let historyIdToSave = shouldAdvance ? historyResult.latestHistoryId : nil
-            try await messagePersister.finalizeSync(historyId: historyIdToSave, in: context)
+            if let historyIdToSave {
+                await messagePersister.setAccountHistoryId(historyIdToSave, in: context)
+            }
 
-            let modifiedConversations = await ModificationTracker.shared.commitTransaction(modificationTransaction)
-            committedModificationTransaction = true
+            let modifiedConversations = await ModificationTracker.shared.modifiedConversations(in: modificationTransaction)
 
-            // Phase 6: Update rollups only after message persistence succeeds
+            // Keep historyId advancement and rollup updates in the same durable save.
             try await conversationUpdatePhase.execute(
                 input: modifiedConversations,
                 context: phaseContext
             )
+            progressHandler(0.99, "Saving changes...")
             try await coreDataStack.saveAsync(context: context)
+            _ = await ModificationTracker.shared.commitTransaction(modificationTransaction)
+            committedModificationTransaction = true
             await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
 
             NotificationCenter.default.post(name: .syncCompleted, object: nil)
@@ -281,19 +280,18 @@ final class IncrementalSyncOrchestrator {
                 log.warning("Recovery had fetch failures - keeping previous historyId to retry safely")
             }
 
-            // Save persisted message/history changes before consuming the modified conversation set.
-            try await coreDataStack.saveAsync(context: context)
-
-            let modifiedConversations = await ModificationTracker.shared.commitTransaction(modificationTransaction)
-            committedModificationTransaction = true
+            let modifiedConversations = await ModificationTracker.shared.modifiedConversations(in: modificationTransaction)
 
             if !modifiedConversations.isEmpty {
                 await conversationManager.updateRollupsForModifiedConversations(
                     conversationIDs: modifiedConversations,
                     in: context
                 )
-                try await coreDataStack.saveAsync(context: context)
             }
+
+            try await coreDataStack.saveAsync(context: context)
+            _ = await ModificationTracker.shared.commitTransaction(modificationTransaction)
+            committedModificationTransaction = true
             await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
 
             if shouldAdvanceHistoryId {

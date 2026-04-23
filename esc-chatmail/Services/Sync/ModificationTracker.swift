@@ -35,6 +35,16 @@ actor ModificationTracker {
         return transaction
     }
 
+    /// Returns the run's current modified conversations without changing transaction state.
+    func modifiedConversations(in transaction: Transaction) -> Set<NSManagedObjectID> {
+        guard let state = transactions[transaction.id] else {
+            Log.warning("Attempted to read unknown transaction \(transaction.id)", category: .sync)
+            return []
+        }
+
+        return state.modifications
+    }
+
     /// Marks the run's modifications as ready for rollup updates after persistence succeeds.
     func commitTransaction(_ transaction: Transaction) -> Set<NSManagedObjectID> {
         guard let state = transactions[transaction.id] else {

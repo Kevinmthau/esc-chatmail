@@ -125,22 +125,24 @@ final class InitialSyncOrchestrator {
                 context: context
             )
 
-            // Phase 5: Save everything before rollups consume the modified conversation set
-            progressHandler(0.85, "Saving changes...")
-            try await coreDataStack.saveAsync(context: context)
-            log.info("Initial sync save successful")
+            // Phase 5: Keep historyId and rollup updates in the same save so later syncs
+            // never advance past message changes without the derived conversation state.
+            let modifiedConversations = await ModificationTracker.shared.modifiedConversations(in: modificationTransaction)
 
-            let modifiedConversations = await ModificationTracker.shared.commitTransaction(modificationTransaction)
-            committedModificationTransaction = true
-
-            progressHandler(0.95, "Updating conversations...")
+            progressHandler(0.85, "Updating conversations...")
             if !modifiedConversations.isEmpty {
                 await conversationManager.updateRollupsForModifiedConversations(
                     conversationIDs: modifiedConversations,
                     in: context
                 )
-                try await coreDataStack.saveAsync(context: context)
             }
+
+            progressHandler(0.95, "Saving changes...")
+            try await coreDataStack.saveAsync(context: context)
+            log.info("Initial sync save successful")
+
+            _ = await ModificationTracker.shared.commitTransaction(modificationTransaction)
+            committedModificationTransaction = true
             await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
 
             let conversationCount = await countConversations(in: context)

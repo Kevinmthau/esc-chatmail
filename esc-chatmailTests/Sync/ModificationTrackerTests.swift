@@ -71,6 +71,24 @@ final class ModificationTrackerTests: XCTestCase {
         XCTAssertEqual(transactionCountAfterConsume, 0)
     }
 
+    func testModifiedConversationsSnapshotDoesNotCommitRun() async throws {
+        let ids = try makeConversationIDs(count: 1)
+        let tracker = ModificationTracker.shared
+        let run = await tracker.beginTransaction()
+
+        await tracker.trackModifiedConversation(ids[0], in: run)
+
+        let snapshot = await tracker.modifiedConversations(in: run)
+        let transactionCountAfterSnapshot = await tracker.transactionCount
+        let committedIDs = await tracker.commitTransaction(run)
+
+        XCTAssertEqual(snapshot, Set([ids[0]]))
+        XCTAssertEqual(transactionCountAfterSnapshot, 1)
+        XCTAssertEqual(committedIDs, Set([ids[0]]))
+
+        await tracker.consumeCommittedTransaction(run)
+    }
+
     func testOverlappingRunsCannotStealEachOthersModifiedSets() async throws {
         let ids = try makeConversationIDs(count: 4)
         let tracker = ModificationTracker.shared

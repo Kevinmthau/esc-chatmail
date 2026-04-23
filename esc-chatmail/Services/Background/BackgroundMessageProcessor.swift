@@ -94,13 +94,20 @@ final class BackgroundMessageProcessor {
         let changeSet = Self.buildChangeSet(from: histories)
         var fetchResult = BackgroundMessageProcessingResult.empty
         let modificationTransaction = await ModificationTracker.shared.beginTransaction()
+        let syncCoordinator = await MainActor.run { self.syncCoordinator }
 
         if !changeSet.messageIdsToDelete.isEmpty {
-            await deleteMessages(
+            let deletedConversationIDs = await deleteMessages(
                 messageIds: Array(changeSet.messageIdsToDelete),
                 modificationTransaction: modificationTransaction,
                 in: context
             )
+            if !deletedConversationIDs.isEmpty {
+                await syncCoordinator.updateConversationRollups(
+                    conversationIDs: deletedConversationIDs,
+                    in: context
+                )
+            }
             _ = saveContext(context)
         }
 
@@ -123,7 +130,6 @@ final class BackgroundMessageProcessor {
             }
 
             let modifiedConversationIDs = await ModificationTracker.shared.commitTransaction(modificationTransaction)
-            let syncCoordinator = await MainActor.run { self.syncCoordinator }
             await syncCoordinator.updateConversationRollups(
                 conversationIDs: modifiedConversationIDs,
                 in: context
@@ -282,12 +288,13 @@ final class BackgroundMessageProcessor {
     }
 
     /// Deletes messages from Core Data
+    @discardableResult
     func deleteMessages(
         messageIds: [String],
         modificationTransaction: ModificationTracker.Transaction,
         in context: NSManagedObjectContext
-    ) async {
-        let modifiedConversationIDs: [NSManagedObjectID] = await context.perform {
+    ) async -> Set<NSManagedObjectID> {
+        let modifiedConversationIDs: Set<NSManagedObjectID> = await context.perform {
             let fetchRequest: NSFetchRequest<Message> = Message.fetchRequest()
             fetchRequest.predicate = MessagePredicates.ids(messageIds)
             fetchRequest.fetchBatchSize = 100
@@ -295,12 +302,12 @@ final class BackgroundMessageProcessor {
 
             do {
                 let messages = try context.fetch(fetchRequest)
-                var conversationIDs: [NSManagedObjectID] = []
+                var conversationIDs: Set<NSManagedObjectID> = []
                 conversationIDs.reserveCapacity(messages.count)
 
                 for message in messages {
                     if let conversationID = message.conversation?.objectID {
-                        conversationIDs.append(conversationID)
+                        conversationIDs.insert(conversationID)
                     }
                     context.delete(message)
                 }
@@ -318,5 +325,7 @@ final class BackgroundMessageProcessor {
                 in: modificationTransaction
             )
         }
+
+        return modifiedConversationIDs
     }
 }
