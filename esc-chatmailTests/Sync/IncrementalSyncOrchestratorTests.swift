@@ -2,7 +2,7 @@ import XCTest
 @testable import esc_chatmail
 
 final class IncrementalSyncOrchestratorTests: XCTestCase {
-    func testShouldFlushUIVisibleChanges_allowsNonDestructiveHistory() {
+    func testAllowsIntermediateContextSaves_allowsNonDestructiveHistory() {
         let record = HistoryRecord(
             id: "history-safe",
             messages: nil,
@@ -23,13 +23,11 @@ final class IncrementalSyncOrchestratorTests: XCTestCase {
         )
 
         XCTAssertTrue(
-            IncrementalSyncOrchestrator.shouldFlushUIVisibleChanges(
-                afterLabelProcessingFor: [record]
-            )
+            IncrementalSyncOrchestrator.allowsIntermediateContextSaves(for: [record])
         )
     }
 
-    func testShouldFlushUIVisibleChanges_defersWhenHistoryDeletesMessages() {
+    func testAllowsIntermediateContextSaves_defersWhenHistoryDeletesMessages() {
         let record = HistoryRecord(
             id: "history-delete",
             messages: nil,
@@ -42,13 +40,39 @@ final class IncrementalSyncOrchestratorTests: XCTestCase {
         )
 
         XCTAssertFalse(
-            IncrementalSyncOrchestrator.shouldFlushUIVisibleChanges(
-                afterLabelProcessingFor: [record]
-            )
+            IncrementalSyncOrchestrator.allowsIntermediateContextSaves(for: [record])
         )
     }
 
-    func testShouldFlushUIVisibleChanges_defersWhenHistoryAddsExcludedMailboxLabel() {
+    func testAllowsIntermediateContextSaves_defersWhenMessagesAddedLabelsAreOmitted() {
+        let record = HistoryRecord(
+            id: "history-messages-added-unknown-labels",
+            messages: nil,
+            messagesAdded: [
+                HistoryMessageAdded(
+                    message: GmailMessage(
+                        id: "message-1",
+                        threadId: "thread-1",
+                        labelIds: nil,
+                        snippet: nil,
+                        historyId: nil,
+                        internalDate: nil,
+                        payload: nil,
+                        sizeEstimate: nil
+                    )
+                )
+            ],
+            messagesDeleted: nil,
+            labelsAdded: nil,
+            labelsRemoved: nil
+        )
+
+        XCTAssertFalse(
+            IncrementalSyncOrchestrator.allowsIntermediateContextSaves(for: [record])
+        )
+    }
+
+    func testAllowsIntermediateContextSaves_defersWhenHistoryAddsExcludedMailboxLabel() {
         let record = HistoryRecord(
             id: "history-trash",
             messages: nil,
@@ -64,9 +88,7 @@ final class IncrementalSyncOrchestratorTests: XCTestCase {
         )
 
         XCTAssertFalse(
-            IncrementalSyncOrchestrator.shouldFlushUIVisibleChanges(
-                afterLabelProcessingFor: [record]
-            )
+            IncrementalSyncOrchestrator.allowsIntermediateContextSaves(for: [record])
         )
     }
 }

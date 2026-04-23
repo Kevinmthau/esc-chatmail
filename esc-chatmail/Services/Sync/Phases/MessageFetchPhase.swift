@@ -28,6 +28,9 @@ struct MessageFetchPhase: SyncPhase {
         }
 
         log.info("Fetching \(messageIds.count) new messages")
+        if !context.allowsIntermediateContextSaves {
+            log.debug("Deferring message-fetch batch saves because history may delete local messages")
+        }
 
         let result = try await BatchProcessor.processMessages(
             messageIds: messageIds,
@@ -47,6 +50,7 @@ struct MessageFetchPhase: SyncPhase {
                 in: context.coreDataContext
             )
         } batchCompletion: {
+            guard context.allowsIntermediateContextSaves else { return }
             try await context.coreDataContext.perform {
                 guard context.coreDataContext.hasChanges else { return }
                 try context.coreDataContext.save()

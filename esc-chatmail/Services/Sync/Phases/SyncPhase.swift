@@ -21,6 +21,7 @@ struct SyncPhaseContext {
     let labelIds: Set<String>
     let myAliases: Set<String>
     let modificationTransaction: ModificationTracker.Transaction?
+    let allowsIntermediateContextSaves: Bool
     let syncStartTime: Date
     let progressHandler: (Double, String) -> Void
     let failureTracker: SyncFailureTracker
@@ -30,6 +31,7 @@ struct SyncPhaseContext {
         labelIds: Set<String>,
         myAliases: Set<String>,
         modificationTransaction: ModificationTracker.Transaction? = nil,
+        allowsIntermediateContextSaves: Bool = true,
         syncStartTime: Date,
         progressHandler: @escaping (Double, String) -> Void,
         failureTracker: SyncFailureTracker
@@ -38,6 +40,7 @@ struct SyncPhaseContext {
         self.labelIds = labelIds
         self.myAliases = myAliases
         self.modificationTransaction = modificationTransaction
+        self.allowsIntermediateContextSaves = allowsIntermediateContextSaves
         self.syncStartTime = syncStartTime
         self.progressHandler = progressHandler
         self.failureTracker = failureTracker

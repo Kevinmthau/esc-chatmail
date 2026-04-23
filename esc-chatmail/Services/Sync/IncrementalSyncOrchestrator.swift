@@ -107,8 +107,7 @@ final class IncrementalSyncOrchestrator {
         var committedModificationTransaction = false
         let labelIds = await messagePersister.prefetchLabelIds(in: context)
 
-        // Create shared context for all phases
-        let phaseContext = SyncPhaseContext(
+        let historyCollectionContext = SyncPhaseContext(
             coreDataContext: context,
             labelIds: labelIds,
             myAliases: myAliases,
@@ -122,7 +121,20 @@ final class IncrementalSyncOrchestrator {
             // Phase 1: Collect all history
             let historyResult = try await historyCollectionPhase.execute(
                 input: historyId,
-                context: phaseContext
+                context: historyCollectionContext
+            )
+            let allowsIntermediateContextSaves = Self.allowsIntermediateContextSaves(
+                for: historyResult.records
+            )
+            let phaseContext = SyncPhaseContext(
+                coreDataContext: context,
+                labelIds: labelIds,
+                myAliases: myAliases,
+                modificationTransaction: modificationTransaction,
+                allowsIntermediateContextSaves: allowsIntermediateContextSaves,
+                syncStartTime: syncStartTime,
+                progressHandler: progressHandler,
+                failureTracker: failureTracker
             )
 
             // Phase 2: Fetch new messages
@@ -136,7 +148,7 @@ final class IncrementalSyncOrchestrator {
                 input: historyResult.records,
                 context: phaseContext
             )
-            if Self.shouldFlushUIVisibleChanges(afterLabelProcessingFor: historyResult.records) {
+            if phaseContext.allowsIntermediateContextSaves {
                 try await flushUIVisibleChangesIfNeeded(
                     in: context,
                     stageDescription: "label processing"
@@ -328,11 +340,14 @@ final class IncrementalSyncOrchestrator {
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastReconciliationTimeKey)
     }
 
-    nonisolated static func shouldFlushUIVisibleChanges(
-        afterLabelProcessingFor records: [HistoryRecord]
-    ) -> Bool {
+    nonisolated static func allowsIntermediateContextSaves(for records: [HistoryRecord]) -> Bool {
         !records.contains { record in
             if let messagesDeleted = record.messagesDeleted, !messagesDeleted.isEmpty {
+                return true
+            }
+
+            if let messagesAdded = record.messagesAdded,
+               messagesAdded.contains(where: { $0.message.labelIds == nil }) {
                 return true
             }
 
@@ -345,6 +360,12 @@ final class IncrementalSyncOrchestrator {
 
             return false
         }
+    }
+
+    nonisolated static func shouldFlushUIVisibleChanges(
+        afterLabelProcessingFor records: [HistoryRecord]
+    ) -> Bool {
+        allowsIntermediateContextSaves(for: records)
     }
 
     /// Saves the sync context mid-run so conversation list updates (preview/unread) merge
