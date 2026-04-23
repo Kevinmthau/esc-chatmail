@@ -208,6 +208,90 @@ final class BackgroundMessageProcessorTests: XCTestCase {
         XCTAssertEqual(result, BackgroundMessageProcessingResult(fetchedCount: 1, failedFetchCount: 0))
     }
 
+    func testProcessHistoryChanges_abortsWhenDeleteSaveFails() async throws {
+        await ModificationTracker.shared.reset()
+
+        let stack = TestCoreDataStack()
+        let seedConversation = ConversationBuilder.simple(in: stack.viewContext)
+        _ = MessageBuilder()
+            .withId("delete-me")
+            .withThreadId("thread-delete")
+            .inConversation(seedConversation)
+            .build(in: stack.viewContext)
+        try stack.saveViewContext()
+
+        let apiClient = MockGmailAPIClient()
+        apiClient.addMessage(
+            GmailMessage(
+                id: "fetch-me",
+                threadId: "thread-fetch",
+                labelIds: ["INBOX"],
+                snippet: "Fetched in background",
+                historyId: "h1",
+                internalDate: nil,
+                payload: nil,
+                sizeEstimate: nil
+            )
+        )
+
+        let syncCoordinator = MockBackgroundSyncCoordinator(
+            seedConversationObjectID: seedConversation.objectID
+        )
+        let saveRecorder = RollbackOnFirstSaveRecorder(stack: stack)
+        let processor = BackgroundMessageProcessor(
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            saveContext: { saveRecorder.save(context: $0) },
+            apiClient: apiClient,
+            syncCoordinator: syncCoordinator
+        )
+
+        let history = HistoryRecord(
+            id: "history-delete-save-failure",
+            messages: nil,
+            messagesAdded: [
+                HistoryMessageAdded(
+                    message: GmailMessage(
+                        id: "fetch-me",
+                        threadId: "thread-fetch",
+                        labelIds: ["INBOX"],
+                        snippet: "Fetched in background",
+                        historyId: "h1",
+                        internalDate: nil,
+                        payload: nil,
+                        sizeEstimate: nil
+                    )
+                )
+            ],
+            messagesDeleted: [
+                HistoryMessageDeleted(message: MessageListItem(id: "delete-me", threadId: nil))
+            ],
+            labelsAdded: nil,
+            labelsRemoved: nil
+        )
+
+        let backgroundContext = stack.newBackgroundContext()
+        let result = await processor.processHistoryChanges(histories: [history], in: backgroundContext)
+
+        let verificationContext = stack.newBackgroundContext()
+        let deletedMessage = await verificationContext.perform {
+            try? verificationContext.fetchMessage(byId: "delete-me")
+        }
+        let fetchedMessage = await verificationContext.perform {
+            try? verificationContext.fetchMessage(byId: "fetch-me")
+        }
+
+        XCTAssertEqual(saveRecorder.callCount, 1)
+        XCTAssertNotNil(deletedMessage)
+        XCTAssertNil(fetchedMessage)
+        XCTAssertTrue(apiClient.getMessageCalledIds.isEmpty)
+        XCTAssertTrue(syncCoordinator.prefetchContextIDs.isEmpty)
+        XCTAssertEqual(syncCoordinator.rollupContextIDs, [ObjectIdentifier(backgroundContext)])
+        XCTAssertEqual(syncCoordinator.rollupConversationIDs, [Set([seedConversation.objectID])])
+        XCTAssertEqual(result, BackgroundMessageProcessingResult(fetchedCount: 0, failedFetchCount: 1))
+        let transactionCount = await ModificationTracker.shared.transactionCount
+        XCTAssertEqual(transactionCount, 0)
+    }
+
     func testProcessHistoryChanges_persistsDeletionsWhenFetchedMessageSaveFails() async throws {
         let stack = TestCoreDataStack()
         let seedConversation = ConversationBuilder.simple(in: stack.viewContext)
@@ -584,6 +668,34 @@ private final class BackgroundSaveRecorder: @unchecked Sendable {
         }
 
         if shouldFail {
+            return false
+        }
+
+        return stack.saveIfNeeded(context: context)
+    }
+}
+
+private final class RollbackOnFirstSaveRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private let stack: TestCoreDataStack
+
+    private(set) var callCount = 0
+
+    init(stack: TestCoreDataStack) {
+        self.stack = stack
+    }
+
+    func save(context: NSManagedObjectContext) -> Bool {
+        let shouldFail: Bool
+        lock.lock()
+        callCount += 1
+        shouldFail = callCount == 1
+        lock.unlock()
+
+        if shouldFail {
+            context.performAndWait {
+                context.rollback()
+            }
             return false
         }
 

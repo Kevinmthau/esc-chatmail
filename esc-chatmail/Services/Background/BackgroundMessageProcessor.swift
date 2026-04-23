@@ -108,7 +108,14 @@ final class BackgroundMessageProcessor {
                     in: context
                 )
             }
-            _ = saveContext(context)
+            guard saveContext(context) else {
+                Log.error("Background history processing failed to save deletions", category: .background)
+                await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
+                return BackgroundMessageProcessingResult(
+                    fetchedCount: 0,
+                    failedFetchCount: 1
+                )
+            }
         }
 
         if !changeSet.messageIdsToFetch.isEmpty {

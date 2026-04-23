@@ -136,10 +136,14 @@ final class IncrementalSyncOrchestrator {
                 input: historyResult.records,
                 context: phaseContext
             )
-            try await flushUIVisibleChangesIfNeeded(
-                in: context,
-                stageDescription: "label processing"
-            )
+            if Self.shouldFlushUIVisibleChanges(afterLabelProcessingFor: historyResult.records) {
+                try await flushUIVisibleChangesIfNeeded(
+                    in: context,
+                    stageDescription: "label processing"
+                )
+            } else {
+                log.debug("Deferring mid-sync flush because history includes destructive local changes")
+            }
 
             // Phase 4: Reconciliation
             // Skip label reconciliation when history reported no changes (saves ~2.5s per sync)
@@ -322,6 +326,25 @@ final class IncrementalSyncOrchestrator {
     /// Records the current time as the last reconciliation time
     private func recordReconciliationTime() {
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastReconciliationTimeKey)
+    }
+
+    nonisolated static func shouldFlushUIVisibleChanges(
+        afterLabelProcessingFor records: [HistoryRecord]
+    ) -> Bool {
+        !records.contains { record in
+            if let messagesDeleted = record.messagesDeleted, !messagesDeleted.isEmpty {
+                return true
+            }
+
+            if let labelsAdded = record.labelsAdded,
+               labelsAdded.contains(where: { item in
+                   item.labelIds.contains(where: MessagePersister.excludedMailboxLabelIDs.contains)
+               }) {
+                return true
+            }
+
+            return false
+        }
     }
 
     /// Saves the sync context mid-run so conversation list updates (preview/unread) merge

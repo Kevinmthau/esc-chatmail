@@ -248,7 +248,7 @@ final class InitialSyncOrchestrator {
         }
     }
 
-    private func handleSyncCompletion(
+    func handleSyncCompletion(
         result: BatchProcessingResult,
         profile: GmailProfile,
         labelIds: Set<String>,
@@ -289,6 +289,7 @@ final class InitialSyncOrchestrator {
                 await failureTracker.recordFailure(failedIds: stillFailedIds)
             } else {
                 log.info("All failed messages recovered on retry - advancing historyId")
+                await failureTracker.recordSuccess()
             }
             syncCompletedWithWarnings = disposition.hadWarnings
         } else {
