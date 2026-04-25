@@ -173,6 +173,30 @@ final class ConversationMergerTests: XCTestCase {
         XCTAssertEqual(winner.lastMessageDate, newDate)
     }
 
+    func testMerge_preservesSnippetFromNewestConversation() throws {
+        let oldDate = Date(timeIntervalSince1970: 100)
+        let newDate = Date(timeIntervalSince1970: 200)
+
+        let winner = ConversationBuilder()
+            .withKeyHash("winner")
+            .withSnippet("Old winner snippet")
+            .withLastMessageDate(oldDate)
+            .build(in: context)
+
+        let loser = ConversationBuilder()
+            .withKeyHash("loser")
+            .withSnippet("New loser snippet")
+            .withLastMessageDate(newDate)
+            .build(in: context)
+
+        try testStack.saveViewContext()
+
+        merger.merge(from: loser, into: winner)
+
+        XCTAssertEqual(winner.lastMessageDate, newDate)
+        XCTAssertEqual(winner.snippet, "New loser snippet")
+    }
+
     func testMerge_preservesPinnedStatus() throws {
         let winner = ConversationBuilder()
             .withKeyHash("winner")

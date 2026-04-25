@@ -169,8 +169,8 @@ cleanup and broad rewrites.
 
 1. Done 2026-04-25: Centralized chat-visible message predicates and updated
    `VirtualScrollStateTests`.
-2. Fix rollup clearing and `ConversationMerger` snippet/date ordering; add
-   focused rollup and merge tests.
+2. Done 2026-04-25: Fixed rollup clearing and `ConversationMerger`
+   snippet/date ordering; added focused rollup and merge tests.
 3. Change conversation-list mark-read to use batch read updates and one pending
    action batch.
 4. Inject the Gmail client/fetcher into
@@ -228,13 +228,14 @@ cleanup and broad rewrites.
 
 ### 2. Fix Stale Conversation Rollups
 
+- Status: Completed 2026-04-25.
 - Why this is the right next patch: stale rollup fields directly affect list
   ordering, snippets, unread state, and archive visibility.
 - Files to change:
   - `esc-chatmail/Services/Conversation/ConversationRollupUpdater.swift`
   - `esc-chatmail/Services/Conversation/ConversationMerger.swift`
   - `esc-chatmailTests/ConversationMergerTests.swift`
-  - Add or update focused rollup tests.
+  - `esc-chatmailTests/ConversationRollupUpdaterTests.swift`
 - Implementation approach:
   - Clear `latestInboxDate` when there are no inbox messages.
   - Clear `lastMessageDate` and `snippet` when there are no visible messages, if

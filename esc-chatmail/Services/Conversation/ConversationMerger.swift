@@ -300,6 +300,9 @@ struct ConversationMerger: Sendable {
 
     /// Merges messages and data from loser into winner.
     func merge(from loser: Conversation, into winner: Conversation) {
+        let originalWinnerLastMessageDate = winner.lastMessageDate ?? .distantPast
+        let loserLastMessageDate = loser.lastMessageDate ?? .distantPast
+
         // Reassign all messages from loser to winner
         if let messages = loser.messages {
             for message in messages {
@@ -308,11 +311,10 @@ struct ConversationMerger: Sendable {
         }
 
         // Merge rollup data
-        winner.lastMessageDate = max(winner.lastMessageDate ?? .distantPast,
-                                    loser.lastMessageDate ?? .distantPast)
+        winner.lastMessageDate = max(originalWinnerLastMessageDate, loserLastMessageDate)
 
         if winner.snippet == nil ||
-           (loser.lastMessageDate ?? .distantPast) > (winner.lastMessageDate ?? .distantPast) {
+           loserLastMessageDate > originalWinnerLastMessageDate {
             winner.snippet = loser.snippet
         }
 

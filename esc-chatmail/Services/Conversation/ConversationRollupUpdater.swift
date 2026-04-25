@@ -19,7 +19,7 @@ struct ConversationRollupUpdater: Sendable {
     ///   - myEmail: The current user's email (must be captured before entering context.perform block)
     func updateRollups(for conversation: Conversation, myEmail: String) {
         guard conversation.managedObjectContext != nil else { return }
-        guard let messages = conversation.messages else { return }
+        let messages = conversation.messages ?? []
 
         // Phase 1: Filter draft messages and update metadata
         let visibleMessages = filterVisibleMessages(messages)
@@ -190,6 +190,9 @@ struct ConversationRollupUpdater: Sendable {
         if let latestMessage = sortedMessages.last {
             conversation.lastMessageDate = latestMessage.internalDate
             conversation.snippet = latestMessage.conversationPreviewText
+        } else {
+            conversation.lastMessageDate = nil
+            conversation.snippet = nil
         }
     }
 
@@ -288,6 +291,8 @@ struct ConversationRollupUpdater: Sendable {
 
         if let latestInboxMessage = inboxMessages.max(by: { $0.internalDate < $1.internalDate }) {
             conversation.latestInboxDate = latestInboxMessage.internalDate
+        } else {
+            conversation.latestInboxDate = nil
         }
     }
 
