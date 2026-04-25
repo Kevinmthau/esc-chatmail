@@ -134,7 +134,7 @@ struct esc_chatmailApp: App {
 
     private func waitForCoreData() async -> Bool {
         do {
-            try await CoreDataStack.shared.waitForStoreToLoad(timeout: 10.0)
+            try await CoreDataStack.shared.waitForStoreToLoad(timeout: .infinity)
             return true
         } catch {
             Log.error("Core Data store failed to load", category: .coreData, error: error)
