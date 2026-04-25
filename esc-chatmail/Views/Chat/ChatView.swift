@@ -31,11 +31,7 @@ struct ChatView: View {
 
         let request = NSFetchRequest<Message>(entityName: "Message")
         request.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: true)]
-        request.predicate = NSPredicate(
-            format: "conversation == %@ AND NONE labels.id IN %@",
-            conversation,
-            ["DRAFT", "SPAM", "TRASH"]
-        )
+        request.predicate = MessagePredicates.visibleInChat(conversation: conversation)
         request.fetchBatchSize = CoreDataConfig.fetchBatchSize
         request.relationshipKeyPathsForPrefetching = ["participants", "participants.person", "attachments", "labels"]
         request.includesPendingChanges = true

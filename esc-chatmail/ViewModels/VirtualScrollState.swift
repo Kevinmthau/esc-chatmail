@@ -567,7 +567,7 @@ final class VirtualScrollState: ObservableObject {
             return VirtualScrollMessagePage(messageIDs: [], totalCount: 0)
         }
 
-        let predicate = NSPredicate(format: "conversation.id == %@", conversationUUID as CVarArg)
+        let predicate = MessagePredicates.visibleInChat(conversationId: conversationUUID)
         nonisolated(unsafe) let safePredicate = predicate
 
         return await context.perform {
@@ -606,7 +606,7 @@ final class VirtualScrollState: ObservableObject {
             return VirtualScrollMessagePage(messageIDs: [], totalCount: 0)
         }
 
-        let predicate = NSPredicate(format: "conversation.id == %@", conversationUUID as CVarArg)
+        let predicate = MessagePredicates.visibleInChat(conversationId: conversationUUID)
         nonisolated(unsafe) let safePredicate = predicate
 
         return await context.perform {

@@ -43,6 +43,59 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertTrue(page.messageIDs.isEmpty)
     }
 
+    func testLoadMessagePage_omitsExcludedLabelMessagesFromPageIDs() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .recentlyActive()
+            .build(in: viewContext)
+        let excludedLabels = makeExcludedLabels()
+        let visible0 = makeMessage(id: "virtual-scroll-visible-0", date: 0, conversation: conversation)
+        let spam = makeMessage(id: "virtual-scroll-spam", date: 1, conversation: conversation)
+        spam.addToLabels(excludedLabels.spam)
+        let visible1 = makeMessage(id: "virtual-scroll-visible-1", date: 2, conversation: conversation)
+        let draft = makeMessage(id: "virtual-scroll-draft", date: 3, conversation: conversation)
+        draft.addToLabels(excludedLabels.draft)
+        let trash = makeMessage(id: "virtual-scroll-trash", date: 4, conversation: conversation)
+        trash.addToLabels(excludedLabels.trash)
+        let visible2 = makeMessage(id: "virtual-scroll-visible-2", date: 5, conversation: conversation)
+
+        try viewContext.save()
+
+        let page = await VirtualScrollState.loadMessagePage(
+            conversationId: conversation.id.uuidString,
+            range: 0..<10,
+            in: stack.newBackgroundContext()
+        )
+
+        XCTAssertEqual(page.totalCount, 3)
+        XCTAssertEqual(page.messageIDs, [visible0, visible1, visible2].map(\.objectID))
+    }
+
+    func testLoadMessagePage_omitsExcludedLabelMessagesFromTotalCount() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .recentlyActive()
+            .build(in: viewContext)
+        let excludedLabels = makeExcludedLabels()
+        _ = makeMessage(id: "virtual-scroll-count-visible-0", date: 0, conversation: conversation)
+        let draft = makeMessage(id: "virtual-scroll-count-draft", date: 1, conversation: conversation)
+        draft.addToLabels(excludedLabels.draft)
+        _ = makeMessage(id: "virtual-scroll-count-visible-1", date: 2, conversation: conversation)
+        let trash = makeMessage(id: "virtual-scroll-count-trash", date: 3, conversation: conversation)
+        trash.addToLabels(excludedLabels.trash)
+
+        try viewContext.save()
+
+        let page = await VirtualScrollState.loadMessagePage(
+            conversationId: conversation.id.uuidString,
+            range: 0..<0,
+            in: stack.newBackgroundContext()
+        )
+
+        XCTAssertEqual(page.totalCount, 2)
+        XCTAssertTrue(page.messageIDs.isEmpty)
+    }
+
     func testInitialLoad_publishesOnlyViewContextMessages() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 8)
         let configuration = VirtualScrollConfiguration(
@@ -134,6 +187,46 @@ final class VirtualScrollStateTests: XCTestCase {
 
         XCTAssertEqual(state.visibleRangeStartIndex, 5)
         XCTAssertEqual(state.scrollPosition, 5)
+    }
+
+    func testInitialLoadFromEnd_omitsExcludedPendingMessageWhileKeepingValidPendingMessage() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 3)
+        let excludedLabels = makeExcludedLabels()
+        try viewContext.save()
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 10,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+        let draftPendingMessage = try makePendingMessage(
+            id: "virtual-scroll-pending-draft",
+            date: Date(timeIntervalSince1970: 3),
+            conversation: conversation
+        )
+        draftPendingMessage.addToLabels(excludedLabels.draft)
+        let validPendingMessage = try makePendingMessage(
+            id: "virtual-scroll-pending-valid",
+            date: Date(timeIntervalSince1970: 4),
+            conversation: conversation
+        )
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        let expectedIDs = messages.map(\.objectID) + [validPendingMessage.objectID]
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == expectedIDs &&
+                state.totalMessageCount == 4 &&
+                !state.isLoadingMore
+        }
     }
 
     func testInitialLoadFromEnd_doesNotLoadOlderWindowWhenTopOfTailFirstAppears() async throws {
@@ -455,17 +548,37 @@ final class VirtualScrollStateTests: XCTestCase {
 
         var messages: [Message] = []
         for index in 0..<count {
-            let message = MessageBuilder()
-                .withId("virtual-scroll-\(index)")
-                .withSubject("Message \(index)")
-                .withDate(Date(timeIntervalSince1970: TimeInterval(index)))
-                .inConversation(conversation)
-                .build(in: viewContext)
+            let message = makeMessage(
+                id: "virtual-scroll-\(index)",
+                date: TimeInterval(index),
+                conversation: conversation
+            )
             messages.append(message)
         }
 
         try viewContext.save()
         return (conversation, messages)
+    }
+
+    private func makeMessage(
+        id: String,
+        date: TimeInterval,
+        conversation: Conversation
+    ) -> Message {
+        MessageBuilder()
+            .withId(id)
+            .withSubject(id)
+            .withDate(Date(timeIntervalSince1970: date))
+            .inConversation(conversation)
+            .build(in: viewContext)
+    }
+
+    private func makeExcludedLabels() -> (draft: Label, spam: Label, trash: Label) {
+        (
+            draft: LabelBuilder().draft().build(in: viewContext),
+            spam: LabelBuilder().spam().build(in: viewContext),
+            trash: LabelBuilder().trash().build(in: viewContext)
+        )
     }
 
     private func makePendingMessage(

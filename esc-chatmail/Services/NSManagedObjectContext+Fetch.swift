@@ -195,6 +195,8 @@ extension NSManagedObjectContext {
 
 /// Type-safe predicates for Message entity
 enum MessagePredicates {
+    static let chatExcludedLabelIDs = ["DRAFT", "SPAM", "TRASH"]
+
     static func id(_ id: String) -> NSPredicate {
         NSPredicate(format: "id == %@", id)
     }
@@ -209,6 +211,22 @@ enum MessagePredicates {
 
     static func inConversation(_ conversation: Conversation) -> NSPredicate {
         NSPredicate(format: "conversation == %@", conversation)
+    }
+
+    static func visibleInChat(conversation: Conversation) -> NSPredicate {
+        NSPredicate(
+            format: "conversation == %@ AND NONE labels.id IN %@",
+            conversation,
+            chatExcludedLabelIDs
+        )
+    }
+
+    static func visibleInChat(conversationId: UUID) -> NSPredicate {
+        NSPredicate(
+            format: "conversation.id == %@ AND NONE labels.id IN %@",
+            conversationId as CVarArg,
+            chatExcludedLabelIDs
+        )
     }
 
     static func hasLabel(_ labelId: String) -> NSPredicate {

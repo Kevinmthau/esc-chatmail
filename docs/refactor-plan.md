@@ -167,7 +167,7 @@ cleanup and broad rewrites.
 
 ### Phase 1: Highest-Impact Low-Risk Fixes
 
-1. Centralize chat-visible message predicates and update
+1. Done 2026-04-25: Centralized chat-visible message predicates and updated
    `VirtualScrollStateTests`.
 2. Fix rollup clearing and `ConversationMerger` snippet/date ordering; add
    focused rollup and merge tests.
@@ -209,6 +209,7 @@ cleanup and broad rewrites.
 
 ### 1. Align Chat Virtual-Scroll Predicates
 
+- Status: Completed 2026-04-25.
 - Why this is the right next patch: it is a concrete correctness bug with low
   blast radius and direct user-visible impact on chat scrolling.
 - Files to change:
@@ -268,15 +269,14 @@ cleanup and broad rewrites.
 
 1. Single most important refactor: create the shared sync-run coordinator for
    foreground/background sync and cursor/rollup finalization.
-2. Single best small patch: centralize and apply the chat-visible message
-   predicate in `VirtualScrollState`.
+2. Single best small patch: fix stale conversation rollups and
+   `ConversationMerger` snippet/date ordering.
 
 Follow-up implementation prompt:
 
-> Implement the chat-visible message predicate hardening patch. Inspect
-> `ChatView.swift`, `VirtualScrollState.swift`, and
-> `VirtualScrollStateTests.swift`; add a shared helper for the message predicate
-> that excludes `DRAFT`, `SPAM`, and `TRASH`; use it for both persisted and
-> pending virtual-scroll page/count fetches; keep `ChatView` behavior unchanged;
-> add tests proving excluded-label messages are omitted from IDs and counts while
-> valid pending messages remain visible.
+> Implement the stale conversation rollup patch. Inspect
+> `ConversationRollupUpdater.swift`, `ConversationMerger.swift`, and the focused
+> rollup/merge tests; clear inbox and visible-message rollup fields from a
+> complete derived snapshot; preserve intended empty-thread behavior; fix merge
+> snippet/date ordering by comparing old source dates before assigning the merged
+> date; add tests for clearing stale fields and keeping the newest snippet.
