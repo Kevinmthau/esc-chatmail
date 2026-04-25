@@ -142,6 +142,14 @@ Good default targeted suites:
 - Compose: `ComposeViewModelTests`, `ComposeSendOrchestratorTests`
 - Chat bubble loading: `MessageBubbleLoaderTests`, `MessageBubbleViewModelTests`
 
+## Refactor plan
+
+- Before starting any refactor, read:
+  - `docs/refactor-plan.md`
+- Treat it as the current prioritized roadmap.
+- Prefer implementing one scoped item at a time.
+- When making changes, keep the plan updated if priorities, findings, or implementation status change.
+
 ## Refactor Rules
 
 - Do not refactor unrelated code while implementing a feature.
