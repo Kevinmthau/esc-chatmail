@@ -23,9 +23,9 @@ protocol ActionExecutorProtocol: Sendable {
 /// Executes pending actions against the Gmail API
 /// Extracted from PendingActionsManager for single responsibility
 actor GmailActionExecutor: ActionExecutorProtocol {
-    private let apiClientProvider: @Sendable () async -> GmailAPIClient
+    private let apiClientProvider: @Sendable () async -> any GmailAPIClientProtocol
 
-    init(apiClientProvider: @escaping @Sendable () async -> GmailAPIClient = {
+    init(apiClientProvider: @escaping @Sendable () async -> any GmailAPIClientProtocol = {
         await MainActor.run { GmailAPIClient.shared }
     }) {
         self.apiClientProvider = apiClientProvider
@@ -43,45 +43,51 @@ actor GmailActionExecutor: ActionExecutorProtocol {
 
         switch type {
         case .markRead:
+            if let messageIds = payload?["messageIds"] as? [String], !messageIds.isEmpty {
+                try await apiClient.batchModify(ids: messageIds, addLabelIds: nil, removeLabelIds: ["UNREAD"])
+                Log.diagnostic(.pendingActions, "Executed batch markRead for \(messageIds.count) messages", category: .sync)
+                return
+            }
+
             guard let messageId = messageId else {
                 throw PendingActionError.missingMessageId
             }
-            _ = try await apiClient.modifyMessage(id: messageId, removeLabelIds: ["UNREAD"])
+            _ = try await apiClient.modifyMessage(id: messageId, addLabelIds: nil, removeLabelIds: ["UNREAD"])
             Log.diagnostic(.pendingActions, "Executed markRead for message: \(messageId)", category: .sync)
 
         case .markUnread:
             guard let messageId = messageId else {
                 throw PendingActionError.missingMessageId
             }
-            _ = try await apiClient.modifyMessage(id: messageId, addLabelIds: ["UNREAD"])
+            _ = try await apiClient.modifyMessage(id: messageId, addLabelIds: ["UNREAD"], removeLabelIds: nil)
             Log.diagnostic(.pendingActions, "Executed markUnread for message: \(messageId)", category: .sync)
 
         case .archive:
             guard let messageId = messageId else {
                 throw PendingActionError.missingMessageId
             }
-            _ = try await apiClient.modifyMessage(id: messageId, removeLabelIds: ["INBOX"])
+            _ = try await apiClient.modifyMessage(id: messageId, addLabelIds: nil, removeLabelIds: ["INBOX"])
             Log.diagnostic(.pendingActions, "Executed archive for message: \(messageId)", category: .sync)
 
         case .archiveConversation:
             guard let messageIds = payload?["messageIds"] as? [String], !messageIds.isEmpty else {
                 throw PendingActionError.missingMessageIds
             }
-            try await apiClient.batchModify(ids: messageIds, removeLabelIds: ["INBOX"])
+            try await apiClient.batchModify(ids: messageIds, addLabelIds: nil, removeLabelIds: ["INBOX"])
             Log.diagnostic(.pendingActions, "Executed archiveConversation for \(messageIds.count) messages", category: .sync)
 
         case .star:
             guard let messageId = messageId else {
                 throw PendingActionError.missingMessageId
             }
-            _ = try await apiClient.modifyMessage(id: messageId, addLabelIds: ["STARRED"])
+            _ = try await apiClient.modifyMessage(id: messageId, addLabelIds: ["STARRED"], removeLabelIds: nil)
             Log.diagnostic(.pendingActions, "Executed star for message: \(messageId)", category: .sync)
 
         case .unstar:
             guard let messageId = messageId else {
                 throw PendingActionError.missingMessageId
             }
-            _ = try await apiClient.modifyMessage(id: messageId, removeLabelIds: ["STARRED"])
+            _ = try await apiClient.modifyMessage(id: messageId, addLabelIds: nil, removeLabelIds: ["STARRED"])
             Log.diagnostic(.pendingActions, "Executed unstar for message: \(messageId)", category: .sync)
 
         case .reportSpam:

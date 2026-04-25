@@ -31,13 +31,24 @@ extension PendingActionsManager {
         return await context.perform {
             let request = NSFetchRequest<PendingAction>(entityName: "PendingAction")
             request.predicate = NSPredicate(
-                format: "messageId == %@ AND actionType == %@ AND (status == %@ OR status == %@)",
-                messageId, type.rawValue, "pending", "processing"
+                format: "actionType == %@ AND (status == %@ OR status == %@)",
+                type.rawValue, "pending", "processing"
             )
-            request.fetchLimit = 1
+            request.fetchBatchSize = 20
 
             do {
-                return try context.fetch(request).first != nil
+                return try context.fetch(request).contains { action in
+                    if action.messageIdValue == messageId {
+                        return true
+                    }
+                    guard let payload = action.payloadValue,
+                          let data = payload.data(using: .utf8),
+                          let decoded = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let messageIds = decoded["messageIds"] as? [String] else {
+                        return false
+                    }
+                    return messageIds.contains(messageId)
+                }
             } catch {
                 Log.error("Failed to check for pending action", category: .sync, error: error)
                 return false  // Assume no pending action on error

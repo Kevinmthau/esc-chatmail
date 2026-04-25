@@ -140,8 +140,8 @@ cleanup and broad rewrites.
 
 - Align `VirtualScrollState` predicates with `ChatView` to avoid loading and
   counting draft/spam/trash rows the UI cannot render.
-- Route conversation-list mark-read through the existing batch read path instead
-  of per-message saves/actions.
+- Done 2026-04-25: Routed conversation-list mark-read through the existing
+  batch read path with one pending action batch.
 - Stop canceling every `ProcessedTextCache.prefetch` batch during rapid scroll;
   coalesce requests or let a bounded queue drain.
 - Include `bodyStorageURI` and HTML source signatures in text/HTML prefetch paths
@@ -171,8 +171,8 @@ cleanup and broad rewrites.
    `VirtualScrollStateTests`.
 2. Done 2026-04-25: Fixed rollup clearing and `ConversationMerger`
    snippet/date ordering; added focused rollup and merge tests.
-3. Change conversation-list mark-read to use batch read updates and one pending
-   action batch.
+3. Done 2026-04-25: Changed conversation-list mark-read to use batch read
+   updates and one pending action batch.
 4. Inject the Gmail client/fetcher into
    `SyncReconciliation.fetchGmailMetadataInParallel`; remove
    `GmailAPIClient.shared` from that path.
@@ -270,14 +270,14 @@ cleanup and broad rewrites.
 
 1. Single most important refactor: create the shared sync-run coordinator for
    foreground/background sync and cursor/rollup finalization.
-2. Single best small patch: fix stale conversation rollups and
-   `ConversationMerger` snippet/date ordering.
+2. Single best small patch: inject the Gmail client/fetcher into
+   `SyncReconciliation.fetchGmailMetadataInParallel` and remove
+   `GmailAPIClient.shared` from that path.
 
 Follow-up implementation prompt:
 
-> Implement the stale conversation rollup patch. Inspect
-> `ConversationRollupUpdater.swift`, `ConversationMerger.swift`, and the focused
-> rollup/merge tests; clear inbox and visible-message rollup fields from a
-> complete derived snapshot; preserve intended empty-thread behavior; fix merge
-> snippet/date ordering by comparing old source dates before assigning the merged
-> date; add tests for clearing stale fields and keeping the newest snippet.
+> Implement the `SyncReconciliation` dependency-injection patch. Inspect
+> `SyncReconciliation.swift`, its construction sites, and focused reconciliation
+> tests; route Gmail metadata fetches through the injected fetcher/client instead
+> of `GmailAPIClient.shared`; preserve existing reconciliation limits and error
+> handling; add a test that fails if the shared singleton path is used.

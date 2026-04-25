@@ -118,9 +118,14 @@ final class MessageActionsTests: XCTestCase {
                 conversation.inboxUnreadCount == 0
         }
 
-        let queuedActions = await pendingActionsManager.queuedSingleActions
-        XCTAssertEqual(queuedActions.map(\.messageId), ["message-to-read"])
-        XCTAssertEqual(queuedActions.map(\.type), [.markRead])
+        let queuedSingleActions = await pendingActionsManager.queuedSingleActions
+        XCTAssertTrue(queuedSingleActions.isEmpty)
+
+        let queuedConversationActions = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queuedConversationActions.count, 1)
+        XCTAssertEqual(queuedConversationActions.first?.type, .markRead)
+        XCTAssertEqual(queuedConversationActions.first?.sourceConversationId, conversation.id)
+        XCTAssertEqual(queuedConversationActions.first?.messageIds, ["message-to-read"])
     }
 
     func testMarkMessagesAsReadBatch_keepsLaterUnreadInboxMessageUnreadAndCounted() async throws {
@@ -162,9 +167,62 @@ final class MessageActionsTests: XCTestCase {
                 conversation.inboxUnreadCount == 1
         }
 
-        let queuedActions = await pendingActionsManager.queuedSingleActions
-        XCTAssertEqual(queuedActions.map(\.messageId), ["message-visible-at-open"])
-        XCTAssertEqual(queuedActions.map(\.type), [.markRead])
+        let queuedSingleActions = await pendingActionsManager.queuedSingleActions
+        XCTAssertTrue(queuedSingleActions.isEmpty)
+
+        let queuedConversationActions = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queuedConversationActions.count, 1)
+        XCTAssertEqual(queuedConversationActions.first?.type, .markRead)
+        XCTAssertEqual(queuedConversationActions.first?.sourceConversationId, conversation.id)
+        XCTAssertEqual(queuedConversationActions.first?.messageIds, ["message-visible-at-open"])
+    }
+
+    func testMarkConversationAsRead_usesBatchUpdateAndSinglePendingAction() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .withUnreadCount(2)
+            .build(in: context)
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
+        let firstMessage = MessageBuilder()
+            .withId("inbox-unread-1")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        firstMessage.addToLabels(inboxLabel)
+        let secondMessage = MessageBuilder()
+            .withId("inbox-unread-2")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        secondMessage.addToLabels(inboxLabel)
+        let nonInboxMessage = MessageBuilder()
+            .withId("sent-unread")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        try coreDataStack.saveViewContext()
+
+        await messageActions.markConversationAsRead(conversation: conversation)
+
+        await waitUntil {
+            self.context.refreshAllObjects()
+            return !firstMessage.isUnread &&
+                !secondMessage.isUnread &&
+                nonInboxMessage.isUnread &&
+                conversation.inboxUnreadCount == 0
+        }
+
+        let queuedSingleActions = await pendingActionsManager.queuedSingleActions
+        XCTAssertTrue(queuedSingleActions.isEmpty)
+
+        let queuedConversationActions = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queuedConversationActions.count, 1)
+        XCTAssertEqual(queuedConversationActions.first?.type, .markRead)
+        XCTAssertEqual(queuedConversationActions.first?.sourceConversationId, conversation.id)
+        XCTAssertEqual(
+            Set(queuedConversationActions.first?.messageIds ?? []),
+            Set(["inbox-unread-1", "inbox-unread-2"])
+        )
     }
 
     private func waitUntil(
@@ -189,16 +247,30 @@ final class MessageActionsTests: XCTestCase {
 
 actor MockPendingActionsManager: PendingActionsManagerProtocol {
     private(set) var queuedSingleActions: [(type: PendingAction.ActionType, messageId: String)] = []
+    private(set) var queuedConversationActions: [(type: PendingAction.ActionType, sourceConversationId: UUID, messageIds: [String])] = []
 
     func queueAction(type: PendingAction.ActionType, messageId: String, payload: [String : Any]?) async {
         queuedSingleActions.append((type: type, messageId: messageId))
     }
 
-    func queueConversationAction(type: PendingAction.ActionType, sourceConversationId: UUID, messageIds: [String]) async {}
+    func queueConversationAction(type: PendingAction.ActionType, sourceConversationId: UUID, messageIds: [String]) async {
+        queuedConversationActions.append((
+            type: type,
+            sourceConversationId: sourceConversationId,
+            messageIds: messageIds
+        ))
+    }
+
     func processAllPendingActions() async {}
-    func pendingActionCount() async -> Int { queuedSingleActions.count }
+    func pendingActionCount() async -> Int {
+        queuedSingleActions.count + queuedConversationActions.count
+    }
+
     func hasPendingAction(forMessageId messageId: String, type: PendingAction.ActionType) async -> Bool {
-        queuedSingleActions.contains { $0.messageId == messageId && $0.type == type }
+        queuedSingleActions.contains { $0.messageId == messageId && $0.type == type } ||
+            queuedConversationActions.contains { action in
+                action.type == type && action.messageIds.contains(messageId)
+            }
     }
     func cancelPendingAction(forMessageId messageId: String, type: PendingAction.ActionType) async {}
     func stopMonitoring() {}

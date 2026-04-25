@@ -55,11 +55,13 @@ final class MessageActions: ObservableObject {
 
     func markConversationAsRead(conversation: Conversation) async {
         let context = coreDataStack.viewContext
-        let unreadInboxMessages = fetchUnreadInboxMessages(for: conversation, context: context)
+        let unreadInboxMessageIDs = snapshotUnreadInboxMessageObjectIDs(for: conversation, context: context)
+        guard !unreadInboxMessageIDs.isEmpty else { return }
 
-        for message in unreadInboxMessages {
-            await markAsRead(message: message)
-        }
+        await markMessagesAsReadBatch(
+            messageIDs: unreadInboxMessageIDs,
+            conversationID: conversation.objectID
+        )
     }
 
     /// Snapshots the unread message IDs that should be cleared when a chat opens.
@@ -132,9 +134,10 @@ final class MessageActions: ObservableObject {
     func markMessagesAsReadBatch(messageIDs: [NSManagedObjectID], conversationID: NSManagedObjectID) async {
         let context = coreDataStack.newBackgroundContext()
 
-        let gmailMessageIds: [String] = await context.perform {
+        let batchResult: (messageIds: [String], sourceConversationId: UUID?) = await context.perform {
             var markedIds: [String] = []
             let modificationDate = Date()
+            var sourceConversationId: UUID?
 
             for messageID in messageIDs {
                 guard let message = try? context.existingObject(with: messageID) as? Message else { continue }
@@ -142,6 +145,7 @@ final class MessageActions: ObservableObject {
 
                 message.isUnread = false
                 message.localModifiedAt = modificationDate
+                sourceConversationId = sourceConversationId ?? message.conversation?.id
 
                 if !message.id.isEmpty {
                     markedIds.append(message.id)
@@ -150,6 +154,7 @@ final class MessageActions: ObservableObject {
 
             // Update conversation unread count atomically
             if let conv = try? context.existingObject(with: conversationID) as? Conversation {
+                sourceConversationId = sourceConversationId ?? conv.id
                 let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
                 countRequest.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
                     NSPredicate(format: "conversation == %@", conv),
@@ -160,16 +165,25 @@ final class MessageActions: ObservableObject {
             }
 
             context.saveOrLog(operation: "batch mark messages as read")
-            return markedIds
+            return (markedIds, sourceConversationId)
         }
 
-        // Queue actions for Gmail sync
-        for messageId in gmailMessageIds {
-            await pendingActionsManager.queueAction(
+        guard !batchResult.messageIds.isEmpty else { return }
+
+        if let sourceConversationId = batchResult.sourceConversationId {
+            await pendingActionsManager.queueConversationAction(
                 type: .markRead,
-                messageId: messageId,
-                payload: nil
+                sourceConversationId: sourceConversationId,
+                messageIds: batchResult.messageIds
             )
+        } else {
+            for messageId in batchResult.messageIds {
+                await pendingActionsManager.queueAction(
+                    type: .markRead,
+                    messageId: messageId,
+                    payload: nil
+                )
+            }
         }
     }
 
@@ -421,18 +435,23 @@ final class MessageActions: ObservableObject {
         }
     }
 
-    /// Fetches unread INBOX messages for a conversation using Core Data predicates (avoids N+1)
-    private func fetchUnreadInboxMessages(for conversation: Conversation, context: NSManagedObjectContext) -> [Message] {
-        let request = Message.fetchRequest()
+    private func snapshotUnreadInboxMessageObjectIDs(
+        for conversation: Conversation,
+        context: NSManagedObjectContext
+    ) -> [NSManagedObjectID] {
+        let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
         request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
             NSPredicate(format: "conversation == %@", conversation),
             NSPredicate(format: "ANY labels.id == %@", "INBOX"),
             NSPredicate(format: "isUnread == YES")
         ])
+        request.fetchBatchSize = 50
+        request.resultType = .managedObjectIDResultType
+
         do {
             return try context.fetch(request)
         } catch {
-            Log.error("Failed to fetch unread INBOX messages for conversation", category: .coreData, error: error)
+            Log.error("Failed to snapshot unread INBOX message IDs for conversation", category: .coreData, error: error)
             return []
         }
     }
