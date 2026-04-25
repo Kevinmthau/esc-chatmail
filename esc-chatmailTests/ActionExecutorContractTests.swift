@@ -21,6 +21,26 @@ final class ActionExecutorContractTests: XCTestCase {
         XCTAssertEqual(apiClient.batchModifyCalls.first?.remove, ["UNREAD"])
     }
 
+    func testGmailActionExecutor_markReadPayloadChunksBatchModifyRequests() async throws {
+        let apiClient = MockGmailAPIClient()
+        let executor = GmailActionExecutor(apiClientProvider: { apiClient })
+        let messageIds = (0..<2_001).map { "msg-\($0)" }
+
+        try await executor.execute(
+            type: .markRead,
+            messageId: nil,
+            sourceConversationId: UUID(),
+            payload: ["messageIds": messageIds]
+        )
+
+        XCTAssertEqual(apiClient.modifyMessageCallCount, 0)
+        XCTAssertEqual(apiClient.batchModifyCallCount, 3)
+        XCTAssertEqual(apiClient.batchModifyCalls.map { $0.ids.count }, [1_000, 1_000, 1])
+        XCTAssertEqual(apiClient.batchModifyCalls.flatMap(\.ids), messageIds)
+        XCTAssertTrue(apiClient.batchModifyCalls.allSatisfy { $0.add == nil })
+        XCTAssertTrue(apiClient.batchModifyCalls.allSatisfy { $0.remove == ["UNREAD"] })
+    }
+
     func testMockActionExecutor_batchActionAcceptsNilSourceConversationId() async throws {
         let executor = MockActionExecutor()
         let payload: [String: Any] = ["messageIds": ["msg-1", "msg-2"]]

@@ -23,6 +23,8 @@ protocol ActionExecutorProtocol: Sendable {
 /// Executes pending actions against the Gmail API
 /// Extracted from PendingActionsManager for single responsibility
 actor GmailActionExecutor: ActionExecutorProtocol {
+    private static let gmailBatchModifyLimit = 1_000
+
     private let apiClientProvider: @Sendable () async -> any GmailAPIClientProtocol
 
     init(apiClientProvider: @escaping @Sendable () async -> any GmailAPIClientProtocol = {
@@ -44,7 +46,9 @@ actor GmailActionExecutor: ActionExecutorProtocol {
         switch type {
         case .markRead:
             if let messageIds = payload?["messageIds"] as? [String], !messageIds.isEmpty {
-                try await apiClient.batchModify(ids: messageIds, addLabelIds: nil, removeLabelIds: ["UNREAD"])
+                for batch in messageIds.chunked(into: Self.gmailBatchModifyLimit) {
+                    try await apiClient.batchModify(ids: batch, addLabelIds: nil, removeLabelIds: ["UNREAD"])
+                }
                 Log.diagnostic(.pendingActions, "Executed batch markRead for \(messageIds.count) messages", category: .sync)
                 return
             }
