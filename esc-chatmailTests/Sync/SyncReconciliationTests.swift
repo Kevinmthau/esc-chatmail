@@ -57,4 +57,54 @@ final class SyncReconciliationTests: XCTestCase {
         XCTAssertEqual(missingIds, ["message-120"])
         XCTAssertEqual(mockAPI.listMessagesCallCount, 2)
     }
+
+    func testReconcileLabelStates_fetchesMetadataThroughInjectedClient() async throws {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.setMessageList(["message-needs-inbox"])
+        mockAPI.addMessage(
+            GmailMessageBuilder()
+                .withId("message-needs-inbox")
+                .withLabels(["INBOX", "UNREAD"])
+                .build()
+        )
+
+        let seedContext = stack.viewContext
+        _ = LabelBuilder.inboxLabel(in: seedContext)
+        let conversation = ConversationBuilder.simple(in: seedContext)
+        MessageBuilder()
+            .withId("message-needs-inbox")
+            .withThreadId("thread-needs-inbox")
+            .read()
+            .inConversation(conversation)
+            .build(in: seedContext)
+        try stack.saveViewContext()
+
+        let sut = SyncReconciliation(
+            messageFetcher: MessageFetcher(apiClient: mockAPI)
+        )
+        let reconcileContext = stack.newBackgroundContext()
+
+        await sut.reconcileLabelStates(
+            in: reconcileContext,
+            labelIds: ["INBOX"],
+            modificationTransaction: nil
+        )
+
+        let reconciledState = try await reconcileContext.perform {
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", "message-needs-inbox")
+            request.fetchLimit = 1
+
+            let message = try XCTUnwrap(reconcileContext.fetch(request).first)
+            let labelIds = Set((message.labels ?? []).map(\.id))
+            return (isUnread: message.isUnread, labelIds: labelIds)
+        }
+
+        XCTAssertEqual(mockAPI.listMessagesCallCount, 1)
+        XCTAssertEqual(mockAPI.getMessageCallCount, 1)
+        XCTAssertEqual(mockAPI.getMessageCalledIds, ["message-needs-inbox"])
+        XCTAssertEqual(mockAPI.getMessageCalledFormats, ["metadata"])
+        XCTAssertTrue(reconciledState.isUnread)
+        XCTAssertTrue(reconciledState.labelIds.contains("INBOX"))
+    }
 }

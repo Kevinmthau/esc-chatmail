@@ -94,6 +94,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
     private(set) var getMessageCallCount = 0
     private(set) var getMessageCalledIds: [String] = []
+    private(set) var getMessageCalledFormats: [String] = []
 
     private(set) var modifyMessageCallCount = 0
     private(set) var modifyMessageCalls: [(id: String, add: [String]?, remove: [String]?)] = []
@@ -173,6 +174,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             listMessagesLastPageToken = nil
             getMessageCallCount = 0
             getMessageCalledIds = []
+            getMessageCalledFormats = []
             modifyMessageCallCount = 0
             modifyMessageCalls = []
             sendMessageCallCount = 0
@@ -225,6 +227,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         let delay = withStateLock {
             getMessageCallCount += 1
             getMessageCalledIds.append(id)
+            getMessageCalledFormats.append(format)
             return artificialDelay
         }
 

@@ -173,9 +173,9 @@ cleanup and broad rewrites.
    snippet/date ordering; added focused rollup and merge tests.
 3. Done 2026-04-25: Changed conversation-list mark-read to use batch read
    updates and one pending action batch.
-4. Inject the Gmail client/fetcher into
-   `SyncReconciliation.fetchGmailMetadataInParallel`; remove
-   `GmailAPIClient.shared` from that path.
+4. Done 2026-04-25: Routed
+   `SyncReconciliation.fetchGmailMetadataInParallel` metadata fetches through
+   the injected `MessageFetcher` instead of `GmailAPIClient.shared`.
 5. Make Core Data startup waiting fail immediately on stored load error instead
    of only timing out.
 
@@ -270,14 +270,12 @@ cleanup and broad rewrites.
 
 1. Single most important refactor: create the shared sync-run coordinator for
    foreground/background sync and cursor/rollup finalization.
-2. Single best small patch: inject the Gmail client/fetcher into
-   `SyncReconciliation.fetchGmailMetadataInParallel` and remove
-   `GmailAPIClient.shared` from that path.
+2. Single best small patch: make Core Data startup waiting fail immediately on
+   stored load error instead of only timing out.
 
 Follow-up implementation prompt:
 
-> Implement the `SyncReconciliation` dependency-injection patch. Inspect
-> `SyncReconciliation.swift`, its construction sites, and focused reconciliation
-> tests; route Gmail metadata fetches through the injected fetcher/client instead
-> of `GmailAPIClient.shared`; preserve existing reconciliation limits and error
-> handling; add a test that fails if the shared singleton path is used.
+> Implement the Core Data startup error patch. Inspect `CoreDataStack` startup
+> and callers that wait for persistence readiness; make stored load errors fail
+> waiters immediately instead of waiting for timeout; preserve successful
+> startup behavior; add a focused test for immediate failure propagation.

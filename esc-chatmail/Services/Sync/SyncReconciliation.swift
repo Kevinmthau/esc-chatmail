@@ -234,13 +234,14 @@ final class SyncReconciliation: Sendable {
         let chunks = messageIds.chunked(into: Self.maxConcurrentGmailRequests)
         var allMetadata: [String: GmailMetadata] = [:]
         var transientErrors: [(String, Error)] = []
+        let messageFetcher = self.messageFetcher
 
         for chunk in chunks {
             let results = await withTaskGroup(of: MetadataFetchResult.self) { group -> [MetadataFetchResult] in
                 for messageId in chunk {
                     group.addTask {
                         do {
-                            let gmailMessage = try await GmailAPIClient.shared.getMessage(id: messageId, format: "metadata")
+                            let gmailMessage = try await messageFetcher.getMessageMetadata(id: messageId)
                             let labelIds = Set(gmailMessage.labelIds ?? [])
                             return .success(GmailMetadata(
                                 messageId: messageId,

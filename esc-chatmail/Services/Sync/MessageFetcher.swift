@@ -306,6 +306,11 @@ final class MessageFetcher: @unchecked Sendable {
         return try await apiClient.getProfile()
     }
 
+    /// Fetches Gmail metadata for a single message.
+    func getMessageMetadata(id: String) async throws -> GmailMessage {
+        try await apiClient.getMessage(id: id, format: "metadata")
+    }
+
     /// Fetches send-as aliases from Gmail API
     func listSendAs() async throws -> [SendAs] {
         return try await apiClient.listSendAs()
