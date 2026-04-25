@@ -44,17 +44,18 @@ final class CoreDataStack: @unchecked Sendable {
     }
 
     private var storeLoadError: Error? {
-        get {
-            #if DEBUG
-            dispatchPrecondition(condition: .notOnQueue(isolationQueue))
-            #endif
-            return isolationQueue.sync { _storeLoadError }
-        }
-        set {
-            #if DEBUG
-            dispatchPrecondition(condition: .notOnQueue(isolationQueue))
-            #endif
-            isolationQueue.sync { _storeLoadError = newValue }
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+        #endif
+        return isolationQueue.sync { _storeLoadError }
+    }
+
+    private var storeLoadState: (isLoaded: Bool, loadError: Error?) {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+        #endif
+        return isolationQueue.sync {
+            (isLoaded: _isStoreLoaded, loadError: _storeLoadError)
         }
     }
 
@@ -62,8 +63,40 @@ final class CoreDataStack: @unchecked Sendable {
         #if DEBUG
         dispatchPrecondition(condition: .notOnQueue(isolationQueue))
         #endif
-        isolationQueue.sync { _isStoreLoaded = loaded }
+        isolationQueue.sync {
+            _isStoreLoaded = loaded
+            if loaded {
+                _storeLoadError = nil
+            }
+        }
     }
+
+    private func setStoreLoadError(_ error: Error?) {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+        #endif
+        isolationQueue.sync {
+            _isStoreLoaded = false
+            _storeLoadError = error
+        }
+    }
+
+    private func resetStoreLoadTracking() {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+        #endif
+        isolationQueue.sync {
+            _isStoreLoaded = false
+            _storeLoadError = nil
+            _loadAttempts = 0
+        }
+    }
+
+#if DEBUG
+    func debugSetStoreLoadErrorForTesting(_ error: Error) {
+        setStoreLoadError(error)
+    }
+#endif
 
     lazy var persistentContainer: NSPersistentContainer = {
         let container = NSPersistentContainer(name: "ESCChatmail")
@@ -105,7 +138,6 @@ final class CoreDataStack: @unchecked Sendable {
             guard let self = self else { return }
 
             if let error = error as NSError? {
-                self.storeLoadError = error
                 self.handleStoreLoadError(error, for: container)
             } else {
                 self.setStoreLoaded(true)
@@ -128,10 +160,10 @@ final class CoreDataStack: @unchecked Sendable {
             }
 
         case .migrationRecovery:
-            attemptMigrationRecovery(for: container)
+            attemptMigrationRecovery(for: container, originalError: error)
 
         case .storeReset:
-            attemptStoreReset(for: container)
+            attemptStoreReset(for: container, originalError: error)
         }
     }
 
@@ -139,25 +171,32 @@ final class CoreDataStack: @unchecked Sendable {
         loadPersistentStores(for: container)
     }
 
-    private func attemptMigrationRecovery(for container: NSPersistentContainer) {
-        guard let storeURL = container.persistentStoreDescriptions.first?.url else { return }
+    private func attemptMigrationRecovery(for container: NSPersistentContainer, originalError: NSError) {
+        guard let storeURL = container.persistentStoreDescriptions.first?.url else {
+            setStoreLoadError(originalError)
+            recoveryHandler.notifyUserOfCriticalError(originalError)
+            return
+        }
 
         if recoveryHandler.prepareMigrationRecovery(for: storeURL) {
             loadPersistentStores(for: container)
         } else {
-            attemptStoreReset(for: container)
+            attemptStoreReset(for: container, originalError: originalError)
         }
     }
 
-    private func attemptStoreReset(for container: NSPersistentContainer) {
-        guard let storeURL = container.persistentStoreDescriptions.first?.url else { return }
+    private func attemptStoreReset(for container: NSPersistentContainer, originalError: NSError) {
+        guard let storeURL = container.persistentStoreDescriptions.first?.url else {
+            setStoreLoadError(originalError)
+            recoveryHandler.notifyUserOfCriticalError(originalError)
+            return
+        }
 
         if recoveryHandler.prepareStoreReset(for: storeURL) {
             loadPersistentStores(for: container)
         } else {
-            recoveryHandler.notifyUserOfCriticalError(
-                storeLoadError ?? NSError(domain: "CoreData", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unknown error"])
-            )
+            setStoreLoadError(originalError)
+            recoveryHandler.notifyUserOfCriticalError(originalError)
         }
     }
 
@@ -168,7 +207,16 @@ final class CoreDataStack: @unchecked Sendable {
     func waitForStoreToLoad(timeout: TimeInterval = 10) async throws {
         let startTime = Date()
 
-        while !isStoreLoaded {
+        while true {
+            let state = storeLoadState
+            if state.isLoaded {
+                return
+            }
+
+            if let loadError = state.loadError {
+                throw CoreDataError.storeLoadFailed(loadError)
+            }
+
             if Date().timeIntervalSince(startTime) > timeout {
                 throw CoreDataError.storeLoadFailed(storeLoadError ?? NSError(domain: "CoreData", code: -1, userInfo: [NSLocalizedDescriptionKey: "Store load timeout"]))
             }
@@ -180,9 +228,14 @@ final class CoreDataStack: @unchecked Sendable {
     private func waitForStoreToLoadSync(timeout: TimeInterval = 10) throws {
         let startTime = Date()
 
-        while !isStoreLoaded {
-            if let storeLoadError {
-                throw CoreDataError.storeLoadFailed(storeLoadError)
+        while true {
+            let state = storeLoadState
+            if state.isLoaded {
+                return
+            }
+
+            if let loadError = state.loadError {
+                throw CoreDataError.storeLoadFailed(loadError)
             }
 
             if Date().timeIntervalSince(startTime) > timeout {
@@ -205,6 +258,7 @@ final class CoreDataStack: @unchecked Sendable {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             persistentContainer.loadPersistentStores { [weak self] storeDescription, error in
                 if let error = error {
+                    self?.setStoreLoadError(error)
                     Log.error("Failed to load Core Data store async", category: .coreData, error: error)
                     continuation.resume(throwing: CoreDataError.storeLoadFailed(error))
                 } else {
@@ -322,8 +376,7 @@ final class CoreDataStack: @unchecked Sendable {
         }
 
         // Reset state
-        setStoreLoaded(false)
-        loadAttempts = 0
+        resetStoreLoadTracking()
 
         if let firstError = errors.first {
             throw CoreDataError.persistentFailure(firstError)
@@ -361,6 +414,7 @@ final class CoreDataStack: @unchecked Sendable {
 
         persistentContainer.loadPersistentStores { [weak self] storeDescription, error in
             if let error = error {
+                self?.setStoreLoadError(error)
                 loadError = error
                 Log.error("Failed to reload Core Data store", category: .coreData, error: error)
             } else {

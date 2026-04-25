@@ -88,7 +88,10 @@ struct esc_chatmailApp: App {
         logStartupTiming("Core Data container accessed")
 
         // 3. Wait for Core Data store to load
-        await waitForCoreData()
+        guard await waitForCoreData() else {
+            logStartupTiming("Core Data failed")
+            return
+        }
         logStartupTiming("Core Data ready")
 
         // 4. Start cache coordinator for Core Data change notifications
@@ -129,16 +132,13 @@ struct esc_chatmailApp: App {
         }
     }
 
-    private func waitForCoreData() async {
-        let startTime = Date()
-        let timeout: TimeInterval = 10.0
-
-        while !CoreDataStack.shared.isStoreLoaded {
-            if Date().timeIntervalSince(startTime) > timeout {
-                Log.error("Core Data store load timeout", category: .coreData)
-                break
-            }
-            try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+    private func waitForCoreData() async -> Bool {
+        do {
+            try await CoreDataStack.shared.waitForStoreToLoad(timeout: 10.0)
+            return true
+        } catch {
+            Log.error("Core Data store failed to load", category: .coreData, error: error)
+            return false
         }
     }
     

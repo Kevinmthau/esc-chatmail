@@ -176,8 +176,8 @@ cleanup and broad rewrites.
 4. Done 2026-04-25: Routed
    `SyncReconciliation.fetchGmailMetadataInParallel` metadata fetches through
    the injected `MessageFetcher` instead of `GmailAPIClient.shared`.
-5. Make Core Data startup waiting fail immediately on stored load error instead
-   of only timing out.
+5. Done 2026-04-25: Made Core Data startup/readiness waiting fail immediately
+   on stored terminal load errors instead of only timing out.
 
 ### Phase 2: Architectural Refactors
 
@@ -270,12 +270,13 @@ cleanup and broad rewrites.
 
 1. Single most important refactor: create the shared sync-run coordinator for
    foreground/background sync and cursor/rollup finalization.
-2. Single best small patch: make Core Data startup waiting fail immediately on
-   stored load error instead of only timing out.
+2. Single best small patch: harden optimistic-send failure cleanup so failed
+   sends do not leave conversation-list drift.
 
 Follow-up implementation prompt:
 
-> Implement the Core Data startup error patch. Inspect `CoreDataStack` startup
-> and callers that wait for persistence readiness; make stored load errors fail
-> waiters immediately instead of waiting for timeout; preserve successful
-> startup behavior; add a focused test for immediate failure propagation.
+> Implement the optimistic-send failure cleanup patch. Inspect
+> `GmailSendService+OptimisticUpdates`, `OutboundSendMutationTracker`, and
+> existing optimistic failure tests; ensure failed sends recompute or restore
+> affected conversation rollups, including optimistic unarchive and empty-thread
+> cases.
