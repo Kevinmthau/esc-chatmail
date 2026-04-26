@@ -126,8 +126,15 @@ final class BackgroundSyncManager {
 
     private func performDeltaSync(isProcessingTask: Bool) async -> Bool {
         guard let syncRun = await syncRunCoordinator.beginRun(kind: .background) else {
-            Log.info("Skipping background sync because another sync run is active", category: .background)
-            return true
+            let activeKind = await syncRunCoordinator.activeRunKind()
+            Log.info("Skipping background sync because \(activeKind?.rawValue ?? "another run") is active", category: .background)
+
+            guard Self.shouldScheduleRetryWhenBlocked(by: activeKind) else {
+                return true
+            }
+
+            scheduleCatchUpRetry()
+            return false
         }
 
         let success = await performDeltaSyncWithinRun(isProcessingTask: isProcessingTask)
@@ -529,5 +536,9 @@ final class BackgroundSyncManager {
             retryAction: .none,
             shouldResetRetryState: true
         )
+    }
+
+    static func shouldScheduleRetryWhenBlocked(by activeRunKind: SyncRunKind?) -> Bool {
+        activeRunKind == nil || activeRunKind == .pendingActions
     }
 }

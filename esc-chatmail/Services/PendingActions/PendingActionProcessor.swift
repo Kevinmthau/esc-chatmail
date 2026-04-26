@@ -9,16 +9,18 @@ extension PendingActionsManager {
 
     /// Resets stuck processing actions to failed so they can be retried.
     func recoverStuckProcessingActions() async {
+        guard await hasStuckProcessingActions() else { return }
+
         let syncRun = await acquirePendingActionRun()
-        await recoverStuckProcessingActionsUnlocked()
+        _ = await recoverStuckProcessingActionsUnlocked()
         await syncRunCoordinator.endRun(syncRun)
     }
 
-    func recoverStuckProcessingActionsUnlocked() async {
+    func recoverStuckProcessingActionsUnlocked() async -> Bool {
         let context = coreDataStack.newBackgroundContext()
         let cutoffDate = Date().addingTimeInterval(-processingStaleInterval)
 
-        await context.perform {
+        return await context.perform {
             let request = NSFetchRequest<PendingAction>(entityName: "PendingAction")
             let statusPredicate = NSPredicate(format: "status == %@", "processing")
             let stalePredicate = NSCompoundPredicate(orPredicateWithSubpredicates: [
@@ -29,17 +31,96 @@ extension PendingActionsManager {
 
             do {
                 let stuckActions = try context.fetch(request)
-                guard !stuckActions.isEmpty else { return }
+                guard !stuckActions.isEmpty else { return false }
 
                 for action in stuckActions {
                     action.setValue("failed", forKey: "status")
                 }
                 try context.save()
                 Log.warning("Recovered \(stuckActions.count) stuck pending actions", category: .sync)
+                return true
             } catch {
                 Log.error("Failed to recover stuck pending actions", category: .sync, error: error)
+                return false
             }
         }
+    }
+
+    func hasActionsNeedingProcessing() async -> Bool {
+        let context = coreDataStack.newBackgroundContext()
+        let cutoffDate = Date().addingTimeInterval(-processingStaleInterval)
+        let maxRetries = self.maxRetries
+
+        return await context.perform {
+            Self.hasActionsNeedingProcessing(
+                in: context,
+                maxRetries: maxRetries,
+                staleProcessingCutoff: cutoffDate
+            )
+        }
+    }
+
+    func hasStuckProcessingActions() async -> Bool {
+        let context = coreDataStack.newBackgroundContext()
+        let cutoffDate = Date().addingTimeInterval(-processingStaleInterval)
+
+        return await context.perform {
+            let request = NSFetchRequest<NSFetchRequestResult>(entityName: "PendingAction")
+            request.predicate = Self.stuckProcessingPredicate(staleProcessingCutoff: cutoffDate)
+            request.fetchLimit = 1
+
+            do {
+                return (try context.count(for: request)) > 0
+            } catch {
+                Log.error("Failed to count stuck pending actions", category: .sync, error: error)
+                return false
+            }
+        }
+    }
+
+    private nonisolated static func hasActionsNeedingProcessing(
+        in context: NSManagedObjectContext,
+        maxRetries: Int,
+        staleProcessingCutoff: Date
+    ) -> Bool {
+        let request = NSFetchRequest<NSFetchRequestResult>(entityName: "PendingAction")
+        request.predicate = actionsNeedingProcessingPredicate(
+            maxRetries: maxRetries,
+            staleProcessingCutoff: staleProcessingCutoff
+        )
+        request.fetchLimit = 1
+
+        do {
+            return (try context.count(for: request)) > 0
+        } catch {
+            Log.error("Failed to count pending actions", category: .sync, error: error)
+            return false
+        }
+    }
+
+    private nonisolated static func actionsNeedingProcessingPredicate(
+        maxRetries: Int,
+        staleProcessingCutoff: Date
+    ) -> NSPredicate {
+        NSCompoundPredicate(orPredicateWithSubpredicates: [
+            NSPredicate(format: "status == %@", "pending"),
+            NSCompoundPredicate(andPredicateWithSubpredicates: [
+                NSPredicate(format: "status == %@", "failed"),
+                NSPredicate(format: "retryCount < %d", maxRetries)
+            ]),
+            stuckProcessingPredicate(staleProcessingCutoff: staleProcessingCutoff)
+        ])
+    }
+
+    private nonisolated static func stuckProcessingPredicate(
+        staleProcessingCutoff: Date
+    ) -> NSPredicate {
+        let statusPredicate = NSPredicate(format: "status == %@", "processing")
+        let stalePredicate = NSCompoundPredicate(orPredicateWithSubpredicates: [
+            NSPredicate(format: "lastAttempt == nil"),
+            NSPredicate(format: "lastAttempt < %@", staleProcessingCutoff as NSDate)
+        ])
+        return NSCompoundPredicate(andPredicateWithSubpredicates: [statusPredicate, stalePredicate])
     }
 
     /// Fetches the next pending action to process.

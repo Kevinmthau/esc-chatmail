@@ -58,6 +58,21 @@ final class BackgroundSyncManagerTests: XCTestCase {
         )
     }
 
+    func testBlockedBackgroundSync_schedulesRetryOnlyForPendingActions() {
+        XCTAssertTrue(
+            BackgroundSyncManager.shouldScheduleRetryWhenBlocked(by: .pendingActions)
+        )
+        XCTAssertFalse(
+            BackgroundSyncManager.shouldScheduleRetryWhenBlocked(by: .foregroundIncremental)
+        )
+        XCTAssertFalse(
+            BackgroundSyncManager.shouldScheduleRetryWhenBlocked(by: .background)
+        )
+        XCTAssertTrue(
+            BackgroundSyncManager.shouldScheduleRetryWhenBlocked(by: nil)
+        )
+    }
+
     func testHistoryContinuationCompatibility_requiresMatchingAccountAndCursor() {
         let continuationState = BackgroundSyncContinuationState.history(
             startHistoryId: "history-100",

@@ -202,12 +202,14 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
 
         guard !isProcessing else { return }
         guard networkMonitor.isConnected else { return }
+        guard await hasActionsNeedingProcessing() else { return }
+        guard !isProcessing else { return }
 
         isProcessing = true
         defer { isProcessing = false }
 
         let syncRun = await acquirePendingActionRun()
-        await recoverStuckProcessingActionsUnlocked()
+        _ = await recoverStuckProcessingActionsUnlocked()
 
         guard networkMonitor.isConnected else {
             await syncRunCoordinator.endRun(syncRun)
