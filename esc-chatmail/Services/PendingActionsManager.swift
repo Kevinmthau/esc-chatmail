@@ -23,6 +23,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
     let coreDataStack: CoreDataStack
     let actionExecutor: ActionExecutorProtocol
     let networkMonitor: NetworkMonitorProtocol
+    let syncRunCoordinator: SyncRunCoordinator
 
     // MARK: - Configuration (internal for extensions)
 
@@ -43,17 +44,20 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         self.coreDataStack = CoreDataStack.shared
         self.actionExecutor = GmailActionExecutor()
         self.networkMonitor = AppNetworkMonitor.shared
+        self.syncRunCoordinator = .shared
     }
 
     /// Testable initializer with dependency injection
     init(
         coreDataStack: CoreDataStack,
         actionExecutor: ActionExecutorProtocol = GmailActionExecutor(),
-        networkMonitor: NetworkMonitorProtocol = AppNetworkMonitor.shared
+        networkMonitor: NetworkMonitorProtocol = AppNetworkMonitor.shared,
+        syncRunCoordinator: SyncRunCoordinator = .shared
     ) {
         self.coreDataStack = coreDataStack
         self.actionExecutor = actionExecutor
         self.networkMonitor = networkMonitor
+        self.syncRunCoordinator = syncRunCoordinator
     }
 
     /// Sets up network monitoring on first use
@@ -61,8 +65,8 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         guard !isInitialized else { return }
         isInitialized = true
 
-        Task {
-            await recoverStuckProcessingActions()
+        Task { [weak self] in
+            await self?.recoverStuckProcessingActions()
         }
 
         networkMonitor.onConnectivityChange = { [weak self] isConnected in
@@ -91,6 +95,17 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         pendingProcessTask = nil
     }
 
+    func acquirePendingActionRun() async -> SyncRun {
+        while true {
+            if let syncRun = await syncRunCoordinator.beginRun(kind: .pendingActions) {
+                return syncRun
+            }
+
+            Log.debug("Pending action processing waiting for active sync run", category: .sync)
+            await syncRunCoordinator.waitUntilIdle()
+        }
+    }
+
     public func stopMonitoring() {
         networkMonitor.stop()
         isInitialized = false
@@ -116,9 +131,10 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
             return context.saveOrLog(operation: "queue pending action: \(type.rawValue)")
         }
 
-        // Only process if save succeeded - prevents processing stale/incomplete actions
+        // Only process if save succeeded - prevents processing stale/incomplete actions.
+        // Processing is scheduled so UI action calls do not wait behind an active sync run.
         if saveSucceeded && networkMonitor.isConnected {
-            await processAllPendingActions()
+            scheduleProcessing()
         } else if !saveSucceeded {
             Log.error("Failed to save pending action \(type.rawValue) for message \(messageId) - action will not be queued", category: .sync)
         }
@@ -147,9 +163,10 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
             return context.saveOrLog(operation: "queue conversation action: \(type.rawValue)")
         }
 
-        // Only process if save succeeded - prevents processing stale/incomplete actions
+        // Only process if save succeeded - prevents processing stale/incomplete actions.
+        // Processing is scheduled so UI action calls do not wait behind an active sync run.
         if saveSucceeded && networkMonitor.isConnected {
-            await processAllPendingActions()
+            scheduleProcessing()
         } else if !saveSucceeded {
             Log.error("Failed to save conversation action \(type.rawValue) for conversation \(sourceConversationId) - action will not be queued", category: .sync)
         }
@@ -183,13 +200,19 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
     public func processAllPendingActions() async {
         ensureInitialized()
 
-        await recoverStuckProcessingActions()
-
         guard !isProcessing else { return }
         guard networkMonitor.isConnected else { return }
 
         isProcessing = true
         defer { isProcessing = false }
+
+        let syncRun = await acquirePendingActionRun()
+        await recoverStuckProcessingActionsUnlocked()
+
+        guard networkMonitor.isConnected else {
+            await syncRunCoordinator.endRun(syncRun)
+            return
+        }
 
         let context = coreDataStack.newBackgroundContext()
 
@@ -199,5 +222,6 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         }
 
         await cleanupCompletedActions(context: context)
+        await syncRunCoordinator.endRun(syncRun)
     }
 }

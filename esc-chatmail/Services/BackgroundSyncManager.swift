@@ -30,10 +30,12 @@ final class BackgroundSyncManager {
     private let messageProcessor: BackgroundMessageProcessor
     private let authSessionProvider: @MainActor @Sendable () -> AuthSession
     private let apiClientProvider: @MainActor @Sendable () -> GmailAPIClientProtocol
+    private let syncRunCoordinator: SyncRunCoordinator
 
     init(
         taskScheduler: BackgroundTaskScheduler = .shared,
         coreDataStack: CoreDataStack = .shared,
+        syncRunCoordinator: SyncRunCoordinator = .shared,
         authSessionProvider: @escaping @MainActor @Sendable () -> AuthSession = { AuthSession.shared },
         apiClientProvider: @escaping @MainActor @Sendable () -> GmailAPIClientProtocol = { GmailAPIClient.shared },
         syncCoordinatorProvider: @escaping @MainActor @Sendable () -> BackgroundSyncMessageCoordinating = {
@@ -49,6 +51,7 @@ final class BackgroundSyncManager {
         )
         self.authSessionProvider = authSessionProvider
         self.apiClientProvider = apiClientProvider
+        self.syncRunCoordinator = syncRunCoordinator
 
         setupTaskHandlers()
     }
@@ -122,6 +125,17 @@ final class BackgroundSyncManager {
     // MARK: - Sync Orchestration
 
     private func performDeltaSync(isProcessingTask: Bool) async -> Bool {
+        guard let syncRun = await syncRunCoordinator.beginRun(kind: .background) else {
+            Log.info("Skipping background sync because another sync run is active", category: .background)
+            return true
+        }
+
+        let success = await performDeltaSyncWithinRun(isProcessingTask: isProcessingTask)
+        await syncRunCoordinator.endRun(syncRun)
+        return success
+    }
+
+    private func performDeltaSyncWithinRun(isProcessingTask: Bool) async -> Bool {
         do {
             let authSession = await MainActor.run { authSessionProvider() }
             _ = try await authSession.withFreshToken()

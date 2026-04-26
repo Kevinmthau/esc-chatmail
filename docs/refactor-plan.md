@@ -182,8 +182,9 @@ cleanup and broad rewrites.
 
 ### Phase 2: Architectural Refactors
 
-1. Add a shared sync-run coordinator used by foreground and background sync
-   before either mutates Core Data or history cursors.
+1. Done 2026-04-26: Added a shared sync-run coordinator used by foreground and
+   background sync, plus pending action processing, before sync-owned Core Data
+   mutations or history cursor updates.
 2. Extract conversation routing policy and authoritative rollup snapshot
    assignment.
 3. Add durable optimistic-send mutation records or rollback snapshots for
@@ -270,16 +271,16 @@ cleanup and broad rewrites.
 
 ## Recommended Next Steps
 
-1. Single most important refactor: create the shared sync-run coordinator for
-   foreground/background sync and cursor/rollup finalization.
-2. The optimistic-send failure cleanup patch is complete. Pick the next small
-   patch from the remaining quick wins after deciding whether to prioritize the
-   sync-run coordinator.
+1. Next architectural refactor: extract conversation routing policy and
+   authoritative rollup snapshot assignment.
+2. Smaller remaining quick wins: coalesce `ProcessedTextCache.prefetch`
+   cancellation, include `bodyStorageURI`/source signatures in prefetch keys, or
+   snapshot participant emails for contact filtering.
 
 Follow-up implementation prompt:
 
-> Implement the shared sync-run coordinator. Inspect `SyncEngine`,
-> `BackgroundSyncManager`, `BackgroundMessageProcessor`, and
-> `PendingActionsManager`; ensure foreground and background sync acquire one
-> serialized run boundary before mutating Core Data, history cursors, rollups,
-> or sync notifications.
+> Extract conversation routing policy and authoritative rollup snapshot
+> assignment. Inspect `ConversationCreationSerializer`,
+> `MessageConversationRouter`, `ConversationRollupUpdater`, and
+> `ConversationMerger`; ensure participant-hash routing, Gmail thread reuse,
+> archive reactivation, and derived rollup fields use one explicit policy.

@@ -46,7 +46,7 @@ final class SyncEngine: ObservableObject {
     private let coreDataStack: CoreDataStack
     private let attachmentDownloader: AttachmentDownloader
     private let networkMonitor: NetworkMonitorService
-    private let syncStateActor: SyncStateActor
+    private let syncRunCoordinator: SyncRunCoordinator
 
     private let log = LogCategory.sync.logger
 
@@ -72,7 +72,7 @@ final class SyncEngine: ObservableObject {
         self.coreDataStack = coreDataStack
         self.attachmentDownloader = attachmentDownloader
         self.networkMonitor = NetworkMonitorService()
-        self.syncStateActor = SyncStateActor()
+        self.syncRunCoordinator = .shared
 
         self.initialSyncOrchestrator = InitialSyncOrchestrator(
             messageFetcher: messageFetcher,
@@ -99,15 +99,15 @@ final class SyncEngine: ObservableObject {
     /// Cancels any currently running sync operation
     func cancelSync() async {
         log.info("Cancelling sync")
-        await syncStateActor.cancelCurrentSync()
-        uiState.update(isSyncing: false, status: "Sync cancelled")
+        if await syncRunCoordinator.cancelForegroundRun() {
+            uiState.update(isSyncing: false, status: "Sync cancelled")
+        }
     }
 
     /// Performs initial full sync
     func performInitialSync() async throws {
-        // Use atomic beginSyncWithTask to prevent race conditions between
-        // beginSync() and setSyncTask() calls
-        let syncTask = await syncStateActor.beginSyncWithTask {
+        // Create the foreground task only after acquiring the shared sync-run boundary.
+        let syncRunTask = await syncRunCoordinator.beginRunWithTask(kind: .foregroundInitial) {
             Task { [weak self] in
                 guard let self else {
                     // This can happen if app is backgrounded/terminated during sync setup
@@ -118,19 +118,19 @@ final class SyncEngine: ObservableObject {
             }
         }
 
-        guard let syncTask else {
+        guard let syncRunTask else {
             log.debug("Sync already in progress, skipping initial sync")
             return
         }
 
-        await runSyncTask(syncTask, syncType: "Initial")
+        await runSyncTask(syncRunTask, syncType: "Initial")
     }
 
     /// Performs incremental sync using Gmail history API
     func performIncrementalSync() async throws {
         switch await prepareIncrementalSync() {
-        case .started(let syncTask):
-            await runSyncTask(syncTask, syncType: "Incremental")
+        case .started(let syncRunTask):
+            await runSyncTask(syncRunTask, syncType: "Incremental")
         case .alreadyInProgress:
             log.debug("Sync already in progress, skipping incremental sync")
         case .skippedNoNetwork:
@@ -140,10 +140,10 @@ final class SyncEngine: ObservableObject {
 
     func triggerIncrementalSyncIfPossible() async -> ForegroundSyncRequestResult {
         switch await prepareIncrementalSync() {
-        case .started(let syncTask):
+        case .started(let syncRunTask):
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                await self.runSyncTask(syncTask, syncType: "Incremental")
+                await self.runSyncTask(syncRunTask, syncType: "Incremental")
             }
             return .started
         case .alreadyInProgress:
@@ -155,22 +155,22 @@ final class SyncEngine: ObservableObject {
     }
 
     func waitForCurrentSyncToComplete() async {
-        await syncStateActor.waitUntilIdle()
+        await syncRunCoordinator.waitUntilIdle()
     }
 
     /// Executes a sync task with unified error handling
-    /// Note: Task is already set atomically by beginSyncWithTask, so no setSyncTask call needed
-    private func runSyncTask(_ task: Task<Void, Error>, syncType: String) async {
+    /// Note: Task is already set atomically by the shared sync-run coordinator.
+    private func runSyncTask(_ syncRunTask: SyncRunTask, syncType: String) async {
 
         do {
-            try await task.value
-            await syncStateActor.endSync()
+            try await syncRunTask.task.value
+            await syncRunCoordinator.endRun(syncRunTask.run)
         } catch is CancellationError {
-            await syncStateActor.endSync()
+            await syncRunCoordinator.endRun(syncRunTask.run)
             log.info("\(syncType) sync was cancelled")
             uiState.update(isSyncing: false, status: "Sync cancelled")
         } catch {
-            await syncStateActor.endSync()
+            await syncRunCoordinator.endRun(syncRunTask.run)
             log.error("\(syncType) sync failed", error: error)
             uiState.update(isSyncing: false, status: "Sync failed: \(formatSyncError(error))")
         }
@@ -262,7 +262,7 @@ final class SyncEngine: ObservableObject {
     }
 
     private enum IncrementalSyncPreparationResult {
-        case started(Task<Void, Error>)
+        case started(SyncRunTask)
         case alreadyInProgress
         case skippedNoNetwork
     }
@@ -274,7 +274,7 @@ final class SyncEngine: ObservableObject {
             return .skippedNoNetwork
         }
 
-        let syncTask = await syncStateActor.beginSyncWithTask {
+        let syncRunTask = await syncRunCoordinator.beginRunWithTask(kind: .foregroundIncremental) {
             Task { [weak self] in
                 guard let self else {
                     // This can happen if app is backgrounded/terminated during incremental sync setup
@@ -285,11 +285,11 @@ final class SyncEngine: ObservableObject {
             }
         }
 
-        guard let syncTask else {
+        guard let syncRunTask else {
             return .alreadyInProgress
         }
 
-        return .started(syncTask)
+        return .started(syncRunTask)
     }
 
     // MARK: - Error Formatting

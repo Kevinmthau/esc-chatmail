@@ -9,6 +9,12 @@ extension PendingActionsManager {
 
     /// Resets stuck processing actions to failed so they can be retried.
     func recoverStuckProcessingActions() async {
+        let syncRun = await acquirePendingActionRun()
+        await recoverStuckProcessingActionsUnlocked()
+        await syncRunCoordinator.endRun(syncRun)
+    }
+
+    func recoverStuckProcessingActionsUnlocked() async {
         let context = coreDataStack.newBackgroundContext()
         let cutoffDate = Date().addingTimeInterval(-processingStaleInterval)
 
