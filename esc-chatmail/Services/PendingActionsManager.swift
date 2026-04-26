@@ -91,8 +91,12 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         }
     }
 
-    private func clearPendingTask() {
+    private func clearPendingTask() async {
         pendingProcessTask = nil
+
+        guard networkMonitor.isConnected else { return }
+        guard await hasActionsNeedingProcessing() else { return }
+        scheduleProcessing()
     }
 
     func acquirePendingActionRun() async -> SyncRun {
