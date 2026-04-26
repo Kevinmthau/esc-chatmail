@@ -73,22 +73,24 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         let archivedConversation = ConversationBuilder()
             .withParticipantHash(participantHash)
             .withDisplayName("Archived Thread")
-            .withSnippet("Previous sent message")
+            .withSnippet("Previous received message")
             .withLastMessageDate(previousMessageDate)
             .hasInboxMessages(false)
             .archivedOn(archivedAt)
             .setHidden()
             .build(in: context)
 
-        let sentLabel = LabelBuilder().sent().build(in: context)
+        let nonInboxLabel = LabelBuilder()
+            .withId("CATEGORY_PERSONAL")
+            .withName("Personal")
+            .build(in: context)
         let previousMessage = MessageBuilder()
-            .withId("previous-sent-message")
+            .withId("previous-received-message")
             .withDate(previousMessageDate)
-            .withSnippet("Previous sent message")
-            .fromMe()
+            .withSnippet("Previous received message")
             .inConversation(archivedConversation)
             .build(in: context)
-        previousMessage.addToLabels(sentLabel)
+        previousMessage.addToLabels(nonInboxLabel)
 
         try coreDataStack.saveViewContext()
 
@@ -109,7 +111,7 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertEqual(archivedConversation.displayName, "Archived Thread")
         XCTAssertFalse(archivedConversation.hasInbox)
         XCTAssertEqual(archivedConversation.lastMessageDate, previousMessageDate)
-        XCTAssertEqual(archivedConversation.snippet, "Previous sent message")
+        XCTAssertEqual(archivedConversation.snippet, "Previous received message")
     }
 
     func testHandleFailedOptimisticMessage_withLocalAttachments_marksOnlyLocalAttachmentsFailed() throws {

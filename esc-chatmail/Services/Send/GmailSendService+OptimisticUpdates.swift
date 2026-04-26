@@ -366,7 +366,6 @@ private struct OptimisticFailureConversationCleanup {
         }
 
         guard let archivedAtBeforeOptimisticChanges,
-              conversation.archivedAt == nil,
               !conversation.hasInbox else {
             return
         }
