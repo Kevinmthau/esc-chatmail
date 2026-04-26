@@ -140,14 +140,21 @@ extension GmailSendService {
     /// Deletes an optimistic message (used when send fails).
     @MainActor
     func deleteOptimisticMessage(_ message: Message) {
+        let conversationCleanup = OptimisticFailureConversationCleanup(message: message)
         viewContext.delete(message)
+        finalizeOptimisticFailureCleanup(conversationCleanup)
 
+        saveOptimisticFailureCleanup()
+    }
+
+    @MainActor
+    private func saveOptimisticFailureCleanup() {
         do {
             if viewContext.hasChanges {
                 try viewContext.save()
             }
         } catch {
-            Log.error("Failed to delete optimistic message", category: .message, error: error)
+            Log.error("Failed to save optimistic failure cleanup", category: .message, error: error)
         }
     }
 
@@ -163,7 +170,13 @@ extension GmailSendService {
             deleteOptimisticMessage(message)
             return
         }
-        markAttachmentsAsFailed(localAttachments)
+
+        let conversationCleanup = OptimisticFailureConversationCleanup(message: message)
+        for attachment in localAttachments {
+            attachment.state = .failed
+        }
+        finalizeOptimisticFailureCleanup(conversationCleanup)
+        saveOptimisticFailureCleanup()
     }
 
     @MainActor
@@ -179,6 +192,32 @@ extension GmailSendService {
         let fallbackAttachments = resolveAttachments(from: fallbackAttachmentReferences)
         guard !fallbackAttachments.isEmpty else { return }
         markAttachmentsAsFailed(fallbackAttachments)
+    }
+
+    @MainActor
+    private func finalizeOptimisticFailureCleanup(_ cleanup: OptimisticFailureConversationCleanup?) {
+        guard let cleanup,
+              let conversation = cleanup.conversation,
+              conversation.managedObjectContext != nil else {
+            return
+        }
+
+        viewContext.processPendingChanges()
+
+        guard !conversation.isDeleted else { return }
+
+        let remainingMessages = conversation.messages?.filter { !$0.isDeleted } ?? []
+        if cleanup.wasInserted && remainingMessages.isEmpty {
+            viewContext.delete(conversation)
+            return
+        }
+
+        ConversationRollupUpdater().updateRollups(
+            for: conversation,
+            myEmail: authSession.userEmail ?? ""
+        )
+
+        cleanup.restorePreOptimisticConversationStateIfNeeded()
     }
 
     /// Finds or creates a conversation for the optimistic send path without forcing
@@ -283,5 +322,66 @@ extension GmailSendService {
             guard let objectID = reference.resolveObjectID(in: viewContext) else { return nil }
             return try? viewContext.existingObject(with: objectID) as? Attachment
         }
+    }
+}
+
+private struct OptimisticFailureConversationCleanup {
+    let conversation: Conversation?
+    let wasInserted: Bool
+    private let archivedAtBeforeOptimisticChanges: Date?
+    private let hiddenBeforeOptimisticChanges: Bool
+    private let displayNameBeforeOptimisticChanges: String?
+
+    @MainActor
+    init(message: Message) {
+        guard let conversation = message.conversation else {
+            self.conversation = nil
+            self.wasInserted = false
+            self.archivedAtBeforeOptimisticChanges = nil
+            self.hiddenBeforeOptimisticChanges = false
+            self.displayNameBeforeOptimisticChanges = nil
+            return
+        }
+
+        let committedValues = conversation.committedValues(
+            forKeys: ["archivedAt", "hidden", "displayName"]
+        )
+
+        self.conversation = conversation
+        self.wasInserted = conversation.isInserted
+        self.archivedAtBeforeOptimisticChanges = committedValues["archivedAt"] as? Date
+        self.hiddenBeforeOptimisticChanges = Self.boolValue(
+            from: committedValues["hidden"],
+            defaultValue: conversation.hidden
+        )
+        self.displayNameBeforeOptimisticChanges = committedValues["displayName"] as? String
+    }
+
+    @MainActor
+    func restorePreOptimisticConversationStateIfNeeded() {
+        guard let conversation else { return }
+
+        if !wasInserted {
+            conversation.displayName = displayNameBeforeOptimisticChanges
+        }
+
+        guard let archivedAtBeforeOptimisticChanges,
+              conversation.archivedAt == nil,
+              !conversation.hasInbox else {
+            return
+        }
+
+        conversation.archivedAt = archivedAtBeforeOptimisticChanges
+        conversation.hidden = hiddenBeforeOptimisticChanges
+    }
+
+    private static func boolValue(from value: Any?, defaultValue: Bool) -> Bool {
+        if let bool = value as? Bool {
+            return bool
+        }
+        if let number = value as? NSNumber {
+            return number.boolValue
+        }
+        return defaultValue
     }
 }

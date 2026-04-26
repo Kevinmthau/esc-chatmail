@@ -35,9 +35,10 @@ cleanup and broad rewrites.
 ### 3. Optimistic Send Rollback Can Drift from Persisted Conversation State
 
 - Fragile: `GmailSendService+OptimisticUpdates` mutates conversation date,
-  snippet, and archive state, keeps the optimistic graph unsaved until success,
-  then failure cleanup only deletes or marks the message. `OutboundSendMutationTracker`
-  is in-memory only.
+  snippet, and archive state, keeps the optimistic graph unsaved until success.
+  Done 2026-04-26: failure cleanup now recomputes or restores affected
+  conversation rollups. Remaining risk: `OutboundSendMutationTracker` is
+  in-memory only.
 - Production risk: failed sends can leave stale list metadata, unarchived empty
   threads, or lost failure state after relaunch.
 - User symptoms: a conversation appears delivered, revived, or reordered even
@@ -249,6 +250,7 @@ cleanup and broad rewrites.
 
 ### 3. Harden Optimistic-Send Failure Cleanup
 
+- Status: Completed 2026-04-26.
 - Why this is the right next patch: failed sends should not leave durable
   conversation-list drift.
 - Files to change:
@@ -270,13 +272,14 @@ cleanup and broad rewrites.
 
 1. Single most important refactor: create the shared sync-run coordinator for
    foreground/background sync and cursor/rollup finalization.
-2. Single best small patch: harden optimistic-send failure cleanup so failed
-   sends do not leave conversation-list drift.
+2. The optimistic-send failure cleanup patch is complete. Pick the next small
+   patch from the remaining quick wins after deciding whether to prioritize the
+   sync-run coordinator.
 
 Follow-up implementation prompt:
 
-> Implement the optimistic-send failure cleanup patch. Inspect
-> `GmailSendService+OptimisticUpdates`, `OutboundSendMutationTracker`, and
-> existing optimistic failure tests; ensure failed sends recompute or restore
-> affected conversation rollups, including optimistic unarchive and empty-thread
-> cases.
+> Implement the shared sync-run coordinator. Inspect `SyncEngine`,
+> `BackgroundSyncManager`, `BackgroundMessageProcessor`, and
+> `PendingActionsManager`; ensure foreground and background sync acquire one
+> serialized run boundary before mutating Core Data, history cursors, rollups,
+> or sync notifications.
