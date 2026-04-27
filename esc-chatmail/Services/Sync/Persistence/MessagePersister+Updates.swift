@@ -8,6 +8,7 @@ private struct MessageUpdateResult {
     let modifiedConversationID: NSManagedObjectID?
     let shouldInvalidateRenderedContent: Bool
     let participantDisplayNameUpdateEmails: [String]
+    let participantDisplayNameUpdateConversationIDs: Set<NSManagedObjectID>
 }
 
 extension MessagePersister {
@@ -35,7 +36,8 @@ extension MessagePersister {
                     didUpdate: false,
                     modifiedConversationID: nil,
                     shouldInvalidateRenderedContent: false,
-                    participantDisplayNameUpdateEmails: []
+                    participantDisplayNameUpdateEmails: [],
+                    participantDisplayNameUpdateConversationIDs: []
                 )
             }
 
@@ -44,7 +46,8 @@ extension MessagePersister {
                     didUpdate: false,
                     modifiedConversationID: nil,
                     shouldInvalidateRenderedContent: false,
-                    participantDisplayNameUpdateEmails: []
+                    participantDisplayNameUpdateEmails: [],
+                    participantDisplayNameUpdateConversationIDs: []
                 )
             }
 
@@ -84,7 +87,7 @@ extension MessagePersister {
                 existingMessage.bodyText = plainText
             }
 
-            let participantDisplayNameUpdateEmails = self.updateKnownParticipantDisplayNames(
+            let participantDisplayNameUpdate = self.updateKnownParticipantDisplayNames(
                 from: processedMessage.headers,
                 in: context
             )
@@ -203,7 +206,8 @@ extension MessagePersister {
                 didUpdate: true,
                 modifiedConversationID: modifiedConversationID,
                 shouldInvalidateRenderedContent: bodyStorageURIChanged || bodyTextChanged || snippetChanged,
-                participantDisplayNameUpdateEmails: participantDisplayNameUpdateEmails
+                participantDisplayNameUpdateEmails: participantDisplayNameUpdate.emails,
+                participantDisplayNameUpdateConversationIDs: participantDisplayNameUpdate.conversationIDs
             )
         }
 
@@ -211,12 +215,14 @@ extension MessagePersister {
             await PersonCache.shared.invalidateEntry(for: email)
         }
 
+        var modifiedConversationIDs = result.participantDisplayNameUpdateConversationIDs
         if let modifiedConversationID = result.modifiedConversationID {
-            await ModificationTracker.shared.trackModifiedConversation(
-                modifiedConversationID,
-                in: modificationTransaction
-            )
+            modifiedConversationIDs.insert(modifiedConversationID)
         }
+        await ModificationTracker.shared.trackModifiedConversations(
+            modifiedConversationIDs,
+            in: modificationTransaction
+        )
 
         if result.shouldInvalidateRenderedContent {
             await ProcessedTextCache.shared.invalidate(messageId: processedMessage.id)

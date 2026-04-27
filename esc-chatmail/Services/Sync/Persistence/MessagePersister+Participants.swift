@@ -73,8 +73,9 @@ extension MessagePersister {
     nonisolated func updateKnownParticipantDisplayNames(
         from headers: ProcessedHeaders,
         in context: NSManagedObjectContext
-    ) -> [String] {
+    ) -> (emails: [String], conversationIDs: Set<NSManagedObjectID>) {
         var invalidatedEmails = Set<String>()
+        var invalidatedConversationIDs = Set<NSManagedObjectID>()
 
         func update(email rawEmail: String, displayName rawDisplayName: String?) {
             let displayName = rawDisplayName?
@@ -102,6 +103,11 @@ extension MessagePersister {
 
                 person.displayName = displayName
                 invalidatedEmails.insert(email)
+                for participation in person.conversationParticipations ?? [] {
+                    if let conversationID = participation.conversation?.objectID {
+                        invalidatedConversationIDs.insert(conversationID)
+                    }
+                }
             } catch {
                 Log.error("Failed to update participant display name for \(email)", category: .coreData, error: error)
             }
@@ -119,6 +125,6 @@ extension MessagePersister {
             update(email: recipient.email, displayName: recipient.displayName)
         }
 
-        return Array(invalidatedEmails)
+        return (Array(invalidatedEmails), invalidatedConversationIDs)
     }
 }

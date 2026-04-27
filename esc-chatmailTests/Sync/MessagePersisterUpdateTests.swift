@@ -261,6 +261,75 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(conversation.displayName, "BONBONWHIMS")
     }
 
+    func testUpdateExistingMessage_tracksAllConversationsSharingRenamedParticipant() async throws {
+        await ModificationTracker.shared.reset()
+
+        let senderEmail = "info@bonbonwhims.com"
+        let firstConversation = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: [senderEmail]))
+            .withDisplayName("Info")
+            .build(in: context)
+        let secondConversation = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: [senderEmail]))
+            .withDisplayName("Info")
+            .build(in: context)
+        let sender = PersonBuilder.emailOnly(senderEmail, in: context)
+        addConversationParticipant(person: sender, to: firstConversation)
+        addConversationParticipant(person: sender, to: secondConversation)
+        let existingMessage = MessageBuilder()
+            .withId("bonbonwhims-shared-person-message")
+            .withThreadId("bonbonwhims-shared-person-thread")
+            .withSender(email: senderEmail, name: nil)
+            .inConversation(firstConversation)
+            .build(in: context)
+        addMessageParticipant(person: sender, kind: .from, to: existingMessage)
+        try testStack.saveViewContext()
+
+        var headers = ProcessedHeaders()
+        headers.subject = "Our Totally Spies! Collab is here"
+        headers.from = "BONBONWHIMS <\(senderEmail)>"
+        headers.to = [EmailAddress(email: "kmthau@gmail.com", displayName: "Kevin Thau")]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: existingMessage.id,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: existingMessage.snippet,
+            cleanedSnippet: existingMessage.cleanedSnippet,
+            internalDate: existingMessage.internalDate,
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: existingMessage.bodyText,
+            labelIds: [],
+            isUnread: false,
+            isNewsletter: true,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+        let transaction = await ModificationTracker.shared.beginTransaction()
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            modificationTransaction: transaction,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        let modifiedConversations = await ModificationTracker.shared.modifiedConversations(in: transaction)
+        XCTAssertEqual(modifiedConversations, Set([firstConversation.objectID, secondConversation.objectID]))
+
+        await ConversationRollupUpdater().updateRollupsForModified(
+            conversationIDs: modifiedConversations,
+            in: context,
+            myEmail: "kmthau@gmail.com"
+        )
+        XCTAssertEqual(firstConversation.displayName, "BONBONWHIMS")
+        XCTAssertEqual(secondConversation.displayName, "BONBONWHIMS")
+
+        await ModificationTracker.shared.reset()
+    }
+
     func testCreateNewMessage_sameGmThreadIdWithParticipantDrift_reusesExistingConversation() async throws {
         let threadId = "thread-join-123"
         let existingConversation = ConversationBuilder()
