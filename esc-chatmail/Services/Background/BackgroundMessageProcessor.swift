@@ -13,6 +13,10 @@ protocol BackgroundSyncMessageCoordinating: AnyObject, Sendable {
         conversationIDs: Set<NSManagedObjectID>,
         in context: NSManagedObjectContext
     ) async
+    func updateConversationDisplayNames(
+        conversationIDs: Set<NSManagedObjectID>,
+        in context: NSManagedObjectContext
+    ) async
 }
 
 extension SyncEngine: BackgroundSyncMessageCoordinating {}
@@ -136,11 +140,20 @@ final class BackgroundMessageProcessor {
                 )
             }
 
+            let trackedDisplayNameOnlyConversationIDs = await ModificationTracker.shared
+                .displayNameOnlyConversations(in: modificationTransaction)
             let modifiedConversationIDs = await ModificationTracker.shared.commitTransaction(modificationTransaction)
+            let displayNameOnlyConversationIDs = trackedDisplayNameOnlyConversationIDs.subtracting(modifiedConversationIDs)
             await syncCoordinator.updateConversationRollups(
                 conversationIDs: modifiedConversationIDs,
                 in: context
             )
+            if !displayNameOnlyConversationIDs.isEmpty {
+                await syncCoordinator.updateConversationDisplayNames(
+                    conversationIDs: displayNameOnlyConversationIDs,
+                    in: context
+                )
+            }
             if saveContext(context) {
                 await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
             } else {
@@ -272,11 +285,20 @@ final class BackgroundMessageProcessor {
                 )
             }
 
+            let trackedDisplayNameOnlyConversationIDs = await ModificationTracker.shared
+                .displayNameOnlyConversations(in: ownedTransaction!)
             let modifiedConversationIDs = await ModificationTracker.shared.commitTransaction(ownedTransaction!)
+            let displayNameOnlyConversationIDs = trackedDisplayNameOnlyConversationIDs.subtracting(modifiedConversationIDs)
             await syncCoordinator.updateConversationRollups(
                 conversationIDs: modifiedConversationIDs,
                 in: context
             )
+            if !displayNameOnlyConversationIDs.isEmpty {
+                await syncCoordinator.updateConversationDisplayNames(
+                    conversationIDs: displayNameOnlyConversationIDs,
+                    in: context
+                )
+            }
             if saveContext(context) {
                 await ModificationTracker.shared.consumeCommittedTransaction(ownedTransaction!)
             } else {

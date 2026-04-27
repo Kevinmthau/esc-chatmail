@@ -215,12 +215,19 @@ extension MessagePersister {
             await PersonCache.shared.invalidateEntry(for: email)
         }
 
-        var modifiedConversationIDs = result.participantDisplayNameUpdateConversationIDs
         if let modifiedConversationID = result.modifiedConversationID {
-            modifiedConversationIDs.insert(modifiedConversationID)
+            await ModificationTracker.shared.trackModifiedConversation(
+                modifiedConversationID,
+                in: modificationTransaction
+            )
         }
-        await ModificationTracker.shared.trackModifiedConversations(
-            modifiedConversationIDs,
+
+        var displayNameOnlyConversationIDs = result.participantDisplayNameUpdateConversationIDs
+        if let modifiedConversationID = result.modifiedConversationID {
+            displayNameOnlyConversationIDs.remove(modifiedConversationID)
+        }
+        await ModificationTracker.shared.trackDisplayNameOnlyConversations(
+            displayNameOnlyConversationIDs,
             in: modificationTransaction
         )
 

@@ -189,12 +189,21 @@ final class IncrementalSyncOrchestrator {
             }
 
             let modifiedConversations = await ModificationTracker.shared.modifiedConversations(in: modificationTransaction)
+            let trackedDisplayNameOnlyConversations = await ModificationTracker.shared
+                .displayNameOnlyConversations(in: modificationTransaction)
+            let displayNameOnlyConversations = trackedDisplayNameOnlyConversations.subtracting(modifiedConversations)
 
             // Keep historyId advancement and rollup updates in the same durable save.
             try await conversationUpdatePhase.execute(
                 input: modifiedConversations,
                 context: phaseContext
             )
+            if !displayNameOnlyConversations.isEmpty {
+                await conversationManager.updateConversationDisplayNames(
+                    conversationIDs: displayNameOnlyConversations,
+                    in: context
+                )
+            }
             progressHandler(0.99, "Saving changes...")
             try await coreDataStack.saveAsync(context: context)
             _ = await ModificationTracker.shared.commitTransaction(modificationTransaction)
@@ -297,10 +306,19 @@ final class IncrementalSyncOrchestrator {
             }
 
             let modifiedConversations = await ModificationTracker.shared.modifiedConversations(in: modificationTransaction)
+            let trackedDisplayNameOnlyConversations = await ModificationTracker.shared
+                .displayNameOnlyConversations(in: modificationTransaction)
+            let displayNameOnlyConversations = trackedDisplayNameOnlyConversations.subtracting(modifiedConversations)
 
             if !modifiedConversations.isEmpty {
                 await conversationManager.updateRollupsForModifiedConversations(
                     conversationIDs: modifiedConversations,
+                    in: context
+                )
+            }
+            if !displayNameOnlyConversations.isEmpty {
+                await conversationManager.updateConversationDisplayNames(
+                    conversationIDs: displayNameOnlyConversations,
                     in: context
                 )
             }

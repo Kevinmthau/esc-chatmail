@@ -160,6 +160,37 @@ struct ConversationRollupUpdater: Sendable {
         }
     }
 
+    /// Refreshes stored display names for selected conversations without recomputing rollups.
+    @MainActor
+    func updateDisplayNamesForConversations(
+        conversationIDs: Set<NSManagedObjectID>,
+        in context: NSManagedObjectContext,
+        myEmail: String
+    ) async {
+        guard !conversationIDs.isEmpty else { return }
+
+        await context.perform {
+            let request = Conversation.fetchRequest()
+            request.predicate = NSPredicate(format: "SELF IN %@", conversationIDs)
+            request.relationshipKeyPathsForPrefetching = [
+                "participants",
+                "participants.person"
+            ]
+
+            let conversations: [Conversation]
+            do {
+                conversations = try context.fetch(request)
+            } catch {
+                Log.error("Failed to fetch conversations for display-name update", category: .conversation, error: error)
+                return
+            }
+
+            for conversation in conversations {
+                self.updateDisplayNameOnly(for: conversation, myEmail: myEmail)
+            }
+        }
+    }
+
     // MARK: - Private Helper Methods
 
     private func logRollupSnapshot(

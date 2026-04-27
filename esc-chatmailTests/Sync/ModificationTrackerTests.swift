@@ -89,6 +89,25 @@ final class ModificationTrackerTests: XCTestCase {
         await tracker.consumeCommittedTransaction(run)
     }
 
+    func testDisplayNameOnlyConversationsStaySeparateFromRollupIDs() async throws {
+        let ids = try makeConversationIDs(count: 2)
+        let tracker = ModificationTracker.shared
+        let run = await tracker.beginTransaction()
+
+        await tracker.trackModifiedConversation(ids[0], in: run)
+        await tracker.trackDisplayNameOnlyConversations(Set([ids[1]]), in: run)
+
+        let modifiedIDs = await tracker.modifiedConversations(in: run)
+        let displayNameOnlyIDs = await tracker.displayNameOnlyConversations(in: run)
+        let committedIDs = await tracker.commitTransaction(run)
+
+        XCTAssertEqual(modifiedIDs, Set([ids[0]]))
+        XCTAssertEqual(displayNameOnlyIDs, Set([ids[1]]))
+        XCTAssertEqual(committedIDs, Set([ids[0]]))
+
+        await tracker.consumeCommittedTransaction(run)
+    }
+
     func testOverlappingRunsCannotStealEachOthersModifiedSets() async throws {
         let ids = try makeConversationIDs(count: 4)
         let tracker = ModificationTracker.shared

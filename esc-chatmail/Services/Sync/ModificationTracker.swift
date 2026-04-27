@@ -8,11 +8,25 @@ actor ModificationTracker {
         fileprivate let id: UUID
     }
 
-    private enum TransactionState {
-        case active(Set<NSManagedObjectID>)
-        case committed(Set<NSManagedObjectID>)
+    private struct ConversationModifications: Equatable {
+        var rollupIDs: Set<NSManagedObjectID>
+        var displayNameOnlyIDs: Set<NSManagedObjectID>
 
-        var modifications: Set<NSManagedObjectID> {
+        static let empty = ConversationModifications(
+            rollupIDs: [],
+            displayNameOnlyIDs: []
+        )
+
+        var trackedCount: Int {
+            rollupIDs.count + displayNameOnlyIDs.count
+        }
+    }
+
+    private enum TransactionState {
+        case active(ConversationModifications)
+        case committed(ConversationModifications)
+
+        var modifications: ConversationModifications {
             switch self {
             case .active(let modifications), .committed(let modifications):
                 modifications
@@ -30,7 +44,7 @@ actor ModificationTracker {
 
     func beginTransaction() -> Transaction {
         let transaction = Transaction(id: UUID())
-        transactions[transaction.id] = .active([])
+        transactions[transaction.id] = .active(.empty)
         Log.debug("Started modification transaction: \(transaction.id)", category: .sync)
         return transaction
     }
@@ -42,7 +56,17 @@ actor ModificationTracker {
             return []
         }
 
-        return state.modifications
+        return state.modifications.rollupIDs
+    }
+
+    /// Returns conversations that only need display-name refreshes.
+    func displayNameOnlyConversations(in transaction: Transaction) -> Set<NSManagedObjectID> {
+        guard let state = transactions[transaction.id] else {
+            Log.warning("Attempted to read display-name-only changes for unknown transaction \(transaction.id)", category: .sync)
+            return []
+        }
+
+        return state.modifications.displayNameOnlyIDs
     }
 
     /// Marks the run's modifications as ready for rollup updates after persistence succeeds.
@@ -56,13 +80,13 @@ actor ModificationTracker {
         case .active(let modifications):
             transactions[transaction.id] = .committed(modifications)
             Log.debug(
-                "Committed modification transaction \(transaction.id) with \(modifications.count) conversations",
+                "Committed modification transaction \(transaction.id) with \(modifications.trackedCount) conversations",
                 category: .sync
             )
-            return modifications
+            return modifications.rollupIDs
         case .committed(let modifications):
             Log.warning("Transaction \(transaction.id) was already committed", category: .sync)
-            return modifications
+            return modifications.rollupIDs
         }
     }
 
@@ -79,7 +103,7 @@ actor ModificationTracker {
         case .committed(let modifications):
             transactions.removeValue(forKey: transaction.id)
             Log.debug(
-                "Consumed committed transaction \(transaction.id) with \(modifications.count) conversations",
+                "Consumed committed transaction \(transaction.id) with \(modifications.trackedCount) conversations",
                 category: .sync
             )
         }
@@ -97,7 +121,7 @@ actor ModificationTracker {
         case .active(let modifications):
             transactions.removeValue(forKey: transaction.id)
             Log.debug(
-                "Rolled back modification transaction \(transaction.id) with \(modifications.count) conversations",
+                "Rolled back modification transaction \(transaction.id) with \(modifications.trackedCount) conversations",
                 category: .sync
             )
         case .committed:
@@ -120,7 +144,7 @@ actor ModificationTracker {
 
         switch state {
         case .active(var modifications):
-            modifications.insert(objectID)
+            modifications.rollupIDs.insert(objectID)
             transactions[transaction.id] = .active(modifications)
         case .committed:
             Log.warning("Attempted to track modification on committed transaction \(transaction.id)", category: .sync)
@@ -149,10 +173,30 @@ actor ModificationTracker {
 
         switch state {
         case .active(var modifications):
-            modifications.formUnion(objectIDs)
+            modifications.rollupIDs.formUnion(objectIDs)
             transactions[transaction.id] = .active(modifications)
         case .committed:
             Log.warning("Attempted to track modifications on committed transaction \(transaction.id)", category: .sync)
+        }
+    }
+
+    func trackDisplayNameOnlyConversations(
+        _ objectIDs: Set<NSManagedObjectID>,
+        in transaction: Transaction?
+    ) {
+        guard let transaction, !objectIDs.isEmpty else { return }
+
+        guard let state = transactions[transaction.id] else {
+            Log.warning("Attempted to track display-name-only changes for unknown transaction \(transaction.id)", category: .sync)
+            return
+        }
+
+        switch state {
+        case .active(var modifications):
+            modifications.displayNameOnlyIDs.formUnion(objectIDs)
+            transactions[transaction.id] = .active(modifications)
+        case .committed:
+            Log.warning("Attempted to track display-name-only changes on committed transaction \(transaction.id)", category: .sync)
         }
     }
 
@@ -163,11 +207,11 @@ actor ModificationTracker {
     }
 
     var modifiedCount: Int {
-        transactions.values.reduce(0) { $0 + $1.modifications.count }
+        transactions.values.reduce(0) { $0 + $1.modifications.trackedCount }
     }
 
     func modificationCount(in transaction: Transaction) -> Int {
-        transactions[transaction.id]?.modifications.count ?? 0
+        transactions[transaction.id]?.modifications.trackedCount ?? 0
     }
 
     var transactionCount: Int {

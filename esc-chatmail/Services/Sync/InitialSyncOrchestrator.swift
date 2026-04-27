@@ -128,11 +128,20 @@ final class InitialSyncOrchestrator {
             // Phase 5: Keep historyId and rollup updates in the same save so later syncs
             // never advance past message changes without the derived conversation state.
             let modifiedConversations = await ModificationTracker.shared.modifiedConversations(in: modificationTransaction)
+            let trackedDisplayNameOnlyConversations = await ModificationTracker.shared
+                .displayNameOnlyConversations(in: modificationTransaction)
+            let displayNameOnlyConversations = trackedDisplayNameOnlyConversations.subtracting(modifiedConversations)
 
             progressHandler(0.85, "Updating conversations...")
             if !modifiedConversations.isEmpty {
                 await conversationManager.updateRollupsForModifiedConversations(
                     conversationIDs: modifiedConversations,
+                    in: context
+                )
+            }
+            if !displayNameOnlyConversations.isEmpty {
+                await conversationManager.updateConversationDisplayNames(
+                    conversationIDs: displayNameOnlyConversations,
                     in: context
                 )
             }

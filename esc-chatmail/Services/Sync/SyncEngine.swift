@@ -196,6 +196,19 @@ final class SyncEngine: ObservableObject {
         )
     }
 
+    /// Updates conversation display names without recomputing rollup fields.
+    nonisolated func updateConversationDisplayNames(
+        conversationIDs: Set<NSManagedObjectID>,
+        in context: NSManagedObjectContext
+    ) async {
+        guard !conversationIDs.isEmpty else { return }
+
+        await conversationManager.updateConversationDisplayNames(
+            conversationIDs: conversationIDs,
+            in: context
+        )
+    }
+
     /// Prefetches label IDs for background sync
     nonisolated func prefetchLabelIdsForBackground(in context: NSManagedObjectContext) async -> Set<String> {
         return await messagePersister.prefetchLabelIds(in: context)

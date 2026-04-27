@@ -96,6 +96,19 @@ final class ConversationManager: Sendable {
         )
     }
 
+    /// Refreshes stored display names for selected conversations without touching rollup fields.
+    @MainActor
+    func updateConversationDisplayNames(
+        conversationIDs: Set<NSManagedObjectID>,
+        in context: NSManagedObjectContext
+    ) async {
+        await rollupUpdater.updateDisplayNamesForConversations(
+            conversationIDs: conversationIDs,
+            in: context,
+            myEmail: currentUserEmail()
+        )
+    }
+
     /// Updates rollups for ALL conversations - expensive O(n*m) operation.
     @MainActor
     func updateAllConversationRollups(in context: NSManagedObjectContext) async {

@@ -272,6 +272,8 @@ final class MessagePersisterUpdateTests: XCTestCase {
         let secondConversation = ConversationBuilder()
             .withParticipantHash(calculateParticipantHash(from: [senderEmail]))
             .withDisplayName("Info")
+            .withSnippet("Keep this local snippet")
+            .withLastMessageDate(Date(timeIntervalSince1970: 1_700_000_000))
             .build(in: context)
         let sender = PersonBuilder.emailOnly(senderEmail, in: context)
         addConversationParticipant(person: sender, to: firstConversation)
@@ -317,15 +319,26 @@ final class MessagePersisterUpdateTests: XCTestCase {
 
         XCTAssertTrue(didUpdate)
         let modifiedConversations = await ModificationTracker.shared.modifiedConversations(in: transaction)
-        XCTAssertEqual(modifiedConversations, Set([firstConversation.objectID, secondConversation.objectID]))
+        let trackedDisplayNameOnlyConversations = await ModificationTracker.shared
+            .displayNameOnlyConversations(in: transaction)
+        let displayNameOnlyConversations = trackedDisplayNameOnlyConversations.subtracting(modifiedConversations)
+        XCTAssertEqual(modifiedConversations, Set([firstConversation.objectID]))
+        XCTAssertEqual(displayNameOnlyConversations, Set([secondConversation.objectID]))
 
         await ConversationRollupUpdater().updateRollupsForModified(
             conversationIDs: modifiedConversations,
             in: context,
             myEmail: "kmthau@gmail.com"
         )
+        await ConversationRollupUpdater().updateDisplayNamesForConversations(
+            conversationIDs: displayNameOnlyConversations,
+            in: context,
+            myEmail: "kmthau@gmail.com"
+        )
         XCTAssertEqual(firstConversation.displayName, "BONBONWHIMS")
         XCTAssertEqual(secondConversation.displayName, "BONBONWHIMS")
+        XCTAssertEqual(secondConversation.snippet, "Keep this local snippet")
+        XCTAssertEqual(secondConversation.lastMessageDate, Date(timeIntervalSince1970: 1_700_000_000))
 
         await ModificationTracker.shared.reset()
     }

@@ -596,6 +596,7 @@ private final class MockBackgroundSyncCoordinator: @unchecked Sendable, Backgrou
     private(set) var savedMessageContextIDs: [ObjectIdentifier] = []
     private(set) var rollupContextIDs: [ObjectIdentifier] = []
     private(set) var rollupConversationIDs: [Set<NSManagedObjectID>] = []
+    private(set) var displayNameConversationIDs: [Set<NSManagedObjectID>] = []
 
     init(seedConversationObjectID: NSManagedObjectID) {
         self.seedConversationObjectID = seedConversationObjectID
@@ -639,6 +640,15 @@ private final class MockBackgroundSyncCoordinator: @unchecked Sendable, Backgrou
         lock.lock()
         rollupContextIDs.append(ObjectIdentifier(context))
         rollupConversationIDs.append(conversationIDs)
+        lock.unlock()
+    }
+
+    func updateConversationDisplayNames(
+        conversationIDs: Set<NSManagedObjectID>,
+        in context: NSManagedObjectContext
+    ) async {
+        lock.lock()
+        displayNameConversationIDs.append(conversationIDs)
         lock.unlock()
     }
 }
