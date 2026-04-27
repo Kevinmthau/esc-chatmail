@@ -700,7 +700,8 @@ struct TransactionalPreviewBuilder {
         }
 
         var dateLine: String?
-        var partyTimeLine: String?
+        var partyLine: String?
+        var timeLine: String?
 
         for line in lines {
             let normalized = normalizedText(line)
@@ -712,12 +713,16 @@ struct TransactionalPreviewBuilder {
                 dateLine = normalized
             }
 
-            if partyTimeLine == nil, looksLikeReservationPartyTimeLine(normalized) {
-                partyTimeLine = normalizedReservationPartyTimeLine(normalized)
+            if partyLine == nil, let candidate = reservationPartySize(in: normalized) {
+                partyLine = candidate
+            }
+
+            if timeLine == nil, let candidate = reservationTime(in: normalized) {
+                timeLine = candidate
             }
         }
 
-        let segments = [dateLine, partyTimeLine].compactMap { $0 }
+        let segments = [dateLine, partyLine, timeLine].compactMap { $0 }
         guard !segments.isEmpty else {
             return nil
         }
@@ -746,17 +751,26 @@ struct TransactionalPreviewBuilder {
         return nil
     }
 
-    private func looksLikeReservationPartyTimeLine(_ line: String) -> Bool {
-        let hasPartySize = line.range(
+    private func reservationPartySize(in line: String) -> String? {
+        guard let range = line.range(
             of: #"\b\d+\s+(?:guest|guests|person|people)\b"#,
             options: [.regularExpression, .caseInsensitive]
-        ) != nil
-        let hasTime = line.range(
+        ) else {
+            return nil
+        }
+
+        return normalizedReservationPartyTimeLine(String(line[range]))
+    }
+
+    private func reservationTime(in line: String) -> String? {
+        guard let range = line.range(
             of: #"\b\d{1,2}:\d{2}\s*(?:AM|PM)\b"#,
             options: [.regularExpression, .caseInsensitive]
-        ) != nil
+        ) else {
+            return nil
+        }
 
-        return hasPartySize || hasTime
+        return normalizedReservationPartyTimeLine(String(line[range]))
     }
 
     private func normalizedReservationPartyTimeLine(_ line: String) -> String {

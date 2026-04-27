@@ -156,4 +156,40 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
         XCTAssertEqual(result?.sourceLabel, "El Puma (Maximes)")
         XCTAssertEqual(result?.sourceDomain, "message.sevenrooms.com")
     }
+
+    func testBuildPreview_mergesReservationPartySizeAndTimeFromSeparateLines() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <h1>El Puma (Maximes)</h1>
+            <p>Reservation confirmed</p>
+            <p>Wednesday, April 29, 2026</p>
+            <p>4 guests</p>
+            <p>7:30 PM</p>
+        </body>
+        </html>
+        """
+        let bodyText = """
+        El Puma (Maximes)
+
+        Reservation confirmed
+
+        Wednesday, April 29, 2026
+
+        4 guests
+
+        7:30 PM
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: bodyText,
+            senderName: "El Puma (Maximes)",
+            senderEmail: "r+abc@message.sevenrooms.com",
+            subject: "Reservation confirmation for El Puma (Maximes)"
+        )
+
+        XCTAssertEqual(result?.detailLine, "Wednesday, April 29, 2026 • 4 guests • 7:30 PM")
+    }
 }

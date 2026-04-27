@@ -697,8 +697,8 @@ struct HTMLDisplayWrapper {
 
         let candidates = [
             largestLayoutWidth(in: normalizedHTML, pattern: #"<table[^>]*?\bwidth\s*=\s*["']?([0-9]{3,4})"#),
-            largestLayoutWidth(in: normalizedHTML, pattern: #"\bwidth\s*:\s*([0-9]{3,4})\s*px"#),
-            largestLayoutWidth(in: normalizedHTML, pattern: #"\bmin-width\s*:\s*([0-9]{3,4})\s*px"#)
+            largestLayoutWidth(in: normalizedHTML, pattern: #"(?:^|[;{"'=])\s*width\s*:\s*([0-9]{3,4})\s*px"#),
+            largestLayoutWidth(in: normalizedHTML, pattern: #"(?:^|[;{"'=])\s*min-width\s*:\s*([0-9]{3,4})\s*px"#)
         ].compactMap { $0 }
 
         return candidates.max()

@@ -253,6 +253,33 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertFalse(result.contains("shrink-to-fit=no"))
     }
 
+    func testWrapHTMLForDisplay_originalPurposeIgnoresResponsiveMaxWidthBreakpoints() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            .container { max-width: 600px; width: 100%; margin: 0 auto; }
+            @media only screen and (max-width: 600px) {
+                .container { width: 100% !important; }
+            }
+            @media only screen and (min-width: 600px) {
+                .container { width: 100% !important; }
+            }
+            </style>
+        </head>
+        <body>
+            <div class="container">Fluid message</div>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=600"#))
+    }
+
     func testWrapHTMLForDisplay_originalPurposeUsesFixedViewportForSevenRoomsBreakpointTemplate() {
         let html = """
         <!DOCTYPE html>
