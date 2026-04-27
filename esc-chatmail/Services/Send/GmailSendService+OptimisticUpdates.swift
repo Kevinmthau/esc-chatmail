@@ -241,17 +241,17 @@ extension GmailSendService {
             throw SendError.conversationNotFound
         }
 
-        if let activeConversation = matchingConversations.first(where: { $0.archivedAt == nil }) {
-            activeConversation.displayName = DisplayNameFormatter.formatGroupNames(recipients)
-            return activeConversation
-        }
-
-        if let archivedConversation = matchingConversations.first {
-            archivedConversation.archivedAt = nil
-            archivedConversation.hidden = false
-            archivedConversation.displayName = DisplayNameFormatter.formatGroupNames(recipients)
-            Log.debug("Un-archived conversation \(archivedConversation.id) due to optimistic new message", category: .conversation)
-            return archivedConversation
+        let routingPolicy = ConversationRoutingPolicy()
+        if let existingConversation = routingPolicy.selectParticipantHashConversation(
+            from: matchingConversations,
+            reactivateArchivedIfNeeded: true
+        ) {
+            routingPolicy.reactivateArchivedConversationIfNeeded(
+                existingConversation,
+                shouldReactivate: true
+            )
+            existingConversation.displayName = DisplayNameFormatter.formatGroupNames(recipients)
+            return existingConversation
         }
 
         let identityHeaders = recipients.map { MessageHeader(name: "To", value: $0) }

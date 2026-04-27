@@ -84,4 +84,43 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertNil(conversation.lastMessageDate)
         XCTAssertNil(conversation.snippet)
     }
+
+    func testUpdateRollups_keepsActiveConversationVisibleWhenLatestMessageIsOutgoing() throws {
+        let oldDate = Date(timeIntervalSince1970: 100)
+        let sentDate = Date(timeIntervalSince1970: 200)
+
+        let conversation = ConversationBuilder()
+            .withSnippet("Old archived incoming")
+            .withLastMessageDate(oldDate)
+            .visible()
+            .hasInboxMessages(false)
+            .build(in: context)
+
+        MessageBuilder()
+            .withId("old-received-message")
+            .withDate(oldDate)
+            .withSnippet("Old archived incoming")
+            .inConversation(conversation)
+            .build(in: context)
+
+        let sentLabel = LabelBuilder().sent().build(in: context)
+        let sentMessage = MessageBuilder()
+            .withId("latest-sent-message")
+            .withDate(sentDate)
+            .withSnippet("Latest outgoing")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        sentMessage.addToLabels(sentLabel)
+
+        try context.save()
+
+        updater.updateRollups(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertFalse(conversation.hasInbox)
+        XCTAssertNil(conversation.archivedAt)
+        XCTAssertFalse(conversation.hidden)
+        XCTAssertEqual(conversation.lastMessageDate, sentDate)
+        XCTAssertEqual(conversation.snippet, "Latest outgoing")
+    }
 }

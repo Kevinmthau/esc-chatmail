@@ -455,7 +455,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
         )
     }
 
-    func testCreateNewMessage_sentOnlyMessageInArchivedThread_doesNotReactivateConversation() async throws {
+    func testCreateNewMessage_sentOnlyMessageInArchivedThread_reactivatesConversation() async throws {
         let threadId = "thread-archived-sent-only"
         let archivedConversation = ConversationBuilder()
             .withSnippet("Old archived snippet")
@@ -499,8 +499,8 @@ final class MessagePersisterUpdateTests: XCTestCase {
             in: context
         )
 
-        XCTAssertNotNil(archivedConversation.archivedAt)
-        XCTAssertTrue(archivedConversation.hidden)
+        XCTAssertNil(archivedConversation.archivedAt)
+        XCTAssertFalse(archivedConversation.hidden)
     }
 
     func testCreateNewMessage_sameGmThreadIdBackfillsMissingParticipantHashAndReusesConversation() async throws {
@@ -557,7 +557,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
         )
     }
 
-    func testCreateNewMessage_sentOnlyMessageInParticipantFallback_doesNotReactivateConversation() async throws {
+    func testCreateNewMessage_sentOnlyMessageInParticipantFallback_reactivatesConversation() async throws {
         let participantHash = calculateParticipantHash(from: [normalizedEmail("friend@example.com")])
         let archivedConversation = ConversationBuilder()
             .withParticipantHash(participantHash)
@@ -598,8 +598,8 @@ final class MessagePersisterUpdateTests: XCTestCase {
             in: context
         )
 
-        XCTAssertNotNil(archivedConversation.archivedAt)
-        XCTAssertTrue(archivedConversation.hidden)
+        XCTAssertNil(archivedConversation.archivedAt)
+        XCTAssertFalse(archivedConversation.hidden)
 
         let fetch = Message.fetchRequest()
         fetch.predicate = NSPredicate(format: "id == %@", "sent-only-fallback-message")
@@ -660,8 +660,8 @@ final class MessagePersisterUpdateTests: XCTestCase {
 
         let conversationCount = try context.count(for: Conversation.fetchRequest())
         XCTAssertEqual(conversationCount, 1, "Sent-only sync should not spawn a new active conversation for the same Gmail thread")
-        XCTAssertNotNil(archivedConversation.archivedAt)
-        XCTAssertTrue(archivedConversation.hidden)
+        XCTAssertNil(archivedConversation.archivedAt)
+        XCTAssertFalse(archivedConversation.hidden)
 
         let fetch = Message.fetchRequest()
         fetch.predicate = NSPredicate(format: "id == %@", "sent-participant-drift-message")

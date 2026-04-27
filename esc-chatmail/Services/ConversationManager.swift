@@ -45,12 +45,11 @@ final class ConversationManager: Sendable {
 
     // MARK: - Conversation Creation
 
-    /// Finds an ACTIVE (non-archived) conversation for the given participants, or creates a new one.
+    /// Finds a conversation for the given participants, or creates a new one.
     ///
-    /// Archive-aware lookup:
-    /// 1. Look for conversations with matching participantHash WHERE archivedAt IS NULL
-    /// 2. If found, return the existing active conversation
-    /// 3. If not found (all archived or none exist), create a NEW conversation
+    /// Archive-aware lookup is owned by `ConversationRoutingPolicy`: active
+    /// conversations are always eligible, while archived conversations are only
+    /// reused when the caller's message should reactivate them.
     ///
     /// Note: This method is serialized per participantHash to prevent duplicate conversations.
     /// - Parameters:

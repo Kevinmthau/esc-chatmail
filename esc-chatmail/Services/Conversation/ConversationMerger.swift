@@ -300,39 +300,20 @@ struct ConversationMerger: Sendable {
 
     /// Merges messages and data from loser into winner.
     func merge(from loser: Conversation, into winner: Conversation) {
-        let originalWinnerLastMessageDate = winner.lastMessageDate ?? .distantPast
-        let loserLastMessageDate = loser.lastMessageDate ?? .distantPast
+        let wasPinned = winner.pinned || loser.pinned
+        let loserMessages = loser.messages ?? []
 
         // Reassign all messages from loser to winner
-        if let messages = loser.messages {
-            for message in messages {
-                message.conversation = winner
-            }
+        for message in loserMessages {
+            message.conversation = winner
         }
 
-        // Merge rollup data
-        winner.lastMessageDate = max(originalWinnerLastMessageDate, loserLastMessageDate)
-
-        if winner.snippet == nil ||
-           loserLastMessageDate > originalWinnerLastMessageDate {
-            winner.snippet = loser.snippet
-        }
-
-        winner.hasInbox = winner.hasInbox || loser.hasInbox
-        winner.inboxUnreadCount += loser.inboxUnreadCount
-
-        if let loserLatestInboxDate = loser.latestInboxDate {
-            let winnerLatestInboxDate = winner.latestInboxDate ?? .distantPast
-            winner.latestInboxDate = max(winnerLatestInboxDate, loserLatestInboxDate)
-        }
-
-        if winner.archivedAt == nil || loser.archivedAt == nil {
-            winner.archivedAt = nil
-        }
-        winner.hidden = winner.hidden && loser.hidden
+        ConversationRollupSnapshot.make(
+            from: (winner.messages ?? []).union(loserMessages)
+        ).apply(to: winner)
 
         // Preserve pinned status
-        winner.pinned = winner.pinned || loser.pinned
+        winner.pinned = wasPinned
     }
 
     private func visibilityRank(for conversation: Conversation) -> Int {

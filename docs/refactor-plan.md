@@ -185,8 +185,10 @@ cleanup and broad rewrites.
 1. Done 2026-04-26: Added a shared sync-run coordinator used by foreground and
    background sync, plus pending action processing, before sync-owned Core Data
    mutations or history cursor updates.
-2. Extract conversation routing policy and authoritative rollup snapshot
-   assignment.
+2. Done 2026-04-27: Extracted conversation routing policy and authoritative
+   rollup snapshot assignment. Sent/outgoing messages can now consistently
+   reactivate archived participant/thread matches, and merger/rollup assignment
+   derives conversation-list fields from the merged message set.
 3. Add durable optimistic-send mutation records or rollback snapshots for
    conversation state.
 4. Introduce `EmailPreviewSourceLoader` and route preview classifiers/builders
@@ -271,16 +273,16 @@ cleanup and broad rewrites.
 
 ## Recommended Next Steps
 
-1. Next architectural refactor: extract conversation routing policy and
-   authoritative rollup snapshot assignment.
+1. Next architectural refactor: add durable optimistic-send mutation records or
+   rollback snapshots for conversation state.
 2. Smaller remaining quick wins: coalesce `ProcessedTextCache.prefetch`
    cancellation, include `bodyStorageURI`/source signatures in prefetch keys, or
    snapshot participant emails for contact filtering.
 
 Follow-up implementation prompt:
 
-> Extract conversation routing policy and authoritative rollup snapshot
-> assignment. Inspect `ConversationCreationSerializer`,
-> `MessageConversationRouter`, `ConversationRollupUpdater`, and
-> `ConversationMerger`; ensure participant-hash routing, Gmail thread reuse,
-> archive reactivation, and derived rollup fields use one explicit policy.
+> Add durable optimistic-send mutation records or rollback snapshots for
+> conversation state. Inspect `GmailSendService+OptimisticUpdates`,
+> `OutboundSendMutationTracker`, and `OutboundMessageCoordinator`; ensure
+> optimistic unarchive/date/snippet changes can survive failure or relaunch and
+> restore conversation rollups deterministically.

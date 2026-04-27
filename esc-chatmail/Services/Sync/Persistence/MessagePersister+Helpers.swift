@@ -142,12 +142,10 @@ extension MessagePersister {
         }
 
         // New inbox mail should immediately reactivate hidden/archived threads.
-        if conversation.archivedAt != nil {
-            conversation.archivedAt = nil
-        }
-        if conversation.hidden {
-            conversation.hidden = false
-        }
+        ConversationRoutingPolicy().reactivateArchivedConversationIfNeeded(
+            conversation,
+            shouldReactivate: true
+        )
     }
 
     /// Applies list-critical rollup fields immediately when an existing message is updated.
@@ -181,12 +179,10 @@ extension MessagePersister {
                 conversation.latestInboxDate = message.internalDate
             }
 
-            if conversation.archivedAt != nil {
-                conversation.archivedAt = nil
-            }
-            if conversation.hidden {
-                conversation.hidden = false
-            }
+            ConversationRoutingPolicy().reactivateArchivedConversationIfNeeded(
+                conversation,
+                shouldReactivate: true
+            )
         } else if previousHadInboxLabel {
             // This message left INBOX; recompute inbox-only indicators for correctness.
             refreshConversationInboxIndicators(conversation)

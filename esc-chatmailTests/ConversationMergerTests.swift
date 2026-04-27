@@ -159,10 +159,20 @@ final class ConversationMergerTests: XCTestCase {
             .withKeyHash("winner")
             .withLastMessageDate(oldDate)
             .build(in: context)
+        MessageBuilder()
+            .withId("winner-old-message")
+            .withDate(oldDate)
+            .inConversation(winner)
+            .build(in: context)
 
         let loser = ConversationBuilder()
             .withKeyHash("loser")
             .withLastMessageDate(newDate)
+            .build(in: context)
+        MessageBuilder()
+            .withId("loser-new-message")
+            .withDate(newDate)
+            .inConversation(loser)
             .build(in: context)
 
         try testStack.saveViewContext()
@@ -182,11 +192,23 @@ final class ConversationMergerTests: XCTestCase {
             .withSnippet("Old winner snippet")
             .withLastMessageDate(oldDate)
             .build(in: context)
+        MessageBuilder()
+            .withId("winner-old-snippet-message")
+            .withDate(oldDate)
+            .withSnippet("Old winner snippet")
+            .inConversation(winner)
+            .build(in: context)
 
         let loser = ConversationBuilder()
             .withKeyHash("loser")
             .withSnippet("New loser snippet")
             .withLastMessageDate(newDate)
+            .build(in: context)
+        MessageBuilder()
+            .withId("loser-new-snippet-message")
+            .withDate(newDate)
+            .withSnippet("New loser snippet")
+            .inConversation(loser)
             .build(in: context)
 
         try testStack.saveViewContext()
@@ -218,15 +240,32 @@ final class ConversationMergerTests: XCTestCase {
     }
 
     func testMerge_combinatesUnreadCounts() throws {
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
         let winner = ConversationBuilder()
             .withKeyHash("winner")
-            .withUnreadCount(3)
             .build(in: context)
 
         let loser = ConversationBuilder()
             .withKeyHash("loser")
-            .withUnreadCount(5)
             .build(in: context)
+
+        for index in 0..<3 {
+            let message = MessageBuilder()
+                .withId("winner-unread-\(index)")
+                .unread()
+                .inConversation(winner)
+                .build(in: context)
+            message.addToLabels(inboxLabel)
+        }
+
+        for index in 0..<5 {
+            let message = MessageBuilder()
+                .withId("loser-unread-\(index)")
+                .unread()
+                .inConversation(loser)
+                .build(in: context)
+            message.addToLabels(inboxLabel)
+        }
 
         try testStack.saveViewContext()
 
@@ -236,6 +275,7 @@ final class ConversationMergerTests: XCTestCase {
     }
 
     func testMerge_preservesInboxStatus() throws {
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
         let winner = ConversationBuilder()
             .withKeyHash("winner")
             .hasInboxMessages(false)
@@ -245,6 +285,11 @@ final class ConversationMergerTests: XCTestCase {
             .withKeyHash("loser")
             .hasInboxMessages(true)
             .build(in: context)
+        let inboxMessage = MessageBuilder()
+            .withId("loser-inbox-message")
+            .inConversation(loser)
+            .build(in: context)
+        inboxMessage.addToLabels(inboxLabel)
 
         try testStack.saveViewContext()
 
@@ -256,6 +301,7 @@ final class ConversationMergerTests: XCTestCase {
     }
 
     func testMerge_reactivatesWinnerWhenLoserIsVisible() throws {
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
         let winner = ConversationBuilder()
             .withKeyHash("winner")
             .archived()
@@ -266,6 +312,11 @@ final class ConversationMergerTests: XCTestCase {
             .withKeyHash("loser")
             .visible()
             .build(in: context)
+        let inboxMessage = MessageBuilder()
+            .withId("loser-visible-inbox-message")
+            .inConversation(loser)
+            .build(in: context)
+        inboxMessage.addToLabels(inboxLabel)
 
         try testStack.saveViewContext()
 
@@ -368,6 +419,7 @@ final class ConversationMergerTests: XCTestCase {
             .withSubject("Re: Project plan")
             .inConversation(visibleConversation)
             .build(in: context)
+        visibleMessage.addToLabels(LabelBuilder().inbox().build(in: context))
 
         let archivedMessage1 = MessageBuilder()
             .withId("msg-thread-archived-1")

@@ -20,23 +20,10 @@ struct ConversationRollupUpdater: Sendable {
     func updateRollups(for conversation: Conversation, myEmail: String) {
         guard conversation.managedObjectContext != nil else { return }
         let messages = conversation.messages ?? []
+        let snapshot = ConversationRollupSnapshot.make(from: messages)
+        logRollupSnapshot(snapshot, for: conversation, totalCount: messages.count)
+        snapshot.apply(to: conversation)
 
-        // Phase 1: Filter draft messages and update metadata
-        let visibleMessages = filterVisibleMessages(messages)
-        updateLastMessageMetadata(for: conversation, from: visibleMessages)
-
-        // Phase 2: Update inbox status
-        let (inboxMessages, hasInbox) = calculateInboxStatus(from: messages)
-        let previousHasInbox = conversation.hasInbox
-        conversation.hasInbox = hasInbox
-
-        // Phase 3: Update archive state
-        updateArchiveState(for: conversation, hasInbox: hasInbox, messages: messages)
-
-        // Phase 4: Update inbox metrics
-        updateInboxMetrics(for: conversation, inboxMessages: inboxMessages, previousHasInbox: previousHasInbox, totalCount: messages.count)
-
-        // Phase 5: Update display name
         updateDisplayNameOnly(for: conversation, myEmail: myEmail)
     }
 
@@ -175,125 +162,16 @@ struct ConversationRollupUpdater: Sendable {
 
     // MARK: - Private Helper Methods
 
-    /// Filters out mailbox states that should not drive visible thread metadata.
-    private func filterVisibleMessages(_ messages: Set<Message>) -> [Message] {
-        messages.filter { message in
-            guard let labels = message.labels else { return true }
-            let excludedLabelIDs = MessagePersister.excludedMailboxLabelIDs
-            return !labels.contains { excludedLabelIDs.contains($0.id) }
-        }
-    }
-
-    /// Updates last message date and snippet from sorted messages.
-    private func updateLastMessageMetadata(for conversation: Conversation, from visibleMessages: [Message]) {
-        let sortedMessages = visibleMessages.sorted { $0.internalDate < $1.internalDate }
-        if let latestMessage = sortedMessages.last {
-            conversation.lastMessageDate = latestMessage.internalDate
-            conversation.snippet = latestMessage.conversationPreviewText
-        } else {
-            conversation.lastMessageDate = nil
-            conversation.snippet = nil
-        }
-    }
-
-    /// Calculates inbox status from all messages.
-    /// Returns tuple of (inbox messages array, hasInbox flag).
-    private func calculateInboxStatus(from messages: Set<Message>) -> ([Message], Bool) {
-        var inboxMessages: [Message] = []
-
-        for message in messages {
-            if let labels = message.labels {
-                let labelIds = labels.map { $0.id }
-                let hasInbox = labelIds.contains("INBOX")
-                if hasInbox {
-                    inboxMessages.append(message)
-                }
-                Log.diagnostic(
-                    .conversationRollups,
-                    "Message \(message.id): labels=\(labelIds), hasINBOX=\(hasInbox)",
-                    category: .conversation
-                )
-            } else {
-                Log.warning("Message \(message.id): could not read labels (labels nil)", category: .conversation)
-            }
-        }
-
-        return (inboxMessages, !inboxMessages.isEmpty)
-    }
-
-    /// Updates archive state based on inbox status.
-    /// CRITICAL: Handles archive/un-archive transitions.
-    /// Sent-only conversations (user initiated, no replies yet) are NOT auto-archived.
-    private func updateArchiveState(for conversation: Conversation, hasInbox: Bool, messages: Set<Message>) {
-        // Check if this is a sent-only conversation (user initiated, no replies yet)
-        // Note: We check both SENT label AND isFromMe because optimistic messages
-        // may not have the SENT label yet (it gets added when Gmail returns the message)
-        let hasSentOrFromMeMessages = messages.contains { message in
-            message.isFromMe || (message.labels?.contains { $0.id == "SENT" } ?? false)
-        }
-        let hasReceivedMessages = messages.contains { message in
-            !message.isFromMe
-        }
-        let isSentOnlyConversation = hasSentOrFromMeMessages && !hasReceivedMessages && !hasInbox
-
-        if hasInbox && conversation.archivedAt != nil {
-            // Un-archive: At least one message is back in inbox
-            conversation.archivedAt = nil
-            conversation.hidden = false
-            Log.diagnostic(
-                .conversationRollups,
-                "Conversation \(conversation.id.uuidString): UN-ARCHIVED (hasInbox=true, archivedAt->nil)",
-                category: .conversation
-            )
-        } else if !hasInbox && conversation.archivedAt == nil && !isSentOnlyConversation {
-            // Archive only if:
-            // - No INBOX messages AND
-            // - Not a sent-only conversation (awaiting reply)
-            conversation.archivedAt = Date()
-            conversation.hidden = true
-            Log.diagnostic(
-                .conversationRollups,
-                "Conversation \(conversation.id.uuidString): ARCHIVED (hasInbox=false, archivedAt set)",
-                category: .conversation
-            )
-        } else if isSentOnlyConversation && conversation.archivedAt == nil {
-            Log.diagnostic(
-                .conversationRollups,
-                "Conversation \(conversation.id.uuidString): KEPT VISIBLE (sent-only, awaiting reply)",
-                category: .conversation
-            )
-        }
-
-        // Keep hidden state in sync with archive state (for backward compatibility)
-        // But don't hide sent-only conversations
-        if hasInbox && conversation.hidden {
-            conversation.hidden = false
-        } else if !hasInbox && !conversation.hidden && !isSentOnlyConversation {
-            conversation.hidden = true
-        }
-    }
-
-    /// Updates inbox-related metrics (unread count, latest inbox date).
-    private func updateInboxMetrics(
+    private func logRollupSnapshot(
+        _ snapshot: ConversationRollupSnapshot,
         for conversation: Conversation,
-        inboxMessages: [Message],
-        previousHasInbox: Bool,
         totalCount: Int
     ) {
-        let hasInbox = !inboxMessages.isEmpty
         Log.diagnostic(
             .conversationRollups,
-            "Conversation \(conversation.id.uuidString): hasInbox=\(hasInbox) (was \(previousHasInbox)), inboxMsgCount=\(inboxMessages.count), totalMsgCount=\(totalCount), hidden=\(conversation.hidden)",
+            "Conversation \(conversation.id.uuidString): hasInbox=\(snapshot.hasInbox), unread=\(snapshot.inboxUnreadCount), totalMsgCount=\(totalCount), hidden=\(conversation.hidden)",
             category: .conversation
         )
-
-        conversation.inboxUnreadCount = Int32(inboxMessages.filter { $0.isUnread }.count)
-
-        if let latestInboxMessage = inboxMessages.max(by: { $0.internalDate < $1.internalDate }) {
-            conversation.latestInboxDate = latestInboxMessage.internalDate
-        } else {
-            conversation.latestInboxDate = nil
-        }
     }
 
     /// Updates only the stored display name from participants, excluding the current user.

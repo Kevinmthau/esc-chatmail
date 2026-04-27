@@ -32,30 +32,34 @@ actor ConversationCreationSerializer {
         // Use NSManagedObjectID (which is Sendable) to avoid capturing non-Sendable Conversation
         // Use Result type since context.perform can't throw
         let result: Result<NSManagedObjectID, Error> = await context.perform {
-            // Look for ANY conversation with these participants (including archived)
-            // This ensures replies to sent messages join the existing conversation
+            let routingPolicy = ConversationRoutingPolicy()
+
+            // Look for existing conversations with these participants. Active
+            // conversations are always eligible; archived conversations are only
+            // reused when the caller's message should reactivate them.
             // Use includesPendingChanges = false to query the persistent store directly,
             // bypassing any in-memory changes that might not reflect other contexts' saves
             let request = Conversation.fetchRequest()
             request.predicate = NSPredicate(format: "participantHash == %@", participantHash)
-            request.fetchLimit = 1
+            request.fetchBatchSize = 10
             request.includesPendingChanges = false  // Query persistent store, not just in-memory
 
-            let existing: Conversation?
+            let matchingConversations: [Conversation]
             do {
-                existing = try context.fetch(request).first
+                matchingConversations = try context.fetch(request)
             } catch {
                 Log.error("Failed to fetch existing conversation for participantHash", category: .coreData, error: error)
-                existing = nil
+                matchingConversations = []
             }
 
-            if let existing = existing {
-                // If the conversation was archived, un-archive it (new message reactivates it)
-                if reactivateArchivedIfNeeded, existing.archivedAt != nil {
-                    existing.archivedAt = nil
-                    existing.hidden = false
-                    Log.debug("Un-archived conversation \(existing.id) due to new message", category: .conversation)
-                }
+            if let existing = routingPolicy.selectParticipantHashConversation(
+                from: matchingConversations,
+                reactivateArchivedIfNeeded: reactivateArchivedIfNeeded
+            ) {
+                routingPolicy.reactivateArchivedConversationIfNeeded(
+                    existing,
+                    shouldReactivate: reactivateArchivedIfNeeded
+                )
                 return .success(existing.objectID)
             }
 

@@ -15,15 +15,18 @@ final class MessageConversationRouter {
     }
 
     private let conversationManager: ConversationManager
+    private let routingPolicy: ConversationRoutingPolicy
     private let forwardingDetector: @Sendable (_ subject: String?, _ contentCandidates: [String?]) -> Bool
 
     init(
         conversationManager: ConversationManager = ConversationManager(),
+        routingPolicy: ConversationRoutingPolicy = ConversationRoutingPolicy(),
         forwardingDetector: @escaping @Sendable (_ subject: String?, _ contentCandidates: [String?]) -> Bool = { subject, candidates in
             ForwardingHeuristics.indicatesForwarding(subject: subject, contentCandidates: candidates)
         }
     ) {
         self.conversationManager = conversationManager
+        self.routingPolicy = routingPolicy
         self.forwardingDetector = forwardingDetector
     }
 
@@ -32,7 +35,10 @@ final class MessageConversationRouter {
         myAliases: Set<String>,
         in context: NSManagedObjectContext
     ) async throws -> NSManagedObjectID {
-        let shouldReactivateConversation = processedMessage.labelIds.contains("INBOX")
+        let shouldReactivateConversation = routingPolicy.shouldReactivateArchivedConversation(
+            labelIDs: processedMessage.labelIds,
+            isFromMe: processedMessage.headers.isFromMe
+        )
 
         let identity = conversationManager.createConversationIdentity(
             from: processedMessage.headers,
@@ -86,6 +92,7 @@ final class MessageConversationRouter {
     ) async -> NSManagedObjectID? {
         guard !gmThreadId.isEmpty else { return nil }
         let forwardingDetector = self.forwardingDetector
+        let routingPolicy = self.routingPolicy
 
         return await context.perform {
             let request = Message.fetchRequest()
@@ -148,10 +155,10 @@ final class MessageConversationRouter {
                     )
                 }
 
-                if reactivateArchivedIfNeeded, existingConversation.archivedAt != nil {
-                    existingConversation.archivedAt = nil
-                    existingConversation.hidden = false
-                }
+                routingPolicy.reactivateArchivedConversationIfNeeded(
+                    existingConversation,
+                    shouldReactivate: reactivateArchivedIfNeeded
+                )
 
                 return existingConversation.objectID
             } catch {
