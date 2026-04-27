@@ -700,10 +700,11 @@ struct TransactionalPreviewBuilder {
         }
 
         var dateLine: String?
+        var dateLineIndex: Int?
         var partyLine: String?
-        var timeLine: String?
+        var partyLineIndex: Int?
 
-        for line in lines {
+        for (index, line) in lines.enumerated() {
             let normalized = normalizedText(line)
             guard !normalized.isEmpty else {
                 continue
@@ -711,13 +712,30 @@ struct TransactionalPreviewBuilder {
 
             if dateLine == nil, looksLikeDate(normalized) {
                 dateLine = normalized
+                dateLineIndex = index
             }
 
             if partyLine == nil, let candidate = reservationPartySize(in: normalized) {
                 partyLine = candidate
+                partyLineIndex = index
+            }
+        }
+
+        var timeLine: String?
+        for (index, line) in lines.enumerated() {
+            let normalized = normalizedText(line)
+            guard !normalized.isEmpty else {
+                continue
             }
 
-            if timeLine == nil, let candidate = reservationTime(in: normalized) {
+            if timeLine == nil,
+               let candidate = reservationTime(in: normalized),
+               isReservationTimeLine(
+                index: index,
+                line: normalized,
+                dateLineIndex: dateLineIndex,
+                partyLineIndex: partyLineIndex
+               ) {
                 timeLine = candidate
             }
         }
@@ -760,6 +778,27 @@ struct TransactionalPreviewBuilder {
         }
 
         return normalizedReservationPartyTimeLine(String(line[range]))
+    }
+
+    private func isReservationTimeLine(index: Int, line: String, dateLineIndex: Int?, partyLineIndex: Int?) -> Bool {
+        if index == dateLineIndex || index == partyLineIndex {
+            return true
+        }
+
+        guard isStandaloneReservationTime(line) else {
+            return false
+        }
+
+        return [dateLineIndex, partyLineIndex]
+            .compactMap { $0 }
+            .contains { abs($0 - index) == 1 }
+    }
+
+    private func isStandaloneReservationTime(_ line: String) -> Bool {
+        line.range(
+            of: #"^\d{1,2}:\d{2}\s*(?:AM|PM)$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
     }
 
     private func reservationTime(in line: String) -> String? {

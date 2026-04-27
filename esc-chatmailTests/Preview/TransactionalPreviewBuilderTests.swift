@@ -192,4 +192,49 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
 
         XCTAssertEqual(result?.detailLine, "Wednesday, April 29, 2026 • 4 guests • 7:30 PM")
     }
+
+    func testBuildPreview_doesNotPairReservationPartyWithLaterCancellationTime() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <h1>El Puma (Maximes)</h1>
+            <p>Reservation confirmed</p>
+            <p>Wednesday, April 29, 2026</p>
+            <p>4 guests</p>
+            <p>Your reservation number is 3YZ29N45F4PW</p>
+            <p>Cancellations made after Tuesday, April 28, 2026</p>
+            <p>5:00 PM</p>
+            <p>will be charged a fee.</p>
+        </body>
+        </html>
+        """
+        let bodyText = """
+        El Puma (Maximes)
+
+        Reservation confirmed
+
+        Wednesday, April 29, 2026
+
+        4 guests
+
+        Your reservation number is 3YZ29N45F4PW
+
+        Cancellations made after Tuesday, April 28, 2026
+
+        5:00 PM
+
+        will be charged a fee.
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: bodyText,
+            senderName: "El Puma (Maximes)",
+            senderEmail: "r+abc@message.sevenrooms.com",
+            subject: "Reservation confirmation for El Puma (Maximes)"
+        )
+
+        XCTAssertEqual(result?.detailLine, "Wednesday, April 29, 2026 • 4 guests")
+    }
 }
