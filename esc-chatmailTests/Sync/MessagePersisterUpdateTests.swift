@@ -206,6 +206,61 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertFalse(saved.isUnread)
     }
 
+    func testUpdateExistingMessage_enrichesParticipantDisplayNameFromRefreshedFromHeader() async throws {
+        let senderEmail = "info@bonbonwhims.com"
+        let conversation = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: [senderEmail]))
+            .withDisplayName("Info")
+            .build(in: context)
+        let sender = PersonBuilder.emailOnly(senderEmail, in: context)
+        addConversationParticipant(person: sender, to: conversation)
+        let existingMessage = MessageBuilder()
+            .withId("bonbonwhims-message")
+            .withThreadId("bonbonwhims-thread")
+            .withSender(email: senderEmail, name: nil)
+            .inConversation(conversation)
+            .build(in: context)
+        addMessageParticipant(person: sender, kind: .from, to: existingMessage)
+
+        var headers = ProcessedHeaders()
+        headers.subject = "Our Totally Spies! Collab is here"
+        headers.from = "BONBONWHIMS <\(senderEmail)>"
+        headers.to = [EmailAddress(email: "kmthau@gmail.com", displayName: "Kevin Thau")]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: existingMessage.id,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: existingMessage.snippet,
+            cleanedSnippet: existingMessage.cleanedSnippet,
+            internalDate: existingMessage.internalDate,
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: existingMessage.bodyText,
+            labelIds: [],
+            isUnread: false,
+            isNewsletter: true,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertEqual(existingMessage.senderName, "BONBONWHIMS")
+        XCTAssertEqual(sender.displayName, "BONBONWHIMS")
+
+        ConversationRollupUpdater().updateDisplayNameOnly(
+            for: conversation,
+            myEmail: "kmthau@gmail.com"
+        )
+        XCTAssertEqual(conversation.displayName, "BONBONWHIMS")
+    }
+
     func testCreateNewMessage_sameGmThreadIdWithParticipantDrift_reusesExistingConversation() async throws {
         let threadId = "thread-join-123"
         let existingConversation = ConversationBuilder()
@@ -1160,6 +1215,22 @@ final class MessagePersisterUpdateTests: XCTestCase {
 
         AttachmentPaths.deleteFile(at: savedAttachment.localURL)
         AttachmentPaths.deleteFile(at: savedAttachment.previewURL)
+    }
+
+    private func addConversationParticipant(person: Person, to conversation: Conversation) {
+        let participant = ConversationParticipant(context: context)
+        participant.id = UUID()
+        participant.participantRole = .normal
+        participant.person = person
+        participant.conversation = conversation
+    }
+
+    private func addMessageParticipant(person: Person, kind: ParticipantKind, to message: Message) {
+        let participant = MessageParticipant(context: context)
+        participant.id = UUID()
+        participant.participantKind = kind
+        participant.person = person
+        participant.message = message
     }
 }
 

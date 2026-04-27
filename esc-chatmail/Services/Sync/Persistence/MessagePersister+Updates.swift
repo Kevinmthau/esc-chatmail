@@ -7,6 +7,7 @@ private struct MessageUpdateResult {
     let didUpdate: Bool
     let modifiedConversationID: NSManagedObjectID?
     let shouldInvalidateRenderedContent: Bool
+    let participantDisplayNameUpdateEmails: [String]
 }
 
 extension MessagePersister {
@@ -33,7 +34,8 @@ extension MessagePersister {
                 return MessageUpdateResult(
                     didUpdate: false,
                     modifiedConversationID: nil,
-                    shouldInvalidateRenderedContent: false
+                    shouldInvalidateRenderedContent: false,
+                    participantDisplayNameUpdateEmails: []
                 )
             }
 
@@ -41,7 +43,8 @@ extension MessagePersister {
                 return MessageUpdateResult(
                     didUpdate: false,
                     modifiedConversationID: nil,
-                    shouldInvalidateRenderedContent: false
+                    shouldInvalidateRenderedContent: false,
+                    participantDisplayNameUpdateEmails: []
                 )
             }
 
@@ -80,6 +83,11 @@ extension MessagePersister {
             if let plainText = processedMessage.plainTextBody, !plainText.isEmpty {
                 existingMessage.bodyText = plainText
             }
+
+            let participantDisplayNameUpdateEmails = self.updateKnownParticipantDisplayNames(
+                from: processedMessage.headers,
+                in: context
+            )
 
             if let savedBodyStorageURI {
                 existingMessage.bodyStorageURI = savedBodyStorageURI
@@ -194,8 +202,13 @@ extension MessagePersister {
             return MessageUpdateResult(
                 didUpdate: true,
                 modifiedConversationID: modifiedConversationID,
-                shouldInvalidateRenderedContent: bodyStorageURIChanged || bodyTextChanged || snippetChanged
+                shouldInvalidateRenderedContent: bodyStorageURIChanged || bodyTextChanged || snippetChanged,
+                participantDisplayNameUpdateEmails: participantDisplayNameUpdateEmails
             )
+        }
+
+        for email in result.participantDisplayNameUpdateEmails {
+            await PersonCache.shared.invalidateEntry(for: email)
         }
 
         if let modifiedConversationID = result.modifiedConversationID {

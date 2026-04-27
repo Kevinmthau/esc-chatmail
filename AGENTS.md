@@ -58,6 +58,16 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 bash Scripts/run-tests.sh -only-testing 'esc-chatmailTests/<SuiteName>'
 ```
 
+Participant and conversation-rollup adjacent suites:
+
+```bash
+DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4.1' \
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+bash Scripts/run-tests.sh \
+  -only-testing 'esc-chatmailTests/ParticipantLoaderTests' \
+  -only-testing 'esc-chatmailTests/ConversationRollupUpdaterTests'
+```
+
 Notes:
 - `Scripts/run-tests.sh` uses scheme `esc-chatmail`, configuration `Debug`, and skips `PerformanceRegressionTests` unless `--performance` is passed.
 - If `DESTINATION` is omitted, the script picks the first available iPhone simulator. Prefer setting it explicitly for reproducible Codex runs and to avoid failures when a previously documented runtime is no longer installed.

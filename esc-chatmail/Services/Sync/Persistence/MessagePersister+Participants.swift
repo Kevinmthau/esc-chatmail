@@ -66,4 +66,59 @@ extension MessagePersister {
             Log.error("Failed to create participant for message \(message.id): \(error)", category: .coreData)
         }
     }
+
+    /// Enriches existing participant Person records with better display names from refreshed headers.
+    /// Existing messages are updated without recreating MessageParticipant rows, so this keeps
+    /// conversation titles aligned with the latest `From` / recipient header names.
+    nonisolated func updateKnownParticipantDisplayNames(
+        from headers: ProcessedHeaders,
+        in context: NSManagedObjectContext
+    ) -> [String] {
+        var invalidatedEmails = Set<String>()
+
+        func update(email rawEmail: String, displayName rawDisplayName: String?) {
+            let displayName = rawDisplayName?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let displayName,
+                  !displayName.isEmpty,
+                  !EmailNormalizer.isHideMyEmailDisplayName(displayName) else {
+                return
+            }
+
+            let email = EmailNormalizer.normalize(rawEmail)
+            guard !email.isEmpty else { return }
+
+            let request = Person.fetchRequest()
+            request.predicate = NSPredicate(format: "email == %@", email)
+            request.fetchLimit = 1
+            request.fetchBatchSize = 1
+
+            do {
+                guard let person = try context.fetch(request).first,
+                      EmailNormalizer.isBetterDisplayName(displayName, than: person.displayName),
+                      person.displayName != displayName else {
+                    return
+                }
+
+                person.displayName = displayName
+                invalidatedEmails.insert(email)
+            } catch {
+                Log.error("Failed to update participant display name for \(email)", category: .coreData, error: error)
+            }
+        }
+
+        if let from = headers.from,
+           let email = EmailNormalizer.extractEmail(from: from) {
+            update(
+                email: email,
+                displayName: EmailNormalizer.extractDisplayName(from: from)
+            )
+        }
+
+        for recipient in headers.to + headers.cc + headers.bcc {
+            update(email: recipient.email, displayName: recipient.displayName)
+        }
+
+        return Array(invalidatedEmails)
+    }
 }
