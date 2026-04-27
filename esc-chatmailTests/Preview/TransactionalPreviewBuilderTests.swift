@@ -193,6 +193,48 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
         XCTAssertEqual(result?.detailLine, "Wednesday, April 29, 2026 • 4 guests • 7:30 PM")
     }
 
+    func testBuildPreview_mergesReservationTimeFromAdjacentLabelledLine() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <h1>El Puma (Maximes)</h1>
+            <p>Reservation confirmed</p>
+            <p>Wednesday, April 29, 2026</p>
+            <p>4 guests</p>
+            <p>Reservation time 7:30 PM</p>
+        </body>
+        </html>
+        """
+        for timeLine in ["Time: 7:30 PM", "Reservation time 7:30 PM"] {
+            let bodyText = """
+            El Puma (Maximes)
+
+            Reservation confirmed
+
+            Wednesday, April 29, 2026
+
+            4 guests
+
+            \(timeLine)
+            """
+
+            let result = sut.buildPreview(
+                canonicalHTML: html,
+                bodyText: bodyText,
+                senderName: "El Puma (Maximes)",
+                senderEmail: "r+abc@message.sevenrooms.com",
+                subject: "Reservation confirmation for El Puma (Maximes)"
+            )
+
+            XCTAssertEqual(
+                result?.detailLine,
+                "Wednesday, April 29, 2026 • 4 guests • 7:30 PM",
+                "Expected labelled time line to merge: \(timeLine)"
+            )
+        }
+    }
+
     func testBuildPreview_doesNotPairReservationPartyWithLaterCancellationTime() {
         let html = """
         <!DOCTYPE html>

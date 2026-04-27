@@ -785,7 +785,7 @@ struct TransactionalPreviewBuilder {
             return true
         }
 
-        guard isStandaloneReservationTime(line) else {
+        guard isStandaloneReservationTime(line) || isLabelledReservationTime(line) else {
             return false
         }
 
@@ -797,6 +797,13 @@ struct TransactionalPreviewBuilder {
     private func isStandaloneReservationTime(_ line: String) -> Bool {
         line.range(
             of: #"^\d{1,2}:\d{2}\s*(?:AM|PM)$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
+    private func isLabelledReservationTime(_ line: String) -> Bool {
+        line.range(
+            of: #"^(?:reservation\s+)?time(?:\s*:\s*|\s+)\d{1,2}:\d{2}\s*(?:AM|PM)$"#,
             options: [.regularExpression, .caseInsensitive]
         ) != nil
     }
