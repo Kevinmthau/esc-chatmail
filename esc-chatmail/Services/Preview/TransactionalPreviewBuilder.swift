@@ -121,6 +121,10 @@ struct TransactionalPreviewBuilder {
             return truncate(cleanedSnippet, limit: 90)
         }
 
+        if let reservationSubtitle = resolvedReservationSubtitle(from: lines, excluding: excludedValues) {
+            return reservationSubtitle
+        }
+
         for line in lines {
             guard let candidate = normalizedCandidateLine(line) else {
                 continue
@@ -162,6 +166,12 @@ struct TransactionalPreviewBuilder {
             return status
         }
 
+        let combinedText = lines.joined(separator: "\n").lowercased()
+        if combinedText.contains("reservation has been cancelled") ||
+            combinedText.contains("reservation has been canceled") {
+            return "Cancelled"
+        }
+
         return nil
     }
 
@@ -189,6 +199,10 @@ struct TransactionalPreviewBuilder {
 
         if !segments.isEmpty {
             return truncate(segments.prefix(2).joined(separator: " • "), limit: 90)
+        }
+
+        if let reservationDetailLine = resolvedReservationDetailLine(from: lines) {
+            return reservationDetailLine
         }
 
         let excludedValues = normalizedSet(from: excluded + [status])
@@ -679,6 +693,79 @@ struct TransactionalPreviewBuilder {
         return lowercased.range(of: #"^\d{1,2}/\d{1,2}/\d{2,4}$"#, options: .regularExpression) != nil
     }
 
+    private func resolvedReservationDetailLine(from lines: [String]) -> String? {
+        let combinedText = lines.joined(separator: "\n").lowercased()
+        guard combinedText.contains("reservation") else {
+            return nil
+        }
+
+        var dateLine: String?
+        var partyTimeLine: String?
+
+        for line in lines {
+            let normalized = normalizedText(line)
+            guard !normalized.isEmpty else {
+                continue
+            }
+
+            if dateLine == nil, looksLikeDate(normalized) {
+                dateLine = normalized
+            }
+
+            if partyTimeLine == nil, looksLikeReservationPartyTimeLine(normalized) {
+                partyTimeLine = normalizedReservationPartyTimeLine(normalized)
+            }
+        }
+
+        let segments = [dateLine, partyTimeLine].compactMap { $0 }
+        guard !segments.isEmpty else {
+            return nil
+        }
+
+        return truncate(segments.joined(separator: " • "), limit: 90)
+    }
+
+    private func resolvedReservationSubtitle(from lines: [String], excluding excludedValues: Set<String>) -> String? {
+        for line in lines {
+            guard let candidate = normalizedCandidateLine(line) else {
+                continue
+            }
+
+            let comparable = normalizedComparableText(candidate)
+            let isReservationCancellation =
+                comparable.contains("reservation has been cancelled") ||
+                comparable.contains("reservation has been canceled")
+            guard !excludedValues.contains(comparable),
+                  isReservationCancellation else {
+                continue
+            }
+
+            return truncate(candidate, limit: 90)
+        }
+
+        return nil
+    }
+
+    private func looksLikeReservationPartyTimeLine(_ line: String) -> Bool {
+        let hasPartySize = line.range(
+            of: #"\b\d+\s+(?:guest|guests|person|people)\b"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+        let hasTime = line.range(
+            of: #"\b\d{1,2}:\d{2}\s*(?:AM|PM)\b"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+
+        return hasPartySize || hasTime
+    }
+
+    private func normalizedReservationPartyTimeLine(_ line: String) -> String {
+        normalizedText(line)
+            .replacingOccurrences(of: "⋅", with: " • ")
+            .replacingOccurrences(of: "·", with: " • ")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+    }
+
     private func isDetailFieldLabel(_ text: String) -> Bool {
         canonicalDetailField(for: text) != nil || normalizedComparableText(text) == "transaction details"
     }
@@ -856,6 +943,7 @@ struct TransactionalPreviewBuilder {
         guard !shouldSkipLine(normalized),
               !shouldStopAtFooter(normalized),
               !isDetailFieldLabel(normalized),
+              !genericTransactionTitleValues.contains(lowercased),
               !ignoredTitlePatterns.contains(where: lowercased.contains) else {
             return false
         }
@@ -923,6 +1011,12 @@ private let transactionalTitlePatterns = [
     "deposit confirmation",
     "order confirmed",
     "order confirmation",
+    "reservation confirmation",
+    "reservation cancellation",
+    "reservation has been canceled",
+    "reservation has been cancelled",
+    "reservation canceled",
+    "reservation cancelled",
     "security alert",
     "security notice",
     "receipt",
@@ -981,6 +1075,8 @@ private let transactionalPromotionalPatterns = promotionalTransactionLineHints +
 
 private let transactionalFooterStopPatterns = [
     "for any issues",
+    "experience by",
+    "you are receiving this email",
     "help center",
     "customer support",
     "see our disclosures",
@@ -1000,6 +1096,10 @@ private let ignoredTitlePatterns = [
     "disclosures",
     "licenses",
     "venmo rt"
+]
+
+private let genericTransactionTitleValues: Set<String> = [
+    "payment complete"
 ]
 
 private let detailFieldPatterns: [String: [String]] = [

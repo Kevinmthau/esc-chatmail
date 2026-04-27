@@ -106,4 +106,54 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
         XCTAssertEqual(result?.amount, "$100.00")
         XCTAssertEqual(result?.subtitle, "For sushi dinner")
     }
+
+    func testBuildPreview_extractsReservationCancellationDetails() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <h1>El Puma (Maximes)</h1>
+            <p>This reservation has been cancelled. We look forward to assisting you with future reservations.</p>
+            <p>Mr. Kevin Thau</p>
+            <p>Wednesday, April 29, 2026</p>
+            <p>4 guests · 7:30 PM</p>
+            <p>Your reservation number is 3YZ29N45F4PW</p>
+            <p>experience by</p>
+            <p>You are receiving this email from El Puma (Maximes) through SevenRooms</p>
+        </body>
+        </html>
+        """
+        let bodyText = """
+        El Puma (Maximes)
+
+        This reservation has been cancelled. We look forward to assisting you with future reservations.
+
+        Mr. Kevin Thau
+
+        Wednesday, April 29, 2026
+
+        4 guests  ·  7:30 PM
+
+        Your reservation number is 3YZ29N45F4PW
+
+        experience by
+
+        You are receiving this email from El Puma (Maximes) through SevenRooms
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: bodyText,
+            senderName: "El Puma (Maximes)",
+            senderEmail: "r+abc@message.sevenrooms.com",
+            subject: "Reservation Cancellation for El Puma (Maximes) | Mr. Kevin Thau on 4/29/26"
+        )
+
+        XCTAssertEqual(result?.title, "Reservation Cancellation for El Puma (Maximes) | Mr. Kevin Thau on 4/29/26")
+        XCTAssertEqual(result?.subtitle, "This reservation has been cancelled. We look forward to assisting you with future...")
+        XCTAssertEqual(result?.status, "Cancelled")
+        XCTAssertEqual(result?.detailLine, "Wednesday, April 29, 2026 • 4 guests • 7:30 PM")
+        XCTAssertEqual(result?.sourceLabel, "El Puma (Maximes)")
+        XCTAssertEqual(result?.sourceDomain, "message.sevenrooms.com")
+    }
 }

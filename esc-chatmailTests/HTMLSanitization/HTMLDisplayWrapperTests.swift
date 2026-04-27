@@ -221,7 +221,7 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertTrue(result.contains("color: rgb(54,55,55);"))
     }
 
-    func testWrapHTMLForDisplay_originalPurposeDoesNotDisableShrinkToFit() {
+    func testWrapHTMLForDisplay_originalPurposeUsesFixedViewportForLegacyLayout() {
         let html = """
         <!DOCTYPE html>
         <html>
@@ -233,7 +233,53 @@ final class HTMLDisplayWrapperTests: XCTestCase {
 
         let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
 
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=600, initial-scale=1.0, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains("shrink-to-fit=no"))
+    }
+
+    func testWrapHTMLForDisplay_originalPurposeUsesDeviceViewportWithoutFixedLayout() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <p>Fluid message</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
         XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains("shrink-to-fit=no"))
+    }
+
+    func testWrapHTMLForDisplay_originalPurposeUsesFixedViewportForSevenRoomsBreakpointTemplate() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            @media all and (min-width:376px) {
+                .email-bg-size { width: 600px !important; }
+                .card-size { width: 480px !important; }
+            }
+            @media all and (max-width:375px) {
+                .email-bg-size { width: 375px !important; }
+                .card-size { width: 355px !important; }
+            }
+            </style>
+        </head>
+        <body>
+            <table width="600" class="email-bg-size">
+                <tr><td><table class="card-size" style="width: 480px;"><tr><td>Reservation</td></tr></table></td></tr>
+            </table>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=600, initial-scale=1.0, user-scalable=yes">"#))
         XCTAssertFalse(result.contains("shrink-to-fit=no"))
     }
 

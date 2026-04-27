@@ -241,6 +241,13 @@ private let callToActionPatterns = [
 private let transactionalPatterns = [
     "receipt",
     "invoice",
+    "reservation number",
+    "reservation has been canceled",
+    "reservation has been cancelled",
+    "reservation confirmation",
+    "reservation cancellation",
+    "reservation canceled",
+    "reservation cancelled",
     "order confirmation",
     "order confirmed",
     "tracking number",

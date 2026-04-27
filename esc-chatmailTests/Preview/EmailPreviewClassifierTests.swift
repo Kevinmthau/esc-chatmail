@@ -102,6 +102,30 @@ final class EmailPreviewClassifierTests: XCTestCase {
         XCTAssertTrue(result.signals.contains(.transactionalKeywords))
     }
 
+    func testClassifyReservationCancellation_returnsTransactional() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <p>This reservation has been cancelled. We look forward to assisting you with future reservations.</p>
+            <p>Wednesday, April 29, 2026</p>
+            <p>4 guests · 7:30 PM</p>
+            <p>Your reservation number is 3YZ29N45F4PW</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.classify(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderEmail: "r+abc@message.sevenrooms.com",
+            subject: "Reservation Cancellation for El Puma (Maximes) | Mr. Kevin Thau on 4/29/26"
+        )
+
+        XCTAssertEqual(result.kind, .transactional)
+        XCTAssertTrue(result.signals.contains(.transactionalKeywords))
+    }
+
     func testClassifyConversationalHTML_returnsPersonToPerson() {
         let html = """
         <div>Hi Kevin,</div>

@@ -9,6 +9,9 @@ enum HTMLDisplayPurpose: String, CaseIterable, Sendable {
 /// Designed to match Apple Mail's rendering behavior as closely as possible
 struct HTMLDisplayWrapper {
     private static let appleMailFallbackFontStack = "-apple-system, BlinkMacSystemFont, \"Helvetica Neue\", Helvetica, Arial, sans-serif"
+    private static let minimumFixedLayoutViewportWidth = 376
+    private static let maximumFixedLayoutViewportWidth = 900
+
     private struct RootTypographyDetector {
         // swiftlint:disable:next force_try
         private static let rootElementTagRegex = try! NSRegularExpression(
@@ -494,7 +497,7 @@ struct HTMLDisplayWrapper {
         let shouldApplyDarkModeFallbackText = isDarkMode && displayPurpose == .preview
         let originalColorSchemeHead = colorSchemeHead(for: displayPurpose)
         let originalColorSchemeCSS = colorSchemeCSS(for: displayPurpose)
-        let viewportMetaTag = viewportMetaTag(for: displayPurpose)
+        let viewportMetaTag = viewportMetaTag(for: displayPurpose, html: html)
 
         let injectedHead = """
         \(viewportMetaTag)
@@ -565,7 +568,7 @@ struct HTMLDisplayWrapper {
         let shouldApplyDarkModeFallbackText = isDarkMode && displayPurpose == .preview
         let originalColorSchemeHead = colorSchemeHead(for: displayPurpose)
         let originalColorSchemeCSS = colorSchemeCSS(for: displayPurpose)
-        let viewportMetaTag = viewportMetaTag(for: displayPurpose)
+        let viewportMetaTag = viewportMetaTag(for: displayPurpose, html: html)
 
         return """
         <!DOCTYPE html>
@@ -672,15 +675,55 @@ struct HTMLDisplayWrapper {
         return "color-scheme: light;"
     }
 
-    private func viewportMetaTag(for displayPurpose: HTMLDisplayPurpose) -> String {
+    private func viewportMetaTag(for displayPurpose: HTMLDisplayPurpose, html: String) -> String {
         switch displayPurpose {
         case .preview:
             return #"<meta name="viewport" content="width=device-width, initial-scale=1.0, shrink-to-fit=no, user-scalable=yes">"#
         case .original:
             // Some marketing emails still rely on WebKit's initial shrink-to-fit behavior for
             // legacy fixed-width sections that intentionally do not stack on mobile.
+            if let fixedWidth = originalFixedLayoutViewportWidth(in: html) {
+                return #"<meta name="viewport" content="width=\#(fixedWidth), initial-scale=1.0, user-scalable=yes">"#
+            }
             return #"<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">"#
         }
+    }
+
+    private func originalFixedLayoutViewportWidth(in html: String) -> Int? {
+        let normalizedHTML = html
+            .replacingOccurrences(of: "=\r\n", with: "")
+            .replacingOccurrences(of: "=\n", with: "")
+            .replacingOccurrences(of: "=3D", with: "=", options: .caseInsensitive)
+
+        let candidates = [
+            largestLayoutWidth(in: normalizedHTML, pattern: #"<table[^>]*?\bwidth\s*=\s*["']?([0-9]{3,4})"#),
+            largestLayoutWidth(in: normalizedHTML, pattern: #"\bwidth\s*:\s*([0-9]{3,4})\s*px"#),
+            largestLayoutWidth(in: normalizedHTML, pattern: #"\bmin-width\s*:\s*([0-9]{3,4})\s*px"#)
+        ].compactMap { $0 }
+
+        return candidates.max()
+    }
+
+    private func largestLayoutWidth(in html: String, pattern: String) -> Int? {
+        guard let regex = try? NSRegularExpression(
+            pattern: pattern,
+            options: [.caseInsensitive, .dotMatchesLineSeparators]
+        ) else {
+            return nil
+        }
+
+        let range = NSRange(html.startIndex..<html.endIndex, in: html)
+        return regex.matches(in: html, range: range).compactMap { match -> Int? in
+            guard match.numberOfRanges > 1,
+                  let valueRange = Range(match.range(at: 1), in: html),
+                  let width = Int(html[valueRange]),
+                  width >= Self.minimumFixedLayoutViewportWidth,
+                  width <= Self.maximumFixedLayoutViewportWidth else {
+                return nil
+            }
+
+            return width
+        }.max()
     }
 
     private func linkCSS(for displayPurpose: HTMLDisplayPurpose) -> String {
