@@ -24,6 +24,69 @@ final class SyncUIState: ObservableObject {
     }
 }
 
+// MARK: - Sync Timing
+
+struct SyncPhaseTimer {
+    let name: String
+    let startedAt: CFAbsoluteTime
+}
+
+struct SyncPhaseTiming: Equatable {
+    let name: String
+    let duration: TimeInterval
+    let detail: String?
+}
+
+struct SyncTimingRecorder {
+    let syncType: String
+    let runStartedAt: CFAbsoluteTime
+    private(set) var phases: [SyncPhaseTiming] = []
+
+    init(syncType: String, runStartedAt: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()) {
+        self.syncType = syncType
+        self.runStartedAt = runStartedAt
+    }
+
+    func start(_ name: String) -> SyncPhaseTimer {
+        SyncPhaseTimer(name: name, startedAt: CFAbsoluteTimeGetCurrent())
+    }
+
+    mutating func finish(_ timer: SyncPhaseTimer, detail: String? = nil) {
+        let duration = CFAbsoluteTimeGetCurrent() - timer.startedAt
+        phases.append(SyncPhaseTiming(name: timer.name, duration: duration, detail: detail))
+
+        var message = "Sync timing [\(syncType)] \(timer.name)=\(Self.formatDuration(duration))"
+        if let detail, !detail.isEmpty {
+            message += " \(detail)"
+        }
+        Log.info(message, category: .sync)
+    }
+
+    func finishRun(outcome: String) {
+        let totalDuration = CFAbsoluteTimeGetCurrent() - runStartedAt
+        Log.info(summary(totalDuration: totalDuration, outcome: outcome), category: .sync)
+    }
+
+    func summary(totalDuration: TimeInterval, outcome: String) -> String {
+        let phaseSummary = phases
+            .map { phase in
+                var value = "\(phase.name)=\(Self.formatDuration(phase.duration))"
+                if let detail = phase.detail, !detail.isEmpty {
+                    value += " \(detail)"
+                }
+                return value
+            }
+            .joined(separator: ", ")
+
+        let suffix = phaseSummary.isEmpty ? "" : "; \(phaseSummary)"
+        return "Sync timing [\(syncType)] total=\(Self.formatDuration(totalDuration)) outcome=\(outcome)\(suffix)"
+    }
+
+    static func formatDuration(_ duration: TimeInterval) -> String {
+        String(format: "%.3fs", duration)
+    }
+}
+
 // MARK: - Core Data Performance Logger
 
 /// Logger for tracking Core Data performance metrics

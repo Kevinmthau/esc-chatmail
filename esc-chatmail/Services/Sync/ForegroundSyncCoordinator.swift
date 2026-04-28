@@ -107,6 +107,20 @@ final class ForegroundSyncCoordinator {
         }
     }
 
+    func performUserInitiatedSync(reason: String) async {
+        let outcome = await requestSyncIfNeeded(reason: reason, force: true)
+        guard outcome == .alreadyInProgress else { return }
+
+        log.debug("User-initiated sync waiting for active run (\(reason))")
+        await syncEngine.waitForCurrentSyncToComplete()
+        guard !Task.isCancelled else { return }
+
+        let retryOutcome = await requestSyncIfNeeded(reason: "\(reason)AfterCurrent", force: true)
+        if retryOutcome == .alreadyInProgress {
+            log.debug("Skipping queued user-initiated sync (\(reason)): sync still active")
+        }
+    }
+
     private func startPeriodicLoopIfNeeded() -> Bool {
         guard periodicTask == nil else { return false }
 

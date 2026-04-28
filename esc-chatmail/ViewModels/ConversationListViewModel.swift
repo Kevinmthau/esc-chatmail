@@ -40,6 +40,7 @@ final class ConversationListViewModel: ObservableObject {
 
     let messageActions: MessageActions
     let syncEngine: SyncEngine
+    let foregroundSyncCoordinator: ForegroundSyncCoordinator
     let conversationManager: ConversationManager
 
     private let storage: StorageDependencies
@@ -61,6 +62,7 @@ final class ConversationListViewModel: ObservableObject {
         let resolvedDependencies = dependencies ?? Dependencies.shared.makeConversationListDependencies()
         self.storage = resolvedDependencies.storage
         self.syncEngine = resolvedDependencies.syncEngine
+        self.foregroundSyncCoordinator = resolvedDependencies.foregroundSyncCoordinator
         self.messageActions = resolvedDependencies.messaging.makeMessageActions()
         self.conversationManager = resolvedDependencies.conversationManager
 
@@ -118,11 +120,7 @@ final class ConversationListViewModel: ObservableObject {
     // MARK: - Sync Operations
 
     func performSync() async {
-        do {
-            try await syncEngine.performIncrementalSync()
-        } catch {
-            Log.error("Sync error", category: .sync, error: error)
-        }
+        await foregroundSyncCoordinator.performUserInitiatedSync(reason: "pullToRefresh")
     }
 
     // MARK: - Selection Operations (Delegate to Service)

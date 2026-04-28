@@ -89,23 +89,44 @@ final class IncrementalSyncOrchestrator {
         initialSyncFallback: @escaping () async throws -> Void
     ) async throws -> IncrementalSyncResult {
         let syncStartTime = Date()
+        var timing = SyncTimingRecorder(syncType: "incremental")
 
         // Fetch account data
-        let accountData = try await messagePersister.fetchAccountData()
+        let accountTimer = timing.start("accountData")
+        let accountData: AccountData?
+        do {
+            accountData = try await messagePersister.fetchAccountData()
+        } catch {
+            timing.finish(accountTimer, detail: "failed=true")
+            timing.finishRun(outcome: "failed error=\(error.localizedDescription)")
+            throw error
+        }
+        timing.finish(accountTimer, detail: "hasHistory=\(accountData?.historyId != nil)")
 
         guard let accountData = accountData, let historyId = accountData.historyId else {
             log.info("No account/historyId found, performing initial sync")
-            try await initialSyncFallback()
+            let fallbackTimer = timing.start("initialSyncFallback")
+            do {
+                try await initialSyncFallback()
+                timing.finish(fallbackTimer)
+                timing.finishRun(outcome: "initialFallback")
+            } catch {
+                timing.finish(fallbackTimer, detail: "failed=true")
+                timing.finishRun(outcome: "failed error=\(error.localizedDescription)")
+                throw error
+            }
             return IncrementalSyncResult(newMessagesCount: 0, labelChangesProcessed: 0, hadWarnings: false)
         }
 
         log.info("Starting incremental sync with historyId: \(historyId)")
+        let setupTimer = timing.start("setup")
         myAliases = await AliasManager.shared.getAliases(from: coreDataStack.newBackgroundContext())
 
         let context = coreDataStack.newBackgroundContext()
         let modificationTransaction = await ModificationTracker.shared.beginTransaction()
         var committedModificationTransaction = false
         let labelIds = await messagePersister.prefetchLabelIds(in: context)
+        timing.finish(setupTimer, detail: "aliases=\(myAliases.count) labels=\(labelIds.count)")
 
         let historyCollectionContext = SyncPhaseContext(
             coreDataContext: context,
@@ -119,9 +140,14 @@ final class IncrementalSyncOrchestrator {
 
         do {
             // Phase 1: Collect all history
+            let historyTimer = timing.start("historyCollection")
             let historyResult = try await historyCollectionPhase.execute(
                 input: historyId,
                 context: historyCollectionContext
+            )
+            timing.finish(
+                historyTimer,
+                detail: "records=\(historyResult.records.count) newMessages=\(historyResult.newMessageIds.count) truncated=\(historyResult.wasTruncated)"
             )
             let allowsIntermediateContextSaves = Self.allowsIntermediateContextSaves(
                 for: historyResult.records
@@ -138,21 +164,30 @@ final class IncrementalSyncOrchestrator {
             )
 
             // Phase 2: Fetch new messages
+            let messageFetchTimer = timing.start("messageFetch")
             let fetchResult = try await messageFetchPhase.execute(
                 input: historyResult.newMessageIds,
                 context: phaseContext
             )
+            timing.finish(
+                messageFetchTimer,
+                detail: "success=\(fetchResult.successfulCount) failed=\(fetchResult.failedIds.count)"
+            )
 
             // Phase 3: Process label changes (AFTER messages are fetched)
+            let labelTimer = timing.start("labelProcessing")
             try await labelProcessingPhase.execute(
                 input: historyResult.records,
                 context: phaseContext
             )
+            timing.finish(labelTimer, detail: "records=\(historyResult.records.count)")
             if phaseContext.allowsIntermediateContextSaves {
+                let flushTimer = timing.start("intermediateFlush")
                 try await flushUIVisibleChangesIfNeeded(
                     in: context,
                     stageDescription: "label processing"
                 )
+                timing.finish(flushTimer)
             } else {
                 log.debug("Deferring mid-sync flush because history includes destructive local changes")
             }
@@ -162,6 +197,7 @@ final class IncrementalSyncOrchestrator {
             // BUT run reconciliation periodically (every hour) to catch label drift
             let noHistoryChanges = historyResult.records.isEmpty && historyResult.newMessageIds.isEmpty
             let shouldSkipReconciliation = noHistoryChanges && !shouldForceReconciliation()
+            let reconciliationTimer = timing.start("reconciliation")
             try await reconciliationPhase.execute(
                 input: ReconciliationInput(skipLabelReconciliation: shouldSkipReconciliation),
                 context: phaseContext
@@ -169,9 +205,11 @@ final class IncrementalSyncOrchestrator {
             if !shouldSkipReconciliation {
                 recordReconciliationTime()
             }
+            timing.finish(reconciliationTimer, detail: "skipLabels=\(shouldSkipReconciliation)")
 
             // Don't advance historyId if history collection was truncated - we need to
             // retry from the same point to get remaining pages
+            let historyAdvanceTimer = timing.start("historyAdvanceDecision")
             let shouldAdvance: Bool
             if historyResult.wasTruncated {
                 log.info("History was truncated - will retry from same point on next sync")
@@ -182,6 +220,7 @@ final class IncrementalSyncOrchestrator {
                     latestHistoryId: historyResult.latestHistoryId
                 )
             }
+            timing.finish(historyAdvanceTimer, detail: "advance=\(shouldAdvance)")
 
             let historyIdToSave = shouldAdvance ? historyResult.latestHistoryId : nil
             if let historyIdToSave {
@@ -194,6 +233,7 @@ final class IncrementalSyncOrchestrator {
             let displayNameOnlyConversations = trackedDisplayNameOnlyConversations.subtracting(modifiedConversations)
 
             // Keep historyId advancement and rollup updates in the same durable save.
+            let conversationTimer = timing.start("conversationUpdates")
             try await conversationUpdatePhase.execute(
                 input: modifiedConversations,
                 context: phaseContext
@@ -204,14 +244,25 @@ final class IncrementalSyncOrchestrator {
                     in: context
                 )
             }
+            timing.finish(
+                conversationTimer,
+                detail: "rollups=\(modifiedConversations.count) names=\(displayNameOnlyConversations.count)"
+            )
             progressHandler(0.99, "Saving changes...")
+            let saveTimer = timing.start("save")
             try await coreDataStack.saveAsync(context: context)
+            timing.finish(saveTimer)
             _ = await ModificationTracker.shared.commitTransaction(modificationTransaction)
             committedModificationTransaction = true
             await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
 
             NotificationCenter.default.post(name: .syncCompleted, object: nil)
+            let cleanupTimer = timing.start("incrementalCleanup")
             await dataCleanupService.runIncrementalCleanup()
+            timing.finish(cleanupTimer)
+            timing.finishRun(
+                outcome: "success newMessages=\(fetchResult.successfulCount) labelRecords=\(historyResult.records.count) warnings=\(fetchResult.hasFailures)"
+            )
 
             return IncrementalSyncResult(
                 newMessagesCount: fetchResult.successfulCount,
@@ -225,14 +276,25 @@ final class IncrementalSyncOrchestrator {
             }
             if case .historyIdExpired = error {
                 log.warning("History ID expired, performing recovery sync")
-                try await performHistoryRecoverySync(progressHandler: progressHandler)
+                let recoveryTimer = timing.start("historyRecovery")
+                do {
+                    try await performHistoryRecoverySync(progressHandler: progressHandler)
+                    timing.finish(recoveryTimer)
+                    timing.finishRun(outcome: "historyRecovery warnings=true")
+                } catch {
+                    timing.finish(recoveryTimer, detail: "failed=true")
+                    timing.finishRun(outcome: "failed error=\(error.localizedDescription)")
+                    throw error
+                }
                 return IncrementalSyncResult(newMessagesCount: 0, labelChangesProcessed: 0, hadWarnings: true)
             }
+            timing.finishRun(outcome: "failed error=\(error.localizedDescription)")
             throw error
         } catch {
             if !committedModificationTransaction {
                 await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
             }
+            timing.finishRun(outcome: "failed error=\(error.localizedDescription)")
             throw error
         }
     }

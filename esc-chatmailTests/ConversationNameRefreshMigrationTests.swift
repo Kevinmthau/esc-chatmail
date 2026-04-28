@@ -205,6 +205,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
             ),
             messaging: Dependencies.shared.makeMessagingDependencies(),
             syncEngine: Dependencies.shared.syncEngine,
+            foregroundSyncCoordinator: Dependencies.shared.foregroundSyncCoordinator,
             conversationManager: makeConversationManager(currentUserEmail: currentUserEmail),
             makeConversationSearchService: { searchService },
             makeConversationSelectionService: { selectionService },

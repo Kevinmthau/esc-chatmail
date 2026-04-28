@@ -152,6 +152,48 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
         XCTAssertEqual(syncEngine.waitForCurrentSyncToCompleteCalls, 2)
         XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 2)
     }
+
+    func testPerformUserInitiatedSync_waitsForActiveRunThenForcesRefresh() async {
+        let syncEngine = MockForegroundSyncEngine()
+        let authSession = MockForegroundSyncAuthSession(isAuthenticated: true)
+        let coordinator = ForegroundSyncCoordinator(
+            syncEngine: syncEngine,
+            authSession: authSession,
+            periodicInterval: 3_600,
+            minimumSyncGap: 90
+        )
+
+        defer { coordinator.stop(reason: "testCleanup") }
+
+        let forcedRefreshStarted = expectation(description: "forced refresh started")
+        let syncCanFinish = AsyncGate()
+        syncEngine.requestResults = [.alreadyInProgress, .started]
+        syncEngine.onWaitForCurrentSyncToComplete = {
+            await syncCanFinish.wait()
+        }
+        syncEngine.onTriggerIncrementalSyncIfPossible = {
+            let result = syncEngine.requestResults.removeFirst()
+            if result == .started {
+                forcedRefreshStarted.fulfill()
+            }
+            return result
+        }
+
+        let refreshTask = Task {
+            await coordinator.performUserInitiatedSync(reason: "pullToRefresh")
+        }
+
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(syncEngine.waitForCurrentSyncToCompleteCalls, 1)
+        XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 1)
+
+        await syncCanFinish.open()
+        await fulfillment(of: [forcedRefreshStarted], timeout: 1.0)
+        await refreshTask.value
+
+        XCTAssertEqual(syncEngine.waitForCurrentSyncToCompleteCalls, 1)
+        XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 2)
+    }
 }
 
 @MainActor

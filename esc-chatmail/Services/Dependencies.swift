@@ -245,6 +245,7 @@ final class Dependencies: ObservableObject {
             storage: makeStorageDependencies(),
             messaging: makeMessagingDependencies(),
             syncEngine: syncEngine,
+            foregroundSyncCoordinator: foregroundSyncCoordinator,
             conversationManager: conversationManager,
             makeConversationSearchService: { [self] in
                 makeConversationSearchService()

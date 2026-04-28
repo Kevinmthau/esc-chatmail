@@ -70,6 +70,7 @@ final class InitialSyncOrchestrator {
         progressHandler: @escaping (Double, String) -> Void
     ) async throws -> InitialSyncResult {
         let syncStartTime = CFAbsoluteTimeGetCurrent()
+        var timing = SyncTimingRecorder(syncType: "initial", runStartedAt: syncStartTime)
         let signpostID = performanceLogger.beginOperation("InitialSync")
 
         let context = coreDataStack.newBackgroundContext()
@@ -77,11 +78,14 @@ final class InitialSyncOrchestrator {
         var committedModificationTransaction = false
 
         // Run one-time cleanup
+        let cleanupTimer = timing.start("initialCleanup")
         await runInitialCleanupIfNeeded(in: context)
+        timing.finish(cleanupTimer)
 
         do {
             // Phase 1: Fetch profile and aliases
             progressHandler(0.05, "Fetching profile...")
+            let profileTimer = timing.start("profileAndAliases")
             let (profile, aliases) = try await fetchProfileAndAliases()
             myAliases = Set(([profile.emailAddress] + aliases).map(normalizedEmail))
             await AliasManager.shared.setAliases(myAliases)
@@ -91,18 +95,22 @@ final class InitialSyncOrchestrator {
                 in: context,
                 saveHistoryId: false
             )
+            timing.finish(profileTimer, detail: "aliases=\(aliases.count)")
 
             // Phase 2: Fetch and save labels
             progressHandler(0.1, "Fetching labels...")
+            let labelsTimer = timing.start("labels")
             let labels = try await messageFetcher.listLabels()
             await messagePersister.saveLabels(labels, in: context)
             let labelIds = await messagePersister.prefetchLabelIds(in: context)
+            timing.finish(labelsTimer, detail: "labels=\(labels.count)")
 
             // Phase 3: Fetch and process messages
             progressHandler(0.2, "Fetching messages...")
             let query = buildInitialSyncQuery()
             log.info("Initial sync query: \(query)")
 
+            let messagesTimer = timing.start("fetchAndProcessMessages")
             let result = try await fetchAndProcessMessages(
                 query: query,
                 labelIds: labelIds,
@@ -113,10 +121,15 @@ final class InitialSyncOrchestrator {
                     progressHandler(0.2 + progress * 0.65, status)
                 }
             )
+            timing.finish(
+                messagesTimer,
+                detail: "processed=\(result.totalProcessed) success=\(result.successfulCount) failed=\(result.failedIds.count)"
+            )
 
             log.info("Initial sync: processed=\(result.totalProcessed), success=\(result.successfulCount), failed=\(result.failedIds.count)")
 
             // Phase 4: Handle failures and determine historyId advancement
+            let completionTimer = timing.start("completionPolicy")
             let syncCompletedWithWarnings = await handleSyncCompletion(
                 result: result,
                 profile: profile,
@@ -124,6 +137,7 @@ final class InitialSyncOrchestrator {
                 modificationTransaction: modificationTransaction,
                 context: context
             )
+            timing.finish(completionTimer, detail: "warnings=\(syncCompletedWithWarnings)")
 
             // Phase 5: Keep historyId and rollup updates in the same save so later syncs
             // never advance past message changes without the derived conversation state.
@@ -133,6 +147,7 @@ final class InitialSyncOrchestrator {
             let displayNameOnlyConversations = trackedDisplayNameOnlyConversations.subtracting(modifiedConversations)
 
             progressHandler(0.85, "Updating conversations...")
+            let conversationTimer = timing.start("conversationUpdates")
             if !modifiedConversations.isEmpty {
                 await conversationManager.updateRollupsForModifiedConversations(
                     conversationIDs: modifiedConversations,
@@ -145,9 +160,15 @@ final class InitialSyncOrchestrator {
                     in: context
                 )
             }
+            timing.finish(
+                conversationTimer,
+                detail: "rollups=\(modifiedConversations.count) names=\(displayNameOnlyConversations.count)"
+            )
 
             progressHandler(0.95, "Saving changes...")
+            let saveTimer = timing.start("save")
             try await coreDataStack.saveAsync(context: context)
+            timing.finish(saveTimer)
             log.info("Initial sync save successful")
 
             _ = await ModificationTracker.shared.commitTransaction(modificationTransaction)
@@ -171,6 +192,9 @@ final class InitialSyncOrchestrator {
                 conversationsUpdated: conversationCount,
                 totalDuration: totalDuration
             )
+            timing.finishRun(
+                outcome: "success messages=\(result.successfulCount) conversations=\(conversationCount) warnings=\(syncCompletedWithWarnings)"
+            )
 
             return InitialSyncResult(
                 messagesProcessed: result.successfulCount,
@@ -184,6 +208,7 @@ final class InitialSyncOrchestrator {
                 await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
             }
             performanceLogger.endOperation("InitialSync", signpostID: signpostID)
+            timing.finishRun(outcome: "failed error=\(error.localizedDescription)")
             log.error("Initial sync failed", error: error)
             throw error
         }
