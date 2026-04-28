@@ -52,7 +52,7 @@ struct EmailContentSection: View {
             routes.append(.transactional)
         }
 
-        if classificationKind == .newsletter || isNewsletter {
+        if classificationKind == .newsletter || (isNewsletter && !isForwardedEmail) {
             routes.append(.newsletter)
         }
 
