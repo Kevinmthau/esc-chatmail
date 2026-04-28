@@ -153,6 +153,45 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
         XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 2)
     }
 
+    func testPerformUserInitiatedSync_waitsForStartedRefreshToComplete() async {
+        let syncEngine = MockForegroundSyncEngine()
+        let authSession = MockForegroundSyncAuthSession(isAuthenticated: true)
+        let coordinator = ForegroundSyncCoordinator(
+            syncEngine: syncEngine,
+            authSession: authSession,
+            periodicInterval: 3_600,
+            minimumSyncGap: 90
+        )
+
+        defer { coordinator.stop(reason: "testCleanup") }
+
+        let syncCanFinish = AsyncGate()
+        let refreshCompletion = AsyncFlag()
+        syncEngine.onWaitForCurrentSyncToComplete = {
+            await syncCanFinish.wait()
+        }
+        syncEngine.onTriggerIncrementalSyncIfPossible = {
+            return .started
+        }
+
+        let refreshTask = Task {
+            await coordinator.performUserInitiatedSync(reason: "pullToRefresh")
+            await refreshCompletion.set()
+        }
+
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(syncEngine.waitForCurrentSyncToCompleteCalls, 1)
+        XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 1)
+        let completedBeforeSyncFinished = await refreshCompletion.get()
+        XCTAssertFalse(completedBeforeSyncFinished)
+
+        await syncCanFinish.open()
+        await refreshTask.value
+
+        let completedAfterSyncFinished = await refreshCompletion.get()
+        XCTAssertTrue(completedAfterSyncFinished)
+    }
+
     func testPerformUserInitiatedSync_waitsForActiveRunThenForcesRefresh() async {
         let syncEngine = MockForegroundSyncEngine()
         let authSession = MockForegroundSyncAuthSession(isAuthenticated: true)
@@ -191,7 +230,7 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
         await fulfillment(of: [forcedRefreshStarted], timeout: 1.0)
         await refreshTask.value
 
-        XCTAssertEqual(syncEngine.waitForCurrentSyncToCompleteCalls, 1)
+        XCTAssertEqual(syncEngine.waitForCurrentSyncToCompleteCalls, 2)
         XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 2)
     }
 }
@@ -251,5 +290,17 @@ private actor AsyncGate {
         let pendingContinuations = continuations
         continuations.removeAll()
         pendingContinuations.forEach { $0.resume() }
+    }
+}
+
+private actor AsyncFlag {
+    private var value = false
+
+    func get() -> Bool {
+        value
+    }
+
+    func set() {
+        value = true
     }
 }

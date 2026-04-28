@@ -27,13 +27,13 @@ The repo uses:
 Use the Xcode app toolchain explicitly. Plain `xcodebuild` will otherwise point at Command Line Tools on this machine.
 
 Default simulator:
-- `platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4.1`
-- `26.4` is not currently installed on this machine. If a command still references `26.4`, update it to `26.4.1`.
+- `platform=iOS Simulator,name=iPhone 17 Pro`
+- Xcode 26.4.1 currently registers the iOS simulator runtime as `26.4`; do not pin `OS=26.4.1`.
 
 Exact build command:
 
 ```bash
-DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4.1' \
+DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro' \
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 xcodebuild build \
   -project esc-chatmail.xcodeproj \
@@ -45,7 +45,7 @@ xcodebuild build \
 Exact full test command:
 
 ```bash
-DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4.1' \
+DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro' \
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 bash Scripts/run-tests.sh
 ```
@@ -53,7 +53,7 @@ bash Scripts/run-tests.sh
 Narrow test pattern:
 
 ```bash
-DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4.1' \
+DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro' \
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 bash Scripts/run-tests.sh -only-testing 'esc-chatmailTests/<SuiteName>'
 ```
@@ -61,7 +61,7 @@ bash Scripts/run-tests.sh -only-testing 'esc-chatmailTests/<SuiteName>'
 Participant and conversation-rollup adjacent suites:
 
 ```bash
-DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4.1' \
+DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro' \
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 bash Scripts/run-tests.sh \
   -only-testing 'esc-chatmailTests/ParticipantLoaderTests' \

@@ -24,14 +24,14 @@ Run the real `esc-chatmail` project with the correct toolchain, scheme, and simu
    - If `xcodebuild` says the active developer directory is Command Line Tools, this was omitted.
 
 3. Prefer an explicit simulator destination.
-   - Default simulator: `platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4.1`
-   - `26.4` is not currently installed on this machine. If a command still references `26.4`, update it to `26.4.1`.
+   - Default simulator: `platform=iOS Simulator,name=iPhone 17 Pro`
+   - Xcode 26.4.1 currently registers the iOS simulator runtime as `26.4`; do not pin `OS=26.4.1`.
    - Reason: `Scripts/run-tests.sh` otherwise picks the first available iPhone simulator, which can land on an older runtime.
 
 4. Use these commands.
 
 ```bash
-DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4.1' \
+DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro' \
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 xcodebuild build \
   -project esc-chatmail.xcodeproj \
@@ -41,7 +41,7 @@ xcodebuild build \
 ```
 
 ```bash
-DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4.1' \
+DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro' \
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 bash Scripts/run-tests.sh
 ```
@@ -50,7 +50,7 @@ bash Scripts/run-tests.sh
    - Narrow test command pattern:
 
 ```bash
-DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4.1' \
+DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro' \
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 bash Scripts/run-tests.sh -only-testing 'esc-chatmailTests/<SuiteName>'
 ```
