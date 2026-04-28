@@ -1069,6 +1069,7 @@ private let transactionalTitlePatterns = [
     "transfer confirmation",
     "deposit completed",
     "deposit confirmation",
+    "deposit declined",
     "order confirmed",
     "order confirmation",
     "reservation confirmation",
@@ -1183,7 +1184,8 @@ private let transactionalStatusPatterns = [
     "failed",
     "canceled",
     "cancelled",
-    "refunded"
+    "refunded",
+    "declined"
 ]
 
 private let months = [

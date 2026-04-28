@@ -36,6 +36,36 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
         XCTAssertEqual(result?.detailLine, "Apr 08, 2026")
     }
 
+    func testBuildPreview_extractsSingleTableDepositDeclinedNotification() {
+        let html = """
+        <table border="0" cellpadding="0" cellspacing="0" id="tblHeader">
+            <tr><td>&nbsp;</td><td bgcolor="003C71"><font color="FFFFFF"><strong>Example National Bank</strong></font></td></tr>
+            <tr><td>&nbsp;</td><td bgcolor="E3EDFF"><font color="000000"><strong>Deposit Declined</strong></font></td></tr>
+            <tr><td>&nbsp;</td><td><strong>Account Number Ending: 0039</strong></td></tr>
+            <tr><td>&nbsp;</td><td><strong>Example National Mobile Check Deposit</strong></td></tr>
+            <tr><td>&nbsp;</td><td>
+                <p>Your deposit of $10,181.90 was declined due to "Your daily deposit limit amount was exceeded".</p>
+                <p>We are sorry that we are not able to accept your deposit through Example National mobile banking.</p>
+                <p>Please do not respond to this message or send email to this address.</p>
+            </td></tr>
+        </table>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderName: "Example National Bank",
+            senderEmail: "alerts@examplebank.com",
+            subject: nil
+        )
+
+        XCTAssertEqual(result?.title, "Deposit Declined")
+        XCTAssertEqual(result?.amount, "$10,181.90")
+        XCTAssertEqual(result?.subtitle, "Account Number Ending: 0039")
+        XCTAssertEqual(result?.detailLine, "Example National Mobile Check Deposit")
+        XCTAssertEqual(result?.sourceLabel, "Example National Bank")
+    }
+
     func testBuildPreview_ignoresVenmoPromoBannerAndPrefersAvatarImage() {
         let html = """
         <!DOCTYPE html>

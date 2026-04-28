@@ -486,20 +486,18 @@ final class VirtualScrollState: ObservableObject {
     ) async -> [ChatMessageRowModel] {
         guard !messageIDs.isEmpty else { return [] }
 
-        let resolvedRows: [NSManagedObjectID: ChatMessageRowModel] = await viewContext.perform { [viewContext] in
-            let request = NSFetchRequest<Message>(entityName: "Message")
-            request.predicate = NSPredicate(format: "SELF IN %@", messageIDs)
-            request.fetchBatchSize = messageIDs.count
-            request.relationshipKeyPathsForPrefetching = ["participants", "participants.person", "attachments"]
+        let request = NSFetchRequest<Message>(entityName: "Message")
+        request.predicate = NSPredicate(format: "SELF IN %@", messageIDs)
+        request.fetchBatchSize = messageIDs.count
+        request.relationshipKeyPathsForPrefetching = ["participants", "participants.person", "attachments"]
 
-            let fetchedMessages = (try? viewContext.fetch(request)) ?? []
-            return Dictionary(
-                uniqueKeysWithValues: fetchedMessages.compactMap { message in
-                    guard !message.isDeleted else { return nil }
-                    return (message.objectID, ChatMessageRowModelMapper.map(message))
-                }
-            )
-        }
+        let fetchedMessages = (try? viewContext.fetch(request)) ?? []
+        let resolvedRows: [NSManagedObjectID: ChatMessageRowModel] = Dictionary(
+            uniqueKeysWithValues: fetchedMessages.compactMap { message in
+                guard !message.isDeleted else { return nil }
+                return (message.objectID, ChatMessageRowModelMapper.map(message))
+            }
+        )
 
         for objectID in messageIDs {
             if let row = resolvedRows[objectID] {

@@ -93,6 +93,12 @@ struct EmailPreviewClassifier {
             addSignal(.senderNoReply)
         }
 
+        if containsAny(transactionalNoReplyLanguagePatterns, in: lowercasedHTML) ||
+            containsAny(transactionalNoReplyLanguagePatterns, in: lowercasedText) {
+            transactionalScore += 8
+            addSignal(.noReplyLanguage)
+        }
+
         if metrics.tableCount >= 1 && metrics.linkCount >= 1 {
             transactionalScore += 6
         }
@@ -252,6 +258,7 @@ private let transactionalPatterns = [
     "order confirmed",
     "tracking number",
     "statement",
+    "statement is ready",
     "password reset",
     "security alert",
     "security notice",
@@ -261,6 +268,9 @@ private let transactionalPatterns = [
     "one time passcode",
     "billing",
     "account activity",
+    "account number ending",
+    "account ending in",
+    "service message",
     "you paid",
     "paid you",
     "money credited",
@@ -270,12 +280,24 @@ private let transactionalPatterns = [
     "payment completed",
     "transfer completed",
     "transfer confirmation",
+    "deposit declined",
     "deposit confirmation",
     "deposit completed",
+    "daily deposit limit",
+    "mobile check deposit",
     "transaction details",
     "transaction id",
     "payment method",
     "see transaction"
+]
+
+private let transactionalNoReplyLanguagePatterns = [
+    "do not reply",
+    "don't reply",
+    "do not respond",
+    "don't respond",
+    "please do not reply",
+    "please do not respond"
 ]
 
 private let replyChainPatterns = [

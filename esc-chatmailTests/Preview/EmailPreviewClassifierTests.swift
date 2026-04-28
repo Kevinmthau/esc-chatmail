@@ -69,6 +69,52 @@ final class EmailPreviewClassifierTests: XCTestCase {
         XCTAssertTrue(result.signals.contains(.senderNoReply))
     }
 
+    func testClassifySingleTableDepositDeclinedHTML_returnsTransactional() {
+        let html = """
+        <table border="0" cellpadding="0" cellspacing="0" id="tblHeader">
+            <tr><td>&nbsp;</td><td bgcolor="003C71"><font color="FFFFFF"><strong>Example National Bank</strong></font></td></tr>
+            <tr><td>&nbsp;</td><td bgcolor="E3EDFF"><font color="000000"><strong>Deposit Declined</strong></font></td></tr>
+            <tr><td>&nbsp;</td><td><strong>Account Number Ending: 0039</strong></td></tr>
+            <tr><td>&nbsp;</td><td><strong>Example National Mobile Check Deposit</strong></td></tr>
+            <tr><td>&nbsp;</td><td>
+                <p>Your deposit of $10,181.90 was declined due to "Your daily deposit limit amount was exceeded".</p>
+                <p>We are sorry that we are not able to accept your deposit through Example National mobile banking.</p>
+                <p>Please do not respond to this message or send email to this address.</p>
+            </td></tr>
+        </table>
+        """
+
+        let result = sut.classify(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderEmail: "alerts@examplebank.com",
+            subject: "Deposit Notification (Deposit Declined)"
+        )
+
+        XCTAssertEqual(result.kind, .transactional)
+        XCTAssertTrue(result.signals.contains(.transactionalKeywords))
+        XCTAssertTrue(result.signals.contains(.noReplyLanguage))
+    }
+
+    func testClassifyNoReplyLanguageWithoutTransactionalSignal_staysPersonToPerson() {
+        let html = """
+        <div>
+            <p>Please do not respond to this message until I send the updated itinerary.</p>
+            <p>Thanks, Alex</p>
+        </div>
+        """
+
+        let result = sut.classify(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderEmail: "alex@example.com",
+            subject: "Quick note"
+        )
+
+        XCTAssertEqual(result.kind, .personToPerson)
+        XCTAssertTrue(result.signals.contains(.noReplyLanguage))
+    }
+
     func testClassifyVenmoPaymentHTML_returnsTransactional() {
         let html = """
         <!DOCTYPE html>

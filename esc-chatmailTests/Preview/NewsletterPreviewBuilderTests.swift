@@ -422,4 +422,34 @@ final class EmailContentSectionTests: XCTestCase {
     func testShouldUseTransactionalPreviewCard_regularMessage_returnsTrue() {
         XCTAssertTrue(EmailContentSection.shouldUseTransactionalPreviewCard(isForwardedEmail: false))
     }
+
+    func testNativePreviewCardRoutes_newsletterFlagAttemptsNewsletterWhenClassifierIsConservative() {
+        let routes = EmailContentSection.nativePreviewCardRoutes(
+            isNewsletter: true,
+            isForwardedEmail: false,
+            classificationKind: .personToPerson
+        )
+
+        XCTAssertEqual(routes, [.newsletter])
+    }
+
+    func testNativePreviewCardRoutes_transactionalClassificationPrecedesNewsletterFlag() {
+        let routes = EmailContentSection.nativePreviewCardRoutes(
+            isNewsletter: true,
+            isForwardedEmail: false,
+            classificationKind: .transactional
+        )
+
+        XCTAssertEqual(routes, [.transactional, .newsletter])
+    }
+
+    func testNativePreviewCardRoutes_forwardedTransactionalSkipsTransactionalCard() {
+        let routes = EmailContentSection.nativePreviewCardRoutes(
+            isNewsletter: false,
+            isForwardedEmail: true,
+            classificationKind: .transactional
+        )
+
+        XCTAssertEqual(routes, [])
+    }
 }

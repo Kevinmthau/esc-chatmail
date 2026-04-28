@@ -18,6 +18,7 @@ enum EmailPreviewClassificationSignal: String, Equatable, Sendable {
     case manyLinks
     case senderNewsletter
     case senderNoReply
+    case noReplyLanguage
     case subjectDigest
     case transactionalKeywords
     case callToActionLanguage

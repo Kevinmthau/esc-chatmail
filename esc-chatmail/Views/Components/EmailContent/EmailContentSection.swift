@@ -40,6 +40,25 @@ struct EmailContentSection: View {
         !isForwardedEmail
     }
 
+    static func nativePreviewCardRoutes(
+        isNewsletter: Bool,
+        isForwardedEmail: Bool,
+        classificationKind: EmailPreviewKind
+    ) -> [NativePreviewCardRoute] {
+        var routes: [NativePreviewCardRoute] = []
+
+        if classificationKind == .transactional,
+           shouldUseTransactionalPreviewCard(isForwardedEmail: isForwardedEmail) {
+            routes.append(.transactional)
+        }
+
+        if classificationKind == .newsletter || isNewsletter {
+            routes.append(.newsletter)
+        }
+
+        return routes
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let renderedPreview {
@@ -119,47 +138,53 @@ struct EmailContentSection: View {
                 return
             }
 
-            switch classification.kind {
-            case .newsletter:
-                if let model = newsletterPreviewBuilder.buildPreview(
-                    canonicalHTML: canonicalHTML,
-                    bodyText: message.bodyText,
-                    cleanedSnippet: message.cleanedSnippet,
-                    senderName: message.senderName,
-                    senderEmail: message.senderEmail,
-                    subject: message.subject
-                ) {
-                    await finishLoad(with: .newsletter(model), generation: generation)
-                    return
-                }
+            let routes = Self.nativePreviewCardRoutes(
+                isNewsletter: message.isNewsletter,
+                isForwardedEmail: message.isForwardedEmail,
+                classificationKind: classification.kind
+            )
 
-                Log.diagnostic(
-                    .htmlPreview,
-                    level: .info,
-                    "EmailContentSection newsletter fallback for message \(message.id): preview model unavailable",
-                    category: .ui
-                )
-            case .transactional where Self.shouldUseTransactionalPreviewCard(isForwardedEmail: message.isForwardedEmail):
-                if let model = transactionalPreviewBuilder.buildPreview(
-                    canonicalHTML: canonicalHTML,
-                    bodyText: message.bodyText,
-                    cleanedSnippet: message.cleanedSnippet,
-                    senderName: message.senderName,
-                    senderEmail: message.senderEmail,
-                    subject: message.subject
-                ) {
-                    await finishLoad(with: .transactional(model), generation: generation)
-                    return
-                }
+            for route in routes {
+                switch route {
+                case .newsletter:
+                    if let model = newsletterPreviewBuilder.buildPreview(
+                        canonicalHTML: canonicalHTML,
+                        bodyText: message.bodyText,
+                        cleanedSnippet: message.cleanedSnippet,
+                        senderName: message.senderName,
+                        senderEmail: message.senderEmail,
+                        subject: message.subject
+                    ) {
+                        await finishLoad(with: .newsletter(model), generation: generation)
+                        return
+                    }
 
-                Log.diagnostic(
-                    .htmlPreview,
-                    level: .info,
-                    "EmailContentSection transactional fallback for message \(message.id): preview model unavailable",
-                    category: .ui
-                )
-            case .transactional, .personToPerson:
-                break
+                    Log.diagnostic(
+                        .htmlPreview,
+                        level: .info,
+                        "EmailContentSection newsletter fallback for message \(message.id): preview model unavailable",
+                        category: .ui
+                    )
+                case .transactional:
+                    if let model = transactionalPreviewBuilder.buildPreview(
+                        canonicalHTML: canonicalHTML,
+                        bodyText: message.bodyText,
+                        cleanedSnippet: message.cleanedSnippet,
+                        senderName: message.senderName,
+                        senderEmail: message.senderEmail,
+                        subject: message.subject
+                    ) {
+                        await finishLoad(with: .transactional(model), generation: generation)
+                        return
+                    }
+
+                    Log.diagnostic(
+                        .htmlPreview,
+                        level: .info,
+                        "EmailContentSection transactional fallback for message \(message.id): preview model unavailable",
+                        category: .ui
+                    )
+                }
             }
 
             if let previewHTML = await htmlContentLoader.preparePreviewHTML(
@@ -279,6 +304,11 @@ struct EmailContentSection: View {
 
         return resolved
     }
+}
+
+enum NativePreviewCardRoute: Equatable {
+    case newsletter
+    case transactional
 }
 
 private enum LoadedPreview: Equatable {
