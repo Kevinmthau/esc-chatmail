@@ -453,6 +453,16 @@ final class EmailContentSectionTests: XCTestCase {
         XCTAssertEqual(routes, [])
     }
 
+    func testNativePreviewCardRoutes_forwardedNewsletterClassificationFallsThroughToHTML() {
+        let routes = EmailContentSection.nativePreviewCardRoutes(
+            isNewsletter: false,
+            isForwardedEmail: true,
+            classificationKind: .newsletter
+        )
+
+        XCTAssertEqual(routes, [])
+    }
+
     func testNativePreviewCardRoutes_forwardedTransactionalSkipsTransactionalCard() {
         let routes = EmailContentSection.nativePreviewCardRoutes(
             isNewsletter: false,
