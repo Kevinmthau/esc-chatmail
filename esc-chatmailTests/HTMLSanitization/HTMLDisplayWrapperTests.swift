@@ -233,7 +233,7 @@ final class HTMLDisplayWrapperTests: XCTestCase {
 
         let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
 
-        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=600, initial-scale=1.0, user-scalable=yes">"#))
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=600, user-scalable=yes">"#))
         XCTAssertFalse(result.contains("shrink-to-fit=no"))
     }
 
@@ -256,7 +256,7 @@ final class HTMLDisplayWrapperTests: XCTestCase {
 
         let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
 
-        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=600, initial-scale=1.0, user-scalable=yes">"#))
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=600, user-scalable=yes">"#))
         XCTAssertFalse(result.contains("shrink-to-fit=no"))
     }
 
@@ -302,6 +302,36 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         </head>
         <body>
             <div class="container">Responsive marketing layout</div>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=600"#))
+    }
+
+    func testWrapHTMLForDisplay_originalPurposeUsesDeviceViewportForResponsiveFixedWidthTables() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            @media only screen and (max-width:479px) {
+                table.mj-full-width-mobile { width: 100% !important; }
+                td.mj-full-width-mobile { width: auto !important; }
+            }
+            </style>
+        </head>
+        <body>
+            <table align="center" width="600" role="presentation">
+                <tr>
+                    <td style="width:600px;" class="mj-full-width-mobile">
+                        <img src="https://example.com/hero.jpg" width="600">
+                    </td>
+                </tr>
+            </table>
         </body>
         </html>
         """
@@ -425,7 +455,7 @@ final class HTMLDisplayWrapperTests: XCTestCase {
 
         let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
 
-        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=600, initial-scale=1.0, user-scalable=yes">"#))
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=600, user-scalable=yes">"#))
         XCTAssertFalse(result.contains("shrink-to-fit=no"))
     }
 

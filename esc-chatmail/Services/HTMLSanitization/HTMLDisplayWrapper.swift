@@ -683,7 +683,7 @@ struct HTMLDisplayWrapper {
             // Some marketing emails still rely on WebKit's initial shrink-to-fit behavior for
             // legacy fixed-width sections that intentionally do not stack on mobile.
             if let fixedWidth = originalFixedLayoutViewportWidth(in: html) {
-                return #"<meta name="viewport" content="width=\#(fixedWidth), initial-scale=1.0, user-scalable=yes">"#
+                return #"<meta name="viewport" content="width=\#(fixedWidth), user-scalable=yes">"#
             }
             return #"<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">"#
         }
@@ -695,9 +695,15 @@ struct HTMLDisplayWrapper {
             .replacingOccurrences(of: "=\n", with: "")
             .replacingOccurrences(of: "=3D", with: "=", options: .caseInsensitive)
         let liveHTML = removingHTMLComments(from: normalizedHTML)
+        let containsResponsiveWidthQuery = containsResponsiveScreenWidthMediaQuery(in: liveHTML)
+
+        if containsResponsiveWidthQuery && containsResponsiveFluidLayoutOverride(in: liveHTML) {
+            return nil
+        }
+
         let layoutCSSHTML = removingConditionalCSSMediaBlocks(
             from: liveHTML,
-            preservingUnconditionalScreenMedia: !containsResponsiveScreenWidthMediaQuery(in: liveHTML)
+            preservingUnconditionalScreenMedia: !containsResponsiveWidthQuery
         )
 
         let candidates = [
@@ -707,6 +713,47 @@ struct HTMLDisplayWrapper {
         ].compactMap { $0 }
 
         return candidates.max()
+    }
+
+    private func containsResponsiveFluidLayoutOverride(in html: String) -> Bool {
+        var searchStart = html.startIndex
+
+        while let mediaRange = html.range(
+            of: "@media",
+            options: .caseInsensitive,
+            range: searchStart..<html.endIndex
+        ) {
+            guard let blockStart = html[mediaRange.upperBound...].firstIndex(of: "{"),
+                  let blockEnd = matchingClosingBrace(in: html, openingBrace: blockStart) else {
+                searchStart = mediaRange.upperBound
+                continue
+            }
+
+            let mediaPrelude = html[mediaRange.upperBound..<blockStart]
+            let queries = mediaPrelude.split(separator: ",", omittingEmptySubsequences: true)
+            if queries.contains(where: isResponsiveScreenWidthMediaQuery) {
+                let blockBody = String(html[html.index(after: blockStart)..<blockEnd])
+                if containsFluidWidthDeclaration(in: blockBody) {
+                    return true
+                }
+            }
+
+            searchStart = html.index(after: blockEnd)
+        }
+
+        return false
+    }
+
+    private func containsFluidWidthDeclaration(in css: String) -> Bool {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?:^|[\s{;])width\s*:\s*100\s*%"#,
+            options: [.caseInsensitive]
+        ) else {
+            return false
+        }
+
+        let range = NSRange(css.startIndex..<css.endIndex, in: css)
+        return regex.firstMatch(in: css, range: range) != nil
     }
 
     private func removingHTMLComments(from html: String) -> String {
