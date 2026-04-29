@@ -695,12 +695,12 @@ struct HTMLDisplayWrapper {
             .replacingOccurrences(of: "=\n", with: "")
             .replacingOccurrences(of: "=3D", with: "=", options: .caseInsensitive)
         let liveHTML = removingHTMLComments(from: normalizedHTML)
-        let nonMediaHTML = removingCSSMediaBlocks(from: liveHTML)
+        let layoutCSSHTML = removingConditionalCSSMediaBlocks(from: liveHTML)
 
         let candidates = [
             largestLayoutWidth(in: liveHTML, pattern: #"<table[^>]*?\bwidth\s*=\s*["']?([0-9]{3,4})"#),
-            largestLayoutWidth(in: nonMediaHTML, pattern: #"(?:^|[;{"'=])\s*width\s*:\s*([0-9]{3,4})\s*px"#),
-            largestLayoutWidth(in: nonMediaHTML, pattern: #"(?:^|[;{"'=])\s*min-width\s*:\s*([0-9]{3,4})\s*px"#)
+            largestLayoutWidth(in: layoutCSSHTML, pattern: #"(?:^|[;{"'=])\s*width\s*:\s*([0-9]{3,4})\s*px"#),
+            largestLayoutWidth(in: layoutCSSHTML, pattern: #"(?:^|[;{"'=])\s*min-width\s*:\s*([0-9]{3,4})\s*px"#)
         ].compactMap { $0 }
 
         return candidates.max()
@@ -718,7 +718,7 @@ struct HTMLDisplayWrapper {
         return regex.stringByReplacingMatches(in: html, range: range, withTemplate: "")
     }
 
-    private func removingCSSMediaBlocks(from html: String) -> String {
+    private func removingConditionalCSSMediaBlocks(from html: String) -> String {
         var result = html
         var searchStart = result.startIndex
 
@@ -733,12 +733,45 @@ struct HTMLDisplayWrapper {
                 continue
             }
 
+            let mediaPrelude = result[mediaRange.upperBound..<blockStart]
+            guard shouldIgnoreCSSMediaBlock(with: mediaPrelude) else {
+                searchStart = result.index(after: blockStart)
+                continue
+            }
+
             let removalEnd = result.index(after: blockEnd)
             result.removeSubrange(mediaRange.lowerBound..<removalEnd)
             searchStart = mediaRange.lowerBound
         }
 
         return result
+    }
+
+    private func shouldIgnoreCSSMediaBlock(with prelude: Substring) -> Bool {
+        let queries = prelude.split(separator: ",", omittingEmptySubsequences: true)
+        guard !queries.isEmpty else {
+            return true
+        }
+
+        return !queries.contains { isUnconditionallyApplicableScreenMediaQuery($0) }
+    }
+
+    private func isUnconditionallyApplicableScreenMediaQuery(_ query: Substring) -> Bool {
+        let normalized = String(query)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty,
+              !normalized.contains("(") else {
+            return false
+        }
+
+        let tokens = normalized.split { $0.isWhitespace }.map(String.init)
+        guard !tokens.contains("not") else {
+            return false
+        }
+
+        let mediaTypes = tokens.filter { $0 != "only" && $0 != "and" }
+        return mediaTypes.count == 1 && (mediaTypes[0] == "screen" || mediaTypes[0] == "all")
     }
 
     private func matchingClosingBrace(in text: String, openingBrace: String.Index) -> String.Index? {

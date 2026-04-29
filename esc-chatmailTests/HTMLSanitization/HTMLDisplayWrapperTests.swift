@@ -237,6 +237,29 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertFalse(result.contains("shrink-to-fit=no"))
     }
 
+    func testWrapHTMLForDisplay_originalPurposeUsesFixedViewportForUnconditionalScreenMediaWidth() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            @media screen {
+                .container { width: 600px; }
+            }
+            </style>
+        </head>
+        <body>
+            <div class="container">Fixed marketing layout</div>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=600, initial-scale=1.0, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains("shrink-to-fit=no"))
+    }
+
     func testWrapHTMLForDisplay_originalPurposeUsesDeviceViewportWithoutFixedLayout() {
         let html = """
         <!DOCTYPE html>
