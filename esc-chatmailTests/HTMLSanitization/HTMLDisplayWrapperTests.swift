@@ -325,7 +325,7 @@ final class HTMLDisplayWrapperTests: XCTestCase {
             </style>
         </head>
         <body>
-            <table align="center" width="600" role="presentation">
+            <table align="center" width="600" role="presentation" class="mj-full-width-mobile">
                 <tr>
                     <td style="width:600px;" class="mj-full-width-mobile">
                         <img src="https://example.com/hero.jpg" width="600">
@@ -340,6 +340,37 @@ final class HTMLDisplayWrapperTests: XCTestCase {
 
         XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">"#))
         XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=600"#))
+    }
+
+    func testWrapHTMLForDisplay_originalPurposeKeepsFixedViewportForNestedResponsiveHelpers() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            @media only screen and (max-width:480px) {
+                .ctaButton { width: 100% !important; }
+                .heroImage { width: 100% !important; }
+            }
+            </style>
+        </head>
+        <body>
+            <table align="center" width="600" role="presentation" class="legacyShell">
+                <tr>
+                    <td>
+                        <img class="heroImage" src="https://example.com/hero.jpg" width="564">
+                        <a class="ctaButton" href="https://example.com">Open</a>
+                    </td>
+                </tr>
+            </table>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=600, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=device-width"#))
     }
 
     func testWrapHTMLForDisplay_originalPurposeUsesDeviceViewportWithoutFixedLayout() {

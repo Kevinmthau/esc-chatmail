@@ -12,6 +12,12 @@ struct HTMLDisplayWrapper {
     private static let minimumFixedLayoutViewportWidth = 376
     private static let maximumFixedLayoutViewportWidth = 900
 
+    private struct LayoutSelectorTarget {
+        let tagName: String?
+        let id: String?
+        let classNames: Set<String>
+    }
+
     private struct RootTypographyDetector {
         // swiftlint:disable:next force_try
         private static let rootElementTagRegex = try! NSRegularExpression(
@@ -697,10 +703,6 @@ struct HTMLDisplayWrapper {
         let liveHTML = removingHTMLComments(from: normalizedHTML)
         let containsResponsiveWidthQuery = containsResponsiveScreenWidthMediaQuery(in: liveHTML)
 
-        if containsResponsiveWidthQuery && containsResponsiveFluidLayoutOverride(in: liveHTML) {
-            return nil
-        }
-
         let layoutCSSHTML = removingConditionalCSSMediaBlocks(
             from: liveHTML,
             preservingUnconditionalScreenMedia: !containsResponsiveWidthQuery
@@ -712,10 +714,36 @@ struct HTMLDisplayWrapper {
             largestLayoutWidth(in: layoutCSSHTML, pattern: #"(?:^|[;{"'=])\s*min-width\s*:\s*([0-9]{3,4})\s*px"#)
         ].compactMap { $0 }
 
-        return candidates.max()
+        guard let fixedWidth = candidates.max() else {
+            return nil
+        }
+
+        if containsResponsiveWidthQuery,
+           containsResponsiveFluidLayoutOverride(
+               in: liveHTML,
+               layoutCSSHTML: layoutCSSHTML,
+               fixedWidth: fixedWidth
+           ) {
+            return nil
+        }
+
+        return fixedWidth
     }
 
-    private func containsResponsiveFluidLayoutOverride(in html: String) -> Bool {
+    private func containsResponsiveFluidLayoutOverride(
+        in html: String,
+        layoutCSSHTML: String,
+        fixedWidth: Int
+    ) -> Bool {
+        let fixedLayoutTargets = fixedLayoutSelectorTargets(
+            in: html,
+            layoutCSSHTML: layoutCSSHTML,
+            fixedWidth: fixedWidth
+        )
+        guard !fixedLayoutTargets.isEmpty else {
+            return false
+        }
+
         var searchStart = html.startIndex
 
         while let mediaRange = html.range(
@@ -733,7 +761,7 @@ struct HTMLDisplayWrapper {
             let queries = mediaPrelude.split(separator: ",", omittingEmptySubsequences: true)
             if queries.contains(where: isResponsiveScreenWidthMediaQuery) {
                 let blockBody = String(html[html.index(after: blockStart)..<blockEnd])
-                if containsFluidWidthDeclaration(in: blockBody) {
+                if containsFluidWidthDeclaration(in: blockBody, targeting: fixedLayoutTargets) {
                     return true
                 }
             }
@@ -744,16 +772,183 @@ struct HTMLDisplayWrapper {
         return false
     }
 
-    private func containsFluidWidthDeclaration(in css: String) -> Bool {
+    private func fixedLayoutSelectorTargets(
+        in html: String,
+        layoutCSSHTML: String,
+        fixedWidth: Int
+    ) -> [LayoutSelectorTarget] {
+        fixedTableSelectorTargets(in: html, fixedWidth: fixedWidth)
+            + fixedCSSSelectorTargets(in: layoutCSSHTML, fixedWidth: fixedWidth)
+    }
+
+    private func fixedTableSelectorTargets(in html: String, fixedWidth: Int) -> [LayoutSelectorTarget] {
         guard let regex = try? NSRegularExpression(
-            pattern: #"(?:^|[\s{;])width\s*:\s*100\s*%"#,
+            pattern: #"<table\b(?=[^>]*?\bwidth\s*=\s*["']?\#(fixedWidth)(?:["'\s>]|[^0-9]))[^>]*>"#,
+            options: [.caseInsensitive, .dotMatchesLineSeparators]
+        ) else {
+            return []
+        }
+
+        let range = NSRange(html.startIndex..<html.endIndex, in: html)
+        return regex.matches(in: html, range: range).compactMap { match in
+            guard let tagRange = Range(match.range(at: 0), in: html) else {
+                return nil
+            }
+
+            return htmlElementSelectorTarget(tagName: "table", tagHTML: String(html[tagRange]))
+        }
+    }
+
+    private func fixedCSSSelectorTargets(in html: String, fixedWidth: Int) -> [LayoutSelectorTarget] {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"([^{}@]+)\{[^{}]*(?<!-)\b(?:width|min-width)\s*:\s*\#(fixedWidth)\s*px\b"#,
+            options: [.caseInsensitive]
+        ) else {
+            return []
+        }
+
+        let range = NSRange(html.startIndex..<html.endIndex, in: html)
+        return regex.matches(in: html, range: range).flatMap { match -> [LayoutSelectorTarget] in
+            guard let selectorsRange = Range(match.range(at: 1), in: html) else {
+                return []
+            }
+
+            return selectorTargets(in: String(html[selectorsRange]))
+        }
+    }
+
+    private func containsFluidWidthDeclaration(
+        in css: String,
+        targeting fixedLayoutTargets: [LayoutSelectorTarget]
+    ) -> Bool {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"([^{}@]+)\{[^{}]*(?<!-)\bwidth\s*:\s*100\s*%"#,
             options: [.caseInsensitive]
         ) else {
             return false
         }
 
         let range = NSRange(css.startIndex..<css.endIndex, in: css)
-        return regex.firstMatch(in: css, range: range) != nil
+        return regex.matches(in: css, range: range).contains { match in
+            guard let selectorsRange = Range(match.range(at: 1), in: css) else {
+                return false
+            }
+
+            return selectorTargets(in: String(css[selectorsRange])).contains { target in
+                fixedLayoutTargets.contains { fixedTarget in
+                    selectorTarget(target, matches: fixedTarget)
+                }
+            }
+        }
+    }
+
+    private func selectorTarget(
+        _ target: LayoutSelectorTarget,
+        matches fixedTarget: LayoutSelectorTarget
+    ) -> Bool {
+        if let targetTagName = target.tagName,
+           let fixedTagName = fixedTarget.tagName,
+           targetTagName != fixedTagName {
+            return false
+        }
+
+        if let targetID = target.id {
+            guard fixedTarget.id == targetID else {
+                return false
+            }
+        }
+
+        guard target.classNames.isSubset(of: fixedTarget.classNames) else {
+            return false
+        }
+
+        if target.id != nil || !target.classNames.isEmpty {
+            return true
+        }
+
+        return target.tagName != nil && fixedTarget.tagName == target.tagName
+    }
+
+    private func selectorTargets(in selectors: String) -> [LayoutSelectorTarget] {
+        selectors.split(separator: ",").compactMap { selector in
+            selectorTarget(in: String(selector))
+        }
+    }
+
+    private func selectorTarget(in selector: String) -> LayoutSelectorTarget? {
+        let compound = selector
+            .replacingOccurrences(of: ">", with: " ")
+            .replacingOccurrences(of: "+", with: " ")
+            .replacingOccurrences(of: "~", with: " ")
+            .split { $0.isWhitespace }
+            .last
+            .map(String.init) ?? selector
+
+        let tagName = firstRegexCapture(
+            in: compound,
+            pattern: #"^(?:[A-Za-z_][A-Za-z0-9_-]*\|)?([A-Za-z][A-Za-z0-9_-]*)"#
+        )?.lowercased()
+        let id = firstRegexCapture(in: compound, pattern: #"#([A-Za-z_][A-Za-z0-9_-]*)"#)
+        let classNames = Set(regexCaptures(in: compound, pattern: #"\.([A-Za-z_][A-Za-z0-9_-]*)"#))
+
+        guard tagName != nil || id != nil || !classNames.isEmpty else {
+            return nil
+        }
+
+        return LayoutSelectorTarget(tagName: tagName, id: id, classNames: classNames)
+    }
+
+    private func htmlElementSelectorTarget(tagName: String, tagHTML: String) -> LayoutSelectorTarget {
+        let id = attributeValue(named: "id", in: tagHTML)
+        let classNames = Set(
+            attributeValue(named: "class", in: tagHTML)?
+                .split { $0.isWhitespace }
+                .map(String.init) ?? []
+        )
+
+        return LayoutSelectorTarget(tagName: tagName.lowercased(), id: id, classNames: classNames)
+    }
+
+    private func attributeValue(named name: String, in tagHTML: String) -> String? {
+        let pattern = #"\b\#(name)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+
+        let range = NSRange(tagHTML.startIndex..<tagHTML.endIndex, in: tagHTML)
+        guard let match = regex.firstMatch(in: tagHTML, range: range) else {
+            return nil
+        }
+
+        for index in 1..<match.numberOfRanges {
+            guard let valueRange = Range(match.range(at: index), in: tagHTML) else {
+                continue
+            }
+
+            return String(tagHTML[valueRange])
+        }
+
+        return nil
+    }
+
+    private func firstRegexCapture(in text: String, pattern: String) -> String? {
+        regexCaptures(in: text, pattern: pattern).first
+    }
+
+    private func regexCaptures(in text: String, pattern: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return []
+        }
+
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.matches(in: text, range: range).compactMap { match in
+            guard match.numberOfRanges > 1,
+                  let valueRange = Range(match.range(at: 1), in: text) else {
+                return nil
+            }
+
+            return String(text[valueRange])
+        }
     }
 
     private func removingHTMLComments(from html: String) -> String {
