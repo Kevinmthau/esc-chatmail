@@ -16,6 +16,22 @@ struct HTMLDisplayWrapper {
         let tagName: String?
         let id: String?
         let classNames: Set<String>
+        let classAttributeValue: String?
+        let exactClassAttributeValues: Set<String>
+
+        init(
+            tagName: String?,
+            id: String?,
+            classNames: Set<String>,
+            classAttributeValue: String? = nil,
+            exactClassAttributeValues: Set<String> = []
+        ) {
+            self.tagName = tagName
+            self.id = id
+            self.classNames = classNames
+            self.classAttributeValue = classAttributeValue
+            self.exactClassAttributeValues = exactClassAttributeValues
+        }
     }
 
     private struct RootTypographyDetector {
@@ -777,8 +793,12 @@ struct HTMLDisplayWrapper {
         layoutCSSHTML: String,
         fixedWidth: Int
     ) -> [LayoutSelectorTarget] {
-        fixedTableSelectorTargets(in: html, fixedWidth: fixedWidth)
-            + fixedInlineStyleSelectorTargets(in: html, fixedWidth: fixedWidth)
+        let fixedTableTargets = fixedTableSelectorTargets(in: html, fixedWidth: fixedWidth)
+        if !fixedTableTargets.isEmpty {
+            return fixedTableTargets
+        }
+
+        return fixedInlineStyleSelectorTargets(in: html, fixedWidth: fixedWidth)
             + fixedCSSSelectorTargets(in: layoutCSSHTML, fixedWidth: fixedWidth)
     }
 
@@ -892,11 +912,18 @@ struct HTMLDisplayWrapper {
             }
         }
 
+        for classAttributeValue in target.exactClassAttributeValues {
+            guard fixedTarget.classAttributeValue == classAttributeValue
+                    || fixedTarget.exactClassAttributeValues.contains(classAttributeValue) else {
+                return false
+            }
+        }
+
         guard target.classNames.isSubset(of: fixedTarget.classNames) else {
             return false
         }
 
-        if target.id != nil || !target.classNames.isEmpty {
+        if target.id != nil || !target.classNames.isEmpty || !target.exactClassAttributeValues.isEmpty {
             return true
         }
 
@@ -923,28 +950,40 @@ struct HTMLDisplayWrapper {
             pattern: #"^(?:[A-Za-z_][A-Za-z0-9_-]*\|)?([A-Za-z][A-Za-z0-9_-]*)"#
         )?.lowercased()
         let id = firstRegexCapture(in: compound, pattern: #"#([A-Za-z_][A-Za-z0-9_-]*)"#)
+        let exactClassAttributeValues = Set(classAttributeSelectorValues(in: compound))
         let classNames = Set(regexCaptures(in: compound, pattern: #"\.([A-Za-z_][A-Za-z0-9_-]*)"#)
-            + classAttributeSelectorNames(in: compound))
+            + exactClassAttributeValues.flatMap { $0.split { $0.isWhitespace }.map(String.init) })
 
-        guard tagName != nil || id != nil || !classNames.isEmpty else {
+        guard tagName != nil || id != nil || !classNames.isEmpty || !exactClassAttributeValues.isEmpty else {
             return nil
         }
 
-        return LayoutSelectorTarget(tagName: tagName, id: id, classNames: classNames)
+        return LayoutSelectorTarget(
+            tagName: tagName,
+            id: id,
+            classNames: classNames,
+            exactClassAttributeValues: exactClassAttributeValues
+        )
     }
 
     private func htmlElementSelectorTarget(tagName: String, tagHTML: String) -> LayoutSelectorTarget {
         let id = attributeValue(named: "id", in: tagHTML)
+        let classAttributeValue = attributeValue(named: "class", in: tagHTML)
         let classNames = Set(
-            attributeValue(named: "class", in: tagHTML)?
+            classAttributeValue?
                 .split { $0.isWhitespace }
                 .map(String.init) ?? []
         )
 
-        return LayoutSelectorTarget(tagName: tagName.lowercased(), id: id, classNames: classNames)
+        return LayoutSelectorTarget(
+            tagName: tagName.lowercased(),
+            id: id,
+            classNames: classNames,
+            classAttributeValue: classAttributeValue
+        )
     }
 
-    private func classAttributeSelectorNames(in selector: String) -> [String] {
+    private func classAttributeSelectorValues(in selector: String) -> [String] {
         guard let regex = try? NSRegularExpression(
             pattern: #"\[\s*class\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))\s*(?:[iIsS])?\]"#,
             options: [.caseInsensitive]
@@ -959,7 +998,7 @@ struct HTMLDisplayWrapper {
                     continue
                 }
 
-                return selector[valueRange].split { $0.isWhitespace }.map(String.init)
+                return [String(selector[valueRange])]
             }
 
             return []
