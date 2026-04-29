@@ -789,7 +789,9 @@ struct HTMLDisplayWrapper {
             return false
         }
 
-        let mediaTypePrelude = normalized.split(separator: "(", maxSplits: 1).first ?? ""
+        let mediaTypePrelude = normalized
+            .split(separator: "(", maxSplits: 1, omittingEmptySubsequences: false)
+            .first ?? ""
         let mediaTypes = mediaTypePrelude
             .split { $0.isWhitespace }
             .filter { $0 != "only" && $0 != "and" }
