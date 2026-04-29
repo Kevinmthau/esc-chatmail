@@ -96,7 +96,7 @@ extension MessagePersister {
 
             do {
                 guard let person = try context.fetch(request).first,
-                      EmailNormalizer.isBetterDisplayName(displayName, than: person.displayName),
+                      EmailNormalizer.isBetterDisplayName(displayName, than: person.displayName, forEmail: email),
                       person.displayName != displayName else {
                     return
                 }

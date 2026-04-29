@@ -37,9 +37,9 @@ class EmailNormalizer {
            let range = Range(match.range(at: 1), in: string) {
             return String(string[range])
         }
-        
-        if string.contains("@") {
-            return string.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let match = firstBareEmailMatch(in: string) {
+            return match.email
         }
         
         return nil
@@ -53,16 +53,9 @@ class EmailNormalizer {
         
         for recipient in recipients {
             let recipientStr = String(recipient).trimmingCharacters(in: .whitespacesAndNewlines)
-            
-            // Extract email from "Name <email>" format
-            let pattern = #"<([^>]+@[^>]+)>"#
-            if let regex = try? NSRegularExpression(pattern: pattern),
-               let match = regex.firstMatch(in: recipientStr, range: NSRange(recipientStr.startIndex..., in: recipientStr)),
-               let range = Range(match.range(at: 1), in: recipientStr) {
-                emails.append(String(recipientStr[range]))
-            } else if recipientStr.contains("@") {
-                // Plain email address
-                emails.append(recipientStr)
+
+            if let email = extractEmail(from: recipientStr) {
+                emails.append(email)
             }
         }
         
@@ -74,6 +67,25 @@ class EmailNormalizer {
             let name = String(string[..<emailStartIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
             return name.isEmpty ? nil : name.replacingOccurrences(of: "\"", with: "")
         }
+
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let commentStart = trimmed.lastIndex(of: "("),
+           trimmed.hasSuffix(")"),
+           let emailMatch = firstBareEmailMatch(in: String(trimmed[..<commentStart])),
+           !emailMatch.email.isEmpty {
+            let comment = trimmed[trimmed.index(after: commentStart)..<trimmed.index(before: trimmed.endIndex)]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\"", with: "")
+            return comment.isEmpty ? nil : comment
+        }
+
+        if let emailMatch = firstBareEmailMatch(in: trimmed) {
+            let leadingName = String(trimmed[..<emailMatch.range.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\"", with: "")
+            return leadingName.isEmpty ? nil : leadingName
+        }
+
         return nil
     }
 
@@ -124,6 +136,47 @@ class EmailNormalizer {
         return new.count > existing.count
     }
 
+    /// Returns true if `newName` should replace `existingName` for a specific email.
+    /// Address-derived names are weak because they were likely synthesized from the
+    /// local part before a real header or contact name was available.
+    static func isBetterDisplayName(_ newName: String?, than existingName: String?, forEmail email: String) -> Bool {
+        guard let new = newName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !new.isEmpty else { return false }
+        guard let existing = existingName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !existing.isEmpty else { return true }
+
+        if isAddressDerivedDisplayName(existing, forEmail: email) {
+            if !isAddressDerivedDisplayName(new, forEmail: email) {
+                return displayNameParts(new).count >= displayNameParts(existing).count
+            }
+
+            if new != existing && hasIntentionalCasing(new) {
+                return true
+            }
+        }
+
+        return isBetterDisplayName(new, than: existing)
+    }
+
+    static func isAddressDerivedDisplayName(_ displayName: String?, forEmail email: String) -> Bool {
+        guard let displayName = displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !displayName.isEmpty else {
+            return false
+        }
+
+        let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        let localPart: String
+        if let atIndex = trimmedEmail.firstIndex(of: "@") {
+            localPart = String(trimmedEmail[..<atIndex])
+        } else {
+            localPart = trimmedEmail
+        }
+
+        let comparableDisplayName = displayNameForComparison(displayName)
+        return comparableDisplayName == displayNameForComparison(localPart)
+            || comparableDisplayName == displayNameForComparison(formatAsDisplayName(email: email))
+    }
+
     /// Returns true for Apple's "Hide My Email" placeholder contact labels.
     ///
     /// These labels represent relay routing aliases rather than real participants
@@ -138,5 +191,44 @@ class EmailNormalizer {
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
 
         return normalized == "hide my email"
+    }
+
+    private static func firstBareEmailMatch(in string: String) -> (email: String, range: Range<String.Index>)? {
+        let pattern = #"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: string, range: NSRange(string.startIndex..., in: string)),
+              let range = Range(match.range, in: string) else {
+            return nil
+        }
+
+        return (String(string[range]), range)
+    }
+
+    private static func displayNameForComparison(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\"", with: "")
+            .replacingOccurrences(of: ".", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .lowercased()
+    }
+
+    private static func displayNameParts(_ value: String) -> [String] {
+        displayNameForComparison(value)
+            .components(separatedBy: " ")
+            .filter { !$0.isEmpty }
+    }
+
+    private static func hasIntentionalCasing(_ value: String) -> Bool {
+        let letters = value.filter { $0.isLetter }
+        guard letters.count > 1 else { return false }
+
+        if letters.allSatisfy({ $0.isUppercase }) {
+            return true
+        }
+
+        return letters.dropFirst().contains { $0.isUppercase }
     }
 }

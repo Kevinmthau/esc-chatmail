@@ -114,6 +114,10 @@ extension MessagePersister {
         }
 
         if !result.participantEmails.isEmpty {
+            for email in result.participantEmails {
+                await PersonCache.shared.invalidateEntry(for: email)
+            }
+
             let photoPrefetcher = self.photoPrefetcher
             let participantEmails = result.participantEmails
             Task.detached(priority: .background) {

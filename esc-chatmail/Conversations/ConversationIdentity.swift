@@ -81,7 +81,7 @@ func makeConversationIdentity(from headers: [MessageHeader],
                 if EmailNormalizer.isHideMyEmailDisplayName(displayName) {
                     continue
                 }
-                if EmailNormalizer.isBetterDisplayName(displayName, than: displayNames[normalized]) {
+                if EmailNormalizer.isBetterDisplayName(displayName, than: displayNames[normalized], forEmail: normalized) {
                     displayNames[normalized] = displayName
                 }
             }

@@ -109,6 +109,16 @@ final class EmailNormalizerTests: XCTestCase {
         XCTAssertEqual(result, "john@example.com")
     }
 
+    func testExtractEmail_commentDisplayName_extractsBareEmail() {
+        let result = EmailNormalizer.extractEmail(from: "john@example.com (John Smith)")
+        XCTAssertEqual(result, "john@example.com")
+    }
+
+    func testExtractEmail_leadingDisplayNameWithoutBrackets_extractsBareEmail() {
+        let result = EmailNormalizer.extractEmail(from: "John Smith john@example.com")
+        XCTAssertEqual(result, "john@example.com")
+    }
+
     func testExtractEmail_noEmail_returnsNil() {
         let result = EmailNormalizer.extractEmail(from: "John Smith")
         XCTAssertNil(result)
@@ -134,6 +144,11 @@ final class EmailNormalizerTests: XCTestCase {
     func testExtractAllEmails_mixedFormats_extractsAll() {
         let result = EmailNormalizer.extractAllEmails(from: "John <john@example.com>, jane@example.com")
         XCTAssertEqual(result, ["john@example.com", "jane@example.com"])
+    }
+
+    func testExtractAllEmails_commentDisplayName_extractsBareEmail() {
+        let result = EmailNormalizer.extractAllEmails(from: "john@example.com (John Smith)")
+        XCTAssertEqual(result, ["john@example.com"])
     }
 
     func testExtractAllEmails_emptyString_returnsEmpty() {
@@ -166,6 +181,16 @@ final class EmailNormalizerTests: XCTestCase {
     func testExtractDisplayName_emptyNameBeforeBracket_returnsNil() {
         let result = EmailNormalizer.extractDisplayName(from: "<john@example.com>")
         XCTAssertNil(result)
+    }
+
+    func testExtractDisplayName_commentDisplayName_extractsComment() {
+        let result = EmailNormalizer.extractDisplayName(from: "john@example.com (John Smith)")
+        XCTAssertEqual(result, "John Smith")
+    }
+
+    func testExtractDisplayName_leadingDisplayNameWithoutBrackets_extractsName() {
+        let result = EmailNormalizer.extractDisplayName(from: "John Smith john@example.com")
+        XCTAssertEqual(result, "John Smith")
     }
 
     // MARK: - formatAsDisplayName Tests
@@ -250,6 +275,21 @@ final class EmailNormalizerTests: XCTestCase {
     func testIsBetterDisplayName_bothNil_isFalse() {
         let result = EmailNormalizer.isBetterDisplayName(nil, than: nil)
         XCTAssertFalse(result)
+    }
+
+    func testIsBetterDisplayName_forEmail_replacesSinglePartAddressDerivedName() {
+        let result = EmailNormalizer.isBetterDisplayName("Kevin", than: "Kmthau", forEmail: "kmthau@example.com")
+        XCTAssertTrue(result)
+    }
+
+    func testIsBetterDisplayName_forEmail_preservesMoreCompleteAddressDerivedName() {
+        let result = EmailNormalizer.isBetterDisplayName("John", than: "John Doe", forEmail: "john.doe@example.com")
+        XCTAssertFalse(result)
+    }
+
+    func testIsBetterDisplayName_forEmail_prefersIntentionalHeaderCasing() {
+        let result = EmailNormalizer.isBetterDisplayName("BONBONWHIMS", than: "Bonbonwhims", forEmail: "bonbonwhims@example.com")
+        XCTAssertTrue(result)
     }
 
     // MARK: - Hide My Email Detection

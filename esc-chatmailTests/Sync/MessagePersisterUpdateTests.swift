@@ -261,6 +261,63 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(conversation.displayName, "BONBONWHIMS")
     }
 
+    func testUpdateExistingMessage_replacesAddressDerivedParticipantDisplayName() async throws {
+        let senderEmail = "bonbonwhims@example.com"
+        let conversation = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: [senderEmail]))
+            .withDisplayName("Bonbonwhims")
+            .build(in: context)
+        let sender = PersonBuilder()
+            .withEmail(senderEmail)
+            .withDisplayName("Bonbonwhims")
+            .build(in: context)
+        addConversationParticipant(person: sender, to: conversation)
+        let existingMessage = MessageBuilder()
+            .withId("bonbonwhims-address-derived-message")
+            .withThreadId("bonbonwhims-address-derived-thread")
+            .withSender(email: senderEmail, name: nil)
+            .inConversation(conversation)
+            .build(in: context)
+        addMessageParticipant(person: sender, kind: .from, to: existingMessage)
+
+        var headers = ProcessedHeaders()
+        headers.subject = "Brand casing should win"
+        headers.from = "BONBONWHIMS <\(senderEmail)>"
+        headers.to = [EmailAddress(email: "kmthau@gmail.com", displayName: "Kevin Thau")]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: existingMessage.id,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: existingMessage.snippet,
+            cleanedSnippet: existingMessage.cleanedSnippet,
+            internalDate: existingMessage.internalDate,
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: existingMessage.bodyText,
+            labelIds: [],
+            isUnread: false,
+            isNewsletter: true,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertEqual(sender.displayName, "BONBONWHIMS")
+
+        ConversationRollupUpdater().updateDisplayNameOnly(
+            for: conversation,
+            myEmail: "kmthau@gmail.com"
+        )
+        XCTAssertEqual(conversation.displayName, "BONBONWHIMS")
+    }
+
     func testUpdateExistingMessage_tracksAllConversationsSharingRenamedParticipant() async throws {
         await ModificationTracker.shared.reset()
 
