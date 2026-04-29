@@ -778,6 +778,7 @@ struct HTMLDisplayWrapper {
         fixedWidth: Int
     ) -> [LayoutSelectorTarget] {
         fixedTableSelectorTargets(in: html, fixedWidth: fixedWidth)
+            + fixedInlineStyleSelectorTargets(in: html, fixedWidth: fixedWidth)
             + fixedCSSSelectorTargets(in: layoutCSSHTML, fixedWidth: fixedWidth)
     }
 
@@ -796,6 +797,39 @@ struct HTMLDisplayWrapper {
             }
 
             return htmlElementSelectorTarget(tagName: "table", tagHTML: String(html[tagRange]))
+        }
+    }
+
+    private func fixedInlineStyleSelectorTargets(in html: String, fixedWidth: Int) -> [LayoutSelectorTarget] {
+        guard let tagRegex = try? NSRegularExpression(
+            pattern: #"<([A-Za-z][A-Za-z0-9:-]*)\b(?=[^>]*?\bstyle\s*=)[^>]*>"#,
+            options: [.caseInsensitive, .dotMatchesLineSeparators]
+        ),
+        let widthRegex = try? NSRegularExpression(
+            pattern: #"(?<!-)\b(?:width|min-width)\s*:\s*\#(fixedWidth)\s*px\b"#,
+            options: [.caseInsensitive]
+        ) else {
+            return []
+        }
+
+        let range = NSRange(html.startIndex..<html.endIndex, in: html)
+        return tagRegex.matches(in: html, range: range).compactMap { match in
+            guard let tagNameRange = Range(match.range(at: 1), in: html),
+                  let tagRange = Range(match.range(at: 0), in: html) else {
+                return nil
+            }
+
+            let tagHTML = String(html[tagRange])
+            guard let style = attributeValue(named: "style", in: tagHTML) else {
+                return nil
+            }
+
+            let styleRange = NSRange(style.startIndex..<style.endIndex, in: style)
+            guard widthRegex.firstMatch(in: style, range: styleRange) != nil else {
+                return nil
+            }
+
+            return htmlElementSelectorTarget(tagName: String(html[tagNameRange]), tagHTML: tagHTML)
         }
     }
 
@@ -889,7 +923,8 @@ struct HTMLDisplayWrapper {
             pattern: #"^(?:[A-Za-z_][A-Za-z0-9_-]*\|)?([A-Za-z][A-Za-z0-9_-]*)"#
         )?.lowercased()
         let id = firstRegexCapture(in: compound, pattern: #"#([A-Za-z_][A-Za-z0-9_-]*)"#)
-        let classNames = Set(regexCaptures(in: compound, pattern: #"\.([A-Za-z_][A-Za-z0-9_-]*)"#))
+        let classNames = Set(regexCaptures(in: compound, pattern: #"\.([A-Za-z_][A-Za-z0-9_-]*)"#)
+            + classAttributeSelectorNames(in: compound))
 
         guard tagName != nil || id != nil || !classNames.isEmpty else {
             return nil
@@ -907,6 +942,28 @@ struct HTMLDisplayWrapper {
         )
 
         return LayoutSelectorTarget(tagName: tagName.lowercased(), id: id, classNames: classNames)
+    }
+
+    private func classAttributeSelectorNames(in selector: String) -> [String] {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"\[\s*class\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))\s*(?:[iIsS])?\]"#,
+            options: [.caseInsensitive]
+        ) else {
+            return []
+        }
+
+        let range = NSRange(selector.startIndex..<selector.endIndex, in: selector)
+        return regex.matches(in: selector, range: range).flatMap { match -> [String] in
+            for index in 1..<match.numberOfRanges {
+                guard let valueRange = Range(match.range(at: index), in: selector) else {
+                    continue
+                }
+
+                return selector[valueRange].split { $0.isWhitespace }.map(String.init)
+            }
+
+            return []
+        }
     }
 
     private func attributeValue(named name: String, in tagHTML: String) -> String? {

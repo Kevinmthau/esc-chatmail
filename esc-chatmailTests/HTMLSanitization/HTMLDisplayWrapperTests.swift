@@ -312,6 +312,52 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=600"#))
     }
 
+    func testWrapHTMLForDisplay_originalPurposeUsesDeviceViewportForResponsiveInlineFixedWidth() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            @media (max-width: 480px) {
+                .container { width: 100% !important; }
+            }
+            </style>
+        </head>
+        <body>
+            <div class="container" style="width: 600px;">Responsive marketing layout</div>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=600"#))
+    }
+
+    func testWrapHTMLForDisplay_originalPurposeUsesDeviceViewportForClassAttributeResponsiveSelector() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            @media only screen and (max-width: 480px) {
+                *[class=container] { width: 100% !important; }
+            }
+            </style>
+        </head>
+        <body>
+            <table width="600" class="container"><tr><td>Responsive marketing layout</td></tr></table>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=600"#))
+    }
+
     func testWrapHTMLForDisplay_originalPurposeUsesDeviceViewportForResponsiveFixedWidthTables() {
         let html = """
         <!DOCTYPE html>
