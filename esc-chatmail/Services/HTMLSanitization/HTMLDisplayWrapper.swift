@@ -695,7 +695,10 @@ struct HTMLDisplayWrapper {
             .replacingOccurrences(of: "=\n", with: "")
             .replacingOccurrences(of: "=3D", with: "=", options: .caseInsensitive)
         let liveHTML = removingHTMLComments(from: normalizedHTML)
-        let layoutCSSHTML = removingConditionalCSSMediaBlocks(from: liveHTML)
+        let layoutCSSHTML = removingConditionalCSSMediaBlocks(
+            from: liveHTML,
+            preservingUnconditionalScreenMedia: !containsResponsiveScreenWidthMediaQuery(in: liveHTML)
+        )
 
         let candidates = [
             largestLayoutWidth(in: liveHTML, pattern: #"<table[^>]*?\bwidth\s*=\s*["']?([0-9]{3,4})"#),
@@ -718,7 +721,10 @@ struct HTMLDisplayWrapper {
         return regex.stringByReplacingMatches(in: html, range: range, withTemplate: "")
     }
 
-    private func removingConditionalCSSMediaBlocks(from html: String) -> String {
+    private func removingConditionalCSSMediaBlocks(
+        from html: String,
+        preservingUnconditionalScreenMedia: Bool = true
+    ) -> String {
         var result = html
         var searchStart = result.startIndex
 
@@ -734,7 +740,7 @@ struct HTMLDisplayWrapper {
             }
 
             let mediaPrelude = result[mediaRange.upperBound..<blockStart]
-            guard shouldIgnoreCSSMediaBlock(with: mediaPrelude) else {
+            guard !preservingUnconditionalScreenMedia || shouldIgnoreCSSMediaBlock(with: mediaPrelude) else {
                 searchStart = result.index(after: blockStart)
                 continue
             }
@@ -745,6 +751,50 @@ struct HTMLDisplayWrapper {
         }
 
         return result
+    }
+
+    private func containsResponsiveScreenWidthMediaQuery(in html: String) -> Bool {
+        var searchStart = html.startIndex
+
+        while let mediaRange = html.range(
+            of: "@media",
+            options: .caseInsensitive,
+            range: searchStart..<html.endIndex
+        ) {
+            guard let blockStart = html[mediaRange.upperBound...].firstIndex(of: "{"),
+                  let blockEnd = matchingClosingBrace(in: html, openingBrace: blockStart) else {
+                searchStart = mediaRange.upperBound
+                continue
+            }
+
+            let mediaPrelude = html[mediaRange.upperBound..<blockStart]
+            let queries = mediaPrelude.split(separator: ",", omittingEmptySubsequences: true)
+            if queries.contains(where: isResponsiveScreenWidthMediaQuery) {
+                return true
+            }
+
+            searchStart = html.index(after: blockEnd)
+        }
+
+        return false
+    }
+
+    private func isResponsiveScreenWidthMediaQuery(_ query: Substring) -> Bool {
+        let normalized = String(query)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty,
+              !normalized.contains("not"),
+              normalized.contains("max-width") || normalized.contains("max-device-width") else {
+            return false
+        }
+
+        let mediaTypePrelude = normalized.split(separator: "(", maxSplits: 1).first ?? ""
+        let mediaTypes = mediaTypePrelude
+            .split { $0.isWhitespace }
+            .filter { $0 != "only" && $0 != "and" }
+
+        return mediaTypes.isEmpty || mediaTypes.contains("screen") || mediaTypes.contains("all")
     }
 
     private func shouldIgnoreCSSMediaBlock(with prelude: Substring) -> Bool {
