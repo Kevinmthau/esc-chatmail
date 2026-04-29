@@ -112,6 +112,9 @@ final class EmailNormalizerTests: XCTestCase {
     func testExtractEmail_bareEmailWithDotAtomSpecials_returnsFullEmail() {
         let result = EmailNormalizer.extractEmail(from: "customer/department=shipping@example.com")
         XCTAssertEqual(result, "customer/department=shipping@example.com")
+
+        let percentResult = EmailNormalizer.extractEmail(from: "user%dept@example.com")
+        XCTAssertEqual(percentResult, "user%dept@example.com")
     }
 
     func testExtractEmail_unsupportedBareLocalPartDoesNotReturnPartialEmail() {
