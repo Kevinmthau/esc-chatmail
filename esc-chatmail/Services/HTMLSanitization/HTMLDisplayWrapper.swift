@@ -913,8 +913,7 @@ struct HTMLDisplayWrapper {
         }
 
         for classAttributeValue in target.exactClassAttributeValues {
-            guard fixedTarget.classAttributeValue == classAttributeValue
-                    || fixedTarget.exactClassAttributeValues.contains(classAttributeValue) else {
+            guard exactClassAttributeValue(classAttributeValue, matches: fixedTarget) else {
                 return false
             }
         }
@@ -928,6 +927,22 @@ struct HTMLDisplayWrapper {
         }
 
         return target.tagName != nil && fixedTarget.tagName == target.tagName
+    }
+
+    private func exactClassAttributeValue(
+        _ classAttributeValue: String,
+        matches fixedTarget: LayoutSelectorTarget
+    ) -> Bool {
+        if fixedTarget.classAttributeValue == classAttributeValue
+            || fixedTarget.exactClassAttributeValues.contains(classAttributeValue) {
+            return true
+        }
+
+        let exactClassNames = Set(classAttributeValue.split { $0.isWhitespace }.map(String.init))
+        return !exactClassNames.isEmpty
+            && fixedTarget.classAttributeValue == nil
+            && fixedTarget.exactClassAttributeValues.isEmpty
+            && fixedTarget.classNames == exactClassNames
     }
 
     private func selectorTargets(in selectors: String) -> [LayoutSelectorTarget] {
