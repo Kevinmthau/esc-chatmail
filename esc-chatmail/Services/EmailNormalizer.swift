@@ -194,10 +194,14 @@ class EmailNormalizer {
     }
 
     private static func firstBareEmailMatch(in string: String) -> (email: String, range: Range<String.Index>)? {
-        let pattern = #"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}"#
+        let atom = #"[A-Z0-9!#$%&'*+/=?^_`{|}~-]+"#
+        let localPart = #"\#(atom)(?:\.\#(atom))*"#
+        let domainLabel = #"[A-Z0-9](?:[A-Z0-9\-]{0,61}[A-Z0-9])?"#
+        let domain = #"\#(domainLabel)(?:\.\#(domainLabel))*\.[A-Z]{2,}"#
+        let pattern = #"(?:^|[\s<(\[,;])(\#(localPart)@\#(domain))(?=$|[\s>)\],;.!?])"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
               let match = regex.firstMatch(in: string, range: NSRange(string.startIndex..., in: string)),
-              let range = Range(match.range, in: string) else {
+              let range = Range(match.range(at: 1), in: string) else {
             return nil
         }
 

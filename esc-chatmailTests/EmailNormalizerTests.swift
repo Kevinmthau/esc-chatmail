@@ -104,6 +104,21 @@ final class EmailNormalizerTests: XCTestCase {
         XCTAssertEqual(result, "john@example.com")
     }
 
+    func testExtractEmail_bareEmailWithApostrophe_returnsFullEmail() {
+        let result = EmailNormalizer.extractEmail(from: "o'connor@example.com")
+        XCTAssertEqual(result, "o'connor@example.com")
+    }
+
+    func testExtractEmail_bareEmailWithDotAtomSpecials_returnsFullEmail() {
+        let result = EmailNormalizer.extractEmail(from: "customer/department=shipping@example.com")
+        XCTAssertEqual(result, "customer/department=shipping@example.com")
+    }
+
+    func testExtractEmail_unsupportedBareLocalPartDoesNotReturnPartialEmail() {
+        XCTAssertNil(EmailNormalizer.extractEmail(from: #"o\connor@example.com"#))
+        XCTAssertNil(EmailNormalizer.extractEmail(from: "o:connor@example.com"))
+    }
+
     func testExtractEmail_plainEmailWithWhitespace_trimmed() {
         let result = EmailNormalizer.extractEmail(from: "  john@example.com  ")
         XCTAssertEqual(result, "john@example.com")
