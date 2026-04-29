@@ -694,14 +694,91 @@ struct HTMLDisplayWrapper {
             .replacingOccurrences(of: "=\r\n", with: "")
             .replacingOccurrences(of: "=\n", with: "")
             .replacingOccurrences(of: "=3D", with: "=", options: .caseInsensitive)
+        let liveHTML = removingHTMLComments(from: normalizedHTML)
+        let nonMediaHTML = removingCSSMediaBlocks(from: liveHTML)
 
         let candidates = [
-            largestLayoutWidth(in: normalizedHTML, pattern: #"<table[^>]*?\bwidth\s*=\s*["']?([0-9]{3,4})"#),
-            largestLayoutWidth(in: normalizedHTML, pattern: #"(?:^|[;{"'=])\s*width\s*:\s*([0-9]{3,4})\s*px"#),
-            largestLayoutWidth(in: normalizedHTML, pattern: #"(?:^|[;{"'=])\s*min-width\s*:\s*([0-9]{3,4})\s*px"#)
+            largestLayoutWidth(in: liveHTML, pattern: #"<table[^>]*?\bwidth\s*=\s*["']?([0-9]{3,4})"#),
+            largestLayoutWidth(in: nonMediaHTML, pattern: #"(?:^|[;{"'=])\s*width\s*:\s*([0-9]{3,4})\s*px"#),
+            largestLayoutWidth(in: nonMediaHTML, pattern: #"(?:^|[;{"'=])\s*min-width\s*:\s*([0-9]{3,4})\s*px"#)
         ].compactMap { $0 }
 
         return candidates.max()
+    }
+
+    private func removingHTMLComments(from html: String) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"<!--[\s\S]*?-->"#,
+            options: []
+        ) else {
+            return html
+        }
+
+        let range = NSRange(html.startIndex..<html.endIndex, in: html)
+        return regex.stringByReplacingMatches(in: html, range: range, withTemplate: "")
+    }
+
+    private func removingCSSMediaBlocks(from html: String) -> String {
+        var result = html
+        var searchStart = result.startIndex
+
+        while let mediaRange = result.range(
+            of: "@media",
+            options: .caseInsensitive,
+            range: searchStart..<result.endIndex
+        ) {
+            guard let blockStart = result[mediaRange.upperBound...].firstIndex(of: "{"),
+                  let blockEnd = matchingClosingBrace(in: result, openingBrace: blockStart) else {
+                searchStart = mediaRange.upperBound
+                continue
+            }
+
+            let removalEnd = result.index(after: blockEnd)
+            result.removeSubrange(mediaRange.lowerBound..<removalEnd)
+            searchStart = mediaRange.lowerBound
+        }
+
+        return result
+    }
+
+    private func matchingClosingBrace(in text: String, openingBrace: String.Index) -> String.Index? {
+        var index = openingBrace
+        var depth = 0
+        var quoteCharacter: Character?
+
+        while index < text.endIndex {
+            let character = text[index]
+
+            if let activeQuote = quoteCharacter {
+                if character == "\\" {
+                    let escapedIndex = text.index(after: index)
+                    guard escapedIndex < text.endIndex else {
+                        return nil
+                    }
+                    index = escapedIndex
+                } else if character == activeQuote {
+                    quoteCharacter = nil
+                }
+            } else {
+                switch character {
+                case "\"", "'":
+                    quoteCharacter = character
+                case "{":
+                    depth += 1
+                case "}":
+                    depth -= 1
+                    if depth == 0 {
+                        return index
+                    }
+                default:
+                    break
+                }
+            }
+
+            index = text.index(after: index)
+        }
+
+        return nil
     }
 
     private func largestLayoutWidth(in html: String, pattern: String) -> Int? {

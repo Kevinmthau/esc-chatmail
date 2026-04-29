@@ -218,12 +218,19 @@ struct NewsletterPreviewBuilder {
 
         var bestCandidate: HeroImageCandidate?
 
-        for (index, match) in matches.prefix(8).enumerated() {
+        let candidateMatches = Array(matches.prefix(8))
+
+        for (index, match) in candidateMatches.enumerated() {
             guard let range = Range(match.range, in: sanitizedHTML) else {
                 continue
             }
 
             let tag = String(sanitizedHTML[range])
+            let followingHTML = htmlSegmentAfterImage(
+                at: index,
+                in: sanitizedHTML,
+                matches: candidateMatches
+            )
             let width = numericAttribute(named: "width", in: tag)
             let height = numericAttribute(named: "height", in: tag)
             let descriptor = [
@@ -281,6 +288,8 @@ struct NewsletterPreviewBuilder {
                 score -= 18
             }
 
+            score += imageContextScore(followingHTML)
+
             if let width, width <= 80 {
                 score -= 15
             }
@@ -310,6 +319,101 @@ struct NewsletterPreviewBuilder {
         }
 
         return bestCandidate
+    }
+
+    private func htmlSegmentAfterImage(
+        at index: Int,
+        in html: String,
+        matches: [NSTextCheckingResult]
+    ) -> String {
+        guard index < matches.count,
+              let currentRange = Range(matches[index].range, in: html) else {
+            return ""
+        }
+
+        let segmentStart = currentRange.upperBound
+        let nextImageStart = nextImageStartIndex(after: index, in: html, matches: matches)
+        let maximumEnd = html.index(segmentStart, offsetBy: 2_500, limitedBy: nextImageStart) ?? nextImageStart
+        guard segmentStart < maximumEnd else {
+            return ""
+        }
+
+        return String(html[segmentStart..<maximumEnd])
+    }
+
+    private func nextImageStartIndex(
+        after index: Int,
+        in html: String,
+        matches: [NSTextCheckingResult]
+    ) -> String.Index {
+        let nextIndex = index + 1
+        guard nextIndex < matches.count,
+              let nextRange = Range(matches[nextIndex].range, in: html) else {
+            return html.endIndex
+        }
+
+        return nextRange.lowerBound
+    }
+
+    private func imageContextScore(_ followingHTML: String) -> Int {
+        guard !followingHTML.isEmpty else {
+            return 0
+        }
+
+        let plainText = normalizedText(TextProcessing.extractPlainText(from: followingHTML))
+        guard !plainText.isEmpty else {
+            return 0
+        }
+
+        let lines = previewLines(from: plainText)
+        var score = 0
+
+        if lines.contains(where: isSubstantiveImageFollowupLine) {
+            score += 14
+        }
+
+        if lines.allSatisfy(isNavigationLikeImageFollowupLine),
+           lines.contains(where: isNavigationLikeImageFollowupLine) {
+            score -= 14
+        }
+
+        return score
+    }
+
+    private func isSubstantiveImageFollowupLine(_ line: String) -> Bool {
+        if shouldSkipLine(line) || shouldStopAtFooter(line) || isNavigationLikeImageFollowupLine(line) {
+            return false
+        }
+
+        if line.count >= 60 {
+            return true
+        }
+
+        return line.count >= 34 && line.range(of: "[.!?]$", options: .regularExpression) != nil
+    }
+
+    private func isNavigationLikeImageFollowupLine(_ line: String) -> Bool {
+        let lowercased = line.lowercased()
+
+        if lowercased.contains("shop") && lowercased.contains("events") {
+            return true
+        }
+
+        if lowercased.contains("|") {
+            let segments = lowercased
+                .split(separator: "|")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+            if segments.count >= 2,
+               segments.allSatisfy({ segment in
+                   segment.count <= 18 && segment.split(separator: " ").count <= 3
+               }) {
+                return true
+            }
+        }
+
+        return false
     }
 
     private func safeHeroImageURL(

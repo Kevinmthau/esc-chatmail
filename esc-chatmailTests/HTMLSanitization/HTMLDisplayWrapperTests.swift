@@ -280,6 +280,50 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=600"#))
     }
 
+    func testWrapHTMLForDisplay_originalPurposeIgnoresOutlookAndDesktopOnlyWidths() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            .templateContainer {
+                max-width: 600px !important;
+            }
+            @media only screen and (min-width:768px) {
+                .templateContainer {
+                    width: 600px !important;
+                }
+            }
+            @media only screen and (max-width:480px) {
+                .mcnImage {
+                    width: 100% !important;
+                }
+            }
+            </style>
+        </head>
+        <body>
+            <!--[if (gte mso 9)|(IE)]>
+            <table align="center" border="0" cellspacing="0" cellpadding="0" width="600">
+            <tr><td width="600">
+            <![endif]-->
+            <table class="templateContainer" width="100%">
+                <tr>
+                    <td><img class="mcnImage" src="https://example.com/hero.jpg" width="564"></td>
+                </tr>
+            </table>
+            <!--[if (gte mso 9)|(IE)]>
+            </td></tr></table>
+            <![endif]-->
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=600"#))
+    }
+
     func testWrapHTMLForDisplay_originalPurposeUsesFixedViewportForSevenRoomsBreakpointTemplate() {
         let html = """
         <!DOCTYPE html>

@@ -153,6 +153,46 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         XCTAssertEqual(result?.heroImageDisplayMode, .fill)
     }
 
+    func testBuildPreview_prefersContentHeroOverMailchimpHeaderImage() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table class="mcnImageBlock">
+                <tr>
+                    <td>
+                        <img src="https://gallery.mailchimp.com/list/images/eataly-header.jpg" width="564" style="max-width: 1302px;" class="mcnImage">
+                    </td>
+                </tr>
+            </table>
+            <table class="mcnTextBlock">
+                <tr><td>SHOP | EVENTS | WINE CLUB</td></tr>
+            </table>
+            <table class="mcnDividerBlock"><tr><td></td></tr></table>
+            <table class="mcnImageBlock">
+                <tr>
+                    <td>
+                        <img src="https://mcusercontent.com/list/images/elena-walch-hero.jpg" width="564" style="max-width: 800px;" class="mcnImage">
+                    </td>
+                </tr>
+            </table>
+            <p>In the heart of Alto Adige, Elena Walch makes wines shaped by mountain air, mineral soils, and a precise estate vision.</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderName: "Eataly Vino",
+            senderEmail: "thewineshop@eataly.com",
+            subject: "Elena Walch: Bottled Alps"
+        )
+
+        XCTAssertEqual(result?.heroImageURL, "https://mcusercontent.com/list/images/elena-walch-hero.jpg")
+        XCTAssertEqual(result?.heroImageDisplayMode, .fill)
+    }
+
     func testBuildPreview_handlesAbsurdImageDimensionsWithoutOverflow() {
         let html = """
         <!DOCTYPE html>
