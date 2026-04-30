@@ -1024,11 +1024,13 @@ struct HTMLDisplayWrapper {
         while let block = nextCSSBlock(in: css, from: currentIndex) {
             let prelude = block.prelude.trimmingCharacters(in: .whitespacesAndNewlines)
             if prelude.hasPrefix("@") {
-                declarations += mediaQueryWidthDeclarations(
-                    in: block.body,
-                    selectorElements: selectorElements,
-                    order: &order
-                )
+                if nestedAtRuleIsUnconditionalScreenMedia(prelude) {
+                    declarations += mediaQueryWidthDeclarations(
+                        in: block.body,
+                        selectorElements: selectorElements,
+                        order: &order
+                    )
+                }
             } else {
                 let selectorTexts = prelude.split(separator: ",").map {
                     cssSelectorText(from: String($0))
@@ -1057,6 +1059,17 @@ struct HTMLDisplayWrapper {
         }
 
         return declarations
+    }
+
+    private func nestedAtRuleIsUnconditionalScreenMedia(_ prelude: String) -> Bool {
+        let trimmedPrelude = prelude.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercasedPrelude = trimmedPrelude.lowercased()
+        guard lowercasedPrelude.hasPrefix("@media") else {
+            return false
+        }
+
+        let mediaPreludeStart = trimmedPrelude.index(trimmedPrelude.startIndex, offsetBy: "@media".count)
+        return !shouldIgnoreCSSMediaBlock(with: trimmedPrelude[mediaPreludeStart...])
     }
 
     private func widthStates(in declarationBody: String) -> [(state: LayoutWidthState, isImportant: Bool)] {
