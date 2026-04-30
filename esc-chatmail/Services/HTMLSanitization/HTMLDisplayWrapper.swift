@@ -796,11 +796,16 @@ struct HTMLDisplayWrapper {
             let queries = mediaPrelude.split(separator: ",", omittingEmptySubsequences: true)
             if queries.contains(where: isResponsiveScreenWidthMediaQuery) {
                 let blockBody = String(html[html.index(after: blockStart)..<blockEnd])
-                if containsFluidWidthDeclaration(
+                let fluidTargets = fluidWidthDeclarationTargets(
                     in: blockBody,
-                    targeting: fixedLayoutTargets,
                     selectorElements: selectorElements
-                ) {
+                )
+                if !fluidTargets.isEmpty,
+                   fixedLayoutTargets.allSatisfy({ fixedTarget in
+                       fluidTargets.contains { target in
+                           selectorTarget(target, matches: fixedTarget)
+                       }
+                   }) {
                     return true
                 }
             }
@@ -965,32 +970,27 @@ struct HTMLDisplayWrapper {
         return elements
     }
 
-    private func containsFluidWidthDeclaration(
+    private func fluidWidthDeclarationTargets(
         in css: String,
-        targeting fixedLayoutTargets: [LayoutSelectorTarget],
         selectorElements: [HTMLSelectorElement]
-    ) -> Bool {
+    ) -> [LayoutSelectorTarget] {
         guard let regex = try? NSRegularExpression(
             pattern: #"([^{}@]+)\{[^{}]*(?<!-)\bwidth\s*:\s*100\s*%"#,
             options: [.caseInsensitive]
         ) else {
-            return false
+            return []
         }
 
         let range = NSRange(css.startIndex..<css.endIndex, in: css)
-        return regex.matches(in: css, range: range).contains { match in
+        return regex.matches(in: css, range: range).flatMap { match -> [LayoutSelectorTarget] in
             guard let selectorsRange = Range(match.range(at: 1), in: css) else {
-                return false
+                return []
             }
 
             return selectorTargets(
                 in: String(css[selectorsRange]),
                 matching: selectorElements
-            ).contains { target in
-                fixedLayoutTargets.contains { fixedTarget in
-                    selectorTarget(target, matches: fixedTarget)
-                }
-            }
+            )
         }
     }
 
