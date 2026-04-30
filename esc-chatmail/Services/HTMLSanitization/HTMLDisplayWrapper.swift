@@ -37,6 +37,8 @@ struct HTMLDisplayWrapper {
     private enum LayoutSelectorCombinator {
         case descendant
         case child
+        case adjacentSibling
+        case generalSibling
     }
 
     private struct LayoutSelectorPart {
@@ -46,7 +48,8 @@ struct HTMLDisplayWrapper {
 
     private struct HTMLSelectorElement {
         let target: LayoutSelectorTarget
-        let ancestors: [LayoutSelectorTarget]
+        let ancestors: [Int]
+        let previousSiblingIndex: Int?
     }
 
     private struct RootTypographyDetector {
@@ -921,7 +924,8 @@ struct HTMLDisplayWrapper {
         }
 
         var elements: [HTMLSelectorElement] = []
-        var stack: [LayoutSelectorTarget] = []
+        var stack: [Int] = []
+        var lastChildIndexStack: [Int?] = [nil]
         let range = NSRange(html.startIndex..<html.endIndex, in: html)
         for match in regex.matches(in: html, range: range) {
             guard let tagNameRange = Range(match.range(at: 2), in: html),
@@ -932,8 +936,9 @@ struct HTMLDisplayWrapper {
             let tagHTML = String(html[tagRange])
             let tagName = String(html[tagNameRange]).lowercased()
             if Range(match.range(at: 1), in: html) != nil {
-                if let index = stack.lastIndex(where: { $0.tagName == tagName }) {
+                if let index = stack.lastIndex(where: { elements[$0].target.tagName == tagName }) {
                     stack.removeSubrange(index...)
+                    lastChildIndexStack.removeSubrange((index + 1)..<lastChildIndexStack.count)
                 }
                 continue
             }
@@ -942,10 +947,18 @@ struct HTMLDisplayWrapper {
                 tagName: tagName,
                 tagHTML: tagHTML
             )
-            elements.append(HTMLSelectorElement(target: elementTarget, ancestors: stack))
+            let previousSiblingIndex = lastChildIndexStack.last.flatMap { $0 }
+            let elementIndex = elements.count
+            elements.append(HTMLSelectorElement(
+                target: elementTarget,
+                ancestors: stack,
+                previousSiblingIndex: previousSiblingIndex
+            ))
+            lastChildIndexStack[lastChildIndexStack.count - 1] = elementIndex
 
             if !isSelfClosingHTMLElement(tagName: tagName, tagHTML: tagHTML) {
-                stack.append(elementTarget)
+                stack.append(elementIndex)
+                lastChildIndexStack.append(nil)
             }
         }
 
@@ -1085,20 +1098,23 @@ struct HTMLDisplayWrapper {
             return nil
         }
 
-        return elements.compactMap { element in
-            htmlSelectorElement(element, matches: selectorParts) ? element.target : nil
+        return elements.indices.compactMap { index in
+            htmlSelectorElement(at: index, in: elements, matches: selectorParts) ? elements[index].target : nil
         }
     }
 
     private func htmlSelectorElement(
-        _ element: HTMLSelectorElement,
+        at elementIndex: Int,
+        in elements: [HTMLSelectorElement],
         matches selectorParts: [LayoutSelectorPart]
     ) -> Bool {
+        let element = elements[elementIndex]
         guard let lastPart = selectorParts.last,
               selectorTarget(lastPart.target, matches: element.target) else {
             return false
         }
 
+        var currentElementIndex = elementIndex
         var ancestorEndIndex = element.ancestors.count
         for partIndex in stride(from: selectorParts.count - 2, through: 0, by: -1) {
             let part = selectorParts[partIndex]
@@ -1111,39 +1127,80 @@ struct HTMLDisplayWrapper {
                 }
 
                 let parentIndex = ancestorEndIndex - 1
-                guard selectorTarget(part.target, matches: element.ancestors[parentIndex]) else {
+                let parentElementIndex = elements[currentElementIndex].ancestors[parentIndex]
+                guard selectorTarget(part.target, matches: elements[parentElementIndex].target) else {
                     return false
                 }
                 ancestorEndIndex = parentIndex
+                currentElementIndex = parentElementIndex
 
             case .descendant:
-                guard let ancestorIndex = matchingAncestorIndex(
+                guard let ancestorIndex = matchingAncestorPosition(
                     for: part.target,
                     before: ancestorEndIndex,
-                    in: element.ancestors
+                    in: elements[currentElementIndex].ancestors,
+                    elements: elements
                 ) else {
                     return false
                 }
+                currentElementIndex = elements[currentElementIndex].ancestors[ancestorIndex]
                 ancestorEndIndex = ancestorIndex
+
+            case .adjacentSibling:
+                guard let siblingIndex = elements[currentElementIndex].previousSiblingIndex else {
+                    return false
+                }
+
+                guard selectorTarget(part.target, matches: elements[siblingIndex].target) else {
+                    return false
+                }
+                currentElementIndex = siblingIndex
+
+            case .generalSibling:
+                guard let siblingIndex = matchingPreviousSiblingIndex(
+                    for: part.target,
+                    from: elements[currentElementIndex].previousSiblingIndex,
+                    in: elements
+                ) else {
+                    return false
+                }
+                currentElementIndex = siblingIndex
             }
         }
 
         return true
     }
 
-    private func matchingAncestorIndex(
+    private func matchingAncestorPosition(
         for target: LayoutSelectorTarget,
         before endIndex: Int,
-        in ancestors: [LayoutSelectorTarget]
+        in ancestors: [Int],
+        elements: [HTMLSelectorElement]
     ) -> Int? {
         guard endIndex > 0 else {
             return nil
         }
 
         for index in stride(from: endIndex - 1, through: 0, by: -1) {
-            if selectorTarget(target, matches: ancestors[index]) {
+            if selectorTarget(target, matches: elements[ancestors[index]].target) {
                 return index
             }
+        }
+
+        return nil
+    }
+
+    private func matchingPreviousSiblingIndex(
+        for target: LayoutSelectorTarget,
+        from siblingIndex: Int?,
+        in elements: [HTMLSelectorElement]
+    ) -> Int? {
+        var index = siblingIndex
+        while let currentIndex = index {
+            if selectorTarget(target, matches: elements[currentIndex].target) {
+                return currentIndex
+            }
+            index = elements[currentIndex].previousSiblingIndex
         }
 
         return nil
@@ -1223,7 +1280,12 @@ struct HTMLDisplayWrapper {
             }
 
             if character == "+" || character == "~" {
-                return nil
+                guard appendCurrentPart() else {
+                    return nil
+                }
+                pendingCombinator = character == "+" ? .adjacentSibling : .generalSibling
+                hasWhitespaceAfterCurrent = false
+                continue
             }
 
             if character == ">" {
