@@ -1911,7 +1911,7 @@ struct HTMLDisplayWrapper {
         var foundWidthConstraint = false
 
         if let widthBoundRegex = try? NSRegularExpression(
-            pattern: #"\(\s*(min|max)-(?:device-)?width\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(px|em)\s*\)"#,
+            pattern: #"\(\s*(min|max)-(?:device-)?width\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(px|em|rem)\s*\)"#,
             options: [.caseInsensitive]
         ) {
             let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
@@ -1941,7 +1941,7 @@ struct HTMLDisplayWrapper {
         }
 
         if let exactWidthRegex = try? NSRegularExpression(
-            pattern: #"\(\s*(?:device-)?width\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(px|em)\s*\)"#,
+            pattern: #"\(\s*(?:device-)?width\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(px|em|rem)\s*\)"#,
             options: [.caseInsensitive]
         ) {
             let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
@@ -1987,7 +1987,16 @@ struct HTMLDisplayWrapper {
             return nil
         }
 
-        let multiplier = String(unit) == "em" ? 16.0 : 1.0
+        let multiplier: Double
+        switch String(unit) {
+        case "px":
+            multiplier = 1.0
+        case "em", "rem":
+            multiplier = 16.0
+        default:
+            return nil
+        }
+
         let pixelValue = numericValue * multiplier
         guard pixelValue.isFinite else {
             return nil
