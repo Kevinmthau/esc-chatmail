@@ -336,6 +336,33 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=device-width"#))
     }
 
+    func testWrapHTMLForDisplay_originalPurposeKeepsFixedViewportForComplexFixedSelectorWithUnrelatedResponsiveElement() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            .desktop .container { width: 600px; }
+            @media only screen and (max-width: 480px) {
+                #mobile { width: 100% !important; }
+            }
+            </style>
+        </head>
+        <body>
+            <div class="desktop">
+                <div class="container">Fixed marketing layout</div>
+            </div>
+            <div id="mobile" class="container">Mobile helper</div>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=600, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=device-width"#))
+    }
+
     func testWrapHTMLForDisplay_originalPurposeUsesDeviceViewportForResponsiveWidthWithoutMediaType() {
         let html = """
         <!DOCTYPE html>

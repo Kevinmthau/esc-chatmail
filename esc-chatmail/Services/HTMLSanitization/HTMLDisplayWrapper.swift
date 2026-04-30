@@ -868,7 +868,15 @@ struct HTMLDisplayWrapper {
                 return []
             }
 
-            return selectorTargets(in: String(html[selectorsRange])).flatMap { target in
+            return String(html[selectorsRange]).split(separator: ",").flatMap { selector -> [LayoutSelectorTarget] in
+                let selector = cssSelectorText(from: String(selector))
+                guard let target = selectorTarget(in: selector) else {
+                    return []
+                }
+                guard !selectorContainsCombinator(selector) else {
+                    return [target]
+                }
+
                 let matchingElements = elementTargets.filter { elementTarget in
                     selectorTarget(target, matches: elementTarget)
                 }
@@ -956,6 +964,69 @@ struct HTMLDisplayWrapper {
         }
 
         return target.tagName != nil && fixedTarget.tagName == target.tagName
+    }
+
+    private func cssSelectorText(from capturedSelector: String) -> String {
+        let selector = capturedSelector.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let styleRange = selector.range(of: "<style", options: [.caseInsensitive, .backwards]),
+              let tagEnd = selector[styleRange.lowerBound...].firstIndex(of: ">") else {
+            return selector
+        }
+
+        return String(selector[selector.index(after: tagEnd)...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func selectorContainsCombinator(_ selector: String) -> Bool {
+        var previousOutsideAttributeWasWhitespace = false
+        var isInsideAttributeSelector = false
+        var quoteCharacter: Character?
+
+        for character in selector {
+            if let activeQuote = quoteCharacter {
+                if character == activeQuote {
+                    quoteCharacter = nil
+                }
+                continue
+            }
+
+            if character == "\"" || character == "'" {
+                quoteCharacter = character
+                continue
+            }
+
+            if character == "[" {
+                isInsideAttributeSelector = true
+                previousOutsideAttributeWasWhitespace = false
+                continue
+            }
+
+            if character == "]" {
+                isInsideAttributeSelector = false
+                previousOutsideAttributeWasWhitespace = false
+                continue
+            }
+
+            guard !isInsideAttributeSelector else {
+                continue
+            }
+
+            if character == ">" || character == "+" || character == "~" {
+                return true
+            }
+
+            if character.isWhitespace {
+                previousOutsideAttributeWasWhitespace = true
+                continue
+            }
+
+            if previousOutsideAttributeWasWhitespace {
+                return true
+            }
+            previousOutsideAttributeWasWhitespace = false
+        }
+
+        return false
     }
 
     private func exactClassAttributeValue(
