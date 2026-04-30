@@ -389,6 +389,58 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=600"#))
     }
 
+    func testWrapHTMLForDisplay_originalPurposeKeepsFixedViewportForComplexResponsiveSelectorUnmatchedAncestor() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            .desktop .container { width: 600px; }
+            @media only screen and (max-width: 480px) {
+                .mobile #hero { width: 100% !important; }
+            }
+            </style>
+        </head>
+        <body>
+            <div class="desktop">
+                <div id="hero" class="container">Fixed marketing layout</div>
+            </div>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=600, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=device-width"#))
+    }
+
+    func testWrapHTMLForDisplay_originalPurposeUsesDeviceViewportForComplexResponsiveSelectorMatchedAncestor() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            .desktop .container { width: 600px; }
+            @media only screen and (max-width: 480px) {
+                .desktop #hero { width: 100% !important; }
+            }
+            </style>
+        </head>
+        <body>
+            <div class="desktop">
+                <div id="hero" class="container">Responsive marketing layout</div>
+            </div>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=600"#))
+    }
+
     func testWrapHTMLForDisplay_originalPurposeUsesDeviceViewportForResponsiveWidthWithoutMediaType() {
         let html = """
         <!DOCTYPE html>

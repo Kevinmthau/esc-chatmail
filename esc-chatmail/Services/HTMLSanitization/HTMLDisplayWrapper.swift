@@ -775,6 +775,7 @@ struct HTMLDisplayWrapper {
             return false
         }
 
+        let selectorElements = htmlSelectorElements(in: html)
         var searchStart = html.startIndex
 
         while let mediaRange = html.range(
@@ -792,7 +793,11 @@ struct HTMLDisplayWrapper {
             let queries = mediaPrelude.split(separator: ",", omittingEmptySubsequences: true)
             if queries.contains(where: isResponsiveScreenWidthMediaQuery) {
                 let blockBody = String(html[html.index(after: blockStart)..<blockEnd])
-                if containsFluidWidthDeclaration(in: blockBody, targeting: fixedLayoutTargets) {
+                if containsFluidWidthDeclaration(
+                    in: blockBody,
+                    targeting: fixedLayoutTargets,
+                    selectorElements: selectorElements
+                ) {
                     return true
                 }
             }
@@ -949,7 +954,8 @@ struct HTMLDisplayWrapper {
 
     private func containsFluidWidthDeclaration(
         in css: String,
-        targeting fixedLayoutTargets: [LayoutSelectorTarget]
+        targeting fixedLayoutTargets: [LayoutSelectorTarget],
+        selectorElements: [HTMLSelectorElement]
     ) -> Bool {
         guard let regex = try? NSRegularExpression(
             pattern: #"([^{}@]+)\{[^{}]*(?<!-)\bwidth\s*:\s*100\s*%"#,
@@ -964,7 +970,10 @@ struct HTMLDisplayWrapper {
                 return false
             }
 
-            return selectorTargets(in: String(css[selectorsRange])).contains { target in
+            return selectorTargets(
+                in: String(css[selectorsRange]),
+                matching: selectorElements
+            ).contains { target in
                 fixedLayoutTargets.contains { fixedTarget in
                     selectorTarget(target, matches: fixedTarget)
                 }
@@ -1277,9 +1286,23 @@ struct HTMLDisplayWrapper {
             && fixedTarget.classNames == exactClassNames
     }
 
-    private func selectorTargets(in selectors: String) -> [LayoutSelectorTarget] {
-        selectors.split(separator: ",").compactMap { selector in
-            selectorTarget(in: String(selector))
+    private func selectorTargets(
+        in selectors: String,
+        matching elements: [HTMLSelectorElement]
+    ) -> [LayoutSelectorTarget] {
+        selectors.split(separator: ",").flatMap { selector -> [LayoutSelectorTarget] in
+            let selector = cssSelectorText(from: String(selector))
+            guard selectorContainsCombinator(selector) else {
+                return selectorTarget(in: selector).map { [$0] } ?? []
+            }
+
+            guard let matchingElements = htmlElementSelectorTargets(
+                matchingComplexSelector: selector,
+                in: elements
+            ) else {
+                return []
+            }
+            return matchingElements
         }
     }
 
