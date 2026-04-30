@@ -779,6 +779,7 @@ struct HTMLDisplayWrapper {
         }
 
         let selectorElements = htmlSelectorElements(in: html)
+        var fluidTargetsByMediaQuery: [String: [LayoutSelectorTarget]] = [:]
         var searchStart = html.startIndex
 
         while let mediaRange = html.range(
@@ -794,19 +795,27 @@ struct HTMLDisplayWrapper {
 
             let mediaPrelude = html[mediaRange.upperBound..<blockStart]
             let queries = mediaPrelude.split(separator: ",", omittingEmptySubsequences: true)
-            if queries.contains(where: isResponsiveScreenWidthMediaQuery) {
+            let responsiveQueryKeys = queries
+                .filter(isResponsiveScreenWidthMediaQuery)
+                .map(normalizedMediaQueryKey)
+            if !responsiveQueryKeys.isEmpty {
                 let blockBody = String(html[html.index(after: blockStart)..<blockEnd])
                 let fluidTargets = fluidWidthDeclarationTargets(
                     in: blockBody,
                     selectorElements: selectorElements
                 )
-                if !fluidTargets.isEmpty,
-                   fixedLayoutTargets.allSatisfy({ fixedTarget in
-                       fluidTargets.contains { target in
-                           selectorTarget(target, matches: fixedTarget)
-                       }
-                   }) {
-                    return true
+                if !fluidTargets.isEmpty {
+                    for queryKey in responsiveQueryKeys {
+                        fluidTargetsByMediaQuery[queryKey, default: []].append(contentsOf: fluidTargets)
+                        let queryFluidTargets = fluidTargetsByMediaQuery[queryKey] ?? []
+                        if fixedLayoutTargets.allSatisfy({ fixedTarget in
+                            queryFluidTargets.contains { target in
+                                selectorTarget(target, matches: fixedTarget)
+                            }
+                        }) {
+                            return true
+                        }
+                    }
                 }
             }
 
@@ -814,6 +823,10 @@ struct HTMLDisplayWrapper {
         }
 
         return false
+    }
+
+    private func normalizedMediaQueryKey(_ query: Substring) -> String {
+        String(query).lowercased().filter { !$0.isWhitespace }
     }
 
     private func fixedLayoutSelectorTargets(

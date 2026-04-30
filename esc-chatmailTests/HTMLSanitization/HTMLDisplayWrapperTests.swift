@@ -516,6 +516,33 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=device-width"#))
     }
 
+    func testWrapHTMLForDisplay_originalPurposeUsesDeviceViewportWhenSplitMediaBlocksCoverFixedTargets() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            @media only screen and (max-width: 480px) {
+                .first { width: 100% !important; }
+            }
+            @media only screen and (max-width:480px) {
+                .second { width: 100% !important; }
+            }
+            </style>
+        </head>
+        <body>
+            <table width="600" class="first"><tr><td>First responsive section</td></tr></table>
+            <table width="600" class="second"><tr><td>Second responsive section</td></tr></table>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=600"#))
+    }
+
     func testWrapHTMLForDisplay_originalPurposeKeepsFixedViewportForUnmatchedSiblingResponsiveSelector() {
         let html = """
         <!DOCTYPE html>
