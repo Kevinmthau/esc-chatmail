@@ -861,13 +861,42 @@ struct HTMLDisplayWrapper {
             return []
         }
 
+        let elementTargets = htmlElementSelectorTargets(in: html)
         let range = NSRange(html.startIndex..<html.endIndex, in: html)
         return regex.matches(in: html, range: range).flatMap { match -> [LayoutSelectorTarget] in
             guard let selectorsRange = Range(match.range(at: 1), in: html) else {
                 return []
             }
 
-            return selectorTargets(in: String(html[selectorsRange]))
+            return selectorTargets(in: String(html[selectorsRange])).flatMap { target in
+                let matchingElements = elementTargets.filter { elementTarget in
+                    selectorTarget(target, matches: elementTarget)
+                }
+                return matchingElements.isEmpty ? [target] : matchingElements
+            }
+        }
+    }
+
+    private func htmlElementSelectorTargets(in html: String) -> [LayoutSelectorTarget] {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"<([A-Za-z][A-Za-z0-9:-]*)\b[^>]*>"#,
+            options: [.caseInsensitive, .dotMatchesLineSeparators]
+        ) else {
+            return []
+        }
+
+        let range = NSRange(html.startIndex..<html.endIndex, in: html)
+        return regex.matches(in: html, range: range).compactMap { match in
+            guard let tagNameRange = Range(match.range(at: 1), in: html),
+                  let tagRange = Range(match.range(at: 0), in: html) else {
+                return nil
+            }
+
+            let elementTarget = htmlElementSelectorTarget(
+                tagName: String(html[tagNameRange]),
+                tagHTML: String(html[tagRange])
+            )
+            return elementTarget
         }
     }
 
