@@ -34,6 +34,21 @@ struct HTMLDisplayWrapper {
         }
     }
 
+    private enum LayoutSelectorCombinator {
+        case descendant
+        case child
+    }
+
+    private struct LayoutSelectorPart {
+        let target: LayoutSelectorTarget
+        let previousCombinator: LayoutSelectorCombinator?
+    }
+
+    private struct HTMLSelectorElement {
+        let target: LayoutSelectorTarget
+        let ancestors: [LayoutSelectorTarget]
+    }
+
     private struct RootTypographyDetector {
         // swiftlint:disable:next force_try
         private static let rootElementTagRegex = try! NSRegularExpression(
@@ -861,7 +876,8 @@ struct HTMLDisplayWrapper {
             return []
         }
 
-        let elementTargets = htmlElementSelectorTargets(in: html)
+        let selectorElements = htmlSelectorElements(in: html)
+        let elementTargets = selectorElements.map(\.target)
         let range = NSRange(html.startIndex..<html.endIndex, in: html)
         return regex.matches(in: html, range: range).flatMap { match -> [LayoutSelectorTarget] in
             guard let selectorsRange = Range(match.range(at: 1), in: html) else {
@@ -874,7 +890,13 @@ struct HTMLDisplayWrapper {
                     return []
                 }
                 guard !selectorContainsCombinator(selector) else {
-                    return [target]
+                    guard let matchingElements = htmlElementSelectorTargets(
+                        matchingComplexSelector: selector,
+                        in: selectorElements
+                    ) else {
+                        return [target]
+                    }
+                    return matchingElements.isEmpty ? [target] : matchingElements
                 }
 
                 let matchingElements = elementTargets.filter { elementTarget in
@@ -885,27 +907,44 @@ struct HTMLDisplayWrapper {
         }
     }
 
-    private func htmlElementSelectorTargets(in html: String) -> [LayoutSelectorTarget] {
+    private func htmlSelectorElements(in html: String) -> [HTMLSelectorElement] {
         guard let regex = try? NSRegularExpression(
-            pattern: #"<([A-Za-z][A-Za-z0-9:-]*)\b[^>]*>"#,
+            pattern: #"<\s*(/)?\s*([A-Za-z][A-Za-z0-9:-]*)\b[^>]*>"#,
             options: [.caseInsensitive, .dotMatchesLineSeparators]
         ) else {
             return []
         }
 
+        var elements: [HTMLSelectorElement] = []
+        var stack: [LayoutSelectorTarget] = []
         let range = NSRange(html.startIndex..<html.endIndex, in: html)
-        return regex.matches(in: html, range: range).compactMap { match in
-            guard let tagNameRange = Range(match.range(at: 1), in: html),
+        for match in regex.matches(in: html, range: range) {
+            guard let tagNameRange = Range(match.range(at: 2), in: html),
                   let tagRange = Range(match.range(at: 0), in: html) else {
-                return nil
+                continue
+            }
+
+            let tagHTML = String(html[tagRange])
+            let tagName = String(html[tagNameRange]).lowercased()
+            if Range(match.range(at: 1), in: html) != nil {
+                if let index = stack.lastIndex(where: { $0.tagName == tagName }) {
+                    stack.removeSubrange(index...)
+                }
+                continue
             }
 
             let elementTarget = htmlElementSelectorTarget(
-                tagName: String(html[tagNameRange]),
-                tagHTML: String(html[tagRange])
+                tagName: tagName,
+                tagHTML: tagHTML
             )
-            return elementTarget
+            elements.append(HTMLSelectorElement(target: elementTarget, ancestors: stack))
+
+            if !isSelfClosingHTMLElement(tagName: tagName, tagHTML: tagHTML) {
+                stack.append(elementTarget)
+            }
         }
+
+        return elements
     }
 
     private func containsFluidWidthDeclaration(
@@ -1027,6 +1066,199 @@ struct HTMLDisplayWrapper {
         }
 
         return false
+    }
+
+    private func htmlElementSelectorTargets(
+        matchingComplexSelector selector: String,
+        in elements: [HTMLSelectorElement]
+    ) -> [LayoutSelectorTarget]? {
+        guard let selectorParts = complexSelectorParts(in: selector), selectorParts.count > 1 else {
+            return nil
+        }
+
+        return elements.compactMap { element in
+            htmlSelectorElement(element, matches: selectorParts) ? element.target : nil
+        }
+    }
+
+    private func htmlSelectorElement(
+        _ element: HTMLSelectorElement,
+        matches selectorParts: [LayoutSelectorPart]
+    ) -> Bool {
+        guard let lastPart = selectorParts.last,
+              selectorTarget(lastPart.target, matches: element.target) else {
+            return false
+        }
+
+        var ancestorEndIndex = element.ancestors.count
+        for partIndex in stride(from: selectorParts.count - 2, through: 0, by: -1) {
+            let part = selectorParts[partIndex]
+            let combinator = selectorParts[partIndex + 1].previousCombinator ?? .descendant
+
+            switch combinator {
+            case .child:
+                guard ancestorEndIndex > 0 else {
+                    return false
+                }
+
+                let parentIndex = ancestorEndIndex - 1
+                guard selectorTarget(part.target, matches: element.ancestors[parentIndex]) else {
+                    return false
+                }
+                ancestorEndIndex = parentIndex
+
+            case .descendant:
+                guard let ancestorIndex = matchingAncestorIndex(
+                    for: part.target,
+                    before: ancestorEndIndex,
+                    in: element.ancestors
+                ) else {
+                    return false
+                }
+                ancestorEndIndex = ancestorIndex
+            }
+        }
+
+        return true
+    }
+
+    private func matchingAncestorIndex(
+        for target: LayoutSelectorTarget,
+        before endIndex: Int,
+        in ancestors: [LayoutSelectorTarget]
+    ) -> Int? {
+        guard endIndex > 0 else {
+            return nil
+        }
+
+        for index in stride(from: endIndex - 1, through: 0, by: -1) {
+            if selectorTarget(target, matches: ancestors[index]) {
+                return index
+            }
+        }
+
+        return nil
+    }
+
+    private func complexSelectorParts(in selector: String) -> [LayoutSelectorPart]? {
+        var parts: [LayoutSelectorPart] = []
+        var current = ""
+        var pendingCombinator: LayoutSelectorCombinator?
+        var hasWhitespaceAfterCurrent = false
+        var isInsideAttributeSelector = false
+        var parenthesisDepth = 0
+        var quoteCharacter: Character?
+
+        func appendCurrentPart() -> Bool {
+            let compound = current.trimmingCharacters(in: .whitespacesAndNewlines)
+            current.removeAll(keepingCapacity: true)
+            guard !compound.isEmpty else {
+                return true
+            }
+            guard let target = selectorTarget(in: compound) else {
+                return false
+            }
+
+            parts.append(LayoutSelectorPart(
+                target: target,
+                previousCombinator: parts.isEmpty ? nil : pendingCombinator ?? .descendant
+            ))
+            pendingCombinator = nil
+            return true
+        }
+
+        for character in selector {
+            if let activeQuote = quoteCharacter {
+                current.append(character)
+                if character == activeQuote {
+                    quoteCharacter = nil
+                }
+                continue
+            }
+
+            if character == "\"" || character == "'" {
+                current.append(character)
+                quoteCharacter = character
+                continue
+            }
+
+            if character == "[" {
+                current.append(character)
+                isInsideAttributeSelector = true
+                continue
+            }
+
+            if character == "]" {
+                current.append(character)
+                isInsideAttributeSelector = false
+                continue
+            }
+
+            if !isInsideAttributeSelector {
+                if character == "(" {
+                    parenthesisDepth += 1
+                    current.append(character)
+                    continue
+                }
+
+                if character == ")" {
+                    parenthesisDepth = max(0, parenthesisDepth - 1)
+                    current.append(character)
+                    continue
+                }
+            }
+
+            if isInsideAttributeSelector || parenthesisDepth > 0 {
+                current.append(character)
+                continue
+            }
+
+            if character == "+" || character == "~" {
+                return nil
+            }
+
+            if character == ">" {
+                guard appendCurrentPart() else {
+                    return nil
+                }
+                pendingCombinator = .child
+                hasWhitespaceAfterCurrent = false
+                continue
+            }
+
+            if character.isWhitespace {
+                if !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    hasWhitespaceAfterCurrent = true
+                }
+                continue
+            }
+
+            if hasWhitespaceAfterCurrent {
+                guard appendCurrentPart() else {
+                    return nil
+                }
+                pendingCombinator = .descendant
+                hasWhitespaceAfterCurrent = false
+            }
+
+            current.append(character)
+        }
+
+        guard appendCurrentPart() else {
+            return nil
+        }
+
+        return parts
+    }
+
+    private func isSelfClosingHTMLElement(tagName: String, tagHTML: String) -> Bool {
+        let voidElementNames: Set<String> = [
+            "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+            "meta", "param", "source", "track", "wbr"
+        ]
+
+        return voidElementNames.contains(tagName)
+            || tagHTML.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("/>")
     }
 
     private func exactClassAttributeValue(
