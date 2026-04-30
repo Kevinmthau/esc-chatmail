@@ -10,6 +10,7 @@ enum HTMLDisplayPurpose: String, CaseIterable, Sendable {
 struct HTMLDisplayWrapper {
     private static let appleMailFallbackFontStack = "-apple-system, BlinkMacSystemFont, \"Helvetica Neue\", Helvetica, Arial, sans-serif"
     private static let minimumFixedLayoutViewportWidth = 376
+    private static let maximumResponsiveLayoutViewportWidth = 480
     private static let maximumFixedLayoutViewportWidth = 900
 
     private struct LayoutSelectorTarget {
@@ -78,6 +79,27 @@ struct HTMLDisplayWrapper {
                 return lhs.classLikeCount < rhs.classLikeCount
             }
             return lhs.elementCount < rhs.elementCount
+        }
+    }
+
+    private struct CSSMediaWidthRange {
+        let minimum: Int?
+        let maximum: Int?
+
+        func intersection(with other: CSSMediaWidthRange) -> CSSMediaWidthRange? {
+            let minimum = [minimum, other.minimum].compactMap { $0 }.max()
+            let maximum = [maximum, other.maximum].compactMap { $0 }.min()
+            if let minimum, let maximum, minimum > maximum {
+                return nil
+            }
+
+            return CSSMediaWidthRange(minimum: minimum, maximum: maximum)
+        }
+
+        func canMatchResponsiveLayoutViewport() -> Bool {
+            let lowerBound = max(minimum ?? 0, HTMLDisplayWrapper.minimumFixedLayoutViewportWidth)
+            let upperBound = min(maximum ?? Int.max, HTMLDisplayWrapper.maximumResponsiveLayoutViewportWidth)
+            return lowerBound <= upperBound
         }
     }
 
@@ -825,18 +847,22 @@ struct HTMLDisplayWrapper {
 
             let mediaPrelude = html[mediaRange.upperBound..<blockStart]
             let queries = mediaPrelude.split(separator: ",", omittingEmptySubsequences: true)
-            let responsiveQueryKeys = queries
-                .filter(isResponsiveScreenWidthMediaQuery)
-                .map(normalizedMediaQueryKey)
-            if !responsiveQueryKeys.isEmpty {
+            let responsiveQueries = queries.filter(isResponsiveScreenWidthMediaQuery)
+            if !responsiveQueries.isEmpty {
                 let blockBody = String(html[html.index(after: blockStart)..<blockEnd])
-                let widthDeclarations = mediaQueryWidthDeclarations(
-                    in: blockBody,
-                    selectorElements: selectorElements,
-                    order: &widthDeclarationOrder
-                )
-                if !widthDeclarations.isEmpty {
-                    for queryKey in responsiveQueryKeys {
+                for query in responsiveQueries {
+                    guard let mediaWidthRange = screenMediaQueryWidthRange(query) else {
+                        continue
+                    }
+
+                    let widthDeclarations = mediaQueryWidthDeclarations(
+                        in: blockBody,
+                        selectorElements: selectorElements,
+                        activeMediaWidthRanges: [mediaWidthRange],
+                        order: &widthDeclarationOrder
+                    )
+                    if !widthDeclarations.isEmpty {
+                        let queryKey = normalizedMediaQueryKey(query)
                         widthDeclarationsByMediaQuery[queryKey, default: []].append(contentsOf: widthDeclarations)
                     }
                 }
@@ -1016,6 +1042,7 @@ struct HTMLDisplayWrapper {
     private func mediaQueryWidthDeclarations(
         in css: String,
         selectorElements: [HTMLSelectorElement],
+        activeMediaWidthRanges: [CSSMediaWidthRange],
         order: inout Int
     ) -> [LayoutWidthDeclaration] {
         var declarations: [LayoutWidthDeclaration] = []
@@ -1024,10 +1051,14 @@ struct HTMLDisplayWrapper {
         while let block = nextCSSBlock(in: css, from: currentIndex) {
             let prelude = block.prelude.trimmingCharacters(in: .whitespacesAndNewlines)
             if prelude.hasPrefix("@") {
-                if nestedAtRuleIsUnconditionalScreenMedia(prelude) {
+                if let nestedMediaWidthRanges = nestedMediaWidthRanges(
+                    for: prelude,
+                    activeMediaWidthRanges: activeMediaWidthRanges
+                ) {
                     declarations += mediaQueryWidthDeclarations(
                         in: block.body,
                         selectorElements: selectorElements,
+                        activeMediaWidthRanges: nestedMediaWidthRanges,
                         order: &order
                     )
                 }
@@ -1061,15 +1092,28 @@ struct HTMLDisplayWrapper {
         return declarations
     }
 
-    private func nestedAtRuleIsUnconditionalScreenMedia(_ prelude: String) -> Bool {
+    private func nestedMediaWidthRanges(
+        for prelude: String,
+        activeMediaWidthRanges: [CSSMediaWidthRange]
+    ) -> [CSSMediaWidthRange]? {
         let trimmedPrelude = prelude.trimmingCharacters(in: .whitespacesAndNewlines)
         let lowercasedPrelude = trimmedPrelude.lowercased()
         guard lowercasedPrelude.hasPrefix("@media") else {
-            return false
+            return nil
         }
 
         let mediaPreludeStart = trimmedPrelude.index(trimmedPrelude.startIndex, offsetBy: "@media".count)
-        return !shouldIgnoreCSSMediaBlock(with: trimmedPrelude[mediaPreludeStart...])
+        let nestedMediaRanges = trimmedPrelude[mediaPreludeStart...]
+            .split(separator: ",", omittingEmptySubsequences: true)
+            .compactMap(screenMediaQueryWidthRange)
+
+        let matchingRanges = activeMediaWidthRanges.flatMap { activeRange in
+            nestedMediaRanges.compactMap { nestedRange in
+                activeRange.intersection(with: nestedRange)
+            }
+        }.filter { $0.canMatchResponsiveLayoutViewport() }
+
+        return matchingRanges.isEmpty ? nil : matchingRanges
     }
 
     private func widthStates(in declarationBody: String) -> [(state: LayoutWidthState, isImportant: Bool)] {
@@ -1791,9 +1835,78 @@ struct HTMLDisplayWrapper {
         let normalized = String(query)
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        guard !normalized.isEmpty,
-              !normalized.contains("not"),
+        guard mediaQueryTargetsScreen(normalized),
               normalized.contains("max-width") || normalized.contains("max-device-width") else {
+            return false
+        }
+
+        return true
+    }
+
+    private func screenMediaQueryWidthRange(_ query: Substring) -> CSSMediaWidthRange? {
+        let normalized = String(query)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard mediaQueryTargetsScreen(normalized) else {
+            return nil
+        }
+
+        var minimum: Int?
+        var maximum: Int?
+        var foundWidthConstraint = false
+
+        if let widthBoundRegex = try? NSRegularExpression(
+            pattern: #"\(\s*(min|max)-(?:device-)?width\s*:\s*([0-9]{1,4})\s*px\s*\)"#,
+            options: [.caseInsensitive]
+        ) {
+            let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+            for match in widthBoundRegex.matches(in: normalized, range: range) {
+                guard let boundRange = Range(match.range(at: 1), in: normalized),
+                      let widthRange = Range(match.range(at: 2), in: normalized),
+                      let width = Int(normalized[widthRange]) else {
+                    continue
+                }
+
+                foundWidthConstraint = true
+                if String(normalized[boundRange]) == "min" {
+                    minimum = max(minimum ?? width, width)
+                } else {
+                    maximum = min(maximum ?? width, width)
+                }
+            }
+        }
+
+        if let exactWidthRegex = try? NSRegularExpression(
+            pattern: #"\(\s*(?:device-)?width\s*:\s*([0-9]{1,4})\s*px\s*\)"#,
+            options: [.caseInsensitive]
+        ) {
+            let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+            for match in exactWidthRegex.matches(in: normalized, range: range) {
+                guard let widthRange = Range(match.range(at: 1), in: normalized),
+                      let width = Int(normalized[widthRange]) else {
+                    continue
+                }
+
+                foundWidthConstraint = true
+                minimum = max(minimum ?? width, width)
+                maximum = min(maximum ?? width, width)
+            }
+        }
+
+        guard foundWidthConstraint || isUnconditionallyApplicableScreenMediaQuery(query) else {
+            return nil
+        }
+
+        if let minimum, let maximum, minimum > maximum {
+            return nil
+        }
+
+        return CSSMediaWidthRange(minimum: minimum, maximum: maximum)
+    }
+
+    private func mediaQueryTargetsScreen(_ normalized: String) -> Bool {
+        guard !normalized.isEmpty,
+              !normalized.contains("not") else {
             return false
         }
 
