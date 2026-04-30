@@ -91,7 +91,7 @@ struct BaseEmailWebView: UIViewRepresentable {
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
-        context.coordinator.parent = self
+        context.coordinator.updateParent(self)
         context.coordinator.applyBackgroundAppearance(to: webView)
         context.coordinator.loadContentIfReady(in: webView)
     }
@@ -105,7 +105,7 @@ struct BaseEmailWebView: UIViewRepresentable {
     class Coordinator: NSObject, WKNavigationDelegate {
         var parent: BaseEmailWebView
         var lastLoadedContent: String = ""
-        var lastLoadedModeSignature: String = ""
+        var lastLoadedReloadSignature: String = ""
         private var isLoading = false
         private var lastDeliveredPreviewHeight: CGFloat = 0
         private var previewMeasurementGeneration = 0
@@ -117,7 +117,12 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
 
         var needsReload: Bool {
-            lastLoadedContent != parent.htmlContent || lastLoadedModeSignature != modeSignature(for: parent.mode)
+            lastLoadedContent != parent.htmlContent || lastLoadedReloadSignature != reloadSignature()
+        }
+
+        func updateParent(_ parent: BaseEmailWebView) {
+            self.parent = parent
+            cidHandler?.message = parent.message
         }
 
         func loadContent(in webView: WKWebView) {
@@ -125,8 +130,7 @@ struct BaseEmailWebView: UIViewRepresentable {
             isLoading = true
             lastDeliveredPreviewHeight = 0
             previewMeasurementGeneration &+= 1
-            lastLoadedContent = parent.htmlContent
-            lastLoadedModeSignature = modeSignature(for: parent.mode)
+            recordLoadedSignature()
 
             let htmlToLoad: String
             switch parent.mode {
@@ -164,6 +168,16 @@ struct BaseEmailWebView: UIViewRepresentable {
             loadContent(in: webView)
         }
 
+        func recordLoadedSignature() {
+            lastLoadedContent = parent.htmlContent
+            lastLoadedReloadSignature = reloadSignature()
+        }
+
+        func resetLoadedSignatureAfterFailure() {
+            lastLoadedContent = ""
+            lastLoadedReloadSignature = ""
+        }
+
         func applyBackgroundAppearance(to webView: WKWebView) {
             webView.isOpaque = false
             switch parent.mode {
@@ -176,6 +190,17 @@ struct BaseEmailWebView: UIViewRepresentable {
             webView.backgroundColor = backgroundColor
             webView.scrollView.backgroundColor = backgroundColor
             webView.underPageBackgroundColor = backgroundColor
+        }
+
+        private func reloadSignature() -> String {
+            "\(modeSignature(for: parent.mode)):\(messageIdentitySignature())"
+        }
+
+        private func messageIdentitySignature() -> String {
+            guard let message = parent.message else {
+                return "message:none"
+            }
+            return "message:\(message.id)"
         }
 
         private func modeSignature(for mode: EmailWebViewMode) -> String {
@@ -423,11 +448,13 @@ struct BaseEmailWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             isLoading = false
+            resetLoadedSignatureAfterFailure()
             Log.debug("WebView navigation failed: \(error)", category: .ui)
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             isLoading = false
+            resetLoadedSignatureAfterFailure()
             Log.debug("WebView provisional navigation failed: \(error)", category: .ui)
         }
 
