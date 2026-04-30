@@ -543,6 +543,59 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=600"#))
     }
 
+    func testWrapHTMLForDisplay_originalPurposeKeepsFixedViewportWhenSplitMediaBlockOverridesFluidSelector() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            @media only screen and (max-width: 480px) {
+                .first { width: 100% !important; }
+            }
+            @media only screen and (max-width:480px) {
+                .first { width: 600px !important; }
+                .second { width: 100% !important; }
+            }
+            </style>
+        </head>
+        <body>
+            <table width="600" class="first"><tr><td>Fixed section</td></tr></table>
+            <table width="600" class="second"><tr><td>Responsive section</td></tr></table>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=600, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=device-width"#))
+    }
+
+    func testWrapHTMLForDisplay_originalPurposeKeepsFixedViewportForMixedFluidAndFixedSelectorsInSameQuery() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            @media only screen and (max-width: 480px) {
+                .first { width: 100% !important; }
+                .second { width: 600px !important; }
+            }
+            </style>
+        </head>
+        <body>
+            <table width="600" class="first"><tr><td>Responsive section</td></tr></table>
+            <table width="600" class="second"><tr><td>Fixed section</td></tr></table>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=600, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=device-width"#))
+    }
+
     func testWrapHTMLForDisplay_originalPurposeKeepsFixedViewportForUnmatchedSiblingResponsiveSelector() {
         let html = """
         <!DOCTYPE html>

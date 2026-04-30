@@ -52,6 +52,35 @@ struct HTMLDisplayWrapper {
         let previousSiblingIndex: Int?
     }
 
+    private enum LayoutWidthState {
+        case fluid
+        case nonFluid
+    }
+
+    private struct LayoutWidthDeclaration {
+        let target: LayoutSelectorTarget
+        let state: LayoutWidthState
+        let isImportant: Bool
+        let specificity: CSSSelectorSpecificity
+        let order: Int
+    }
+
+    private struct CSSSelectorSpecificity: Comparable {
+        let idCount: Int
+        let classLikeCount: Int
+        let elementCount: Int
+
+        static func < (lhs: CSSSelectorSpecificity, rhs: CSSSelectorSpecificity) -> Bool {
+            if lhs.idCount != rhs.idCount {
+                return lhs.idCount < rhs.idCount
+            }
+            if lhs.classLikeCount != rhs.classLikeCount {
+                return lhs.classLikeCount < rhs.classLikeCount
+            }
+            return lhs.elementCount < rhs.elementCount
+        }
+    }
+
     private struct RootTypographyDetector {
         // swiftlint:disable:next force_try
         private static let rootElementTagRegex = try! NSRegularExpression(
@@ -779,7 +808,8 @@ struct HTMLDisplayWrapper {
         }
 
         let selectorElements = htmlSelectorElements(in: html)
-        var fluidTargetsByMediaQuery: [String: [LayoutSelectorTarget]] = [:]
+        var widthDeclarationsByMediaQuery: [String: [LayoutWidthDeclaration]] = [:]
+        var widthDeclarationOrder = 0
         var searchStart = html.startIndex
 
         while let mediaRange = html.range(
@@ -800,21 +830,14 @@ struct HTMLDisplayWrapper {
                 .map(normalizedMediaQueryKey)
             if !responsiveQueryKeys.isEmpty {
                 let blockBody = String(html[html.index(after: blockStart)..<blockEnd])
-                let fluidTargets = fluidWidthDeclarationTargets(
+                let widthDeclarations = mediaQueryWidthDeclarations(
                     in: blockBody,
-                    selectorElements: selectorElements
+                    selectorElements: selectorElements,
+                    order: &widthDeclarationOrder
                 )
-                if !fluidTargets.isEmpty {
+                if !widthDeclarations.isEmpty {
                     for queryKey in responsiveQueryKeys {
-                        fluidTargetsByMediaQuery[queryKey, default: []].append(contentsOf: fluidTargets)
-                        let queryFluidTargets = fluidTargetsByMediaQuery[queryKey] ?? []
-                        if fixedLayoutTargets.allSatisfy({ fixedTarget in
-                            queryFluidTargets.contains { target in
-                                selectorTarget(target, matches: fixedTarget)
-                            }
-                        }) {
-                            return true
-                        }
+                        widthDeclarationsByMediaQuery[queryKey, default: []].append(contentsOf: widthDeclarations)
                     }
                 }
             }
@@ -822,7 +845,14 @@ struct HTMLDisplayWrapper {
             searchStart = html.index(after: blockEnd)
         }
 
-        return false
+        return widthDeclarationsByMediaQuery.values.contains { declarations in
+            fixedLayoutTargets.allSatisfy { fixedTarget in
+                finalWidthDeclaration(
+                    matching: fixedTarget,
+                    in: declarations
+                )?.state == .fluid
+            }
+        }
     }
 
     private func normalizedMediaQueryKey(_ query: Substring) -> String {
@@ -983,28 +1013,149 @@ struct HTMLDisplayWrapper {
         return elements
     }
 
-    private func fluidWidthDeclarationTargets(
+    private func mediaQueryWidthDeclarations(
         in css: String,
-        selectorElements: [HTMLSelectorElement]
-    ) -> [LayoutSelectorTarget] {
+        selectorElements: [HTMLSelectorElement],
+        order: inout Int
+    ) -> [LayoutWidthDeclaration] {
+        var declarations: [LayoutWidthDeclaration] = []
+        var currentIndex = css.startIndex
+
+        while let block = nextCSSBlock(in: css, from: currentIndex) {
+            let prelude = block.prelude.trimmingCharacters(in: .whitespacesAndNewlines)
+            if prelude.hasPrefix("@") {
+                declarations += mediaQueryWidthDeclarations(
+                    in: block.body,
+                    selectorElements: selectorElements,
+                    order: &order
+                )
+            } else {
+                let selectorTexts = prelude.split(separator: ",").map {
+                    cssSelectorText(from: String($0))
+                }
+                let widthStates = widthStates(in: block.body)
+
+                for widthState in widthStates {
+                    order += 1
+                    for selector in selectorTexts {
+                        let targets = selectorTargets(in: selector, matching: selectorElements)
+                        let specificity = cssSelectorSpecificity(in: selector)
+                        declarations += targets.map { target in
+                            LayoutWidthDeclaration(
+                                target: target,
+                                state: widthState.state,
+                                isImportant: widthState.isImportant,
+                                specificity: specificity,
+                                order: order
+                            )
+                        }
+                    }
+                }
+            }
+
+            currentIndex = block.nextIndex
+        }
+
+        return declarations
+    }
+
+    private func widthStates(in declarationBody: String) -> [(state: LayoutWidthState, isImportant: Bool)] {
         guard let regex = try? NSRegularExpression(
-            pattern: #"([^{}@]+)\{[^{}]*(?<!-)\bwidth\s*:\s*100\s*%"#,
+            pattern: #"(?<!-)\bwidth\s*:\s*([^;{}]+)"#,
             options: [.caseInsensitive]
         ) else {
             return []
         }
 
-        let range = NSRange(css.startIndex..<css.endIndex, in: css)
-        return regex.matches(in: css, range: range).flatMap { match -> [LayoutSelectorTarget] in
-            guard let selectorsRange = Range(match.range(at: 1), in: css) else {
-                return []
+        let range = NSRange(declarationBody.startIndex..<declarationBody.endIndex, in: declarationBody)
+        return regex.matches(in: declarationBody, range: range).compactMap { match in
+            guard let valueRange = Range(match.range(at: 1), in: declarationBody) else {
+                return nil
             }
 
-            return selectorTargets(
-                in: String(css[selectorsRange]),
-                matching: selectorElements
+            let value = String(declarationBody[valueRange])
+            return (
+                state: isFluidWidthValue(value) ? .fluid : .nonFluid,
+                isImportant: value.range(of: "!important", options: .caseInsensitive) != nil
             )
         }
+    }
+
+    private func isFluidWidthValue(_ value: String) -> Bool {
+        let normalized = value
+            .replacingOccurrences(of: "!important", with: "", options: .caseInsensitive)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let regex = try? NSRegularExpression(
+            pattern: #"^100\s*%$"#,
+            options: [.caseInsensitive]
+        ) else {
+            return false
+        }
+
+        let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+        return regex.firstMatch(in: normalized, range: range) != nil
+    }
+
+    private func finalWidthDeclaration(
+        matching fixedTarget: LayoutSelectorTarget,
+        in declarations: [LayoutWidthDeclaration]
+    ) -> LayoutWidthDeclaration? {
+        declarations.reduce(nil) { currentWinner, declaration in
+            guard selectorTarget(declaration.target, matches: fixedTarget) else {
+                return currentWinner
+            }
+
+            guard let currentWinner else {
+                return declaration
+            }
+
+            return widthDeclaration(declaration, overrides: currentWinner) ? declaration : currentWinner
+        }
+    }
+
+    private func widthDeclaration(
+        _ declaration: LayoutWidthDeclaration,
+        overrides currentWinner: LayoutWidthDeclaration
+    ) -> Bool {
+        if declaration.isImportant != currentWinner.isImportant {
+            return declaration.isImportant
+        }
+        if declaration.specificity != currentWinner.specificity {
+            return declaration.specificity > currentWinner.specificity
+        }
+        return declaration.order >= currentWinner.order
+    }
+
+    private func cssSelectorSpecificity(in selector: String) -> CSSSelectorSpecificity {
+        let sanitizedSelector = removingSelectorPseudoElementSuffixes(from: selector)
+        let idCount = regexMatchCount(in: sanitizedSelector, pattern: #"#([A-Za-z_][A-Za-z0-9_-]*)"#)
+        let classLikeCount =
+            regexMatchCount(in: sanitizedSelector, pattern: #"\.([A-Za-z_][A-Za-z0-9_-]*)"#)
+            + regexMatchCount(in: sanitizedSelector, pattern: #"\[[^\]]+\]"#)
+            + regexMatchCount(in: sanitizedSelector, pattern: #":(?!:)[A-Za-z_-][A-Za-z0-9_-]*(?:\([^)]*\))?"#)
+        let elementCount = regexMatchCount(
+            in: sanitizedSelector,
+            pattern: #"(?:(?<=^)|(?<=[\s>+~]))(?:[A-Za-z_][A-Za-z0-9_-]*\|)?[A-Za-z][A-Za-z0-9_-]*(?=$|[#.\[:\s>+~])"#
+        )
+
+        return CSSSelectorSpecificity(
+            idCount: idCount,
+            classLikeCount: classLikeCount,
+            elementCount: elementCount
+        )
+    }
+
+    private func removingSelectorPseudoElementSuffixes(from selector: String) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"::[A-Za-z_-][A-Za-z0-9_-]*(?:\([^)]*\))?"#,
+            options: []
+        ) else {
+            return selector
+        }
+
+        let range = NSRange(selector.startIndex..<selector.endIndex, in: selector)
+        return regex.stringByReplacingMatches(in: selector, range: range, withTemplate: "")
     }
 
     private func selectorTarget(
@@ -1492,6 +1643,15 @@ struct HTMLDisplayWrapper {
         }
     }
 
+    private func regexMatchCount(in text: String, pattern: String) -> Int {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return 0
+        }
+
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.numberOfMatches(in: text, range: range)
+    }
+
     private func removingHTMLComments(from html: String) -> String {
         guard let regex = try? NSRegularExpression(
             pattern: #"<!--[\s\S]*?-->"#,
@@ -1502,6 +1662,58 @@ struct HTMLDisplayWrapper {
 
         let range = NSRange(html.startIndex..<html.endIndex, in: html)
         return regex.stringByReplacingMatches(in: html, range: range, withTemplate: "")
+    }
+
+    private func nextCSSBlock(
+        in css: String,
+        from startIndex: String.Index
+    ) -> (prelude: String, body: String, nextIndex: String.Index)? {
+        var index = startIndex
+        var quoteCharacter: Character?
+        var braceDepth = 0
+        let preludeStart = startIndex
+        var preludeEnd: String.Index?
+        var blockStart: String.Index?
+
+        while index < css.endIndex {
+            let character = css[index]
+
+            if let activeQuote = quoteCharacter {
+                if character == "\\" {
+                    index = css.index(after: index)
+                } else if character == activeQuote {
+                    quoteCharacter = nil
+                }
+            } else {
+                switch character {
+                case "\"", "'":
+                    quoteCharacter = character
+                case "{":
+                    if braceDepth == 0 {
+                        preludeEnd = index
+                        blockStart = css.index(after: index)
+                    }
+                    braceDepth += 1
+                case "}":
+                    guard braceDepth > 0, let blockStart else {
+                        break
+                    }
+
+                    braceDepth -= 1
+                    if braceDepth == 0, let preludeEnd {
+                        let prelude = String(css[preludeStart..<preludeEnd])
+                        let body = String(css[blockStart..<index])
+                        return (prelude, body, css.index(after: index))
+                    }
+                default:
+                    break
+                }
+            }
+
+            index = css.index(after: index)
+        }
+
+        return nil
     }
 
     private func removingConditionalCSSMediaBlocks(
