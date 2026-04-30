@@ -178,6 +178,26 @@ struct BaseEmailWebView: UIViewRepresentable {
             lastLoadedReloadSignature = ""
         }
 
+        func resetLoadedSignatureAfterFailure(for error: Error) {
+            guard !isCancelledNavigationError(error) else {
+                return
+            }
+            resetLoadedSignatureAfterFailure()
+        }
+
+        private func isCancelledNavigationError(_ error: Error) -> Bool {
+            let nsError = error as NSError
+            if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+                return true
+            }
+
+            if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? Error {
+                return isCancelledNavigationError(underlyingError)
+            }
+
+            return false
+        }
+
         func applyBackgroundAppearance(to webView: WKWebView) {
             webView.isOpaque = false
             switch parent.mode {
@@ -448,13 +468,13 @@ struct BaseEmailWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             isLoading = false
-            resetLoadedSignatureAfterFailure()
+            resetLoadedSignatureAfterFailure(for: error)
             Log.debug("WebView navigation failed: \(error)", category: .ui)
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             isLoading = false
-            resetLoadedSignatureAfterFailure()
+            resetLoadedSignatureAfterFailure(for: error)
             Log.debug("WebView provisional navigation failed: \(error)", category: .ui)
         }
 

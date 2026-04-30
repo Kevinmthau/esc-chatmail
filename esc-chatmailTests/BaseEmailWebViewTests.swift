@@ -58,6 +58,18 @@ final class BaseEmailWebViewTests: XCTestCase {
         XCTAssertEqual(coordinator.lastLoadedReloadSignature, "")
     }
 
+    func testCancelledNavigationFailurePreservesLoadedSignature() {
+        let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: nil))
+        let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled)
+
+        coordinator.recordLoadedSignature()
+        XCTAssertFalse(coordinator.needsReload)
+
+        coordinator.resetLoadedSignatureAfterFailure(for: error)
+
+        XCTAssertFalse(coordinator.needsReload)
+    }
+
     private func makeWebView(message: Message?) -> BaseEmailWebView {
         BaseEmailWebView(
             htmlContent: "<html><body><img src=\"cid:image001@example.com\"></body></html>",
