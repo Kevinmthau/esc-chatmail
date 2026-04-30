@@ -107,6 +107,7 @@ struct BaseEmailWebView: UIViewRepresentable {
         var lastLoadedContent: String = ""
         var lastLoadedReloadSignature: String = ""
         private var isLoading = false
+        private var hasFinishedLoad = false
         private var lastDeliveredPreviewHeight: CGFloat = 0
         private var previewMeasurementGeneration = 0
         /// Holds strong reference to the cid: scheme handler
@@ -171,15 +172,21 @@ struct BaseEmailWebView: UIViewRepresentable {
         func recordLoadedSignature() {
             lastLoadedContent = parent.htmlContent
             lastLoadedReloadSignature = reloadSignature()
+            hasFinishedLoad = false
+        }
+
+        func recordFinishedLoad() {
+            hasFinishedLoad = true
         }
 
         func resetLoadedSignatureAfterFailure() {
             lastLoadedContent = ""
             lastLoadedReloadSignature = ""
+            hasFinishedLoad = false
         }
 
         func resetLoadedSignatureAfterFailure(for error: Error) {
-            guard !isCancelledNavigationError(error) else {
+            if isCancelledNavigationError(error), hasFinishedLoad {
                 return
             }
             resetLoadedSignatureAfterFailure()
@@ -460,6 +467,7 @@ struct BaseEmailWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             isLoading = false
+            recordFinishedLoad()
             schedulePreviewHeightMeasurement(
                 in: webView,
                 generation: previewMeasurementGeneration
