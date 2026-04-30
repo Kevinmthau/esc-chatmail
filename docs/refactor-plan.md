@@ -1,288 +1,395 @@
-# Production Hardening Refactor Plan
+# ESC Chatmail Refactor Plan
 
-This plan prioritizes correctness, Core Data consistency, sync reliability,
-performance, and architectural boundaries. It intentionally avoids cosmetic
-cleanup and broad rewrites.
+This plan prioritizes correctness, user-visible reliability, and performance in the iOS app. It intentionally avoids cosmetic cleanup, broad rewrites, and architecture churn unless the change removes a real production risk.
 
-## A. Highest-Risk Areas
+## Principles
 
-### 1. Foreground and Background Sync Lack One Serialized Boundary
+1. Fix concrete bugs before restructuring code.
+2. Keep diffs small enough to review and revert safely.
+3. Preserve full-message email fidelity unless a behavior is clearly wrong.
+4. Keep preview-specific shortcuts out of the original-message rendering path.
+5. Prefer source signatures and authoritative snapshots over manual invalidation and partial mutation.
+6. Add regression tests for every bug fix that can be tested without brittle UI automation.
+7. Run targeted tests first, then broader suites when shared infrastructure is touched.
 
-- Fragile: `SyncEngine` uses `SyncStateActor`, but `BackgroundSyncManager` and
-  `BackgroundMessageProcessor` bypass that lock while still mutating messages,
-  rollups, and history cursors.
-- Production risk: foreground and background sync can overlap, process the same
-  Gmail history, and save competing state from different contexts.
-- User symptoms: missed messages, stale unread/archive state, conversations
-  jumping after a foreground refresh, or history cursor drift.
-- Root cause: foreground sync locking is local to `SyncEngine`; background sync
-  treats `SyncEngine` as a persistence helper rather than participating in one
-  sync transaction model.
+## Current Highest-Risk Areas
 
-### 2. Conversation Routing Can Attach Messages to Hidden Archived Threads
+### 1. WebView and inline attachment correctness
 
-- Fragile: `ConversationManager` documents active-only lookup, but
-  `ConversationCreationSerializer` fetches any conversation by
-  `participantHash` with `fetchLimit = 1`. `MessageConversationRouter` only
-  reactivates when the processed message has `INBOX`.
-- Production risk: sent, archived, or non-inbox messages can attach to an
-  archived conversation and remain hidden.
-- User symptoms: sent messages or replies appear to disappear, or new work is
-  merged into an old archived thread.
-- Root cause: participant identity, Gmail thread reuse, and archive
-  reactivation policy are split across multiple types with inconsistent rules.
+Risk: `BaseEmailWebView` creates a `CIDSchemeHandler` once in `makeUIView`. SwiftUI can reuse the same WebView for a different message, but `updateUIView` does not currently refresh the handler's `message` reference. This can make `cid:` inline images resolve against the wrong message, disappear, or return the transparent-pixel fallback.
 
-### 3. Optimistic Send Rollback Can Drift from Persisted Conversation State
+User symptoms:
 
-- Fragile: `GmailSendService+OptimisticUpdates` mutates conversation date,
-  snippet, and archive state, keeps the optimistic graph unsaved until success.
-  Done 2026-04-26: failure cleanup now recomputes or restores affected
-  conversation rollups. Remaining risk: `OutboundSendMutationTracker` is
-  in-memory only.
-- Production risk: failed sends can leave stale list metadata, unarchived empty
-  threads, or lost failure state after relaunch.
-- User symptoms: a conversation appears delivered, revived, or reordered even
-  though the send failed.
-- Root cause: optimistic mutations lack a durable lifecycle and rollback
-  snapshot for conversation-level state.
+- Inline email images randomly missing.
+- The same message sometimes renders differently after scrolling or reopening.
+- A reused WebView shows stale attachment behavior.
 
-### 4. Chat Paging Uses a Different Message Universe Than `ChatView`
+Preferred fix:
 
-- Fragile: `ChatView` excludes `DRAFT`, `SPAM`, and `TRASH`, but
-  `VirtualScrollState.loadMessagePage` and `loadPendingMessagePage` fetch only
-  by `conversation.id`.
-- Production risk: virtual counts and visible rows can diverge from the
-  `FetchedResults<Message>` collection used by the chat UI.
-- User symptoms: wrong rows, broken message grouping, scroll jumps, and
-  off-by-one behavior around page boundaries.
-- Root cause: duplicated Core Data predicates instead of one shared
-  chat-visible message query.
+- Update `context.coordinator.cidHandler?.message = message` in `BaseEmailWebView.updateUIView`.
+- Include a stable message identity in the WebView reload signature when cid attachments are possible.
+- Add focused tests around `CIDSchemeHandler` content-id matching and WebView coordinator state if practical.
 
-### 5. Conversation Rollups Are Not Always Authoritative Snapshots
+### 2. HTML URL sanitization gaps
 
-- Fragile: `ConversationRollupUpdater` does not clear `latestInboxDate` when no
-  inbox messages remain, and does not clear `lastMessageDate` or `snippet` when
-  no visible messages remain. `ConversationMerger.merge` updates
-  `winner.lastMessageDate` before comparing snippet recency.
-- Production risk: derived fields can retain stale values after deletion,
-  archive, spam, trash, or merge operations.
-- User symptoms: stale previews, stale ordering, wrong unread counts, or wrong
-  inbox/archive state.
-- Root cause: rollup code applies partial mutations instead of assigning from a
-  complete derived snapshot.
+Risk: `HTMLURLSanitizer` handles quoted `href` and `src` attributes, but valid unquoted attributes can bypass the sanitizer regex. CSP and navigation policy reduce the blast radius, but hostile email HTML should be sanitized at the source layer.
 
-### 6. HTML Preview Loading Repeats Expensive Work and Has Fragmented Caches
+User symptoms:
 
-- Fragile: `EmailContentSection` loads canonical HTML, classifies it, lets
-  builders re-parse text/images, and may then fall back to
-  `loadContentWithTimeout`. `HTMLContentLoader` also uses singleton recovery
-  and cache keys that rely on invalidation rather than the full HTML source
-  signature.
-- Production risk: expensive repeated regex/HTML work during scroll and stale
-  preview/full-message output when invalidation misses a path.
-- User symptoms: janky chat scrolling, stale preview cards, delayed WebView
-  fallback rendering.
-- Root cause: there is no single preview source snapshot shared by
-  classifiers, preview builders, and renderers.
+- Unsafe or malformed email HTML survives sanitization.
+- Security behavior depends too much on WebKit navigation policy instead of the sanitizer.
 
-### 7. Reconciliation Can Silently Miss Label Drift
+Preferred fix:
 
-- Fragile: `SyncReconciliation` skips label reconciliation when history reports
-  no changes, checks only the first 100 recent messages, and fetches metadata
-  through `GmailAPIClient.shared` instead of the injected fetcher/client.
-- Production risk: missed archive/unread transitions can remain local truth.
-- User symptoms: unread counts and inbox/archive state stay wrong until a later
-  full cleanup or unrelated sync.
-- Root cause: reconciliation is partly outside the sync dependency boundary and
-  has a separate bounded query policy.
+- Extend attribute scanning to handle quoted and unquoted `href` / `src` values.
+- Preserve existing entity and percent-decoding protections.
+- Add tests for unquoted `javascript:`, encoded `javascript:`, unsafe `data:`, and safe `cid:` / `https:` values.
 
-### 8. Conversation-List Read/Unread Actions Still Do Per-Message Work
+### 3. WebView load failure retry behavior
 
-- Fragile: `MessageActions.markConversationAsRead` loops unread inbox messages,
-  saving and queuing each action. Chat uses `markMessagesAsReadBatch`, but the
-  list path does not.
-- Production risk: slow taps/swipes and larger race windows with pending action
-  processing.
-- User symptoms: list lag on large unread threads, delayed badge updates, and
-  excessive pending-action traffic.
-- Root cause: batching exists but is not the default conversation-level API.
+Risk: `BaseEmailWebView.Coordinator.loadContent` marks content as loaded before `WKWebView` finishes loading. If the load fails, the failed content signature remains current, so the view may not retry until the HTML or mode changes.
 
-## B. Best Refactor Targets
+User symptoms:
 
-- `SyncEngine`, `BackgroundSyncManager`, `BackgroundMessageProcessor`,
-  `PendingActionsManager`: introduce one sync-run coordinator that owns
-  foreground/background exclusion, run identity, context creation, cursor
-  advancement, final rollup save, and notification posting.
-- `ConversationCreationSerializer`, `MessageConversationRouter`,
-  `ConversationRollupUpdater`, `ConversationMerger`: split routing policy from
-  rollup calculation. Add an authoritative `ConversationRollupSnapshot`
-  computed from visible/inbox messages and assigned consistently.
-- `ChatView`, `VirtualScrollState`, `MessageActions`: centralize the
-  chat-visible message predicate so list fetches, virtual paging, unread
-  snapshots, and counts all agree.
-- `ChatDependencies`: split into narrower groups for content/rendering,
-  actions, compose/reply/forward, contacts, and Core Data. Recent narrowing
-  helped, but `ChatViewModel` still receives too much app surface.
-- `EmailContentSection`, `HTMLContentLoader`, `NewsletterPreviewBuilder`,
-  `TransactionalPreviewBuilder`, `MessageBubbleLoader`: add an
-  `EmailPreviewSourceLoader` that returns canonical HTML, source signature,
-  extracted text, extracted images, and classification once.
-- `CacheCoordinator`, `MessagePersister+Updates`, `HTMLContentHandler`,
-  `ProcessedTextCache`, `HTMLContentLoader`: define one message-content
-  invalidation contract, ideally keyed by stable content revision/source
-  signature instead of scattered manual invalidations.
-- `GmailSendService+OptimisticUpdates`, `OutboundSendMutationTracker`,
-  `OutboundMessageCoordinator`: make optimistic send state durable enough to
-  survive failure/relaunch and restore conversation rollups.
+- Blank email body after a transient WebView load failure.
+- Reopening or theme/layout changes fix the issue, but normal refresh does not.
 
-## C. Performance Opportunities
+Preferred fix:
 
-### Quick Wins
+- Clear `lastLoadedContent` and `lastLoadedModeSignature` in `didFail` and `didFailProvisionalNavigation`.
+- Keep logging lightweight.
+- Add a coordinator-level test if possible, otherwise cover through a narrow helper extraction.
 
-- Align `VirtualScrollState` predicates with `ChatView` to avoid loading and
-  counting draft/spam/trash rows the UI cannot render.
-- Done 2026-04-25: Routed conversation-list mark-read through the existing
-  batch read path with one pending action batch.
-- Stop canceling every `ProcessedTextCache.prefetch` batch during rapid scroll;
-  coalesce requests or let a bounded queue drain.
-- Include `bodyStorageURI` and HTML source signatures in text/HTML prefetch paths
-  so cache misses do not force later bubble recomputation.
-- Snapshot participant emails into `ConversationSnapshot` or a filter snapshot
-  so contact filtering does not fault through participants/persons on the main
-  actor.
+### 4. HTML content cache can serve stale output
 
-### Deeper Structural Fixes
+Risk: `HTMLContentLoader` caches wrapped output by message ID and display variants, but not by canonical source signature. If recovered HTML, stored HTML, raw source extraction, or attachment fallback output changes without perfect invalidation, stale preview/original HTML can persist.
 
-- Build preview cards from one parsed/source snapshot instead of each
-  classifier and builder extracting text/images separately.
-- Replace repeated ad hoc HTML attribute/tag regex passes in preview builders
-  with one constrained parser or intermediate representation.
-- Move expensive message/content mapping out of SwiftUI body-derived load keys
-  where possible; use stable revision values instead of repeated `hashValue`
-  work.
-- Make rollup recomputation batch-oriented after sync/action transactions
-  instead of scattered across label processors, message persisters, mergers, and
-  UI actions.
+User symptoms:
 
-## D. Hardening Plan
+- A message continues showing old HTML after recovery or content rewrite.
+- Preview and original views disagree.
+- Scrolling reuses stale preview output.
 
-### Phase 1: Highest-Impact Low-Risk Fixes
+Preferred fix:
 
-1. Done 2026-04-25: Centralized chat-visible message predicates and updated
-   `VirtualScrollStateTests`.
-2. Done 2026-04-25: Fixed rollup clearing and `ConversationMerger`
-   snippet/date ordering; added focused rollup and merge tests.
-3. Done 2026-04-25: Changed conversation-list mark-read to use batch read
-   updates and one pending action batch.
-4. Done 2026-04-25: Routed
-   `SyncReconciliation.fetchGmailMetadataInParallel` metadata fetches through
-   the injected `MessageFetcher` instead of `GmailAPIClient.shared`.
-5. Done 2026-04-25: Made Core Data startup/readiness waiting fail immediately
-   on stored terminal load errors instead of only timing out.
+- Introduce a stable source signature for canonical HTML.
+- Include that signature in cache keys for preview and original rendering.
+- Prefer deriving the signature from the canonical HTML bytes, or from file URI plus modification date and size before loading.
+- Keep manual invalidation, but stop relying on it as the only correctness boundary.
 
-### Phase 2: Architectural Refactors
+### 5. Preview loading repeats expensive parsing and classification
 
-1. Done 2026-04-26: Added a shared sync-run coordinator used by foreground and
-   background sync, plus pending action processing, before sync-owned Core Data
-   mutations or history cursor updates.
-2. Done 2026-04-27: Extracted conversation routing policy and authoritative
-   rollup snapshot assignment. Sent/outgoing messages can now consistently
-   reactivate archived participant/thread matches, and merger/rollup assignment
-   derives conversation-list fields from the merged message set.
-3. Add durable optimistic-send mutation records or rollback snapshots for
-   conversation state.
-4. Introduce `EmailPreviewSourceLoader` and route preview classifiers/builders
-   through it.
-5. Split `ChatDependencies` and shrink `ChatViewModel` orchestration
-   responsibilities.
+Risk: Preview rendering loads canonical HTML, classifies content, extracts text/images, and may fall back to WebView rendering through separate paths. This duplicates regex and HTML work during scroll and makes cache invalidation fragmented.
 
-### Phase 3: Deeper Cleanup and Future-Proofing
+User symptoms:
 
-1. Consolidate HTML/CSS parsing for previews and reduce builder-specific regex
-   parsing.
-2. Replace scattered cache invalidation with a message content
-   revision/source-signature model.
-3. Add sync reconciliation metrics and developer-visible failure counters for
-   skipped/capped reconciliation.
-4. Revisit one-time migrations so flags are set only after verified successful
-   mutation.
-5. Audit unused or partially wired Core Data indexes/search infrastructure
-   before relying on it.
+- Janky chat scrolling.
+- Slow preview card appearance.
+- Stale or inconsistent preview cards.
 
-## E. Patch Candidates
+Preferred fix:
 
-### 1. Align Chat Virtual-Scroll Predicates
+- Add an `EmailPreviewSourceLoader` that returns one immutable source snapshot per message/display variant.
+- Route newsletter previews, transactional previews, text extraction, image extraction, and WebView fallback through that snapshot.
+- Key caches by message ID plus source signature plus display mode.
 
-- Status: Completed 2026-04-25.
-- Why this is the right next patch: it is a concrete correctness bug with low
-  blast radius and direct user-visible impact on chat scrolling.
-- Files to change:
-  - `esc-chatmail/Views/Chat/ChatView.swift`
-  - `esc-chatmail/ViewModels/VirtualScrollState.swift`
-  - `esc-chatmailTests/VirtualScrollStateTests.swift`
-- Implementation approach:
-  - Add a shared chat-visible message predicate helper.
-  - Use it for `ChatView` fetches and both persisted/pending virtual-scroll page
-    and count fetches.
-  - Preserve `includesPendingChanges` differences where they are intentional.
-- Tests:
-  - Excluded-label messages are omitted from page IDs.
-  - Excluded-label messages are omitted from total counts.
-  - Valid pending messages still appear in the pending page path.
+### 6. Optimistic send state is still not durable enough
 
-### 2. Fix Stale Conversation Rollups
+Risk: Optimistic send cleanup now recomputes or restores affected conversation state, but mutation tracking is still mostly in-memory. A relaunch during send or failure can lose rollback context.
 
-- Status: Completed 2026-04-25.
-- Why this is the right next patch: stale rollup fields directly affect list
-  ordering, snippets, unread state, and archive visibility.
-- Files to change:
-  - `esc-chatmail/Services/Conversation/ConversationRollupUpdater.swift`
-  - `esc-chatmail/Services/Conversation/ConversationMerger.swift`
-  - `esc-chatmailTests/ConversationMergerTests.swift`
-  - `esc-chatmailTests/ConversationRollupUpdaterTests.swift`
-- Implementation approach:
-  - Clear `latestInboxDate` when there are no inbox messages.
-  - Clear `lastMessageDate` and `snippet` when there are no visible messages, if
-    that is the intended empty-thread behavior.
-  - In `ConversationMerger.merge`, capture old winner/loser dates before
-    assigning the merged date, then choose snippet from the newer source.
-- Tests:
-  - No inbox messages clears `latestInboxDate`.
-  - No visible messages clears stale visible metadata.
-  - Merge keeps the snippet from the newest conversation.
+User symptoms:
 
-### 3. Harden Optimistic-Send Failure Cleanup
+- A failed send leaves a conversation bumped, unarchived, or with stale snippet/date.
+- A failed optimistic bubble state is inconsistent after relaunch.
 
-- Status: Completed 2026-04-26.
-- Why this is the right next patch: failed sends should not leave durable
-  conversation-list drift.
-- Files to change:
-  - `esc-chatmail/Services/Send/GmailSendService+OptimisticUpdates.swift`
-  - `esc-chatmailTests/Send/GmailSendServiceOptimisticFailureTests.swift`
-  - Potentially `ConversationRollupUpdater` or a small rollback helper.
-- Implementation approach:
-  - Capture affected conversation identity/state before deleting or marking the
-    optimistic message failed.
-  - Recompute or restore the conversation rollup after cleanup.
-  - Handle the case where optimistic send unarchived an archived conversation.
-- Tests:
-  - Failed send after optimistic unarchive restores archive/list state.
-  - Failed send without attachments does not leave an empty stale conversation.
-  - Failed send with local attachments keeps the failed bubble while preserving
-    correct rollup state.
+Preferred fix:
 
-## Recommended Next Steps
+- Add durable optimistic-send mutation records or rollback snapshots.
+- Persist enough conversation state to restore archive, hidden, display name, date, and snippet deterministically.
+- Reconcile durable send records at startup.
 
-1. Next architectural refactor: add durable optimistic-send mutation records or
-   rollback snapshots for conversation state.
-2. Smaller remaining quick wins: coalesce `ProcessedTextCache.prefetch`
-   cancellation, include `bodyStorageURI`/source signatures in prefetch keys, or
-   snapshot participant emails for contact filtering.
+### 7. Sync and reconciliation need better observability
 
-Follow-up implementation prompt:
+Risk: The shared sync-run coordinator now serializes foreground, background, and pending action processing, but the app still needs better visibility into skipped reconciliation, capped metadata checks, and drift repair.
 
-> Add durable optimistic-send mutation records or rollback snapshots for
-> conversation state. Inspect `GmailSendService+OptimisticUpdates`,
-> `OutboundSendMutationTracker`, and `OutboundMessageCoordinator`; ensure
-> optimistic unarchive/date/snippet changes can survive failure or relaunch and
-> restore conversation rollups deterministically.
+User symptoms:
+
+- Unread/archive state remains wrong until a later sync or manual refresh.
+- Hard-to-debug sync drift with little developer visibility.
+
+Preferred fix:
+
+- Add counters/logs for reconciliation caps, skipped checks, metadata fetch failures, and repaired label drift.
+- Keep this diagnostic-only unless it reveals a concrete correction bug.
+
+## Phased Plan
+
+## Phase 1: Immediate correctness fixes
+
+Goal: fix concrete bugs with small, low-risk patches before starting broader refactors.
+
+### 1.1 Refresh cid handler state on WebView reuse
+
+Files:
+
+- `esc-chatmail/Views/Components/EmailContent/BaseEmailWebView.swift`
+- `esc-chatmail/Services/CIDSchemeHandler.swift`
+- Tests if practical: new `CIDSchemeHandlerTests` or coordinator helper tests
+
+Implementation:
+
+- Update the coordinator's cid handler with the latest `message` in `updateUIView`.
+- Add message identity to the mode/reload signature if a stale cid graph can survive with identical HTML.
+- Verify full-message rendering and preview rendering still behave differently where intended.
+
+Validation:
+
+- Run HTML/WebView-adjacent tests.
+- Manually inspect full-message cid image behavior in simulator if possible.
+
+### 1.2 Harden URL attribute sanitization
+
+Files:
+
+- `esc-chatmail/Services/HTMLSanitization/HTMLURLSanitizer.swift`
+- `esc-chatmailTests/HTMLSanitization/HTMLSanitizerServiceTests.swift` or a new focused URL sanitizer test suite
+
+Implementation:
+
+- Replace quoted-only `href` / `src` regex logic with attribute scanning that supports quoted and unquoted values.
+- Preserve existing normalization and modern image format rewrite behavior.
+- Do not rewrite safe `cid:` sources.
+- Keep safe relative URLs allowed.
+
+Validation:
+
+- Add regression tests for quoted and unquoted unsafe values.
+- Add safe-case tests for `https:`, `mailto:`, `tel:`, `cid:`, relative paths, fragments, and safe image data URLs.
+
+### 1.3 Reset loaded signatures after WebView failure
+
+Files:
+
+- `esc-chatmail/Views/Components/EmailContent/BaseEmailWebView.swift`
+
+Implementation:
+
+- Clear loaded content and mode signature in both navigation failure callbacks.
+- Avoid infinite retry loops. The next SwiftUI update/layout should be enough to retry.
+
+Validation:
+
+- Build.
+- Add a narrow coordinator helper test only if this can be made non-brittle.
+
+### 1.4 Add canonical HTML source signatures to cache keys
+
+Files:
+
+- `esc-chatmail/Services/HTMLContentLoader.swift`
+- Related cache tests if present, otherwise add focused loader cache tests
+
+Implementation:
+
+- Compute a `sourceSignature` for canonical HTML after selecting the source and before wrapping.
+- Include `sourceSignature` in preview/original cache keys.
+- Preserve existing invalidation behavior.
+- Avoid hashing multiple times on hot paths when the source snapshot can carry the signature forward.
+
+Validation:
+
+- Add tests showing the same message ID with changed canonical HTML does not return stale wrapped output.
+- Run HTML loader and display wrapper tests.
+
+## Phase 2: Preview pipeline consolidation
+
+Goal: reduce repeated HTML work during scroll and make preview behavior more predictable.
+
+### 2.1 Introduce `EmailPreviewSourceLoader`
+
+New model:
+
+```swift
+struct EmailPreviewSource: Sendable {
+    let messageId: String
+    let sourceSignature: String
+    let canonicalHTML: String?
+    let plainText: String?
+    let extractedText: String?
+    let extractedImages: [EmailPreviewImage]
+    let classification: EmailPreviewClassification
+}
+```
+
+Files likely involved:
+
+- `esc-chatmail/Services/HTMLContentLoader.swift`
+- `esc-chatmail/Views/Components/EmailContent/EmailContentSection.swift`
+- `esc-chatmail/Services/Preview/NewsletterPreviewBuilder.swift`
+- `esc-chatmail/Services/Preview/TransactionalPreviewBuilder.swift`
+- `esc-chatmail/ViewModels/MessageBubbleLoader.swift`
+- Related preview/classifier tests
+
+Implementation:
+
+- Build a source loader that selects canonical HTML once.
+- Extract preview text/images once.
+- Classify once.
+- Return one immutable snapshot to preview builders and fallback renderers.
+- Keep full-message original rendering outside this preview-specific path.
+
+Validation:
+
+- Existing newsletter, transactional, classifier, and message bubble tests should still pass.
+- Add tests proving builders reuse snapshot data rather than reparsing where practical.
+
+### 2.2 Move preview cache keys to source signatures
+
+Implementation:
+
+- Key preview-derived caches by `messageId + sourceSignature + preview mode`.
+- Remove redundant or fragile invalidation where source signatures make it unnecessary.
+- Keep explicit invalidation for memory cleanup and major message mutations.
+
+Validation:
+
+- Test changed body storage/source HTML invalidates preview output without manual invalidation.
+- Watch scroll performance and cache hit behavior.
+
+### 2.3 Reduce builder-specific regex passes
+
+Implementation:
+
+- After the source loader is stable, consolidate common extraction logic.
+- Do not introduce a heavy parser unless it clearly improves correctness or performance.
+- Keep newsletter/transactional builder logic focused on presentation decisions.
+
+Validation:
+
+- Preserve existing preview snapshots.
+- Add regression fixtures for complex newsletter HTML.
+
+## Phase 3: Durable optimistic send lifecycle
+
+Goal: make send failure and relaunch behavior deterministic.
+
+### 3.1 Add durable optimistic send mutation records
+
+Files likely involved:
+
+- `esc-chatmail/Services/Send/GmailSendService+OptimisticUpdates.swift`
+- `esc-chatmail/Services/Send/OutboundSendMutationTracker.swift`
+- `esc-chatmail/Services/Send/OutboundMessageCoordinator.swift`
+- Core Data model if a durable entity is needed
+- Send failure tests
+
+Implementation:
+
+- Persist a rollback snapshot when an optimistic send mutates conversation-level fields.
+- Track message ID, conversation ID, archivedAt, hidden, displayName, lastMessageDate, snippet, and whether the conversation was newly inserted.
+- On send success, clear the durable record.
+- On send failure, restore from the durable record or recompute rollups when safer.
+- On startup, reconcile abandoned optimistic records.
+
+Validation:
+
+- Failed send after optimistic unarchive restores archive/list state.
+- Relaunch during send failure does not leave stale conversation state.
+- Failed send with local attachments keeps failed attachment/bubble state while preserving rollups.
+
+## Phase 4: Sync and reconciliation observability
+
+Goal: make sync drift detectable and easier to repair.
+
+### 4.1 Add reconciliation diagnostics
+
+Files likely involved:
+
+- `esc-chatmail/Services/Sync/SyncReconciliation.swift`
+- `esc-chatmail/Services/Sync/IncrementalSyncOrchestrator.swift`
+- `esc-chatmail/Services/Sync/SyncEngine.swift`
+
+Implementation:
+
+- Add structured counters for messages checked, messages skipped, metadata fetch failures, drift found, drift repaired, and reconciliation capped.
+- Keep logs low volume.
+- Prefer diagnostic records that can be inspected in development builds.
+
+Validation:
+
+- Existing sync tests pass.
+- Add tests for capped reconciliation and metadata failure reporting if the structure supports it.
+
+### 4.2 Decide whether capped reconciliation should become resumable
+
+Implementation:
+
+- After diagnostics exist, evaluate whether the first-100-message policy is enough.
+- If not, add resumable reconciliation windows instead of doing a large unbounded fetch.
+
+Validation:
+
+- Tests for multiple reconciliation windows.
+- Ensure no large foreground UI stalls.
+
+## Phase 5: Dependency and view-model narrowing
+
+Goal: reduce orchestration complexity after correctness and performance are stable.
+
+### 5.1 Split chat dependencies by responsibility
+
+Files likely involved:
+
+- `esc-chatmail/Services/ConversationList/ConversationListDependencies.swift`
+- `esc-chatmail/ViewModels/ChatViewModel.swift`
+- `esc-chatmail/Views/Chat/*`
+
+Implementation:
+
+- Split large dependency containers into narrower groups: rendering/content, message actions, compose/reply/forward, contacts, and Core Data.
+- Do not change behavior.
+- Avoid moving logic into SwiftUI views.
+
+Validation:
+
+- Existing ChatViewModel tests pass.
+- Keep diffs mechanical and reviewable.
+
+### 5.2 Remove obsolete compatibility seams
+
+Implementation:
+
+- After several phases land, delete dead adapters, duplicate helpers, and unused migration scaffolding.
+- Only remove code proven unused by search and tests.
+
+Validation:
+
+- Full test suite.
+- Build cleanly with no new warnings in touched scope.
+
+## Test Strategy
+
+Use targeted tests first:
+
+- HTML/rendering: `HTMLContentLoaderTests`, `HTMLDisplayWrapperTests`, `HTMLSanitizerServiceTests`, `HTMLRemoteImageAttachmentFallbackTests`, `HTMLPreviewScaleCalculatorTests`
+- Preview classification/cards: `NewsletterPreviewBuilderTests`, `TransactionalPreviewBuilderTests`, `EmailPreviewClassifierTests`
+- WebView/CID: add focused tests where possible
+- Compose/send: `ComposeViewModelTests`, `ComposeSendOrchestratorTests`, `GmailSendServiceOptimisticFailureTests`, `OutboundMessageCoordinatorTests`
+- Sync: `SyncRunCoordinatorTests`, `ForegroundSyncCoordinatorTests`, reconciliation tests
+- Chat bubble loading: `MessageBubbleLoaderTests`, `MessageBubbleViewModelTests`
+
+Before finishing any phase:
+
+1. Run the narrowest relevant tests.
+2. Run broader suites if shared infrastructure changed.
+3. Run the app build.
+4. Review the diff for behavior changes outside the intended scope.
+5. Update this plan if scope or risk changes.
+
+## Recommended Next Patch
+
+Start with Phase 1.1, Phase 1.2, and Phase 1.3 as one small correctness branch if the diff stays compact. Otherwise split them into separate patches.
+
+Implementation prompt:
+
+> Implement Phase 1 of `docs/refactor-plan.md`. Fix WebView cid handler reuse, harden URL sanitization for unquoted href/src attributes, and reset WebView loaded signatures on navigation failure. Keep the changes minimal, add focused regression tests where practical, run the relevant HTML/WebView tests, then run the iOS build. Do not start Phase 2 until Phase 1 is clean.
