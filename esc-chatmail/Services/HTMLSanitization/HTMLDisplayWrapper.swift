@@ -882,8 +882,8 @@ struct HTMLDisplayWrapper {
             if !responsiveQueries.isEmpty {
                 let blockBody = String(html[html.index(after: blockStart)..<blockEnd])
                 for query in responsiveQueries {
-                    let mediaWidthRange = screenMediaQueryWidthRange(query) ?? .responsiveLayoutViewport
-                    guard mediaWidthRange.canMatchResponsiveLayoutViewport() else {
+                    guard let mediaWidthRange = screenMediaQueryWidthRange(query),
+                          mediaWidthRange.canMatchResponsiveLayoutViewport() else {
                         continue
                     }
 
@@ -1989,7 +1989,12 @@ struct HTMLDisplayWrapper {
 
         let multiplier = String(unit) == "em" ? 16.0 : 1.0
         let pixelValue = numericValue * multiplier
-        return isMinimum ? Int(ceil(pixelValue)) : Int(floor(pixelValue))
+        guard pixelValue.isFinite else {
+            return nil
+        }
+
+        let boundedPixelValue = min(pixelValue, Double(Self.maximumFixedLayoutViewportWidth))
+        return isMinimum ? Int(ceil(boundedPixelValue)) : Int(floor(boundedPixelValue))
     }
 
     private func mediaQueryTargetsScreen(_ normalized: String) -> Bool {
