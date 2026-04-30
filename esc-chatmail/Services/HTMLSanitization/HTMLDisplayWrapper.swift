@@ -64,6 +64,12 @@ struct HTMLDisplayWrapper {
         let isImportant: Bool
         let specificity: CSSSelectorSpecificity
         let order: Int
+        let mediaWidthRange: CSSMediaWidthRange
+    }
+
+    private struct ResponsiveMediaWidthDeclarations {
+        let mediaWidthRange: CSSMediaWidthRange
+        var declarations: [LayoutWidthDeclaration]
     }
 
     private struct CSSSelectorSpecificity: Comparable {
@@ -86,6 +92,13 @@ struct HTMLDisplayWrapper {
         let minimum: Int?
         let maximum: Int?
 
+        static var responsiveLayoutViewport: CSSMediaWidthRange {
+            CSSMediaWidthRange(
+                minimum: HTMLDisplayWrapper.minimumFixedLayoutViewportWidth,
+                maximum: HTMLDisplayWrapper.maximumResponsiveLayoutViewportWidth
+            )
+        }
+
         func intersection(with other: CSSMediaWidthRange) -> CSSMediaWidthRange? {
             let minimum = [minimum, other.minimum].compactMap { $0 }.max()
             let maximum = [maximum, other.maximum].compactMap { $0 }.min()
@@ -97,9 +110,27 @@ struct HTMLDisplayWrapper {
         }
 
         func canMatchResponsiveLayoutViewport() -> Bool {
+            responsiveLayoutViewportSpan() != nil
+        }
+
+        func contains(_ width: Int) -> Bool {
+            if let minimum, width < minimum {
+                return false
+            }
+            if let maximum, width > maximum {
+                return false
+            }
+            return true
+        }
+
+        func responsiveLayoutViewportSpan() -> ClosedRange<Int>? {
             let lowerBound = max(minimum ?? 0, HTMLDisplayWrapper.minimumFixedLayoutViewportWidth)
             let upperBound = min(maximum ?? Int.max, HTMLDisplayWrapper.maximumResponsiveLayoutViewportWidth)
-            return lowerBound <= upperBound
+            guard lowerBound <= upperBound else {
+                return nil
+            }
+
+            return lowerBound...upperBound
         }
     }
 
@@ -830,7 +861,7 @@ struct HTMLDisplayWrapper {
         }
 
         let selectorElements = htmlSelectorElements(in: html)
-        var widthDeclarationsByMediaQuery: [String: [LayoutWidthDeclaration]] = [:]
+        var widthDeclarationsByMediaQuery: [String: ResponsiveMediaWidthDeclarations] = [:]
         var widthDeclarationOrder = 0
         var searchStart = html.startIndex
 
@@ -851,7 +882,8 @@ struct HTMLDisplayWrapper {
             if !responsiveQueries.isEmpty {
                 let blockBody = String(html[html.index(after: blockStart)..<blockEnd])
                 for query in responsiveQueries {
-                    guard let mediaWidthRange = screenMediaQueryWidthRange(query) else {
+                    let mediaWidthRange = screenMediaQueryWidthRange(query) ?? .responsiveLayoutViewport
+                    guard mediaWidthRange.canMatchResponsiveLayoutViewport() else {
                         continue
                     }
 
@@ -863,7 +895,15 @@ struct HTMLDisplayWrapper {
                     )
                     if !widthDeclarations.isEmpty {
                         let queryKey = normalizedMediaQueryKey(query)
-                        widthDeclarationsByMediaQuery[queryKey, default: []].append(contentsOf: widthDeclarations)
+                        if var existingDeclarations = widthDeclarationsByMediaQuery[queryKey] {
+                            existingDeclarations.declarations.append(contentsOf: widthDeclarations)
+                            widthDeclarationsByMediaQuery[queryKey] = existingDeclarations
+                        } else {
+                            widthDeclarationsByMediaQuery[queryKey] = ResponsiveMediaWidthDeclarations(
+                                mediaWidthRange: mediaWidthRange,
+                                declarations: widthDeclarations
+                            )
+                        }
                     }
                 }
             }
@@ -871,12 +911,19 @@ struct HTMLDisplayWrapper {
             searchStart = html.index(after: blockEnd)
         }
 
-        return widthDeclarationsByMediaQuery.values.contains { declarations in
-            fixedLayoutTargets.allSatisfy { fixedTarget in
-                finalWidthDeclaration(
-                    matching: fixedTarget,
-                    in: declarations
-                )?.state == .fluid
+        return widthDeclarationsByMediaQuery.values.contains { mediaDeclarations in
+            guard let responsiveSpan = mediaDeclarations.mediaWidthRange.responsiveLayoutViewportSpan() else {
+                return false
+            }
+
+            return responsiveSpan.allSatisfy { viewportWidth in
+                fixedLayoutTargets.allSatisfy { fixedTarget in
+                    finalWidthDeclaration(
+                        matching: fixedTarget,
+                        in: mediaDeclarations.declarations,
+                        at: viewportWidth
+                    )?.state == .fluid
+                }
             }
         }
     }
@@ -1073,14 +1120,17 @@ struct HTMLDisplayWrapper {
                     for selector in selectorTexts {
                         let targets = selectorTargets(in: selector, matching: selectorElements)
                         let specificity = cssSelectorSpecificity(in: selector)
-                        declarations += targets.map { target in
-                            LayoutWidthDeclaration(
-                                target: target,
-                                state: widthState.state,
-                                isImportant: widthState.isImportant,
-                                specificity: specificity,
-                                order: order
-                            )
+                        for activeMediaWidthRange in activeMediaWidthRanges {
+                            declarations += targets.map { target in
+                                LayoutWidthDeclaration(
+                                    target: target,
+                                    state: widthState.state,
+                                    isImportant: widthState.isImportant,
+                                    specificity: specificity,
+                                    order: order,
+                                    mediaWidthRange: activeMediaWidthRange
+                                )
+                            }
                         }
                     }
                 }
@@ -1156,9 +1206,14 @@ struct HTMLDisplayWrapper {
 
     private func finalWidthDeclaration(
         matching fixedTarget: LayoutSelectorTarget,
-        in declarations: [LayoutWidthDeclaration]
+        in declarations: [LayoutWidthDeclaration],
+        at viewportWidth: Int
     ) -> LayoutWidthDeclaration? {
         declarations.reduce(nil) { currentWinner, declaration in
+            guard declaration.mediaWidthRange.contains(viewportWidth) else {
+                return currentWinner
+            }
+
             guard selectorTarget(declaration.target, matches: fixedTarget) else {
                 return currentWinner
             }
@@ -1856,19 +1911,28 @@ struct HTMLDisplayWrapper {
         var foundWidthConstraint = false
 
         if let widthBoundRegex = try? NSRegularExpression(
-            pattern: #"\(\s*(min|max)-(?:device-)?width\s*:\s*([0-9]{1,4})\s*px\s*\)"#,
+            pattern: #"\(\s*(min|max)-(?:device-)?width\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(px|em)\s*\)"#,
             options: [.caseInsensitive]
         ) {
             let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
             for match in widthBoundRegex.matches(in: normalized, range: range) {
                 guard let boundRange = Range(match.range(at: 1), in: normalized),
                       let widthRange = Range(match.range(at: 2), in: normalized),
-                      let width = Int(normalized[widthRange]) else {
+                      let unitRange = Range(match.range(at: 3), in: normalized) else {
+                    continue
+                }
+
+                let isMinimum = String(normalized[boundRange]) == "min"
+                guard let width = mediaQueryWidthPixels(
+                    from: normalized[widthRange],
+                    unit: normalized[unitRange],
+                    isMinimum: isMinimum
+                ) else {
                     continue
                 }
 
                 foundWidthConstraint = true
-                if String(normalized[boundRange]) == "min" {
+                if isMinimum {
                     minimum = max(minimum ?? width, width)
                 } else {
                     maximum = min(maximum ?? width, width)
@@ -1877,19 +1941,29 @@ struct HTMLDisplayWrapper {
         }
 
         if let exactWidthRegex = try? NSRegularExpression(
-            pattern: #"\(\s*(?:device-)?width\s*:\s*([0-9]{1,4})\s*px\s*\)"#,
+            pattern: #"\(\s*(?:device-)?width\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(px|em)\s*\)"#,
             options: [.caseInsensitive]
         ) {
             let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
             for match in exactWidthRegex.matches(in: normalized, range: range) {
                 guard let widthRange = Range(match.range(at: 1), in: normalized),
-                      let width = Int(normalized[widthRange]) else {
+                      let unitRange = Range(match.range(at: 2), in: normalized),
+                      let minimumWidth = mediaQueryWidthPixels(
+                        from: normalized[widthRange],
+                        unit: normalized[unitRange],
+                        isMinimum: true
+                      ),
+                      let maximumWidth = mediaQueryWidthPixels(
+                        from: normalized[widthRange],
+                        unit: normalized[unitRange],
+                        isMinimum: false
+                      ) else {
                     continue
                 }
 
                 foundWidthConstraint = true
-                minimum = max(minimum ?? width, width)
-                maximum = min(maximum ?? width, width)
+                minimum = max(minimum ?? minimumWidth, minimumWidth)
+                maximum = min(maximum ?? maximumWidth, maximumWidth)
             }
         }
 
@@ -1902,6 +1976,20 @@ struct HTMLDisplayWrapper {
         }
 
         return CSSMediaWidthRange(minimum: minimum, maximum: maximum)
+    }
+
+    private func mediaQueryWidthPixels(
+        from value: Substring,
+        unit: Substring,
+        isMinimum: Bool
+    ) -> Int? {
+        guard let numericValue = Double(value) else {
+            return nil
+        }
+
+        let multiplier = String(unit) == "em" ? 16.0 : 1.0
+        let pixelValue = numericValue * multiplier
+        return isMinimum ? Int(ceil(pixelValue)) : Int(floor(pixelValue))
     }
 
     private func mediaQueryTargetsScreen(_ normalized: String) -> Bool {

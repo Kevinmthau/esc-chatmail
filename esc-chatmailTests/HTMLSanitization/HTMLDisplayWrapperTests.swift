@@ -652,6 +652,33 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=device-width"#))
     }
 
+    func testWrapHTMLForDisplay_originalPurposeKeepsFixedViewportForNestedFluidSubBreakpoint() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            @media (max-width:480px) {
+                .container { width:600px !important; }
+
+                @media (max-width:400px) {
+                    .container { width:100% !important; }
+                }
+            }
+            </style>
+        </head>
+        <body>
+            <table width="600" class="container"><tr><td>Fixed section</td></tr></table>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=600, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=device-width"#))
+    }
+
     func testWrapHTMLForDisplay_originalPurposeAppliesUnconditionalNestedScreenMediaOverride() {
         let html = """
         <!DOCTYPE html>
@@ -669,6 +696,52 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         </head>
         <body>
             <table width="600" class="container"><tr><td>Responsive section</td></tr></table>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=600"#))
+    }
+
+    func testWrapHTMLForDisplay_originalPurposeUsesDeviceViewportForDecimalResponsiveBreakpoint() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            @media (max-width: 575.98px) {
+                .container { width: 100% !important; }
+            }
+            </style>
+        </head>
+        <body>
+            <table width="600" class="container"><tr><td>Responsive marketing layout</td></tr></table>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=600"#))
+    }
+
+    func testWrapHTMLForDisplay_originalPurposeUsesDeviceViewportForEmResponsiveBreakpoint() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            @media (max-width: 30em) {
+                .container { width: 100% !important; }
+            }
+            </style>
+        </head>
+        <body>
+            <table width="600" class="container"><tr><td>Responsive marketing layout</td></tr></table>
         </body>
         </html>
         """
