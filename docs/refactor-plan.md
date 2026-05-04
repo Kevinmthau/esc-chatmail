@@ -133,7 +133,8 @@ Status as of 2026-05-04:
 - 1.1 complete: WebView coordinator updates the CID handler message and reload signatures include message identity.
 - 1.2 complete: URL sanitization scans quoted and unquoted `href` / `src` attributes, with focused regression coverage.
 - 1.3 complete: WebView navigation failures clear loaded signatures so failed loads can retry.
-- 1.4 remains the next Phase 1 patch.
+- 1.4 complete: `HTMLContentLoader` cache keys include canonical source signatures, with stale-cache regression coverage.
+- Phase 1 is complete. Phase 2.1 is the next refactor item.
 
 ### 1.1 Refresh cid handler state on WebView reuse
 
@@ -395,8 +396,8 @@ Before finishing any phase:
 
 ## Recommended Next Patch
 
-Start with Phase 1.4 as the next correctness patch before moving into Phase 2.
+Start with Phase 2.1 now that Phase 1 is clean.
 
 Implementation prompt:
 
-> Implement Phase 1.4 of `docs/refactor-plan.md`. Add canonical HTML source signatures to `HTMLContentLoader` cache keys so changed canonical content cannot return stale wrapped output. Keep manual invalidation, add focused loader cache regression tests, run the relevant HTML loader/display wrapper tests, then run the iOS build. Do not start Phase 2 until Phase 1 is clean.
+> Implement Phase 2.1 of `docs/refactor-plan.md`. Introduce an `EmailPreviewSourceLoader` that selects canonical HTML once and returns one immutable preview source snapshot per message/display variant. Route preview classification, text extraction, image extraction, newsletter/transactional builders, and WebView fallback toward that snapshot without changing the full-message rendering path. Add focused preview-source tests, run newsletter/transactional/classifier and message-bubble tests as relevant, then run the iOS build.

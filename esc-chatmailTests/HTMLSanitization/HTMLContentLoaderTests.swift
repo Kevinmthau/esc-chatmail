@@ -141,6 +141,79 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertFalse(lightReload.html?.contains("background-color: #1c1c1e") == true)
     }
 
+    func testLoadContent_cacheInvalidatesWhenMessageHTMLChangesWithoutManualInvalidation() async {
+        let messageId = "html-loader-source-signature-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        _ = contentHandler.saveHTML("<html><body><p>FIRST_SOURCE_TOKEN</p></body></html>", for: messageId)
+
+        let first = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .preview
+        )
+
+        _ = contentHandler.saveHTML("<html><body><p>SECOND_SOURCE_TOKEN</p></body></html>", for: messageId)
+
+        let second = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .preview
+        )
+
+        XCTAssertEqual(first.source, .messageId)
+        XCTAssertEqual(second.source, .messageId)
+        XCTAssertTrue(first.html?.contains("FIRST_SOURCE_TOKEN") == true)
+        XCTAssertFalse(first.html?.contains("SECOND_SOURCE_TOKEN") == true)
+        XCTAssertTrue(second.html?.contains("SECOND_SOURCE_TOKEN") == true)
+        XCTAssertFalse(second.html?.contains("FIRST_SOURCE_TOKEN") == true)
+    }
+
+    func testLoadContent_cacheInvalidatesWhenStorageURISourceChangesWithoutManualInvalidation() async throws {
+        let messageId = "html-loader-storage-signature-\(UUID().uuidString)"
+        let firstStorageURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("html-loader-storage-first-\(UUID().uuidString).html")
+        let secondStorageURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("html-loader-storage-second-\(UUID().uuidString).html")
+
+        defer {
+            try? FileManager.default.removeItem(at: firstStorageURL)
+            try? FileManager.default.removeItem(at: secondStorageURL)
+        }
+
+        try "<html><body><p>FIRST_STORAGE_TOKEN</p></body></html>"
+            .write(to: firstStorageURL, atomically: true, encoding: .utf8)
+        try "<html><body><p>SECOND_STORAGE_TOKEN</p></body></html>"
+            .write(to: secondStorageURL, atomically: true, encoding: .utf8)
+
+        let first = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: firstStorageURL.absoluteString,
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .preview
+        )
+
+        let second = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: secondStorageURL.absoluteString,
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .preview
+        )
+
+        XCTAssertEqual(first.source, .storageURI)
+        XCTAssertEqual(second.source, .storageURI)
+        XCTAssertTrue(first.html?.contains("FIRST_STORAGE_TOKEN") == true)
+        XCTAssertFalse(first.html?.contains("SECOND_STORAGE_TOKEN") == true)
+        XCTAssertTrue(second.html?.contains("SECOND_STORAGE_TOKEN") == true)
+        XCTAssertFalse(second.html?.contains("FIRST_STORAGE_TOKEN") == true)
+    }
+
     func testPreparePreviewHTML_wrapsKnownCanonicalHTMLWithoutReloadingSources() async {
         let previewHTML = await loader.preparePreviewHTML(
             fromCanonicalHTML: """

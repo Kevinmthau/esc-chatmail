@@ -44,11 +44,13 @@ struct HTMLLoadResult {
 
 private final class CachedHTMLLoadResultBox {
     let cacheKey: String
+    let variantKey: String
     let messageId: String
     let result: HTMLLoadResult
 
-    init(_ result: HTMLLoadResult, cacheKey: String, messageId: String) {
+    init(_ result: HTMLLoadResult, cacheKey: String, variantKey: String, messageId: String) {
         self.cacheKey = cacheKey
+        self.variantKey = variantKey
         self.messageId = messageId
         self.result = result
     }
@@ -59,7 +61,7 @@ private final class HTMLContentCacheDelegate: NSObject, NSCacheDelegate {
 
     func cache(_ cache: NSCache<AnyObject, AnyObject>, willEvictObject obj: Any) {
         guard let box = obj as? CachedHTMLLoadResultBox else { return }
-        owner?.removeTrackedCacheKey(box.cacheKey, for: box.messageId)
+        owner?.removeTrackedCacheKey(box.cacheKey, variantKey: box.variantKey, for: box.messageId)
     }
 }
 
@@ -99,6 +101,7 @@ final class HTMLContentLoader {
     private let htmlCacheDelegate: HTMLContentCacheDelegate
     private let htmlCacheKeyLock = NSLock()
     private var htmlCacheKeysByMessageID: [String: Set<String>] = [:]
+    private var htmlCacheKeyByVariantKey: [String: String] = [:]
 
     init(
         contentHandler: HTMLContentHandler = HTMLContentHandler(),
@@ -138,7 +141,7 @@ final class HTMLContentLoader {
         originalHTMLPreference: OriginalEmailHTMLPreference = .automatic
     ) async -> HTMLLoadResult {
         let normalizedFallbackText = normalizedMeaningfulPlainText(from: bodyText)
-        let cacheKey = cacheKey(
+        let variantKey = cacheVariantKey(
             messageId: messageId,
             plainText: normalizedFallbackText,
             senderEmail: senderEmail,
@@ -149,17 +152,14 @@ final class HTMLContentLoader {
             originalHTMLPreference: originalHTMLPreference
         )
 
-        if let cachedResult = htmlCache.object(forKey: cacheKey) {
-            return cachedResult.result
-        }
-
         // Method 1: Try loading from message ID.
         // Treat empty HTML as missing so we can fall back to storage URI / recovery / plain text.
         if contentHandler.htmlFileExists(for: messageId),
            let html = canonicalHTMLSource(from: contentHandler.loadHTML(for: messageId)),
            !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if let prepared = await wrappedHTMLIfMeaningful(
+            if let result = await cachedOrPreparedHTMLResult(
                 html,
+                source: .messageId,
                 messageId: messageId,
                 plainText: normalizedFallbackText,
                 senderEmail: senderEmail,
@@ -167,20 +167,10 @@ final class HTMLContentLoader {
                 isDarkMode: isDarkMode,
                 cleanupMode: cleanupMode,
                 displayPurpose: displayPurpose,
-                originalHTMLPreference: originalHTMLPreference
+                originalHTMLPreference: originalHTMLPreference,
+                variantKey: variantKey
             ) {
-                switch prepared {
-                case .html(let wrapped):
-                    return cachedHTMLResult(
-                        html: wrapped.html,
-                        source: .messageId,
-                        shouldCache: wrapped.shouldCache,
-                        cacheKey: cacheKey,
-                        messageId: messageId
-                    )
-                case .nativePlainText(let text):
-                    return qualityFallbackResult(text)
-                }
+                return result
             }
             Log.debug("loadContent: Method 1 (messageId file) rejected by wrappedHTMLIfMeaningful for \(messageId) (htmlLen=\(html.count))", category: .ui)
         }
@@ -191,8 +181,9 @@ final class HTMLContentLoader {
            FileManager.default.fileExists(atPath: url.path),
            let html = canonicalHTMLSource(from: contentHandler.loadHTML(from: url)),
            !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if let prepared = await wrappedHTMLIfMeaningful(
+            if let result = await cachedOrPreparedHTMLResult(
                 html,
+                source: .storageURI,
                 messageId: messageId,
                 plainText: normalizedFallbackText,
                 senderEmail: senderEmail,
@@ -200,20 +191,10 @@ final class HTMLContentLoader {
                 isDarkMode: isDarkMode,
                 cleanupMode: cleanupMode,
                 displayPurpose: displayPurpose,
-                originalHTMLPreference: originalHTMLPreference
+                originalHTMLPreference: originalHTMLPreference,
+                variantKey: variantKey
             ) {
-                switch prepared {
-                case .html(let wrapped):
-                    return cachedHTMLResult(
-                        html: wrapped.html,
-                        source: .storageURI,
-                        shouldCache: wrapped.shouldCache,
-                        cacheKey: cacheKey,
-                        messageId: messageId
-                    )
-                case .nativePlainText(let text):
-                    return qualityFallbackResult(text)
-                }
+                return result
             }
             Log.debug("loadContent: Method 2 (storageURI) rejected by wrappedHTMLIfMeaningful for \(messageId) (htmlLen=\(html.count))", category: .ui)
         }
@@ -221,8 +202,10 @@ final class HTMLContentLoader {
         // Method 3: Extract embedded HTML from raw RFC822 source stored in bodyText
         if let text = bodyText,
            let rawSourceHTML = RawEmailSourceSanitizer.extractHTMLText(from: text),
-           let prepared = await wrappedHTMLIfMeaningful(
-               rawSourceHTML,
+           let html = canonicalHTMLSource(from: rawSourceHTML),
+           let result = await cachedOrPreparedHTMLResult(
+               html,
+               source: .rawSourceHTML,
                messageId: messageId,
                plainText: normalizedFallbackText,
                senderEmail: senderEmail,
@@ -230,26 +213,22 @@ final class HTMLContentLoader {
                isDarkMode: isDarkMode,
                cleanupMode: cleanupMode,
                displayPurpose: displayPurpose,
-               originalHTMLPreference: originalHTMLPreference
+               originalHTMLPreference: originalHTMLPreference,
+               variantKey: variantKey
            ) {
-            switch prepared {
-            case .html(let wrapped):
-                return cachedHTMLResult(
-                    html: wrapped.html,
-                    source: .rawSourceHTML,
-                    shouldCache: wrapped.shouldCache,
-                    cacheKey: cacheKey,
-                    messageId: messageId
-                )
-            case .nativePlainText(let text):
-                return qualityFallbackResult(text)
-            }
+            return result
+        }
+
+        if let cachedResult = cachedHTMLResultForUnavailableSource(variantKey: variantKey) {
+            return cachedResult
         }
 
         // Method 4: Recovery - fetch from Gmail API if local content missing
-        if let html = await HTMLContentRecoveryService.shared.recoverHTMLContent(messageId: messageId),
-           let prepared = await wrappedHTMLIfMeaningful(
+        if let recoveredHTML = await HTMLContentRecoveryService.shared.recoverHTMLContent(messageId: messageId),
+           let html = canonicalHTMLSource(from: recoveredHTML),
+           let result = await cachedOrPreparedHTMLResult(
                html,
+               source: .recovered,
                messageId: messageId,
                plainText: normalizedFallbackText,
                senderEmail: senderEmail,
@@ -257,20 +236,10 @@ final class HTMLContentLoader {
                isDarkMode: isDarkMode,
                cleanupMode: cleanupMode,
                displayPurpose: displayPurpose,
-               originalHTMLPreference: originalHTMLPreference
+               originalHTMLPreference: originalHTMLPreference,
+               variantKey: variantKey
            ) {
-            switch prepared {
-            case .html(let wrapped):
-                return cachedHTMLResult(
-                    html: wrapped.html,
-                    source: .recovered,
-                    shouldCache: wrapped.shouldCache,
-                    cacheKey: cacheKey,
-                    messageId: messageId
-                )
-            case .nativePlainText(let text):
-                return qualityFallbackResult(text)
-            }
+            return result
         }
 
         Log.debug("loadContent: All HTML methods failed for \(messageId), falling back to plain text (bodyText=\(bodyText?.count ?? 0) chars)", category: .ui)
@@ -478,6 +447,10 @@ final class HTMLContentLoader {
         let keys: [String]
         htmlCacheKeyLock.lock()
         keys = Array(htmlCacheKeysByMessageID.removeValue(forKey: messageId) ?? [])
+        if !keys.isEmpty {
+            let keySet = Set(keys)
+            htmlCacheKeyByVariantKey = htmlCacheKeyByVariantKey.filter { !keySet.contains($0.value) }
+        }
         htmlCacheKeyLock.unlock()
 
         for key in keys {
@@ -500,7 +473,7 @@ final class HTMLContentLoader {
     }
 #endif
 
-    private func cacheKey(
+    private func cacheVariantKey(
         messageId: String,
         plainText: String?,
         senderEmail: String?,
@@ -524,6 +497,14 @@ final class HTMLContentLoader {
         return "\(messageId)_\(isDarkMode)_\(cleanupMode.rawValue)_\(displayPurpose.rawValue)_\(originalHTMLPreference.rawValue)_\(evaluatorInputsKey)" as NSString
     }
 
+    private func cacheKey(
+        variantKey: NSString,
+        source: HTMLLoadResult.HTMLLoadSource,
+        sourceSignature: String
+    ) -> NSString {
+        "\(variantKey)_\(cacheComponent(for: source))_\(sourceSignature)" as NSString
+    }
+
     private func cacheFingerprint(for text: String?) -> String {
         guard let text = text?
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -537,11 +518,109 @@ final class HTMLContentLoader {
             .joined()
     }
 
+    private func sourceSignature(for html: String) -> String {
+        let digest = SHA256.hash(data: Data(html.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "sha256:\(digest)"
+    }
+
+    private func cacheComponent(for source: HTMLLoadResult.HTMLLoadSource) -> String {
+        switch source {
+        case .messageId:
+            return "messageId"
+        case .storageURI:
+            return "storageURI"
+        case .rawSourceHTML:
+            return "rawSourceHTML"
+        case .recovered:
+            return "recovered"
+        case .qualityFallback:
+            return "qualityFallback"
+        case .plainTextFallback:
+            return "plainTextFallback"
+        case .notFound:
+            return "notFound"
+        }
+    }
+
+    private func cachedOrPreparedHTMLResult(
+        _ html: String,
+        source: HTMLLoadResult.HTMLLoadSource,
+        messageId: String,
+        plainText: String?,
+        senderEmail: String?,
+        subject: String?,
+        isDarkMode: Bool,
+        cleanupMode: HTMLContentCleanupMode,
+        displayPurpose: HTMLDisplayPurpose,
+        originalHTMLPreference: OriginalEmailHTMLPreference,
+        variantKey: NSString
+    ) async -> HTMLLoadResult? {
+        let cacheKey = cacheKey(
+            variantKey: variantKey,
+            source: source,
+            sourceSignature: sourceSignature(for: html)
+        )
+
+        if let cachedResult = htmlCache.object(forKey: cacheKey) {
+            return cachedResult.result
+        }
+
+        guard let prepared = await wrappedHTMLIfMeaningful(
+            html,
+            messageId: messageId,
+            plainText: plainText,
+            senderEmail: senderEmail,
+            subject: subject,
+            isDarkMode: isDarkMode,
+            cleanupMode: cleanupMode,
+            displayPurpose: displayPurpose,
+            originalHTMLPreference: originalHTMLPreference
+        ) else {
+            return nil
+        }
+
+        switch prepared {
+        case .html(let wrapped):
+            return cachedHTMLResult(
+                html: wrapped.html,
+                source: source,
+                shouldCache: wrapped.shouldCache,
+                cacheKey: cacheKey,
+                variantKey: variantKey,
+                messageId: messageId
+            )
+        case .nativePlainText(let text):
+            return qualityFallbackResult(text)
+        }
+    }
+
+    private func cachedHTMLResultForUnavailableSource(variantKey: NSString) -> HTMLLoadResult? {
+        let trackedCacheKey: String?
+
+        htmlCacheKeyLock.lock()
+        trackedCacheKey = htmlCacheKeyByVariantKey[variantKey as String]
+        htmlCacheKeyLock.unlock()
+
+        guard let trackedCacheKey else {
+            return nil
+        }
+
+        if let cachedResult = htmlCache.object(forKey: trackedCacheKey as NSString) {
+            return cachedResult.result
+        }
+
+        removeTrackedVariantKey(variantKey as String, ifMappedTo: trackedCacheKey)
+        return nil
+    }
+
     private func cachedHTMLResult(
         html: String,
         source: HTMLLoadResult.HTMLLoadSource,
         shouldCache: Bool,
         cacheKey: NSString,
+        variantKey: NSString,
         messageId: String
     ) -> HTMLLoadResult {
         let result = HTMLLoadResult(html: html, source: source)
@@ -552,9 +631,18 @@ final class HTMLContentLoader {
 
         let cost = html.utf8.count
         let trackedCacheKey = cacheKey as String
-        trackCacheKey(trackedCacheKey, for: messageId)
+        let trackedVariantKey = variantKey as String
+        let staleCacheKey = trackCacheKey(trackedCacheKey, variantKey: trackedVariantKey, for: messageId)
+        if let staleCacheKey {
+            htmlCache.removeObject(forKey: staleCacheKey as NSString)
+        }
         htmlCache.setObject(
-            CachedHTMLLoadResultBox(result, cacheKey: trackedCacheKey, messageId: messageId),
+            CachedHTMLLoadResultBox(
+                result,
+                cacheKey: trackedCacheKey,
+                variantKey: trackedVariantKey,
+                messageId: messageId
+            ),
             forKey: cacheKey,
             cost: cost
         )
@@ -562,13 +650,20 @@ final class HTMLContentLoader {
         return result
     }
 
-    private func trackCacheKey(_ cacheKey: String, for messageId: String) {
+    private func trackCacheKey(_ cacheKey: String, variantKey: String, for messageId: String) -> String? {
         htmlCacheKeyLock.lock()
+        let staleCacheKey = htmlCacheKeyByVariantKey[variantKey]
+        if let staleCacheKey, staleCacheKey != cacheKey {
+            htmlCacheKeysByMessageID[messageId]?.remove(staleCacheKey)
+        }
         htmlCacheKeysByMessageID[messageId, default: []].insert(cacheKey)
+        htmlCacheKeyByVariantKey[variantKey] = cacheKey
         htmlCacheKeyLock.unlock()
+
+        return staleCacheKey == cacheKey ? nil : staleCacheKey
     }
 
-    fileprivate func removeTrackedCacheKey(_ cacheKey: String, for messageId: String) {
+    fileprivate func removeTrackedCacheKey(_ cacheKey: String, variantKey: String, for messageId: String) {
         htmlCacheKeyLock.lock()
         defer { htmlCacheKeyLock.unlock() }
 
@@ -580,6 +675,21 @@ final class HTMLContentLoader {
         } else {
             htmlCacheKeysByMessageID[messageId] = trackedKeys
         }
+
+        if htmlCacheKeyByVariantKey[variantKey] == cacheKey {
+            htmlCacheKeyByVariantKey.removeValue(forKey: variantKey)
+        }
+    }
+
+    private func removeTrackedVariantKey(_ variantKey: String, ifMappedTo cacheKey: String) {
+        htmlCacheKeyLock.lock()
+        defer { htmlCacheKeyLock.unlock() }
+
+        guard htmlCacheKeyByVariantKey[variantKey] == cacheKey else {
+            return
+        }
+
+        htmlCacheKeyByVariantKey.removeValue(forKey: variantKey)
     }
 
 #if DEBUG
