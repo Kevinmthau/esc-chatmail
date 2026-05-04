@@ -185,6 +185,10 @@ final class HTMLContentLoader {
            FileManager.default.fileExists(atPath: url.path) {
             if let html = canonicalHTMLSource(from: contentHandler.loadHTML(from: url)),
                !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if rejectedCurrentHTMLSource {
+                    invalidate(messageId: messageId)
+                    rejectedCurrentHTMLSource = false
+                }
                 if let result = await cachedOrPreparedHTMLResult(
                     html,
                     source: .storageURI,
@@ -209,6 +213,10 @@ final class HTMLContentLoader {
         if let text = bodyText,
            let rawSourceHTML = RawEmailSourceSanitizer.extractHTMLText(from: text) {
             if let html = canonicalHTMLSource(from: rawSourceHTML) {
+                if rejectedCurrentHTMLSource {
+                    invalidate(messageId: messageId)
+                    rejectedCurrentHTMLSource = false
+                }
                 if let result = await cachedOrPreparedHTMLResult(
                     html,
                     source: .rawSourceHTML,

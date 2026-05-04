@@ -214,6 +214,76 @@ final class HTMLContentLoaderTests: XCTestCase {
 #endif
     }
 
+    func testLoadContent_invalidatesRejectedMessageCacheBeforeReturningStorageFallback() async throws {
+        let messageId = "html-loader-rejected-storage-fallback-\(UUID().uuidString)"
+        let storageURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("html-loader-storage-fallback-\(UUID().uuidString).html")
+
+        defer {
+            contentHandler.deleteHTML(for: messageId)
+            try? FileManager.default.removeItem(at: storageURL)
+        }
+
+        _ = contentHandler.saveHTML("<html><body><p>STALE_CACHE_TOKEN</p></body></html>", for: messageId)
+
+        let lightCached = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "Plain fallback token",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .preview
+        )
+        let darkCached = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "Plain fallback token",
+            isDarkMode: true,
+            cleanupMode: .none,
+            displayPurpose: .preview
+        )
+
+        _ = contentHandler.saveHTML(
+            """
+            <html><body><div style="display: none;">Rejected current source</div></body></html>
+            """,
+            for: messageId
+        )
+        try "<html><body><p>STORAGE_FALLBACK_TOKEN</p></body></html>"
+            .write(to: storageURL, atomically: true, encoding: .utf8)
+
+        let storageFallback = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: storageURL.absoluteString,
+            bodyText: "Plain fallback token",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .preview
+        )
+
+        contentHandler.deleteHTML(for: messageId)
+        try FileManager.default.removeItem(at: storageURL)
+
+        let laterFallback = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: storageURL.absoluteString,
+            bodyText: "Plain fallback token",
+            isDarkMode: true,
+            cleanupMode: .none,
+            displayPurpose: .preview
+        )
+
+        XCTAssertEqual(lightCached.source, .messageId)
+        XCTAssertEqual(darkCached.source, .messageId)
+        XCTAssertTrue(darkCached.html?.contains("STALE_CACHE_TOKEN") == true)
+        XCTAssertEqual(storageFallback.source, .storageURI)
+        XCTAssertTrue(storageFallback.html?.contains("STORAGE_FALLBACK_TOKEN") == true)
+        XCTAssertFalse(storageFallback.html?.contains("STALE_CACHE_TOKEN") == true)
+        XCTAssertEqual(laterFallback.source, .plainTextFallback)
+        XCTAssertTrue(laterFallback.html?.contains("Plain fallback token") == true)
+        XCTAssertFalse(laterFallback.html?.contains("STALE_CACHE_TOKEN") == true)
+    }
+
     func testLoadContent_cacheInvalidatesWhenStorageURISourceChangesWithoutManualInvalidation() async throws {
         let messageId = "html-loader-storage-signature-\(UUID().uuidString)"
         let firstStorageURL = FileManager.default.temporaryDirectory
