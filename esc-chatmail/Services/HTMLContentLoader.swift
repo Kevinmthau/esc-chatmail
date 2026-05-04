@@ -19,7 +19,7 @@ struct HTMLLoadResult {
     let presentation: HTMLLoadPresentation
     let nativeText: String?
 
-    enum HTMLLoadSource: Equatable {
+    enum HTMLLoadSource: Hashable {
         case messageId
         case storageURI
         case rawSourceHTML
@@ -152,7 +152,7 @@ final class HTMLContentLoader {
             originalHTMLPreference: originalHTMLPreference
         )
 
-        var rejectedCurrentHTMLSource = false
+        var rejectedHTMLSources = Set<HTMLLoadResult.HTMLLoadSource>()
 
         // Method 1: Try loading from message ID.
         // Treat empty HTML as unusable so we can fall back to storage URI / recovery / plain text.
@@ -176,7 +176,7 @@ final class HTMLContentLoader {
                 }
                 Log.debug("loadContent: Method 1 (messageId file) rejected by wrappedHTMLIfMeaningful for \(messageId) (htmlLen=\(html.count))", category: .ui)
             }
-            rejectedCurrentHTMLSource = true
+            rejectedHTMLSources.insert(.messageId)
         }
 
         // Method 2: Try loading from stored URI
@@ -185,9 +185,9 @@ final class HTMLContentLoader {
            FileManager.default.fileExists(atPath: url.path) {
             if let html = canonicalHTMLSource(from: contentHandler.loadHTML(from: url)),
                !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                if rejectedCurrentHTMLSource {
-                    invalidate(messageId: messageId)
-                    rejectedCurrentHTMLSource = false
+                if !rejectedHTMLSources.isEmpty {
+                    invalidateCachedResults(messageId: messageId, sources: rejectedHTMLSources)
+                    rejectedHTMLSources.removeAll()
                 }
                 if let result = await cachedOrPreparedHTMLResult(
                     html,
@@ -206,16 +206,16 @@ final class HTMLContentLoader {
                 }
                 Log.debug("loadContent: Method 2 (storageURI) rejected by wrappedHTMLIfMeaningful for \(messageId) (htmlLen=\(html.count))", category: .ui)
             }
-            rejectedCurrentHTMLSource = true
+            rejectedHTMLSources.insert(.storageURI)
         }
 
         // Method 3: Extract embedded HTML from raw RFC822 source stored in bodyText
         if let text = bodyText,
            let rawSourceHTML = RawEmailSourceSanitizer.extractHTMLText(from: text) {
             if let html = canonicalHTMLSource(from: rawSourceHTML) {
-                if rejectedCurrentHTMLSource {
-                    invalidate(messageId: messageId)
-                    rejectedCurrentHTMLSource = false
+                if !rejectedHTMLSources.isEmpty {
+                    invalidateCachedResults(messageId: messageId, sources: rejectedHTMLSources)
+                    rejectedHTMLSources.removeAll()
                 }
                 if let result = await cachedOrPreparedHTMLResult(
                     html,
@@ -234,11 +234,11 @@ final class HTMLContentLoader {
                 }
                 Log.debug("loadContent: Method 3 (rawSourceHTML) rejected by wrappedHTMLIfMeaningful for \(messageId) (htmlLen=\(html.count))", category: .ui)
             }
-            rejectedCurrentHTMLSource = true
+            rejectedHTMLSources.insert(.rawSourceHTML)
         }
 
-        if rejectedCurrentHTMLSource {
-            invalidate(messageId: messageId)
+        if !rejectedHTMLSources.isEmpty {
+            invalidateCachedResults(messageId: messageId, sources: rejectedHTMLSources)
         } else if let cachedResult = cachedHTMLResultForUnavailableSource(variantKey: variantKey) {
             return cachedResult
         }
@@ -464,11 +464,37 @@ final class HTMLContentLoader {
 
     /// Invalidates cached HTML content for a message (both light/dark variants).
     func invalidate(messageId: String) {
+        invalidateCachedResults(messageId: messageId) { _ in true }
+    }
+
+    private func invalidateCachedResults(
+        messageId: String,
+        sources: Set<HTMLLoadResult.HTMLLoadSource>
+    ) {
+        invalidateCachedResults(messageId: messageId) { sources.contains($0) }
+    }
+
+    private func invalidateCachedResults(
+        messageId: String,
+        matching shouldInvalidate: (HTMLLoadResult.HTMLLoadSource) -> Bool
+    ) {
         let keys: [String]
         htmlCacheKeyLock.lock()
-        keys = Array(htmlCacheKeysByMessageID.removeValue(forKey: messageId) ?? [])
+        let trackedKeys = htmlCacheKeysByMessageID[messageId] ?? []
+        keys = trackedKeys.filter { key in
+            guard let box = htmlCache.object(forKey: key as NSString) else {
+                return true
+            }
+            return shouldInvalidate(box.result.source)
+        }
         if !keys.isEmpty {
             let keySet = Set(keys)
+            let remainingKeys = trackedKeys.subtracting(keySet)
+            if remainingKeys.isEmpty {
+                htmlCacheKeysByMessageID.removeValue(forKey: messageId)
+            } else {
+                htmlCacheKeysByMessageID[messageId] = remainingKeys
+            }
             htmlCacheKeyByVariantKey = htmlCacheKeyByVariantKey.filter { !keySet.contains($0.value) }
         }
         htmlCacheKeyLock.unlock()

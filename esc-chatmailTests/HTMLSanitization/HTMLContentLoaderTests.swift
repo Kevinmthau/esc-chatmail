@@ -284,6 +284,95 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertFalse(laterFallback.html?.contains("STALE_CACHE_TOKEN") == true)
     }
 
+    func testLoadContent_keepsStorageFallbackCacheWhenMessageIdSourceRemainsRejected() async throws {
+        let messageId = "html-loader-rejected-storage-cache-\(UUID().uuidString)"
+        let storageURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("html-loader-storage-cache-\(UUID().uuidString).html")
+
+        defer {
+            contentHandler.deleteHTML(for: messageId)
+            try? FileManager.default.removeItem(at: storageURL)
+        }
+
+        _ = contentHandler.saveHTML(
+            """
+            <html><body><div style="display: none;">Rejected current source</div></body></html>
+            """,
+            for: messageId
+        )
+
+        try """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <img src="https://cdn.example.com/banner.jpg?format=webp&width=600" alt="Banner">
+          <p>STORAGE_FALLBACK_TOKEN</p>
+        </body>
+        </html>
+        """.write(to: storageURL, atomically: true, encoding: .utf8)
+
+        let recorder = RequestRecorder()
+        let imageData = onePixelPNG
+        let remoteImageFallback = HTMLRemoteImageAttachmentFallback(
+            requestExecutor: { request in
+                await recorder.record(request)
+
+                let response = try XCTUnwrap(
+                    HTTPURLResponse(
+                        url: try XCTUnwrap(request.url),
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: [
+                            "Content-Type": "image/webp",
+                            "Content-Disposition": "inline; filename=\"hero.webp\"",
+                            "Content-Length": "\(imageData.count)"
+                        ]
+                    )
+                )
+
+                if request.httpMethod == "HEAD" {
+                    return (Data(), response)
+                }
+
+                return (imageData, response)
+            },
+            rewrittenDataURLCacheMaxEntries: 1,
+            rewrittenDataURLCacheMaxBytes: 1
+        )
+
+        loader = HTMLContentLoader(
+            contentHandler: contentHandler,
+            sanitizer: .shared,
+            remoteImageAttachmentFallback: remoteImageFallback
+        )
+
+        let first = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: storageURL.absoluteString,
+            senderEmail: "sender@example.com",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        let second = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: storageURL.absoluteString,
+            senderEmail: "sender@example.com",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        XCTAssertEqual(first.source, .storageURI)
+        XCTAssertEqual(second.source, .storageURI)
+        XCTAssertTrue((second.html ?? "").contains("STORAGE_FALLBACK_TOKEN"))
+        XCTAssertTrue((second.html ?? "").contains("src=\"data:image/"))
+
+        let snapshot = await recorder.snapshot()
+        XCTAssertEqual(snapshot.methods, ["HEAD", "GET"])
+    }
+
     func testLoadContent_cacheInvalidatesWhenStorageURISourceChangesWithoutManualInvalidation() async throws {
         let messageId = "html-loader-storage-signature-\(UUID().uuidString)"
         let firstStorageURL = FileManager.default.temporaryDirectory
