@@ -152,74 +152,86 @@ final class HTMLContentLoader {
             originalHTMLPreference: originalHTMLPreference
         )
 
+        var rejectedCurrentHTMLSource = false
+
         // Method 1: Try loading from message ID.
-        // Treat empty HTML as missing so we can fall back to storage URI / recovery / plain text.
-        if contentHandler.htmlFileExists(for: messageId),
-           let html = canonicalHTMLSource(from: contentHandler.loadHTML(for: messageId)),
-           !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if let result = await cachedOrPreparedHTMLResult(
-                html,
-                source: .messageId,
-                messageId: messageId,
-                plainText: normalizedFallbackText,
-                senderEmail: senderEmail,
-                subject: subject,
-                isDarkMode: isDarkMode,
-                cleanupMode: cleanupMode,
-                displayPurpose: displayPurpose,
-                originalHTMLPreference: originalHTMLPreference,
-                variantKey: variantKey
-            ) {
-                return result
+        // Treat empty HTML as unusable so we can fall back to storage URI / recovery / plain text.
+        if contentHandler.htmlFileExists(for: messageId) {
+            if let html = canonicalHTMLSource(from: contentHandler.loadHTML(for: messageId)),
+               !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if let result = await cachedOrPreparedHTMLResult(
+                    html,
+                    source: .messageId,
+                    messageId: messageId,
+                    plainText: normalizedFallbackText,
+                    senderEmail: senderEmail,
+                    subject: subject,
+                    isDarkMode: isDarkMode,
+                    cleanupMode: cleanupMode,
+                    displayPurpose: displayPurpose,
+                    originalHTMLPreference: originalHTMLPreference,
+                    variantKey: variantKey
+                ) {
+                    return result
+                }
+                Log.debug("loadContent: Method 1 (messageId file) rejected by wrappedHTMLIfMeaningful for \(messageId) (htmlLen=\(html.count))", category: .ui)
             }
-            Log.debug("loadContent: Method 1 (messageId file) rejected by wrappedHTMLIfMeaningful for \(messageId) (htmlLen=\(html.count))", category: .ui)
+            rejectedCurrentHTMLSource = true
         }
 
         // Method 2: Try loading from stored URI
         if let urlString = bodyStorageURI,
            let url = StorageURIResolver.resolve(urlString),
-           FileManager.default.fileExists(atPath: url.path),
-           let html = canonicalHTMLSource(from: contentHandler.loadHTML(from: url)),
-           !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if let result = await cachedOrPreparedHTMLResult(
-                html,
-                source: .storageURI,
-                messageId: messageId,
-                plainText: normalizedFallbackText,
-                senderEmail: senderEmail,
-                subject: subject,
-                isDarkMode: isDarkMode,
-                cleanupMode: cleanupMode,
-                displayPurpose: displayPurpose,
-                originalHTMLPreference: originalHTMLPreference,
-                variantKey: variantKey
-            ) {
-                return result
+           FileManager.default.fileExists(atPath: url.path) {
+            if let html = canonicalHTMLSource(from: contentHandler.loadHTML(from: url)),
+               !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if let result = await cachedOrPreparedHTMLResult(
+                    html,
+                    source: .storageURI,
+                    messageId: messageId,
+                    plainText: normalizedFallbackText,
+                    senderEmail: senderEmail,
+                    subject: subject,
+                    isDarkMode: isDarkMode,
+                    cleanupMode: cleanupMode,
+                    displayPurpose: displayPurpose,
+                    originalHTMLPreference: originalHTMLPreference,
+                    variantKey: variantKey
+                ) {
+                    return result
+                }
+                Log.debug("loadContent: Method 2 (storageURI) rejected by wrappedHTMLIfMeaningful for \(messageId) (htmlLen=\(html.count))", category: .ui)
             }
-            Log.debug("loadContent: Method 2 (storageURI) rejected by wrappedHTMLIfMeaningful for \(messageId) (htmlLen=\(html.count))", category: .ui)
+            rejectedCurrentHTMLSource = true
         }
 
         // Method 3: Extract embedded HTML from raw RFC822 source stored in bodyText
         if let text = bodyText,
-           let rawSourceHTML = RawEmailSourceSanitizer.extractHTMLText(from: text),
-           let html = canonicalHTMLSource(from: rawSourceHTML),
-           let result = await cachedOrPreparedHTMLResult(
-               html,
-               source: .rawSourceHTML,
-               messageId: messageId,
-               plainText: normalizedFallbackText,
-               senderEmail: senderEmail,
-               subject: subject,
-               isDarkMode: isDarkMode,
-               cleanupMode: cleanupMode,
-               displayPurpose: displayPurpose,
-               originalHTMLPreference: originalHTMLPreference,
-               variantKey: variantKey
-           ) {
-            return result
+           let rawSourceHTML = RawEmailSourceSanitizer.extractHTMLText(from: text) {
+            if let html = canonicalHTMLSource(from: rawSourceHTML) {
+                if let result = await cachedOrPreparedHTMLResult(
+                    html,
+                    source: .rawSourceHTML,
+                    messageId: messageId,
+                    plainText: normalizedFallbackText,
+                    senderEmail: senderEmail,
+                    subject: subject,
+                    isDarkMode: isDarkMode,
+                    cleanupMode: cleanupMode,
+                    displayPurpose: displayPurpose,
+                    originalHTMLPreference: originalHTMLPreference,
+                    variantKey: variantKey
+                ) {
+                    return result
+                }
+                Log.debug("loadContent: Method 3 (rawSourceHTML) rejected by wrappedHTMLIfMeaningful for \(messageId) (htmlLen=\(html.count))", category: .ui)
+            }
+            rejectedCurrentHTMLSource = true
         }
 
-        if let cachedResult = cachedHTMLResultForUnavailableSource(variantKey: variantKey) {
+        if rejectedCurrentHTMLSource {
+            invalidate(messageId: messageId)
+        } else if let cachedResult = cachedHTMLResultForUnavailableSource(variantKey: variantKey) {
             return cachedResult
         }
 

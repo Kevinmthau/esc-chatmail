@@ -173,6 +173,47 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertFalse(second.html?.contains("FIRST_SOURCE_TOKEN") == true)
     }
 
+    func testLoadContent_cacheDoesNotReturnStaleHTMLAfterCurrentSourceRejected() async {
+        let messageId = "html-loader-rejected-source-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        _ = contentHandler.saveHTML("<html><body><p>STALE_CACHE_TOKEN</p></body></html>", for: messageId)
+
+        let cached = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "Plain fallback token",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .preview
+        )
+
+        _ = contentHandler.saveHTML(
+            """
+            <html><body><div style="display: none;">Rejected current source</div></body></html>
+            """,
+            for: messageId
+        )
+
+        let fallback = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "Plain fallback token",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .preview
+        )
+
+        XCTAssertEqual(cached.source, .messageId)
+        XCTAssertTrue(cached.html?.contains("STALE_CACHE_TOKEN") == true)
+        XCTAssertEqual(fallback.source, .plainTextFallback)
+        XCTAssertTrue(fallback.html?.contains("Plain fallback token") == true)
+        XCTAssertFalse(fallback.html?.contains("STALE_CACHE_TOKEN") == true)
+#if DEBUG
+        XCTAssertEqual(loader.debugCachedVariantCount(for: messageId), 0)
+#endif
+    }
+
     func testLoadContent_cacheInvalidatesWhenStorageURISourceChangesWithoutManualInvalidation() async throws {
         let messageId = "html-loader-storage-signature-\(UUID().uuidString)"
         let firstStorageURL = FileManager.default.temporaryDirectory
