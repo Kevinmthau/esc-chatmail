@@ -132,6 +132,13 @@ final class HTMLURLSanitizerTests: XCTestCase {
         XCTAssertTrue(result.contains("href=\"#\""))
     }
 
+    func testSanitizeURLs_slashDelimitedHrefAfterQuotedAttribute_rewrittenToHash() {
+        let html = "<a/title=\">\" href=\"javascript:alert(1)\">Click</a>"
+        let result = sut.sanitizeURLs(html)
+        XCTAssertFalse(result.contains("javascript:"))
+        XCTAssertTrue(result.contains("href=\"#\""))
+    }
+
     func testSanitizeURLs_namespacedHrefJavascript_rewrittenToHash() {
         let html = "<svg><use xlink:href=\"javascript:alert(1)\"></use></svg>"
         let result = sut.sanitizeURLs(html)
@@ -167,6 +174,13 @@ final class HTMLURLSanitizerTests: XCTestCase {
 
     func testSanitizeURLs_srcJavascript_replacedWithTransparentPixel() {
         let html = "<img src=\"javascript:alert(1)\">"
+        let result = sut.sanitizeURLs(html)
+        XCTAssertFalse(result.contains("javascript:"))
+        XCTAssertTrue(result.contains("data:image/gif;base64"))
+    }
+
+    func testSanitizeURLs_slashDelimitedSrcAfterQuotedAttribute_replacedWithTransparentPixel() {
+        let html = "<img/title=\">\" src=\"javascript:alert(1)\">"
         let result = sut.sanitizeURLs(html)
         XCTAssertFalse(result.contains("javascript:"))
         XCTAssertTrue(result.contains("data:image/gif;base64"))

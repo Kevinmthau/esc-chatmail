@@ -188,7 +188,7 @@ struct HTMLURLSanitizer {
             case .tagName:
                 if character == ">" {
                     return index
-                } else if character.isWhitespace {
+                } else if character.isWhitespace || character == "/" {
                     state = .beforeAttributeName
                 }
             case .beforeAttributeName:
