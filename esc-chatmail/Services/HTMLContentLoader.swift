@@ -238,7 +238,7 @@ final class HTMLContentLoader {
         }
 
         if !rejectedHTMLSources.isEmpty {
-            invalidateCachedResults(messageId: messageId, sources: rejectedHTMLSources)
+            invalidate(messageId: messageId)
         } else if let cachedResult = cachedHTMLResultForUnavailableSource(variantKey: variantKey) {
             return cachedResult
         }
