@@ -18,6 +18,16 @@ struct HTMLURLSanitizer {
         let valueRange: NSRange
     }
 
+    private enum TagScanState {
+        case tagName
+        case beforeAttributeName
+        case attributeName
+        case afterAttributeName
+        case beforeAttributeValue
+        case quotedAttributeValue(Character)
+        case unquotedAttributeValue
+    }
+
     private static let modernImageFormatQueryHints: [(key: String, riskyValues: Set<String>, replacement: String)] = [
         ("format", ["auto", "avif", "webp"], "jpeg"),
         ("fm", ["avif", "webp"], "jpg")
@@ -76,9 +86,11 @@ struct HTMLURLSanitizer {
 
             let url = String(html[valueRange])
 
-            switch attribute.lowercasedName {
-            case "href":
+            if isHrefAttribute(attribute.lowercasedName) {
                 return isURLSafe(url) ? nil : (attribute.fullRange, "\(attribute.name)=\"#\"")
+            }
+
+            switch attribute.lowercasedName {
             case "src":
                 guard let replacement = sanitizedSrcReplacement(
                     for: url,
@@ -168,18 +180,63 @@ struct HTMLURLSanitizer {
 
     private func tagEndIndex(in html: String, from startIndex: String.Index) -> String.Index? {
         var index = startIndex
-        var quote: Character?
+        var state: TagScanState = .tagName
 
         while index < html.endIndex {
             let character = html[index]
-            if let activeQuote = quote {
-                if character == activeQuote {
-                    quote = nil
+            switch state {
+            case .tagName:
+                if character == ">" {
+                    return index
+                } else if character.isWhitespace {
+                    state = .beforeAttributeName
                 }
-            } else if character == "\"" || character == "'" {
-                quote = character
-            } else if character == ">" {
-                return index
+            case .beforeAttributeName:
+                if character == ">" {
+                    return index
+                } else if character.isWhitespace || character == "/" {
+                    break
+                } else {
+                    state = .attributeName
+                }
+            case .attributeName:
+                if character == ">" {
+                    return index
+                } else if character == "=" {
+                    state = .beforeAttributeValue
+                } else if character.isWhitespace || character == "/" {
+                    state = .afterAttributeName
+                }
+            case .afterAttributeName:
+                if character == ">" {
+                    return index
+                } else if character == "=" {
+                    state = .beforeAttributeValue
+                } else if character.isWhitespace || character == "/" {
+                    break
+                } else {
+                    state = .attributeName
+                }
+            case .beforeAttributeValue:
+                if character == ">" {
+                    return index
+                } else if character.isWhitespace {
+                    break
+                } else if character == "\"" || character == "'" {
+                    state = .quotedAttributeValue(character)
+                } else {
+                    state = .unquotedAttributeValue
+                }
+            case .quotedAttributeValue(let quote):
+                if character == quote {
+                    state = .beforeAttributeName
+                }
+            case .unquotedAttributeValue:
+                if character == ">" {
+                    return index
+                } else if character.isWhitespace {
+                    state = .beforeAttributeName
+                }
             }
             index = html.index(after: index)
         }
@@ -237,7 +294,7 @@ struct HTMLURLSanitizer {
             }
 
             let lowercasedName = attributeName.lowercased()
-            if lowercasedName == "href" || lowercasedName == "src" {
+            if isHrefAttribute(lowercasedName) || lowercasedName == "src" {
                 attributes.append(
                     URLAttribute(
                         name: attributeName,
@@ -252,6 +309,10 @@ struct HTMLURLSanitizer {
         }
 
         return attributes
+    }
+
+    private func isHrefAttribute(_ lowercasedName: String) -> Bool {
+        lowercasedName == "href" || lowercasedName.hasSuffix(":href")
     }
 
     private func skipTagName(
