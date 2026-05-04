@@ -128,6 +128,13 @@ Preferred fix:
 
 Goal: fix concrete bugs with small, low-risk patches before starting broader refactors.
 
+Status as of 2026-05-04:
+
+- 1.1 complete: WebView coordinator updates the CID handler message and reload signatures include message identity.
+- 1.2 complete: URL sanitization scans quoted and unquoted `href` / `src` attributes, with focused regression coverage.
+- 1.3 complete: WebView navigation failures clear loaded signatures so failed loads can retry.
+- 1.4 remains the next Phase 1 patch.
+
 ### 1.1 Refresh cid handler state on WebView reuse
 
 Files:
@@ -388,8 +395,8 @@ Before finishing any phase:
 
 ## Recommended Next Patch
 
-Start with Phase 1.1, Phase 1.2, and Phase 1.3 as one small correctness branch if the diff stays compact. Otherwise split them into separate patches.
+Start with Phase 1.4 as the next correctness patch before moving into Phase 2.
 
 Implementation prompt:
 
-> Implement Phase 1 of `docs/refactor-plan.md`. Fix WebView cid handler reuse, harden URL sanitization for unquoted href/src attributes, and reset WebView loaded signatures on navigation failure. Keep the changes minimal, add focused regression tests where practical, run the relevant HTML/WebView tests, then run the iOS build. Do not start Phase 2 until Phase 1 is clean.
+> Implement Phase 1.4 of `docs/refactor-plan.md`. Add canonical HTML source signatures to `HTMLContentLoader` cache keys so changed canonical content cannot return stale wrapped output. Keep manual invalidation, add focused loader cache regression tests, run the relevant HTML loader/display wrapper tests, then run the iOS build. Do not start Phase 2 until Phase 1 is clean.

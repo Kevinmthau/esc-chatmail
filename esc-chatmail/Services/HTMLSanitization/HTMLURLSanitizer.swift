@@ -11,23 +11,12 @@ struct HTMLURLSanitizer {
         "javascript", "vbscript", "data"  // data: handled separately for images
     ]
 
-    // Cached compiled regex patterns for performance
-    // These patterns are compile-time constants; failure indicates programmer error
-    private static let hrefRegex: NSRegularExpression = {
-        // swiftlint:disable:next force_try
-        try! NSRegularExpression(
-            pattern: "href\\s*=\\s*[\"']([^\"']*)[\"']",
-            options: .caseInsensitive
-        )
-    }()
-
-    private static let srcRegex: NSRegularExpression = {
-        // swiftlint:disable:next force_try
-        try! NSRegularExpression(
-            pattern: "src\\s*=\\s*[\"']([^\"']*)[\"']",
-            options: .caseInsensitive
-        )
-    }()
+    private struct URLAttribute {
+        let name: String
+        let lowercasedName: String
+        let fullRange: NSRange
+        let valueRange: NSRange
+    }
 
     private static let modernImageFormatQueryHints: [(key: String, riskyValues: Set<String>, replacement: String)] = [
         ("format", ["auto", "avif", "webp"], "jpeg"),
@@ -68,11 +57,7 @@ struct HTMLURLSanitizer {
     func sanitizeURLs(_ html: String, rewriteModernFormatQueryHints: Bool = true) -> String {
         var result = html
 
-        // Sanitize href attributes
-        result = sanitizeHrefAttributes(result)
-
-        // Sanitize src attributes
-        result = sanitizeSrcAttributes(
+        result = sanitizeURLAttributes(
             result,
             rewriteModernFormatQueryHints: rewriteModernFormatQueryHints
         )
@@ -83,65 +68,245 @@ struct HTMLURLSanitizer {
         return result
     }
 
-    private func sanitizeHrefAttributes(_ html: String) -> String {
-        var result = html
-        let matches = Self.hrefRegex.matches(in: result, range: NSRange(result.startIndex..., in: result))
+    private func sanitizeURLAttributes(_ html: String, rewriteModernFormatQueryHints: Bool) -> String {
+        let replacements = urlAttributes(in: html).compactMap { attribute -> (NSRange, String)? in
+            guard let valueRange = Range(attribute.valueRange, in: html) else {
+                return nil
+            }
 
-        for match in matches.reversed() {
-            if let range = Range(match.range(at: 1), in: result) {
-                let url = String(result[range])
-                if !isURLSafe(url) {
-                    guard let fullRange = Range(match.range, in: result) else { continue }
-                    result.replaceSubrange(fullRange, with: "href=\"#\"")
+            let url = String(html[valueRange])
+
+            switch attribute.lowercasedName {
+            case "href":
+                return isURLSafe(url) ? nil : (attribute.fullRange, "\(attribute.name)=\"#\"")
+            case "src":
+                guard let replacement = sanitizedSrcReplacement(
+                    for: url,
+                    rewriteModernFormatQueryHints: rewriteModernFormatQueryHints
+                ) else {
+                    return nil
                 }
+                return (attribute.fullRange, replacement)
+            default:
+                return nil
             }
         }
 
+        var result = html
+        for replacement in replacements.sorted(by: { $0.0.location > $1.0.location }) {
+            guard let range = Range(replacement.0, in: result) else {
+                continue
+            }
+            result.replaceSubrange(range, with: replacement.1)
+        }
         return result
     }
 
-    private func sanitizeSrcAttributes(_ html: String, rewriteModernFormatQueryHints: Bool) -> String {
-        var result = html
-        let srcMatches = Self.srcRegex.matches(in: result, range: NSRange(result.startIndex..., in: result))
-
+    private func sanitizedSrcReplacement(
+        for rawURL: String,
+        rewriteModernFormatQueryHints: Bool
+    ) -> String? {
         let transparentPixel = "src=\"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7\""
+        let url = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let decodedURL = HTMLEntityDecoder.decode(url)
 
-        for match in srcMatches.reversed() {
-            if let range = Range(match.range(at: 1), in: result) {
-                let url = String(result[range]).trimmingCharacters(in: .whitespacesAndNewlines)
-                let decodedURL = HTMLEntityDecoder.decode(url)
-
-                // Skip empty URLs
-                if url.isEmpty {
-                    guard let fullRange = Range(match.range, in: result) else { continue }
-                    result.replaceSubrange(fullRange, with: transparentPixel)
-                    continue
-                }
-
-                // Normalize URL to catch bypass attempts
-                let normalized = normalizeURL(decodedURL)
-
-                // Block dangerous protocols (javascript:, vbscript:, and unsafe data: URLs)
-                if normalized.hasPrefix("javascript:") || normalized.hasPrefix("vbscript:") {
-                    guard let fullRange = Range(match.range, in: result) else { continue }
-                    result.replaceSubrange(fullRange, with: transparentPixel)
-                } else if normalized.hasPrefix("data:") && !isDataURL(normalized) {
-                    // Block non-image data URLs (e.g., data:text/html)
-                    guard let fullRange = Range(match.range, in: result) else { continue }
-                    result.replaceSubrange(fullRange, with: transparentPixel)
-                } else if rewriteModernFormatQueryHints,
-                          let rewrittenURL = rewriteModernImageFormatHints(in: decodedURL),
-                          rewrittenURL != decodedURL,
-                          let fullRange = Range(match.range, in: result) {
-                    let escapedURL = htmlAttributeEscaped(rewrittenURL)
-                    result.replaceSubrange(fullRange, with: "src=\"\(escapedURL)\"")
-                }
-                // cid: URLs are preserved - they'll be handled by CIDSchemeHandler
-                // Allow all other URLs including tracking pixels and newsletter images
-            }
+        // Skip empty URLs
+        if url.isEmpty {
+            return transparentPixel
         }
 
-        return result
+        // Normalize URL to catch bypass attempts
+        let normalized = normalizeURL(decodedURL)
+
+        // Block dangerous protocols (javascript:, vbscript:, and unsafe data: URLs)
+        if normalized.hasPrefix("javascript:") || normalized.hasPrefix("vbscript:") {
+            return transparentPixel
+        } else if normalized.hasPrefix("data:") && !isDataURL(normalized) {
+            // Block non-image data URLs (e.g., data:text/html)
+            return transparentPixel
+        } else if rewriteModernFormatQueryHints,
+                  let rewrittenURL = rewriteModernImageFormatHints(in: decodedURL),
+                  rewrittenURL != decodedURL {
+            let escapedURL = htmlAttributeEscaped(rewrittenURL)
+            return "src=\"\(escapedURL)\""
+        }
+
+        // cid: URLs are preserved - they'll be handled by CIDSchemeHandler
+        // Allow all other URLs including tracking pixels and newsletter images
+        return nil
+    }
+
+    private func urlAttributes(in html: String) -> [URLAttribute] {
+        var attributes: [URLAttribute] = []
+        var index = html.startIndex
+
+        while index < html.endIndex {
+            guard html[index] == "<" else {
+                index = html.index(after: index)
+                continue
+            }
+
+            if html[index...].hasPrefix("<!--") {
+                guard let commentEnd = html[index...].range(of: "-->") else {
+                    break
+                }
+                index = commentEnd.upperBound
+                continue
+            }
+
+            let tagBodyStart = html.index(after: index)
+            guard let tagEnd = tagEndIndex(in: html, from: tagBodyStart) else {
+                break
+            }
+
+            attributes.append(contentsOf: urlAttributes(inTag: tagBodyStart..<tagEnd, html: html))
+            index = html.index(after: tagEnd)
+        }
+
+        return attributes
+    }
+
+    private func tagEndIndex(in html: String, from startIndex: String.Index) -> String.Index? {
+        var index = startIndex
+        var quote: Character?
+
+        while index < html.endIndex {
+            let character = html[index]
+            if let activeQuote = quote {
+                if character == activeQuote {
+                    quote = nil
+                }
+            } else if character == "\"" || character == "'" {
+                quote = character
+            } else if character == ">" {
+                return index
+            }
+            index = html.index(after: index)
+        }
+
+        return nil
+    }
+
+    private func urlAttributes(inTag tagRange: Range<String.Index>, html: String) -> [URLAttribute] {
+        var attributes: [URLAttribute] = []
+        var index = skipTagName(in: html, from: tagRange.lowerBound, to: tagRange.upperBound)
+
+        while index < tagRange.upperBound {
+            index = skipWhitespace(in: html, from: index, to: tagRange.upperBound)
+            guard index < tagRange.upperBound else { break }
+
+            if html[index] == "/" {
+                index = html.index(after: index)
+                continue
+            }
+
+            let attributeStart = index
+            while index < tagRange.upperBound,
+                  !isAttributeNameTerminator(html[index]) {
+                index = html.index(after: index)
+            }
+
+            guard attributeStart < index else {
+                index = html.index(after: index)
+                continue
+            }
+
+            let attributeName = String(html[attributeStart..<index])
+            index = skipWhitespace(in: html, from: index, to: tagRange.upperBound)
+
+            guard index < tagRange.upperBound, html[index] == "=" else {
+                continue
+            }
+
+            index = html.index(after: index)
+            index = skipWhitespace(in: html, from: index, to: tagRange.upperBound)
+
+            let valueStart: String.Index
+            let valueEnd: String.Index
+            let fullEnd: String.Index
+
+            if index < tagRange.upperBound, html[index] == "\"" || html[index] == "'" {
+                let quote = html[index]
+                valueStart = html.index(after: index)
+                valueEnd = quotedValueEnd(in: html, from: valueStart, quote: quote, to: tagRange.upperBound)
+                fullEnd = valueEnd < tagRange.upperBound ? html.index(after: valueEnd) : valueEnd
+            } else {
+                valueStart = index
+                valueEnd = unquotedValueEnd(in: html, from: valueStart, to: tagRange.upperBound)
+                fullEnd = valueEnd
+            }
+
+            let lowercasedName = attributeName.lowercased()
+            if lowercasedName == "href" || lowercasedName == "src" {
+                attributes.append(
+                    URLAttribute(
+                        name: attributeName,
+                        lowercasedName: lowercasedName,
+                        fullRange: NSRange(attributeStart..<fullEnd, in: html),
+                        valueRange: NSRange(valueStart..<valueEnd, in: html)
+                    )
+                )
+            }
+
+            index = fullEnd
+        }
+
+        return attributes
+    }
+
+    private func skipTagName(
+        in html: String,
+        from startIndex: String.Index,
+        to endIndex: String.Index
+    ) -> String.Index {
+        var index = startIndex
+        while index < endIndex,
+              !html[index].isWhitespace,
+              html[index] != "/" {
+            index = html.index(after: index)
+        }
+        return index
+    }
+
+    private func skipWhitespace(
+        in html: String,
+        from startIndex: String.Index,
+        to endIndex: String.Index
+    ) -> String.Index {
+        var index = startIndex
+        while index < endIndex, html[index].isWhitespace {
+            index = html.index(after: index)
+        }
+        return index
+    }
+
+    private func isAttributeNameTerminator(_ character: Character) -> Bool {
+        character.isWhitespace || character == "=" || character == "/" || character == ">"
+    }
+
+    private func quotedValueEnd(
+        in html: String,
+        from startIndex: String.Index,
+        quote: Character,
+        to endIndex: String.Index
+    ) -> String.Index {
+        var index = startIndex
+        while index < endIndex, html[index] != quote {
+            index = html.index(after: index)
+        }
+        return index
+    }
+
+    private func unquotedValueEnd(
+        in html: String,
+        from startIndex: String.Index,
+        to endIndex: String.Index
+    ) -> String.Index {
+        var index = startIndex
+        while index < endIndex, !html[index].isWhitespace {
+            index = html.index(after: index)
+        }
+        return index
     }
 
     /// Normalizes a URL by decoding percent-encoding, HTML entities, and removing control characters

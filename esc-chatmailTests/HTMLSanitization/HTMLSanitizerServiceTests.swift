@@ -785,10 +785,47 @@ final class HTMLSanitizerServiceHTMLURLSanitizerTests: XCTestCase {
         XCTAssertTrue(result.contains("href=\"#\""))
     }
 
+    func testSanitizeURLs_unquotedJavascriptHref_replaces() {
+        let html = "<a href=javascript:alert(1)>Click</a>"
+        let result = sut.sanitizeURLs(html)
+        XCTAssertFalse(result.contains("javascript:"))
+        XCTAssertTrue(result.contains("href=\"#\""))
+    }
+
+    func testSanitizeURLs_unquotedEncodedJavascriptHref_replaces() {
+        let html = "<a href=java%73cript:alert(1)>Click</a>"
+        let result = sut.sanitizeURLs(html)
+        XCTAssertFalse(result.contains("java%73cript:"))
+        XCTAssertTrue(result.contains("href=\"#\""))
+    }
+
     func testSanitizeURLs_safeHref_preserves() {
         let html = "<a href=\"https://example.com\">Link</a>"
         let result = sut.sanitizeURLs(html)
         XCTAssertTrue(result.contains("https://example.com"))
+    }
+
+    func testSanitizeURLs_unquotedSafeHrefs_preserves() {
+        let html = """
+        <a href=https://example.com/page>HTTPS</a>
+        <a href=mailto:test@example.com>Email</a>
+        <a href=tel:+1234567890>Phone</a>
+        <a href=/relative/path>Relative</a>
+        <a href=#section>Fragment</a>
+        """
+        let result = sut.sanitizeURLs(html)
+
+        XCTAssertTrue(result.contains("href=https://example.com/page"))
+        XCTAssertTrue(result.contains("href=mailto:test@example.com"))
+        XCTAssertTrue(result.contains("href=tel:+1234567890"))
+        XCTAssertTrue(result.contains("href=/relative/path"))
+        XCTAssertTrue(result.contains("href=#section"))
+    }
+
+    func testSanitizeURLs_queryParameterNamedSrcInsideQuotedHref_preserves() {
+        let html = "<a href=\"https://example.com/open?src=javascript:label\">Link</a>"
+        let result = sut.sanitizeURLs(html)
+        XCTAssertTrue(result.contains("href=\"https://example.com/open?src=javascript:label\""))
     }
 
     func testSanitizeURLs_javascriptSrc_replaces() {
@@ -797,11 +834,38 @@ final class HTMLSanitizerServiceHTMLURLSanitizerTests: XCTestCase {
         XCTAssertFalse(result.contains("javascript:"))
     }
 
+    func testSanitizeURLs_unquotedJavascriptSrc_replaces() {
+        let html = "<img src=javascript:evil()>"
+        let result = sut.sanitizeURLs(html)
+        XCTAssertFalse(result.contains("javascript:"))
+        XCTAssertTrue(result.contains("data:image/gif;base64"))
+    }
+
+    func testSanitizeURLs_unquotedDataTextHTMLSrc_replaces() {
+        let html = "<img src=data:text/html;base64,PHNjcmlwdD4=>"
+        let result = sut.sanitizeURLs(html)
+        XCTAssertFalse(result.contains("data:text/html"))
+        XCTAssertTrue(result.contains("data:image/gif;base64"))
+    }
+
     func testSanitizeURLs_cidSrc_preserves() {
         // cid: URLs are preserved for CIDSchemeHandler to resolve at runtime
         let html = "<img src=\"cid:image001\">"
         let result = sut.sanitizeURLs(html)
         XCTAssertTrue(result.contains("cid:image001"))
+    }
+
+    func testSanitizeURLs_unquotedSafeSrcs_preserves() {
+        let html = """
+        <img src=https://example.com/image.jpg>
+        <img src=cid:image001>
+        <img src=data:image/png;base64,iVBORw0KGgo=>
+        """
+        let result = sut.sanitizeURLs(html)
+
+        XCTAssertTrue(result.contains("src=https://example.com/image.jpg"))
+        XCTAssertTrue(result.contains("src=cid:image001"))
+        XCTAssertTrue(result.contains("src=data:image/png;base64,iVBORw0KGgo="))
     }
 
     func testSanitizeURLs_emptySrc_replaces() {
