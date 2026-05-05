@@ -183,6 +183,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
     private let cache: LRUCacheActor<String, CachedText>
     private var cacheKeysByMessageID: [String: Set<String>] = [:]
     private var cacheKeyTrackingVersion: UInt64 = 0
+    private var inFlightTrackedCacheWriteCount = 0
 
     /// Track active prefetch task to prevent unbounded task accumulation
     private var activePrefetchTask: Task<Void, Never>?
@@ -264,12 +265,13 @@ actor ProcessedTextCache: MemoryWarningHandler {
     func set(messageId: String, plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart] = []) async {
         let size = Self.estimateSize(plainText, hasRichContent, quotedParts)
         let key = Self.cacheKey(for: messageId)
-        trackCacheKey(key, for: messageId)
+        beginTrackedCacheWrite(key, for: messageId)
         await cache.set(
             key,
             value: CachedText(plainText: plainText, hasRichContent: hasRichContent, quotedParts: quotedParts),
             sizeBytes: size
         )
+        finishTrackedCacheWrite()
         await pruneTrackedCacheKeys()
     }
 
@@ -287,12 +289,13 @@ actor ProcessedTextCache: MemoryWarningHandler {
             sourceSignature: sourceSignature,
             previewMode: previewMode
         )
-        trackCacheKey(key, for: messageId)
+        beginTrackedCacheWrite(key, for: messageId)
         await cache.set(
             key,
             value: CachedText(plainText: plainText, hasRichContent: hasRichContent, quotedParts: quotedParts),
             sizeBytes: size
         )
+        finishTrackedCacheWrite()
         await pruneTrackedCacheKeys()
     }
 
@@ -407,11 +410,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
             bodyStorageURI: bodyStorageURI
         )
         if htmlSourceSignature != "missing" {
-            var components = ["html:\(htmlSourceSignature)"]
-            if let bodyTextSignature = bodyTextSignature(for: bodyText) {
-                components.append("body:\(bodyTextSignature)")
-            }
-            return components.joined(separator: "|")
+            return "html:\(htmlSourceSignature)"
         }
 
         if let bodyTextSignature = bodyTextSignature(for: bodyText) {
@@ -892,10 +891,25 @@ actor ProcessedTextCache: MemoryWarningHandler {
         cacheKeyTrackingVersion &+= 1
     }
 
+    private func beginTrackedCacheWrite(_ key: String, for messageId: String) {
+        inFlightTrackedCacheWriteCount += 1
+        trackCacheKey(key, for: messageId)
+    }
+
+    private func finishTrackedCacheWrite() {
+        guard inFlightTrackedCacheWriteCount > 0 else { return }
+        inFlightTrackedCacheWriteCount -= 1
+    }
+
     private func pruneTrackedCacheKeys() async {
+        guard inFlightTrackedCacheWriteCount == 0 else {
+            return
+        }
+
         let trackingVersion = cacheKeyTrackingVersion
         let liveKeys = Set(await cache.allKeys())
-        guard cacheKeyTrackingVersion == trackingVersion else {
+        guard cacheKeyTrackingVersion == trackingVersion,
+              inFlightTrackedCacheWriteCount == 0 else {
             return
         }
 
@@ -911,6 +925,19 @@ actor ProcessedTextCache: MemoryWarningHandler {
 #if DEBUG
     func trackedCacheKeyCountForTesting() -> Int {
         cacheKeysByMessageID.values.reduce(0) { $0 + $1.count }
+    }
+
+    func beginTrackedCacheWriteForTesting(messageId: String, sourceSignature: String, previewMode: String) {
+        let key = Self.cacheKey(
+            for: messageId,
+            sourceSignature: sourceSignature,
+            previewMode: previewMode
+        )
+        beginTrackedCacheWrite(key, for: messageId)
+    }
+
+    func finishTrackedCacheWriteForTesting() {
+        finishTrackedCacheWrite()
     }
 #endif
 }

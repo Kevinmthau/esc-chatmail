@@ -80,7 +80,7 @@ final class ProcessedTextCacheTests: XCTestCase {
         await cache.clear()
     }
 
-    func testContentSourceSignature_usesHTMLMetadataForStoredHTML() {
+    func testContentSourceSignature_usesOnlyHTMLMetadataForStoredHTML() {
         let handler = HTMLContentHandler.shared
         let messageId = "test-source-signature-\(UUID().uuidString)"
         defer {
@@ -106,7 +106,48 @@ final class ProcessedTextCacheTests: XCTestCase {
             bodyText: "Fallback body",
             handler: handler
         )
-        XCTAssertTrue(sourceSignatureWithBody.hasPrefix("html:\(htmlSignature)|body:sha256:"))
+        XCTAssertEqual(sourceSignatureWithBody, "html:\(htmlSignature)")
+    }
+
+    func testContentSourceSignature_usesBodyTextWhenHTMLMissing() {
+        let handler = HTMLContentHandler.shared
+        let messageId = "test-missing-html-source-signature-\(UUID().uuidString)"
+        handler.deleteHTML(for: messageId)
+
+        let sourceSignature = ProcessedTextCache.contentSourceSignature(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "Fallback body",
+            handler: handler
+        )
+        XCTAssertTrue(sourceSignature.hasPrefix("body:sha256:"))
+    }
+
+    func testCache_prunePreservesTrackedKeysForInFlightWrites() async {
+        let cache = ProcessedTextCache.shared
+        await cache.clear()
+
+        let pendingMessageId = "test-pending-write-\(UUID().uuidString)"
+        let liveMessageId = "test-live-write-\(UUID().uuidString)"
+        await cache.beginTrackedCacheWriteForTesting(
+            messageId: pendingMessageId,
+            sourceSignature: "pending-source",
+            previewMode: "test-preview"
+        )
+
+        await cache.set(
+            messageId: liveMessageId,
+            sourceSignature: "live-source",
+            previewMode: "test-preview",
+            plainText: "Cached text",
+            hasRichContent: false
+        )
+
+        let trackedKeyCount = await cache.trackedCacheKeyCountForTesting()
+        XCTAssertEqual(trackedKeyCount, 2)
+
+        await cache.finishTrackedCacheWriteForTesting()
+        await cache.clear()
     }
 
     func testCache_setWithQuotedParts_returnsCachedQuotes() async {
