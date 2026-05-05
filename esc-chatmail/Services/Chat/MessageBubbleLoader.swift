@@ -683,42 +683,72 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             bodyText: request.bodyText,
             handler: htmlContentHandler
         )
-        let fallbackSourceSignature = ProcessedTextCache.fallbackContentSourceSignature(
-            messageId: request.messageID,
-            bodyStorageURI: request.bodyStorageURI,
-            bodyText: request.bodyText,
-            handler: htmlContentHandler
-        )
 
-        let cacheSourceSignatures = fallbackSourceSignature == sourceSignature
-            ? [sourceSignature]
-            : [sourceSignature, fallbackSourceSignature]
-        for cacheSourceSignature in cacheSourceSignatures {
-            guard let cached = await processedTextCache.get(
-                messageId: request.messageID,
-                sourceSignature: cacheSourceSignature,
-                previewMode: ProcessedTextCache.chatBubblePreviewMode
-            ) else {
-                continue
+        var fallbackSourceSignature: String?
+        func resolveFallbackSourceSignature() -> String {
+            if let fallbackSourceSignature {
+                return fallbackSourceSignature
             }
 
-            let hasHTMLFile = htmlContentHandler.htmlFileExists(for: request.messageID)
+            let signature = ProcessedTextCache.fallbackContentSourceSignature(
+                messageId: request.messageID,
+                bodyStorageURI: request.bodyStorageURI,
+                bodyText: request.bodyText,
+                handler: htmlContentHandler
+            )
+            fallbackSourceSignature = signature
+            return signature
+        }
+
+        func isStaleNewsletterFallback(plainText: String?, hasRichContent: Bool) -> Bool {
+            !request.isFromMe &&
+            resolvedHasHTMLSource &&
+            !hasRichContent &&
+            looksLikeNewsletterFallbackText(plainText ?? request.bodyText ?? request.snippet)
+        }
+
+        if let cached = await processedTextCache.get(
+            messageId: request.messageID,
+            sourceSignature: sourceSignature,
+            previewMode: ProcessedTextCache.chatBubblePreviewMode
+        ) {
             let requiresURIRecompute =
                 resolvedHasHTMLSource &&
                 cached.plainText == nil &&
                 request.bodyStorageURI != nil &&
-                !hasHTMLFile
+                !htmlContentHandler.htmlFileExists(for: request.messageID)
             let requiresBodyFallbackRecompute =
-                cacheSourceSignature == sourceSignature &&
-                fallbackSourceSignature != sourceSignature &&
-                cached.plainText == nil
-            let shouldBypassCachedNewsletterFallback =
-                !request.isFromMe &&
-                resolvedHasHTMLSource &&
+                cached.plainText == nil &&
                 !cached.hasRichContent &&
-                looksLikeNewsletterFallbackText(cached.plainText ?? request.bodyText ?? request.snippet)
+                resolveFallbackSourceSignature() != sourceSignature
+            let shouldBypassCachedNewsletterFallback = isStaleNewsletterFallback(
+                plainText: cached.plainText,
+                hasRichContent: cached.hasRichContent
+            )
 
             if !requiresURIRecompute && !requiresBodyFallbackRecompute && !shouldBypassCachedNewsletterFallback {
+                return (cached.plainText, cached.hasRichContent)
+            }
+        }
+
+        let resolvedFallbackSourceSignature = resolveFallbackSourceSignature()
+        if resolvedFallbackSourceSignature != sourceSignature,
+           let cached = await processedTextCache.get(
+                messageId: request.messageID,
+                sourceSignature: resolvedFallbackSourceSignature,
+                previewMode: ProcessedTextCache.chatBubblePreviewMode
+           ) {
+            let requiresURIRecompute =
+                resolvedHasHTMLSource &&
+                cached.plainText == nil &&
+                request.bodyStorageURI != nil &&
+                !htmlContentHandler.htmlFileExists(for: request.messageID)
+            let shouldBypassCachedNewsletterFallback = isStaleNewsletterFallback(
+                plainText: cached.plainText,
+                hasRichContent: cached.hasRichContent
+            )
+
+            if !requiresURIRecompute && !shouldBypassCachedNewsletterFallback {
                 return (cached.plainText, cached.hasRichContent)
             }
         }
@@ -726,7 +756,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         var result = await processMessageContent(
             from: request,
             sourceSignature: sourceSignature,
-            fallbackSourceSignature: fallbackSourceSignature
+            fallbackSourceSignature: resolvedFallbackSourceSignature
         )
 
         let missingBodyText = request.bodyText?

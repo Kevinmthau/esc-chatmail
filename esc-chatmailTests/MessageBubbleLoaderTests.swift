@@ -466,6 +466,63 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
     }
+
+    func testLoadContent_cachedRichHTMLWithoutTextIsPreservedOverBodyFallback() async throws {
+        let messageId = "bubble-rich-html-cache-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        defer {
+            HTMLContentHandler.shared.deleteHTML(for: messageId)
+        }
+
+        _ = HTMLContentHandler.shared.saveHTML(
+            "<html><body><iframe src=\"https://example.com/embed\"></iframe></body></html>",
+            for: messageId
+        )
+
+        let sourceSignature = ProcessedTextCache.contentSourceSignature(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: nil,
+            handler: HTMLContentHandler.shared
+        )
+        await ProcessedTextCache.shared.set(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            previewMode: ProcessedTextCache.chatBubblePreviewMode,
+            plainText: nil,
+            hasRichContent: true
+        )
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache()
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: "Fallback body text",
+                bodyStorageURI: nil,
+                cleanedSnippet: "Fallback body text",
+                snippet: "Fallback body text",
+                subject: "Embedded media",
+                senderName: "Alice Example",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertNil(result.fullTextContent)
+        XCTAssertTrue(result.hasRichHTMLContent)
+        XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)
+
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+    }
 }
 
 private final class MockBubbleContactsResolver: ContactsResolving, @unchecked Sendable {
