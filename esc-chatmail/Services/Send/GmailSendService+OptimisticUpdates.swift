@@ -81,12 +81,16 @@ extension GmailSendService {
             ),
             in: viewContext
         )
-        upsertOptimisticSendMutationRecord(
-            OptimisticSendMutationSnapshot(
-                optimisticMessageID: messageId,
-                conversation: conversation
-            )
+        let rollbackSnapshot = OptimisticSendMutationSnapshot(
+            optimisticMessageID: messageId,
+            conversation: conversation
         )
+        do {
+            try persistOptimisticSendMutationRecord(rollbackSnapshot)
+        } catch {
+            Log.error("Failed to persist optimistic send mutation record", category: .message, error: error)
+            throw SendError.optimisticCreationFailed
+        }
         viewContext.processPendingChanges()
 
         return OptimisticSendHandle(
@@ -241,8 +245,10 @@ extension GmailSendService {
             myEmail: authSession.userEmail ?? ""
         )
 
+        let hasSupersedingMessage = cleanup.hasRemainingMessageSupersedingOptimisticMessage(remainingMessages)
         cleanup.restorePreOptimisticConversationStateIfNeeded(
-            restoreRollupFields: restoreRollupFields
+            restoreRollupFields: restoreRollupFields && !hasSupersedingMessage,
+            restoreArchiveState: !hasSupersedingMessage
         )
     }
 
@@ -367,10 +373,27 @@ extension GmailSendService {
     }
 
     @MainActor
-    private func upsertOptimisticSendMutationRecord(_ snapshot: OptimisticSendMutationSnapshot) {
-        let record = fetchOptimisticSendMutationRecords(messageID: snapshot.optimisticMessageID).first
-            ?? OutboundSendMutationRecord(context: viewContext)
-        snapshot.apply(to: record)
+    private func persistOptimisticSendMutationRecord(_ snapshot: OptimisticSendMutationSnapshot) throws {
+        guard let coordinator = viewContext.persistentStoreCoordinator else {
+            throw SendError.optimisticCreationFailed
+        }
+
+        let context = NSManagedObjectContext(concurrencyType: .privateQueueConcurrencyType)
+        context.persistentStoreCoordinator = coordinator
+        context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+
+        try context.performAndWait {
+            let record = fetchOptimisticSendMutationRecords(
+                messageID: snapshot.optimisticMessageID,
+                in: context
+            ).first
+                ?? OutboundSendMutationRecord(context: context)
+            snapshot.apply(to: record)
+
+            if context.hasChanges {
+                try context.save()
+            }
+        }
     }
 
     @MainActor
@@ -380,12 +403,19 @@ extension GmailSendService {
 
     @MainActor
     private func fetchOptimisticSendMutationRecords(messageID: String) -> [OutboundSendMutationRecord] {
+        fetchOptimisticSendMutationRecords(messageID: messageID, in: viewContext)
+    }
+
+    private func fetchOptimisticSendMutationRecords(
+        messageID: String,
+        in context: NSManagedObjectContext
+    ) -> [OutboundSendMutationRecord] {
         let request = OutboundSendMutationRecord.fetchRequest()
         request.predicate = NSPredicate(format: "id == %@", messageID)
         request.includesPendingChanges = true
 
         do {
-            return try viewContext.fetch(request)
+            return try context.fetch(request)
         } catch {
             Log.error("Failed to fetch optimistic send mutation record", category: .message, error: error)
             return []
@@ -442,9 +472,13 @@ extension GmailSendService {
             for: conversation,
             myEmail: authSession.userEmail ?? ""
         )
+        let hasSupersedingMessage = remainingMessages.contains {
+            $0.internalDate > snapshot.createdAt
+        }
         snapshot.restoreConversationState(
             conversation,
-            restoreRollupFields: true
+            restoreRollupFields: !hasSupersedingMessage,
+            restoreArchiveState: !hasSupersedingMessage
         )
     }
 
@@ -540,7 +574,8 @@ private struct OptimisticSendMutationSnapshot {
     @MainActor
     func restoreConversationState(
         _ conversation: Conversation,
-        restoreRollupFields: Bool
+        restoreRollupFields: Bool,
+        restoreArchiveState: Bool
     ) {
         guard !newlyInsertedConversation else { return }
 
@@ -551,7 +586,7 @@ private struct OptimisticSendMutationSnapshot {
             conversation.snippet = snippet
         }
 
-        guard !conversation.hasInbox else { return }
+        guard restoreArchiveState, !conversation.hasInbox else { return }
 
         conversation.archivedAt = archivedAt
         conversation.hidden = hidden
@@ -579,6 +614,8 @@ private struct OptimisticSendMutationSnapshot {
 private struct OptimisticFailureConversationCleanup {
     let conversation: Conversation?
     let wasInserted: Bool
+    private let optimisticMessageDate: Date
+    private let optimisticMessageObjectID: NSManagedObjectID
     private let rollbackSnapshot: OptimisticSendMutationSnapshot?
 
     @MainActor
@@ -589,12 +626,16 @@ private struct OptimisticFailureConversationCleanup {
         guard let conversation = message.conversation else {
             self.conversation = nil
             self.wasInserted = false
+            self.optimisticMessageDate = message.internalDate
+            self.optimisticMessageObjectID = message.objectID
             self.rollbackSnapshot = nil
             return
         }
 
         self.conversation = conversation
         self.wasInserted = persistedSnapshot?.newlyInsertedConversation ?? conversation.isInserted
+        self.optimisticMessageDate = message.internalDate
+        self.optimisticMessageObjectID = message.objectID
         self.rollbackSnapshot = persistedSnapshot
             ?? OptimisticSendMutationSnapshot(
                 optimisticMessageID: message.id,
@@ -603,11 +644,23 @@ private struct OptimisticFailureConversationCleanup {
     }
 
     @MainActor
-    func restorePreOptimisticConversationStateIfNeeded(restoreRollupFields: Bool) {
+    func hasRemainingMessageSupersedingOptimisticMessage(_ messages: [Message]) -> Bool {
+        messages.contains { message in
+            message.objectID != optimisticMessageObjectID
+                && message.internalDate > optimisticMessageDate
+        }
+    }
+
+    @MainActor
+    func restorePreOptimisticConversationStateIfNeeded(
+        restoreRollupFields: Bool,
+        restoreArchiveState: Bool
+    ) {
         guard let conversation else { return }
         rollbackSnapshot?.restoreConversationState(
             conversation,
-            restoreRollupFields: restoreRollupFields
+            restoreRollupFields: restoreRollupFields,
+            restoreArchiveState: restoreArchiveState
         )
     }
 }

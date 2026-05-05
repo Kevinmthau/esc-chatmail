@@ -114,6 +114,57 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertEqual(archivedConversation.snippet, "Previous received message")
     }
 
+    func testHandleFailedOptimisticMessage_keepsNewerRemainingMessageRollupAndVisibility() async throws {
+        let context = coreDataStack.viewContext
+        let recipient = "newer-message-thread@example.com"
+        let participantHash = calculateParticipantHash(from: [normalizedEmail(recipient)])
+        let archivedAt = Date(timeIntervalSince1970: 300)
+        let previousMessageDate = Date(timeIntervalSince1970: 250)
+
+        let archivedConversation = ConversationBuilder()
+            .withParticipantHash(participantHash)
+            .withDisplayName("Thread With Newer Message")
+            .withSnippet("Older received message")
+            .withLastMessageDate(previousMessageDate)
+            .hasInboxMessages(false)
+            .archivedOn(archivedAt)
+            .setHidden()
+            .build(in: context)
+
+        _ = MessageBuilder()
+            .withId("older-received-message")
+            .withDate(previousMessageDate)
+            .withSnippet("Older received message")
+            .inConversation(archivedConversation)
+            .build(in: context)
+
+        try coreDataStack.saveViewContext()
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Failed earlier reply",
+            optimisticConversation: .participantHash(participantHash)
+        )
+        let optimisticMessage = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        let newerDate = optimisticMessage.internalDate.addingTimeInterval(10)
+        let newerMessage = MessageBuilder()
+            .withId("newer-remaining-message")
+            .fromMe()
+            .withDate(newerDate)
+            .withSnippet("Newer reply remains")
+            .inConversation(archivedConversation)
+            .build(in: context)
+
+        sendService.handleFailedOptimisticMessage(optimisticMessage)
+
+        XCTAssertNil(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertNotNil(sendService.fetchMessageSync(byID: "newer-remaining-message"))
+        XCTAssertNil(archivedConversation.archivedAt)
+        XCTAssertFalse(archivedConversation.hidden)
+        XCTAssertEqual(archivedConversation.lastMessageDate, newerDate)
+        XCTAssertEqual(archivedConversation.snippet, newerMessage.conversationPreviewText)
+    }
+
     func testHandleFailedOptimisticMessage_afterPersistedOptimisticUnarchive_restoresDurableConversationSnapshot() async throws {
         let context = coreDataStack.viewContext
         let recipient = "persisted-archived-thread@example.com"

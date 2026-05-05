@@ -1,4 +1,5 @@
 import XCTest
+import CoreData
 @testable import esc_chatmail
 
 @MainActor
@@ -51,6 +52,26 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertEqual(fetched.attachmentsArray.compactMap(\.id), ["local_attachment_1"])
     }
 
+    func testCreateOptimisticMessage_persistsMutationRecordBeforeViewContextSave() async throws {
+        let context = coreDataStack.viewContext
+        let recipient = "durable-record@example.com"
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "pending send",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail(recipient)])
+            )
+        )
+
+        XCTAssertTrue(context.hasChanges, "The optimistic message graph should still be pending.")
+
+        coreDataStack.resetViewContext()
+
+        XCTAssertNil(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 1)
+    }
+
     func testCreateOptimisticMessage_reactivatesArchivedConversationWithoutImmediateSave() async throws {
         let context = coreDataStack.viewContext
         let recipient = "friend@example.com"
@@ -99,5 +120,11 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertEqual(handle.conversationReference, ConversationReference(objectID: conversation.objectID))
         XCTAssertEqual(message.gmThreadId, "thread-123")
         XCTAssertTrue(context.hasChanges, "Anchored optimistic replies should stay unsaved until the background send path persists them.")
+    }
+
+    private func optimisticMutationRecordCount(in context: NSManagedObjectContext) throws -> Int {
+        let request = OutboundSendMutationRecord.fetchRequest()
+        request.includesPendingChanges = true
+        return try context.count(for: request)
     }
 }
