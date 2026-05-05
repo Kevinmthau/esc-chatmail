@@ -81,6 +81,12 @@ extension GmailSendService {
             ),
             in: viewContext
         )
+        upsertOptimisticSendMutationRecord(
+            OptimisticSendMutationSnapshot(
+                optimisticMessageID: messageId,
+                conversation: conversation
+            )
+        )
         viewContext.processPendingChanges()
 
         return OptimisticSendHandle(
@@ -125,6 +131,8 @@ extension GmailSendService {
     /// Updates an optimistic message with the actual Gmail IDs after successful send.
     @MainActor
     func updateOptimisticMessage(_ message: Message, with result: SendResult) {
+        let optimisticMessageID = message.id
+        deleteOptimisticSendMutationRecord(messageID: optimisticMessageID)
         message.id = result.messageId
         message.gmThreadId = result.threadId
 
@@ -140,9 +148,14 @@ extension GmailSendService {
     /// Deletes an optimistic message (used when send fails).
     @MainActor
     func deleteOptimisticMessage(_ message: Message) {
-        let conversationCleanup = OptimisticFailureConversationCleanup(message: message)
+        let optimisticMessageID = message.id
+        let conversationCleanup = OptimisticFailureConversationCleanup(
+            message: message,
+            persistedSnapshot: fetchOptimisticSendMutationSnapshot(messageID: optimisticMessageID)
+        )
         viewContext.delete(message)
-        finalizeOptimisticFailureCleanup(conversationCleanup)
+        finalizeOptimisticFailureCleanup(conversationCleanup, restoreRollupFields: true)
+        deleteOptimisticSendMutationRecord(messageID: optimisticMessageID)
 
         saveOptimisticFailureCleanup()
     }
@@ -165,17 +178,23 @@ extension GmailSendService {
     /// are removed to avoid leaving an unsent bubble that appears delivered.
     @MainActor
     func handleFailedOptimisticMessage(_ message: Message) {
+        let optimisticMessageID = message.id
+        let persistedSnapshot = fetchOptimisticSendMutationSnapshot(messageID: optimisticMessageID)
         let localAttachments = message.attachmentsArray.filter(\.isLocalAttachment)
         guard !localAttachments.isEmpty else {
             deleteOptimisticMessage(message)
             return
         }
 
-        let conversationCleanup = OptimisticFailureConversationCleanup(message: message)
+        let conversationCleanup = OptimisticFailureConversationCleanup(
+            message: message,
+            persistedSnapshot: persistedSnapshot
+        )
         for attachment in localAttachments {
             attachment.state = .failed
         }
-        finalizeOptimisticFailureCleanup(conversationCleanup)
+        finalizeOptimisticFailureCleanup(conversationCleanup, restoreRollupFields: false)
+        deleteOptimisticSendMutationRecord(messageID: optimisticMessageID)
         saveOptimisticFailureCleanup()
     }
 
@@ -189,13 +208,18 @@ extension GmailSendService {
             return
         }
 
+        restoreConversationStateForMissingOptimisticMessage(messageID: messageID)
+
         let fallbackAttachments = resolveAttachments(from: fallbackAttachmentReferences)
         guard !fallbackAttachments.isEmpty else { return }
         markAttachmentsAsFailed(fallbackAttachments)
     }
 
     @MainActor
-    private func finalizeOptimisticFailureCleanup(_ cleanup: OptimisticFailureConversationCleanup?) {
+    private func finalizeOptimisticFailureCleanup(
+        _ cleanup: OptimisticFailureConversationCleanup?,
+        restoreRollupFields: Bool
+    ) {
         guard let cleanup,
               let conversation = cleanup.conversation,
               conversation.managedObjectContext != nil else {
@@ -217,7 +241,9 @@ extension GmailSendService {
             myEmail: authSession.userEmail ?? ""
         )
 
-        cleanup.restorePreOptimisticConversationStateIfNeeded()
+        cleanup.restorePreOptimisticConversationStateIfNeeded(
+            restoreRollupFields: restoreRollupFields
+        )
     }
 
     /// Finds or creates a conversation for the optimistic send path without forcing
@@ -323,55 +349,220 @@ extension GmailSendService {
             return try? viewContext.existingObject(with: objectID) as? Attachment
         }
     }
-}
-
-private struct OptimisticFailureConversationCleanup {
-    let conversation: Conversation?
-    let wasInserted: Bool
-    private let archivedAtBeforeOptimisticChanges: Date?
-    private let hiddenBeforeOptimisticChanges: Bool
-    private let displayNameBeforeOptimisticChanges: String?
 
     @MainActor
-    init(message: Message) {
-        guard let conversation = message.conversation else {
-            self.conversation = nil
-            self.wasInserted = false
-            self.archivedAtBeforeOptimisticChanges = nil
-            self.hiddenBeforeOptimisticChanges = false
-            self.displayNameBeforeOptimisticChanges = nil
-            return
+    @discardableResult
+    func reconcileAbandonedOptimisticSendMutations() -> Bool {
+        let messageIDs = fetchAllOptimisticSendMutationRecords().map(\.id)
+        guard !messageIDs.isEmpty else { return false }
+
+        Log.info("Reconciling \(messageIDs.count) abandoned optimistic send mutation(s)", category: .message)
+        for messageID in messageIDs {
+            handleFailedOptimisticMessage(
+                byID: messageID,
+                fallbackAttachmentReferences: []
+            )
         }
-
-        let committedValues = conversation.committedValues(
-            forKeys: ["archivedAt", "hidden", "displayName"]
-        )
-
-        self.conversation = conversation
-        self.wasInserted = conversation.isInserted
-        self.archivedAtBeforeOptimisticChanges = committedValues["archivedAt"] as? Date
-        self.hiddenBeforeOptimisticChanges = Self.boolValue(
-            from: committedValues["hidden"],
-            defaultValue: conversation.hidden
-        )
-        self.displayNameBeforeOptimisticChanges = committedValues["displayName"] as? String
+        return true
     }
 
     @MainActor
-    func restorePreOptimisticConversationStateIfNeeded() {
-        guard let conversation else { return }
+    private func upsertOptimisticSendMutationRecord(_ snapshot: OptimisticSendMutationSnapshot) {
+        let record = fetchOptimisticSendMutationRecords(messageID: snapshot.optimisticMessageID).first
+            ?? OutboundSendMutationRecord(context: viewContext)
+        snapshot.apply(to: record)
+    }
 
-        if !wasInserted {
-            conversation.displayName = displayNameBeforeOptimisticChanges
+    @MainActor
+    private func fetchOptimisticSendMutationSnapshot(messageID: String) -> OptimisticSendMutationSnapshot? {
+        fetchOptimisticSendMutationRecords(messageID: messageID).first.map(OptimisticSendMutationSnapshot.init(record:))
+    }
+
+    @MainActor
+    private func fetchOptimisticSendMutationRecords(messageID: String) -> [OutboundSendMutationRecord] {
+        let request = OutboundSendMutationRecord.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", messageID)
+        request.includesPendingChanges = true
+
+        do {
+            return try viewContext.fetch(request)
+        } catch {
+            Log.error("Failed to fetch optimistic send mutation record", category: .message, error: error)
+            return []
         }
+    }
 
-        guard let archivedAtBeforeOptimisticChanges,
-              !conversation.hasInbox else {
+    @MainActor
+    private func fetchAllOptimisticSendMutationRecords() -> [OutboundSendMutationRecord] {
+        let request = OutboundSendMutationRecord.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: true)]
+        request.includesPendingChanges = true
+
+        do {
+            return try viewContext.fetch(request)
+        } catch {
+            Log.error("Failed to fetch optimistic send mutation records", category: .message, error: error)
+            return []
+        }
+    }
+
+    @MainActor
+    private func deleteOptimisticSendMutationRecord(messageID: String) {
+        for record in fetchOptimisticSendMutationRecords(messageID: messageID) {
+            viewContext.delete(record)
+        }
+    }
+
+    @MainActor
+    private func restoreConversationStateForMissingOptimisticMessage(messageID: String) {
+        guard let snapshot = fetchOptimisticSendMutationSnapshot(messageID: messageID) else {
             return
         }
 
-        conversation.archivedAt = archivedAtBeforeOptimisticChanges
-        conversation.hidden = hiddenBeforeOptimisticChanges
+        defer {
+            deleteOptimisticSendMutationRecord(messageID: messageID)
+            saveOptimisticFailureCleanup()
+        }
+
+        guard let conversation = resolveConversation(for: snapshot),
+              conversation.managedObjectContext != nil,
+              !conversation.isDeleted else {
+            return
+        }
+
+        viewContext.processPendingChanges()
+
+        let remainingMessages = conversation.messages?.filter { !$0.isDeleted } ?? []
+        if snapshot.newlyInsertedConversation && remainingMessages.isEmpty {
+            viewContext.delete(conversation)
+            return
+        }
+
+        ConversationRollupUpdater().updateRollups(
+            for: conversation,
+            myEmail: authSession.userEmail ?? ""
+        )
+        snapshot.restoreConversationState(
+            conversation,
+            restoreRollupFields: true
+        )
+    }
+
+    @MainActor
+    private func resolveConversation(for snapshot: OptimisticSendMutationSnapshot) -> Conversation? {
+        if let conversationURI = snapshot.conversationURI,
+           let url = URL(string: conversationURI),
+           let coordinator = viewContext.persistentStoreCoordinator,
+           let objectID = coordinator.managedObjectID(forURIRepresentation: url),
+           let conversation = try? viewContext.existingObject(with: objectID) as? Conversation {
+            return conversation
+        }
+
+        guard let conversationID = snapshot.conversationID else {
+            return nil
+        }
+
+        let request = Conversation.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", conversationID as CVarArg)
+        request.fetchLimit = 1
+        request.includesPendingChanges = true
+
+        do {
+            return try viewContext.fetch(request).first
+        } catch {
+            Log.error("Failed to resolve optimistic send conversation", category: .message, error: error)
+            return nil
+        }
+    }
+}
+
+private struct OptimisticSendMutationSnapshot {
+    let optimisticMessageID: String
+    let conversationID: UUID?
+    let conversationURI: String?
+    let createdAt: Date
+    let archivedAt: Date?
+    let hidden: Bool
+    let displayName: String?
+    let lastMessageDate: Date?
+    let snippet: String?
+    let newlyInsertedConversation: Bool
+
+    @MainActor
+    init(optimisticMessageID: String, conversation: Conversation) {
+        let newlyInsertedConversation = conversation.isInserted
+        let committedValues: [String: Any] = newlyInsertedConversation
+            ? [:]
+            : conversation.committedValues(
+                forKeys: ["archivedAt", "hidden", "displayName", "lastMessageDate", "snippet"]
+            )
+
+        self.optimisticMessageID = optimisticMessageID
+        self.conversationID = conversation.id
+        self.conversationURI = conversation.objectID.uriRepresentation().absoluteString
+        self.createdAt = Date()
+        self.archivedAt = Self.dateValue(from: committedValues["archivedAt"])
+        self.hidden = newlyInsertedConversation
+            ? false
+            : Self.boolValue(from: committedValues["hidden"], defaultValue: conversation.hidden)
+        self.displayName = Self.stringValue(from: committedValues["displayName"])
+        self.lastMessageDate = Self.dateValue(from: committedValues["lastMessageDate"])
+        self.snippet = Self.stringValue(from: committedValues["snippet"])
+        self.newlyInsertedConversation = newlyInsertedConversation
+    }
+
+    init(record: OutboundSendMutationRecord) {
+        self.optimisticMessageID = record.id
+        self.conversationID = record.conversationId
+        self.conversationURI = record.conversationURI
+        self.createdAt = record.createdAt
+        self.archivedAt = record.archivedAt
+        self.hidden = record.hidden
+        self.displayName = record.displayName
+        self.lastMessageDate = record.lastMessageDate
+        self.snippet = record.snippet
+        self.newlyInsertedConversation = record.newlyInsertedConversation
+    }
+
+    func apply(to record: OutboundSendMutationRecord) {
+        record.id = optimisticMessageID
+        record.conversationId = conversationID
+        record.conversationURI = conversationURI
+        record.createdAt = createdAt
+        record.archivedAt = archivedAt
+        record.hidden = hidden
+        record.displayName = displayName
+        record.lastMessageDate = lastMessageDate
+        record.snippet = snippet
+        record.newlyInsertedConversation = newlyInsertedConversation
+    }
+
+    @MainActor
+    func restoreConversationState(
+        _ conversation: Conversation,
+        restoreRollupFields: Bool
+    ) {
+        guard !newlyInsertedConversation else { return }
+
+        conversation.displayName = displayName
+
+        if restoreRollupFields {
+            conversation.lastMessageDate = lastMessageDate
+            conversation.snippet = snippet
+        }
+
+        guard !conversation.hasInbox else { return }
+
+        conversation.archivedAt = archivedAt
+        conversation.hidden = hidden
+    }
+
+    private static func dateValue(from value: Any?) -> Date? {
+        value as? Date
+    }
+
+    private static func stringValue(from value: Any?) -> String? {
+        value as? String
     }
 
     private static func boolValue(from value: Any?, defaultValue: Bool) -> Bool {
@@ -382,5 +573,41 @@ private struct OptimisticFailureConversationCleanup {
             return number.boolValue
         }
         return defaultValue
+    }
+}
+
+private struct OptimisticFailureConversationCleanup {
+    let conversation: Conversation?
+    let wasInserted: Bool
+    private let rollbackSnapshot: OptimisticSendMutationSnapshot?
+
+    @MainActor
+    init(
+        message: Message,
+        persistedSnapshot: OptimisticSendMutationSnapshot?
+    ) {
+        guard let conversation = message.conversation else {
+            self.conversation = nil
+            self.wasInserted = false
+            self.rollbackSnapshot = nil
+            return
+        }
+
+        self.conversation = conversation
+        self.wasInserted = persistedSnapshot?.newlyInsertedConversation ?? conversation.isInserted
+        self.rollbackSnapshot = persistedSnapshot
+            ?? OptimisticSendMutationSnapshot(
+                optimisticMessageID: message.id,
+                conversation: conversation
+            )
+    }
+
+    @MainActor
+    func restorePreOptimisticConversationStateIfNeeded(restoreRollupFields: Bool) {
+        guard let conversation else { return }
+        rollbackSnapshot?.restoreConversationState(
+            conversation,
+            restoreRollupFields: restoreRollupFields
+        )
     }
 }

@@ -114,6 +114,110 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertEqual(archivedConversation.snippet, "Previous received message")
     }
 
+    func testHandleFailedOptimisticMessage_afterPersistedOptimisticUnarchive_restoresDurableConversationSnapshot() async throws {
+        let context = coreDataStack.viewContext
+        let recipient = "persisted-archived-thread@example.com"
+        let participantHash = calculateParticipantHash(from: [normalizedEmail(recipient)])
+        let archivedAt = Date(timeIntervalSince1970: 200)
+        let previousMessageDate = Date(timeIntervalSince1970: 150)
+
+        let archivedConversation = ConversationBuilder()
+            .withParticipantHash(participantHash)
+            .withDisplayName("Persisted Archived Thread")
+            .withSnippet("Persisted previous message")
+            .withLastMessageDate(previousMessageDate)
+            .hasInboxMessages(false)
+            .archivedOn(archivedAt)
+            .setHidden()
+            .build(in: context)
+
+        let nonInboxLabel = LabelBuilder()
+            .withId("CATEGORY_UPDATES")
+            .withName("Updates")
+            .build(in: context)
+        let previousMessage = MessageBuilder()
+            .withId("persisted-previous-received-message")
+            .withDate(previousMessageDate)
+            .withSnippet("Persisted previous message")
+            .inConversation(archivedConversation)
+            .build(in: context)
+        previousMessage.addToLabels(nonInboxLabel)
+
+        try coreDataStack.saveViewContext()
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Persisted failed reply",
+            optimisticConversation: .participantHash(participantHash)
+        )
+        try coreDataStack.saveViewContext()
+        coreDataStack.resetViewContext()
+
+        let optimisticMessage = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        let persistedConversation = try XCTUnwrap(optimisticMessage.conversation)
+        XCTAssertNil(persistedConversation.archivedAt)
+        XCTAssertFalse(persistedConversation.hidden)
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 1)
+
+        sendService.handleFailedOptimisticMessage(optimisticMessage)
+
+        XCTAssertNil(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertEqual(persistedConversation.archivedAt, archivedAt)
+        XCTAssertTrue(persistedConversation.hidden)
+        XCTAssertEqual(persistedConversation.displayName, "Persisted Archived Thread")
+        XCTAssertFalse(persistedConversation.hasInbox)
+        XCTAssertEqual(persistedConversation.lastMessageDate, previousMessageDate)
+        XCTAssertEqual(persistedConversation.snippet, "Persisted previous message")
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
+    }
+
+    func testUpdateOptimisticMessage_clearsDurableMutationRecordOnSuccess() async throws {
+        let context = coreDataStack.viewContext
+        let recipient = "success-clear@example.com"
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Send will succeed",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail(recipient)])
+            )
+        )
+        let optimisticMessage = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 1)
+
+        sendService.updateOptimisticMessage(
+            optimisticMessage,
+            with: GmailSendService.SendResult(messageId: "gmail-success-id", threadId: "gmail-thread-id")
+        )
+
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
+        XCTAssertNotNil(sendService.fetchMessageSync(byID: "gmail-success-id"))
+    }
+
+    func testReconcileAbandonedOptimisticSendMutations_deletesPersistedNewEmptyConversation() async throws {
+        let context = coreDataStack.viewContext
+        let recipient = "abandoned-new-thread@example.com"
+        let participantHash = calculateParticipantHash(from: [normalizedEmail(recipient)])
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Abandoned pending send",
+            optimisticConversation: .participantHash(participantHash)
+        )
+        try coreDataStack.saveViewContext()
+        coreDataStack.resetViewContext()
+
+        XCTAssertNotNil(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertEqual(try conversationCount(in: context), 1)
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 1)
+
+        sendService.reconcileAbandonedOptimisticSendMutations()
+
+        XCTAssertNil(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertEqual(try conversationCount(in: context), 0)
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
+    }
+
     func testHandleFailedOptimisticMessage_withLocalAttachments_marksOnlyLocalAttachmentsFailed() throws {
         let context = coreDataStack.viewContext
         let conversation = ConversationBuilder()
@@ -199,6 +303,12 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
 
     private func conversationCount(in context: NSManagedObjectContext) throws -> Int {
         let request = Conversation.fetchRequest()
+        request.includesPendingChanges = true
+        return try context.count(for: request)
+    }
+
+    private func optimisticMutationRecordCount(in context: NSManagedObjectContext) throws -> Int {
+        let request = OutboundSendMutationRecord.fetchRequest()
         request.includesPendingChanges = true
         return try context.count(for: request)
     }

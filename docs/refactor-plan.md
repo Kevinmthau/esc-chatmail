@@ -288,6 +288,11 @@ Validation:
 
 Goal: make send failure and relaunch behavior deterministic.
 
+Status as of 2026-05-05:
+
+- 3.1 complete: optimistic sends now create durable Core Data rollback records with conversation state snapshots, success/failure clears those records, failure cleanup can restore persisted snapshots after an intervening save, and startup reconciles abandoned optimistic sends.
+- Phase 3 is complete.
+
 ### 3.1 Add durable optimistic send mutation records
 
 Files likely involved:
@@ -403,8 +408,8 @@ Before finishing any phase:
 
 ## Recommended Next Patch
 
-Start with Phase 3.1 now that the preview pipeline consolidation is complete.
+Start with Phase 4.1 now that the durable optimistic send lifecycle is complete.
 
 Implementation prompt:
 
-> Implement Phase 3.1 of `docs/refactor-plan.md`. Add durable optimistic send mutation records or rollback snapshots so failed sends and relaunch-during-send cases can restore conversation state deterministically. Keep the patch scoped to optimistic send lifecycle persistence, add focused send failure/relaunch tests, then run the relevant compose/send suites and the iOS build.
+> Implement Phase 4.1 of `docs/refactor-plan.md`. Add low-volume reconciliation diagnostics for messages checked, skipped checks, metadata fetch failures, drift found, drift repaired, and capped reconciliation. Keep the patch diagnostic-only unless the instrumentation exposes a concrete correction bug, add focused sync/reconciliation tests where the structure supports it, then run the relevant sync suites and the iOS build.

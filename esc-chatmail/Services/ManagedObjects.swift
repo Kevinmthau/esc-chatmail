@@ -37,6 +37,10 @@ public class Label: NSManagedObject, Identifiable {
 public class PendingAction: NSManagedObject, Identifiable {
 }
 
+@objc(OutboundSendMutationRecord)
+public class OutboundSendMutationRecord: NSManagedObject, Identifiable {
+}
+
 @objc(AbandonedSyncMessage)
 public class AbandonedSyncMessage: NSManagedObject, Identifiable {
 }
@@ -104,6 +108,23 @@ extension PendingAction {
         get { Status(rawValue: status) ?? .pending }
         set { status = newValue.rawValue }
     }
+}
+
+extension OutboundSendMutationRecord {
+    @nonobjc public class func fetchRequest() -> NSFetchRequest<OutboundSendMutationRecord> {
+        NSFetchRequest<OutboundSendMutationRecord>(entityName: "OutboundSendMutationRecord")
+    }
+
+    @NSManaged public var archivedAt: Date?
+    @NSManaged public var conversationId: UUID?
+    @NSManaged public var conversationURI: String?
+    @NSManaged public var createdAt: Date
+    @NSManaged public var displayName: String?
+    @NSManaged public var hidden: Bool
+    @NSManaged public var id: String
+    @NSManaged public var lastMessageDate: Date?
+    @NSManaged public var newlyInsertedConversation: Bool
+    @NSManaged public var snippet: String?
 }
 
 extension Message {

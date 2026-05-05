@@ -86,6 +86,21 @@
             <fetchIndexElement property="createdAt" type="Binary" order="ascending"/>
         </fetchIndex>
     </entity>
+    <entity name="OutboundSendMutationRecord" representedClassName="OutboundSendMutationRecord" syncable="YES">
+        <attribute name="archivedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="conversationId" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="conversationURI" optional="YES" attributeType="String"/>
+        <attribute name="createdAt" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="displayName" optional="YES" attributeType="String"/>
+        <attribute name="hidden" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="id" attributeType="String"/>
+        <attribute name="lastMessageDate" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="newlyInsertedConversation" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="snippet" optional="YES" attributeType="String"/>
+        <fetchIndex name="byOutboundSendMessageIndex">
+            <fetchIndexElement property="id" type="Binary" order="ascending"/>
+        </fetchIndex>
+    </entity>
     <entity name="Message" representedClassName="Message" syncable="YES">
         <attribute name="bodyStorageURI" optional="YES" attributeType="String"/>
         <attribute name="bodyText" optional="YES" attributeType="String"/>

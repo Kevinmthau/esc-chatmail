@@ -108,6 +108,10 @@ struct esc_chatmailApp: App {
         applyUITestLaunchStateIfNeeded()
         logStartupTiming("Auth restored")
 
+        if reconcileAbandonedOptimisticSendsIfAuthenticated() {
+            logStartupTiming("Abandoned optimistic sends reconciled")
+        }
+
         // Start app-scoped foreground sync as soon as auth is available.
         // Scene callbacks may not fire during cold-start when already active.
         if dependencies.authSession.isAuthenticated && !isRunningUITests {
@@ -183,6 +187,7 @@ struct esc_chatmailApp: App {
         if isRunningUITests { return }
 
         if isAuthenticated && scenePhase == .active {
+            reconcileAbandonedOptimisticSendsIfAuthenticated()
             startForegroundSyncSession(
                 reason: "authBecameAuthenticated",
                 triggerImmediateSync: true,
@@ -191,6 +196,12 @@ struct esc_chatmailApp: App {
         } else if !isAuthenticated {
             dependencies.foregroundSyncCoordinator.stop(reason: "authBecameUnauthenticated")
         }
+    }
+
+    @discardableResult
+    private func reconcileAbandonedOptimisticSendsIfAuthenticated() -> Bool {
+        guard dependencies.authSession.isAuthenticated else { return false }
+        return dependencies.makeSendService().reconcileAbandonedOptimisticSendMutations()
     }
 
     private func startForegroundSyncSession(
