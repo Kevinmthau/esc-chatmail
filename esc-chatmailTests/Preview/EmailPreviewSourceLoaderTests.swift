@@ -158,6 +158,49 @@ final class EmailPreviewSourceLoaderTests: XCTestCase {
         XCTAssertEqual(source.extractedImages.first?.sourceURL, "https://cdn.example.com/festival-hero.jpg")
     }
 
+    func testLoadPreviewSourceCapsSummaryActionLinkTextsAfterEmptyAnchors() async throws {
+        let messageId = "preview-source-action-link-cap-\(UUID().uuidString)"
+        defer {
+            HTMLContentHandler.shared.deleteHTML(for: messageId)
+        }
+
+        let emptyLinks = (1...3)
+            .map { "<a href=\"https://example.com/empty-\($0)\"></a>" }
+            .joined(separator: "\n")
+        let actionLinks = (1...20)
+            .map { "<a href=\"https://example.com/action-\($0)\">Action \($0)</a>" }
+            .joined(separator: "\n")
+
+        HTMLContentHandler.shared.saveHTML(
+            """
+            <!DOCTYPE html>
+            <html>
+            <body>
+              <h1>Daily deals</h1>
+              \(emptyLinks)
+              \(actionLinks)
+            </body>
+            </html>
+            """,
+            for: messageId
+        )
+
+        let loadedSource = await EmailPreviewSourceLoader(htmlContentLoader: HTMLContentLoader()).loadPreviewSource(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: nil,
+            senderEmail: "newsletter@example.com",
+            subject: "Daily deals",
+            allowRecovery: false
+        )
+        let source = try XCTUnwrap(loadedSource)
+
+        XCTAssertEqual(source.htmlSummary.actionLinkTexts.count, 12)
+        XCTAssertEqual(source.htmlSummary.actionLinkTexts.first, "Action 1")
+        XCTAssertEqual(source.htmlSummary.actionLinkTexts.last, "Action 12")
+        XCTAssertFalse(source.htmlSummary.actionLinkTexts.contains("Action 13"))
+    }
+
     func testTransactionalBuilderUsesPreviewSourceImageCandidates() async throws {
         let messageId = "preview-source-transactional-\(UUID().uuidString)"
         defer {

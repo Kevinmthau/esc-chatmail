@@ -229,19 +229,32 @@ enum EmailPreviewContentExtractor {
 
     private static func actionLinkTexts(in html: String, maxLinks: Int = 12) -> [String] {
         let pattern = "<a\\b[^>]*>([\\s\\S]*?)</a>"
+        guard maxLinks > 0 else {
+            return []
+        }
+
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
             return []
         }
 
-        let matches = regex.matches(in: html, options: [], range: NSRange(html.startIndex..., in: html))
-        return matches.prefix(maxLinks).compactMap { match in
-            guard match.numberOfRanges > 1,
+        var linkTexts: [String] = []
+        regex.enumerateMatches(in: html, options: [], range: NSRange(html.startIndex..., in: html)) { match, _, stop in
+            guard let match,
+                  match.numberOfRanges > 1,
                   let range = Range(match.range(at: 1), in: html) else {
-                return nil
+                return
             }
 
-            return normalizedHTMLText(from: String(html[range]))
+            if let text = normalizedHTMLText(from: String(html[range])) {
+                linkTexts.append(text)
+            }
+
+            if linkTexts.count >= maxLinks {
+                stop.pointee = true
+            }
         }
+
+        return linkTexts
     }
 }
 
