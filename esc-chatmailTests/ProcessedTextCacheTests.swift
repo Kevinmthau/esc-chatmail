@@ -38,6 +38,77 @@ final class ProcessedTextCacheTests: XCTestCase {
         XCTAssertNil(result)
     }
 
+    func testCache_trackedKeysArePrunedAfterLRUEviction() async {
+        let cache = ProcessedTextCache.shared
+        await cache.clear()
+
+        for index in 0...CacheConfig.textCacheSize {
+            await cache.set(
+                messageId: "test-lru-\(index)",
+                sourceSignature: "source-\(index)",
+                previewMode: "test-preview",
+                plainText: "Message \(index)",
+                hasRichContent: false
+            )
+        }
+
+        let stats = await cache.getStatistics()
+        let trackedKeyCount = await cache.trackedCacheKeyCountForTesting()
+        XCTAssertEqual(stats.currentItemCount, CacheConfig.textCacheSize)
+        XCTAssertEqual(trackedKeyCount, stats.currentItemCount)
+
+        await cache.clear()
+    }
+
+    func testCache_handleMemoryWarningClearsTrackedKeys() async {
+        let cache = ProcessedTextCache.shared
+        await cache.clear()
+
+        await cache.set(
+            messageId: "test-memory-warning-\(UUID().uuidString)",
+            sourceSignature: "source",
+            previewMode: "test-preview",
+            plainText: "Cached text",
+            hasRichContent: false
+        )
+
+        await cache.handleMemoryWarning()
+
+        let trackedKeyCount = await cache.trackedCacheKeyCountForTesting()
+        XCTAssertEqual(trackedKeyCount, 0)
+
+        await cache.clear()
+    }
+
+    func testContentSourceSignature_usesHTMLMetadataForStoredHTML() {
+        let handler = HTMLContentHandler.shared
+        let messageId = "test-source-signature-\(UUID().uuidString)"
+        defer {
+            handler.deleteHTML(for: messageId)
+        }
+
+        let html = "<html><body><p>\(String(repeating: "Large message body. ", count: 1000))</p></body></html>"
+        XCTAssertNotNil(handler.saveHTML(html, for: messageId))
+
+        let htmlSignature = handler.htmlSourceSignature(messageId: messageId, bodyStorageURI: nil)
+        let sourceSignature = ProcessedTextCache.contentSourceSignature(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: nil,
+            handler: handler
+        )
+        XCTAssertEqual(sourceSignature, "html:\(htmlSignature)")
+        XCTAssertFalse(sourceSignature.hasPrefix("html:sha256:"))
+
+        let sourceSignatureWithBody = ProcessedTextCache.contentSourceSignature(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "Fallback body",
+            handler: handler
+        )
+        XCTAssertTrue(sourceSignatureWithBody.hasPrefix("html:\(htmlSignature)|body:sha256:"))
+    }
+
     func testCache_setWithQuotedParts_returnsCachedQuotes() async {
         let cache = ProcessedTextCache.shared
         let testId = "test-quotes-\(UUID().uuidString)"

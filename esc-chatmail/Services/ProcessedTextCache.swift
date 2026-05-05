@@ -182,6 +182,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
     private let cache: LRUCacheActor<String, CachedText>
     private var cacheKeysByMessageID: [String: Set<String>] = [:]
+    private var cacheKeyTrackingVersion: UInt64 = 0
 
     /// Track active prefetch task to prevent unbounded task accumulation
     private var activePrefetchTask: Task<Void, Never>?
@@ -210,6 +211,8 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
     func handleMemoryWarning() async {
         await cache.clear()
+        cacheKeysByMessageID.removeAll()
+        cacheKeyTrackingVersion &+= 1
         Log.info("ProcessedTextCache cleared due to memory warning", category: .coreData)
     }
 
@@ -267,6 +270,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
             value: CachedText(plainText: plainText, hasRichContent: hasRichContent, quotedParts: quotedParts),
             sizeBytes: size
         )
+        await pruneTrackedCacheKeys()
     }
 
     func set(
@@ -289,6 +293,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
             value: CachedText(plainText: plainText, hasRichContent: hasRichContent, quotedParts: quotedParts),
             sizeBytes: size
         )
+        await pruneTrackedCacheKeys()
     }
 
     func prefetch(messageIds: [String]) async {
@@ -397,17 +402,33 @@ actor ProcessedTextCache: MemoryWarningHandler {
         bodyText: String?,
         handler: HTMLContentHandler
     ) -> String {
-        if let html = loadHTML(messageId: messageId, bodyStorageURI: bodyStorageURI, handler: handler) {
-            return "html:\(sha256Signature(for: html))"
+        let htmlSourceSignature = handler.htmlSourceSignature(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI
+        )
+        if htmlSourceSignature != "missing" {
+            var components = ["html:\(htmlSourceSignature)"]
+            if let bodyTextSignature = bodyTextSignature(for: bodyText) {
+                components.append("body:\(bodyTextSignature)")
+            }
+            return components.joined(separator: "|")
         }
 
-        if let bodyText = bodyText?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !bodyText.isEmpty {
-            return "body:\(sha256Signature(for: bodyText))"
+        if let bodyTextSignature = bodyTextSignature(for: bodyText) {
+            return "body:\(bodyTextSignature)"
         }
 
         return "empty"
+    }
+
+    nonisolated private static func bodyTextSignature(for bodyText: String?) -> String? {
+        guard let bodyText = bodyText?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !bodyText.isEmpty else {
+            return nil
+        }
+
+        return sha256Signature(for: bodyText)
     }
 
     nonisolated private static func loadHTML(
@@ -847,12 +868,14 @@ actor ProcessedTextCache: MemoryWarningHandler {
     func clear() async {
         await cache.clear()
         cacheKeysByMessageID.removeAll()
+        cacheKeyTrackingVersion &+= 1
     }
 
     /// Invalidates a specific cache entry by message ID.
     /// Use this when a Message entity is deleted.
     func invalidate(messageId: String) async {
         let trackedKeys = cacheKeysByMessageID.removeValue(forKey: messageId) ?? []
+        cacheKeyTrackingVersion &+= 1
         let legacyKey = Self.cacheKey(for: messageId)
         for key in trackedKeys.union([legacyKey]) {
             await cache.remove(key)
@@ -866,5 +889,28 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
     private func trackCacheKey(_ key: String, for messageId: String) {
         cacheKeysByMessageID[messageId, default: []].insert(key)
+        cacheKeyTrackingVersion &+= 1
     }
+
+    private func pruneTrackedCacheKeys() async {
+        let trackingVersion = cacheKeyTrackingVersion
+        let liveKeys = Set(await cache.allKeys())
+        guard cacheKeyTrackingVersion == trackingVersion else {
+            return
+        }
+
+        cacheKeysByMessageID = cacheKeysByMessageID.reduce(into: [:]) { result, entry in
+            let retainedKeys = entry.value.intersection(liveKeys)
+            if !retainedKeys.isEmpty {
+                result[entry.key] = retainedKeys
+            }
+        }
+        cacheKeyTrackingVersion &+= 1
+    }
+
+#if DEBUG
+    func trackedCacheKeyCountForTesting() -> Int {
+        cacheKeysByMessageID.values.reduce(0) { $0 + $1.count }
+    }
+#endif
 }
