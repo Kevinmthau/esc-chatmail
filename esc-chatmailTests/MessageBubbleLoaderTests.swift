@@ -421,6 +421,51 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertTrue(second.fullTextContent?.contains("SECOND_BODY_TOKEN") == true)
         XCTAssertFalse(second.fullTextContent?.contains("FIRST_BODY_TOKEN") == true)
     }
+
+    func testLoadContent_emptyStoredHTMLKeysBodyFallbackByBodyText() async throws {
+        let messageId = "bubble-empty-html-body-fallback-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        defer {
+            HTMLContentHandler.shared.deleteHTML(for: messageId)
+        }
+
+        _ = HTMLContentHandler.shared.saveHTML(
+            "<html><body><img src=\"cid:hero-image\"></body></html>",
+            for: messageId
+        )
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache()
+        )
+
+        func makeRequest(bodyText: String) -> MessageBubbleContentRequest {
+            MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: bodyText,
+                bodyStorageURI: nil,
+                cleanedSnippet: bodyText,
+                snippet: bodyText,
+                subject: "Fallback body",
+                senderName: "Alice Example",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        }
+
+        let first = await loader.loadContent(from: makeRequest(bodyText: "FIRST_BODY_TOKEN"))
+        let second = await loader.loadContent(from: makeRequest(bodyText: "SECOND_BODY_TOKEN"))
+
+        XCTAssertEqual(first.fullTextContent, "FIRST_BODY_TOKEN")
+        XCTAssertEqual(second.fullTextContent, "SECOND_BODY_TOKEN")
+
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+    }
 }
 
 private final class MockBubbleContactsResolver: ContactsResolving, @unchecked Sendable {

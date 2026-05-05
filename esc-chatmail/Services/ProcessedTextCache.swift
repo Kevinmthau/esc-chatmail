@@ -420,6 +420,26 @@ actor ProcessedTextCache: MemoryWarningHandler {
         return "empty"
     }
 
+    nonisolated static func fallbackContentSourceSignature(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        handler: HTMLContentHandler
+    ) -> String {
+        let sourceSignature = contentSourceSignature(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            handler: handler
+        )
+        guard sourceSignature.hasPrefix("html:"),
+              let bodyTextSignature = bodyTextSignature(for: bodyText) else {
+            return sourceSignature
+        }
+
+        return "\(sourceSignature)|fallback-body:\(bodyTextSignature)"
+    }
+
     nonisolated private static func bodyTextSignature(for bodyText: String?) -> String? {
         guard let bodyText = bodyText?
             .trimmingCharacters(in: .whitespacesAndNewlines),

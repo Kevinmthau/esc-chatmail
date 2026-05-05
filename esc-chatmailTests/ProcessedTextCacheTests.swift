@@ -109,6 +109,26 @@ final class ProcessedTextCacheTests: XCTestCase {
         XCTAssertEqual(sourceSignatureWithBody, "html:\(htmlSignature)")
     }
 
+    func testFallbackContentSourceSignature_includesBodyTextForStoredHTML() {
+        let handler = HTMLContentHandler.shared
+        let messageId = "test-fallback-source-signature-\(UUID().uuidString)"
+        defer {
+            handler.deleteHTML(for: messageId)
+        }
+
+        XCTAssertNotNil(handler.saveHTML("<html><body><img src=\"cid:image\"></body></html>", for: messageId))
+
+        let htmlSignature = handler.htmlSourceSignature(messageId: messageId, bodyStorageURI: nil)
+        let sourceSignature = ProcessedTextCache.fallbackContentSourceSignature(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "Fallback body",
+            handler: handler
+        )
+
+        XCTAssertTrue(sourceSignature.hasPrefix("html:\(htmlSignature)|fallback-body:sha256:"))
+    }
+
     func testContentSourceSignature_usesBodyTextWhenHTMLMissing() {
         let handler = HTMLContentHandler.shared
         let messageId = "test-missing-html-source-signature-\(UUID().uuidString)"

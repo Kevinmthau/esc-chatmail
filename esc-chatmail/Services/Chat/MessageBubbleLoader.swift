@@ -683,30 +683,51 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             bodyText: request.bodyText,
             handler: htmlContentHandler
         )
-
-        if let cached = await processedTextCache.get(
+        let fallbackSourceSignature = ProcessedTextCache.fallbackContentSourceSignature(
             messageId: request.messageID,
-            sourceSignature: sourceSignature,
-            previewMode: ProcessedTextCache.chatBubblePreviewMode
-        ) {
+            bodyStorageURI: request.bodyStorageURI,
+            bodyText: request.bodyText,
+            handler: htmlContentHandler
+        )
+
+        let cacheSourceSignatures = fallbackSourceSignature == sourceSignature
+            ? [sourceSignature]
+            : [sourceSignature, fallbackSourceSignature]
+        for cacheSourceSignature in cacheSourceSignatures {
+            guard let cached = await processedTextCache.get(
+                messageId: request.messageID,
+                sourceSignature: cacheSourceSignature,
+                previewMode: ProcessedTextCache.chatBubblePreviewMode
+            ) else {
+                continue
+            }
+
             let hasHTMLFile = htmlContentHandler.htmlFileExists(for: request.messageID)
             let requiresURIRecompute =
                 resolvedHasHTMLSource &&
                 cached.plainText == nil &&
                 request.bodyStorageURI != nil &&
                 !hasHTMLFile
+            let requiresBodyFallbackRecompute =
+                cacheSourceSignature == sourceSignature &&
+                fallbackSourceSignature != sourceSignature &&
+                cached.plainText == nil
             let shouldBypassCachedNewsletterFallback =
                 !request.isFromMe &&
                 resolvedHasHTMLSource &&
                 !cached.hasRichContent &&
                 looksLikeNewsletterFallbackText(cached.plainText ?? request.bodyText ?? request.snippet)
 
-            if !requiresURIRecompute && !shouldBypassCachedNewsletterFallback {
+            if !requiresURIRecompute && !requiresBodyFallbackRecompute && !shouldBypassCachedNewsletterFallback {
                 return (cached.plainText, cached.hasRichContent)
             }
         }
 
-        var result = await processMessageContent(from: request, sourceSignature: sourceSignature)
+        var result = await processMessageContent(
+            from: request,
+            sourceSignature: sourceSignature,
+            fallbackSourceSignature: fallbackSourceSignature
+        )
 
         let missingBodyText = request.bodyText?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -793,13 +814,15 @@ actor MessageBubbleLoader: MessageBubbleLoading {
 
     private func processMessageContent(
         from request: MessageBubbleContentRequest,
-        sourceSignature: String
+        sourceSignature: String,
+        fallbackSourceSignature: String
     ) async -> (plainText: String?, hasRichContent: Bool) {
         var processedResult = ProcessedTextCache.processMessage(
             messageId: request.messageID,
             bodyStorageURI: request.bodyStorageURI,
             handler: htmlContentHandler
         )
+        var cacheSourceSignature = sourceSignature
 
         if processedResult.plainText == nil, let text = request.bodyText {
             let fallbackContent = RawEmailSourceSanitizer.extractHTMLText(from: text) ?? text
@@ -827,11 +850,12 @@ actor MessageBubbleLoader: MessageBubbleLoading {
                 fallbackResult.hasRichContent,
                 fallbackResult.quotedParts
             )
+            cacheSourceSignature = fallbackSourceSignature
         }
 
         await processedTextCache.set(
             messageId: request.messageID,
-            sourceSignature: sourceSignature,
+            sourceSignature: cacheSourceSignature,
             previewMode: ProcessedTextCache.chatBubblePreviewMode,
             plainText: processedResult.plainText,
             hasRichContent: processedResult.hasRichContent,
