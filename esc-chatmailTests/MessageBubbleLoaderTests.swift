@@ -335,11 +335,12 @@ final class MessageBubbleLoaderTests: XCTestCase {
         """.write(to: htmlURL, atomically: true, encoding: .utf8)
 
         let loader = MessageBubbleLoader(
-            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache()
         )
 
-        let result = await loader.loadContent(
-            from: MessageBubbleContentRequest(
+        func makeRequest(hasAttachments: Bool) -> MessageBubbleContentRequest {
+            MessageBubbleContentRequest(
                 messageID: messageId,
                 bodyText: nil,
                 bodyStorageURI: htmlURL.absoluteString,
@@ -348,13 +349,23 @@ final class MessageBubbleLoaderTests: XCTestCase {
                 subject: "Hello world",
                 senderName: "Alice Example",
                 hasHTMLSource: true,
-                hasAttachments: true,
+                hasAttachments: hasAttachments,
                 isFromMe: false,
                 isForwardedEmail: false,
                 isLikelyCalendarInvite: false,
                 effectiveSenderEmail: "alice@example.com",
                 attachmentSnapshots: []
             )
+        }
+
+        let placeholderResult = await loader.loadContent(
+            from: makeRequest(hasAttachments: false)
+        )
+        XCTAssertTrue(placeholderResult.htmlAnalysis.hasHTMLSource)
+        XCTAssertEqual(placeholderResult.htmlAnalysis.referencedInlineContentIDs, [])
+
+        let result = await loader.loadContent(
+            from: makeRequest(hasAttachments: true)
         )
 
         XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)

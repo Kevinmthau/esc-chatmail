@@ -639,6 +639,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             "sender:\(cacheFingerprint(for: request.senderName))",
             "email:\(cacheFingerprint(for: request.effectiveSenderEmail))",
             "flags:\(request.hasHTMLSource)-\(request.isForwardedEmail)-\(request.isLikelyCalendarInvite)",
+            "hasAttachments:\(request.hasAttachments)",
             "attachments:\(attachmentFingerprint(for: request.attachmentSnapshots))"
         ].joined(separator: "|")
     }
