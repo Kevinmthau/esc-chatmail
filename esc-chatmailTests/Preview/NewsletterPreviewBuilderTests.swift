@@ -455,6 +455,37 @@ final class EmailContentSectionTests: XCTestCase {
         XCTAssertNotEqual(lightKey, darkKey)
     }
 
+    func testPreviewHTMLCacheKeyIncludesSourceSignatureAndPreviewMode() {
+        let firstSourceKey = EmailContentSection.makePreviewHTMLCacheKey(
+            messageId: "message-id",
+            sourceSignature: "sha256:first",
+            isDarkMode: false,
+            cleanupMode: .none
+        )
+        let secondSourceKey = EmailContentSection.makePreviewHTMLCacheKey(
+            messageId: "message-id",
+            sourceSignature: "sha256:second",
+            isDarkMode: false,
+            cleanupMode: .none
+        )
+        let darkModeKey = EmailContentSection.makePreviewHTMLCacheKey(
+            messageId: "message-id",
+            sourceSignature: "sha256:first",
+            isDarkMode: true,
+            cleanupMode: .none
+        )
+        let cleanupModeKey = EmailContentSection.makePreviewHTMLCacheKey(
+            messageId: "message-id",
+            sourceSignature: "sha256:first",
+            isDarkMode: false,
+            cleanupMode: .quotedOnly
+        )
+
+        XCTAssertNotEqual(firstSourceKey, secondSourceKey)
+        XCTAssertNotEqual(firstSourceKey, darkModeKey)
+        XCTAssertNotEqual(firstSourceKey, cleanupModeKey)
+    }
+
     func testShouldUseTransactionalPreviewCard_forwardedMessage_returnsFalse() {
         XCTAssertFalse(EmailContentSection.shouldUseTransactionalPreviewCard(isForwardedEmail: true))
     }

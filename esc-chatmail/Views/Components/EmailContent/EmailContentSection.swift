@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreData
+import CryptoKit
 
 /// Container view that routes chat previews by content type.
 /// Newsletter and strongly-structured transactional emails render as derived native cards.
@@ -21,19 +22,46 @@ struct EmailContentSection: View {
     private let netlifyDeployPreviewBuilder = NetlifyDeployPreviewBuilder()
 
     private var loadKey: String {
-        Self.makeLoadKey(for: message, isDarkMode: colorScheme == .dark)
-    }
-
-    private var previewHeightCacheKey: String {
-        "\(loadKey)|html:\(HTMLContentHandler.shared.htmlFileSignature(for: message.id))"
+        Self.makeLoadKey(
+            for: message,
+            isDarkMode: colorScheme == .dark,
+            htmlSourceSignature: HTMLContentHandler.shared.htmlSourceSignature(
+                messageId: message.id,
+                bodyStorageURI: message.bodyStorageURI
+            )
+        )
     }
 
     static func makeLoadKey(for message: ChatMessageRowModel, isDarkMode: Bool) -> String {
-        let bodyTextHash = message.bodyText?.hashValue ?? 0
-        let cleanedSnippetHash = message.cleanedSnippet?.hashValue ?? 0
-        let subjectHash = message.subject?.hashValue ?? 0
-        let senderHash = message.senderEmail?.hashValue ?? 0
-        return "\(message.id)|\(message.bodyStorageURI ?? "")|\(bodyTextHash)|\(cleanedSnippetHash)|\(subjectHash)|\(senderHash)|\(isDarkMode)|\(message.htmlDisplayCleanupMode.rawValue)"
+        makeLoadKey(
+            for: message,
+            isDarkMode: isDarkMode,
+            htmlSourceSignature: HTMLContentHandler.shared.htmlSourceSignature(
+                messageId: message.id,
+                bodyStorageURI: message.bodyStorageURI
+            )
+        )
+    }
+
+    static func makeLoadKey(
+        for message: ChatMessageRowModel,
+        isDarkMode: Bool,
+        htmlSourceSignature: String?
+    ) -> String {
+        let bodyTextFingerprint = contentFingerprint(for: message.bodyText)
+        let cleanedSnippetFingerprint = contentFingerprint(for: message.cleanedSnippet)
+        let subjectFingerprint = contentFingerprint(for: message.subject)
+        let senderFingerprint = contentFingerprint(for: message.senderEmail)
+        return "\(message.id)|\(message.bodyStorageURI ?? "")|\(bodyTextFingerprint)|\(cleanedSnippetFingerprint)|\(subjectFingerprint)|\(senderFingerprint)|\(isDarkMode)|\(message.htmlDisplayCleanupMode.rawValue)|source:\(htmlSourceSignature ?? "unknown")"
+    }
+
+    static func makePreviewHTMLCacheKey(
+        messageId: String,
+        sourceSignature: String,
+        isDarkMode: Bool,
+        cleanupMode: HTMLContentCleanupMode
+    ) -> String {
+        "\(messageId)|\(sourceSignature)|mode:html-preview|dark:\(isDarkMode)|cleanup:\(cleanupMode.rawValue)"
     }
 
     static func shouldUseTransactionalPreviewCard(isForwardedEmail: Bool) -> Bool {
@@ -194,7 +222,20 @@ struct EmailContentSection: View {
                 isDarkMode: colorScheme == .dark,
                 cleanupMode: message.htmlDisplayCleanupMode
             ) {
-                await finishLoad(with: .transactionalHTML(previewHTML), generation: generation)
+                await finishLoad(
+                    with: .transactionalHTML(
+                        HTMLPreviewPayload(
+                            html: previewHTML,
+                            previewCacheKey: Self.makePreviewHTMLCacheKey(
+                                messageId: message.id,
+                                sourceSignature: previewSource.sourceSignature,
+                                isDarkMode: colorScheme == .dark,
+                                cleanupMode: message.htmlDisplayCleanupMode
+                            )
+                        )
+                    ),
+                    generation: generation
+                )
                 return
             }
         }
@@ -218,7 +259,20 @@ struct EmailContentSection: View {
             Log.diagnostic(.htmlPreview, "EmailContentSection: No HTML content for message \(message.id)", category: .ui)
         }
 
-        await finishLoad(with: result.html.map(LoadedPreview.transactionalHTML), generation: generation)
+        let loadedPreview = result.html.map { html in
+            LoadedPreview.transactionalHTML(
+                HTMLPreviewPayload(
+                    html: html,
+                    previewCacheKey: Self.makePreviewHTMLCacheKey(
+                        messageId: message.id,
+                        sourceSignature: result.sourceSignature ?? Self.htmlContentSignature(for: html),
+                        isDarkMode: colorScheme == .dark,
+                        cleanupMode: message.htmlDisplayCleanupMode
+                    )
+                )
+            )
+        }
+        await finishLoad(with: loadedPreview, generation: generation)
     }
 
     private func finishLoad(with preview: LoadedPreview?, generation: Int) async {
@@ -263,11 +317,11 @@ struct EmailContentSection: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Netlify deploy preview: \(model.title), \(model.status.displayText)")
             .accessibilityHint("Opens the full original email")
-        case .transactionalHTML(let html):
+        case .transactionalHTML(let payload):
             Button(action: onOpenFullMessage) {
                 MiniEmailWebView(
-                    htmlContent: html,
-                    previewCacheKey: previewHeightCacheKey,
+                    htmlContent: payload.html,
+                    previewCacheKey: payload.previewCacheKey,
                     isDarkMode: colorScheme == .dark,
                     senderEmail: message.senderEmail,
                     message: resolvedMessageForInlineAttachments
@@ -302,6 +356,24 @@ struct EmailContentSection: View {
 
         return resolved
     }
+
+    private static func htmlContentSignature(for html: String) -> String {
+        let digest = SHA256.hash(data: Data(html.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "html:\(digest)"
+    }
+
+    private static func contentFingerprint(for text: String?) -> String {
+        guard let text else {
+            return "nil"
+        }
+
+        return SHA256.hash(data: Data(text.utf8))
+            .prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
 }
 
 enum NativePreviewCardRoute: Equatable {
@@ -314,5 +386,10 @@ private enum LoadedPreview: Equatable {
     case newsletter(NewsletterPreviewModel)
     case transactional(TransactionalPreviewModel)
     case netlifyDeploy(NetlifyDeployPreviewModel)
-    case transactionalHTML(String)
+    case transactionalHTML(HTMLPreviewPayload)
+}
+
+private struct HTMLPreviewPayload: Equatable {
+    let html: String
+    let previewCacheKey: String
 }

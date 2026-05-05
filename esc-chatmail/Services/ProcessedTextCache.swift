@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 enum ChatBubbleTextInputKind: Sendable {
@@ -164,6 +165,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
     static let shared = ProcessedTextCache()
     // Bump to invalidate cached entries when processing logic changes.
     private static let processingVersion = "2026-03-02-chat-bubble-unified-v3"
+    static let chatBubblePreviewMode = "chat-bubble-preview"
 
     /// Cached text content with rich content indicator and extracted quotes
     struct CachedText: Sendable {
@@ -179,6 +181,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
     }
 
     private let cache: LRUCacheActor<String, CachedText>
+    private var cacheKeysByMessageID: [String: Set<String>] = [:]
 
     /// Track active prefetch task to prevent unbounded task accumulation
     private var activePrefetchTask: Task<Void, Never>?
@@ -228,15 +231,61 @@ actor ProcessedTextCache: MemoryWarningHandler {
         "\(processingVersion)|\(messageId)"
     }
 
+    private static func cacheKey(
+        for messageId: String,
+        sourceSignature: String,
+        previewMode: String
+    ) -> String {
+        "\(processingVersion)|\(messageId)|source:\(sourceSignature)|mode:\(previewMode)"
+    }
+
     func get(messageId: String) async -> (plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart])? {
         guard let entry = await cache.get(Self.cacheKey(for: messageId)) else { return nil }
         return (entry.plainText, entry.hasRichContent, entry.quotedParts)
     }
 
+    func get(
+        messageId: String,
+        sourceSignature: String,
+        previewMode: String
+    ) async -> (plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart])? {
+        let key = Self.cacheKey(
+            for: messageId,
+            sourceSignature: sourceSignature,
+            previewMode: previewMode
+        )
+        guard let entry = await cache.get(key) else { return nil }
+        return (entry.plainText, entry.hasRichContent, entry.quotedParts)
+    }
+
     func set(messageId: String, plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart] = []) async {
         let size = Self.estimateSize(plainText, hasRichContent, quotedParts)
+        let key = Self.cacheKey(for: messageId)
+        trackCacheKey(key, for: messageId)
         await cache.set(
-            Self.cacheKey(for: messageId),
+            key,
+            value: CachedText(plainText: plainText, hasRichContent: hasRichContent, quotedParts: quotedParts),
+            sizeBytes: size
+        )
+    }
+
+    func set(
+        messageId: String,
+        sourceSignature: String,
+        previewMode: String,
+        plainText: String?,
+        hasRichContent: Bool,
+        quotedParts: [QuotedPart] = []
+    ) async {
+        let size = Self.estimateSize(plainText, hasRichContent, quotedParts)
+        let key = Self.cacheKey(
+            for: messageId,
+            sourceSignature: sourceSignature,
+            previewMode: previewMode
+        )
+        trackCacheKey(key, for: messageId)
+        await cache.set(
+            key,
             value: CachedText(plainText: plainText, hasRichContent: hasRichContent, quotedParts: quotedParts),
             sizeBytes: size
         )
@@ -244,16 +293,28 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
     func prefetch(messageIds: [String]) async {
         // Filter out already cached messages
-        var uncachedIds: [String] = []
+        var uncachedMessages: [(messageId: String, sourceSignature: String)] = []
+        let signatureHandler = HTMLContentHandler.shared
         for messageId in messageIds {
-            if await !cache.contains(Self.cacheKey(for: messageId)) {
-                uncachedIds.append(messageId)
+            let sourceSignature = Self.contentSourceSignature(
+                messageId: messageId,
+                bodyStorageURI: nil,
+                bodyText: nil,
+                handler: signatureHandler
+            )
+            let key = Self.cacheKey(
+                for: messageId,
+                sourceSignature: sourceSignature,
+                previewMode: Self.chatBubblePreviewMode
+            )
+            if await !cache.contains(key) {
+                uncachedMessages.append((messageId, sourceSignature))
             }
         }
-        guard !uncachedIds.isEmpty else { return }
+        guard !uncachedMessages.isEmpty else { return }
 
         // Limit batch size to prevent processing too many at once
-        let idsToProcess = Array(uncachedIds.prefix(maxPrefetchBatchSize))
+        let messagesToProcess = Array(uncachedMessages.prefix(maxPrefetchBatchSize))
 
         // Cancel any existing prefetch task to prevent accumulation during rapid scroll
         activePrefetchTask?.cancel()
@@ -263,10 +324,10 @@ actor ProcessedTextCache: MemoryWarningHandler {
         activePrefetchTaskId = taskId
 
         // Track the new prefetch task
-        activePrefetchTask = Task.detached(priority: .utility) { [weak self, idsToProcess, taskId] in
+        activePrefetchTask = Task.detached(priority: .utility) { [weak self, messagesToProcess, taskId] in
             let handler = HTMLContentHandler.shared
 
-            for messageId in idsToProcess {
+            for (messageId, sourceSignature) in messagesToProcess {
                 // Check for cancellation between messages
                 guard !Task.isCancelled else { break }
 
@@ -275,7 +336,14 @@ actor ProcessedTextCache: MemoryWarningHandler {
                 // Check again before cache write to prevent cancelled tasks from writing stale data
                 guard !Task.isCancelled else { break }
 
-                await self?.set(messageId: messageId, plainText: result.plainText, hasRichContent: result.hasRichContent, quotedParts: result.quotedParts)
+                await self?.set(
+                    messageId: messageId,
+                    sourceSignature: sourceSignature,
+                    previewMode: ProcessedTextCache.chatBubblePreviewMode,
+                    plainText: result.plainText,
+                    hasRichContent: result.hasRichContent,
+                    quotedParts: result.quotedParts
+                )
             }
 
             // Clear task reference on completion, but only if this is still the active task
@@ -323,6 +391,25 @@ actor ProcessedTextCache: MemoryWarningHandler {
         return (nil, false, [])
     }
 
+    nonisolated static func contentSourceSignature(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        handler: HTMLContentHandler
+    ) -> String {
+        if let html = loadHTML(messageId: messageId, bodyStorageURI: bodyStorageURI, handler: handler) {
+            return "html:\(sha256Signature(for: html))"
+        }
+
+        if let bodyText = bodyText?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !bodyText.isEmpty {
+            return "body:\(sha256Signature(for: bodyText))"
+        }
+
+        return "empty"
+    }
+
     nonisolated private static func loadHTML(
         messageId: String,
         bodyStorageURI: String?,
@@ -340,6 +427,13 @@ actor ProcessedTextCache: MemoryWarningHandler {
         }
 
         return handler.loadHTML(from: url)
+    }
+
+    nonisolated private static func sha256Signature(for text: String) -> String {
+        let digest = SHA256.hash(data: Data(text.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "sha256:\(digest)"
     }
 
     /// Determines if HTML contains genuine rich content (newsletters, receipts) vs personal email signature cruft
@@ -752,16 +846,25 @@ actor ProcessedTextCache: MemoryWarningHandler {
 
     func clear() async {
         await cache.clear()
+        cacheKeysByMessageID.removeAll()
     }
 
     /// Invalidates a specific cache entry by message ID.
     /// Use this when a Message entity is deleted.
     func invalidate(messageId: String) async {
-        await cache.remove(Self.cacheKey(for: messageId))
+        let trackedKeys = cacheKeysByMessageID.removeValue(forKey: messageId) ?? []
+        let legacyKey = Self.cacheKey(for: messageId)
+        for key in trackedKeys.union([legacyKey]) {
+            await cache.remove(key)
+        }
     }
 
     /// Returns cache statistics for monitoring
     func getStatistics() async -> LRUCacheStatistics {
         await cache.getStatistics()
+    }
+
+    private func trackCacheKey(_ key: String, for messageId: String) {
+        cacheKeysByMessageID[messageId, default: []].insert(key)
     }
 }

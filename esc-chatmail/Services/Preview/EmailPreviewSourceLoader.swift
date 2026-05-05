@@ -60,11 +60,13 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
         let sourceSignature = Self.sourceSignature(for: canonicalHTML)
         let cacheKey = self.cacheKey(
             messageId: messageId,
-            bodyText: bodyText,
-            senderEmail: senderEmail,
-            subject: subject,
-            allowRecovery: allowRecovery,
-            sourceSignature: sourceSignature
+            sourceSignature: sourceSignature,
+            previewMode: Self.previewMode(
+                bodyText: bodyText,
+                senderEmail: senderEmail,
+                subject: subject,
+                allowRecovery: allowRecovery
+            )
         )
 
         if let cached = cache.object(forKey: cacheKey as NSString) {
@@ -98,19 +100,28 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
 
     private func cacheKey(
         messageId: String,
-        bodyText: String?,
-        senderEmail: String?,
-        subject: String?,
-        allowRecovery: Bool,
-        sourceSignature: String
+        sourceSignature: String,
+        previewMode: String
     ) -> String {
         [
             messageId,
+            sourceSignature,
+            previewMode
+        ].joined(separator: "|")
+    }
+
+    private static func previewMode(
+        bodyText: String?,
+        senderEmail: String?,
+        subject: String?,
+        allowRecovery: Bool
+    ) -> String {
+        [
+            "source-preview-v1",
             "body:\(Self.fingerprint(for: bodyText))",
             "sender:\(Self.fingerprint(for: senderEmail))",
             "subject:\(Self.fingerprint(for: subject))",
-            "recovery:\(allowRecovery)",
-            sourceSignature
+            "recovery:\(allowRecovery)"
         ].joined(separator: "|")
     }
 

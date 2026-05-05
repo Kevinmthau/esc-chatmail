@@ -371,6 +371,56 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)
         XCTAssertEqual(result.htmlAnalysis.referencedInlineContentIDs, ["hero-image"])
     }
+
+    func testLoadContent_sourceSignatureRefreshesProcessedTextWhenStoredHTMLChanges() async throws {
+        let messageId = "bubble-source-refresh-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        defer {
+            HTMLContentHandler.shared.deleteHTML(for: messageId)
+        }
+
+        _ = HTMLContentHandler.shared.saveHTML(
+            "<html><body><p>FIRST_BODY_TOKEN</p></body></html>",
+            for: messageId
+        )
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        func makeRequest() -> MessageBubbleContentRequest {
+            MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: nil,
+                bodyStorageURI: nil,
+                cleanedSnippet: nil,
+                snippet: nil,
+                subject: "Source refresh",
+                senderName: "Alice Example",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        }
+
+        let first = await loader.loadContent(from: makeRequest())
+
+        _ = HTMLContentHandler.shared.saveHTML(
+            "<html><body><p>SECOND_BODY_TOKEN</p></body></html>",
+            for: messageId
+        )
+
+        let second = await loader.loadContent(from: makeRequest())
+
+        XCTAssertTrue(first.fullTextContent?.contains("FIRST_BODY_TOKEN") == true)
+        XCTAssertFalse(first.fullTextContent?.contains("SECOND_BODY_TOKEN") == true)
+        XCTAssertTrue(second.fullTextContent?.contains("SECOND_BODY_TOKEN") == true)
+        XCTAssertFalse(second.fullTextContent?.contains("FIRST_BODY_TOKEN") == true)
+    }
 }
 
 private final class MockBubbleContactsResolver: ContactsResolving, @unchecked Sendable {

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import SwiftUI
 
@@ -81,7 +82,10 @@ struct MiniEmailWebView: View {
     }
 
     private static func previewHeightCacheKey(messageID: String?, htmlContent: String) -> String {
-        let fingerprint = String(htmlContent.hashValue)
+        let fingerprint = SHA256.hash(data: Data(htmlContent.utf8))
+            .prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
         if let messageID, !messageID.isEmpty {
             return "\(messageID)|\(fingerprint)"
         }

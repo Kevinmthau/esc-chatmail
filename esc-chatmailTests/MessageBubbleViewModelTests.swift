@@ -234,7 +234,7 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
             bodyText: sharedPrefix + " tail-one",
             snippet: "Snippet",
             hasHTMLSource: false,
-            htmlFileSignature: "missing",
+            htmlSourceSignature: "missing",
             contactRefreshToken: 0
         )
         let secondSignature = MessageBubble.contentSignature(
@@ -242,7 +242,7 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
             bodyText: sharedPrefix + " tail-two",
             snippet: "Snippet",
             hasHTMLSource: false,
-            htmlFileSignature: "missing",
+            htmlSourceSignature: "missing",
             contactRefreshToken: 0
         )
 
@@ -260,7 +260,10 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
             bodyText: "Body",
             snippet: "Snippet",
             hasHTMLSource: true,
-            htmlFileSignature: handler.htmlFileSignature(for: messageId),
+            htmlSourceSignature: handler.htmlSourceSignature(
+                messageId: messageId,
+                bodyStorageURI: "file:///tmp/stale-fallback.html"
+            ),
             contactRefreshToken: 0
         )
 
@@ -271,7 +274,10 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
             bodyText: "Body",
             snippet: "Snippet",
             hasHTMLSource: true,
-            htmlFileSignature: handler.htmlFileSignature(for: messageId),
+            htmlSourceSignature: handler.htmlSourceSignature(
+                messageId: messageId,
+                bodyStorageURI: "file:///tmp/stale-fallback.html"
+            ),
             contactRefreshToken: 0
         )
 

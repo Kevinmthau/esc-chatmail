@@ -213,10 +213,11 @@ Validation:
 
 Goal: reduce repeated HTML work during scroll and make preview behavior more predictable.
 
-Status as of 2026-05-04:
+Status as of 2026-05-05:
 
 - 2.1 complete: preview routing now uses `EmailPreviewSourceLoader` snapshots for canonical HTML, source signatures, text/image extraction, and classification.
-- Phase 2.2 is the next refactor item.
+- 2.2 complete: preview-derived cache keys now carry source signatures through preview source snapshots, HTML preview height keys, chat-bubble processed text, and source-aware load signatures.
+- Phase 2.3 is the next refactor item.
 
 ### 2.1 Introduce `EmailPreviewSourceLoader`
 
@@ -401,8 +402,8 @@ Before finishing any phase:
 
 ## Recommended Next Patch
 
-Start with Phase 2.2 now that the preview source loader is in place.
+Start with Phase 2.3 now that preview-derived caches use source signatures.
 
 Implementation prompt:
 
-> Implement Phase 2.2 of `docs/refactor-plan.md`. Move preview-derived cache keys to `messageId + sourceSignature + preview mode`, remove redundant invalidation where the source signature is now the correctness boundary, and keep explicit invalidation only for memory cleanup or major message mutations. Add tests showing changed source HTML invalidates preview output without manual invalidation, run preview and message-bubble tests, then run the iOS build.
+> Implement Phase 2.3 of `docs/refactor-plan.md`. Reduce builder-specific regex passes by consolidating common preview extraction logic now that `EmailPreviewSourceLoader` snapshots are stable. Keep newsletter and transactional builders focused on presentation decisions, preserve existing preview behavior, add regression fixtures for complex newsletter HTML where useful, run preview and message-bubble tests, then run the iOS build.

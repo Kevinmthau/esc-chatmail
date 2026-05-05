@@ -74,7 +74,7 @@ final class EmailPreviewSourceLoaderTests: XCTestCase {
             bodyStorageURI: nil,
             bodyText: nil,
             senderEmail: "newsletter@example.com",
-            subject: "First",
+            subject: "Newsletter update",
             allowRecovery: false
         )
         let first = try XCTUnwrap(loadedFirst)
@@ -91,7 +91,7 @@ final class EmailPreviewSourceLoaderTests: XCTestCase {
             bodyStorageURI: nil,
             bodyText: nil,
             senderEmail: "newsletter@example.com",
-            subject: "Second",
+            subject: "Newsletter update",
             allowRecovery: false
         )
         let second = try XCTUnwrap(loadedSecond)

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 private final class CachedMessageBubbleHTMLAnalysisBox {
@@ -651,7 +652,10 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             return "nil"
         }
 
-        return String(text.hashValue)
+        return SHA256.hash(data: Data(text.utf8))
+            .prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     private func attachmentFingerprint(for attachments: [MessageBubbleAttachmentSnapshot]) -> String {
@@ -673,7 +677,18 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         from request: MessageBubbleContentRequest,
         resolvedHasHTMLSource: Bool
     ) async -> (plainText: String?, hasRichContent: Bool) {
-        if let cached = await processedTextCache.get(messageId: request.messageID) {
+        let sourceSignature = ProcessedTextCache.contentSourceSignature(
+            messageId: request.messageID,
+            bodyStorageURI: request.bodyStorageURI,
+            bodyText: request.bodyText,
+            handler: htmlContentHandler
+        )
+
+        if let cached = await processedTextCache.get(
+            messageId: request.messageID,
+            sourceSignature: sourceSignature,
+            previewMode: ProcessedTextCache.chatBubblePreviewMode
+        ) {
             let hasHTMLFile = htmlContentHandler.htmlFileExists(for: request.messageID)
             let requiresURIRecompute =
                 resolvedHasHTMLSource &&
@@ -691,7 +706,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             }
         }
 
-        var result = await processMessageContent(from: request)
+        var result = await processMessageContent(from: request, sourceSignature: sourceSignature)
 
         let missingBodyText = request.bodyText?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -732,6 +747,8 @@ actor MessageBubbleLoader: MessageBubbleLoading {
 
             await processedTextCache.set(
                 messageId: request.messageID,
+                sourceSignature: sourceSignature,
+                previewMode: ProcessedTextCache.chatBubblePreviewMode,
                 plainText: recoveredResult.mainText,
                 hasRichContent: recoveredHasRichContent,
                 quotedParts: recoveredResult.quotedParts
@@ -775,7 +792,8 @@ actor MessageBubbleLoader: MessageBubbleLoading {
     }
 
     private func processMessageContent(
-        from request: MessageBubbleContentRequest
+        from request: MessageBubbleContentRequest,
+        sourceSignature: String
     ) async -> (plainText: String?, hasRichContent: Bool) {
         var processedResult = ProcessedTextCache.processMessage(
             messageId: request.messageID,
@@ -813,6 +831,8 @@ actor MessageBubbleLoader: MessageBubbleLoading {
 
         await processedTextCache.set(
             messageId: request.messageID,
+            sourceSignature: sourceSignature,
+            previewMode: ProcessedTextCache.chatBubblePreviewMode,
             plainText: processedResult.plainText,
             hasRichContent: processedResult.hasRichContent,
             quotedParts: processedResult.quotedParts

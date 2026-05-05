@@ -18,6 +18,7 @@ struct HTMLLoadResult {
     let source: HTMLLoadSource
     let presentation: HTMLLoadPresentation
     let nativeText: String?
+    let sourceSignature: String?
 
     enum HTMLLoadSource: Hashable {
         case messageId
@@ -33,12 +34,14 @@ struct HTMLLoadResult {
         html: String?,
         source: HTMLLoadSource,
         presentation: HTMLLoadPresentation = .html,
-        nativeText: String? = nil
+        nativeText: String? = nil,
+        sourceSignature: String? = nil
     ) {
         self.html = html
         self.source = source
         self.presentation = presentation
         self.nativeText = nativeText
+        self.sourceSignature = sourceSignature
     }
 }
 
@@ -271,7 +274,8 @@ final class HTMLContentLoader {
                     html: nil,
                     source: .plainTextFallback,
                     presentation: .nativePlainText,
-                    nativeText: normalizedText
+                    nativeText: normalizedText,
+                    sourceSignature: "plainText:\(sourceSignature(for: normalizedText))"
                 )
             }
 
@@ -282,7 +286,11 @@ final class HTMLContentLoader {
                 displayPurpose: displayPurpose
             )
             if HTMLMeaningfulContentChecker.hasMeaningfulContent(wrapped) {
-                return HTMLLoadResult(html: wrapped, source: .plainTextFallback)
+                return HTMLLoadResult(
+                    html: wrapped,
+                    source: .plainTextFallback,
+                    sourceSignature: "plainText:\(sourceSignature(for: normalizedText))"
+                )
             }
         }
 
@@ -608,10 +616,11 @@ final class HTMLContentLoader {
         originalHTMLPreference: OriginalEmailHTMLPreference,
         variantKey: NSString
     ) async -> HTMLLoadResult? {
+        let sourceSignature = sourceSignature(for: html)
         let cacheKey = cacheKey(
             variantKey: variantKey,
             source: source,
-            sourceSignature: sourceSignature(for: html)
+            sourceSignature: sourceSignature
         )
 
         if let cachedResult = htmlCache.object(forKey: cacheKey) {
@@ -640,7 +649,8 @@ final class HTMLContentLoader {
                 shouldCache: wrapped.shouldCache,
                 cacheKey: cacheKey,
                 variantKey: variantKey,
-                messageId: messageId
+                messageId: messageId,
+                sourceSignature: sourceSignature
             )
         case .nativePlainText(let text):
             return qualityFallbackResult(text)
@@ -672,9 +682,10 @@ final class HTMLContentLoader {
         shouldCache: Bool,
         cacheKey: NSString,
         variantKey: NSString,
-        messageId: String
+        messageId: String,
+        sourceSignature: String
     ) -> HTMLLoadResult {
-        let result = HTMLLoadResult(html: html, source: source)
+        let result = HTMLLoadResult(html: html, source: source, sourceSignature: sourceSignature)
 
         guard shouldCache else {
             return result
