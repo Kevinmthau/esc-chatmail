@@ -227,9 +227,9 @@ enum EmailPreviewContentExtractor {
         return normalizedHTMLText(from: String(html[range]))
     }
 
-    private static func actionLinkTexts(in html: String, maxLinks: Int = 12) -> [String] {
+    private static func actionLinkTexts(in html: String, maxLinks: Int = 12, maxScannedLinks: Int = 48) -> [String] {
         let pattern = "<a\\b[^>]*>([\\s\\S]*?)</a>"
-        guard maxLinks > 0 else {
+        guard maxLinks > 0, maxScannedLinks > 0 else {
             return []
         }
 
@@ -238,10 +238,15 @@ enum EmailPreviewContentExtractor {
         }
 
         var linkTexts: [String] = []
+        var scannedLinks = 0
         regex.enumerateMatches(in: html, options: [], range: NSRange(html.startIndex..., in: html)) { match, _, stop in
+            scannedLinks += 1
             guard let match,
                   match.numberOfRanges > 1,
                   let range = Range(match.range(at: 1), in: html) else {
+                if scannedLinks >= maxScannedLinks {
+                    stop.pointee = true
+                }
                 return
             }
 
@@ -249,7 +254,7 @@ enum EmailPreviewContentExtractor {
                 linkTexts.append(text)
             }
 
-            if linkTexts.count >= maxLinks {
+            if linkTexts.count >= maxLinks || scannedLinks >= maxScannedLinks {
                 stop.pointee = true
             }
         }
