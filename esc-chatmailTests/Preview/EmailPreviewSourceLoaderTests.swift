@@ -42,6 +42,11 @@ final class EmailPreviewSourceLoaderTests: XCTestCase {
         XCTAssertEqual(unwrappedSource.extractedImages.first?.sourceURL, "https://cdn.example.com/hero.jpg")
         XCTAssertEqual(unwrappedSource.extractedImages.first?.width, 640)
         XCTAssertEqual(unwrappedSource.extractedImages.first?.height, 320)
+        XCTAssertEqual(
+            unwrappedSource.htmlSummary.h1Text,
+            "Tickets are now on sale for the Spring Documentary Festival"
+        )
+        XCTAssertTrue(unwrappedSource.htmlSummary.actionLinkTexts.contains("Manage Preferences"))
 
         let preview = NewsletterPreviewBuilder().buildPreview(
             source: unwrappedSource,
@@ -99,6 +104,58 @@ final class EmailPreviewSourceLoaderTests: XCTestCase {
         XCTAssertNotEqual(first.sourceSignature, second.sourceSignature)
         XCTAssertTrue(second.extractedText?.contains("Second newsletter update") == true)
         XCTAssertFalse(second.extractedText?.contains("First newsletter update") == true)
+    }
+
+    func testLoadPreviewSourceExtractsComplexNewsletterSummary() async throws {
+        let messageId = "preview-source-complex-newsletter-\(UUID().uuidString)"
+        defer {
+            HTMLContentHandler.shared.deleteHTML(for: messageId)
+        }
+
+        HTMLContentHandler.shared.saveHTML(
+            """
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <title>Documentary Festival Dispatch</title>
+            </head>
+            <body>
+              <span class="preheader" style="display:none;max-height:0">
+                Festival passes are now available for opening weekend
+              </span>
+              <table role="presentation">
+                <tr>
+                  <td>
+                    <h1><a href="https://example.com/festival">Spring Documentary Festival opens tonight</a></h1>
+                    <img src="https://cdn.example.com/festival-hero.jpg" width="720" height="360" alt="Festival hero">
+                    <p>Join filmmakers and audiences for premieres, panels, and late-night screenings.</p>
+                    <p><a href="https://example.com/lineup"><span>Read the lineup</span></a></p>
+                  </td>
+                </tr>
+              </table>
+              <p>Manage Preferences</p>
+              <p>Unsubscribe</p>
+            </body>
+            </html>
+            """,
+            for: messageId
+        )
+
+        let loadedSource = await EmailPreviewSourceLoader(htmlContentLoader: HTMLContentLoader()).loadPreviewSource(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: nil,
+            senderEmail: "newsletter@example.com",
+            subject: "Festival dispatch",
+            allowRecovery: false
+        )
+        let source = try XCTUnwrap(loadedSource)
+
+        XCTAssertEqual(source.htmlSummary.preheaderText, "Festival passes are now available for opening weekend")
+        XCTAssertEqual(source.htmlSummary.h1Text, "Spring Documentary Festival opens tonight")
+        XCTAssertEqual(source.htmlSummary.titleText, "Documentary Festival Dispatch")
+        XCTAssertTrue(source.htmlSummary.actionLinkTexts.contains("Read the lineup"))
+        XCTAssertEqual(source.extractedImages.first?.sourceURL, "https://cdn.example.com/festival-hero.jpg")
     }
 
     func testTransactionalBuilderUsesPreviewSourceImageCandidates() async throws {

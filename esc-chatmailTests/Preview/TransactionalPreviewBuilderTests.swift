@@ -309,4 +309,53 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
 
         XCTAssertEqual(result?.detailLine, "Wednesday, April 29, 2026 • 4 guests")
     }
+
+    func testBuildPreviewFromSourceUsesSnapshotActionLinksInsteadOfReparsingHTMLAnchors() {
+        let source = EmailPreviewSource(
+            messageId: "transactional-source-snapshot",
+            sourceSignature: "sha256:snapshot",
+            canonicalHTML: """
+            <!DOCTYPE html>
+            <html>
+            <body>
+                <h1>Payment complete</h1>
+                <p>$24.20</p>
+                <a href="https://example.com/promo">Learn more</a>
+            </body>
+            </html>
+            """,
+            plainText: nil,
+            extractedText: """
+            You paid Cafe Example
+            $24.20
+            Date
+            May 5, 2026
+            """,
+            extractedImages: [],
+            htmlSummary: EmailPreviewHTMLSummary(
+                h1Text: "You paid Cafe Example",
+                h2Text: nil,
+                titleText: nil,
+                preheaderText: nil,
+                actionLinkTexts: ["View receipt"]
+            ),
+            classification: EmailPreviewClassification(
+                kind: .transactional,
+                newsletterScore: 0,
+                transactionalScore: 70,
+                signals: [.transactionalKeywords]
+            )
+        )
+
+        let result = sut.buildPreview(
+            source: source,
+            senderName: "Example Pay",
+            senderEmail: "receipts@example.com",
+            subject: nil
+        )
+
+        XCTAssertEqual(result?.title, "You paid Cafe Example")
+        XCTAssertEqual(result?.amount, "$24.20")
+        XCTAssertEqual(result?.actionLabel, "View receipt")
+    }
 }

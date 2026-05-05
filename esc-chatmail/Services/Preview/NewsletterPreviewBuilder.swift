@@ -13,11 +13,18 @@ struct NewsletterPreviewBuilder {
         senderEmail: String?,
         subject: String? = nil
     ) -> NewsletterPreviewModel? {
-        buildPreview(
+        let extractedContent = EmailPreviewContentExtractor.extract(
             canonicalHTML: canonicalHTML,
             bodyText: bodyText,
-            extractedText: nil,
-            extractedImages: nil,
+            imageExtractor: imageExtractor
+        )
+
+        return buildPreview(
+            canonicalHTML: canonicalHTML,
+            plainText: extractedContent.plainText,
+            extractedText: extractedContent.htmlText,
+            extractedImages: extractedContent.images,
+            htmlSummary: extractedContent.htmlSummary,
             cleanedSnippet: cleanedSnippet,
             senderName: senderName,
             senderEmail: senderEmail,
@@ -38,9 +45,10 @@ struct NewsletterPreviewBuilder {
 
         return buildPreview(
             canonicalHTML: canonicalHTML,
-            bodyText: source.plainText,
+            plainText: source.plainText,
             extractedText: source.extractedText,
             extractedImages: source.extractedImages,
+            htmlSummary: source.htmlSummary,
             cleanedSnippet: cleanedSnippet,
             senderName: senderName,
             senderEmail: senderEmail,
@@ -50,9 +58,10 @@ struct NewsletterPreviewBuilder {
 
     private func buildPreview(
         canonicalHTML: String,
-        bodyText: String?,
+        plainText: String?,
         extractedText: String?,
-        extractedImages: [EmailPreviewImage]?,
+        extractedImages: [EmailPreviewImage],
+        htmlSummary: EmailPreviewHTMLSummary,
         cleanedSnippet: String?,
         senderName: String?,
         senderEmail: String?,
@@ -60,9 +69,9 @@ struct NewsletterPreviewBuilder {
     ) -> NewsletterPreviewModel? {
         let sourceDomain = normalizedSourceDomain(from: senderEmail)
         let sourceLabel = sourceLabel(senderName: senderName, sourceDomain: sourceDomain)
-        let title = resolvedTitle(from: canonicalHTML, subject: subject)
+        let title = resolvedTitle(from: htmlSummary, subject: subject)
         let lines = cleanedPreviewLines(
-            bodyText: bodyText,
+            plainText: plainText,
             canonicalHTML: canonicalHTML,
             extractedText: extractedText
         )
@@ -72,7 +81,7 @@ struct NewsletterPreviewBuilder {
             from: lines,
             excluding: [title, subtitle, subject, sourceLabel, sourceDomain]
         )
-        let heroImage = bestHeroImageCandidate(from: canonicalHTML, extractedImages: extractedImages)
+        let heroImage = bestHeroImageCandidate(from: extractedImages)
         let heroImageURL = heroImage?.url
 
         guard title != nil || subtitle != nil || snippet != nil || heroImageURL != nil else {
@@ -95,12 +104,12 @@ struct NewsletterPreviewBuilder {
         )
     }
 
-    private func resolvedTitle(from canonicalHTML: String, subject: String?) -> String? {
+    private func resolvedTitle(from htmlSummary: EmailPreviewHTMLSummary, subject: String?) -> String? {
         let candidates = [
-            firstTagText("h1", in: canonicalHTML),
-            firstTagText("h2", in: canonicalHTML),
-            firstPreheaderText(in: canonicalHTML),
-            firstTagText("title", in: canonicalHTML),
+            htmlSummary.h1Text,
+            htmlSummary.h2Text,
+            newsletterPreheaderText(htmlSummary.preheaderText),
+            htmlSummary.titleText,
             normalizedText(subject)
         ]
 
@@ -112,6 +121,16 @@ struct NewsletterPreviewBuilder {
         }
 
         return nil
+    }
+
+    private func newsletterPreheaderText(_ text: String?) -> String? {
+        guard let text = normalizedPreviewText(text),
+              !shouldSkipLine(text),
+              !shouldStopAtFooter(text) else {
+            return nil
+        }
+
+        return text
     }
 
     private func resolvedSubtitle(from lines: [String], excluding excluded: [String?]) -> String? {
@@ -170,11 +189,11 @@ struct NewsletterPreviewBuilder {
     }
 
     private func cleanedPreviewLines(
-        bodyText: String?,
+        plainText: String?,
         canonicalHTML: String,
         extractedText: String? = nil
     ) -> [String] {
-        let bodyLines = previewLines(from: normalizedBodyText(bodyText) ?? "")
+        let bodyLines = previewLines(from: plainText ?? "")
         let htmlText = normalizedPreviewText(extractedText)
             ?? normalizedText(TextProcessing.extractPlainText(from: canonicalHTML))
         let htmlLines = previewLines(from: htmlText)
@@ -263,18 +282,10 @@ struct NewsletterPreviewBuilder {
         return score
     }
 
-    private func bestHeroImageCandidate(
-        from canonicalHTML: String,
-        extractedImages: [EmailPreviewImage]? = nil
-    ) -> HeroImageCandidate? {
-        let images = extractedImages ?? imageExtractor.extractImages(from: canonicalHTML, maxImages: 8)
-        return bestHeroImageCandidate(from: Array(images.prefix(8)))
-    }
-
     private func bestHeroImageCandidate(from images: [EmailPreviewImage]) -> HeroImageCandidate? {
         var bestCandidate: HeroImageCandidate?
 
-        for image in images {
+        for image in images.prefix(8) {
             let width = image.width
             let height = image.height
             let descriptor = image.descriptor
@@ -440,31 +451,6 @@ struct NewsletterPreviewBuilder {
         return normalizedURL
     }
 
-    private func firstTagText(_ tagName: String, in html: String) -> String? {
-        let pattern = "<\(tagName)\\b[^>]*>([\\s\\S]*?)</\(tagName)>"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
-              let match = regex.firstMatch(in: html, options: [], range: NSRange(html.startIndex..., in: html)),
-              match.numberOfRanges > 1,
-              let range = Range(match.range(at: 1), in: html) else {
-            return nil
-        }
-
-        return normalizedText(TextProcessing.extractPlainText(from: String(html[range])))
-    }
-
-    private func firstPreheaderText(in html: String) -> String? {
-        let pattern = "<(?:div|span)\\b[^>]*class\\s*=\\s*[\"'][^\"']*preheader[^\"']*[\"'][^>]*>([\\s\\S]*?)</(?:div|span)>"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
-              let match = regex.firstMatch(in: html, options: [], range: NSRange(html.startIndex..., in: html)),
-              match.numberOfRanges > 1,
-              let range = Range(match.range(at: 1), in: html) else {
-            return nil
-        }
-
-        let extracted = normalizedText(TextProcessing.extractPlainText(from: String(html[range])))
-        return shouldSkipLine(extracted) || shouldStopAtFooter(extracted) ? nil : extracted
-    }
-
     private func containsBlockedHeroHint(in text: String) -> Bool {
         blockedHeroImageHints.contains { text.contains($0) }
     }
@@ -616,11 +602,6 @@ struct NewsletterPreviewBuilder {
         return normalized
     }
 
-    private func normalizedBodyText(_ bodyText: String?) -> String? {
-        guard let bodyText else { return nil }
-        return normalizedText(RawEmailSourceSanitizer.extractDisplayText(from: bodyText))
-    }
-
     private func normalizedSet(from strings: [String?]) -> Set<String> {
         Set(strings.compactMap { value in
             guard let value = value else { return nil }
@@ -712,12 +693,7 @@ struct NewsletterPreviewBuilder {
     }
 
     private func normalizedText(_ text: String?) -> String {
-        guard let text else { return "" }
-        return HTMLEntityDecoder.decode(text)
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        EmailPreviewContentExtractor.normalizedText(text)
     }
 
     private func normalizedPreviewText(_ text: String?) -> String? {

@@ -42,6 +42,21 @@ struct EmailPreviewImage: Equatable, Sendable {
     let index: Int
 }
 
+struct EmailPreviewHTMLSummary: Equatable, Sendable {
+    let h1Text: String?
+    let h2Text: String?
+    let titleText: String?
+    let preheaderText: String?
+    let actionLinkTexts: [String]
+}
+
+struct EmailPreviewExtractedContent: Equatable, Sendable {
+    let plainText: String?
+    let htmlText: String?
+    let images: [EmailPreviewImage]
+    let htmlSummary: EmailPreviewHTMLSummary
+}
+
 struct EmailPreviewSource: Equatable, Sendable {
     let messageId: String
     let sourceSignature: String
@@ -49,6 +64,7 @@ struct EmailPreviewSource: Equatable, Sendable {
     let plainText: String?
     let extractedText: String?
     let extractedImages: [EmailPreviewImage]
+    let htmlSummary: EmailPreviewHTMLSummary
     let classification: EmailPreviewClassification
 }
 

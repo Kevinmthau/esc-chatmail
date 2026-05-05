@@ -13,11 +13,18 @@ struct TransactionalPreviewBuilder {
         senderEmail: String?,
         subject: String? = nil
     ) -> TransactionalPreviewModel? {
-        buildPreview(
+        let extractedContent = EmailPreviewContentExtractor.extract(
             canonicalHTML: canonicalHTML,
             bodyText: bodyText,
-            extractedText: nil,
-            extractedImages: nil,
+            imageExtractor: imageExtractor
+        )
+
+        return buildPreview(
+            canonicalHTML: canonicalHTML,
+            plainText: extractedContent.plainText,
+            extractedText: extractedContent.htmlText,
+            extractedImages: extractedContent.images,
+            htmlSummary: extractedContent.htmlSummary,
             cleanedSnippet: cleanedSnippet,
             senderName: senderName,
             senderEmail: senderEmail,
@@ -38,9 +45,10 @@ struct TransactionalPreviewBuilder {
 
         return buildPreview(
             canonicalHTML: canonicalHTML,
-            bodyText: source.plainText,
+            plainText: source.plainText,
             extractedText: source.extractedText,
             extractedImages: source.extractedImages,
+            htmlSummary: source.htmlSummary,
             cleanedSnippet: cleanedSnippet,
             senderName: senderName,
             senderEmail: senderEmail,
@@ -50,9 +58,10 @@ struct TransactionalPreviewBuilder {
 
     private func buildPreview(
         canonicalHTML: String,
-        bodyText: String?,
+        plainText: String?,
         extractedText: String?,
-        extractedImages: [EmailPreviewImage]?,
+        extractedImages: [EmailPreviewImage],
+        htmlSummary: EmailPreviewHTMLSummary,
         cleanedSnippet: String?,
         senderName: String?,
         senderEmail: String?,
@@ -61,17 +70,16 @@ struct TransactionalPreviewBuilder {
         let sourceDomain = normalizedSourceDomain(from: senderEmail)
         let sourceLabel = sourceLabel(senderName: senderName, sourceDomain: sourceDomain)
         let lines = cleanedPreviewLines(
-            bodyText: bodyText,
+            plainText: plainText,
             canonicalHTML: canonicalHTML,
             extractedText: extractedText
         )
         let detailFields = detailFields(from: lines)
-        let title = resolvedTitle(from: canonicalHTML, subject: subject, lines: lines, sourceLabel: sourceLabel)
+        let title = resolvedTitle(from: htmlSummary, subject: subject, lines: lines, sourceLabel: sourceLabel)
         let amount = resolvedAmount(
             subject: subject,
             cleanedSnippet: cleanedSnippet,
             lines: lines,
-            canonicalHTML: canonicalHTML,
             extractedText: extractedText
         )
         let subtitle = resolvedSubtitle(
@@ -86,8 +94,8 @@ struct TransactionalPreviewBuilder {
             status: status,
             excluding: [title, subtitle, amount, sourceLabel, sourceDomain]
         )
-        let actionLabel = resolvedActionLabel(from: canonicalHTML)
-        let image = bestImageCandidate(from: canonicalHTML, extractedImages: extractedImages)
+        let actionLabel = resolvedActionLabel(from: htmlSummary)
+        let image = bestImageCandidate(from: extractedImages)
 
         guard title != nil || amount != nil || subtitle != nil || detailLine != nil else {
             return nil
@@ -111,7 +119,7 @@ struct TransactionalPreviewBuilder {
     }
 
     private func resolvedTitle(
-        from canonicalHTML: String,
+        from htmlSummary: EmailPreviewHTMLSummary,
         subject: String?,
         lines: [String],
         sourceLabel: String?
@@ -119,10 +127,10 @@ struct TransactionalPreviewBuilder {
         let candidates = [
             sanitizedTransactionTitle(subject),
             transactionLine(from: lines, excluding: [sourceLabel]),
-            sanitizedTransactionTitle(firstTagText("h1", in: canonicalHTML)),
-            sanitizedTransactionTitle(firstTagText("h2", in: canonicalHTML)),
-            sanitizedTransactionTitle(firstTagText("title", in: canonicalHTML)),
-            sanitizedTransactionTitle(firstPreheaderText(in: canonicalHTML))
+            sanitizedTransactionTitle(htmlSummary.h1Text),
+            sanitizedTransactionTitle(htmlSummary.h2Text),
+            sanitizedTransactionTitle(htmlSummary.titleText),
+            sanitizedTransactionTitle(htmlSummary.preheaderText)
         ]
 
         for candidate in candidates {
@@ -139,16 +147,13 @@ struct TransactionalPreviewBuilder {
         subject: String?,
         cleanedSnippet: String?,
         lines: [String],
-        canonicalHTML: String,
         extractedText: String? = nil
     ) -> String? {
-        let htmlText = normalizedPreviewText(extractedText)
-            ?? normalizedText(TextProcessing.extractPlainText(from: canonicalHTML))
         let candidates: [String?] = [
             subject,
             cleanedSnippet,
             lines.joined(separator: "\n"),
-            htmlText
+            normalizedPreviewText(extractedText)
         ]
 
         for candidate in candidates {
@@ -280,22 +285,8 @@ struct TransactionalPreviewBuilder {
         return nil
     }
 
-    private func resolvedActionLabel(from canonicalHTML: String) -> String? {
-        let pattern = "<a\\b[^>]*>([\\s\\S]*?)</a>"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return nil
-        }
-
-        let nsRange = NSRange(canonicalHTML.startIndex..., in: canonicalHTML)
-        let matches = regex.matches(in: canonicalHTML, options: [], range: nsRange)
-
-        for match in matches.prefix(12) {
-            guard match.numberOfRanges > 1,
-                  let range = Range(match.range(at: 1), in: canonicalHTML) else {
-                continue
-            }
-
-            let candidate = normalizedText(TextProcessing.extractPlainText(from: String(canonicalHTML[range])))
+    private func resolvedActionLabel(from htmlSummary: EmailPreviewHTMLSummary) -> String? {
+        for candidate in htmlSummary.actionLinkTexts {
             guard !candidate.isEmpty else {
                 continue
             }
@@ -315,11 +306,11 @@ struct TransactionalPreviewBuilder {
     }
 
     private func cleanedPreviewLines(
-        bodyText: String?,
+        plainText: String?,
         canonicalHTML: String,
         extractedText: String? = nil
     ) -> [String] {
-        let bodyLines = previewLines(from: normalizedBodyText(bodyText) ?? "")
+        let bodyLines = previewLines(from: plainText ?? "")
         let htmlText = normalizedPreviewText(extractedText)
             ?? normalizedText(TextProcessing.extractPlainText(from: canonicalHTML))
         let htmlLines = previewLines(from: htmlText)
@@ -467,18 +458,10 @@ struct TransactionalPreviewBuilder {
         return lowercased.contains("payment") && firstAmount(in: line) != nil
     }
 
-    private func bestImageCandidate(
-        from canonicalHTML: String,
-        extractedImages: [EmailPreviewImage]? = nil
-    ) -> TransactionalImageCandidate? {
-        let images = extractedImages ?? imageExtractor.extractImages(from: canonicalHTML, maxImages: 12)
-        return bestImageCandidate(from: Array(images.prefix(12)))
-    }
-
     private func bestImageCandidate(from images: [EmailPreviewImage]) -> TransactionalImageCandidate? {
         var bestCandidate: TransactionalImageCandidate?
 
-        for image in images {
+        for image in images.prefix(12) {
             let width = image.width
             let height = image.height
             let descriptor = image.descriptor
@@ -585,30 +568,6 @@ struct TransactionalPreviewBuilder {
         }
 
         return normalizedURL
-    }
-
-    private func firstTagText(_ tagName: String, in html: String) -> String? {
-        let pattern = "<\(tagName)\\b[^>]*>([\\s\\S]*?)</\(tagName)>"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
-              let match = regex.firstMatch(in: html, options: [], range: NSRange(html.startIndex..., in: html)),
-              match.numberOfRanges > 1,
-              let range = Range(match.range(at: 1), in: html) else {
-            return nil
-        }
-
-        return normalizedText(TextProcessing.extractPlainText(from: String(html[range])))
-    }
-
-    private func firstPreheaderText(in html: String) -> String? {
-        let pattern = "<(?:div|span)\\b[^>]*(?:class\\s*=\\s*[\"'][^\"']*preheader[^\"']*[\"']|id\\s*=\\s*[\"'][^\"']*preheader[^\"']*[\"'])[^>]*>([\\s\\S]*?)</(?:div|span)>"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
-              let match = regex.firstMatch(in: html, options: [], range: NSRange(html.startIndex..., in: html)),
-              match.numberOfRanges > 1,
-              let range = Range(match.range(at: 1), in: html) else {
-            return nil
-        }
-
-        return normalizedText(TextProcessing.extractPlainText(from: String(html[range])))
     }
 
     private func firstAmount(in text: String?) -> String? {
@@ -909,11 +868,6 @@ struct TransactionalPreviewBuilder {
         return primarySegment.capitalized
     }
 
-    private func normalizedBodyText(_ bodyText: String?) -> String? {
-        guard let bodyText else { return nil }
-        return normalizedText(RawEmailSourceSanitizer.extractDisplayText(from: bodyText))
-    }
-
     private func normalizedSet(from strings: [String?]) -> Set<String> {
         Set(strings.compactMap { value in
             let normalized = normalizedComparableText(value)
@@ -952,12 +906,7 @@ struct TransactionalPreviewBuilder {
     }
 
     private func normalizedText(_ text: String?) -> String {
-        guard let text else { return "" }
-        return HTMLEntityDecoder.decode(text)
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        EmailPreviewContentExtractor.normalizedText(text)
     }
 
     private func normalizedPreviewText(_ text: String?) -> String? {

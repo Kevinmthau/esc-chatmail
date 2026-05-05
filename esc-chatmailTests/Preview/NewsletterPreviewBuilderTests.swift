@@ -401,6 +401,52 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         XCTAssertFalse(result?.snippet.lowercased().contains("terms and conditions") == true)
         XCTAssertFalse(result?.snippet.contains("&#8202;") == true)
     }
+
+    func testBuildPreviewFromSourceUsesSnapshotSummaryInsteadOfReparsingHTMLTitle() {
+        let source = EmailPreviewSource(
+            messageId: "newsletter-source-snapshot",
+            sourceSignature: "sha256:snapshot",
+            canonicalHTML: """
+            <!DOCTYPE html>
+            <html>
+            <body>
+                <h1>HTML title that should not win</h1>
+                <p>HTML text that should not be reparsed by the builder.</p>
+            </body>
+            </html>
+            """,
+            plainText: nil,
+            extractedText: """
+            Snapshot newsletter title
+            A durable preview summary should come from the source snapshot once extraction has already run.
+            """,
+            extractedImages: [],
+            htmlSummary: EmailPreviewHTMLSummary(
+                h1Text: "Snapshot newsletter title",
+                h2Text: nil,
+                titleText: nil,
+                preheaderText: nil,
+                actionLinkTexts: []
+            ),
+            classification: EmailPreviewClassification(
+                kind: .newsletter,
+                newsletterScore: 70,
+                transactionalScore: 0,
+                signals: [.unsubscribeFooter]
+            )
+        )
+
+        let result = sut.buildPreview(
+            source: source,
+            senderName: "Example Dispatch",
+            senderEmail: "news@example.com",
+            subject: nil
+        )
+
+        XCTAssertEqual(result?.title, "Snapshot newsletter title")
+        XCTAssertTrue(result?.snippet.contains("durable preview summary") == true)
+        XCTAssertFalse(result?.title.contains("HTML title") == true)
+    }
 }
 
 @MainActor

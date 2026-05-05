@@ -73,13 +73,15 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
             return cached.source
         }
 
-        let plainText = Self.normalizedPlainText(from: bodyText)
-        let extractedText = Self.normalizedHTMLText(from: canonicalHTML)
-        let extractedImages = imageExtractor.extractImages(from: canonicalHTML)
+        let extractedContent = EmailPreviewContentExtractor.extract(
+            canonicalHTML: canonicalHTML,
+            bodyText: bodyText,
+            imageExtractor: imageExtractor
+        )
         let classification = classifier.classify(
             canonicalHTML: canonicalHTML,
-            bodyText: plainText,
-            extractedText: extractedText,
+            bodyText: extractedContent.plainText,
+            extractedText: extractedContent.htmlText,
             senderEmail: senderEmail,
             subject: subject
         )
@@ -88,9 +90,10 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
             messageId: messageId,
             sourceSignature: sourceSignature,
             canonicalHTML: canonicalHTML,
-            plainText: plainText,
-            extractedText: extractedText,
-            extractedImages: extractedImages,
+            plainText: extractedContent.plainText,
+            extractedText: extractedContent.htmlText,
+            extractedImages: extractedContent.images,
+            htmlSummary: extractedContent.htmlSummary,
             classification: classification
         )
 
@@ -145,7 +148,23 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
             .joined()
     }
 
-    private static func normalizedPlainText(from text: String?) -> String? {
+}
+
+enum EmailPreviewContentExtractor {
+    static func extract(
+        canonicalHTML: String,
+        bodyText: String?,
+        imageExtractor: EmailPreviewImageExtractor = EmailPreviewImageExtractor()
+    ) -> EmailPreviewExtractedContent {
+        EmailPreviewExtractedContent(
+            plainText: normalizedPlainText(from: bodyText),
+            htmlText: normalizedHTMLText(from: canonicalHTML),
+            images: imageExtractor.extractImages(from: canonicalHTML),
+            htmlSummary: htmlSummary(from: canonicalHTML)
+        )
+    }
+
+    static func normalizedPlainText(from text: String?) -> String? {
         guard let text, !text.isEmpty else {
             return nil
         }
@@ -154,17 +173,75 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
         return normalized.isEmpty ? nil : normalized
     }
 
-    private static func normalizedHTMLText(from html: String) -> String? {
+    static func normalizedHTMLText(from html: String) -> String? {
         let normalized = normalizedText(TextProcessing.extractPlainText(from: html))
         return normalized.isEmpty ? nil : normalized
     }
 
-    private static func normalizedText(_ text: String) -> String {
-        HTMLEntityDecoder.decode(text)
+    static func normalizedOptionalText(_ text: String?) -> String? {
+        let normalized = normalizedText(text)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    static func normalizedText(_ text: String?) -> String {
+        guard let text else { return "" }
+
+        return HTMLEntityDecoder.decode(text)
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
             .replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func htmlSummary(from html: String) -> EmailPreviewHTMLSummary {
+        EmailPreviewHTMLSummary(
+            h1Text: firstTagText("h1", in: html),
+            h2Text: firstTagText("h2", in: html),
+            titleText: firstTagText("title", in: html),
+            preheaderText: firstPreheaderText(in: html),
+            actionLinkTexts: actionLinkTexts(in: html)
+        )
+    }
+
+    private static func firstTagText(_ tagName: String, in html: String) -> String? {
+        let pattern = "<\(tagName)\\b[^>]*>([\\s\\S]*?)</\(tagName)>"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: html, options: [], range: NSRange(html.startIndex..., in: html)),
+              match.numberOfRanges > 1,
+              let range = Range(match.range(at: 1), in: html) else {
+            return nil
+        }
+
+        return normalizedHTMLText(from: String(html[range]))
+    }
+
+    private static func firstPreheaderText(in html: String) -> String? {
+        let pattern = "<(?:div|span)\\b[^>]*(?:class\\s*=\\s*[\"'][^\"']*preheader[^\"']*[\"']|id\\s*=\\s*[\"'][^\"']*preheader[^\"']*[\"'])[^>]*>([\\s\\S]*?)</(?:div|span)>"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: html, options: [], range: NSRange(html.startIndex..., in: html)),
+              match.numberOfRanges > 1,
+              let range = Range(match.range(at: 1), in: html) else {
+            return nil
+        }
+
+        return normalizedHTMLText(from: String(html[range]))
+    }
+
+    private static func actionLinkTexts(in html: String, maxLinks: Int = 12) -> [String] {
+        let pattern = "<a\\b[^>]*>([\\s\\S]*?)</a>"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return []
+        }
+
+        let matches = regex.matches(in: html, options: [], range: NSRange(html.startIndex..., in: html))
+        return matches.prefix(maxLinks).compactMap { match in
+            guard match.numberOfRanges > 1,
+                  let range = Range(match.range(at: 1), in: html) else {
+                return nil
+            }
+
+            return normalizedHTMLText(from: String(html[range]))
+        }
     }
 }
 
