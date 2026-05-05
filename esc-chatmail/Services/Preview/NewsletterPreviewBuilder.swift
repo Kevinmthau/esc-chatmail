@@ -1,7 +1,7 @@
 import Foundation
 
 struct NewsletterPreviewBuilder {
-    private let sanitizer = HTMLSanitizerService.shared
+    private let imageExtractor = EmailPreviewImageExtractor()
     private let urlSanitizer = HTMLURLSanitizer()
     private let trackingRemover = HTMLTrackingRemover()
 
@@ -13,17 +13,66 @@ struct NewsletterPreviewBuilder {
         senderEmail: String?,
         subject: String? = nil
     ) -> NewsletterPreviewModel? {
+        buildPreview(
+            canonicalHTML: canonicalHTML,
+            bodyText: bodyText,
+            extractedText: nil,
+            extractedImages: nil,
+            cleanedSnippet: cleanedSnippet,
+            senderName: senderName,
+            senderEmail: senderEmail,
+            subject: subject
+        )
+    }
+
+    func buildPreview(
+        source: EmailPreviewSource,
+        cleanedSnippet: String? = nil,
+        senderName: String? = nil,
+        senderEmail: String?,
+        subject: String? = nil
+    ) -> NewsletterPreviewModel? {
+        guard let canonicalHTML = source.canonicalHTML else {
+            return nil
+        }
+
+        return buildPreview(
+            canonicalHTML: canonicalHTML,
+            bodyText: source.plainText,
+            extractedText: source.extractedText,
+            extractedImages: source.extractedImages,
+            cleanedSnippet: cleanedSnippet,
+            senderName: senderName,
+            senderEmail: senderEmail,
+            subject: subject
+        )
+    }
+
+    private func buildPreview(
+        canonicalHTML: String,
+        bodyText: String?,
+        extractedText: String?,
+        extractedImages: [EmailPreviewImage]?,
+        cleanedSnippet: String?,
+        senderName: String?,
+        senderEmail: String?,
+        subject: String?
+    ) -> NewsletterPreviewModel? {
         let sourceDomain = normalizedSourceDomain(from: senderEmail)
         let sourceLabel = sourceLabel(senderName: senderName, sourceDomain: sourceDomain)
         let title = resolvedTitle(from: canonicalHTML, subject: subject)
-        let lines = cleanedPreviewLines(bodyText: bodyText, canonicalHTML: canonicalHTML)
+        let lines = cleanedPreviewLines(
+            bodyText: bodyText,
+            canonicalHTML: canonicalHTML,
+            extractedText: extractedText
+        )
         let subtitle = resolvedSubtitle(from: lines, excluding: [title, subject, sourceLabel, sourceDomain])
         let snippet = resolvedSnippet(
             preferredSnippet: cleanedSnippet,
             from: lines,
             excluding: [title, subtitle, subject, sourceLabel, sourceDomain]
         )
-        let heroImage = bestHeroImageCandidate(from: canonicalHTML)
+        let heroImage = bestHeroImageCandidate(from: canonicalHTML, extractedImages: extractedImages)
         let heroImageURL = heroImage?.url
 
         guard title != nil || subtitle != nil || snippet != nil || heroImageURL != nil else {
@@ -120,9 +169,15 @@ struct NewsletterPreviewBuilder {
         return joined.isEmpty ? nil : truncate(joined, limit: 190)
     }
 
-    private func cleanedPreviewLines(bodyText: String?, canonicalHTML: String) -> [String] {
+    private func cleanedPreviewLines(
+        bodyText: String?,
+        canonicalHTML: String,
+        extractedText: String? = nil
+    ) -> [String] {
         let bodyLines = previewLines(from: normalizedBodyText(bodyText) ?? "")
-        let htmlLines = previewLines(from: normalizedText(TextProcessing.extractPlainText(from: canonicalHTML)))
+        let htmlText = normalizedPreviewText(extractedText)
+            ?? normalizedText(TextProcessing.extractPlainText(from: canonicalHTML))
+        let htmlLines = previewLines(from: htmlText)
 
         guard !bodyLines.isEmpty else {
             return htmlLines
@@ -208,46 +263,30 @@ struct NewsletterPreviewBuilder {
         return score
     }
 
-    private func bestHeroImageCandidate(from canonicalHTML: String) -> HeroImageCandidate? {
-        // Reuse the existing HTML safety pipeline before extracting any image candidate for the
-        // native newsletter card so preview loading does not bypass URL sanitization/tracking rules.
-        let sanitizedHTML = sanitizer.sanitize(canonicalHTML)
-        let regex = try? NSRegularExpression(pattern: "<img\\b[^>]*>", options: [.caseInsensitive])
-        let nsRange = NSRange(sanitizedHTML.startIndex..., in: sanitizedHTML)
-        let matches = regex?.matches(in: sanitizedHTML, options: [], range: nsRange) ?? []
+    private func bestHeroImageCandidate(
+        from canonicalHTML: String,
+        extractedImages: [EmailPreviewImage]? = nil
+    ) -> HeroImageCandidate? {
+        let images = extractedImages ?? imageExtractor.extractImages(from: canonicalHTML, maxImages: 8)
+        return bestHeroImageCandidate(from: Array(images.prefix(8)))
+    }
 
+    private func bestHeroImageCandidate(from images: [EmailPreviewImage]) -> HeroImageCandidate? {
         var bestCandidate: HeroImageCandidate?
 
-        let candidateMatches = Array(matches.prefix(8))
-
-        for (index, match) in candidateMatches.enumerated() {
-            guard let range = Range(match.range, in: sanitizedHTML) else {
+        for image in images {
+            let width = image.width
+            let height = image.height
+            let descriptor = image.descriptor
+            guard let safeSource = safeHeroImageURL(
+                from: image.sourceURL,
+                descriptor: descriptor,
+                width: width,
+                height: height
+            ) else {
                 continue
             }
 
-            let tag = String(sanitizedHTML[range])
-            let followingHTML = htmlSegmentAfterImage(
-                at: index,
-                in: sanitizedHTML,
-                matches: candidateMatches
-            )
-            let width = numericAttribute(named: "width", in: tag)
-            let height = numericAttribute(named: "height", in: tag)
-            let descriptor = [
-                attributeValue(named: "alt", in: tag),
-                attributeValue(named: "class", in: tag)
-            ]
-            .compactMap { $0?.lowercased() }
-            .joined(separator: " ")
-            guard let source = attributeValue(named: "src", in: tag),
-                  let safeSource = safeHeroImageURL(
-                    from: source,
-                    descriptor: descriptor,
-                    width: width,
-                    height: height
-                  ) else {
-                continue
-            }
             let lowercasedSource = safeSource.lowercased()
             guard let displayMode = heroImageDisplayMode(
                 width: width,
@@ -258,7 +297,7 @@ struct NewsletterPreviewBuilder {
                 continue
             }
 
-            var score = 30 - (index * 3)
+            var score = 30 - (image.index * 3)
 
             if let width, width >= 240 {
                 score += 20
@@ -288,7 +327,7 @@ struct NewsletterPreviewBuilder {
                 score -= 18
             }
 
-            score += imageContextScore(followingHTML)
+            score += imageContextScore(fromFollowingText: image.followingText)
 
             if let width, width <= 80 {
                 score -= 15
@@ -298,8 +337,6 @@ struct NewsletterPreviewBuilder {
                 score -= 15
             }
 
-            // Keep very wide images available as a fallback, but prefer conventional hero images
-            // when both are present.
             if displayMode == .fit {
                 score -= 20
             }
@@ -321,46 +358,7 @@ struct NewsletterPreviewBuilder {
         return bestCandidate
     }
 
-    private func htmlSegmentAfterImage(
-        at index: Int,
-        in html: String,
-        matches: [NSTextCheckingResult]
-    ) -> String {
-        guard index < matches.count,
-              let currentRange = Range(matches[index].range, in: html) else {
-            return ""
-        }
-
-        let segmentStart = currentRange.upperBound
-        let nextImageStart = nextImageStartIndex(after: index, in: html, matches: matches)
-        let maximumEnd = html.index(segmentStart, offsetBy: 2_500, limitedBy: nextImageStart) ?? nextImageStart
-        guard segmentStart < maximumEnd else {
-            return ""
-        }
-
-        return String(html[segmentStart..<maximumEnd])
-    }
-
-    private func nextImageStartIndex(
-        after index: Int,
-        in html: String,
-        matches: [NSTextCheckingResult]
-    ) -> String.Index {
-        let nextIndex = index + 1
-        guard nextIndex < matches.count,
-              let nextRange = Range(matches[nextIndex].range, in: html) else {
-            return html.endIndex
-        }
-
-        return nextRange.lowerBound
-    }
-
-    private func imageContextScore(_ followingHTML: String) -> Int {
-        guard !followingHTML.isEmpty else {
-            return 0
-        }
-
-        let plainText = normalizedText(TextProcessing.extractPlainText(from: followingHTML))
+    private func imageContextScore(fromPlainText plainText: String) -> Int {
         guard !plainText.isEmpty else {
             return 0
         }
@@ -378,6 +376,10 @@ struct NewsletterPreviewBuilder {
         }
 
         return score
+    }
+
+    private func imageContextScore(fromFollowingText followingText: String) -> Int {
+        imageContextScore(fromPlainText: normalizedText(followingText))
     }
 
     private func isSubstantiveImageFollowupLine(_ line: String) -> Bool {
@@ -461,35 +463,6 @@ struct NewsletterPreviewBuilder {
 
         let extracted = normalizedText(TextProcessing.extractPlainText(from: String(html[range])))
         return shouldSkipLine(extracted) || shouldStopAtFooter(extracted) ? nil : extracted
-    }
-
-    private func attributeValue(named attribute: String, in tag: String) -> String? {
-        let pattern = "\(attribute)\\s*=\\s*(?:\"([^\"]+)\"|'([^']+)'|([^\\s>]+))"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
-              let match = regex.firstMatch(in: tag, options: [], range: NSRange(tag.startIndex..., in: tag)) else {
-            return nil
-        }
-
-        for index in 1..<match.numberOfRanges {
-            guard let range = Range(match.range(at: index), in: tag) else {
-                continue
-            }
-
-            let value = normalizedText(String(tag[range]))
-            if !value.isEmpty {
-                return value
-            }
-        }
-
-        return nil
-    }
-
-    private func numericAttribute(named attribute: String, in tag: String) -> Int? {
-        guard let value = attributeValue(named: attribute, in: tag) else {
-            return nil
-        }
-
-        return Int(value.replacingOccurrences(of: "[^0-9]", with: "", options: .regularExpression))
     }
 
     private func containsBlockedHeroHint(in text: String) -> Bool {
@@ -745,6 +718,11 @@ struct NewsletterPreviewBuilder {
             .replacingOccurrences(of: "\r", with: "\n")
             .replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizedPreviewText(_ text: String?) -> String? {
+        let normalized = normalizedText(text)
+        return normalized.isEmpty ? nil : normalized
     }
 
     private func shouldSkipLine(_ line: String) -> Bool {

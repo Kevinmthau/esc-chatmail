@@ -4,12 +4,15 @@ struct EmailPreviewClassifier {
     func classify(
         canonicalHTML: String,
         bodyText: String?,
+        extractedText: String? = nil,
         senderEmail: String?,
         subject: String? = nil
     ) -> EmailPreviewClassification {
         let lowercasedHTML = canonicalHTML.lowercased()
-        let extractedText = normalizedBodyText(bodyText) ?? normalizedText(TextProcessing.extractPlainText(from: canonicalHTML))
-        let lowercasedText = extractedText.lowercased()
+        let previewText = normalizedBodyText(bodyText)
+            ?? normalizedOptionalText(extractedText)
+            ?? normalizedText(TextProcessing.extractPlainText(from: canonicalHTML))
+        let lowercasedText = previewText.lowercased()
         let metrics = HTMLMetrics(html: lowercasedHTML)
         let lowercasedSubject = subject?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -153,6 +156,12 @@ struct EmailPreviewClassifier {
             .replacingOccurrences(of: "\r", with: "\n")
             .replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizedOptionalText(_ text: String?) -> String? {
+        guard let text else { return nil }
+        let normalized = normalizedText(text)
+        return normalized.isEmpty ? nil : normalized
     }
 
     private func containsAny(_ patterns: [String], in text: String) -> Bool {

@@ -340,7 +340,8 @@ final class HTMLContentLoader {
     func loadCanonicalHTML(
         messageId: String,
         bodyStorageURI: String?,
-        bodyText: String? = nil
+        bodyText: String? = nil,
+        allowRecovery: Bool = true
     ) async -> String? {
         if contentHandler.htmlFileExists(for: messageId),
            let html = canonicalHTMLSource(from: contentHandler.loadHTML(for: messageId)) {
@@ -358,6 +359,10 @@ final class HTMLContentLoader {
            let rawSourceHTML = RawEmailSourceSanitizer.extractHTMLText(from: text),
            let html = canonicalHTMLSource(from: rawSourceHTML) {
             return html
+        }
+
+        guard allowRecovery else {
+            return nil
         }
 
         if let html = await HTMLContentRecoveryService.shared.recoverHTMLContent(messageId: messageId) {

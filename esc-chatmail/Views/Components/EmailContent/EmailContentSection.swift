@@ -14,7 +14,7 @@ struct EmailContentSection: View {
     @State private var isLoading = true
     @State private var loadGeneration = 0
     private let htmlContentLoader = HTMLContentLoader.shared
-    private let previewClassifier = EmailPreviewClassifier()
+    private let previewSourceLoader = EmailPreviewSourceLoader.shared
     private let calendarInvitePreviewBuilder = CalendarInvitePreviewBuilder()
     private let newsletterPreviewBuilder = NewsletterPreviewBuilder()
     private let transactionalPreviewBuilder = TransactionalPreviewBuilder()
@@ -92,23 +92,22 @@ struct EmailContentSection: View {
     }
 
     private func loadHTML(generation: Int) async {
-        let canonicalHTML = await htmlContentLoader.loadCanonicalHTML(
+        let previewSource = await previewSourceLoader.loadPreviewSource(
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
-            bodyText: message.bodyText
+            bodyText: message.bodyText,
+            senderEmail: message.senderEmail,
+            subject: message.subject,
+            allowRecovery: true
         )
 
-        if let canonicalHTML {
+        if let previewSource,
+           let canonicalHTML = previewSource.canonicalHTML {
             guard !Task.isCancelled else {
                 return
             }
 
-            let classification = previewClassifier.classify(
-                canonicalHTML: canonicalHTML,
-                bodyText: message.bodyText,
-                senderEmail: message.senderEmail,
-                subject: message.subject
-            )
+            let classification = previewSource.classification
             Log.diagnostic(
                 .htmlPreview,
                 level: .info,
@@ -149,8 +148,7 @@ struct EmailContentSection: View {
                 switch route {
                 case .newsletter:
                     if let model = newsletterPreviewBuilder.buildPreview(
-                        canonicalHTML: canonicalHTML,
-                        bodyText: message.bodyText,
+                        source: previewSource,
                         cleanedSnippet: message.cleanedSnippet,
                         senderName: message.senderName,
                         senderEmail: message.senderEmail,
@@ -168,8 +166,7 @@ struct EmailContentSection: View {
                     )
                 case .transactional:
                     if let model = transactionalPreviewBuilder.buildPreview(
-                        canonicalHTML: canonicalHTML,
-                        bodyText: message.bodyText,
+                        source: previewSource,
                         cleanedSnippet: message.cleanedSnippet,
                         senderName: message.senderName,
                         senderEmail: message.senderEmail,

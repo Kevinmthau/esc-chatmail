@@ -118,6 +118,32 @@ protocol MessageBubbleLoading: Sendable {
 
 enum MessageBubbleHTMLAnalysisBuilder {
     static func build(
+        previewSource: EmailPreviewSource?,
+        hasHTMLSourceHint: Bool,
+        isForwardedEmail: Bool,
+        isLikelyCalendarInvite: Bool,
+        bodyText: String?,
+        cleanedSnippet: String?,
+        senderName: String?,
+        senderEmail: String?,
+        subject: String?,
+        attachmentSnapshots: [MessageBubbleAttachmentSnapshot]
+    ) -> MessageBubbleHTMLAnalysis {
+        build(
+            canonicalHTML: previewSource?.canonicalHTML,
+            hasHTMLSource: hasHTMLSourceHint || previewSource?.canonicalHTML != nil,
+            isForwardedEmail: isForwardedEmail,
+            isLikelyCalendarInvite: isLikelyCalendarInvite,
+            bodyText: bodyText,
+            cleanedSnippet: cleanedSnippet,
+            senderName: senderName,
+            senderEmail: senderEmail,
+            subject: subject,
+            attachmentSnapshots: attachmentSnapshots
+        )
+    }
+
+    static func build(
         messageID: String,
         bodyStorageURI: String?,
         hasHTMLSourceHint: Bool,
@@ -138,27 +164,17 @@ enum MessageBubbleHTMLAnalysisBuilder {
         )
         let hasHTMLSource = hasHTMLSourceHint || canonicalHTML != nil
 
-        guard let canonicalHTML else {
-            return .placeholder(hasHTMLSource: hasHTMLSource)
-        }
-
-        return MessageBubbleHTMLAnalysis(
+        return build(
+            canonicalHTML: canonicalHTML,
             hasHTMLSource: hasHTMLSource,
-            referencedInlineContentIDs: extractReferencedContentIDs(from: canonicalHTML),
-            nonDisplayableInlineContentIDs: extractNonDisplayableInlineContentIDs(
-                from: canonicalHTML,
-                attachments: attachmentSnapshots
-            ),
-            supportsCalendarInvitePreviewCard: supportsCalendarInvitePreviewCard(
-                canonicalHTML: canonicalHTML,
-                isForwardedEmail: isForwardedEmail,
-                isLikelyCalendarInvite: isLikelyCalendarInvite,
-                bodyText: bodyText,
-                cleanedSnippet: cleanedSnippet,
-                senderName: senderName,
-                senderEmail: senderEmail,
-                subject: subject
-            )
+            isForwardedEmail: isForwardedEmail,
+            isLikelyCalendarInvite: isLikelyCalendarInvite,
+            bodyText: bodyText,
+            cleanedSnippet: cleanedSnippet,
+            senderName: senderName,
+            senderEmail: senderEmail,
+            subject: subject,
+            attachmentSnapshots: attachmentSnapshots
         )
     }
 
@@ -403,6 +419,42 @@ enum MessageBubbleHTMLAnalysisBuilder {
         ) != nil
     }
 
+    private static func build(
+        canonicalHTML: String?,
+        hasHTMLSource: Bool,
+        isForwardedEmail: Bool,
+        isLikelyCalendarInvite: Bool,
+        bodyText: String?,
+        cleanedSnippet: String?,
+        senderName: String?,
+        senderEmail: String?,
+        subject: String?,
+        attachmentSnapshots: [MessageBubbleAttachmentSnapshot]
+    ) -> MessageBubbleHTMLAnalysis {
+        guard let canonicalHTML else {
+            return .placeholder(hasHTMLSource: hasHTMLSource)
+        }
+
+        return MessageBubbleHTMLAnalysis(
+            hasHTMLSource: hasHTMLSource,
+            referencedInlineContentIDs: extractReferencedContentIDs(from: canonicalHTML),
+            nonDisplayableInlineContentIDs: extractNonDisplayableInlineContentIDs(
+                from: canonicalHTML,
+                attachments: attachmentSnapshots
+            ),
+            supportsCalendarInvitePreviewCard: supportsCalendarInvitePreviewCard(
+                canonicalHTML: canonicalHTML,
+                isForwardedEmail: isForwardedEmail,
+                isLikelyCalendarInvite: isLikelyCalendarInvite,
+                bodyText: bodyText,
+                cleanedSnippet: cleanedSnippet,
+                senderName: senderName,
+                senderEmail: senderEmail,
+                subject: subject
+            )
+        )
+    }
+
     private static let signatureSignOffMarkers = [
         "warmly",
         "best regards",
@@ -443,19 +495,22 @@ actor MessageBubbleLoader: MessageBubbleLoading {
     private let htmlContentHandler: HTMLContentHandler
     private let htmlContentRecoveryService: any HTMLContentRecovering
     private let htmlAnalysisCache: MessageBubbleHTMLAnalysisCache
+    private let previewSourceLoader: any EmailPreviewSourceLoading
 
     init(
         contactsResolver: any ContactsResolving = ContactsResolver.shared,
         processedTextCache: ProcessedTextCache = .shared,
         htmlContentHandler: HTMLContentHandler = .shared,
         htmlContentRecoveryService: any HTMLContentRecovering = HTMLContentRecoveryService.shared,
-        htmlAnalysisCache: MessageBubbleHTMLAnalysisCache = .shared
+        htmlAnalysisCache: MessageBubbleHTMLAnalysisCache = .shared,
+        previewSourceLoader: any EmailPreviewSourceLoading = EmailPreviewSourceLoader.shared
     ) {
         self.contactsResolver = contactsResolver
         self.processedTextCache = processedTextCache
         self.htmlContentHandler = htmlContentHandler
         self.htmlContentRecoveryService = htmlContentRecoveryService
         self.htmlAnalysisCache = htmlAnalysisCache
+        self.previewSourceLoader = previewSourceLoader
     }
 
     func loadSenderInfo(from request: MessageBubbleSenderRequest) async -> MessageBubbleSenderResult {
@@ -484,7 +539,8 @@ actor MessageBubbleLoader: MessageBubbleLoading {
     }
 
     func loadContent(from request: MessageBubbleContentRequest) async -> MessageBubbleContentResult {
-        let htmlAnalysis = cachedHTMLAnalysis(for: request)
+        let previewSource = await loadPreviewSourceIfAvailable(for: request)
+        let htmlAnalysis = cachedHTMLAnalysis(for: request, previewSource: previewSource)
         let forwardedDisplayContent =
             request.isFromMe && request.isForwardedEmail
             ? ForwardedMessageDisplayParser.parseOutgoingForward(
@@ -516,15 +572,34 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         )
     }
 
-    private func cachedHTMLAnalysis(for request: MessageBubbleContentRequest) -> MessageBubbleHTMLAnalysis {
-        let cacheKey = htmlAnalysisCacheKey(for: request)
+    private func loadPreviewSourceIfAvailable(for request: MessageBubbleContentRequest) async -> EmailPreviewSource? {
+        guard request.hasHTMLSource ||
+                request.bodyStorageURI != nil ||
+                htmlContentHandler.htmlFileExists(for: request.messageID) else {
+            return nil
+        }
+
+        return await previewSourceLoader.loadPreviewSource(
+            messageId: request.messageID,
+            bodyStorageURI: request.bodyStorageURI,
+            bodyText: request.bodyText,
+            senderEmail: request.effectiveSenderEmail,
+            subject: request.subject,
+            allowRecovery: false
+        )
+    }
+
+    private func cachedHTMLAnalysis(
+        for request: MessageBubbleContentRequest,
+        previewSource: EmailPreviewSource?
+    ) -> MessageBubbleHTMLAnalysis {
+        let cacheKey = htmlAnalysisCacheKey(for: request, previewSource: previewSource)
         if let cached = htmlAnalysisCache.value(forKey: cacheKey) {
             return cached
         }
 
         let analysis = MessageBubbleHTMLAnalysisBuilder.build(
-            messageID: request.messageID,
-            bodyStorageURI: request.bodyStorageURI,
+            previewSource: previewSource,
             hasHTMLSourceHint: request.hasHTMLSource,
             isForwardedEmail: request.isForwardedEmail,
             isLikelyCalendarInvite: request.isLikelyCalendarInvite,
@@ -533,14 +608,16 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             senderName: request.senderName,
             senderEmail: request.effectiveSenderEmail,
             subject: request.subject,
-            attachmentSnapshots: request.attachmentSnapshots,
-            handler: htmlContentHandler
+            attachmentSnapshots: request.attachmentSnapshots
         )
         htmlAnalysisCache.setValue(analysis, forKey: cacheKey)
         return analysis
     }
 
-    private func htmlAnalysisCacheKey(for request: MessageBubbleContentRequest) -> String {
+    private func htmlAnalysisCacheKey(
+        for request: MessageBubbleContentRequest,
+        previewSource: EmailPreviewSource?
+    ) -> String {
         let htmlSourceSignature = htmlContentHandler.htmlSourceSignature(
             messageId: request.messageID,
             bodyStorageURI: request.bodyStorageURI
@@ -549,6 +626,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             request.messageID,
             request.bodyStorageURI ?? "storage:nil",
             "html:\(htmlSourceSignature)",
+            "source:\(previewSource?.sourceSignature ?? "nil")",
             "body:\(cacheFingerprint(for: request.bodyText))",
             "snippet:\(cacheFingerprint(for: request.cleanedSnippet))",
             "subject:\(cacheFingerprint(for: request.subject))",

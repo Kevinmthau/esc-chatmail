@@ -134,7 +134,7 @@ Status as of 2026-05-04:
 - 1.2 complete: URL sanitization scans quoted and unquoted `href` / `src` attributes, with focused regression coverage.
 - 1.3 complete: WebView navigation failures clear loaded signatures so failed loads can retry.
 - 1.4 complete: `HTMLContentLoader` cache keys include canonical source signatures, with stale-cache regression coverage.
-- Phase 1 is complete. Phase 2.1 is the next refactor item.
+- Phase 1 is complete.
 
 ### 1.1 Refresh cid handler state on WebView reuse
 
@@ -212,6 +212,11 @@ Validation:
 ## Phase 2: Preview pipeline consolidation
 
 Goal: reduce repeated HTML work during scroll and make preview behavior more predictable.
+
+Status as of 2026-05-04:
+
+- 2.1 complete: preview routing now uses `EmailPreviewSourceLoader` snapshots for canonical HTML, source signatures, text/image extraction, and classification.
+- Phase 2.2 is the next refactor item.
 
 ### 2.1 Introduce `EmailPreviewSourceLoader`
 
@@ -396,8 +401,8 @@ Before finishing any phase:
 
 ## Recommended Next Patch
 
-Start with Phase 2.1 now that Phase 1 is clean.
+Start with Phase 2.2 now that the preview source loader is in place.
 
 Implementation prompt:
 
-> Implement Phase 2.1 of `docs/refactor-plan.md`. Introduce an `EmailPreviewSourceLoader` that selects canonical HTML once and returns one immutable preview source snapshot per message/display variant. Route preview classification, text extraction, image extraction, newsletter/transactional builders, and WebView fallback toward that snapshot without changing the full-message rendering path. Add focused preview-source tests, run newsletter/transactional/classifier and message-bubble tests as relevant, then run the iOS build.
+> Implement Phase 2.2 of `docs/refactor-plan.md`. Move preview-derived cache keys to `messageId + sourceSignature + preview mode`, remove redundant invalidation where the source signature is now the correctness boundary, and keep explicit invalidation only for memory cleanup or major message mutations. Add tests showing changed source HTML invalidates preview output without manual invalidation, run preview and message-bubble tests, then run the iOS build.

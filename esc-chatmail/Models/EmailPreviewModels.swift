@@ -33,6 +33,25 @@ struct EmailPreviewClassification: Equatable, Sendable {
     let signals: [EmailPreviewClassificationSignal]
 }
 
+struct EmailPreviewImage: Equatable, Sendable {
+    let sourceURL: String
+    let width: Int?
+    let height: Int?
+    let descriptor: String
+    let followingText: String
+    let index: Int
+}
+
+struct EmailPreviewSource: Equatable, Sendable {
+    let messageId: String
+    let sourceSignature: String
+    let canonicalHTML: String?
+    let plainText: String?
+    let extractedText: String?
+    let extractedImages: [EmailPreviewImage]
+    let classification: EmailPreviewClassification
+}
+
 extension EmailPreviewClassification {
     var diagnosticSummary: String {
         let signalSummary = signals.map(\.rawValue).joined(separator: ",")
