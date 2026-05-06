@@ -27,10 +27,10 @@ struct ParticipantsListView: View {
         self.onCreateNewContact = onCreateNewContact
         self.onAddToExistingContact = onAddToExistingContact
         self.onEditContact = onEditContact
-        self.participantLoader = chatDependencies.participantLoader
-        self.currentUserEmail = chatDependencies.authSession.userEmail ?? ""
-        self.invalidateContactsCache = chatDependencies.invalidateContactsCache
-        self.clearPersonCache = chatDependencies.clearPersonCache
+        self.participantLoader = chatDependencies.contacts.participantLoader
+        self.currentUserEmail = chatDependencies.session.authSession.userEmail ?? ""
+        self.invalidateContactsCache = chatDependencies.contacts.invalidateContactsCache
+        self.clearPersonCache = chatDependencies.contacts.clearPersonCache
     }
 
     var body: some View {

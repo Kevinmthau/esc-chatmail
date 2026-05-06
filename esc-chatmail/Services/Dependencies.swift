@@ -275,30 +275,40 @@ final class Dependencies: ObservableObject {
         }
 
         return ChatDependencies(
-            authSession: authSession,
-            participantLoader: participantLoader,
-            htmlContentHandler: htmlContentHandler,
-            processedTextCache: processedTextCache,
-            contactsResolver: contactsResolver,
-            messageActions: makeMessageActions(),
-            outboundMessageCoordinator: makeOutboundMessageCoordinator(),
-            outboundAttachmentContextBuilder: makeOutboundAttachmentContextBuilder(),
-            outboundReplyContextBuilder: makeOutboundReplyContextBuilder(),
-            composeForwardModeContextBuilder: makeComposeForwardModeContextBuilder(),
-            makeMessageBubbleLoader: makeMessageBubbleLoader,
-            viewContext: viewContext,
-            makeBackgroundContext: { [coreDataStack] in
-                coreDataStack.newBackgroundContext()
-            },
-            makeChatContactManager: { ChatContactManager() },
-            invalidateContactsCache: {
-                if let contactsResolver = contactsResolver as? ContactsResolver {
-                    await contactsResolver.invalidateAllCache()
+            session: ChatSessionDependencies(
+                authSession: authSession
+            ),
+            content: ChatContentDependencies(
+                htmlContentHandler: htmlContentHandler,
+                processedTextCache: processedTextCache,
+                makeMessageBubbleLoader: makeMessageBubbleLoader
+            ),
+            messaging: ChatMessagingDependencies(
+                messageActions: makeMessageActions(),
+                outboundMessageCoordinator: makeOutboundMessageCoordinator(),
+                outboundAttachmentContextBuilder: makeOutboundAttachmentContextBuilder(),
+                outboundReplyContextBuilder: makeOutboundReplyContextBuilder(),
+                composeForwardModeContextBuilder: makeComposeForwardModeContextBuilder()
+            ),
+            contacts: ChatContactDependencies(
+                participantLoader: participantLoader,
+                contactsResolver: contactsResolver,
+                makeChatContactManager: { ChatContactManager() },
+                invalidateContactsCache: {
+                    if let contactsResolver = contactsResolver as? ContactsResolver {
+                        await contactsResolver.invalidateAllCache()
+                    }
+                },
+                clearPersonCache: {
+                    await personCache.clearCache()
                 }
-            },
-            clearPersonCache: {
-                await personCache.clearCache()
-            }
+            ),
+            storage: ChatStorageDependencies(
+                viewContext: viewContext,
+                makeBackgroundContext: { [coreDataStack] in
+                    coreDataStack.newBackgroundContext()
+                }
+            )
         )
     }
 

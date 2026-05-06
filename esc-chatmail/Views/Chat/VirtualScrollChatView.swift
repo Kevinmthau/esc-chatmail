@@ -16,8 +16,8 @@ struct VirtualScrollChatView: View {
             wrappedValue: VirtualScrollState(
                 conversationId: conversation.id.uuidString,
                 initialWindowPosition: .end,
-                viewContext: chatDependencies.viewContext,
-                makeBackgroundContext: chatDependencies.makeBackgroundContext
+                viewContext: chatDependencies.storage.viewContext,
+                makeBackgroundContext: chatDependencies.storage.makeBackgroundContext
             )
         )
     }
@@ -34,8 +34,8 @@ struct VirtualScrollChatView: View {
                             } else {
                                 MessageBubble(
                                     message: message,
-                                    messageBubbleLoader: chatDependencies.makeMessageBubbleLoader(),
-                                    htmlContentHandler: chatDependencies.htmlContentHandler,
+                                    messageBubbleLoader: chatDependencies.content.makeMessageBubbleLoader(),
+                                    htmlContentHandler: chatDependencies.content.htmlContentHandler,
                                     isEffectivelyOneToOneConversation: conversation.conversationType == .oneToOne,
                                     style: .compact,
                                     onOpenFullMessage: { messageObjectID in
@@ -71,7 +71,7 @@ struct VirtualScrollChatView: View {
     }
 
     private func resolveMessage(with objectID: NSManagedObjectID) -> Message? {
-        let viewContext = chatDependencies.viewContext
+        let viewContext = chatDependencies.storage.viewContext
         if let registered = viewContext.registeredObject(for: objectID) as? Message,
            !registered.isDeleted {
             return registered

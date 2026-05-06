@@ -34,12 +34,12 @@ struct ChatMessagesView: View {
         self.chatDependencies = chatDependencies
         self.isTextFieldFocused = isTextFieldFocused
         self.onOpenFullMessage = onOpenFullMessage
-        let viewContext = chatDependencies.viewContext
+        let viewContext = chatDependencies.storage.viewContext
         let scrollState = VirtualScrollState(
             conversationId: conversation.id.uuidString,
             initialWindowPosition: .end,
             viewContext: viewContext,
-            makeBackgroundContext: chatDependencies.makeBackgroundContext
+            makeBackgroundContext: chatDependencies.storage.makeBackgroundContext
         )
         _scrollState = StateObject(
             wrappedValue: scrollState
@@ -70,8 +70,8 @@ struct ChatMessagesView: View {
 
                         MessageBubble(
                             message: message,
-                            messageBubbleLoader: chatDependencies.makeMessageBubbleLoader(),
-                            htmlContentHandler: chatDependencies.htmlContentHandler,
+                            messageBubbleLoader: chatDependencies.content.makeMessageBubbleLoader(),
+                            htmlContentHandler: chatDependencies.content.htmlContentHandler,
                             isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
                             contactRefreshToken: coordinator.contactRefreshToken,
                             isLastFromSender: isLastFromSender,

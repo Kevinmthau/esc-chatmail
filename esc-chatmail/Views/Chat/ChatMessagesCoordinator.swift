@@ -69,10 +69,10 @@ final class ChatMessagesCoordinator: ObservableObject {
             viewModel.cancelPrefetch()
         }
         self.loadSenderGroupingKeys = { senderEmails in
-            await chatDependencies.participantLoader.senderGroupingKeys(for: senderEmails)
+            await chatDependencies.contacts.participantLoader.senderGroupingKeys(for: senderEmails)
         }
-        self.invalidateContactsCache = chatDependencies.invalidateContactsCache
-        self.clearPersonCache = chatDependencies.clearPersonCache
+        self.invalidateContactsCache = chatDependencies.contacts.invalidateContactsCache
+        self.clearPersonCache = chatDependencies.contacts.clearPersonCache
         self.sleep = sleep
     }
 

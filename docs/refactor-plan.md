@@ -362,6 +362,10 @@ Validation:
 
 Goal: reduce orchestration complexity after correctness and performance are stable.
 
+Status as of 2026-05-06:
+
+- 5.1 complete: chat dependencies are split into session, content/rendering, messaging, contacts, and storage groups, with chat view/view-model call sites updated mechanically and no behavior changes intended.
+
 ### 5.1 Split chat dependencies by responsibility
 
 Files likely involved:
@@ -414,8 +418,8 @@ Before finishing any phase:
 
 ## Recommended Next Patch
 
-Start with Phase 5.1 now that sync reconciliation observability and bounded missed-message recovery are complete.
+Consider Phase 5.2 only if search and tests prove specific compatibility adapters, duplicate helpers, or migration scaffolding are unused.
 
 Implementation prompt:
 
-> Implement Phase 5.1 of `docs/refactor-plan.md`. Split chat dependencies by responsibility without changing behavior, keep the diff mechanical and reviewable, run existing ChatViewModel tests, then run the iOS build.
+> Implement one narrowly proven Phase 5.2 cleanup from `docs/refactor-plan.md`. Remove only code proven unused by search and tests, run the relevant targeted tests, then run the iOS build.
