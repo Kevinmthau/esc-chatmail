@@ -208,6 +208,78 @@ final class SyncReconciliationTests: XCTestCase {
         XCTAssertNil(mockAPI.listMessagesLastPageToken)
     }
 
+    func testCheckForMissedMessagesWithDiagnosticsPreservesCurrentOverflowWhileResumingOldCursor() async throws {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.paginatedListMessagesResponses = [
+            "__first_page__": MessagesListResponse(
+                messages: (1...100).map { MessageListItem(id: "current-\($0)", threadId: "current-thread-\($0)") },
+                nextPageToken: "current-page-2",
+                resultSizeEstimate: 150
+            ),
+            "old-page-2": MessagesListResponse(
+                messages: (1...100).map { MessageListItem(id: "old-\($0)", threadId: "old-thread-\($0)") },
+                nextPageToken: "old-page-3",
+                resultSizeEstimate: 250
+            )
+        ]
+        try setPersistedMissedMessageCursors([
+            persistedCursor(query: "after:0 -label:spam -label:drafts -label:trash", pageToken: "old-page-2")
+        ])
+
+        UserDefaults.standard.set(
+            Date().timeIntervalSince1970,
+            forKey: SyncConfig.lastSuccessfulSyncTimeKey
+        )
+
+        let sut = SyncReconciliation(
+            messageFetcher: MessageFetcher(apiClient: mockAPI)
+        )
+
+        let result = await sut.checkForMissedMessagesWithDiagnostics(
+            in: stack.newBackgroundContext(),
+            installTimestamp: Date().addingTimeInterval(-(24 * 60 * 60)).timeIntervalSince1970
+        )
+
+        XCTAssertEqual(result.missingIds.count, 200)
+        XCTAssertTrue(result.diagnostics.cappedReconciliation)
+        XCTAssertTrue(result.diagnostics.resumedMissedMessageWindow)
+        XCTAssertEqual(mockAPI.listMessagesCallCount, 2)
+        XCTAssertEqual(try persistedMissedMessageCursorTokens(), ["old-page-3", "current-page-2"])
+    }
+
+    func testCheckForMissedMessagesWithDiagnosticsKeepsResumeCursorOnTransientPageError() async throws {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.paginatedListMessagesResponses = [
+            "__first_page__": MessagesListResponse(
+                messages: [MessageListItem(id: "current-1", threadId: "current-thread-1")],
+                nextPageToken: nil,
+                resultSizeEstimate: 1
+            )
+        ]
+        mockAPI.listMessagesErrorsByPageToken["old-page-2"] = APIError.rateLimited
+        try setPersistedMissedMessageCursors([
+            persistedCursor(query: "after:0 -label:spam -label:drafts -label:trash", pageToken: "old-page-2")
+        ])
+
+        UserDefaults.standard.set(
+            Date().timeIntervalSince1970,
+            forKey: SyncConfig.lastSuccessfulSyncTimeKey
+        )
+
+        let sut = SyncReconciliation(
+            messageFetcher: MessageFetcher(apiClient: mockAPI)
+        )
+
+        let result = await sut.checkForMissedMessagesWithDiagnostics(
+            in: stack.newBackgroundContext(),
+            installTimestamp: Date().addingTimeInterval(-(24 * 60 * 60)).timeIntervalSince1970
+        )
+
+        XCTAssertTrue(result.missingIds.isEmpty)
+        XCTAssertEqual(mockAPI.listMessagesCallCount, 2)
+        XCTAssertEqual(try persistedMissedMessageCursorTokens(), ["old-page-2"])
+    }
+
     func testReconcileLabelStates_fetchesMetadataThroughInjectedClient() async throws {
         let mockAPI = MockGmailAPIClient()
         mockAPI.setMessageList(["message-needs-inbox"])
@@ -319,5 +391,35 @@ final class SyncReconciliationTests: XCTestCase {
                 .build(in: seedContext)
         }
         try stack.saveViewContext()
+    }
+
+    private func persistedCursor(query: String, pageToken: String) -> [String: Any] {
+        [
+            "query": query,
+            "pageToken": pageToken,
+            "startedAt": Date().timeIntervalSince1970
+        ]
+    }
+
+    private func setPersistedMissedMessageCursors(_ cursors: [[String: Any]]) throws {
+        let json: Any = cursors.count == 1 ? cursors[0] : cursors
+        let data = try JSONSerialization.data(withJSONObject: json)
+        UserDefaults.standard.set(data, forKey: SyncConfig.missedMessageReconciliationCursorKey)
+    }
+
+    private func persistedMissedMessageCursorTokens() throws -> [String] {
+        guard let data = UserDefaults.standard.data(forKey: SyncConfig.missedMessageReconciliationCursorKey) else {
+            return []
+        }
+
+        let json = try JSONSerialization.jsonObject(with: data)
+        if let cursors = json as? [[String: Any]] {
+            return cursors.compactMap { $0["pageToken"] as? String }
+        }
+        if let cursor = json as? [String: Any],
+           let pageToken = cursor["pageToken"] as? String {
+            return [pageToken]
+        }
+        return []
     }
 }

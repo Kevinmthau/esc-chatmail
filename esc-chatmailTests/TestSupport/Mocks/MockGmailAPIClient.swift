@@ -54,6 +54,8 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
     /// Error to throw on listMessages() (resets after throwing)
     var listMessagesError: Error?
+    /// Optional page-token keyed listMessages() errors (reset after throwing).
+    var listMessagesErrorsByPageToken: [String: Error] = [:]
 
     /// Error to throw on getMessage() (resets after throwing)
     var getMessageError: Error?
@@ -156,6 +158,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
             // Errors
             listMessagesError = nil
+            listMessagesErrorsByPageToken = [:]
             getMessageError = nil
             getMessageErrors = [:]
             modifyMessageError = nil
@@ -212,6 +215,9 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         }
 
         return try withStateLock {
+            if let error = listMessagesErrorsByPageToken.removeValue(forKey: pageTokenKey(pageToken)) {
+                throw error
+            }
             if let error = listMessagesError {
                 listMessagesError = nil
                 throw error

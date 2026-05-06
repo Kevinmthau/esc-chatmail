@@ -162,12 +162,12 @@ final class SyncReconciliation: Sendable {
             return RecentMessageIDFetchResult(ids: [], wasCapped: false, resumedFromCursor: false)
         }
 
-        let pendingCursor = loadMissedMessageReconciliationCursor()
-        let effectiveMaxCount = reconciliationBudget(maxCount, hasPendingCursor: pendingCursor != nil)
+        let pendingCursors = loadMissedMessageReconciliationCursors()
+        let effectiveMaxCount = reconciliationBudget(maxCount, hasPendingCursor: !pendingCursors.isEmpty)
 
-        if let pendingCursor {
+        if !pendingCursors.isEmpty {
             return try await fetchRecentMessageIdsResuming(
-                cursor: pendingCursor,
+                cursors: pendingCursors,
                 currentQuery: query,
                 maxCount: effectiveMaxCount
             )
@@ -237,7 +237,7 @@ final class SyncReconciliation: Sendable {
     }
 
     private func fetchRecentMessageIdsResuming(
-        cursor: MissedMessageReconciliationCursor,
+        cursors: [MissedMessageReconciliationCursor],
         currentQuery: String,
         maxCount: Int
     ) async throws -> RecentMessageIDFetchResult {
@@ -248,8 +248,16 @@ final class SyncReconciliation: Sendable {
             maxCount: newestPageCount
         )
         let remaining = maxCount - newestWindow.ids.count
+        let currentOverflowCursor = newestWindow.nextPageToken.flatMap { nextPageToken in
+            cursors.contains(where: { $0.query == currentQuery }) ? nil : MissedMessageReconciliationCursor(
+                query: currentQuery,
+                pageToken: nextPageToken,
+                startedAt: Date().timeIntervalSince1970
+            )
+        }
 
         guard remaining > 0 else {
+            saveMissedMessageReconciliationCursors(cursors + [currentOverflowCursor].compactMap { $0 })
             return RecentMessageIDFetchResult(
                 ids: newestWindow.ids,
                 wasCapped: true,
@@ -257,36 +265,87 @@ final class SyncReconciliation: Sendable {
             )
         }
 
-        do {
-            let resumedWindow = try await fetchMessageIdWindow(
-                query: cursor.query,
-                startPageToken: cursor.pageToken,
-                maxCount: remaining
-            )
-            let ids = combinedUniqueIds(newestWindow.ids, resumedWindow.ids)
-            saveMissedMessageReconciliationCursor(
-                query: cursor.query,
-                nextPageToken: resumedWindow.nextPageToken,
-                startedAt: cursor.startedAt
-            )
+        var ids = newestWindow.ids
+        var remainingBudget = remaining
+        var cursorsToSave: [MissedMessageReconciliationCursor] = []
 
-            if resumedWindow.nextPageToken != nil {
-                log.warning(
-                    "Reconciliation resumed and capped at \(ids.count) recent messages; remaining pages will be checked on a later sync"
-                )
-            } else {
-                log.debug("Reconciliation completed pending missed-message window")
+        for index in cursors.indices {
+            let cursor = cursors[index]
+            guard remainingBudget > 0 else {
+                cursorsToSave.append(contentsOf: cursors[index...])
+                break
             }
 
-            return RecentMessageIDFetchResult(
-                ids: ids,
-                wasCapped: resumedWindow.nextPageToken != nil,
-                resumedFromCursor: true
-            )
-        } catch {
-            clearMissedMessageReconciliationCursor()
-            throw error
+            let resumedWindow: MessageIDWindowFetchResult
+            do {
+                resumedWindow = try await fetchMessageIdWindow(
+                    query: cursor.query,
+                    startPageToken: cursor.pageToken,
+                    maxCount: remainingBudget
+                )
+            } catch {
+                let nextIndex = cursors.index(after: index)
+                let remainingCursors = nextIndex < cursors.endIndex ? cursors[nextIndex...] : cursors[cursors.endIndex...]
+                saveResumeCursorsAfterResumeFailure(
+                    error: error,
+                    processedCursors: cursorsToSave,
+                    failedCursor: cursor,
+                    remainingCursors: remainingCursors,
+                    currentOverflowCursor: currentOverflowCursor
+                )
+                throw error
+            }
+
+            ids = combinedUniqueIds(ids, resumedWindow.ids)
+            remainingBudget -= resumedWindow.ids.count
+
+            if let nextPageToken = resumedWindow.nextPageToken {
+                cursorsToSave.append(
+                    MissedMessageReconciliationCursor(
+                        query: cursor.query,
+                        pageToken: nextPageToken,
+                        startedAt: cursor.startedAt
+                    )
+                )
+            }
         }
+
+        if let currentOverflowCursor {
+            cursorsToSave.append(currentOverflowCursor)
+        }
+        saveMissedMessageReconciliationCursors(cursorsToSave)
+
+        if !cursorsToSave.isEmpty {
+            log.warning(
+                "Reconciliation resumed and capped at \(ids.count) recent messages; remaining pages will be checked on a later sync"
+            )
+        } else {
+            log.debug("Reconciliation completed pending missed-message window")
+        }
+
+        return RecentMessageIDFetchResult(
+            ids: ids,
+            wasCapped: !cursorsToSave.isEmpty,
+            resumedFromCursor: true
+        )
+    }
+
+    private func saveResumeCursorsAfterResumeFailure(
+        error: Error,
+        processedCursors: [MissedMessageReconciliationCursor],
+        failedCursor: MissedMessageReconciliationCursor,
+        remainingCursors: ArraySlice<MissedMessageReconciliationCursor>,
+        currentOverflowCursor: MissedMessageReconciliationCursor?
+    ) {
+        var cursorsToSave = processedCursors
+        if !isInvalidReconciliationCursorError(error) {
+            cursorsToSave.append(failedCursor)
+        }
+        cursorsToSave.append(contentsOf: remainingCursors)
+        if let currentOverflowCursor {
+            cursorsToSave.append(currentOverflowCursor)
+        }
+        saveMissedMessageReconciliationCursors(cursorsToSave)
     }
 
     private func reconciliationBudget(_ baseCount: Int, hasPendingCursor: Bool) -> Int {
@@ -314,23 +373,29 @@ final class SyncReconciliation: Sendable {
         let startedAt: TimeInterval
     }
 
-    private func loadMissedMessageReconciliationCursor() -> MissedMessageReconciliationCursor? {
+    private func loadMissedMessageReconciliationCursors() -> [MissedMessageReconciliationCursor] {
         let defaults = UserDefaults.standard
         guard let data = defaults.data(forKey: SyncConfig.missedMessageReconciliationCursorKey) else {
-            return nil
+            return []
         }
 
         do {
-            let cursor = try JSONDecoder().decode(MissedMessageReconciliationCursor.self, from: data)
-            let age = Date().timeIntervalSince1970 - cursor.startedAt
-            guard !cursor.pageToken.isEmpty, age <= SyncConfig.maxReconciliationWindow else {
-                clearMissedMessageReconciliationCursor()
-                return nil
+            let decoder = JSONDecoder()
+            let decodedCursors: [MissedMessageReconciliationCursor]
+            if let cursors = try? decoder.decode([MissedMessageReconciliationCursor].self, from: data) {
+                decodedCursors = cursors
+            } else {
+                decodedCursors = [try decoder.decode(MissedMessageReconciliationCursor.self, from: data)]
             }
-            return cursor
+
+            let validCursors = compactReconciliationCursors(decodedCursors.filter(isValidReconciliationCursor))
+            if validCursors.count != decodedCursors.count {
+                saveMissedMessageReconciliationCursors(validCursors)
+            }
+            return validCursors
         } catch {
             clearMissedMessageReconciliationCursor()
-            return nil
+            return []
         }
     }
 
@@ -350,12 +415,55 @@ final class SyncReconciliation: Sendable {
             startedAt: startedAt
         )
 
+        saveMissedMessageReconciliationCursors([cursor])
+    }
+
+    private func saveMissedMessageReconciliationCursors(_ cursors: [MissedMessageReconciliationCursor]) {
+        let validCursors = compactReconciliationCursors(cursors.filter(isValidReconciliationCursor))
+        guard !validCursors.isEmpty else {
+            clearMissedMessageReconciliationCursor()
+            return
+        }
+
         do {
-            let data = try JSONEncoder().encode(cursor)
+            let data = try JSONEncoder().encode(validCursors)
             UserDefaults.standard.set(data, forKey: SyncConfig.missedMessageReconciliationCursorKey)
         } catch {
             clearMissedMessageReconciliationCursor()
         }
+    }
+
+    private func isValidReconciliationCursor(_ cursor: MissedMessageReconciliationCursor) -> Bool {
+        let age = Date().timeIntervalSince1970 - cursor.startedAt
+        return !cursor.query.isEmpty &&
+            !cursor.pageToken.isEmpty &&
+            age <= SyncConfig.maxReconciliationWindow
+    }
+
+    private func compactReconciliationCursors(
+        _ cursors: [MissedMessageReconciliationCursor]
+    ) -> [MissedMessageReconciliationCursor] {
+        var seen = Set<String>()
+        return cursors.filter { cursor in
+            seen.insert("\(cursor.query)|\(cursor.pageToken)").inserted
+        }
+    }
+
+    private func isInvalidReconciliationCursorError(_ error: Error) -> Bool {
+        guard let apiError = error as? APIError,
+              case .invalidData(let message) = apiError else {
+            return false
+        }
+
+        let lowercasedMessage = message.lowercased()
+        let mentionsPageToken = lowercasedMessage.contains("page token") ||
+            lowercasedMessage.contains("pagetoken") ||
+            lowercasedMessage.contains("page_token")
+        let mentionsCursor = lowercasedMessage.contains("cursor")
+        let isInvalidOrExpired = lowercasedMessage.contains("invalid") ||
+            lowercasedMessage.contains("expired")
+
+        return isInvalidOrExpired && (mentionsPageToken || mentionsCursor)
     }
 
     private func clearMissedMessageReconciliationCursor() {
