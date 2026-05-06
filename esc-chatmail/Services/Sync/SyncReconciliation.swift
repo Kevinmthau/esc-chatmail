@@ -1,6 +1,62 @@
 import Foundation
 import CoreData
 
+struct SyncReconciliationDiagnostics: Sendable, Equatable {
+    var missedMessageCandidatesChecked = 0
+    var missedMessagesFound = 0
+    var labelMessagesChecked = 0
+    var skippedChecks = 0
+    var metadataFetchFailures = 0
+    var driftFound = 0
+    var driftRepaired = 0
+    var cappedReconciliation = false
+    var cappedAtMessageCount = 0
+
+    var messagesChecked: Int {
+        missedMessageCandidatesChecked + labelMessagesChecked
+    }
+
+    var hasWarnings: Bool {
+        metadataFetchFailures > 0 || cappedReconciliation
+    }
+
+    var hasFindings: Bool {
+        missedMessagesFound > 0 || skippedChecks > 0 || driftFound > 0 || driftRepaired > 0
+    }
+
+    var summary: String {
+        [
+            "messagesChecked=\(messagesChecked)",
+            "missedChecked=\(missedMessageCandidatesChecked)",
+            "missedFound=\(missedMessagesFound)",
+            "labelChecked=\(labelMessagesChecked)",
+            "skipped=\(skippedChecks)",
+            "metadataFailures=\(metadataFetchFailures)",
+            "driftFound=\(driftFound)",
+            "driftRepaired=\(driftRepaired)",
+            "capped=\(cappedReconciliation)",
+            "cappedAt=\(cappedAtMessageCount)"
+        ].joined(separator: " ")
+    }
+
+    mutating func merge(_ other: SyncReconciliationDiagnostics) {
+        missedMessageCandidatesChecked += other.missedMessageCandidatesChecked
+        missedMessagesFound += other.missedMessagesFound
+        labelMessagesChecked += other.labelMessagesChecked
+        skippedChecks += other.skippedChecks
+        metadataFetchFailures += other.metadataFetchFailures
+        driftFound += other.driftFound
+        driftRepaired += other.driftRepaired
+        cappedReconciliation = cappedReconciliation || other.cappedReconciliation
+        cappedAtMessageCount = max(cappedAtMessageCount, other.cappedAtMessageCount)
+    }
+}
+
+struct MissedMessageReconciliationResult: Sendable, Equatable {
+    let missingIds: [String]
+    let diagnostics: SyncReconciliationDiagnostics
+}
+
 /// Handles reconciliation between Gmail and local state
 ///
 /// Responsibilities:
@@ -32,6 +88,18 @@ final class SyncReconciliation: Sendable {
         in context: NSManagedObjectContext,
         installTimestamp: TimeInterval
     ) async -> [String] {
+        await checkForMissedMessagesWithDiagnostics(
+            in: context,
+            installTimestamp: installTimestamp
+        ).missingIds
+    }
+
+    func checkForMissedMessagesWithDiagnostics(
+        in context: NSManagedObjectContext,
+        installTimestamp: TimeInterval
+    ) async -> MissedMessageReconciliationResult {
+        var diagnostics = SyncReconciliationDiagnostics()
+
         do {
             let reconciliationStartTime = calculateReconciliationStartTime(installTimestamp: installTimestamp)
             let epochSeconds = Int(reconciliationStartTime.timeIntervalSince1970)
@@ -50,33 +118,44 @@ final class SyncReconciliation: Sendable {
                 )
             )
 
-            let recentMessageIds = try await fetchRecentMessageIds(
+            let fetchResult = try await fetchRecentMessageIds(
                 query: query,
                 maxCount: maxMessagesToCheck
             )
+            diagnostics.missedMessageCandidatesChecked = fetchResult.ids.count
+            diagnostics.cappedReconciliation = fetchResult.wasCapped
+            diagnostics.cappedAtMessageCount = fetchResult.wasCapped ? fetchResult.ids.count : 0
 
-            guard !recentMessageIds.isEmpty else {
+            guard !fetchResult.ids.isEmpty else {
                 log.debug("No recent messages to check for reconciliation")
-                return []
+                return MissedMessageReconciliationResult(missingIds: [], diagnostics: diagnostics)
             }
 
-            log.debug("Checking \(recentMessageIds.count) recent Gmail messages against local DB")
+            log.debug("Checking \(fetchResult.ids.count) recent Gmail messages against local DB")
 
-            let missingIds = await findMissingMessages(ids: recentMessageIds, in: context)
+            let missingIds = await findMissingMessages(ids: fetchResult.ids, in: context)
+            diagnostics.missedMessagesFound = missingIds.count
 
             if !missingIds.isEmpty {
                 log.info("Found \(missingIds.count) messages in Gmail but not locally")
             }
 
-            return missingIds
+            return MissedMessageReconciliationResult(missingIds: missingIds, diagnostics: diagnostics)
         } catch {
             log.error("Reconciliation check failed", error: error)
-            return []
+            return MissedMessageReconciliationResult(missingIds: [], diagnostics: diagnostics)
         }
     }
 
-    private func fetchRecentMessageIds(query: String, maxCount: Int) async throws -> [String] {
-        guard maxCount > 0 else { return [] }
+    private struct RecentMessageIDFetchResult {
+        let ids: [String]
+        let wasCapped: Bool
+    }
+
+    private func fetchRecentMessageIds(query: String, maxCount: Int) async throws -> RecentMessageIDFetchResult {
+        guard maxCount > 0 else {
+            return RecentMessageIDFetchResult(ids: [], wasCapped: false)
+        }
 
         var pageToken: String? = nil
         var collectedIds: [String] = []
@@ -106,7 +185,7 @@ final class SyncReconciliation: Sendable {
             )
         }
 
-        return collectedIds
+        return RecentMessageIDFetchResult(ids: collectedIds, wasCapped: pageToken != nil)
     }
 
     /// Calculates the start time for reconciliation window
@@ -174,6 +253,20 @@ final class SyncReconciliation: Sendable {
         labelIds: Set<String>,
         modificationTransaction: ModificationTracker.Transaction?
     ) async {
+        _ = await reconcileLabelStatesWithDiagnostics(
+            in: context,
+            labelIds: labelIds,
+            modificationTransaction: modificationTransaction
+        )
+    }
+
+    func reconcileLabelStatesWithDiagnostics(
+        in context: NSManagedObjectContext,
+        labelIds: Set<String>,
+        modificationTransaction: ModificationTracker.Transaction?
+    ) async -> SyncReconciliationDiagnostics {
+        var diagnostics = SyncReconciliationDiagnostics()
+
         do {
             // Query recent messages (last 24 hours)
             let oneDayAgo = Date().addingTimeInterval(-86400)
@@ -187,29 +280,45 @@ final class SyncReconciliation: Sendable {
 
             guard !recentMessageIds.isEmpty else {
                 log.debug("No recent messages to reconcile labels for")
-                return
+                return diagnostics
             }
 
+            diagnostics.labelMessagesChecked = recentMessageIds.count
             log.debug("Reconciling labels for \(recentMessageIds.count) recent messages")
 
             // Step 1: Fetch Gmail metadata in parallel with bounded concurrency
-            let gmailMetadata = try await fetchGmailMetadataInParallel(messageIds: recentMessageIds)
+            let metadataSummary: MetadataFetchSummary
+            do {
+                metadataSummary = try await fetchGmailMetadataInParallel(messageIds: recentMessageIds)
+            } catch let error as MetadataFetchFailure {
+                diagnostics.metadataFetchFailures = error.failureCount
+                log.error("Label reconciliation failed", error: error.underlyingError)
+                return diagnostics
+            }
+            diagnostics.metadataFetchFailures = metadataSummary.failureCount
+            diagnostics.skippedChecks += metadataSummary.deletedCount
 
             // Step 2: Process mismatches (local messages fetched inside context.perform for thread safety)
             let stats = await processReconciliationMismatches(
-                gmailMetadata: gmailMetadata,
+                gmailMetadata: metadataSummary.metadata,
                 messageIds: recentMessageIds,
                 context: context,
                 modificationTransaction: modificationTransaction
             )
+            diagnostics.skippedChecks += stats.skippedChecks
+            diagnostics.driftFound = stats.driftFound
+            diagnostics.driftRepaired = stats.driftRepaired
 
             if stats.labelMismatches > 0 {
                 log.info("Label reconciliation: found \(stats.labelMismatches) mismatches, updated \(stats.updatedMessages) messages")
             } else {
                 log.debug("Label reconciliation: no mismatches (checked \(recentMessageIds.count - stats.notInLocalDB) local messages)")
             }
+
+            return diagnostics
         } catch {
             log.error("Label reconciliation failed", error: error)
+            return diagnostics
         }
     }
 
@@ -227,13 +336,25 @@ final class SyncReconciliation: Sendable {
         case error(String, Error)  // Message ID and the error
     }
 
+    private struct MetadataFetchSummary {
+        let metadata: [String: GmailMetadata]
+        let failureCount: Int
+        let deletedCount: Int
+    }
+
+    private struct MetadataFetchFailure: Error {
+        let failureCount: Int
+        let underlyingError: Error
+    }
+
     /// Fetches Gmail metadata in parallel with bounded concurrency
     /// Returns metadata for messages that still exist, skips deleted messages, and throws on transient errors
-    private func fetchGmailMetadataInParallel(messageIds: [String]) async throws -> [String: GmailMetadata] {
+    private func fetchGmailMetadataInParallel(messageIds: [String]) async throws -> MetadataFetchSummary {
         // Use chunks to limit concurrent requests
         let chunks = messageIds.chunked(into: Self.maxConcurrentGmailRequests)
         var allMetadata: [String: GmailMetadata] = [:]
         var transientErrors: [(String, Error)] = []
+        var deletedCount = 0
         let messageFetcher = self.messageFetcher
 
         for chunk in chunks {
@@ -274,6 +395,7 @@ final class SyncReconciliation: Sendable {
                 case .success(let metadata):
                     allMetadata[metadata.messageId] = metadata
                 case .deleted(let messageId):
+                    deletedCount += 1
                     log.debug("Message \(messageId) was deleted from Gmail, skipping reconciliation")
                 case .error(let messageId, let error):
                     transientErrors.append((messageId, error))
@@ -288,14 +410,21 @@ final class SyncReconciliation: Sendable {
                 // All requests failed - likely auth/network/rate limit issue
                 let (_, firstError) = transientErrors[0]
                 log.error("All metadata fetches failed (\(transientErrors.count) errors), aborting reconciliation", error: firstError)
-                throw firstError
+                throw MetadataFetchFailure(
+                    failureCount: transientErrors.count,
+                    underlyingError: firstError
+                )
             } else {
                 // Some succeeded, some failed - log and continue with what we have
                 log.warning("Metadata fetch had \(transientErrors.count) transient errors, continuing with \(allMetadata.count) successful fetches")
             }
         }
 
-        return allMetadata
+        return MetadataFetchSummary(
+            metadata: allMetadata,
+            failureCount: transientErrors.count,
+            deletedCount: deletedCount
+        )
     }
 
     /// Result of reconciling a single message
@@ -367,16 +496,20 @@ final class SyncReconciliation: Sendable {
             for (messageId, gmail) in gmailData {
                 guard let localMessage = localMessageDict[messageId] else {
                     stats.notInLocalDB += 1
+                    stats.skippedChecks += 1
                     continue
                 }
 
                 // Skip if message has pending local changes that have not yet been synced.
                 if HistoryProcessor.hasPendingLocalModification(message: localMessage) {
+                    stats.skippedChecks += 1
                     continue
                 }
 
                 let localLabels = localMessage.labels ?? []
                 let localHasInbox = localLabels.contains { $0.id == "INBOX" }
+                var messageHadDrift = false
+                var messageWasRepaired = false
                 var wasModified = false
 
                 // Check INBOX label discrepancy
@@ -384,18 +517,22 @@ final class SyncReconciliation: Sendable {
                     // Don't re-add INBOX if locally marked as SPAM - user intent takes precedence
                     let localHasSpam = localLabels.contains { $0.id == "SPAM" }
                     if gmail.hasInbox && localHasSpam {
+                        stats.skippedChecks += 1
                         continue
                     }
 
                     stats.labelMismatches += 1
+                    messageHadDrift = true
 
                     if gmail.hasInbox {
                         if let inboxLabel = inboxLabel {
                             localMessage.addToLabels(inboxLabel)
+                            messageWasRepaired = true
                         }
                     } else {
                         if let existingInbox = localLabels.first(where: { $0.id == "INBOX" }) {
                             localMessage.removeFromLabels(existingInbox)
+                            messageWasRepaired = true
                         }
                     }
 
@@ -405,8 +542,17 @@ final class SyncReconciliation: Sendable {
 
                 // Check UNREAD status
                 if localMessage.isUnread != gmail.isUnread {
+                    messageHadDrift = true
                     localMessage.isUnread = gmail.isUnread
+                    messageWasRepaired = true
                     wasModified = true
+                }
+
+                if messageHadDrift {
+                    stats.driftFound += 1
+                }
+                if messageWasRepaired {
+                    stats.driftRepaired += 1
                 }
 
                 if wasModified, let conversationID = localMessage.conversation?.objectID {
@@ -435,4 +581,7 @@ private struct ReconciliationStats {
     var labelMismatches = 0
     var updatedMessages = 0
     var notInLocalDB = 0
+    var skippedChecks = 0
+    var driftFound = 0
+    var driftRepaired = 0
 }

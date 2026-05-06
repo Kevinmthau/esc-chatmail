@@ -10,7 +10,7 @@ struct ReconciliationInput {
 /// Phase 4: Reconciliation to catch missed messages
 struct ReconciliationPhase: SyncPhase {
     typealias Input = ReconciliationInput
-    typealias Output = Void
+    typealias Output = SyncReconciliationDiagnostics
 
     let name = "Reconciliation"
     let progressRange: ClosedRange<Double> = 0.8...0.85
@@ -33,18 +33,21 @@ struct ReconciliationPhase: SyncPhase {
     func execute(
         input: ReconciliationInput,
         context: SyncPhaseContext
-    ) async throws {
+    ) async throws -> SyncReconciliationDiagnostics {
         try Task.checkCancellation()
+        var diagnostics = SyncReconciliationDiagnostics()
 
         context.reportProgress(0, status: "Checking for missed messages...", phase: self)
 
         let installTimestamp = UserDefaults.standard.double(forKey: "installTimestamp")
 
         // Check for missed messages
-        let missedIds = await reconciliation.checkForMissedMessages(
+        let missedResult = await reconciliation.checkForMissedMessagesWithDiagnostics(
             in: context.coreDataContext,
             installTimestamp: installTimestamp
         )
+        let missedIds = missedResult.missingIds
+        diagnostics.merge(missedResult.diagnostics)
 
         if !missedIds.isEmpty {
             log.info("Reconciliation found \(missedIds.count) missed messages")
@@ -74,13 +77,27 @@ struct ReconciliationPhase: SyncPhase {
             log.debug("Skipping label reconciliation (no history changes)")
         } else {
             context.reportProgress(0.8, status: "Reconciling labels...", phase: self)
-            await reconciliation.reconcileLabelStates(
+            let labelDiagnostics = await reconciliation.reconcileLabelStatesWithDiagnostics(
                 in: context.coreDataContext,
                 labelIds: context.labelIds,
                 modificationTransaction: context.modificationTransaction
             )
+            diagnostics.merge(labelDiagnostics)
         }
 
+        logDiagnostics(diagnostics)
         context.reportProgress(1.0, status: "Reconciliation complete", phase: self)
+        return diagnostics
+    }
+
+    private func logDiagnostics(_ diagnostics: SyncReconciliationDiagnostics) {
+        let message = "Reconciliation diagnostics: \(diagnostics.summary)"
+        if diagnostics.hasWarnings {
+            log.warning("\(message)")
+        } else if diagnostics.hasFindings {
+            log.info("\(message)")
+        } else {
+            log.debug("\(message)")
+        }
     }
 }

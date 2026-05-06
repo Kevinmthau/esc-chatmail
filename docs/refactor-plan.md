@@ -321,6 +321,10 @@ Validation:
 
 Goal: make sync drift detectable and easier to repair.
 
+Status as of 2026-05-06:
+
+- 4.1 complete: reconciliation now emits structured diagnostics for checked messages, skipped checks, metadata failures, drift found/repaired, and capped missed-message scans; sync timing includes the summary and focused reconciliation coverage exercises cap and metadata-failure reporting.
+
 ### 4.1 Add reconciliation diagnostics
 
 Files likely involved:
@@ -408,8 +412,8 @@ Before finishing any phase:
 
 ## Recommended Next Patch
 
-Start with Phase 4.1 now that the durable optimistic send lifecycle is complete.
+Start with Phase 4.2 now that reconciliation diagnostics exist.
 
 Implementation prompt:
 
-> Implement Phase 4.1 of `docs/refactor-plan.md`. Add low-volume reconciliation diagnostics for messages checked, skipped checks, metadata fetch failures, drift found, drift repaired, and capped reconciliation. Keep the patch diagnostic-only unless the instrumentation exposes a concrete correction bug, add focused sync/reconciliation tests where the structure supports it, then run the relevant sync suites and the iOS build.
+> Implement Phase 4.2 of `docs/refactor-plan.md`. Use the reconciliation diagnostics from Phase 4.1 to decide whether capped reconciliation should become resumable. If the first-window policy is not enough, add bounded resumable reconciliation windows instead of an unbounded foreground fetch, add focused tests for multiple windows, then run the relevant sync suites and the iOS build.

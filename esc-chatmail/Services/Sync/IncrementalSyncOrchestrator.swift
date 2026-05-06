@@ -198,14 +198,17 @@ final class IncrementalSyncOrchestrator {
             let noHistoryChanges = historyResult.records.isEmpty && historyResult.newMessageIds.isEmpty
             let shouldSkipReconciliation = noHistoryChanges && !shouldForceReconciliation()
             let reconciliationTimer = timing.start("reconciliation")
-            try await reconciliationPhase.execute(
+            let reconciliationDiagnostics = try await reconciliationPhase.execute(
                 input: ReconciliationInput(skipLabelReconciliation: shouldSkipReconciliation),
                 context: phaseContext
             )
             if !shouldSkipReconciliation {
                 recordReconciliationTime()
             }
-            timing.finish(reconciliationTimer, detail: "skipLabels=\(shouldSkipReconciliation)")
+            timing.finish(
+                reconciliationTimer,
+                detail: "skipLabels=\(shouldSkipReconciliation) \(reconciliationDiagnostics.summary)"
+            )
 
             // Don't advance historyId if history collection was truncated - we need to
             // retry from the same point to get remaining pages
