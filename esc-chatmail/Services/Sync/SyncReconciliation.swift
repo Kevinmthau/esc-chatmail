@@ -288,7 +288,7 @@ final class SyncReconciliation: Sendable {
                 let remainingCursors = nextIndex < cursors.endIndex ? cursors[nextIndex...] : cursors[cursors.endIndex...]
                 saveResumeCursorsAfterResumeFailure(
                     error: error,
-                    processedCursors: cursorsToSave,
+                    priorCursors: Array(cursors[..<index]),
                     failedCursor: cursor,
                     remainingCursors: remainingCursors,
                     currentOverflowCursor: currentOverflowCursor
@@ -332,12 +332,12 @@ final class SyncReconciliation: Sendable {
 
     private func saveResumeCursorsAfterResumeFailure(
         error: Error,
-        processedCursors: [MissedMessageReconciliationCursor],
+        priorCursors: [MissedMessageReconciliationCursor],
         failedCursor: MissedMessageReconciliationCursor,
         remainingCursors: ArraySlice<MissedMessageReconciliationCursor>,
         currentOverflowCursor: MissedMessageReconciliationCursor?
     ) {
-        var cursorsToSave = processedCursors
+        var cursorsToSave = priorCursors
         if !isInvalidReconciliationCursorError(error) {
             cursorsToSave.append(failedCursor)
         }

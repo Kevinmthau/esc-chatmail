@@ -280,6 +280,45 @@ final class SyncReconciliationTests: XCTestCase {
         XCTAssertEqual(try persistedMissedMessageCursorTokens(), ["old-page-2"])
     }
 
+    func testCheckForMissedMessagesWithDiagnosticsPreservesPriorResumeCursorOnLaterTransientPageError() async throws {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.paginatedListMessagesResponses = [
+            "__first_page__": MessagesListResponse(
+                messages: [MessageListItem(id: "current-1", threadId: "current-thread-1")],
+                nextPageToken: nil,
+                resultSizeEstimate: 1
+            ),
+            "old-a-page-2": MessagesListResponse(
+                messages: [MessageListItem(id: "old-a-1", threadId: "old-a-thread-1")],
+                nextPageToken: nil,
+                resultSizeEstimate: 1
+            )
+        ]
+        mockAPI.listMessagesErrorsByPageToken["old-b-page-2"] = APIError.rateLimited
+        try setPersistedMissedMessageCursors([
+            persistedCursor(query: "after:0 -label:spam -label:drafts -label:trash", pageToken: "old-a-page-2"),
+            persistedCursor(query: "after:1 -label:spam -label:drafts -label:trash", pageToken: "old-b-page-2")
+        ])
+
+        UserDefaults.standard.set(
+            Date().timeIntervalSince1970,
+            forKey: SyncConfig.lastSuccessfulSyncTimeKey
+        )
+
+        let sut = SyncReconciliation(
+            messageFetcher: MessageFetcher(apiClient: mockAPI)
+        )
+
+        let result = await sut.checkForMissedMessagesWithDiagnostics(
+            in: stack.newBackgroundContext(),
+            installTimestamp: Date().addingTimeInterval(-(24 * 60 * 60)).timeIntervalSince1970
+        )
+
+        XCTAssertTrue(result.missingIds.isEmpty)
+        XCTAssertEqual(mockAPI.listMessagesCallCount, 3)
+        XCTAssertEqual(try persistedMissedMessageCursorTokens(), ["old-a-page-2", "old-b-page-2"])
+    }
+
     func testReconcileLabelStates_fetchesMetadataThroughInjectedClient() async throws {
         let mockAPI = MockGmailAPIClient()
         mockAPI.setMessageList(["message-needs-inbox"])
