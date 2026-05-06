@@ -212,9 +212,9 @@ final class ChatViewModel: ObservableObject {
     }
 
     /// Sends a reply with optional attachments
-    func sendReply(with attachments: [Attachment]) async {
+    func sendReply(with attachments: [Attachment]) async -> Bool {
         let trimmedReplyText = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedReplyText.isEmpty || !attachments.isEmpty else { return }
+        guard !trimmedReplyText.isEmpty || !attachments.isEmpty else { return false }
 
         let result: OutboundMessageResult?
         do {
@@ -236,13 +236,14 @@ final class ChatViewModel: ObservableObject {
             )
         } catch {
             Log.error("Failed to create optimistic message for reply", category: .message, error: error)
-            return
+            return false
         }
-        guard result != nil else { return }
+        guard result != nil else { return false }
 
         // Clear composer immediately after optimistic insertion.
         replyText = ""
         replyingTo = nil
+        return true
     }
 
     // MARK: - Prefetch Operations

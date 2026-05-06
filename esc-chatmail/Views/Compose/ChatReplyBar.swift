@@ -5,7 +5,7 @@ struct ChatReplyBar: View {
     @Binding var replyText: String
     @Binding var replyingTo: Message?
     let conversation: Conversation
-    let onSend: ([Attachment]) async -> Void
+    let onSend: ([Attachment]) async -> Bool
     var focusBinding: FocusState<Bool>.Binding
     @State private var isSending = false
     @State private var attachments: [Attachment] = []
@@ -90,8 +90,10 @@ struct ChatReplyBar: View {
             if canSend {
                 Task {
                     isSending = true
-                    await onSend(attachments)
-                    attachments = []
+                    let didSend = await onSend(attachments)
+                    if didSend {
+                        attachments = []
+                    }
                     isSending = false
                 }
             }

@@ -234,11 +234,12 @@ final class ChatViewModelTests: XCTestCase {
         viewModel.replyText = "Reply body"
         viewModel.replyingTo = replyTarget
 
-        await viewModel.sendReply(with: [])
+        let didSend = await viewModel.sendReply(with: [])
 
         guard case .reply(let request)? = coordinator.lastRequest else {
             return XCTFail("Expected reply request")
         }
+        XCTAssertTrue(didSend)
         XCTAssertEqual(request.context.conversationObjectID, conversation.objectID)
         XCTAssertEqual(request.context.replyingToMessageObjectID, replyTarget.objectID)
         XCTAssertEqual(
@@ -311,30 +312,70 @@ final class ChatViewModelTests: XCTestCase {
         replyTarget.references = "<mutated-ref@example.com>"
         replyTarget.bodyText = "Mutated body"
 
-        await viewModel.sendReply(with: [])
+        let didSend = await viewModel.sendReply(with: [])
 
         guard case .reply(let request)? = coordinator.lastRequest else {
             return XCTFail("Expected reply request")
         }
+        XCTAssertTrue(didSend)
         XCTAssertEqual(request.context.conversationObjectID, conversation.objectID)
         XCTAssertEqual(request.context.replyingToMessageObjectID, replyTarget.objectID)
+    }
+
+    func testSendReply_reportsFailureWithoutClearingDraftState() async {
+        let authSession = makeTestAuthSession(userEmail: "me@example.com")
+        let coordinator = MockChatOutboundMessageCoordinator()
+        coordinator.sendError = MockChatSendError.optimisticCreationFailed
+        let tokenManager = MockTokenManager()
+        let deps = Dependencies(
+            authSession: authSession,
+            tokenManager: tokenManager,
+            gmailAPIClient: GmailAPIClient(tokenManager: tokenManager),
+            outboundMessageCoordinator: coordinator
+        )
+        let context = deps.viewContext
+        let conversation = ConversationBuilder()
+            .withDisplayName("Reply Thread")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies()
+        )
+        viewModel.replyText = "Retryable reply"
+
+        let didSend = await viewModel.sendReply(with: [])
+
+        XCTAssertFalse(didSend)
+        XCTAssertEqual(viewModel.replyText, "Retryable reply")
     }
 }
 
 @MainActor
 private final class MockChatOutboundMessageCoordinator: OutboundMessageCoordinating {
     private(set) var lastRequest: OutboundMessageRequest?
+    var sendError: Error?
+    var sendResult: OutboundMessageResult? = .init(
+        optimisticMessageID: "optimistic-1",
+        conversationReference: ConversationReference(
+            persistentStoreURI: URL(string: "x-coredata://conversation/123")!
+        )
+    )
 
     func send(
         _ request: OutboundMessageRequest,
         reconciliationHooks: OutboundMessageReconciliationHooks
     ) async throws -> OutboundMessageResult? {
         lastRequest = request
-        return .init(
-            optimisticMessageID: "optimistic-1",
-            conversationReference: ConversationReference(
-                persistentStoreURI: URL(string: "x-coredata://conversation/123")!
-            )
-        )
+        if let sendError {
+            throw sendError
+        }
+        return sendResult
     }
+}
+
+private enum MockChatSendError: Error {
+    case optimisticCreationFailed
 }
