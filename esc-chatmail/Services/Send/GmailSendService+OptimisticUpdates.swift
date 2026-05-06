@@ -174,6 +174,9 @@ extension GmailSendService {
             message: message,
             persistedSnapshot: snapshot
         )
+        for attachment in message.attachmentsArray {
+            attachment.message = nil
+        }
         viewContext.delete(message)
         finalizeOptimisticFailureCleanup(conversationCleanup, restoreRollupFields: true)
     }

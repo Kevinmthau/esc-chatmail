@@ -108,8 +108,21 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         context.failMutationRecordPersistence = false
         XCTAssertEqual(try messageCount(in: context), 0)
         XCTAssertEqual(try conversationCount(in: context), 0)
-        XCTAssertEqual(try attachmentCount(in: context), 0)
+        XCTAssertEqual(try attachmentCount(in: context), 1)
+        XCTAssertNil(attachment.message)
         XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
+
+        context.failAfterObtainingPermanentIDs = false
+        let retryHandle = try await failingSendService.createOptimisticMessage(
+            to: [recipient],
+            body: "retry send",
+            attachments: attachmentContexts,
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail(recipient)])
+            )
+        )
+        let retryMessage = try XCTUnwrap(failingSendService.fetchMessageSync(byID: retryHandle.optimisticMessageID))
+        XCTAssertEqual(retryMessage.attachmentsArray.first?.objectID, attachment.objectID)
     }
 
     func testCreateOptimisticMessage_reactivatesArchivedConversationWithoutImmediateSave() async throws {
@@ -189,6 +202,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
 
 private final class MutationRecordPersistenceFailingContext: NSManagedObjectContext {
     var failMutationRecordPersistence = false
+    var failAfterObtainingPermanentIDs = true
 
     override var persistentStoreCoordinator: NSPersistentStoreCoordinator? {
         get {
@@ -201,6 +215,8 @@ private final class MutationRecordPersistenceFailingContext: NSManagedObjectCont
 
     override func obtainPermanentIDs(for objects: [NSManagedObject]) throws {
         try super.obtainPermanentIDs(for: objects)
-        failMutationRecordPersistence = true
+        if failAfterObtainingPermanentIDs {
+            failMutationRecordPersistence = true
+        }
     }
 }
