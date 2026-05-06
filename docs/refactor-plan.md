@@ -324,6 +324,8 @@ Goal: make sync drift detectable and easier to repair.
 Status as of 2026-05-06:
 
 - 4.1 complete: reconciliation now emits structured diagnostics for checked messages, skipped checks, metadata failures, drift found/repaired, and capped missed-message scans; sync timing includes the summary and focused reconciliation coverage exercises cap and metadata-failure reporting.
+- 4.2 complete: capped missed-message reconciliation now persists a bounded page cursor, checks the newest page plus one resumed window when a cursor is pending, expires stale cursors, and has focused coverage for advancing across multiple capped windows.
+- Phase 4 is complete.
 
 ### 4.1 Add reconciliation diagnostics
 
@@ -412,8 +414,8 @@ Before finishing any phase:
 
 ## Recommended Next Patch
 
-Start with Phase 4.2 now that reconciliation diagnostics exist.
+Start with Phase 5.1 now that sync reconciliation observability and bounded missed-message recovery are complete.
 
 Implementation prompt:
 
-> Implement Phase 4.2 of `docs/refactor-plan.md`. Use the reconciliation diagnostics from Phase 4.1 to decide whether capped reconciliation should become resumable. If the first-window policy is not enough, add bounded resumable reconciliation windows instead of an unbounded foreground fetch, add focused tests for multiple windows, then run the relevant sync suites and the iOS build.
+> Implement Phase 5.1 of `docs/refactor-plan.md`. Split chat dependencies by responsibility without changing behavior, keep the diff mechanical and reviewable, run existing ChatViewModel tests, then run the iOS build.

@@ -124,6 +124,9 @@ struct SyncConfig {
     /// UserDefaults key for tracking last label reconciliation time
     static let lastReconciliationTimeKey = "lastReconciliationTime"
 
+    /// UserDefaults key for resuming bounded missed-message reconciliation windows
+    static let missedMessageReconciliationCursorKey = "missedMessageReconciliationCursor"
+
     /// Interval between forced label reconciliations even when history is empty (in seconds)
     /// Running reconciliation hourly ensures label drift is caught even without history changes
     static let reconciliationInterval: TimeInterval = 3600 // 1 hour

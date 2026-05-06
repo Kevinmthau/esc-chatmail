@@ -11,6 +11,7 @@ struct SyncReconciliationDiagnostics: Sendable, Equatable {
     var driftRepaired = 0
     var cappedReconciliation = false
     var cappedAtMessageCount = 0
+    var resumedMissedMessageWindow = false
 
     var messagesChecked: Int {
         missedMessageCandidatesChecked + labelMessagesChecked
@@ -35,7 +36,8 @@ struct SyncReconciliationDiagnostics: Sendable, Equatable {
             "driftFound=\(driftFound)",
             "driftRepaired=\(driftRepaired)",
             "capped=\(cappedReconciliation)",
-            "cappedAt=\(cappedAtMessageCount)"
+            "cappedAt=\(cappedAtMessageCount)",
+            "resumedMissedWindow=\(resumedMissedMessageWindow)"
         ].joined(separator: " ")
     }
 
@@ -49,6 +51,7 @@ struct SyncReconciliationDiagnostics: Sendable, Equatable {
         driftRepaired += other.driftRepaired
         cappedReconciliation = cappedReconciliation || other.cappedReconciliation
         cappedAtMessageCount = max(cappedAtMessageCount, other.cappedAtMessageCount)
+        resumedMissedMessageWindow = resumedMissedMessageWindow || other.resumedMissedMessageWindow
     }
 }
 
@@ -125,6 +128,7 @@ final class SyncReconciliation: Sendable {
             diagnostics.missedMessageCandidatesChecked = fetchResult.ids.count
             diagnostics.cappedReconciliation = fetchResult.wasCapped
             diagnostics.cappedAtMessageCount = fetchResult.wasCapped ? fetchResult.ids.count : 0
+            diagnostics.resumedMissedMessageWindow = fetchResult.resumedFromCursor
 
             guard !fetchResult.ids.isEmpty else {
                 log.debug("No recent messages to check for reconciliation")
@@ -150,14 +154,64 @@ final class SyncReconciliation: Sendable {
     private struct RecentMessageIDFetchResult {
         let ids: [String]
         let wasCapped: Bool
+        let resumedFromCursor: Bool
     }
 
     private func fetchRecentMessageIds(query: String, maxCount: Int) async throws -> RecentMessageIDFetchResult {
         guard maxCount > 0 else {
-            return RecentMessageIDFetchResult(ids: [], wasCapped: false)
+            return RecentMessageIDFetchResult(ids: [], wasCapped: false, resumedFromCursor: false)
         }
 
-        var pageToken: String? = nil
+        let pendingCursor = loadMissedMessageReconciliationCursor()
+        let effectiveMaxCount = reconciliationBudget(maxCount, hasPendingCursor: pendingCursor != nil)
+
+        if let pendingCursor {
+            return try await fetchRecentMessageIdsResuming(
+                cursor: pendingCursor,
+                currentQuery: query,
+                maxCount: effectiveMaxCount
+            )
+        }
+
+        let fetchResult = try await fetchMessageIdWindow(
+            query: query,
+            startPageToken: nil,
+            maxCount: effectiveMaxCount
+        )
+        saveMissedMessageReconciliationCursor(
+            query: query,
+            nextPageToken: fetchResult.nextPageToken,
+            startedAt: Date().timeIntervalSince1970
+        )
+
+        if fetchResult.nextPageToken != nil {
+            log.warning(
+                "Reconciliation capped at \(fetchResult.ids.count) recent messages; remaining pages will be checked on a later sync"
+            )
+        }
+
+        return RecentMessageIDFetchResult(
+            ids: fetchResult.ids,
+            wasCapped: fetchResult.nextPageToken != nil,
+            resumedFromCursor: false
+        )
+    }
+
+    private struct MessageIDWindowFetchResult {
+        let ids: [String]
+        let nextPageToken: String?
+    }
+
+    private func fetchMessageIdWindow(
+        query: String,
+        startPageToken: String?,
+        maxCount: Int
+    ) async throws -> MessageIDWindowFetchResult {
+        guard maxCount > 0 else {
+            return MessageIDWindowFetchResult(ids: [], nextPageToken: startPageToken)
+        }
+
+        var pageToken = startPageToken
         var collectedIds: [String] = []
         var seenIds = Set<String>()
 
@@ -179,13 +233,133 @@ final class SyncReconciliation: Sendable {
             pageToken = nextPageToken
         } while pageToken != nil && collectedIds.count < maxCount
 
-        if pageToken != nil {
-            log.warning(
-                "Reconciliation capped at \(collectedIds.count) recent messages; newer pages will be checked on a later sync"
+        return MessageIDWindowFetchResult(ids: collectedIds, nextPageToken: pageToken)
+    }
+
+    private func fetchRecentMessageIdsResuming(
+        cursor: MissedMessageReconciliationCursor,
+        currentQuery: String,
+        maxCount: Int
+    ) async throws -> RecentMessageIDFetchResult {
+        let newestPageCount = min(SyncConfig.reconciliationPageSize, maxCount)
+        let newestWindow = try await fetchMessageIdWindow(
+            query: currentQuery,
+            startPageToken: nil,
+            maxCount: newestPageCount
+        )
+        let remaining = maxCount - newestWindow.ids.count
+
+        guard remaining > 0 else {
+            return RecentMessageIDFetchResult(
+                ids: newestWindow.ids,
+                wasCapped: true,
+                resumedFromCursor: false
             )
         }
 
-        return RecentMessageIDFetchResult(ids: collectedIds, wasCapped: pageToken != nil)
+        do {
+            let resumedWindow = try await fetchMessageIdWindow(
+                query: cursor.query,
+                startPageToken: cursor.pageToken,
+                maxCount: remaining
+            )
+            let ids = combinedUniqueIds(newestWindow.ids, resumedWindow.ids)
+            saveMissedMessageReconciliationCursor(
+                query: cursor.query,
+                nextPageToken: resumedWindow.nextPageToken,
+                startedAt: cursor.startedAt
+            )
+
+            if resumedWindow.nextPageToken != nil {
+                log.warning(
+                    "Reconciliation resumed and capped at \(ids.count) recent messages; remaining pages will be checked on a later sync"
+                )
+            } else {
+                log.debug("Reconciliation completed pending missed-message window")
+            }
+
+            return RecentMessageIDFetchResult(
+                ids: ids,
+                wasCapped: resumedWindow.nextPageToken != nil,
+                resumedFromCursor: true
+            )
+        } catch {
+            clearMissedMessageReconciliationCursor()
+            throw error
+        }
+    }
+
+    private func reconciliationBudget(_ baseCount: Int, hasPendingCursor: Bool) -> Int {
+        guard hasPendingCursor else { return baseCount }
+
+        let minimumResumeBudget = SyncConfig.minimumReconciliationMessages + SyncConfig.reconciliationPageSize
+        return min(SyncConfig.maxReconciliationMessages, max(baseCount, minimumResumeBudget))
+    }
+
+    private func combinedUniqueIds(_ first: [String], _ second: [String]) -> [String] {
+        var seen = Set<String>()
+        var combined: [String] = []
+        combined.reserveCapacity(first.count + second.count)
+
+        for id in first + second where seen.insert(id).inserted {
+            combined.append(id)
+        }
+
+        return combined
+    }
+
+    private struct MissedMessageReconciliationCursor: Codable {
+        let query: String
+        let pageToken: String
+        let startedAt: TimeInterval
+    }
+
+    private func loadMissedMessageReconciliationCursor() -> MissedMessageReconciliationCursor? {
+        let defaults = UserDefaults.standard
+        guard let data = defaults.data(forKey: SyncConfig.missedMessageReconciliationCursorKey) else {
+            return nil
+        }
+
+        do {
+            let cursor = try JSONDecoder().decode(MissedMessageReconciliationCursor.self, from: data)
+            let age = Date().timeIntervalSince1970 - cursor.startedAt
+            guard !cursor.pageToken.isEmpty, age <= SyncConfig.maxReconciliationWindow else {
+                clearMissedMessageReconciliationCursor()
+                return nil
+            }
+            return cursor
+        } catch {
+            clearMissedMessageReconciliationCursor()
+            return nil
+        }
+    }
+
+    private func saveMissedMessageReconciliationCursor(
+        query: String,
+        nextPageToken: String?,
+        startedAt: TimeInterval
+    ) {
+        guard let nextPageToken, !nextPageToken.isEmpty else {
+            clearMissedMessageReconciliationCursor()
+            return
+        }
+
+        let cursor = MissedMessageReconciliationCursor(
+            query: query,
+            pageToken: nextPageToken,
+            startedAt: startedAt
+        )
+
+        do {
+            let data = try JSONEncoder().encode(cursor)
+            UserDefaults.standard.set(data, forKey: SyncConfig.missedMessageReconciliationCursorKey)
+        } catch {
+            clearMissedMessageReconciliationCursor()
+        }
+    }
+
+    private func clearMissedMessageReconciliationCursor() {
+        UserDefaults.standard.removeObject(forKey: SyncConfig.missedMessageReconciliationCursorKey)
     }
 
     /// Calculates the start time for reconciliation window

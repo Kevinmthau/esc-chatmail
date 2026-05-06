@@ -8,10 +8,12 @@ final class SyncReconciliationTests: XCTestCase {
         try super.setUpWithError()
         stack = TestCoreDataStack()
         UserDefaults.standard.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+        UserDefaults.standard.removeObject(forKey: SyncConfig.missedMessageReconciliationCursorKey)
     }
 
     override func tearDownWithError() throws {
         UserDefaults.standard.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+        UserDefaults.standard.removeObject(forKey: SyncConfig.missedMessageReconciliationCursorKey)
         stack = nil
         try super.tearDownWithError()
     }
@@ -88,6 +90,122 @@ final class SyncReconciliationTests: XCTestCase {
         XCTAssertTrue(result.diagnostics.cappedReconciliation)
         XCTAssertEqual(result.diagnostics.cappedAtMessageCount, 100)
         XCTAssertEqual(mockAPI.listMessagesCallCount, 1)
+    }
+
+    func testCheckForMissedMessagesWithDiagnosticsResumesCappedWindowsAcrossRuns() async throws {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.paginatedListMessagesResponses = [
+            "__first_page__": MessagesListResponse(
+                messages: (1...100).map { MessageListItem(id: "message-\($0)", threadId: "thread-\($0)") },
+                nextPageToken: "page-2",
+                resultSizeEstimate: 250
+            ),
+            "page-2": MessagesListResponse(
+                messages: (101...200).map { MessageListItem(id: "message-\($0)", threadId: "thread-\($0)") },
+                nextPageToken: "page-3",
+                resultSizeEstimate: 250
+            ),
+            "page-3": MessagesListResponse(
+                messages: (201...250).map { MessageListItem(id: "message-\($0)", threadId: "thread-\($0)") },
+                nextPageToken: nil,
+                resultSizeEstimate: 250
+            )
+        ]
+
+        UserDefaults.standard.set(
+            Date().timeIntervalSince1970,
+            forKey: SyncConfig.lastSuccessfulSyncTimeKey
+        )
+
+        let sut = SyncReconciliation(
+            messageFetcher: MessageFetcher(apiClient: mockAPI)
+        )
+        let installTimestamp = Date().addingTimeInterval(-(24 * 60 * 60)).timeIntervalSince1970
+
+        let firstResult = await sut.checkForMissedMessagesWithDiagnostics(
+            in: stack.newBackgroundContext(),
+            installTimestamp: installTimestamp
+        )
+
+        XCTAssertEqual(firstResult.missingIds, (1...100).map { "message-\($0)" })
+        XCTAssertTrue(firstResult.diagnostics.cappedReconciliation)
+        XCTAssertFalse(firstResult.diagnostics.resumedMissedMessageWindow)
+        XCTAssertEqual(mockAPI.listMessagesCallCount, 1)
+        XCTAssertNil(mockAPI.listMessagesLastPageToken)
+
+        try seedMessages(1...100)
+
+        let secondResult = await sut.checkForMissedMessagesWithDiagnostics(
+            in: stack.newBackgroundContext(),
+            installTimestamp: installTimestamp
+        )
+
+        XCTAssertEqual(secondResult.missingIds, (101...200).map { "message-\($0)" })
+        XCTAssertTrue(secondResult.diagnostics.cappedReconciliation)
+        XCTAssertTrue(secondResult.diagnostics.resumedMissedMessageWindow)
+        XCTAssertEqual(secondResult.diagnostics.missedMessageCandidatesChecked, 200)
+        XCTAssertEqual(mockAPI.listMessagesCallCount, 3)
+        XCTAssertEqual(mockAPI.listMessagesLastPageToken, "page-2")
+
+        try seedMessages(101...200)
+
+        let thirdResult = await sut.checkForMissedMessagesWithDiagnostics(
+            in: stack.newBackgroundContext(),
+            installTimestamp: installTimestamp
+        )
+
+        XCTAssertEqual(thirdResult.missingIds, (201...250).map { "message-\($0)" })
+        XCTAssertFalse(thirdResult.diagnostics.cappedReconciliation)
+        XCTAssertTrue(thirdResult.diagnostics.resumedMissedMessageWindow)
+        XCTAssertEqual(thirdResult.diagnostics.missedMessageCandidatesChecked, 150)
+        XCTAssertEqual(mockAPI.listMessagesCallCount, 5)
+        XCTAssertEqual(mockAPI.listMessagesLastPageToken, "page-3")
+    }
+
+    func testCheckForMissedMessagesWithDiagnosticsIgnoresExpiredResumeCursor() async throws {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.paginatedListMessagesResponses = [
+            "__first_page__": MessagesListResponse(
+                messages: (1...100).map { MessageListItem(id: "message-\($0)", threadId: "thread-\($0)") },
+                nextPageToken: "page-2",
+                resultSizeEstimate: 150
+            ),
+            "page-2": MessagesListResponse(
+                messages: (101...150).map { MessageListItem(id: "message-\($0)", threadId: "thread-\($0)") },
+                nextPageToken: nil,
+                resultSizeEstimate: 150
+            )
+        ]
+        let staleStartedAt = Date()
+            .addingTimeInterval(-SyncConfig.maxReconciliationWindow - 60)
+            .timeIntervalSince1970
+        let staleCursor = [
+            "query": "after:0 -label:spam -label:drafts -label:trash",
+            "pageToken": "page-2",
+            "startedAt": staleStartedAt
+        ] as [String: Any]
+        let cursorData = try JSONSerialization.data(withJSONObject: staleCursor)
+        UserDefaults.standard.set(cursorData, forKey: SyncConfig.missedMessageReconciliationCursorKey)
+
+        UserDefaults.standard.set(
+            Date().timeIntervalSince1970,
+            forKey: SyncConfig.lastSuccessfulSyncTimeKey
+        )
+
+        let sut = SyncReconciliation(
+            messageFetcher: MessageFetcher(apiClient: mockAPI)
+        )
+
+        let result = await sut.checkForMissedMessagesWithDiagnostics(
+            in: stack.newBackgroundContext(),
+            installTimestamp: Date().addingTimeInterval(-(24 * 60 * 60)).timeIntervalSince1970
+        )
+
+        XCTAssertEqual(result.missingIds, (1...100).map { "message-\($0)" })
+        XCTAssertTrue(result.diagnostics.cappedReconciliation)
+        XCTAssertFalse(result.diagnostics.resumedMissedMessageWindow)
+        XCTAssertEqual(mockAPI.listMessagesCallCount, 1)
+        XCTAssertNil(mockAPI.listMessagesLastPageToken)
     }
 
     func testReconcileLabelStates_fetchesMetadataThroughInjectedClient() async throws {
@@ -190,5 +308,16 @@ final class SyncReconciliationTests: XCTestCase {
         XCTAssertEqual(diagnostics.driftRepaired, 1)
         XCTAssertTrue(reconciledState.isUnread)
         XCTAssertTrue(reconciledState.labelIds.contains("INBOX"))
+    }
+
+    private func seedMessages(_ range: ClosedRange<Int>) throws {
+        let seedContext = stack.viewContext
+        for index in range {
+            MessageBuilder()
+                .withId("message-\(index)")
+                .withThreadId("thread-\(index)")
+                .build(in: seedContext)
+        }
+        try stack.saveViewContext()
     }
 }
