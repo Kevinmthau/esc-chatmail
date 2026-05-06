@@ -72,6 +72,46 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertEqual(try optimisticMutationRecordCount(in: context), 1)
     }
 
+    func testCreateOptimisticMessage_rollsBackPendingGraphWhenMutationRecordPersistenceFails() async throws {
+        let context = MutationRecordPersistenceFailingContext(concurrencyType: .mainQueueConcurrencyType)
+        context.persistentStoreCoordinator = coreDataStack.persistentContainer.persistentStoreCoordinator
+        context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+        let failingSendService = GmailSendService(viewContext: context)
+        let attachment = AttachmentBuilder()
+            .withId("local_record_failure_attachment")
+            .asImage()
+            .queued()
+            .withLocalURL("Attachments/record-failure.jpg")
+            .withPreviewURL("Previews/record-failure.jpg")
+            .build(in: context)
+        let attachmentContexts = try OutboundAttachmentContextBuilder(viewContext: context)
+            .buildSendAttachments(from: [attachment])
+        context.failMutationRecordPersistence = false
+        let recipient = "record-failure@example.com"
+
+        do {
+            _ = try await failingSendService.createOptimisticMessage(
+                to: [recipient],
+                body: "pending send",
+                attachments: attachmentContexts,
+                optimisticConversation: .participantHash(
+                    calculateParticipantHash(from: [normalizedEmail(recipient)])
+                )
+            )
+            XCTFail("Expected optimistic creation to fail")
+        } catch let error as GmailSendService.SendError {
+            guard case .optimisticCreationFailed = error else {
+                return XCTFail("Expected optimisticCreationFailed but got \(error)")
+            }
+        }
+
+        context.failMutationRecordPersistence = false
+        XCTAssertEqual(try messageCount(in: context), 0)
+        XCTAssertEqual(try conversationCount(in: context), 0)
+        XCTAssertEqual(try attachmentCount(in: context), 0)
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
+    }
+
     func testCreateOptimisticMessage_reactivatesArchivedConversationWithoutImmediateSave() async throws {
         let context = coreDataStack.viewContext
         let recipient = "friend@example.com"
@@ -126,5 +166,41 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         let request = OutboundSendMutationRecord.fetchRequest()
         request.includesPendingChanges = true
         return try context.count(for: request)
+    }
+
+    private func messageCount(in context: NSManagedObjectContext) throws -> Int {
+        let request = Message.fetchRequest()
+        request.includesPendingChanges = true
+        return try context.count(for: request)
+    }
+
+    private func conversationCount(in context: NSManagedObjectContext) throws -> Int {
+        let request = Conversation.fetchRequest()
+        request.includesPendingChanges = true
+        return try context.count(for: request)
+    }
+
+    private func attachmentCount(in context: NSManagedObjectContext) throws -> Int {
+        let request = Attachment.fetchRequest()
+        request.includesPendingChanges = true
+        return try context.count(for: request)
+    }
+}
+
+private final class MutationRecordPersistenceFailingContext: NSManagedObjectContext {
+    var failMutationRecordPersistence = false
+
+    override var persistentStoreCoordinator: NSPersistentStoreCoordinator? {
+        get {
+            failMutationRecordPersistence ? nil : super.persistentStoreCoordinator
+        }
+        set {
+            super.persistentStoreCoordinator = newValue
+        }
+    }
+
+    override func obtainPermanentIDs(for objects: [NSManagedObject]) throws {
+        try super.obtainPermanentIDs(for: objects)
+        failMutationRecordPersistence = true
     }
 }

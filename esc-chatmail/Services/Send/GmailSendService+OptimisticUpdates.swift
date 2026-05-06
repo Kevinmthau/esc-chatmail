@@ -89,6 +89,7 @@ extension GmailSendService {
             try persistOptimisticSendMutationRecord(rollbackSnapshot)
         } catch {
             Log.error("Failed to persist optimistic send mutation record", category: .message, error: error)
+            rollbackOptimisticCreation(message, snapshot: rollbackSnapshot)
             throw SendError.optimisticCreationFailed
         }
         viewContext.processPendingChanges()
@@ -162,6 +163,19 @@ extension GmailSendService {
         deleteOptimisticSendMutationRecord(messageID: optimisticMessageID)
 
         saveOptimisticFailureCleanup()
+    }
+
+    @MainActor
+    private func rollbackOptimisticCreation(
+        _ message: Message,
+        snapshot: OptimisticSendMutationSnapshot
+    ) {
+        let conversationCleanup = OptimisticFailureConversationCleanup(
+            message: message,
+            persistedSnapshot: snapshot
+        )
+        viewContext.delete(message)
+        finalizeOptimisticFailureCleanup(conversationCleanup, restoreRollupFields: true)
     }
 
     @MainActor
