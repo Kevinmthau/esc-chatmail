@@ -903,7 +903,7 @@ struct NewsletterPreviewBuilder {
         let connectorCount = tokens.filter { teaserConnectorTokens.contains($0) }.count
         return normalized.count >= 70 ||
             normalized.range(of: "[.!?,;:]", options: .regularExpression) != nil ||
-            tokens.count >= 4 ||
+            normalized.lowercased().contains("just landed") ||
             connectorCount >= 2
     }
 
@@ -914,7 +914,7 @@ struct NewsletterPreviewBuilder {
         }
 
         let navigationTokenCount = tokens.filter { navigationSnippetTokens.contains($0) }.count
-        return navigationTokenCount >= 3 && navigationTokenCount * 2 >= tokens.count
+        return navigationTokenCount >= 4 && navigationTokenCount * 2 >= tokens.count
     }
 
     private func previewWordTokens(in text: String) -> [String] {

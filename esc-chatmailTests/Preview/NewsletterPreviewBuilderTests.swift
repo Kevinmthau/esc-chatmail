@@ -516,6 +516,14 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
             senderEmail: "dispatch@example.com",
             subject: "Weekly Edit"
         )
+        let ctaResult = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            cleanedSnippet: "https://brand.example.com?utm_source=email Explore all sale styles now",
+            senderName: "Weekly Edit",
+            senderEmail: "dispatch@example.com",
+            subject: "Weekly Edit"
+        )
 
         XCTAssertTrue(preferredResult?.snippet.contains("office staples") == true)
         XCTAssertFalse(preferredResult?.snippet.contains("Women Men Kids Sale") == true)
@@ -523,6 +531,8 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         XCTAssertFalse(bodyResult?.snippet.contains("Women Men Kids Sale") == true)
         XCTAssertTrue(shortNavigationResult?.snippet.contains("office staples") == true)
         XCTAssertFalse(shortNavigationResult?.snippet.contains("Shop the new arrivals") == true)
+        XCTAssertTrue(ctaResult?.snippet.contains("office staples") == true)
+        XCTAssertFalse(ctaResult?.snippet.contains("Explore all sale styles") == true)
     }
 
     func testBuildPreview_preservesShortUTMTeaserHeadline() {
@@ -552,9 +562,18 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
             senderEmail: "dispatch@example.com",
             subject: "Style Notes"
         )
+        let retailHeadlineResult = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            cleanedSnippet: "https://brand.example.com?utm_source=email New shoes and dresses are here",
+            senderName: "Style Notes",
+            senderEmail: "dispatch@example.com",
+            subject: "Style Notes"
+        )
 
         XCTAssertEqual(preferredResult?.snippet, teaser)
         XCTAssertEqual(bodyResult?.snippet, teaser)
+        XCTAssertEqual(retailHeadlineResult?.snippet, "New shoes and dresses are here")
     }
 
     func testBuildPreview_stripsLeadingTitleFromPreferredCleanedSnippet() {
