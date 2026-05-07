@@ -326,6 +326,55 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         XCTAssertFalse(result?.subtitle?.contains("Priority room upgrade") == true)
     }
 
+    func testBuildPreview_stripsLeadingTrackingURLFromCleanedSnippet() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <h1>Design Weekly</h1>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            cleanedSnippet: "( https://click.example.com/open?utm_campaign=weekly ) New gallery openings, studio visits, and handmade pieces are highlighted in this week's design edit.",
+            senderName: "Design Weekly",
+            senderEmail: "dispatch@example.com",
+            subject: "Design Weekly"
+        )
+
+        XCTAssertTrue(result?.snippet.hasPrefix("New gallery openings") == true)
+        XCTAssertFalse(result?.snippet.contains("click.example.com") == true)
+    }
+
+    func testBuildPreview_preservesOnlyTeaserLineAfterLeadingTrackingURL() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <h1>Travel Notes</h1>
+        </body>
+        </html>
+        """
+
+        let bodyText = """
+        ( https://track.example.com/click/abc?utm_campaign=newsletter ) A new set of coastal retreats is opening this summer, with early booking windows and design notes for travelers.
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: bodyText,
+            senderName: "Travel Notes",
+            senderEmail: "dispatch@example.com",
+            subject: "Travel Notes"
+        )
+
+        XCTAssertTrue(result?.snippet.hasPrefix("A new set of coastal retreats") == true)
+        XCTAssertFalse(result?.snippet.contains("track.example.com") == true)
+    }
+
     func testBuildPreview_stripsLeadingTitleFromPreferredCleanedSnippet() {
         let html = """
         <!DOCTYPE html>

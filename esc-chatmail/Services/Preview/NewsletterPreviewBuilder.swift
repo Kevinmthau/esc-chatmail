@@ -217,6 +217,7 @@ struct NewsletterPreviewBuilder {
 
         let rawLines = rawText.components(separatedBy: .newlines)
         var lines: [String] = []
+        var leadingURLFallbackLines: [String] = []
 
         for line in rawLines {
             let normalizedLine = normalizedText(line)
@@ -224,26 +225,39 @@ struct NewsletterPreviewBuilder {
                 continue
             }
 
-            if shouldStopAtFooter(normalizedLine), !lines.isEmpty {
+            let lineWithoutLeadingURL = trimmingLeadingPreviewURLNoise(from: normalizedLine)
+            let usesLeadingURLFallback = lineWithoutLeadingURL != normalizedLine
+            let candidateLine = usesLeadingURLFallback ? lineWithoutLeadingURL : normalizedLine
+
+            guard !candidateLine.isEmpty else {
+                continue
+            }
+
+            if shouldStopAtFooter(candidateLine), !lines.isEmpty || !leadingURLFallbackLines.isEmpty {
                 break
             }
 
-            if shouldSkipLine(normalizedLine) {
+            if shouldSkipLine(candidateLine) {
                 continue
             }
 
-            if lines.contains(where: { normalizedComparableText($0) == normalizedComparableText(normalizedLine) }) {
+            if lines.contains(where: { normalizedComparableText($0) == normalizedComparableText(candidateLine) }) ||
+                leadingURLFallbackLines.contains(where: { normalizedComparableText($0) == normalizedComparableText(candidateLine) }) {
                 continue
             }
 
-            lines.append(normalizedLine)
+            if usesLeadingURLFallback {
+                leadingURLFallbackLines.append(candidateLine)
+            } else {
+                lines.append(candidateLine)
+            }
 
             if lines.count >= 10 {
                 break
             }
         }
 
-        return lines
+        return lines.isEmpty ? Array(leadingURLFallbackLines.prefix(10)) : lines
     }
 
     private func previewQualityScore(for lines: [String]) -> Int {
@@ -621,6 +635,7 @@ struct NewsletterPreviewBuilder {
         excludedValues: Set<String>
     ) -> String? {
         var normalized = trimmedPreviewBoundaryText(normalizedText(text))
+        normalized = trimmingLeadingPreviewURLNoise(from: normalized)
         normalized = trimmingLeadingExcludedText(from: normalized, excluded: excluded)
         normalized = trimmingFooterContent(from: normalized)
 
@@ -768,6 +783,19 @@ struct NewsletterPreviewBuilder {
         return withoutLeadingWrapper.hasPrefix("http://") ||
             withoutLeadingWrapper.hasPrefix("https://") ||
             withoutLeadingWrapper.hasPrefix("www.")
+    }
+
+    private func trimmingLeadingPreviewURLNoise(from line: String) -> String {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let range = trimmed.range(
+            of: #"^\s*[\(\[\{<]?\s*(?:https?://|www\.)[^\s\)\]\}>]+(?:\s*[\)\]\}>])?\s*"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) else {
+            return line
+        }
+
+        return trimmedPreviewBoundaryText(String(trimmed[range.upperBound...]))
+            .replacingOccurrences(of: #"^[\)\]\}]+\s*"#, with: "", options: .regularExpression)
     }
 
     private func isMeaningfulTitle(_ title: String) -> Bool {
