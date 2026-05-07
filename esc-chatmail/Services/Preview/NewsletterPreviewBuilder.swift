@@ -4,6 +4,10 @@ struct NewsletterPreviewBuilder {
     private let imageExtractor = EmailPreviewImageExtractor()
     private let urlSanitizer = HTMLURLSanitizer()
     private let trackingRemover = HTMLTrackingRemover()
+    private static let leadingPreviewURLRegex = try? NSRegularExpression(
+        pattern: #"^\s*[\(\[\{<]?\s*((?:https?://|www\.)[^\s\)\]\}>]+)(?:\s*[\)\]\}>])?\s*"#,
+        options: [.caseInsensitive]
+    )
 
     func buildPreview(
         canonicalHTML: String,
@@ -257,7 +261,23 @@ struct NewsletterPreviewBuilder {
             }
         }
 
-        return lines.isEmpty ? Array(leadingURLFallbackLines.prefix(10)) : lines
+        if lines.isEmpty {
+            return Array(leadingURLFallbackLines.prefix(10))
+        }
+
+        guard !leadingURLFallbackLines.isEmpty else {
+            return lines
+        }
+
+        if lines.count < 10 {
+            return lines + Array(leadingURLFallbackLines.prefix(10 - lines.count))
+        }
+
+        if lines.contains(where: { $0.count >= 30 }) {
+            return lines
+        }
+
+        return Array(lines.prefix(9)) + Array(leadingURLFallbackLines.prefix(1))
     }
 
     private func previewQualityScore(for lines: [String]) -> Int {
@@ -635,7 +655,7 @@ struct NewsletterPreviewBuilder {
         excludedValues: Set<String>
     ) -> String? {
         var normalized = trimmedPreviewBoundaryText(normalizedText(text))
-        normalized = trimmingLeadingPreviewURLNoise(from: normalized)
+        normalized = trimmingLeadingPreviewURLNoise(from: normalized, requiringTrackingURL: true)
         normalized = trimmingLeadingExcludedText(from: normalized, excluded: excluded)
         normalized = trimmingFooterContent(from: normalized)
 
@@ -785,17 +805,66 @@ struct NewsletterPreviewBuilder {
             withoutLeadingWrapper.hasPrefix("www.")
     }
 
-    private func trimmingLeadingPreviewURLNoise(from line: String) -> String {
+    private func trimmingLeadingPreviewURLNoise(from line: String, requiringTrackingURL: Bool = false) -> String {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let range = trimmed.range(
-            of: #"^\s*[\(\[\{<]?\s*(?:https?://|www\.)[^\s\)\]\}>]+(?:\s*[\)\]\}>])?\s*"#,
-            options: [.regularExpression, .caseInsensitive]
-        ) else {
+        guard let match = leadingPreviewURLMatch(in: trimmed),
+              !requiringTrackingURL || isTrackingLikePreviewURL(match.url) else {
             return line
         }
 
-        return trimmedPreviewBoundaryText(String(trimmed[range.upperBound...]))
+        return trimmedPreviewBoundaryText(String(trimmed[match.range.upperBound...]))
             .replacingOccurrences(of: #"^[\)\]\}]+\s*"#, with: "", options: .regularExpression)
+    }
+
+    private func leadingPreviewURLMatch(in line: String) -> (range: Range<String.Index>, url: String)? {
+        guard let match = Self.leadingPreviewURLRegex?.firstMatch(
+            in: line,
+            range: NSRange(line.startIndex..., in: line)
+        ),
+              let range = Range(match.range, in: line),
+              let urlRange = Range(match.range(at: 1), in: line) else {
+            return nil
+        }
+
+        return (range, String(line[urlRange]))
+    }
+
+    private func isTrackingLikePreviewURL(_ rawURL: String) -> Bool {
+        var normalized = rawURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        if normalized.hasPrefix("www.") {
+            normalized = "https://\(normalized)"
+        }
+
+        guard let components = URLComponents(string: normalized) else {
+            return false
+        }
+
+        let trackingTokens: Set<String> = [
+            "click",
+            "clicks",
+            "link",
+            "links",
+            "redirect",
+            "redir",
+            "track",
+            "tracking",
+            "trk"
+        ]
+        let hostSegments = components.host?
+            .split(separator: ".")
+            .map(String.init) ?? []
+        if hostSegments.contains(where: trackingTokens.contains) {
+            return true
+        }
+
+        let pathSegments = components.path
+            .split { !$0.isLetter && !$0.isNumber }
+            .map(String.init)
+
+        return pathSegments.contains(where: trackingTokens.contains)
     }
 
     private func isMeaningfulTitle(_ title: String) -> Bool {

@@ -375,6 +375,58 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         XCTAssertFalse(result?.snippet.contains("track.example.com") == true)
     }
 
+    func testBuildPreview_keepsTrackingURLTeaserWhenLaterLineIsShortCTA() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <h1>Style Notes</h1>
+        </body>
+        </html>
+        """
+
+        let bodyText = """
+        ( https://track.example.com/click/abc?utm_campaign=newsletter ) Linen layers, beach-ready accessories, and early summer staples are now available for the warmer weekends ahead.
+        Read more
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: bodyText,
+            senderName: "Style Notes",
+            senderEmail: "dispatch@example.com",
+            subject: "Style Notes"
+        )
+
+        XCTAssertTrue(result?.snippet.hasPrefix("Linen layers") == true)
+        XCTAssertFalse(result?.snippet.contains("track.example.com") == true)
+        XCTAssertFalse(result?.snippet == "example.com")
+    }
+
+    func testBuildPreview_rejectsNonTrackingURLPreferredSnippetNavigationCopy() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <h1>Weekly Edit</h1>
+            <p>A sharper edit of office staples, weekend layers, and practical accessories just landed.</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            cleanedSnippet: "https://brand.example.com Women Men Kids Sale Dresses New Arrivals",
+            senderName: "Weekly Edit",
+            senderEmail: "dispatch@example.com",
+            subject: "Weekly Edit"
+        )
+
+        XCTAssertTrue(result?.snippet.contains("office staples") == true)
+        XCTAssertFalse(result?.snippet.contains("Women Men Kids Sale") == true)
+    }
+
     func testBuildPreview_stripsLeadingTitleFromPreferredCleanedSnippet() {
         let html = """
         <!DOCTYPE html>
