@@ -282,6 +282,50 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         XCTAssertFalse(result?.snippet.contains("96") == true)
     }
 
+    func testBuildPreview_skipsTrackingURLSnippetAndListItemSubtitle() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <img src="http://cdn.mcauto-images-production.sendgrid.net/list/wimbledon-hero.gif" width="1080" height="1080" alt="Wimbledon hero">
+            <table>
+                <tr><td class="header-1">Centre Court.</td></tr>
+                <tr><td class="header-1-subdued">New London Spots.</td></tr>
+            </table>
+            <p>Atlas Concierge can secure the most exclusive access to the All England Lawn Tennis Club before the first serve.</p>
+        </body>
+        </html>
+        """
+
+        let invisiblePreviewPadding = String(repeating: "\u{034F}\u{200C}\u{00A0}", count: 8)
+        let bodyText = """
+        \(invisiblePreviewPadding)
+        ( https://www.atlascard.com?utm_campaign=website&utm_medium=email&utm_source=sendgrid.com ) Centre Court. New London Spots. Hi Kevin Michael.
+        * Priority room upgrade
+        * Daily breakfast
+        Courtside access for the Grand Slam
+        Atlas Concierge can secure the most exclusive access to the All England Lawn Tennis Club before the first serve.
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: bodyText,
+            cleanedSnippet: "( https://www.atlascard.com?utm_campaign=website&utm_medium=email&utm_source=sendgrid.com ) Centre Court. New London Spots.",
+            senderName: "Atlas",
+            senderEmail: "hello@atlascard.com",
+            subject: "May 2026 | Wimbledon, London Hot Spots, Concierge for The Championships"
+        )
+
+        XCTAssertEqual(
+            result?.heroImageURL,
+            "https://cdn.mcauto-images-production.sendgrid.net/list/wimbledon-hero.gif"
+        )
+        XCTAssertEqual(result?.subtitle, "Courtside access for the Grand Slam")
+        XCTAssertTrue(result?.snippet.contains("Atlas Concierge can secure") == true)
+        XCTAssertFalse(result?.snippet.contains("atlascard.com") == true)
+        XCTAssertFalse(result?.subtitle?.contains("Priority room upgrade") == true)
+    }
+
     func testBuildPreview_stripsLeadingTitleFromPreferredCleanedSnippet() {
         let html = """
         <!DOCTYPE html>

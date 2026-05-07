@@ -567,7 +567,7 @@ struct TransactionalPreviewBuilder {
             return nil
         }
 
-        return normalizedURL
+        return EmailPreviewRemoteImageURL.normalizedForNativePreview(normalizedURL)
     }
 
     private func firstAmount(in text: String?) -> String? {

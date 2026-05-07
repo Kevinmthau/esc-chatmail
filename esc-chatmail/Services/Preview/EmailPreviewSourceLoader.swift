@@ -186,11 +186,50 @@ enum EmailPreviewContentExtractor {
     static func normalizedText(_ text: String?) -> String {
         guard let text else { return "" }
 
-        return HTMLEntityDecoder.decode(text)
+        return normalizePreviewScalars(HTMLEntityDecoder.decode(text))
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
             .replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func normalizePreviewScalars(_ text: String) -> String {
+        text.unicodeScalars.map { scalar in
+            if isInvisiblePreviewScalar(scalar) {
+                return ""
+            }
+
+            if isPreviewSpaceScalar(scalar) {
+                return " "
+            }
+
+            return String(scalar)
+        }
+        .joined()
+    }
+
+    private static func isInvisiblePreviewScalar(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x00AD, 0x034F, 0x061C, 0x180E,
+             0x200B...0x200F,
+             0x202A...0x202E,
+             0x2060...0x206F,
+             0xFEFF:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func isPreviewSpaceScalar(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x00A0, 0x1680,
+             0x2000...0x200A,
+             0x202F, 0x205F, 0x3000:
+            return true
+        default:
+            return false
+        }
     }
 
     private static func htmlSummary(from html: String) -> EmailPreviewHTMLSummary {
@@ -260,6 +299,19 @@ enum EmailPreviewContentExtractor {
         }
 
         return linkTexts
+    }
+}
+
+enum EmailPreviewRemoteImageURL {
+    static func normalizedForNativePreview(_ rawURL: String) -> String {
+        guard var components = URLComponents(string: rawURL),
+              components.scheme?.lowercased() == "http",
+              components.host?.isEmpty == false else {
+            return rawURL
+        }
+
+        components.scheme = "https"
+        return components.string ?? rawURL
     }
 }
 

@@ -139,6 +139,7 @@ struct NewsletterPreviewBuilder {
         for line in lines {
             let comparable = normalizedComparableText(line)
             guard !excludedValues.contains(comparable),
+                  !TextProcessing.isListItem(line),
                   line.count >= 18,
                   line.count <= 55 else {
                 continue
@@ -448,7 +449,7 @@ struct NewsletterPreviewBuilder {
             return nil
         }
 
-        return normalizedURL
+        return EmailPreviewRemoteImageURL.normalizedForNativePreview(normalizedURL)
     }
 
     private func containsBlockedHeroHint(in text: String) -> Bool {
@@ -712,7 +713,7 @@ struct NewsletterPreviewBuilder {
             return true
         }
 
-        if lowercased.hasPrefix("http://") || lowercased.hasPrefix("https://") {
+        if startsWithPreviewURLNoise(line) {
             return true
         }
 
@@ -726,6 +727,10 @@ struct NewsletterPreviewBuilder {
 
     private func lineLooksLikePreviewNoise(_ line: String) -> Bool {
         let lowercased = line.lowercased()
+
+        if startsWithPreviewURLNoise(line) {
+            return true
+        }
 
         if lowercased.contains("{") && lowercased.contains("}") && lowercased.contains(":") {
             return true
@@ -751,6 +756,18 @@ struct NewsletterPreviewBuilder {
         }
 
         return previewNoisePatterns.contains { lowercased.contains($0) }
+    }
+
+    private func startsWithPreviewURLNoise(_ line: String) -> Bool {
+        let withoutLeadingWrapper = line
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "([{<"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        return withoutLeadingWrapper.hasPrefix("http://") ||
+            withoutLeadingWrapper.hasPrefix("https://") ||
+            withoutLeadingWrapper.hasPrefix("www.")
     }
 
     private func isMeaningfulTitle(_ title: String) -> Bool {
