@@ -807,13 +807,20 @@ struct NewsletterPreviewBuilder {
 
     private func trimmingLeadingPreviewURLNoise(from line: String, requiringTrackingURL: Bool = false) -> String {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let match = leadingPreviewURLMatch(in: trimmed),
-              !requiringTrackingURL || isTrackingLikePreviewURL(match.url) else {
+        guard let match = leadingPreviewURLMatch(in: trimmed) else {
             return line
         }
 
-        return trimmedPreviewBoundaryText(String(trimmed[match.range.upperBound...]))
+        let trimmedText = trimmedPreviewBoundaryText(String(trimmed[match.range.upperBound...]))
             .replacingOccurrences(of: #"^[\)\]\}]+\s*"#, with: "", options: .regularExpression)
+
+        guard !requiringTrackingURL ||
+                isTrackingLikePreviewURL(match.url) ||
+                isUTMTrackingLikePreviewURL(match.url) && postURLTextLooksLikePreviewTeaser(trimmedText) else {
+            return line
+        }
+
+        return trimmedText
     }
 
     private func leadingPreviewURLMatch(in line: String) -> (range: Range<String.Index>, url: String)? {
@@ -842,10 +849,6 @@ struct NewsletterPreviewBuilder {
             return false
         }
 
-        if components.queryItems?.contains(where: { $0.name.lowercased().hasPrefix("utm_") }) == true {
-            return true
-        }
-
         let trackingTokens: Set<String> = [
             "click",
             "clicks",
@@ -869,6 +872,54 @@ struct NewsletterPreviewBuilder {
             .map(String.init)
 
         return pathSegments.contains(where: trackingTokens.contains)
+    }
+
+    private func isUTMTrackingLikePreviewURL(_ rawURL: String) -> Bool {
+        var normalized = rawURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        if normalized.hasPrefix("www.") {
+            normalized = "https://\(normalized)"
+        }
+
+        guard let components = URLComponents(string: normalized) else {
+            return false
+        }
+
+        return components.queryItems?.contains { $0.name.lowercased().hasPrefix("utm_") } == true
+    }
+
+    private func postURLTextLooksLikePreviewTeaser(_ text: String) -> Bool {
+        let normalized = normalizedText(text)
+        guard normalized.count >= 24,
+              !shouldSkipLine(normalized),
+              !shouldStopAtFooter(normalized),
+              !looksLikeNavigationLabelRun(normalized) else {
+            return false
+        }
+
+        let tokens = previewWordTokens(in: normalized)
+        let connectorCount = tokens.filter { teaserConnectorTokens.contains($0) }.count
+        return normalized.count >= 70 ||
+            normalized.range(of: "[.!?,;:]", options: .regularExpression) != nil ||
+            connectorCount >= 2
+    }
+
+    private func looksLikeNavigationLabelRun(_ line: String) -> Bool {
+        let tokens = previewWordTokens(in: line)
+        guard tokens.count >= 4 else {
+            return false
+        }
+
+        let navigationTokenCount = tokens.filter { navigationSnippetTokens.contains($0) }.count
+        return navigationTokenCount >= 4 && navigationTokenCount * 2 >= tokens.count
+    }
+
+    private func previewWordTokens(in text: String) -> [String] {
+        text.lowercased()
+            .split { !$0.isLetter && !$0.isNumber }
+            .map(String.init)
     }
 
     private func isMeaningfulTitle(_ title: String) -> Bool {
@@ -943,6 +994,48 @@ private let ignoredLinePatterns = [
     "all rights reserved",
     "mailing address",
     "copyright"
+]
+
+private let navigationSnippetTokens: Set<String> = [
+    "accessories",
+    "arrivals",
+    "bags",
+    "beauty",
+    "clearance",
+    "clothing",
+    "dresses",
+    "gift",
+    "gifts",
+    "home",
+    "jewelry",
+    "kids",
+    "men",
+    "new",
+    "outlet",
+    "sale",
+    "shop",
+    "shoes",
+    "stores",
+    "women"
+]
+
+private let teaserConnectorTokens: Set<String> = [
+    "a",
+    "an",
+    "and",
+    "are",
+    "for",
+    "from",
+    "in",
+    "is",
+    "of",
+    "on",
+    "our",
+    "the",
+    "this",
+    "to",
+    "with",
+    "your"
 ]
 
 private let ignoredTitlePatterns = [

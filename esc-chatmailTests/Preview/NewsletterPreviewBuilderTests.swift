@@ -481,6 +481,40 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         XCTAssertFalse(result?.snippet.contains("Women Men Kids Sale") == true)
     }
 
+    func testBuildPreview_rejectsUTMURLNavigationCopy() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <h1>Weekly Edit</h1>
+            <p>A sharper edit of office staples, weekend layers, and practical accessories just landed.</p>
+        </body>
+        </html>
+        """
+
+        let preferredResult = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            cleanedSnippet: "https://brand.example.com?utm_source=email Women Men Kids Sale Dresses New Arrivals",
+            senderName: "Weekly Edit",
+            senderEmail: "dispatch@example.com",
+            subject: "Weekly Edit"
+        )
+
+        let bodyResult = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: "https://brand.example.com?utm_source=email Women Men Kids Sale Dresses New Arrivals",
+            senderName: "Weekly Edit",
+            senderEmail: "dispatch@example.com",
+            subject: "Weekly Edit"
+        )
+
+        XCTAssertTrue(preferredResult?.snippet.contains("office staples") == true)
+        XCTAssertFalse(preferredResult?.snippet.contains("Women Men Kids Sale") == true)
+        XCTAssertTrue(bodyResult?.snippet.contains("office staples") == true)
+        XCTAssertFalse(bodyResult?.snippet.contains("Women Men Kids Sale") == true)
+    }
+
     func testBuildPreview_stripsLeadingTitleFromPreferredCleanedSnippet() {
         let html = """
         <!DOCTYPE html>
