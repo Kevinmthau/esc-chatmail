@@ -508,11 +508,53 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
             senderEmail: "dispatch@example.com",
             subject: "Weekly Edit"
         )
+        let shortNavigationResult = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            cleanedSnippet: "https://brand.example.com?utm_source=email Shop the new arrivals now",
+            senderName: "Weekly Edit",
+            senderEmail: "dispatch@example.com",
+            subject: "Weekly Edit"
+        )
 
         XCTAssertTrue(preferredResult?.snippet.contains("office staples") == true)
         XCTAssertFalse(preferredResult?.snippet.contains("Women Men Kids Sale") == true)
         XCTAssertTrue(bodyResult?.snippet.contains("office staples") == true)
         XCTAssertFalse(bodyResult?.snippet.contains("Women Men Kids Sale") == true)
+        XCTAssertTrue(shortNavigationResult?.snippet.contains("office staples") == true)
+        XCTAssertFalse(shortNavigationResult?.snippet.contains("Shop the new arrivals") == true)
+    }
+
+    func testBuildPreview_preservesShortUTMTeaserHeadline() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <h1>Style Notes</h1>
+        </body>
+        </html>
+        """
+        let teaser = "Spring styles just landed"
+
+        let preferredResult = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            cleanedSnippet: "https://brand.example.com?utm_source=email \(teaser)",
+            senderName: "Style Notes",
+            senderEmail: "dispatch@example.com",
+            subject: "Style Notes"
+        )
+
+        let bodyResult = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: "https://brand.example.com?utm_source=email \(teaser)",
+            senderName: "Style Notes",
+            senderEmail: "dispatch@example.com",
+            subject: "Style Notes"
+        )
+
+        XCTAssertEqual(preferredResult?.snippet, teaser)
+        XCTAssertEqual(bodyResult?.snippet, teaser)
     }
 
     func testBuildPreview_stripsLeadingTitleFromPreferredCleanedSnippet() {
