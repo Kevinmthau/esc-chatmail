@@ -842,6 +842,10 @@ struct NewsletterPreviewBuilder {
             return false
         }
 
+        if components.queryItems?.contains(where: { $0.name.lowercased().hasPrefix("utm_") }) == true {
+            return true
+        }
+
         let trackingTokens: Set<String> = [
             "click",
             "clicks",

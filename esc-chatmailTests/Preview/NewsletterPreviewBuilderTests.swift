@@ -375,6 +375,32 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         XCTAssertFalse(result?.snippet.contains("track.example.com") == true)
     }
 
+    func testBuildPreview_preservesOnlyTeaserLineAfterLeadingUTMURL() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <h1>Travel Notes</h1>
+        </body>
+        </html>
+        """
+
+        let bodyText = """
+        ( https://www.atlascard.com?utm_campaign=website&utm_medium=email&utm_source=sendgrid.com ) Centre Court. New London Spots. Hi Kevin Michael.
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: bodyText,
+            senderName: "Atlas",
+            senderEmail: "hello@atlascard.com",
+            subject: "Travel Notes"
+        )
+
+        XCTAssertTrue(result?.snippet.hasPrefix("Centre Court. New London Spots.") == true)
+        XCTAssertFalse(result?.snippet.contains("atlascard.com") == true)
+    }
+
     func testBuildPreview_keepsTrackingURLTeaserWhenLaterLineIsShortCTA() {
         let html = """
         <!DOCTYPE html>
