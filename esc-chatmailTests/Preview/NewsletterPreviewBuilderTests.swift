@@ -427,6 +427,34 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         XCTAssertFalse(result?.snippet.contains("Women Men Kids Sale") == true)
     }
 
+    func testBuildPreview_rejectsNonTrackingURLPlainTextNavigationCopy() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <h1>Weekly Edit</h1>
+            <p>A sharper edit of office staples, weekend layers, and practical accessories just landed.</p>
+        </body>
+        </html>
+        """
+
+        let bodyText = """
+        https://brand.example.com Women Men Kids Sale Dresses New Arrivals
+        New sale styles are live
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: bodyText,
+            senderName: "Weekly Edit",
+            senderEmail: "dispatch@example.com",
+            subject: "Weekly Edit"
+        )
+
+        XCTAssertTrue(result?.snippet.contains("office staples") == true)
+        XCTAssertFalse(result?.snippet.contains("Women Men Kids Sale") == true)
+    }
+
     func testBuildPreview_stripsLeadingTitleFromPreferredCleanedSnippet() {
         let html = """
         <!DOCTYPE html>

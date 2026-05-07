@@ -229,7 +229,7 @@ struct NewsletterPreviewBuilder {
                 continue
             }
 
-            let lineWithoutLeadingURL = trimmingLeadingPreviewURLNoise(from: normalizedLine)
+            let lineWithoutLeadingURL = trimmingLeadingPreviewURLNoise(from: normalizedLine, requiringTrackingURL: true)
             let usesLeadingURLFallback = lineWithoutLeadingURL != normalizedLine
             let candidateLine = usesLeadingURLFallback ? lineWithoutLeadingURL : normalizedLine
 
