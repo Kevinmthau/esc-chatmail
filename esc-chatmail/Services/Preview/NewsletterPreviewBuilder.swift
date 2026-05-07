@@ -914,6 +914,12 @@ struct NewsletterPreviewBuilder {
         }
 
         let navigationTokenCount = tokens.filter { navigationSnippetTokens.contains($0) }.count
+        if tokens.first == "shop",
+           navigationTokenCount >= 3,
+           navigationTokenCount * 2 >= tokens.count {
+            return true
+        }
+
         return navigationTokenCount >= 4 && navigationTokenCount * 2 >= tokens.count
     }
 

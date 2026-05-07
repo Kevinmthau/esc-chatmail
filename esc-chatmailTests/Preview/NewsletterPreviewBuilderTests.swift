@@ -516,6 +516,21 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
             senderEmail: "dispatch@example.com",
             subject: "Weekly Edit"
         )
+        let shortNavigationWithConnectorsResult = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            cleanedSnippet: "https://brand.example.com?utm_source=email Shop the new arrivals for summer",
+            senderName: "Weekly Edit",
+            senderEmail: "dispatch@example.com",
+            subject: "Weekly Edit"
+        )
+        let shortNavigationWithConnectorsBodyResult = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: "https://brand.example.com?utm_source=email Shop the new arrivals for summer",
+            senderName: "Weekly Edit",
+            senderEmail: "dispatch@example.com",
+            subject: "Weekly Edit"
+        )
         let ctaResult = sut.buildPreview(
             canonicalHTML: html,
             bodyText: nil,
@@ -531,6 +546,10 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         XCTAssertFalse(bodyResult?.snippet.contains("Women Men Kids Sale") == true)
         XCTAssertTrue(shortNavigationResult?.snippet.contains("office staples") == true)
         XCTAssertFalse(shortNavigationResult?.snippet.contains("Shop the new arrivals") == true)
+        XCTAssertTrue(shortNavigationWithConnectorsResult?.snippet.contains("office staples") == true)
+        XCTAssertFalse(shortNavigationWithConnectorsResult?.snippet.contains("Shop the new arrivals") == true)
+        XCTAssertTrue(shortNavigationWithConnectorsBodyResult?.snippet.contains("office staples") == true)
+        XCTAssertFalse(shortNavigationWithConnectorsBodyResult?.snippet.contains("Shop the new arrivals") == true)
         XCTAssertTrue(ctaResult?.snippet.contains("office staples") == true)
         XCTAssertFalse(ctaResult?.snippet.contains("Explore all sale styles") == true)
     }
