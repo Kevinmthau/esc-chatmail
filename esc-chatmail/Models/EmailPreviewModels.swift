@@ -93,7 +93,7 @@ extension NewsletterPreviewHeroImageDisplayMode {
         }
 
         let aspectRatio = imageSize.width / imageSize.height
-        return aspectRatio >= 2.8 ? .fit : .fill
+        return aspectRatio >= 2.3 ? .fit : .fill
     }
 }
 

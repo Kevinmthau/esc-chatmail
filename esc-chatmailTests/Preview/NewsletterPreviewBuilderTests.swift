@@ -1,3 +1,4 @@
+import CoreGraphics
 import XCTest
 @testable import esc_chatmail
 
@@ -191,6 +192,40 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
 
         XCTAssertEqual(result?.heroImageURL, "https://mcusercontent.com/list/images/elena-walch-hero.jpg")
         XCTAssertEqual(result?.heroImageDisplayMode, .fill)
+    }
+
+    func testBuildPreview_doesNotPromoteDecimalWidthLogoOverWideHeaderHero() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <img src="https://mcusercontent.com/list/images/tulane-logo.png" width="238.68" height="auto" class="mceImage">
+            <img src="https://mcusercontent.com/list/images/tulane-header.jpg" width="612" height="240" alt="Tulane University">
+            <h1>TIME TO SUBMIT YOUR PHOTO &amp; INFO FOR THE 2026 TULANE NEW STUDENT BOOK</h1>
+            <p>Dear Tulane Parent, congratulations on your student being part of the Class of 2030.</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderName: "Tulane University New Student Book",
+            senderEmail: "manager@maincampuspublications.com",
+            subject: "Tulane Parents -- Tulane New Student Book Items Needed"
+        )
+
+        XCTAssertEqual(result?.heroImageURL, "https://mcusercontent.com/list/images/tulane-header.jpg")
+        XCTAssertEqual(result?.heroImageDisplayMode, .fit)
+    }
+
+    func testHeroDisplayModeResolvedFitsPanoramicDecodedImages() {
+        let resolvedMode = NewsletterPreviewHeroImageDisplayMode.resolved(
+            preferred: .fill,
+            imageSize: CGSize(width: 612, height: 240)
+        )
+
+        XCTAssertEqual(resolvedMode, .fit)
     }
 
     func testBuildPreview_handlesAbsurdImageDimensionsWithoutOverflow() {

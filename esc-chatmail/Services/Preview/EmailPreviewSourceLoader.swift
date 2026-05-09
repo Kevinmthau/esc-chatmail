@@ -428,7 +428,24 @@ struct EmailPreviewImageExtractor {
             return nil
         }
 
-        return Int(value.replacingOccurrences(of: "[^0-9]", with: "", options: .regularExpression))
+        guard let regex = try? NSRegularExpression(
+            pattern: #"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)"#,
+            options: []
+        ),
+              let match = regex.firstMatch(in: value, options: [], range: NSRange(value.startIndex..., in: value)),
+              let range = Range(match.range, in: value),
+              let number = Double(String(value[range])),
+              number.isFinite else {
+            return nil
+        }
+
+        let rounded = number.rounded()
+        guard rounded > 0,
+              rounded <= Double(Int.max) else {
+            return nil
+        }
+
+        return Int(rounded)
     }
 
     private func normalizedText(_ text: String) -> String {

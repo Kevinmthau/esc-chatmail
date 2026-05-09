@@ -544,11 +544,7 @@ struct NewsletterPreviewBuilder {
             return nil
         }
 
-        if aspectRatio >= 2.8 {
-            return .fit
-        }
-
-        if aspectRatio >= 2.3, looksLikeBanner {
+        if aspectRatio >= 2.3 {
             return .fit
         }
 
@@ -662,6 +658,7 @@ struct NewsletterPreviewBuilder {
         guard !normalized.isEmpty,
               normalized.count >= 24,
               !lineLooksLikePreviewNoise(normalized),
+              !looksLikeShortTitleCluster(normalized),
               !shouldSkipLine(normalized),
               !shouldStopAtFooter(normalized) else {
             return nil
@@ -791,6 +788,35 @@ struct NewsletterPreviewBuilder {
         }
 
         return previewNoisePatterns.contains { lowercased.contains($0) }
+    }
+
+    private func looksLikeShortTitleCluster(_ line: String) -> Bool {
+        guard line.count <= 80 else {
+            return false
+        }
+
+        let fragments = line
+            .split { ".!?".contains($0) }
+            .map { normalizedText(String($0)) }
+            .filter { !$0.isEmpty }
+
+        guard fragments.count >= 2 else {
+            return false
+        }
+
+        return fragments.allSatisfy { fragment in
+            let tokens = previewWordTokens(in: fragment)
+            guard !tokens.isEmpty, tokens.count <= 3 else {
+                return false
+            }
+
+            return fragment.split(separator: " ").allSatisfy { word in
+                guard let first = word.first, first.isLetter else {
+                    return true
+                }
+                return first.isUppercase
+            }
+        }
     }
 
     private func startsWithPreviewURLNoise(_ line: String) -> Bool {
