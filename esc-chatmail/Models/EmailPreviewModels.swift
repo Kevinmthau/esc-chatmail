@@ -82,7 +82,7 @@ enum NewsletterPreviewHeroImageDisplayMode: String, Equatable, Sendable {
 
 extension NewsletterPreviewHeroImageDisplayMode {
     /// Falls back to the decoded image's actual aspect ratio when HTML metadata was
-    /// too sparse to classify a banner-like hero image correctly.
+    /// too sparse to classify very wide hero images correctly.
     static func resolved(preferred: Self, imageSize: CGSize) -> Self {
         guard imageSize.width > 1, imageSize.height > 1 else {
             return preferred
@@ -93,7 +93,7 @@ extension NewsletterPreviewHeroImageDisplayMode {
         }
 
         let aspectRatio = imageSize.width / imageSize.height
-        return aspectRatio >= 2.3 ? .fit : .fill
+        return aspectRatio >= 2.8 ? .fit : .fill
     }
 }
 

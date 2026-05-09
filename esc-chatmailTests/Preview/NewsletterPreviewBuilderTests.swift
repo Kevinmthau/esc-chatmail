@@ -246,13 +246,13 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         XCTAssertEqual(result?.heroImageDisplayMode, .fit)
     }
 
-    func testHeroDisplayModeResolvedFitsPanoramicDecodedImages() {
+    func testHeroDisplayModeResolvedKeepsModeratelyWideDecodedImagesFilled() {
         let resolvedMode = NewsletterPreviewHeroImageDisplayMode.resolved(
             preferred: .fill,
             imageSize: CGSize(width: 612, height: 240)
         )
 
-        XCTAssertEqual(resolvedMode, .fit)
+        XCTAssertEqual(resolvedMode, .fill)
     }
 
     func testImageExtractorIgnoresDimensionAboveIntMax() {

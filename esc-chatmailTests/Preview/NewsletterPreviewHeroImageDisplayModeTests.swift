@@ -30,6 +30,15 @@ final class NewsletterPreviewHeroImageDisplayModeTests: XCTestCase {
         XCTAssertEqual(mode, .fill)
     }
 
+    func testResolved_keepsModeratelyWideImagesAsFill() {
+        let mode = NewsletterPreviewHeroImageDisplayMode.resolved(
+            preferred: .fill,
+            imageSize: CGSize(width: 612, height: 240)
+        )
+
+        XCTAssertEqual(mode, .fill)
+    }
+
     func testResolved_preservesPreferenceForInvalidImageSize() {
         let mode = NewsletterPreviewHeroImageDisplayMode.resolved(
             preferred: .fill,
