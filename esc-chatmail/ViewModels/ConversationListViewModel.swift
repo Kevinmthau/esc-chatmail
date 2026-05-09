@@ -378,9 +378,10 @@ final class ConversationListViewModel: ObservableObject {
         let inserted = conversationObjects(forKey: NSInsertedObjectsKey, in: notification)
         let updated = conversationObjects(forKey: NSUpdatedObjectsKey, in: notification)
         let refreshed = conversationObjects(forKey: NSRefreshedObjectsKey, in: notification)
+        let personAffected = conversationsAffectedByPersonChanges(in: notification)
         let invalidatedIDs = conversationObjectIDs(forKey: NSInvalidatedObjectsKey, in: notification)
         let deletedIDs = conversationObjectIDs(forKey: NSDeletedObjectsKey, in: notification)
-        let updatedConversations = uniqueConversations(from: inserted + updated + refreshed)
+        let updatedConversations = uniqueConversations(from: inserted + updated + refreshed + personAffected)
         let removedIDs = deletedIDs.union(invalidatedIDs)
 
         applyConversationChanges(updatedConversations: updatedConversations, deletedIDs: removedIDs)
@@ -397,6 +398,27 @@ final class ConversationListViewModel: ObservableObject {
             guard object is Conversation else { return nil }
             return object.objectID
         })
+    }
+
+    private func conversationsAffectedByPersonChanges(in notification: Notification) -> [Conversation] {
+        contextObjects(
+            forKeys: [NSUpdatedObjectsKey, NSRefreshedObjectsKey],
+            in: notification
+        )
+        .compactMap { $0 as? Person }
+        .flatMap { person in
+            person.conversationParticipations?.compactMap(\.conversation) ?? []
+        }
+    }
+
+    private func contextObjects(
+        forKeys keys: [String],
+        in notification: Notification
+    ) -> Set<NSManagedObject> {
+        keys.reduce(into: Set<NSManagedObject>()) { result, key in
+            let objects = notification.userInfo?[key] as? Set<NSManagedObject> ?? []
+            result.formUnion(objects)
+        }
     }
 
     private func uniqueConversations(from conversations: [Conversation]) -> [Conversation] {

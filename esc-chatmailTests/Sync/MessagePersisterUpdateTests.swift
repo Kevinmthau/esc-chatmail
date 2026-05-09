@@ -400,6 +400,72 @@ final class MessagePersisterUpdateTests: XCTestCase {
         await ModificationTracker.shared.reset()
     }
 
+    func testUpdateExistingMessage_postsPersonDisplayInfoChangeWhenParticipantNameImproves() async throws {
+        let senderEmail = "info@bonbonwhims.com"
+        let conversation = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: [senderEmail]))
+            .withDisplayName("Info")
+            .build(in: context)
+        let sender = PersonBuilder.emailOnly(senderEmail, in: context)
+        addConversationParticipant(person: sender, to: conversation)
+        let existingMessage = MessageBuilder()
+            .withId("bonbonwhims-notification-message")
+            .withThreadId("bonbonwhims-notification-thread")
+            .withSender(email: senderEmail, name: nil)
+            .inConversation(conversation)
+            .build(in: context)
+        addMessageParticipant(person: sender, kind: .from, to: existingMessage)
+        try testStack.saveViewContext()
+
+        var headers = ProcessedHeaders()
+        headers.subject = "Our Totally Spies! Collab is here"
+        headers.from = "BONBONWHIMS <\(senderEmail)>"
+        headers.to = [EmailAddress(email: "kmthau@gmail.com", displayName: "Kevin Thau")]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: existingMessage.id,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: existingMessage.snippet,
+            cleanedSnippet: existingMessage.cleanedSnippet,
+            internalDate: existingMessage.internalDate,
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: existingMessage.bodyText,
+            labelIds: [],
+            isUnread: false,
+            isNewsletter: true,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        let notificationExpectation = expectation(description: "person display info notification posted")
+        var notifiedEmails = Set<String>()
+        let observer = NotificationCenter.default.addObserver(
+            forName: .personDisplayInfoDidChange,
+            object: nil,
+            queue: nil
+        ) { notification in
+            let emails = PersonDisplayInfoChangeNotification.emails(from: notification)
+            guard emails.contains(senderEmail) else { return }
+            notifiedEmails = emails
+            notificationExpectation.fulfill()
+        }
+        defer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        await fulfillment(of: [notificationExpectation], timeout: 1.0)
+        XCTAssertEqual(notifiedEmails, [senderEmail])
+    }
+
     func testCreateNewMessage_sameGmThreadIdWithParticipantDrift_reusesExistingConversation() async throws {
         let threadId = "thread-join-123"
         let existingConversation = ConversationBuilder()

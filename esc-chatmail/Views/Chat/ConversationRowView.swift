@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreData
+import Combine
 
 /// Snapshot of conversation data to prevent excessive re-renders.
 /// Instead of observing the full Conversation object (which triggers re-renders on ANY property change),
@@ -12,6 +13,8 @@ struct ConversationSnapshot: Equatable {
     let lastMessageDate: Date?
     let displayNameHint: String?
     let participantHash: String?
+    let participantEmails: [String]
+    let participantDisplayNameFingerprint: String
     let showsGroupAvatar: Bool
 
     init(from conversation: Conversation) {
@@ -22,7 +25,32 @@ struct ConversationSnapshot: Equatable {
         self.lastMessageDate = conversation.lastMessageDate
         self.displayNameHint = conversation.displayName
         self.participantHash = conversation.participantHash
+        self.participantEmails = Self.participantEmails(from: conversation)
+        self.participantDisplayNameFingerprint = Self.participantDisplayNameFingerprint(from: conversation)
         self.showsGroupAvatar = conversation.conversationType != .oneToOne
+    }
+
+    private static func participantEmails(from conversation: Conversation) -> [String] {
+        let emails = conversation.participants?
+            .compactMap { participant -> String? in
+                guard let person = participant.person else { return nil }
+                let normalizedEmail = EmailNormalizer.normalize(person.email)
+                return normalizedEmail.isEmpty ? nil : normalizedEmail
+            } ?? []
+
+        return Array(Set(emails)).sorted()
+    }
+
+    private static func participantDisplayNameFingerprint(from conversation: Conversation) -> String {
+        let entries = conversation.participants?
+            .compactMap { participant -> String? in
+                guard let person = participant.person else { return nil }
+                let normalizedEmail = EmailNormalizer.normalize(person.email)
+                guard !normalizedEmail.isEmpty else { return nil }
+                return "\(normalizedEmail)=\(person.displayName ?? "")"
+            } ?? []
+
+        return Array(Set(entries)).sorted().joined(separator: "|")
     }
 }
 
@@ -37,6 +65,7 @@ struct ConversationRowView: View {
 
     @State private var uncachedParticipantInfo: ParticipantLoader.ParticipantInfo?
     @State private var uncachedParticipantInfoKey: String?
+    @State private var participantRefreshToken = 0
 
     @MainActor
     init(
@@ -118,8 +147,14 @@ struct ConversationRowView: View {
             rowContent.task(id: participantInfoKey) {
                 await loadContactInfo(for: participantInfoKey)
             }
+            .onReceive(NotificationCenter.default.publisher(for: .personDisplayInfoDidChange).receive(on: DispatchQueue.main)) { notification in
+                refreshParticipantInfoIfNeeded(for: notification)
+            }
         } else {
             rowContent
+                .onReceive(NotificationCenter.default.publisher(for: .personDisplayInfoDidChange).receive(on: DispatchQueue.main)) { notification in
+                    refreshParticipantInfoIfNeeded(for: notification)
+                }
         }
     }
 
@@ -128,7 +163,9 @@ struct ConversationRowView: View {
             conversationObjectID.uriRepresentation().absoluteString,
             snapshot.participantHash ?? "",
             snapshot.displayNameHint ?? "",
-            EmailNormalizer.normalize(currentUserEmail)
+            snapshot.participantDisplayNameFingerprint,
+            EmailNormalizer.normalize(currentUserEmail),
+            String(participantRefreshToken)
         ].joined(separator: "|")
     }
 
@@ -230,6 +267,17 @@ struct ConversationRowView: View {
 
         uncachedParticipantInfo = info
         uncachedParticipantInfoKey = participantInfoKey
+    }
+
+    private func refreshParticipantInfoIfNeeded(for notification: Notification) {
+        let changedEmails = PersonDisplayInfoChangeNotification.emails(from: notification)
+        guard changedEmails.isEmpty || !Set(snapshot.participantEmails).isDisjoint(with: changedEmails) else {
+            return
+        }
+
+        uncachedParticipantInfo = nil
+        uncachedParticipantInfoKey = nil
+        participantRefreshToken &+= 1
     }
 
     private func formatDate(_ date: Date) -> String {

@@ -214,6 +214,7 @@ extension MessagePersister {
         for email in result.participantDisplayNameUpdateEmails {
             await PersonCache.shared.invalidateEntry(for: email)
         }
+        PersonDisplayInfoChangeNotification.post(emails: result.participantDisplayNameUpdateEmails)
 
         if let modifiedConversationID = result.modifiedConversationID {
             await ModificationTracker.shared.trackModifiedConversation(

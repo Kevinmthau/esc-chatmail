@@ -252,6 +252,53 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
+    func testHandlePersonDisplayInfoDidChangeRefreshesSenderDependentState() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "info@bonbonwhims.com",
+            "other@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        var loadResolvedDisplayNameCount = 0
+        var groupingRequests: [[String]] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: {},
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {
+                loadResolvedDisplayNameCount += 1
+            },
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { senderEmails in
+                groupingRequests.append(senderEmails)
+                return Dictionary(
+                    uniqueKeysWithValues: senderEmails.map { email in
+                        let normalizedEmail = EmailNormalizer.normalize(email)
+                        return (normalizedEmail, "group:\(normalizedEmail)")
+                    }
+                )
+            },
+            invalidateContactsCache: {
+                XCTFail("Internal person refresh should not clear the full contacts cache")
+            },
+            clearPersonCache: {
+                XCTFail("Internal person refresh should not clear the full person cache")
+            },
+            sleep: { _ in }
+        )
+
+        coordinator.handlePersonDisplayInfoDidChange(senderGroupingMessages: rows)
+
+        XCTAssertEqual(coordinator.contactRefreshToken, 1)
+        XCTAssertEqual(loadResolvedDisplayNameCount, 1)
+        await waitUntil {
+            groupingRequests.count == 1
+        }
+        XCTAssertEqual(groupingRequests, [["info@bonbonwhims.com", "other@example.com"]])
+    }
+
     func testHandleMessageCountChange_afterReadyRequestsAnimatedBottomAnchor() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",

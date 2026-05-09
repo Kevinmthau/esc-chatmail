@@ -229,6 +229,50 @@ final class VirtualScrollStateTests: XCTestCase {
         }
     }
 
+    func testVisibleRowsRefreshWhenSenderPersonDisplayNameChanges() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .recentlyActive()
+            .build(in: viewContext)
+        let sender = PersonBuilder()
+            .withEmail("info@bonbonwhims.com")
+            .withDisplayName("Info")
+            .build(in: viewContext)
+        let message = MessageBuilder()
+            .withId("virtual-scroll-person-refresh")
+            .withSender(email: sender.email, name: nil)
+            .withDate(Date(timeIntervalSince1970: 1))
+            .inConversation(conversation)
+            .build(in: viewContext)
+        addMessageParticipant(person: sender, kind: .from, to: message)
+        try viewContext.save()
+
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: VirtualScrollConfiguration(
+                visibleItemCount: 4,
+                bufferSize: 1,
+                pageSize: 3,
+                preloadThreshold: 1
+            ),
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil {
+            state.visibleMessages.first?.senderInfoDisplayName == "Info"
+        }
+
+        sender.displayName = "BONBONWHIMS"
+        viewContext.processPendingChanges()
+
+        await waitUntil {
+            state.visibleMessages.first?.senderInfoDisplayName == "BONBONWHIMS"
+        }
+    }
+
     func testInitialLoadFromEnd_doesNotLoadOlderWindowWhenTopOfTailFirstAppears() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 8)
         let configuration = VirtualScrollConfiguration(
@@ -596,6 +640,14 @@ final class VirtualScrollStateTests: XCTestCase {
         try viewContext.obtainPermanentIDs(for: [message])
         viewContext.processPendingChanges()
         return message
+    }
+
+    private func addMessageParticipant(person: Person, kind: ParticipantKind, to message: Message) {
+        let participant = MessageParticipant(context: viewContext)
+        participant.id = UUID()
+        participant.participantKind = kind
+        participant.person = person
+        participant.message = message
     }
 
     private func waitUntil(

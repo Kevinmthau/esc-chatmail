@@ -23,7 +23,7 @@ extension ContactsResolver {
 
         let context = coreDataStack.newBackgroundContext()
 
-        await context.perform {
+        let didChange = await context.perform {
             let request = Person.fetchRequest()
             request.predicate = NSPredicate(format: "email == %@", email)
 
@@ -47,10 +47,17 @@ extension ContactsResolver {
                     if hasChanges && context.hasChanges {
                         try context.save()
                     }
+                    return hasChanges
                 }
             } catch {
                 Log.error("Failed to update Person", category: .general, error: error)
             }
+
+            return false
+        }
+
+        if didChange {
+            await PersonDisplayInfoChangeNotification.invalidatePersonCacheAndPost(emails: [email])
         }
     }
 }

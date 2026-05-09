@@ -211,6 +211,12 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
     }
 
+    func handlePersonDisplayInfoDidChange(senderGroupingMessages: [ChatMessageRowModel]) {
+        contactRefreshToken &+= 1
+        loadResolvedDisplayName()
+        refreshSenderGroupingKeys(using: senderGroupingMessages)
+    }
+
     func senderRunKey(
         for message: ChatMessageRowModel?,
         isEffectivelyOneToOneConversation: Bool

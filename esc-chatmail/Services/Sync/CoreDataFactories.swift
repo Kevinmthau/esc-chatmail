@@ -23,6 +23,7 @@ struct PersonFactory {
             // Update display name if the new one is better for this email.
             if EmailNormalizer.isBetterDisplayName(displayName, than: existing.displayName, forEmail: email) {
                 existing.displayName = displayName
+                PersonDisplayInfoChangeNotification.invalidatePersonCacheAndPostLater(emails: [email])
             }
             return existing
         }

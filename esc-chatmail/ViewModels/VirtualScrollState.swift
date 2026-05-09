@@ -457,6 +457,24 @@ final class VirtualScrollState: ObservableObject {
             affectedMessageIDs.insert(messageID)
         }
 
+        for object in contextObjects(
+            forKeys: [NSUpdatedObjectsKey, NSRefreshedObjectsKey],
+            in: notification
+        ) {
+            guard let person = object as? Person else {
+                continue
+            }
+
+            for participation in person.messageParticipations ?? [] {
+                guard let messageID = participation.message?.objectID,
+                      visibleMessageIDs.contains(messageID) else {
+                    continue
+                }
+
+                affectedMessageIDs.insert(messageID)
+            }
+        }
+
         return affectedMessageIDs
     }
 

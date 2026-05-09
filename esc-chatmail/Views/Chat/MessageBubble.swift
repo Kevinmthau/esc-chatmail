@@ -221,7 +221,10 @@ struct MessageBubble: View {
                 messageId: message.id,
                 bodyStorageURI: message.bodyStorageURI
             ),
-            contactRefreshToken: contactRefreshToken
+            contactRefreshToken: contactRefreshToken,
+            senderEmail: message.senderInfoEmail,
+            senderDisplayName: message.senderInfoDisplayName,
+            senderAvatarURL: message.senderInfoAvatarURL
         )
     }
 
@@ -235,9 +238,22 @@ struct MessageBubble: View {
         snippet: String?,
         hasHTMLSource: Bool,
         htmlSourceSignature: String,
-        contactRefreshToken: Int
+        contactRefreshToken: Int,
+        senderEmail: String? = nil,
+        senderDisplayName: String? = nil,
+        senderAvatarURL: String? = nil
     ) -> String {
-        "\(bodyStorageURI ?? "")|\(contentFingerprint(for: bodyText))|\(contentFingerprint(for: snippet))|\(hasHTMLSource)|source:\(htmlSourceSignature)|contacts:\(contactRefreshToken)"
+        [
+            bodyStorageURI ?? "",
+            contentFingerprint(for: bodyText),
+            contentFingerprint(for: snippet),
+            String(hasHTMLSource),
+            "source:\(htmlSourceSignature)",
+            "contacts:\(contactRefreshToken)",
+            "senderEmail:\(contentFingerprint(for: senderEmail))",
+            "senderName:\(contentFingerprint(for: senderDisplayName))",
+            "senderAvatar:\(contentFingerprint(for: senderAvatarURL))"
+        ].joined(separator: "|")
     }
 
     private static func contentFingerprint(for text: String?) -> String {

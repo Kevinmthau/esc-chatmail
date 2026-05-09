@@ -2,6 +2,7 @@ import SwiftUI
 import CoreData
 import UIKit
 import Contacts
+import Combine
 
 /// Extracted from ChatView to keep SwiftUI type-checking manageable.
 struct ChatMessagesView: View {
@@ -177,6 +178,16 @@ struct ChatMessagesView: View {
                     senderGroupingMessages: senderGroupingMessages(for: scrollState.visibleMessages)
                 )
             }
+            .onReceive(NotificationCenter.default.publisher(for: .personDisplayInfoDidChange).receive(on: DispatchQueue.main)) { notification in
+                let groupingMessages = senderGroupingMessages(for: scrollState.visibleMessages)
+                guard shouldRefreshForPersonDisplayInfoChange(notification, messages: groupingMessages) else {
+                    return
+                }
+
+                coordinator.handlePersonDisplayInfoDidChange(
+                    senderGroupingMessages: groupingMessages
+                )
+            }
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 0) {
                     Divider()
@@ -251,6 +262,25 @@ struct ChatMessagesView: View {
         }
 
         return scrollState.row(atAbsoluteIndex: index) ?? ChatMessageRowModelMapper.map(messages[index])
+    }
+
+    private func shouldRefreshForPersonDisplayInfoChange(
+        _ notification: Notification,
+        messages: [ChatMessageRowModel]
+    ) -> Bool {
+        let changedEmails = PersonDisplayInfoChangeNotification.emails(from: notification)
+        guard !changedEmails.isEmpty else { return true }
+
+        return messages.contains { message in
+            [
+                message.senderInfoEmail,
+                message.effectiveSenderEmail,
+                message.senderEmail
+            ]
+            .compactMap { $0 }
+            .map(EmailNormalizer.normalize)
+            .contains { changedEmails.contains($0) }
+        }
     }
 
     private func performBottomAnchor(

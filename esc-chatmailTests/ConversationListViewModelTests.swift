@@ -141,6 +141,34 @@ final class ConversationListViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.filteredConversationItems[1], initialItems[2])
     }
 
+    func testPersonDisplayNameChangeRefreshesAffectedConversationItem() async throws {
+        let conversation = makeConversation(name: "Info", snippet: "alpha", date: 300)
+        let person = PersonBuilder()
+            .withEmail("info@bonbonwhims.com")
+            .withDisplayName("Info")
+            .build(in: context)
+        addConversationParticipant(person: person, to: conversation)
+        try context.save()
+
+        let viewModel = ConversationListViewModel()
+        viewModel.onAppear(conversations: [conversation], in: context)
+        let initialItem = try XCTUnwrap(viewModel.filteredConversationItems.first)
+
+        person.displayName = "BONBONWHIMS"
+        context.processPendingChanges()
+
+        await waitUntil {
+            viewModel.filteredConversationItems.first != initialItem
+        }
+
+        let updatedItem = try XCTUnwrap(viewModel.filteredConversationItems.first)
+        XCTAssertEqual(updatedItem.id, conversation.objectID)
+        XCTAssertNotEqual(
+            updatedItem.snapshot.participantDisplayNameFingerprint,
+            initialItem.snapshot.participantDisplayNameFingerprint
+        )
+    }
+
     func testOptimisticUnsavedConversation_survivesReAppear() async throws {
         let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
         let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
@@ -248,6 +276,33 @@ final class ConversationListViewModelTests: XCTestCase {
             .visible()
             .withLastMessageDate(Date(timeIntervalSince1970: date))
             .build(in: context)
+    }
+
+    private func addConversationParticipant(person: Person, to conversation: Conversation) {
+        let participant = ConversationParticipant(context: context)
+        participant.id = UUID()
+        participant.participantRole = .normal
+        participant.person = person
+        participant.conversation = conversation
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval = 1.0,
+        pollIntervalNanoseconds: UInt64 = 20_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while Date() < deadline {
+            if condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+
+        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 
     private func filteredConversationIDs(in viewModel: ConversationListViewModel) -> [NSManagedObjectID] {
