@@ -433,19 +433,48 @@ struct EmailPreviewImageExtractor {
             options: []
         ),
               let match = regex.firstMatch(in: value, options: [], range: NSRange(value.startIndex..., in: value)),
-              let range = Range(match.range, in: value),
-              let number = Double(String(value[range])),
-              number.isFinite else {
+              let range = Range(match.range, in: value) else {
             return nil
         }
 
-        let rounded = number.rounded()
-        guard rounded > 0,
-              rounded <= Double(Int.max) else {
+        return roundedPositiveInteger(from: String(value[range]))
+    }
+
+    private func roundedPositiveInteger(from numericValue: String) -> Int? {
+        var value = numericValue
+        if value.hasPrefix("-") {
             return nil
         }
 
-        return Int(rounded)
+        if value.hasPrefix("+") {
+            value.removeFirst()
+        }
+
+        let parts = value.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+        let integerPart = parts.first.map(String.init) ?? ""
+        let fractionPart = parts.count > 1 ? String(parts[1]) : ""
+        let integerDigits = integerPart.drop { $0 == "0" }
+        let normalizedInteger = integerDigits.isEmpty ? "0" : String(integerDigits)
+        let maxInteger = String(Int.max)
+
+        guard normalizedInteger.count < maxInteger.count
+                || (normalizedInteger.count == maxInteger.count && normalizedInteger <= maxInteger),
+              var rounded = Int(normalizedInteger) else {
+            return nil
+        }
+
+        if let firstFractionDigit = fractionPart.first,
+           (firstFractionDigit.wholeNumberValue ?? 0) >= 5 {
+            guard rounded < Int.max else {
+                return nil
+            }
+            rounded += 1
+        }
+
+        guard rounded > 0 else {
+            return nil
+        }
+        return rounded
     }
 
     private func normalizedText(_ text: String) -> String {

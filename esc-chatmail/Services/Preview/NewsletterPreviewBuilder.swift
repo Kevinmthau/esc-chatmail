@@ -544,7 +544,11 @@ struct NewsletterPreviewBuilder {
             return nil
         }
 
-        if aspectRatio >= 2.3 {
+        if aspectRatio >= 2.8 {
+            return .fit
+        }
+
+        if aspectRatio >= 2.3, looksLikeBanner {
             return .fit
         }
 

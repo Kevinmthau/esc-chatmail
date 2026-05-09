@@ -108,6 +108,30 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         XCTAssertEqual(result?.heroImageDisplayMode, .fit)
     }
 
+    func testBuildPreview_keepsUnhintedModeratelyWideHeroAheadOfLaterSquareImage() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <h1>Campus dispatch</h1>
+            <p>The first photo is the intended lead image for this issue.</p>
+            <img src="https://cdn.example.com/lead-photo.jpg" width="612" height="240" alt="Campus view">
+            <img src="https://cdn.example.com/secondary-photo.jpg" width="240" height="240" alt="Student portrait">
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderEmail: "newsletter@example.com",
+            subject: "Campus dispatch"
+        )
+
+        XCTAssertEqual(result?.heroImageURL, "https://cdn.example.com/lead-photo.jpg")
+        XCTAssertEqual(result?.heroImageDisplayMode, .fill)
+    }
+
     func testBuildPreview_omitsExtremelyWidePromotionalBannerHero() {
         let html = """
         <!DOCTYPE html>
@@ -194,18 +218,19 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         XCTAssertEqual(result?.heroImageDisplayMode, .fill)
     }
 
-    func testBuildPreview_doesNotPromoteDecimalWidthLogoOverWideHeaderHero() {
+    func testBuildPreview_doesNotPromoteDecimalWidthImageOverWideHeaderHero() {
         let html = """
         <!DOCTYPE html>
         <html>
         <body>
-            <img src="https://mcusercontent.com/list/images/tulane-logo.png" width="238.68" height="auto" class="mceImage">
+            <img src="https://mcusercontent.com/list/images/tulane-mark.png" width="238.68" height="auto" class="mceImage">
             <img src="https://mcusercontent.com/list/images/tulane-header.jpg" width="612" height="240" alt="Tulane University">
             <h1>TIME TO SUBMIT YOUR PHOTO &amp; INFO FOR THE 2026 TULANE NEW STUDENT BOOK</h1>
             <p>Dear Tulane Parent, congratulations on your student being part of the Class of 2030.</p>
         </body>
         </html>
         """
+        let images = EmailPreviewImageExtractor().extractImages(from: html)
 
         let result = sut.buildPreview(
             canonicalHTML: html,
@@ -215,6 +240,8 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
             subject: "Tulane Parents -- Tulane New Student Book Items Needed"
         )
 
+        XCTAssertEqual(images.first?.width, 239)
+        XCTAssertNil(images.first?.height)
         XCTAssertEqual(result?.heroImageURL, "https://mcusercontent.com/list/images/tulane-header.jpg")
         XCTAssertEqual(result?.heroImageDisplayMode, .fit)
     }
@@ -226,6 +253,22 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         )
 
         XCTAssertEqual(resolvedMode, .fit)
+    }
+
+    func testImageExtractorIgnoresDimensionAboveIntMax() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <img src="https://cdn.example.com/hero.jpg" width="9223372036854775808" height="240" alt="Hero image">
+        </body>
+        </html>
+        """
+
+        let images = EmailPreviewImageExtractor().extractImages(from: html)
+
+        XCTAssertNil(images.first?.width)
+        XCTAssertEqual(images.first?.height, 240)
     }
 
     func testBuildPreview_handlesAbsurdImageDimensionsWithoutOverflow() {
