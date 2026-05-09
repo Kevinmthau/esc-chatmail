@@ -91,6 +91,10 @@ extension MessagePersister {
                 from: processedMessage.headers,
                 in: context
             )
+            PersonDisplayInfoChangeNotification.invalidatePersonCacheAndPostAfterContextSave(
+                emails: participantDisplayNameUpdate.emails,
+                in: context
+            )
 
             if let savedBodyStorageURI {
                 existingMessage.bodyStorageURI = savedBodyStorageURI
@@ -210,11 +214,6 @@ extension MessagePersister {
                 participantDisplayNameUpdateConversationIDs: participantDisplayNameUpdate.conversationIDs
             )
         }
-
-        for email in result.participantDisplayNameUpdateEmails {
-            await PersonCache.shared.invalidateEntry(for: email)
-        }
-        PersonDisplayInfoChangeNotification.post(emails: result.participantDisplayNameUpdateEmails)
 
         if let modifiedConversationID = result.modifiedConversationID {
             await ModificationTracker.shared.trackModifiedConversation(

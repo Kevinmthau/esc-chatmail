@@ -400,7 +400,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
         await ModificationTracker.shared.reset()
     }
 
-    func testUpdateExistingMessage_postsPersonDisplayInfoChangeWhenParticipantNameImproves() async throws {
+    func testUpdateExistingMessage_postsPersonDisplayInfoChangeAfterSaveWhenParticipantNameImproves() async throws {
         let senderEmail = "info@bonbonwhims.com"
         let conversation = ConversationBuilder()
             .withParticipantHash(calculateParticipantHash(from: [senderEmail]))
@@ -439,7 +439,10 @@ final class MessagePersisterUpdateTests: XCTestCase {
             attachmentInfo: []
         )
 
-        let notificationExpectation = expectation(description: "person display info notification posted")
+        let preSaveNotificationExpectation = expectation(description: "person display info notification not posted before save")
+        preSaveNotificationExpectation.isInverted = true
+        let notificationExpectation = expectation(description: "person display info notification posted after save")
+        var didSave = false
         var notifiedEmails = Set<String>()
         let observer = NotificationCenter.default.addObserver(
             forName: .personDisplayInfoDidChange,
@@ -448,6 +451,10 @@ final class MessagePersisterUpdateTests: XCTestCase {
         ) { notification in
             let emails = PersonDisplayInfoChangeNotification.emails(from: notification)
             guard emails.contains(senderEmail) else { return }
+            guard didSave else {
+                preSaveNotificationExpectation.fulfill()
+                return
+            }
             notifiedEmails = emails
             notificationExpectation.fulfill()
         }
@@ -462,6 +469,10 @@ final class MessagePersisterUpdateTests: XCTestCase {
         )
 
         XCTAssertTrue(didUpdate)
+        await fulfillment(of: [preSaveNotificationExpectation], timeout: 0.2)
+
+        didSave = true
+        try context.save()
         await fulfillment(of: [notificationExpectation], timeout: 1.0)
         XCTAssertEqual(notifiedEmails, [senderEmail])
     }

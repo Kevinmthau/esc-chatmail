@@ -409,10 +409,9 @@ final class VirtualScrollState: ObservableObject {
         guard let window = messageWindow,
               !window.messageIDs.isEmpty else { return }
 
-        let visibleMessageIDs = Set(window.messageIDs)
         let affectedMessageIDs = refreshedVisibleMessageIDs(
             in: notification,
-            visibleMessageIDs: visibleMessageIDs
+            visibleMessageIDs: window.messageIDs
         )
 
         guard !affectedMessageIDs.isEmpty else { return }
@@ -428,16 +427,17 @@ final class VirtualScrollState: ObservableObject {
 
     private func refreshedVisibleMessageIDs(
         in notification: Notification,
-        visibleMessageIDs: Set<NSManagedObjectID>
+        visibleMessageIDs: [NSManagedObjectID]
     ) -> Set<NSManagedObjectID> {
         var affectedMessageIDs = Set<NSManagedObjectID>()
+        let visibleMessageIDSet = Set(visibleMessageIDs)
 
         for object in contextObjects(
             forKeys: [NSUpdatedObjectsKey, NSRefreshedObjectsKey],
             in: notification
         ) {
             guard let message = object as? Message,
-                  visibleMessageIDs.contains(message.objectID) else {
+                  visibleMessageIDSet.contains(message.objectID) else {
                 continue
             }
 
@@ -450,24 +450,26 @@ final class VirtualScrollState: ObservableObject {
         ) {
             guard let attachment = object as? Attachment,
                   let messageID = attachment.message?.objectID,
-                  visibleMessageIDs.contains(messageID) else {
+                  visibleMessageIDSet.contains(messageID) else {
                 continue
             }
 
             affectedMessageIDs.insert(messageID)
         }
 
-        for object in contextObjects(
+        let changedPersonEmails = Set(contextObjects(
             forKeys: [NSUpdatedObjectsKey, NSRefreshedObjectsKey],
             in: notification
-        ) {
-            guard let person = object as? Person else {
-                continue
-            }
+        ).compactMap { object -> String? in
+            guard let person = object as? Person else { return nil }
+            let email = EmailNormalizer.normalize(person.email)
+            return email.isEmpty ? nil : email
+        })
 
-            for participation in person.messageParticipations ?? [] {
-                guard let messageID = participation.message?.objectID,
-                      visibleMessageIDs.contains(messageID) else {
+        if !changedPersonEmails.isEmpty {
+            for messageID in visibleMessageIDs {
+                guard let row = resolveCachedRow(for: messageID),
+                      row.matchesSenderEmail(in: changedPersonEmails) else {
                     continue
                 }
 
@@ -650,5 +652,18 @@ final class VirtualScrollState: ObservableObject {
                 totalCount: totalCount
             )
         }
+    }
+}
+
+private extension ChatMessageRowModel {
+    func matchesSenderEmail(in emails: Set<String>) -> Bool {
+        [
+            senderInfoEmail,
+            effectiveSenderEmail,
+            senderEmail
+        ]
+        .compactMap { $0 }
+        .map(EmailNormalizer.normalize)
+        .contains { emails.contains($0) }
     }
 }

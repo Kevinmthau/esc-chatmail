@@ -1,4 +1,5 @@
 import Foundation
+import CoreData
 
 extension Notification.Name {
     static let personDisplayInfoDidChange = Notification.Name("com.esc.inboxchat.personDisplayInfoDidChange")
@@ -6,6 +7,8 @@ extension Notification.Name {
 
 enum PersonDisplayInfoChangeNotification {
     static let emailsUserInfoKey = "emails"
+    private static let pendingContextSaveEmailsUserInfoKey = "personDisplayInfoDidChange.pendingEmails"
+    private static let contextSaveObserverUserInfoKey = "personDisplayInfoDidChange.contextSaveObserver"
 
     static func post(
         emails: some Sequence<String>,
@@ -41,6 +44,27 @@ enum PersonDisplayInfoChangeNotification {
         }
     }
 
+    static func invalidatePersonCacheAndPostAfterContextSave(
+        emails: some Sequence<String>,
+        in context: NSManagedObjectContext
+    ) {
+        let normalizedEmails = normalizedEmailSet(from: emails)
+        guard !normalizedEmails.isEmpty else { return }
+
+        let existingEmails = normalizedEmailSet(
+            from: context.userInfo[pendingContextSaveEmailsUserInfoKey] as? [String] ?? []
+        )
+        context.userInfo[pendingContextSaveEmailsUserInfoKey] = Array(
+            existingEmails.union(normalizedEmails)
+        ).sorted()
+
+        if context.userInfo[contextSaveObserverUserInfoKey] == nil {
+            context.userInfo[contextSaveObserverUserInfoKey] = PendingPersonDisplayInfoSaveObserver(
+                context: context
+            )
+        }
+    }
+
     static func emails(from notification: Notification) -> Set<String> {
         guard let values = notification.userInfo?[emailsUserInfoKey] as? [String] else {
             return []
@@ -55,5 +79,43 @@ enum PersonDisplayInfoChangeNotification {
                 .map(EmailNormalizer.normalize)
                 .filter { !$0.isEmpty }
         )
+    }
+
+    fileprivate static func takePendingContextSaveEmails(from context: NSManagedObjectContext) -> Set<String> {
+        defer {
+            context.userInfo.removeObject(forKey: pendingContextSaveEmailsUserInfoKey)
+            context.userInfo.removeObject(forKey: contextSaveObserverUserInfoKey)
+        }
+
+        return normalizedEmailSet(
+            from: context.userInfo[pendingContextSaveEmailsUserInfoKey] as? [String] ?? []
+        )
+    }
+}
+
+private final class PendingPersonDisplayInfoSaveObserver: NSObject {
+    private weak var context: NSManagedObjectContext?
+
+    init(context: NSManagedObjectContext) {
+        self.context = context
+        super.init()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(contextDidSave(_:)),
+            name: .NSManagedObjectContextDidSave,
+            object: context
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func contextDidSave(_ _: Notification) {
+        guard let context else { return }
+
+        let emails = PersonDisplayInfoChangeNotification.takePendingContextSaveEmails(from: context)
+        NotificationCenter.default.removeObserver(self)
+        PersonDisplayInfoChangeNotification.invalidatePersonCacheAndPostLater(emails: emails)
     }
 }

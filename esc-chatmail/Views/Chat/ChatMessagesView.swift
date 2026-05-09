@@ -271,6 +271,10 @@ struct ChatMessagesView: View {
         let changedEmails = PersonDisplayInfoChangeNotification.emails(from: notification)
         guard !changedEmails.isEmpty else { return true }
 
+        if !conversationParticipantEmails().isDisjoint(with: changedEmails) {
+            return true
+        }
+
         return messages.contains { message in
             [
                 message.senderInfoEmail,
@@ -281,6 +285,15 @@ struct ChatMessagesView: View {
             .map(EmailNormalizer.normalize)
             .contains { changedEmails.contains($0) }
         }
+    }
+
+    private func conversationParticipantEmails() -> Set<String> {
+        Set(
+            (conversation.participants ?? [])
+                .compactMap { $0.person?.email }
+                .map(EmailNormalizer.normalize)
+                .filter { !$0.isEmpty }
+        )
     }
 
     private func performBottomAnchor(
