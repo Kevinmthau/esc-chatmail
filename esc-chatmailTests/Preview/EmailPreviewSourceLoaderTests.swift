@@ -21,7 +21,7 @@ final class EmailPreviewSourceLoaderTests: XCTestCase {
         </body>
         </html>
         """
-        HTMLContentHandler.shared.saveHTML(html, for: messageId)
+        _ = HTMLContentHandler.shared.saveHTML(html, for: messageId)
 
         let loader = EmailPreviewSourceLoader(htmlContentLoader: HTMLContentLoader())
         let source = await loader.loadPreviewSource(
@@ -36,6 +36,8 @@ final class EmailPreviewSourceLoaderTests: XCTestCase {
         let unwrappedSource = try XCTUnwrap(source)
         XCTAssertEqual(unwrappedSource.messageId, messageId)
         XCTAssertTrue(unwrappedSource.sourceSignature.hasPrefix("sha256:"))
+        XCTAssertEqual(unwrappedSource.sourceKind, .html)
+        XCTAssertTrue(unwrappedSource.hasHTMLSource)
         XCTAssertEqual(unwrappedSource.plainText, "Fallback preview text")
         XCTAssertTrue(unwrappedSource.extractedText?.contains("Spring Documentary Festival") == true)
         XCTAssertEqual(unwrappedSource.classification.kind, .newsletter)
@@ -67,7 +69,7 @@ final class EmailPreviewSourceLoaderTests: XCTestCase {
         }
 
         let loader = EmailPreviewSourceLoader(htmlContentLoader: HTMLContentLoader())
-        HTMLContentHandler.shared.saveHTML(
+        _ = HTMLContentHandler.shared.saveHTML(
             """
             <html><body><h1>First newsletter update</h1><p>View in browser</p><p>Unsubscribe</p></body></html>
             """,
@@ -84,7 +86,7 @@ final class EmailPreviewSourceLoaderTests: XCTestCase {
         )
         let first = try XCTUnwrap(loadedFirst)
 
-        HTMLContentHandler.shared.saveHTML(
+        _ = HTMLContentHandler.shared.saveHTML(
             """
             <html><body><h1>Second newsletter update</h1><p>View in browser</p><p>Unsubscribe</p></body></html>
             """,
@@ -112,7 +114,7 @@ final class EmailPreviewSourceLoaderTests: XCTestCase {
             HTMLContentHandler.shared.deleteHTML(for: messageId)
         }
 
-        HTMLContentHandler.shared.saveHTML(
+        _ = HTMLContentHandler.shared.saveHTML(
             """
             <!DOCTYPE html>
             <html>
@@ -171,7 +173,7 @@ final class EmailPreviewSourceLoaderTests: XCTestCase {
             .map { "<a href=\"https://example.com/action-\($0)\">Action \($0)</a>" }
             .joined(separator: "\n")
 
-        HTMLContentHandler.shared.saveHTML(
+        _ = HTMLContentHandler.shared.saveHTML(
             """
             <!DOCTYPE html>
             <html>
@@ -211,7 +213,7 @@ final class EmailPreviewSourceLoaderTests: XCTestCase {
             .map { "<a href=\"https://example.com/tracker-\($0)\"><img src=\"pixel-\($0).gif\" alt=\"\"></a>" }
             .joined(separator: "\n")
 
-        HTMLContentHandler.shared.saveHTML(
+        _ = HTMLContentHandler.shared.saveHTML(
             """
             <!DOCTYPE html>
             <html>
@@ -244,7 +246,7 @@ final class EmailPreviewSourceLoaderTests: XCTestCase {
             HTMLContentHandler.shared.deleteHTML(for: messageId)
         }
 
-        HTMLContentHandler.shared.saveHTML(
+        _ = HTMLContentHandler.shared.saveHTML(
             """
             <!DOCTYPE html>
             <html>

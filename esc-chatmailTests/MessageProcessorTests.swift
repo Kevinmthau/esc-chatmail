@@ -15,6 +15,62 @@ final class MessageProcessorTests: XCTestCase {
         super.tearDown()
     }
 
+    // MARK: - Canonical MIME Content
+
+    func testProcessGmailMessage_multipartAlternativePlainFirstPersistsHTMLAsCanonicalSource() async throws {
+        let html = """
+        <!DOCTYPE html><html><body><table><tr><td><a href="https://example.com/book">Book now</a></td></tr></table></body></html>
+        """
+        let plainText = """
+        https://tracking.example.com/one
+        https://tracking.example.com/two
+        Book now
+        """
+
+        let message = makeMultipartAlternativeMessage(
+            id: "multipart-plain-first",
+            plainText: plainText,
+            html: html,
+            plainFirst: true
+        )
+
+        let processedMessage = await processor.processGmailMessage(message, myAliases: [])
+        let processed = try XCTUnwrap(processedMessage)
+
+        XCTAssertEqual(processed.htmlBody, html)
+        XCTAssertEqual(processed.canonicalContent?.html, html)
+        XCTAssertTrue(processed.canonicalContent?.hasHTMLSource == true)
+        XCTAssertEqual(processed.canonicalContent?.sourceKind, .html)
+        XCTAssertEqual(processed.plainTextBody, plainText)
+    }
+
+    func testProcessGmailMessage_multipartAlternativeHTMLFirstPersistsHTMLAsCanonicalSource() async throws {
+        let html = """
+        <!DOCTYPE html><html><body><table><tr><td><img src="https://example.com/hero.jpg"><a href="https://example.com/book">Book now</a></td></tr></table></body></html>
+        """
+        let plainText = """
+        https://tracking.example.com/one
+        https://tracking.example.com/two
+        Book now
+        """
+
+        let message = makeMultipartAlternativeMessage(
+            id: "multipart-html-first",
+            plainText: plainText,
+            html: html,
+            plainFirst: false
+        )
+
+        let processedMessage = await processor.processGmailMessage(message, myAliases: [])
+        let processed = try XCTUnwrap(processedMessage)
+
+        XCTAssertEqual(processed.htmlBody, html)
+        XCTAssertEqual(processed.canonicalContent?.html, html)
+        XCTAssertTrue(processed.canonicalContent?.hasHTMLSource == true)
+        XCTAssertEqual(processed.canonicalContent?.sourceKind, .html)
+        XCTAssertEqual(processed.plainTextBody, plainText)
+    }
+
     // MARK: - Gmail Category Labels
 
     func testIsNewsletter_gmailPromotionsLabel_doesNotFlagAlone() {
@@ -1165,6 +1221,65 @@ final class MessageProcessorTests: XCTestCase {
             MessageHeader(name: "Message-ID", value: "<\(id)@test.example.com>")
         ]
     }
+}
+
+private func makeMultipartAlternativeMessage(
+    id: String,
+    plainText: String,
+    html: String,
+    plainFirst: Bool
+) -> GmailMessage {
+    let plainPart = MessagePart(
+        partId: "0.0",
+        mimeType: "text/plain",
+        filename: nil,
+        headers: [
+            MessageHeader(name: "Content-Type", value: "text/plain; charset=utf-8")
+        ],
+        body: MessageBody(
+            size: plainText.count,
+            data: plainText.data(using: .utf8)?.base64EncodedString(),
+            attachmentId: nil
+        ),
+        parts: nil
+    )
+    let htmlPart = MessagePart(
+        partId: "0.1",
+        mimeType: "text/html",
+        filename: nil,
+        headers: [
+            MessageHeader(name: "Content-Type", value: "text/html; charset=utf-8")
+        ],
+        body: MessageBody(
+            size: html.count,
+            data: html.data(using: .utf8)?.base64EncodedString(),
+            attachmentId: nil
+        ),
+        parts: nil
+    )
+    let parts = plainFirst ? [plainPart, htmlPart] : [htmlPart, plainPart]
+
+    return GmailMessage(
+        id: id,
+        threadId: "\(id)-thread",
+        labelIds: ["INBOX"],
+        snippet: "Book now",
+        historyId: "12345",
+        internalDate: "1704067200000",
+        payload: MessagePart(
+            partId: "0",
+            mimeType: "multipart/alternative",
+            filename: nil,
+            headers: [
+                MessageHeader(name: "Subject", value: "Reservation offer"),
+                MessageHeader(name: "From", value: "Reservations <reservations@example.com>"),
+                MessageHeader(name: "To", value: "person@example.com")
+            ],
+            body: nil,
+            parts: parts
+        ),
+        sizeEstimate: html.count + plainText.count
+    )
 }
 
 final class GoldenCorpusReplayTests: XCTestCase {

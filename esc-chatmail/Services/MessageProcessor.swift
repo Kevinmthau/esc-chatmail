@@ -59,6 +59,11 @@ class MessageProcessor {
         if !processedMessage.attachmentInfo.isEmpty {
             processedMessage.hasAttachments = true
         }
+        processedMessage.canonicalContent = canonicalContent(
+            html: content.html,
+            plainText: content.plainText,
+            attachmentInfo: processedMessage.attachmentInfo
+        )
 
         return processedMessage
     }
@@ -342,81 +347,118 @@ class MessageProcessor {
         }
     }
     
-    private func extractContent(from part: MessagePart, messageId: String) async -> (html: String?, plainText: String?) {
-        var html: String? = nil
-        var plainText: String? = nil
+    private struct ExtractedMessageContent: Sendable {
+        var html: String?
+        var plainText: String?
 
-        // Use a box to allow mutation in nested async function
-        actor ContentBox {
-            var html: String? = nil
-            var plainText: String? = nil
-
-            func setHTML(_ value: String?) {
-                guard let value,
-                      value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
-                    return
-                }
-
-                html = value
-            }
-
-            func setPlainText(_ value: String?) {
-                guard let value,
-                      value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
-                    return
-                }
-
-                plainText = value
-            }
-
-            func getHTML() -> String? { html }
-            func getPlainText() -> String? { plainText }
+        var hasAnyContent: Bool {
+            html != nil || plainText != nil
         }
 
-        let box = ContentBox()
+        mutating func mergeMissing(from other: ExtractedMessageContent) {
+            if html == nil {
+                html = other.html
+            }
+            if plainText == nil {
+                plainText = other.plainText
+            }
+        }
+    }
 
-        func traverse(_ part: MessagePart) async {
+    private func extractContent(from part: MessagePart, messageId: String) async -> (html: String?, plainText: String?) {
+        func decodedBody(_ part: MessagePart) async -> String? {
+            if let data = part.body?.data {
+                return decodeBody(data, headers: part.headers)
+            }
+
+            if let attachmentId = part.body?.attachmentId {
+                return await fetchLargeBodyContent(
+                    attachmentId: attachmentId,
+                    messageId: messageId,
+                    headers: part.headers
+                )
+            }
+
+            return nil
+        }
+
+        func normalizedNonEmpty(_ value: String?) -> String? {
+            guard let value else { return nil }
+
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : value
+        }
+
+        func extract(from part: MessagePart) async -> ExtractedMessageContent {
             let resolvedMimeType = resolvedMimeType(for: part)
 
             if isHTMLMimeType(resolvedMimeType) {
-                if let data = part.body?.data {
-                    await box.setHTML(decodeBody(data, headers: part.headers))
-                } else if let attachmentId = part.body?.attachmentId {
-                    // Large HTML body - fetch via attachment API
-                    await box.setHTML(await fetchLargeBodyContent(attachmentId: attachmentId, messageId: messageId, headers: part.headers))
-                }
+                return ExtractedMessageContent(
+                    html: normalizedNonEmpty(await decodedBody(part)),
+                    plainText: nil
+                )
             } else if isPlainTextMimeType(resolvedMimeType) {
-                if let data = part.body?.data {
-                    await box.setPlainText(decodeBody(data, headers: part.headers))
-                } else if let attachmentId = part.body?.attachmentId {
-                    // Large plain text body - fetch via attachment API
-                    await box.setPlainText(await fetchLargeBodyContent(attachmentId: attachmentId, messageId: messageId, headers: part.headers))
+                return ExtractedMessageContent(
+                    html: nil,
+                    plainText: normalizedNonEmpty(await decodedBody(part))
+                )
+            }
+
+            guard let parts = part.parts, !parts.isEmpty else {
+                return ExtractedMessageContent()
+            }
+
+            var extracted = ExtractedMessageContent()
+            for subpart in parts {
+                let childContent = await extract(from: subpart)
+                extracted.mergeMissing(from: childContent)
+                if extracted.html != nil && extracted.plainText != nil {
+                    break
                 }
             }
 
-            if let parts = part.parts {
-                for subpart in parts {
-                    await traverse(subpart)
-                    let hasHTML = await box.getHTML() != nil
-                    let hasPlainText = await box.getPlainText() != nil
-                    if hasHTML && hasPlainText { break }
-                }
-            }
+            return extracted
         }
 
-        await traverse(part)
+        var extracted = await extract(from: part)
 
         // Don't clean HTML content here - preserve original for display
         // The cleaning will be done only when creating snippets
 
-        html = await box.getHTML()
-        plainText = normalizedPlainTextBody(await box.getPlainText())
-
-        if html == nil {
-            html = await extractEmbeddedHTMLFromTextualBodies(from: part, messageId: messageId)
+        if extracted.html == nil {
+            extracted.html = await extractEmbeddedHTMLFromTextualBodies(from: part, messageId: messageId)
         }
 
-        return (html, plainText)
+        return (extracted.html, normalizedPlainTextBody(extracted.plainText))
+    }
+
+    private func canonicalContent(
+        html: String?,
+        plainText: String?,
+        attachmentInfo: [AttachmentInfo]
+    ) -> CanonicalEmailContent? {
+        let inlineContentIDs = attachmentInfo.compactMap(\.contentId)
+        if html?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            return CanonicalEmailContent(
+                html: html,
+                plainText: plainText,
+                sourceKind: .html,
+                sourceLocation: .messageFile,
+                inlineAttachmentContentIDs: inlineContentIDs
+            )
+        }
+
+        if plainText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            return CanonicalEmailContent(
+                html: nil,
+                plainText: plainText,
+                sourceKind: .plainText,
+                sourceLocation: .plainText,
+                inlineAttachmentContentIDs: inlineContentIDs
+            )
+        }
+
+        return nil
     }
 
     private func extractEmbeddedHTMLFromTextualBodies(
@@ -801,6 +843,7 @@ struct ProcessedMessage: Sendable {
     var cleanedSnippet: String?
     var internalDate: Date = Date()
     var headers: ProcessedHeaders = ProcessedHeaders()
+    var canonicalContent: CanonicalEmailContent?
     var htmlBody: String?
     var plainTextBody: String?
     var labelIds: [String] = []

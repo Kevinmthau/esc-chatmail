@@ -110,6 +110,78 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(savedMessage.bodyStorageURI, "file:///tmp/\(processedMessage.id).html")
     }
 
+    func testSaveMessage_multipartAlternativePlainFirstPersistsHTML() async throws {
+        let html = """
+        <!DOCTYPE html><html><body><table><tr><td><a href="https://example.com/cta">Reserve now</a></td></tr></table></body></html>
+        """
+        let plainText = """
+        https://tracking.example.com/a
+        https://tracking.example.com/b
+        Reserve now
+        """
+        let messageId = "persist-plain-first"
+        let htmlSaveSpy = HTMLSaveSpy()
+        let htmlPersister = MessagePersister(
+            saveHTML: { html, messageId in
+                htmlSaveSpy.save(html, messageId: messageId)
+            },
+            photoPrefetcher: { _ in }
+        )
+
+        await htmlPersister.saveMessage(
+            makeMultipartAlternativeMessage(
+                id: messageId,
+                plainText: plainText,
+                html: html,
+                plainFirst: true
+            ),
+            myAliases: [normalizedEmail("recipient@example.com")],
+            in: context
+        )
+
+        let savedMessage = try XCTUnwrap(fetchMessage(id: messageId))
+        XCTAssertEqual(htmlSaveSpy.recordedCallCount, 1)
+        XCTAssertEqual(htmlSaveSpy.recordedHTML, html)
+        XCTAssertEqual(savedMessage.bodyStorageURI, "file:///tmp/\(messageId).html")
+        XCTAssertEqual(savedMessage.bodyText, plainText)
+    }
+
+    func testSaveMessage_multipartAlternativeHTMLFirstPersistsHTML() async throws {
+        let html = """
+        <!DOCTYPE html><html><body><table><tr><td><img src="https://example.com/hero.jpg"><a href="https://example.com/cta">Reserve now</a></td></tr></table></body></html>
+        """
+        let plainText = """
+        https://tracking.example.com/a
+        https://tracking.example.com/b
+        Reserve now
+        """
+        let messageId = "persist-html-first"
+        let htmlSaveSpy = HTMLSaveSpy()
+        let htmlPersister = MessagePersister(
+            saveHTML: { html, messageId in
+                htmlSaveSpy.save(html, messageId: messageId)
+            },
+            photoPrefetcher: { _ in }
+        )
+
+        await htmlPersister.saveMessage(
+            makeMultipartAlternativeMessage(
+                id: messageId,
+                plainText: plainText,
+                html: html,
+                plainFirst: false
+            ),
+            myAliases: [normalizedEmail("recipient@example.com")],
+            in: context
+        )
+
+        let savedMessage = try XCTUnwrap(fetchMessage(id: messageId))
+        XCTAssertEqual(htmlSaveSpy.recordedCallCount, 1)
+        XCTAssertEqual(htmlSaveSpy.recordedHTML, html)
+        XCTAssertEqual(savedMessage.bodyStorageURI, "file:///tmp/\(messageId).html")
+        XCTAssertEqual(savedMessage.bodyText, plainText)
+    }
+
     func testCreateNewMessage_onBackgroundContext_persistsMessageAndConversation() async throws {
         let backgroundContext = testStack.newBackgroundContext()
         var headers = ProcessedHeaders()
@@ -1529,6 +1601,71 @@ final class MessagePersisterUpdateTests: XCTestCase {
         participant.person = person
         participant.message = message
     }
+
+    private func fetchMessage(id: String) throws -> Message? {
+        let request = Message.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", id)
+        request.fetchLimit = 1
+        return try context.fetch(request).first
+    }
+
+    private func makeMultipartAlternativeMessage(
+        id: String,
+        plainText: String,
+        html: String,
+        plainFirst: Bool
+    ) -> GmailMessage {
+        let plainPart = MessagePart(
+            partId: "0.0",
+            mimeType: "text/plain",
+            filename: nil,
+            headers: [
+                MessageHeader(name: "Content-Type", value: "text/plain; charset=utf-8")
+            ],
+            body: MessageBody(
+                size: plainText.count,
+                data: plainText.data(using: .utf8)?.base64EncodedString(),
+                attachmentId: nil
+            ),
+            parts: nil
+        )
+        let htmlPart = MessagePart(
+            partId: "0.1",
+            mimeType: "text/html",
+            filename: nil,
+            headers: [
+                MessageHeader(name: "Content-Type", value: "text/html; charset=utf-8")
+            ],
+            body: MessageBody(
+                size: html.count,
+                data: html.data(using: .utf8)?.base64EncodedString(),
+                attachmentId: nil
+            ),
+            parts: nil
+        )
+
+        return GmailMessage(
+            id: id,
+            threadId: "\(id)-thread",
+            labelIds: ["INBOX"],
+            snippet: "Reserve now",
+            historyId: "12345",
+            internalDate: "1704067200000",
+            payload: MessagePart(
+                partId: "0",
+                mimeType: "multipart/alternative",
+                filename: nil,
+                headers: [
+                    MessageHeader(name: "Subject", value: "Reservation offer"),
+                    MessageHeader(name: "From", value: "Reservations <reservations@example.com>"),
+                    MessageHeader(name: "To", value: "recipient@example.com")
+                ],
+                body: nil,
+                parts: plainFirst ? [plainPart, htmlPart] : [htmlPart, plainPart]
+            ),
+            sizeEstimate: html.count + plainText.count
+        )
+    }
 }
 
 private final class StubMessageProcessor: MessageProcessor {
@@ -1546,6 +1683,7 @@ private final class StubMessageProcessor: MessageProcessor {
 private final class HTMLSaveSpy {
     private let lock = NSLock()
     private var callCount = 0
+    private var lastHTML: String?
 
     var recordedCallCount: Int {
         lock.lock()
@@ -1553,9 +1691,16 @@ private final class HTMLSaveSpy {
         return callCount
     }
 
+    var recordedHTML: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return lastHTML
+    }
+
     func save(_ html: String, messageId: String) -> URL? {
         lock.lock()
         callCount += 1
+        lastHTML = html
         lock.unlock()
         return URL(fileURLWithPath: "/tmp/\(messageId).html")
     }

@@ -94,7 +94,7 @@ struct HTMLMessageView: View {
     @State private var loadedContent: OriginalEmailLoadedContent?
     @State private var isLoading = true
 
-    private let htmlContentLoader = HTMLContentLoader.shared
+    private let originalEmailSourceLoader = OriginalEmailSourceLoader.shared
     private var loadKey: String {
         "\(message.id)|\(message.bodyStorageURI ?? "")|\(message.bodyText?.hashValue ?? 0)|\(message.subject?.hashValue ?? 0)|\(message.senderEmail?.hashValue ?? 0)|\(colorScheme == .dark)"
     }
@@ -146,16 +146,13 @@ struct HTMLMessageView: View {
         }
 
         Log.diagnostic(.htmlPreview, level: .info, "HTMLMessageView loading message \(message.id)", category: .ui)
-        let result = await htmlContentLoader.loadContentWithTimeout(
+        let source = await originalEmailSourceLoader.loadOriginalEmailSource(
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
             bodyText: message.bodyText,
             senderEmail: message.senderEmail,
             subject: message.subject,
             isDarkMode: colorScheme == .dark,
-            cleanupMode: .none,
-            displayPurpose: .original,
-            originalHTMLPreference: .preferHTML,
             timeout: 5.0
         )
 
@@ -163,11 +160,10 @@ struct HTMLMessageView: View {
             return
         }
 
-        // If we loaded HTML from the per-message file location (or recovered it and saved it there),
+        // If we loaded HTML from the per-message file location (or recovered/saved it there),
         // ensure Core Data points at the canonical file URL so the rest of the UI can treat it as
         // having a stable HTML source.
-        if (result.source == .messageId || result.source == .recovered),
-           result.html != nil,
+        if source?.shouldPointBodyStorageURIAtMessageFile == true,
            let context = message.managedObjectContext {
             let messageId = message.id
             Task {
@@ -184,21 +180,25 @@ struct HTMLMessageView: View {
         }
 
         await MainActor.run {
-            switch result.presentation {
+            switch source?.presentation {
             case .html:
-                self.loadedContent = result.html.map(OriginalEmailLoadedContent.html)
+                self.loadedContent = source?.html.map(OriginalEmailLoadedContent.html)
             case .nativePlainText:
-                self.loadedContent = result.nativeText.map(OriginalEmailLoadedContent.plainText)
+                self.loadedContent = source?.plainText.map(OriginalEmailLoadedContent.plainText)
+            case nil:
+                self.loadedContent = nil
             }
             self.isLoading = false
         }
 
-        Log.diagnostic(
-            .htmlPreview,
-            level: .info,
-            "HTMLMessageView loaded message \(message.id) source=\(String(describing: result.source)) presentation=\(result.presentation.rawValue) hasHTML=\(result.html != nil)",
-            category: .ui
-        )
+        if let source {
+            Log.diagnostic(
+                .htmlPreview,
+                level: .info,
+                "HTMLMessageView loaded message \(message.id) sourceKind=\(source.sourceKind.rawValue) sourceLocation=\(source.sourceLocation.rawValue) presentation=\(source.presentation.rawValue) hasHTML=\(source.html != nil)",
+                category: .ui
+            )
+        }
     }
 }
 

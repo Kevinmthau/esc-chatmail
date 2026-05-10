@@ -61,7 +61,8 @@ extension MessagePersister {
             var senderHeaderDisplayNameUpdateEmails = Set<String>()
             var senderHeaderDisplayNameUpdateConversationIDs = Set<NSManagedObjectID>()
             let shouldPreserveLocalMailboxState = HistoryProcessor.hasPendingLocalModification(message: existingMessage)
-            let savedBodyStorageURI = processedMessage.htmlBody.flatMap {
+            let canonicalHTML = processedMessage.canonicalContent?.html ?? processedMessage.htmlBody
+            let savedBodyStorageURI = canonicalHTML.flatMap {
                 saveHTML($0, processedMessage.id)?.absoluteString
             }
 

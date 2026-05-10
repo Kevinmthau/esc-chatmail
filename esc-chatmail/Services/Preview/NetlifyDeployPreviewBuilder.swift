@@ -56,7 +56,7 @@ struct NetlifyDeployPreviewBuilder {
     }
 
     private func containsNetlifyBotMarker(lowercasedHTML: String, lowercasedPlainText: String) -> Bool {
-        if lowercasedHTML.contains("netlify[bot]") || lowercasedHTML.contains("netlify%5Bbot%5D") {
+        if lowercasedHTML.contains("netlify[bot]") || lowercasedHTML.contains("netlify%5bbot%5d") {
             return true
         }
 

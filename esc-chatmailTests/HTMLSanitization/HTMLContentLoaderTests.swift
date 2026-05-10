@@ -499,6 +499,44 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertTrue(previewHTML?.contains("background-color: #f2f2f7") == true)
     }
 
+    func testPrepareOriginalHTMLCachesPreparedOriginalHTML() async {
+        let messageId = "html-loader-original-canonical-cache-\(UUID().uuidString)"
+        let originalHTML = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <table><tr><td>Canonical original body</td></tr></table>
+        </body>
+        </html>
+        """
+
+        let first = await loader.prepareOriginalHTML(
+            fromCanonicalHTML: originalHTML,
+            messageId: messageId,
+            sourceLocation: .messageFile,
+            plainText: nil,
+            senderEmail: "sender@example.com",
+            subject: "Subject",
+            isDarkMode: false
+        )
+        let second = await loader.prepareOriginalHTML(
+            fromCanonicalHTML: originalHTML,
+            messageId: messageId,
+            sourceLocation: .messageFile,
+            plainText: nil,
+            senderEmail: "sender@example.com",
+            subject: "Subject",
+            isDarkMode: false
+        )
+
+        XCTAssertNotNil(first)
+        XCTAssertEqual(first, second)
+        XCTAssertTrue(first?.contains("Canonical original body") == true)
+#if DEBUG
+        XCTAssertEqual(loader.debugCachedVariantCount(for: messageId), 1)
+#endif
+    }
+
     func testLoadContent_cleanupModeQuotedOnlyPreservesSignatureBlock() async {
         let messageId = "html-loader-signature-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }

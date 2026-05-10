@@ -11,15 +11,10 @@ struct EmailContentSection: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.managedObjectContext) private var viewContext
-    @State private var renderedPreview: LoadedPreview?
+    @State private var renderedPreview: EmailPreviewRenderModel?
     @State private var isLoading = true
     @State private var loadGeneration = 0
-    private let htmlContentLoader = HTMLContentLoader.shared
-    private let previewSourceLoader = EmailPreviewSourceLoader.shared
-    private let calendarInvitePreviewBuilder = CalendarInvitePreviewBuilder()
-    private let newsletterPreviewBuilder = NewsletterPreviewBuilder()
-    private let transactionalPreviewBuilder = TransactionalPreviewBuilder()
-    private let netlifyDeployPreviewBuilder = NetlifyDeployPreviewBuilder()
+    private let previewPipeline = EmailPreviewPipeline.shared
 
     private var loadKey: String {
         Self.makeLoadKey(
@@ -61,11 +56,16 @@ struct EmailContentSection: View {
         isDarkMode: Bool,
         cleanupMode: HTMLContentCleanupMode
     ) -> String {
-        "\(messageId)|\(sourceSignature)|mode:html-preview|dark:\(isDarkMode)|cleanup:\(cleanupMode.rawValue)"
+        EmailPreviewPipeline.makePreviewHTMLCacheKey(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            isDarkMode: isDarkMode,
+            cleanupMode: cleanupMode
+        )
     }
 
     static func shouldUseTransactionalPreviewCard(isForwardedEmail: Bool) -> Bool {
-        !isForwardedEmail
+        EmailPreviewPipeline.shouldUseTransactionalPreviewCard(isForwardedEmail: isForwardedEmail)
     }
 
     static func nativePreviewCardRoutes(
@@ -73,19 +73,11 @@ struct EmailContentSection: View {
         isForwardedEmail: Bool,
         classificationKind: EmailPreviewKind
     ) -> [NativePreviewCardRoute] {
-        var routes: [NativePreviewCardRoute] = []
-
-        if classificationKind == .transactional,
-           shouldUseTransactionalPreviewCard(isForwardedEmail: isForwardedEmail) {
-            routes.append(.transactional)
-        }
-
-        if !isForwardedEmail,
-           classificationKind == .newsletter || isNewsletter {
-            routes.append(.newsletter)
-        }
-
-        return routes
+        EmailPreviewPipeline.nativePreviewCardRoutes(
+            isNewsletter: isNewsletter,
+            isForwardedEmail: isForwardedEmail,
+            classificationKind: classificationKind
+        )
     }
 
     var body: some View {
@@ -120,162 +112,34 @@ struct EmailContentSection: View {
     }
 
     private func loadHTML(generation: Int) async {
-        let previewSource = await previewSourceLoader.loadPreviewSource(
-            messageId: message.id,
-            bodyStorageURI: message.bodyStorageURI,
-            bodyText: message.bodyText,
-            senderEmail: message.senderEmail,
-            subject: message.subject,
-            allowRecovery: true
-        )
-
-        if let previewSource,
-           let canonicalHTML = previewSource.canonicalHTML {
-            guard !Task.isCancelled else {
-                return
-            }
-
-            let classification = previewSource.classification
-            Log.diagnostic(
-                .htmlPreview,
-                level: .info,
-                "EmailContentSection classified message \(message.id): \(classification.diagnosticSummary)",
-                category: .ui
-            )
-
-            if !message.isForwardedEmail,
-               let model = calendarInvitePreviewBuilder.buildPreview(
-                canonicalHTML: canonicalHTML,
+        let renderedPreview = await previewPipeline.loadPreview(
+            request: EmailPreviewPipelineRequest(
+                messageId: message.id,
+                bodyStorageURI: message.bodyStorageURI,
                 bodyText: message.bodyText,
                 cleanedSnippet: message.cleanedSnippet,
                 senderName: message.senderName,
                 senderEmail: message.senderEmail,
-                subject: message.subject
-               ) {
-                await finishLoad(with: .calendarInvite(model), generation: generation)
-                return
-            }
-
-            if !message.isForwardedEmail,
-               let model = netlifyDeployPreviewBuilder.buildPreview(
-                canonicalHTML: canonicalHTML,
-                senderEmail: message.senderEmail,
-                subject: message.subject
-               ) {
-                await finishLoad(with: .netlifyDeploy(model), generation: generation)
-                return
-            }
-
-            let routes = Self.nativePreviewCardRoutes(
+                subject: message.subject,
                 isNewsletter: message.isNewsletter,
                 isForwardedEmail: message.isForwardedEmail,
-                classificationKind: classification.kind
+                cleanupMode: message.htmlDisplayCleanupMode,
+                isDarkMode: colorScheme == .dark
             )
-
-            for route in routes {
-                switch route {
-                case .newsletter:
-                    if let model = newsletterPreviewBuilder.buildPreview(
-                        source: previewSource,
-                        cleanedSnippet: message.cleanedSnippet,
-                        senderName: message.senderName,
-                        senderEmail: message.senderEmail,
-                        subject: message.subject
-                    ) {
-                        await finishLoad(with: .newsletter(model), generation: generation)
-                        return
-                    }
-
-                    Log.diagnostic(
-                        .htmlPreview,
-                        level: .info,
-                        "EmailContentSection newsletter fallback for message \(message.id): preview model unavailable",
-                        category: .ui
-                    )
-                case .transactional:
-                    if let model = transactionalPreviewBuilder.buildPreview(
-                        source: previewSource,
-                        cleanedSnippet: message.cleanedSnippet,
-                        senderName: message.senderName,
-                        senderEmail: message.senderEmail,
-                        subject: message.subject
-                    ) {
-                        await finishLoad(with: .transactional(model), generation: generation)
-                        return
-                    }
-
-                    Log.diagnostic(
-                        .htmlPreview,
-                        level: .info,
-                        "EmailContentSection transactional fallback for message \(message.id): preview model unavailable",
-                        category: .ui
-                    )
-                }
-            }
-
-            if let previewHTML = await htmlContentLoader.preparePreviewHTML(
-                fromCanonicalHTML: canonicalHTML,
-                messageId: message.id,
-                bodyText: message.bodyText,
-                senderEmail: message.senderEmail,
-                subject: message.subject,
-                isDarkMode: colorScheme == .dark,
-                cleanupMode: message.htmlDisplayCleanupMode
-            ) {
-                await finishLoad(
-                    with: .transactionalHTML(
-                        HTMLPreviewPayload(
-                            html: previewHTML,
-                            previewCacheKey: Self.makePreviewHTMLCacheKey(
-                                messageId: message.id,
-                                sourceSignature: previewSource.sourceSignature,
-                                isDarkMode: colorScheme == .dark,
-                                cleanupMode: message.htmlDisplayCleanupMode
-                            )
-                        )
-                    ),
-                    generation: generation
-                )
-                return
-            }
-        }
-
-        let result = await htmlContentLoader.loadContentWithTimeout(
-            messageId: message.id,
-            bodyStorageURI: message.bodyStorageURI,
-            bodyText: message.bodyText,
-            senderEmail: message.senderEmail,
-            isDarkMode: colorScheme == .dark,
-            cleanupMode: message.htmlDisplayCleanupMode,
-            displayPurpose: .preview,
-            timeout: 5.0
         )
 
         guard !Task.isCancelled else {
             return
         }
 
-        if result.html == nil {
+        if renderedPreview == nil {
             Log.diagnostic(.htmlPreview, "EmailContentSection: No HTML content for message \(message.id)", category: .ui)
         }
 
-        let loadedPreview = result.html.map { html in
-            LoadedPreview.transactionalHTML(
-                HTMLPreviewPayload(
-                    html: html,
-                    previewCacheKey: Self.makePreviewHTMLCacheKey(
-                        messageId: message.id,
-                        sourceSignature: result.sourceSignature ?? Self.htmlContentSignature(for: html),
-                        isDarkMode: colorScheme == .dark,
-                        cleanupMode: message.htmlDisplayCleanupMode
-                    )
-                )
-            )
-        }
-        await finishLoad(with: loadedPreview, generation: generation)
+        await finishLoad(with: renderedPreview, generation: generation)
     }
 
-    private func finishLoad(with preview: LoadedPreview?, generation: Int) async {
+    private func finishLoad(with preview: EmailPreviewRenderModel?, generation: Int) async {
         await MainActor.run {
             guard generation == loadGeneration else {
                 return
@@ -287,7 +151,7 @@ struct EmailContentSection: View {
     }
 
     @ViewBuilder
-    private func previewView(for renderedPreview: LoadedPreview) -> some View {
+    private func previewView(for renderedPreview: EmailPreviewRenderModel) -> some View {
         switch renderedPreview {
         case .calendarInvite(let model):
             Button(action: onOpenFullMessage) {
@@ -317,7 +181,7 @@ struct EmailContentSection: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Netlify deploy preview: \(model.title), \(model.status.displayText)")
             .accessibilityHint("Opens the full original email")
-        case .transactionalHTML(let payload):
+        case .html(let payload):
             Button(action: onOpenFullMessage) {
                 MiniEmailWebView(
                     htmlContent: payload.html,
@@ -357,13 +221,6 @@ struct EmailContentSection: View {
         return resolved
     }
 
-    private static func htmlContentSignature(for html: String) -> String {
-        let digest = SHA256.hash(data: Data(html.utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
-        return "html:\(digest)"
-    }
-
     private static func contentFingerprint(for text: String?) -> String {
         guard let text else {
             return "nil"
@@ -374,22 +231,4 @@ struct EmailContentSection: View {
             .map { String(format: "%02x", $0) }
             .joined()
     }
-}
-
-enum NativePreviewCardRoute: Equatable {
-    case newsletter
-    case transactional
-}
-
-private enum LoadedPreview: Equatable {
-    case calendarInvite(CalendarInvitePreviewModel)
-    case newsletter(NewsletterPreviewModel)
-    case transactional(TransactionalPreviewModel)
-    case netlifyDeploy(NetlifyDeployPreviewModel)
-    case transactionalHTML(HTMLPreviewPayload)
-}
-
-private struct HTMLPreviewPayload: Equatable {
-    let html: String
-    let previewCacheKey: String
 }

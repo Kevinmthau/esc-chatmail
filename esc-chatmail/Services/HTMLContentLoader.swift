@@ -351,33 +351,27 @@ final class HTMLContentLoader {
         bodyText: String? = nil,
         allowRecovery: Bool = true
     ) async -> String? {
-        if contentHandler.htmlFileExists(for: messageId),
-           let html = canonicalHTMLSource(from: contentHandler.loadHTML(for: messageId)) {
-            return html
-        }
+        await loadCanonicalEmailContent(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            allowRecovery: allowRecovery
+        )?.html
+    }
 
-        if let urlString = bodyStorageURI,
-           let url = StorageURIResolver.resolve(urlString),
-           FileManager.default.fileExists(atPath: url.path),
-           let html = canonicalHTMLSource(from: contentHandler.loadHTML(from: url)) {
-            return html
-        }
-
-        if let text = bodyText,
-           let rawSourceHTML = RawEmailSourceSanitizer.extractHTMLText(from: text),
-           let html = canonicalHTMLSource(from: rawSourceHTML) {
-            return html
-        }
-
-        guard allowRecovery else {
-            return nil
-        }
-
-        if let html = await HTMLContentRecoveryService.shared.recoverHTMLContent(messageId: messageId) {
-            return canonicalHTMLSource(from: html)
-        }
-
-        return nil
+    /// Loads typed canonical content without applying preview/full-message presentation wrappers.
+    func loadCanonicalEmailContent(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String? = nil,
+        allowRecovery: Bool = true
+    ) async -> CanonicalEmailContent? {
+        await CanonicalEmailContentLoader(contentHandler: contentHandler).loadCanonicalEmailContent(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            allowRecovery: allowRecovery
+        )
     }
 
     /// Wraps already-loaded canonical HTML for chat preview rendering without reloading the
@@ -416,6 +410,52 @@ final class HTMLContentLoader {
         case .nativePlainText:
             return nil
         }
+    }
+
+    /// Wraps canonical HTML for the full original-email reader. This method deliberately
+    /// avoids preview cleanup, preview CSS, and original-readable plain-text quality fallback.
+    func prepareOriginalHTML(
+        fromCanonicalHTML canonicalHTML: String,
+        messageId: String,
+        sourceLocation: CanonicalEmailSourceLocation = .messageFile,
+        plainText: String? = nil,
+        senderEmail: String? = nil,
+        subject: String? = nil,
+        isDarkMode: Bool
+    ) async -> String? {
+        guard let normalizedCanonicalHTML = canonicalHTMLSource(from: canonicalHTML) else {
+            return nil
+        }
+
+        let normalizedFallbackText = normalizedMeaningfulPlainText(from: plainText)
+        let variantKey = cacheVariantKey(
+            messageId: messageId,
+            plainText: normalizedFallbackText,
+            senderEmail: senderEmail,
+            subject: subject,
+            isDarkMode: isDarkMode,
+            cleanupMode: .none,
+            displayPurpose: .original,
+            originalHTMLPreference: .preferHTML
+        )
+
+        guard let result = await cachedOrPreparedHTMLResult(
+            normalizedCanonicalHTML,
+            source: htmlLoadSource(for: sourceLocation),
+            messageId: messageId,
+            plainText: normalizedFallbackText,
+            senderEmail: senderEmail,
+            subject: subject,
+            isDarkMode: isDarkMode,
+            cleanupMode: .none,
+            displayPurpose: .original,
+            originalHTMLPreference: .preferHTML,
+            variantKey: variantKey
+        ) else {
+            return nil
+        }
+
+        return result.presentation == .html ? result.html : nil
     }
 
     /// Returns canonical stored HTML only when the original-reader heuristics would keep HTML.
@@ -600,6 +640,23 @@ final class HTMLContentLoader {
             return "plainTextFallback"
         case .notFound:
             return "notFound"
+        }
+    }
+
+    private func htmlLoadSource(
+        for sourceLocation: CanonicalEmailSourceLocation
+    ) -> HTMLLoadResult.HTMLLoadSource {
+        switch sourceLocation {
+        case .messageFile:
+            return .messageId
+        case .storageURI:
+            return .storageURI
+        case .rawSourceHTML:
+            return .rawSourceHTML
+        case .recoveredHTML:
+            return .recovered
+        case .plainText:
+            return .plainTextFallback
         }
     }
 

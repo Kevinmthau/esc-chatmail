@@ -17,23 +17,27 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
     private let gmailAPIClientProvider: @Sendable () async -> any GmailAPIClientProtocol
     private let contentHandler: HTMLContentHandler
     private var recoveryTasks: [String: Task<RecoveryAttemptResult, Never>] = [:]
-    private var messagesKnownWithoutHTML: Set<String> = []
+    private var noHTMLMisses: [String: Date] = [:]
+    private let noHTMLMissCacheTTL: TimeInterval
 
     init(
         gmailAPIClientProvider: @escaping @Sendable () async -> any GmailAPIClientProtocol = {
             await MainActor.run { GmailAPIClient.shared }
         },
-        contentHandler: HTMLContentHandler = .shared
+        contentHandler: HTMLContentHandler = .shared,
+        noHTMLMissCacheTTL: TimeInterval = 300
     ) {
         self.gmailAPIClientProvider = gmailAPIClientProvider
         self.contentHandler = contentHandler
+        self.noHTMLMissCacheTTL = noHTMLMissCacheTTL
     }
 
     /// Recovers HTML content for a message by fetching from Gmail API
     /// Returns the HTML content if successful, nil otherwise
     func recoverHTMLContent(messageId: String) async -> String? {
-        // Avoid repeated API calls for messages we already confirmed have no HTML part.
-        guard !messagesKnownWithoutHTML.contains(messageId) else { return nil }
+        guard !isCachedNoHTMLMiss(messageId) else {
+            return nil
+        }
 
         if let existingTask = recoveryTasks[messageId] {
             return resolvedHTML(from: await existingTask.value, messageId: messageId)
@@ -92,14 +96,27 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
     private func resolvedHTML(from result: RecoveryAttemptResult, messageId: String) -> String? {
         switch result {
         case .html(let html):
-            messagesKnownWithoutHTML.remove(messageId)
+            noHTMLMisses.removeValue(forKey: messageId)
             return html
         case .noHTML:
-            messagesKnownWithoutHTML.insert(messageId)
+            noHTMLMisses[messageId] = Date()
             return nil
         case .failed:
             return nil
         }
+    }
+
+    private func isCachedNoHTMLMiss(_ messageId: String) -> Bool {
+        guard let recordedAt = noHTMLMisses[messageId] else {
+            return false
+        }
+
+        if Date().timeIntervalSince(recordedAt) < noHTMLMissCacheTTL {
+            return true
+        }
+
+        noHTMLMisses.removeValue(forKey: messageId)
+        return false
     }
 
     private func extractEmbeddedHTMLFromTextualBodies(

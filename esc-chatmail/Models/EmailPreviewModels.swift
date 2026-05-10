@@ -66,6 +66,32 @@ struct EmailPreviewSource: Equatable, Sendable {
     let extractedImages: [EmailPreviewImage]
     let htmlSummary: EmailPreviewHTMLSummary
     let classification: EmailPreviewClassification
+    var sourceKind: CanonicalEmailSourceKind = .html
+    var hasHTMLSource: Bool = true
+
+    init(
+        messageId: String,
+        sourceSignature: String,
+        canonicalHTML: String?,
+        plainText: String?,
+        extractedText: String?,
+        extractedImages: [EmailPreviewImage],
+        htmlSummary: EmailPreviewHTMLSummary,
+        classification: EmailPreviewClassification,
+        sourceKind: CanonicalEmailSourceKind = .html,
+        hasHTMLSource: Bool = true
+    ) {
+        self.messageId = messageId
+        self.sourceSignature = sourceSignature
+        self.canonicalHTML = canonicalHTML
+        self.plainText = plainText
+        self.extractedText = extractedText
+        self.extractedImages = extractedImages
+        self.htmlSummary = htmlSummary
+        self.classification = classification
+        self.sourceKind = sourceKind
+        self.hasHTMLSource = hasHTMLSource
+    }
 }
 
 extension EmailPreviewClassification {

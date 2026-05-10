@@ -154,6 +154,28 @@ final class HTMLContentRecoveryServiceTests: XCTestCase {
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
     }
 
+    func testRecoverHTMLContent_cachesNoHTMLMissesWithinTTL() async {
+        let messageId = "html-recovery-no-html-\(UUID().uuidString)"
+        let mockAPIClient = MockGmailAPIClient()
+        mockAPIClient.getMessageResponses[messageId] = makePlainTextOnlyMessage(id: messageId)
+
+        let contentHandler = HTMLContentHandler()
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let service = HTMLContentRecoveryService(
+            gmailAPIClientProvider: { mockAPIClient },
+            contentHandler: contentHandler,
+            noHTMLMissCacheTTL: 300
+        )
+
+        let firstRecovery = await service.recoverHTMLContent(messageId: messageId)
+        let secondRecovery = await service.recoverHTMLContent(messageId: messageId)
+
+        XCTAssertNil(firstRecovery)
+        XCTAssertNil(secondRecovery)
+        XCTAssertEqual(mockAPIClient.getMessageCallCount, 1)
+    }
+
     private func makeHTMLAttachmentMessage(id: String, attachmentId: String) -> GmailMessage {
         let plainText = "Fallback plain text body"
 
@@ -200,6 +222,34 @@ final class HTMLContentRecoveryServiceTests: XCTestCase {
                         parts: nil
                     )
                 ]
+            ),
+            sizeEstimate: plainText.count
+        )
+    }
+
+    private func makePlainTextOnlyMessage(id: String) -> GmailMessage {
+        let plainText = "Plain text body"
+
+        return GmailMessage(
+            id: id,
+            threadId: "\(id)-thread",
+            labelIds: ["INBOX"],
+            snippet: plainText,
+            historyId: "12345",
+            internalDate: "1704067200000",
+            payload: MessagePart(
+                partId: "0",
+                mimeType: "text/plain",
+                filename: nil,
+                headers: [
+                    MessageHeader(name: "Content-Type", value: "text/plain; charset=utf-8")
+                ],
+                body: MessageBody(
+                    size: plainText.count,
+                    data: plainText.data(using: .utf8)?.base64EncodedString(),
+                    attachmentId: nil
+                ),
+                parts: nil
             ),
             sizeEstimate: plainText.count
         )

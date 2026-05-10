@@ -19,7 +19,8 @@ extension MessagePersister {
         in context: NSManagedObjectContext
     ) async throws {
         let saveHTML = self.saveHTML
-        let savedBodyStorageURI = processedMessage.htmlBody.flatMap {
+        let canonicalHTML = processedMessage.canonicalContent?.html ?? processedMessage.htmlBody
+        let savedBodyStorageURI = canonicalHTML.flatMap {
             saveHTML($0, processedMessage.id)?.absoluteString
         }
         let conversationObjectID = try await conversationRouter.resolveConversationObjectID(

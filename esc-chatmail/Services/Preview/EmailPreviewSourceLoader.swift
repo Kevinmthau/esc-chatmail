@@ -48,21 +48,22 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
         subject: String?,
         allowRecovery: Bool = true
     ) async -> EmailPreviewSource? {
-        guard let canonicalHTML = await htmlContentLoader.loadCanonicalHTML(
+        guard let canonicalContent = await htmlContentLoader.loadCanonicalEmailContent(
             messageId: messageId,
             bodyStorageURI: bodyStorageURI,
             bodyText: bodyText,
             allowRecovery: allowRecovery
-        ) else {
+        ),
+              let canonicalHTML = canonicalContent.html else {
             return nil
         }
 
-        let sourceSignature = Self.sourceSignature(for: canonicalHTML)
+        let sourceSignature = canonicalContent.sourceSignature
         let cacheKey = self.cacheKey(
             messageId: messageId,
             sourceSignature: sourceSignature,
             previewMode: Self.previewMode(
-                bodyText: bodyText,
+                bodyText: canonicalContent.plainText,
                 senderEmail: senderEmail,
                 subject: subject,
                 allowRecovery: allowRecovery
@@ -75,7 +76,7 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
 
         let extractedContent = EmailPreviewContentExtractor.extract(
             canonicalHTML: canonicalHTML,
-            bodyText: bodyText,
+            bodyText: canonicalContent.plainText,
             imageExtractor: imageExtractor
         )
         let classification = classifier.classify(
@@ -94,7 +95,16 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
             extractedText: extractedContent.htmlText,
             extractedImages: extractedContent.images,
             htmlSummary: extractedContent.htmlSummary,
-            classification: classification
+            classification: classification,
+            sourceKind: canonicalContent.sourceKind,
+            hasHTMLSource: canonicalContent.hasHTMLSource
+        )
+
+        Log.diagnostic(
+            .htmlPreview,
+            level: .info,
+            "EmailPreviewSourceLoader message \(messageId): sourceKind=\(canonicalContent.sourceKind.rawValue) sourceLocation=\(canonicalContent.sourceLocation.rawValue)",
+            category: .ui
         )
 
         cache.setObject(CachedSourceBox(source), forKey: cacheKey as NSString, cost: canonicalHTML.utf8.count)
@@ -126,13 +136,6 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
             "subject:\(Self.fingerprint(for: subject))",
             "recovery:\(allowRecovery)"
         ].joined(separator: "|")
-    }
-
-    private static func sourceSignature(for html: String) -> String {
-        let digest = SHA256.hash(data: Data(html.utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
-        return "sha256:\(digest)"
     }
 
     private static func fingerprint(for text: String?) -> String {
