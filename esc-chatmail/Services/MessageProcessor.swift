@@ -392,6 +392,10 @@ class MessageProcessor {
         func extract(from part: MessagePart) async -> ExtractedMessageContent {
             let resolvedMimeType = resolvedMimeType(for: part)
 
+            if isAttachmentContentPart(part) {
+                return ExtractedMessageContent()
+            }
+
             if isHTMLMimeType(resolvedMimeType) {
                 return ExtractedMessageContent(
                     html: normalizedNonEmpty(await decodedBody(part)),
@@ -585,6 +589,20 @@ class MessageProcessor {
         }
 
         return mimeType.hasPrefix("text/plain")
+    }
+
+    private func isAttachmentContentPart(_ part: MessagePart) -> Bool {
+        let trimmedFilename = part.filename?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedFilename.isEmpty {
+            return true
+        }
+
+        let contentDisposition = part.headers?
+            .first(where: { $0.name.lowercased() == "content-disposition" })?
+            .value
+            .lowercased() ?? ""
+
+        return contentDisposition.contains("attachment")
     }
 
     private func decodeTransferEncoding(_ text: String, headers: [MessageHeader]?) -> String {

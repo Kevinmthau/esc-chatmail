@@ -71,6 +71,125 @@ final class MessageProcessorTests: XCTestCase {
         XCTAssertEqual(processed.plainTextBody, plainText)
     }
 
+    func testProcessGmailMessage_multipartMixedTextAttachmentBeforeAlternativeUsesBodyText() async throws {
+        let attachmentText = "ATTACHMENT_TOKEN_NOT_BODY"
+        let plainText = "REAL_BODY_TOKEN\nThanks"
+        let html = "<html><body><p>REAL_BODY_TOKEN</p><p>Thanks</p></body></html>"
+
+        let message = makeMultipartMessage(
+            id: "text-attachment-before-alternative",
+            parts: [
+                MessagePart(
+                    partId: "0.0",
+                    mimeType: "text/plain",
+                    filename: "notes.txt",
+                    headers: [
+                        MessageHeader(name: "Content-Type", value: "text/plain; charset=utf-8"),
+                        MessageHeader(name: "Content-Disposition", value: "attachment; filename=\"notes.txt\"")
+                    ],
+                    body: MessageBody(
+                        size: attachmentText.count,
+                        data: Data(attachmentText.utf8).base64EncodedString(),
+                        attachmentId: nil
+                    ),
+                    parts: nil
+                ),
+                MessagePart(
+                    partId: "0.1",
+                    mimeType: "multipart/alternative",
+                    filename: nil,
+                    headers: nil,
+                    body: nil,
+                    parts: [
+                        MessagePart(
+                            partId: "0.1.0",
+                            mimeType: "text/plain",
+                            filename: nil,
+                            headers: [
+                                MessageHeader(name: "Content-Type", value: "text/plain; charset=utf-8")
+                            ],
+                            body: MessageBody(
+                                size: plainText.count,
+                                data: Data(plainText.utf8).base64EncodedString(),
+                                attachmentId: nil
+                            ),
+                            parts: nil
+                        ),
+                        MessagePart(
+                            partId: "0.1.1",
+                            mimeType: "text/html",
+                            filename: nil,
+                            headers: [
+                                MessageHeader(name: "Content-Type", value: "text/html; charset=utf-8")
+                            ],
+                            body: MessageBody(
+                                size: html.count,
+                                data: Data(html.utf8).base64EncodedString(),
+                                attachmentId: nil
+                            ),
+                            parts: nil
+                        )
+                    ]
+                )
+            ]
+        )
+
+        let processedMessage = await processor.processGmailMessage(message, myAliases: [])
+        let processed = try XCTUnwrap(processedMessage)
+
+        XCTAssertEqual(processed.htmlBody, html)
+        XCTAssertEqual(processed.plainTextBody, plainText)
+        XCTAssertEqual(processed.canonicalContent?.plainText, plainText)
+        XCTAssertEqual(processed.attachmentInfo.first?.filename, "notes.txt")
+        XCTAssertFalse(processed.cleanedSnippet?.contains(attachmentText) == true)
+    }
+
+    func testProcessGmailMessage_multipartMixedTrailingPlainTextDoesNotOverrideBody() async throws {
+        let bodyText = "REAL_BODY_TOKEN\nThanks"
+        let trailingText = "TRAILING_GENERATED_TOKEN"
+
+        let message = makeMultipartMessage(
+            id: "trailing-plain-text-does-not-override-body",
+            parts: [
+                MessagePart(
+                    partId: "0.0",
+                    mimeType: "text/plain",
+                    filename: nil,
+                    headers: [
+                        MessageHeader(name: "Content-Type", value: "text/plain; charset=utf-8")
+                    ],
+                    body: MessageBody(
+                        size: bodyText.count,
+                        data: Data(bodyText.utf8).base64EncodedString(),
+                        attachmentId: nil
+                    ),
+                    parts: nil
+                ),
+                MessagePart(
+                    partId: "0.1",
+                    mimeType: "text/plain",
+                    filename: nil,
+                    headers: [
+                        MessageHeader(name: "Content-Type", value: "text/plain; charset=utf-8")
+                    ],
+                    body: MessageBody(
+                        size: trailingText.count,
+                        data: Data(trailingText.utf8).base64EncodedString(),
+                        attachmentId: nil
+                    ),
+                    parts: nil
+                )
+            ]
+        )
+
+        let processedMessage = await processor.processGmailMessage(message, myAliases: [])
+        let processed = try XCTUnwrap(processedMessage)
+
+        XCTAssertEqual(processed.plainTextBody, bodyText)
+        XCTAssertEqual(processed.canonicalContent?.plainText, bodyText)
+        XCTAssertFalse(processed.cleanedSnippet?.contains(trailingText) == true)
+    }
+
     // MARK: - Gmail Category Labels
 
     func testIsNewsletter_gmailPromotionsLabel_doesNotFlagAlone() {
