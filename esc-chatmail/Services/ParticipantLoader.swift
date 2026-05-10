@@ -110,6 +110,7 @@ final class ParticipantLoader {
     private struct ConversationParticipantSnapshot: Sendable {
         let emails: [String]
         let storedDisplayNamesByEmail: [String: String]
+        let headerDisplayNamesByEmail: [String: String]
         let fallbackDisplayName: String?
         let participantHash: String?
     }
@@ -123,6 +124,7 @@ final class ParticipantLoader {
     private struct ParticipantRollupCacheToken: Equatable {
         let participantHash: String
         let fallbackDisplayName: String?
+        let headerDisplayNamesByEmail: [String: String]
     }
 
     private struct CachedParticipantRollup {
@@ -219,12 +221,15 @@ final class ParticipantLoader {
         currentUserEmail: String,
         maxParticipants: Int = 4,
         fallbackDisplayName: String? = nil,
-        includePhotos: Bool = true
+        includePhotos: Bool = true,
+        headerDisplayNamesByEmail: [String: String] = [:],
+        evictOnTokenMismatch: Bool = false
     ) -> ParticipantInfo? {
         guard let token = makeCacheToken(
             participantHash: participantHash,
             sourceEmails: nil,
-            fallbackDisplayName: fallbackDisplayName
+            fallbackDisplayName: fallbackDisplayName,
+            headerDisplayNamesByEmail: headerDisplayNamesByEmail
         ) else {
             return nil
         }
@@ -238,7 +243,8 @@ final class ParticipantLoader {
         return cachedParticipantInfo(
             for: cacheKey,
             token: token,
-            includePhotos: includePhotos
+            includePhotos: includePhotos,
+            evictOnTokenMismatch: evictOnTokenMismatch
         )
     }
 
@@ -343,9 +349,24 @@ final class ParticipantLoader {
             currentUserEmail: currentUserEmail,
             maxParticipants: maxParticipants,
             fallbackDisplayName: snapshot.fallbackDisplayName,
-            includePhotos: includePhotos
+            includePhotos: includePhotos,
+            headerDisplayNamesByEmail: snapshot.headerDisplayNamesByEmail,
+            evictOnTokenMismatch: true
         ) {
             return cachedInfo
+        }
+
+        if includePhotos,
+           let upgradedCachedInfo = await upgradeCachedBaseParticipantInfoWithPhotos(
+                conversationObjectID: conversationObjectID,
+                participantHash: effectiveParticipantHash,
+                currentUserEmail: currentUserEmail,
+                maxParticipants: maxParticipants,
+                fallbackDisplayName: snapshot.fallbackDisplayName,
+                headerDisplayNamesByEmail: snapshot.headerDisplayNamesByEmail,
+                evictOnTokenMismatch: true
+           ) {
+            return upgradedCachedInfo
         }
 
         return await buildAndCacheParticipantInfo(
@@ -354,6 +375,7 @@ final class ParticipantLoader {
             currentUserEmail: currentUserEmail,
             emails: snapshot.emails,
             storedDisplayNamesByEmail: snapshot.storedDisplayNamesByEmail,
+            headerDisplayNamesByEmail: snapshot.headerDisplayNamesByEmail,
             fallbackDisplayName: snapshot.fallbackDisplayName,
             maxParticipants: maxParticipants,
             includePhotos: includePhotos
@@ -522,17 +544,25 @@ final class ParticipantLoader {
                 return ConversationParticipantSnapshot(
                     emails: [],
                     storedDisplayNamesByEmail: [:],
+                    headerDisplayNamesByEmail: [:],
                     fallbackDisplayName: fallbackDisplayName,
                     participantHash: nil
                 )
             }
 
+            let emails = Self.extractNonMeParticipants(
+                from: conversation,
+                currentUserEmail: currentUserEmail
+            )
+
             return ConversationParticipantSnapshot(
-                emails: Self.extractNonMeParticipants(
-                    from: conversation,
-                    currentUserEmail: currentUserEmail
-                ),
+                emails: emails,
                 storedDisplayNamesByEmail: Self.participantDisplayNamesByEmail(from: conversation),
+                headerDisplayNamesByEmail: Self.headerDisplayNamesByEmail(
+                    in: context,
+                    conversation: conversation,
+                    participantEmails: emails
+                ),
                 fallbackDisplayName: conversation.displayName ?? fallbackDisplayName,
                 participantHash: conversation.participantHash
             )
@@ -573,6 +603,7 @@ final class ParticipantLoader {
             maxParticipants: maxParticipants,
             fallbackDisplayName: fallbackDisplayName,
             sourceEmails: emails,
+            headerDisplayNamesByEmail: headerDisplayNamesByEmail,
             baseInfo: baseInfo,
             fullInfo: fullInfo
         )
@@ -619,6 +650,61 @@ final class ParticipantLoader {
         )
     }
 
+    nonisolated
+    private static func headerDisplayNamesByEmail(
+        in context: NSManagedObjectContext,
+        conversation: Conversation,
+        participantEmails: [String]
+    ) -> [String: String] {
+        let participantEmailSet = Set(
+            participantEmails
+                .map(EmailNormalizer.normalize)
+                .filter { !$0.isEmpty }
+        )
+        guard !participantEmailSet.isEmpty else { return [:] }
+
+        let request = NSFetchRequest<NSDictionary>(entityName: "Message")
+        request.resultType = .dictionaryResultType
+        request.propertiesToFetch = ["senderEmail", "senderName"]
+        request.returnsDistinctResults = true
+        request.predicate = NSPredicate(
+            format: "conversation == %@ AND senderEmail != nil AND senderName != nil",
+            conversation
+        )
+        request.fetchBatchSize = 50
+
+        let rows: [NSDictionary]
+        do {
+            rows = try context.fetch(request)
+        } catch {
+            Log.error("Failed to fetch message header display names", category: .coreData, error: error)
+            return [:]
+        }
+
+        var displayNames: [String: String] = [:]
+        for row in rows {
+            guard let senderEmail = row["senderEmail"] as? String else { continue }
+            let normalizedEmail = EmailNormalizer.normalize(senderEmail)
+            guard participantEmailSet.contains(normalizedEmail),
+                  let displayName = PersonDisplayNameResolver.sanitizedExplicitDisplayName(
+                    row["senderName"] as? String,
+                    forEmail: normalizedEmail
+                  ) else {
+                continue
+            }
+
+            if EmailNormalizer.isBetterDisplayName(
+                displayName,
+                than: displayNames[normalizedEmail],
+                forEmail: normalizedEmail
+            ) {
+                displayNames[normalizedEmail] = displayName
+            }
+        }
+
+        return displayNames
+    }
+
     private func upgradeParticipantInfoWithPhotos(_ baseInfo: ParticipantInfo) async -> ParticipantInfo {
         guard !baseInfo.emails.isEmpty else { return baseInfo }
         let avatarPhotos = await loadPhotoSlots(for: baseInfo.emails)
@@ -637,26 +723,35 @@ final class ParticipantLoader {
     private func cachedParticipantInfo(
         for cacheKey: ParticipantRollupCacheKey,
         token: ParticipantRollupCacheToken,
-        includePhotos: Bool
+        includePhotos: Bool,
+        evictOnTokenMismatch: Bool
     ) -> ParticipantInfo? {
         cachedParticipantRollup(
             for: cacheKey,
-            token: token
+            token: token,
+            evictOnTokenMismatch: evictOnTokenMismatch
         )?.participantInfo(includePhotos: includePhotos)
     }
 
     private func cachedParticipantRollup(
         for cacheKey: ParticipantRollupCacheKey,
-        token: ParticipantRollupCacheToken
+        token: ParticipantRollupCacheToken,
+        evictOnTokenMismatch: Bool
     ) -> CachedParticipantRollup? {
         guard var entry = participantRollupCache[cacheKey] else {
             return nil
         }
 
         let now = Date()
-        guard !entry.isExpired(now: now, ttl: participantRollupCacheTTL),
-              entry.token == token else {
+        guard !entry.isExpired(now: now, ttl: participantRollupCacheTTL) else {
             participantRollupCache.removeValue(forKey: cacheKey)
+            return nil
+        }
+
+        guard entry.token == token else {
+            if evictOnTokenMismatch {
+                participantRollupCache.removeValue(forKey: cacheKey)
+            }
             return nil
         }
 
@@ -676,12 +771,15 @@ final class ParticipantLoader {
         participantHash: String?,
         currentUserEmail: String,
         maxParticipants: Int,
-        fallbackDisplayName: String?
+        fallbackDisplayName: String?,
+        headerDisplayNamesByEmail: [String: String] = [:],
+        evictOnTokenMismatch: Bool = false
     ) async -> ParticipantInfo? {
         guard let token = makeCacheToken(
             participantHash: participantHash,
             sourceEmails: nil,
-            fallbackDisplayName: fallbackDisplayName
+            fallbackDisplayName: fallbackDisplayName,
+            headerDisplayNamesByEmail: headerDisplayNamesByEmail
         ) else {
             return nil
         }
@@ -694,7 +792,8 @@ final class ParticipantLoader {
 
         guard let cachedRollup = cachedParticipantRollup(
             for: cacheKey,
-            token: token
+            token: token,
+            evictOnTokenMismatch: evictOnTokenMismatch
         ) else {
             return nil
         }
@@ -726,13 +825,15 @@ final class ParticipantLoader {
         maxParticipants: Int,
         fallbackDisplayName: String?,
         sourceEmails: [String],
+        headerDisplayNamesByEmail: [String: String] = [:],
         baseInfo: ParticipantInfo,
         fullInfo: ParticipantInfo?
     ) {
         guard let token = makeCacheToken(
             participantHash: participantHash,
             sourceEmails: sourceEmails,
-            fallbackDisplayName: fallbackDisplayName
+            fallbackDisplayName: fallbackDisplayName,
+            headerDisplayNamesByEmail: headerDisplayNamesByEmail
         ) else {
             return
         }
@@ -772,7 +873,8 @@ final class ParticipantLoader {
     private func makeCacheToken(
         participantHash: String?,
         sourceEmails: [String]?,
-        fallbackDisplayName: String?
+        fallbackDisplayName: String?,
+        headerDisplayNamesByEmail: [String: String] = [:]
     ) -> ParticipantRollupCacheToken? {
         let trimmedParticipantHash = participantHash?.trimmingCharacters(in: .whitespacesAndNewlines)
         let effectiveParticipantHash: String?
@@ -794,8 +896,34 @@ final class ParticipantLoader {
 
         return ParticipantRollupCacheToken(
             participantHash: effectiveParticipantHash,
-            fallbackDisplayName: fallbackDisplayName
+            fallbackDisplayName: fallbackDisplayName,
+            headerDisplayNamesByEmail: Self.cacheHeaderDisplayNamesByEmail(headerDisplayNamesByEmail)
         )
+    }
+
+    private static func cacheHeaderDisplayNamesByEmail(_ displayNamesByEmail: [String: String]) -> [String: String] {
+        var result: [String: String] = [:]
+
+        for (email, displayName) in displayNamesByEmail {
+            let normalizedEmail = EmailNormalizer.normalize(email)
+            guard !normalizedEmail.isEmpty,
+                  let sanitizedDisplayName = PersonDisplayNameResolver.sanitizedExplicitDisplayName(
+                    displayName,
+                    forEmail: normalizedEmail
+                  ) else {
+                continue
+            }
+
+            if EmailNormalizer.isBetterDisplayName(
+                sanitizedDisplayName,
+                than: result[normalizedEmail],
+                forEmail: normalizedEmail
+            ) {
+                result[normalizedEmail] = sanitizedDisplayName
+            }
+        }
+
+        return result
     }
 
     private func cacheablePhotoInfo(from participantInfo: ParticipantInfo?) -> ParticipantInfo? {

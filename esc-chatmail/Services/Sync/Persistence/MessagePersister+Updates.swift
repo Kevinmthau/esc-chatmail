@@ -56,6 +56,10 @@ extension MessagePersister {
             let previousSnippet = existingMessage.snippet
             let previousBodyText = existingMessage.bodyText
             let previousBodyStorageURI = existingMessage.bodyStorageURI
+            let previousSenderEmail = existingMessage.senderEmail
+            let previousSenderName = existingMessage.senderName
+            var senderHeaderDisplayNameUpdateEmails = Set<String>()
+            var senderHeaderDisplayNameUpdateConversationIDs = Set<NSManagedObjectID>()
             let shouldPreserveLocalMailboxState = HistoryProcessor.hasPendingLocalModification(message: existingMessage)
             let savedBodyStorageURI = processedMessage.htmlBody.flatMap {
                 saveHTML($0, processedMessage.id)?.absoluteString
@@ -75,11 +79,27 @@ extension MessagePersister {
             )
 
             if let from = processedMessage.headers.from {
+                var normalizedSenderEmail = previousSenderEmail.map(EmailNormalizer.normalize) ?? ""
                 if let email = EmailNormalizer.extractEmail(from: from) {
                     existingMessage.setValue(email, forKey: "senderEmail")
+                    normalizedSenderEmail = EmailNormalizer.normalize(email)
                 }
                 if let displayName = EmailNormalizer.extractDisplayName(from: from) {
                     existingMessage.setValue(displayName, forKey: "senderName")
+                    let previousNormalizedSenderEmail = previousSenderEmail.map(EmailNormalizer.normalize) ?? ""
+                    let senderHeaderChanged = displayName != previousSenderName ||
+                        normalizedSenderEmail != previousNormalizedSenderEmail
+                    if senderHeaderChanged,
+                       !normalizedSenderEmail.isEmpty,
+                       PersonDisplayNameResolver.sanitizedExplicitDisplayName(
+                        displayName,
+                        forEmail: normalizedSenderEmail
+                       ) != nil {
+                        senderHeaderDisplayNameUpdateEmails.insert(normalizedSenderEmail)
+                        if let conversationID = existingMessage.conversation?.objectID {
+                            senderHeaderDisplayNameUpdateConversationIDs.insert(conversationID)
+                        }
+                    }
                 }
             }
 
@@ -91,10 +111,16 @@ extension MessagePersister {
                 from: processedMessage.headers,
                 in: context
             )
+            let displayNameUpdateEmails = Array(
+                Set(participantDisplayNameUpdate.emails)
+                    .union(senderHeaderDisplayNameUpdateEmails)
+            )
             PersonDisplayInfoChangeNotification.invalidatePersonCacheAndPostAfterContextSave(
-                emails: participantDisplayNameUpdate.emails,
+                emails: displayNameUpdateEmails,
                 in: context
             )
+            let displayNameUpdateConversationIDs = participantDisplayNameUpdate.conversationIDs
+                .union(senderHeaderDisplayNameUpdateConversationIDs)
 
             if let savedBodyStorageURI {
                 existingMessage.bodyStorageURI = savedBodyStorageURI
@@ -210,8 +236,8 @@ extension MessagePersister {
                 didUpdate: true,
                 modifiedConversationID: modifiedConversationID,
                 shouldInvalidateRenderedContent: bodyStorageURIChanged || bodyTextChanged || snippetChanged,
-                participantDisplayNameUpdateEmails: participantDisplayNameUpdate.emails,
-                participantDisplayNameUpdateConversationIDs: participantDisplayNameUpdate.conversationIDs
+                participantDisplayNameUpdateEmails: displayNameUpdateEmails,
+                participantDisplayNameUpdateConversationIDs: displayNameUpdateConversationIDs
             )
         }
 

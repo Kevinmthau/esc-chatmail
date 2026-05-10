@@ -145,6 +145,112 @@ final class ParticipantLoaderTests: XCTestCase {
         XCTAssertEqual(info.formattedDisplayName, "Unknown Contact")
     }
 
+    func testLoadParticipants_preservesExplicitHeaderNameWhenStoredNameLooksAddressDerived() async throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("John Smith")
+            .withParticipantHash(calculateParticipantHash(from: ["john.smith@example.com"]))
+            .build(in: context)
+
+        let participant = PersonBuilder()
+            .withEmail("john.smith@example.com")
+            .withDisplayName("John Smith")
+            .build(in: context)
+
+        addConversationParticipant(person: participant, to: conversation)
+        _ = MessageBuilder()
+            .withSender(email: "john.smith@example.com", name: "John Smith")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        let contactsResolver = CountingContactsResolving(contactMap: [:])
+        let loader = ParticipantLoader(
+            contactsResolver: contactsResolver,
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { _ in [] },
+            rollupDependencyTracker: ParticipantRollupDependencyTracker()
+        )
+
+        let first = await loader.loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            participantHash: conversation.participantHash,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: false
+        )
+        let second = await loader.loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            participantHash: conversation.participantHash,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: false
+        )
+
+        XCTAssertEqual(first.displayNames, ["John Smith"])
+        XCTAssertEqual(first.formattedDisplayName, "John Smith")
+        XCTAssertEqual(second.displayNames, ["John Smith"])
+        XCTAssertEqual(second.formattedDisplayName, "John Smith")
+        XCTAssertEqual(contactsResolver.lookupCount, 1)
+    }
+
+    func testLoadParticipants_doesNotCacheHeaderOnlyNameAfterHeaderRemoved() async throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("John Smith")
+            .build(in: context)
+
+        let participant = PersonBuilder()
+            .withEmail("john.smith@example.com")
+            .withDisplayName("John Smith")
+            .build(in: context)
+
+        addConversationParticipant(person: participant, to: conversation)
+        let message = MessageBuilder()
+            .withSender(email: "john.smith@example.com", name: "John Smith")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        let loader = ParticipantLoader(
+            contactsResolver: MockContactsResolving(contactMap: [:]),
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { _ in [] },
+            rollupDependencyTracker: ParticipantRollupDependencyTracker()
+        )
+
+        let withHeader = await loader.loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            participantHash: conversation.participantHash,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: false
+        )
+
+        context.delete(message)
+        try context.save()
+
+        let withoutHeader = await loader.loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            participantHash: conversation.participantHash,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: false
+        )
+
+        XCTAssertEqual(withHeader.formattedDisplayName, "John Smith")
+        XCTAssertEqual(withoutHeader.displayNames, [])
+        XCTAssertEqual(withoutHeader.formattedDisplayName, "Unknown Contact")
+    }
+
     func testLoadParticipants_groupOmitsAddressDerivedNamesAndShowsCount() async throws {
         let conversation = ConversationBuilder()
             .withDisplayName("John & Sarah")
