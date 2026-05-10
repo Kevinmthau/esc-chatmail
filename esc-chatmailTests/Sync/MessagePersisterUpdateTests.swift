@@ -477,6 +477,87 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(notifiedEmails, [senderEmail])
     }
 
+    func testUpdateExistingMessage_postsPersonDisplayInfoChangeAfterSaveWhenSenderHeaderNameBecomesUnusable() async throws {
+        let senderEmail = "john.smith@example.com"
+        let conversation = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: [senderEmail]))
+            .withDisplayName("John Smith")
+            .build(in: context)
+        let sender = PersonBuilder()
+            .withEmail(senderEmail)
+            .withDisplayName("Acme Team")
+            .build(in: context)
+        addConversationParticipant(person: sender, to: conversation)
+        let existingMessage = MessageBuilder()
+            .withId("sender-header-unusable-message")
+            .withThreadId("sender-header-unusable-thread")
+            .withSender(email: senderEmail, name: "Acme Team")
+            .inConversation(conversation)
+            .build(in: context)
+        addMessageParticipant(person: sender, kind: .from, to: existingMessage)
+        try testStack.saveViewContext()
+
+        var headers = ProcessedHeaders()
+        headers.subject = "Header name regressed"
+        headers.from = "john.smith <\(senderEmail)>"
+        headers.to = [EmailAddress(email: "kmthau@gmail.com", displayName: "Kevin Thau")]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: existingMessage.id,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: existingMessage.snippet,
+            cleanedSnippet: existingMessage.cleanedSnippet,
+            internalDate: existingMessage.internalDate,
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: existingMessage.bodyText,
+            labelIds: [],
+            isUnread: false,
+            isNewsletter: true,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        let preSaveNotificationExpectation = expectation(description: "person display info notification not posted before save")
+        preSaveNotificationExpectation.isInverted = true
+        let notificationExpectation = expectation(description: "person display info notification posted after save")
+        var didSave = false
+        var notifiedEmails = Set<String>()
+        let observer = NotificationCenter.default.addObserver(
+            forName: .personDisplayInfoDidChange,
+            object: nil,
+            queue: nil
+        ) { notification in
+            let emails = PersonDisplayInfoChangeNotification.emails(from: notification)
+            guard emails.contains(senderEmail) else { return }
+            guard didSave else {
+                preSaveNotificationExpectation.fulfill()
+                return
+            }
+            notifiedEmails = emails
+            notificationExpectation.fulfill()
+        }
+        defer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertEqual(existingMessage.senderName, "john.smith")
+        await fulfillment(of: [preSaveNotificationExpectation], timeout: 0.2)
+
+        didSave = true
+        try context.save()
+        await fulfillment(of: [notificationExpectation], timeout: 1.0)
+        XCTAssertEqual(notifiedEmails, [senderEmail])
+    }
+
     func testCreateNewMessage_sameGmThreadIdWithParticipantDrift_reusesExistingConversation() async throws {
         let threadId = "thread-join-123"
         let existingConversation = ConversationBuilder()

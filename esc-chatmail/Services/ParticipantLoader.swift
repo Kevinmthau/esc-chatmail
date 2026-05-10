@@ -124,7 +124,7 @@ final class ParticipantLoader {
     private struct ParticipantRollupCacheToken: Equatable {
         let participantHash: String
         let fallbackDisplayName: String?
-        let headerDisplayNamesByEmail: [String: String]
+        let headerDisplayNamesByEmail: [String: String]?
     }
 
     private struct CachedParticipantRollup {
@@ -222,7 +222,7 @@ final class ParticipantLoader {
         maxParticipants: Int = 4,
         fallbackDisplayName: String? = nil,
         includePhotos: Bool = true,
-        headerDisplayNamesByEmail: [String: String] = [:],
+        headerDisplayNamesByEmail: [String: String]? = nil,
         evictOnTokenMismatch: Bool = false
     ) -> ParticipantInfo? {
         guard let token = makeCacheToken(
@@ -268,7 +268,8 @@ final class ParticipantLoader {
             currentUserEmail: currentUserEmail,
             maxParticipants: maxParticipants,
             fallbackDisplayName: conversation.displayName,
-            includePhotos: includePhotos
+            includePhotos: includePhotos,
+            headerDisplayNamesByEmail: [:]
         ) {
             return cachedInfo
         }
@@ -319,7 +320,8 @@ final class ParticipantLoader {
             currentUserEmail: currentUserEmail,
             maxParticipants: maxParticipants,
             fallbackDisplayName: fallbackDisplayName,
-            includePhotos: includePhotos
+            includePhotos: includePhotos,
+            headerDisplayNamesByEmail: [:]
         ) {
             return cachedInfo
         }
@@ -330,7 +332,8 @@ final class ParticipantLoader {
                 participantHash: participantHash,
                 currentUserEmail: currentUserEmail,
                 maxParticipants: maxParticipants,
-                fallbackDisplayName: fallbackDisplayName
+                fallbackDisplayName: fallbackDisplayName,
+                headerDisplayNamesByEmail: [:]
            ) {
             return upgradedCachedInfo
         }
@@ -748,7 +751,7 @@ final class ParticipantLoader {
             return nil
         }
 
-        guard entry.token == token else {
+        guard cacheTokensMatch(entry.token, requestToken: token) else {
             if evictOnTokenMismatch {
                 participantRollupCache.removeValue(forKey: cacheKey)
             }
@@ -772,7 +775,7 @@ final class ParticipantLoader {
         currentUserEmail: String,
         maxParticipants: Int,
         fallbackDisplayName: String?,
-        headerDisplayNamesByEmail: [String: String] = [:],
+        headerDisplayNamesByEmail: [String: String]? = nil,
         evictOnTokenMismatch: Bool = false
     ) async -> ParticipantInfo? {
         guard let token = makeCacheToken(
@@ -874,7 +877,7 @@ final class ParticipantLoader {
         participantHash: String?,
         sourceEmails: [String]?,
         fallbackDisplayName: String?,
-        headerDisplayNamesByEmail: [String: String] = [:]
+        headerDisplayNamesByEmail: [String: String]? = nil
     ) -> ParticipantRollupCacheToken? {
         let trimmedParticipantHash = participantHash?.trimmingCharacters(in: .whitespacesAndNewlines)
         let effectiveParticipantHash: String?
@@ -897,8 +900,24 @@ final class ParticipantLoader {
         return ParticipantRollupCacheToken(
             participantHash: effectiveParticipantHash,
             fallbackDisplayName: fallbackDisplayName,
-            headerDisplayNamesByEmail: Self.cacheHeaderDisplayNamesByEmail(headerDisplayNamesByEmail)
+            headerDisplayNamesByEmail: headerDisplayNamesByEmail.map(Self.cacheHeaderDisplayNamesByEmail)
         )
+    }
+
+    private func cacheTokensMatch(
+        _ cachedToken: ParticipantRollupCacheToken,
+        requestToken: ParticipantRollupCacheToken
+    ) -> Bool {
+        guard cachedToken.participantHash == requestToken.participantHash,
+              cachedToken.fallbackDisplayName == requestToken.fallbackDisplayName else {
+            return false
+        }
+
+        guard let requestHeaderDisplayNames = requestToken.headerDisplayNamesByEmail else {
+            return true
+        }
+
+        return cachedToken.headerDisplayNamesByEmail == requestHeaderDisplayNames
     }
 
     private static func cacheHeaderDisplayNamesByEmail(_ displayNamesByEmail: [String: String]) -> [String: String] {

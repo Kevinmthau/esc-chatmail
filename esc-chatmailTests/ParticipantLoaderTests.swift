@@ -181,6 +181,14 @@ final class ParticipantLoaderTests: XCTestCase {
             fallbackDisplayName: conversation.displayName,
             includePhotos: false
         )
+        let cached = loader.cachedParticipantInfo(
+            conversationObjectID: conversation.objectID,
+            participantHash: conversation.participantHash,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: false
+        )
         let second = await loader.loadParticipants(
             from: conversation.objectID,
             in: context,
@@ -193,6 +201,8 @@ final class ParticipantLoaderTests: XCTestCase {
 
         XCTAssertEqual(first.displayNames, ["John Smith"])
         XCTAssertEqual(first.formattedDisplayName, "John Smith")
+        XCTAssertEqual(cached?.displayNames, ["John Smith"])
+        XCTAssertEqual(cached?.formattedDisplayName, "John Smith")
         XCTAssertEqual(second.displayNames, ["John Smith"])
         XCTAssertEqual(second.formattedDisplayName, "John Smith")
         XCTAssertEqual(contactsResolver.lookupCount, 1)

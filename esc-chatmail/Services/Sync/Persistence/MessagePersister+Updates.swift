@@ -84,21 +84,18 @@ extension MessagePersister {
                     existingMessage.setValue(email, forKey: "senderEmail")
                     normalizedSenderEmail = EmailNormalizer.normalize(email)
                 }
-                if let displayName = EmailNormalizer.extractDisplayName(from: from) {
-                    existingMessage.setValue(displayName, forKey: "senderName")
-                    let previousNormalizedSenderEmail = previousSenderEmail.map(EmailNormalizer.normalize) ?? ""
-                    let senderHeaderChanged = displayName != previousSenderName ||
-                        normalizedSenderEmail != previousNormalizedSenderEmail
-                    if senderHeaderChanged,
-                       !normalizedSenderEmail.isEmpty,
-                       PersonDisplayNameResolver.sanitizedExplicitDisplayName(
-                        displayName,
-                        forEmail: normalizedSenderEmail
-                       ) != nil {
-                        senderHeaderDisplayNameUpdateEmails.insert(normalizedSenderEmail)
-                        if let conversationID = existingMessage.conversation?.objectID {
-                            senderHeaderDisplayNameUpdateConversationIDs.insert(conversationID)
-                        }
+                let displayName = EmailNormalizer.extractDisplayName(from: from)
+                existingMessage.setValue(displayName, forKey: "senderName")
+
+                let previousNormalizedSenderEmail = previousSenderEmail.map(EmailNormalizer.normalize) ?? ""
+                let senderHeaderChanged = displayName != previousSenderName ||
+                    normalizedSenderEmail != previousNormalizedSenderEmail
+                if senderHeaderChanged {
+                    for email in [previousNormalizedSenderEmail, normalizedSenderEmail] where !email.isEmpty {
+                        senderHeaderDisplayNameUpdateEmails.insert(email)
+                    }
+                    if let conversationID = existingMessage.conversation?.objectID {
+                        senderHeaderDisplayNameUpdateConversationIDs.insert(conversationID)
                     }
                 }
             }
