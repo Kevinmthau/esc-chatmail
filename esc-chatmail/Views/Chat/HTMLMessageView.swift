@@ -251,6 +251,36 @@ private struct OriginalEmailReadableView: View {
     }
 }
 
+enum OriginalEmailMetadataFormatter {
+    static func senderLine(senderName: String?, senderEmail: String?) -> String? {
+        let trimmedName = senderName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedEmail = senderEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let trimmedEmail, !trimmedEmail.isEmpty {
+            guard let trimmedName, !trimmedName.isEmpty else {
+                return trimmedEmail
+            }
+
+            if let extractedEmail = EmailNormalizer.extractEmail(from: trimmedName),
+               EmailNormalizer.normalize(extractedEmail) == EmailNormalizer.normalize(trimmedEmail) {
+                return trimmedName
+            }
+
+            if EmailNormalizer.normalize(trimmedName) == EmailNormalizer.normalize(trimmedEmail) {
+                return trimmedEmail
+            }
+
+            return "\(trimmedName) <\(trimmedEmail)>"
+        }
+
+        guard let trimmedName, !trimmedName.isEmpty else {
+            return PersonDisplayNameResolver.fallbackSenderName()
+        }
+
+        return trimmedName
+    }
+}
+
 private struct OriginalEmailMetadataCard: View {
     let message: Message
 
@@ -282,18 +312,9 @@ private struct OriginalEmailMetadataCard: View {
     }
 
     private var senderLine: String? {
-        let senderName = message.senderName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let senderEmail = message.senderEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        switch (senderName, senderEmail) {
-        case let (.some(name), .some(email)) where !name.isEmpty && !email.isEmpty:
-            return "\(name) <\(email)>"
-        case let (_, .some(email)) where !email.isEmpty:
-            return email
-        case let (.some(name), _) where !name.isEmpty:
-            return name
-        default:
-            return nil
-        }
+        OriginalEmailMetadataFormatter.senderLine(
+            senderName: message.senderName,
+            senderEmail: message.senderEmail
+        )
     }
 }

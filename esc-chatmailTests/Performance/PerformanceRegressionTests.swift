@@ -391,7 +391,7 @@ final class PerformanceRegressionTests: XCTestCase {
 
         return makeContactMap(
             from: participants.map { person in
-                (person.email, person.displayName ?? EmailNormalizer.formatAsDisplayName(email: person.email))
+                (person.email, person.displayName ?? PersonDisplayNameResolver.fallbackConversationName())
             }
         )
     }
@@ -399,7 +399,7 @@ final class PerformanceRegressionTests: XCTestCase {
     private func makeContactMap(from messages: [Message]) -> [String: ContactMatch] {
         let senderPairs = messages.compactMap { message -> (String, String)? in
             guard let email = message.senderEmailValue else { return nil }
-            let name = message.senderNameValue ?? EmailNormalizer.formatAsDisplayName(email: email)
+            let name = message.senderNameValue ?? PersonDisplayNameResolver.fallbackSenderName()
             return (email, name)
         }
 

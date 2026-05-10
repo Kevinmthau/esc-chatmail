@@ -142,16 +142,18 @@ struct CalendarInvitePreviewBuilder {
             }
         }
 
-        let normalizedSenderName = normalizedMetadataLine(senderName)
+        let normalizedSenderName: String
+        if let senderEmail {
+            normalizedSenderName = PersonDisplayNameResolver.sanitizedExplicitDisplayName(
+                senderName,
+                forEmail: senderEmail
+            ) ?? ""
+        } else {
+            normalizedSenderName = normalizedMetadataLine(senderName)
+        }
         if !normalizedSenderName.isEmpty,
            !isGenericCalendarSender(normalizedSenderName) {
             return "Hosted by \(truncate(normalizedSenderName, limit: 50))"
-        }
-
-        let normalizedSenderEmail = normalizedMetadataLine(senderEmail)
-        if !normalizedSenderEmail.isEmpty,
-           !isGenericCalendarSender(normalizedSenderEmail) {
-            return "Hosted by \(truncate(normalizedSenderEmail, limit: 50))"
         }
 
         return nil

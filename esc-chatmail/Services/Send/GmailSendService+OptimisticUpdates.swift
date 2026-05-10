@@ -299,7 +299,7 @@ extension GmailSendService {
                 existingConversation,
                 shouldReactivate: true
             )
-            existingConversation.displayName = DisplayNameFormatter.formatGroupNames(recipients)
+            existingConversation.displayName = optimisticConversationDisplayName(for: recipients)
             return existingConversation
         }
 
@@ -312,9 +312,19 @@ extension GmailSendService {
         )
 
         // Update display name for sent messages
-        conversation.displayName = DisplayNameFormatter.formatGroupNames(recipients)
+        conversation.displayName = optimisticConversationDisplayName(for: recipients)
 
         return conversation
+    }
+
+    @MainActor
+    private func optimisticConversationDisplayName(for recipients: [String]) -> String {
+        PersonDisplayNameResolver.conversationDisplayName(
+            realNames: [],
+            totalParticipantCount: recipients.count,
+            fallback: nil,
+            participantEmails: recipients
+        )
     }
 
     @MainActor

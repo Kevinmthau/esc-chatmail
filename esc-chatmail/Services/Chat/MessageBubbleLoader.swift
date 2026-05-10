@@ -31,6 +31,23 @@ struct MessageBubbleSenderRequest: Sendable {
     let email: String
     let personDisplayName: String?
     let personAvatarURL: String?
+
+    /// Display name taken directly from the message's From header, when present.
+    /// This is separate from Person.displayName so legacy address-derived stored
+    /// names can be rejected without discarding explicit header names.
+    let headerDisplayName: String?
+
+    init(
+        email: String,
+        personDisplayName: String?,
+        personAvatarURL: String?,
+        headerDisplayName: String? = nil
+    ) {
+        self.email = email
+        self.personDisplayName = personDisplayName
+        self.personAvatarURL = personAvatarURL
+        self.headerDisplayName = headerDisplayName
+    }
 }
 
 struct MessageBubbleSenderResult: Sendable, Equatable {
@@ -516,19 +533,12 @@ actor MessageBubbleLoader: MessageBubbleLoading {
 
     func loadSenderInfo(from request: MessageBubbleSenderRequest) async -> MessageBubbleSenderResult {
         let match = await contactsResolver.lookup(email: request.email)
-        let preferredName = request.personDisplayName?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let contactName = match?.displayName?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        let resolvedName: String
-        if let contactName, !contactName.isEmpty {
-            resolvedName = contactName
-        } else if let preferredName, !preferredName.isEmpty {
-            resolvedName = preferredName
-        } else {
-            resolvedName = EmailNormalizer.formatAsDisplayName(email: request.email)
-        }
+        let resolvedName = PersonDisplayNameResolver.senderDisplayName(
+            email: request.email,
+            contactDisplayName: match?.displayName,
+            headerDisplayName: request.headerDisplayName,
+            storedDisplayName: request.personDisplayName
+        )
 
         let resolvedAvatarURL: String? = match == nil ? request.personAvatarURL : nil
 

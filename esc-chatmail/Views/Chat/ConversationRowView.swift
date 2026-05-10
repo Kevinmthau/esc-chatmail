@@ -34,6 +34,7 @@ struct ConversationSnapshot: Equatable {
         let emails = conversation.participants?
             .compactMap { participant -> String? in
                 guard let person = participant.person else { return nil }
+                guard !EmailNormalizer.isHideMyEmailDisplayName(person.displayName) else { return nil }
                 let normalizedEmail = EmailNormalizer.normalize(person.email)
                 return normalizedEmail.isEmpty ? nil : normalizedEmail
             } ?? []
@@ -96,10 +97,10 @@ struct ConversationRowView: View {
 
             // Avatar stack
             AvatarStackView(
-                avatarPhotos: avatarPhotos,
+                alignedAvatarPhotos: avatarPhotos,
                 participants: participantNames,
                 showsGroupAvatar: snapshot.showsGroupAvatar,
-                fallbackDisplayText: snapshot.displayNameHint
+                fallbackDisplayText: fallbackDisplayName
             )
                 .frame(width: 44, height: 44)
 
@@ -208,15 +209,31 @@ struct ConversationRowView: View {
     }
 
     private var displayName: String {
-        effectiveParticipantInfo?.formattedDisplayName ?? snapshot.displayNameHint ?? ""
+        effectiveParticipantInfo?.formattedDisplayName ?? fallbackDisplayName
     }
 
     private var participantNames: [String] {
-        effectiveParticipantInfo?.displayNames ?? []
+        effectiveParticipantInfo?.avatarDisplayNames ?? []
     }
 
-    private var avatarPhotos: [ProfilePhoto] {
-        effectiveParticipantInfo?.photos ?? []
+    private var avatarPhotos: [ProfilePhoto?] {
+        effectiveParticipantInfo?.avatarPhotos ?? []
+    }
+
+    private var fallbackDisplayName: String {
+        PersonDisplayNameResolver.sanitizedConversationDisplayNameHint(
+            snapshot.displayNameHint,
+            participantEmails: nonSelfParticipantEmails
+        ) ?? PersonDisplayNameResolver.fallbackConversationName(
+            participantCount: nonSelfParticipantEmails.count
+        )
+    }
+
+    private var nonSelfParticipantEmails: [String] {
+        let normalizedCurrentUserEmail = EmailNormalizer.normalize(currentUserEmail)
+        return snapshot.participantEmails.filter { email in
+            EmailNormalizer.normalize(email) != normalizedCurrentUserEmail
+        }
     }
 
     private var needsParticipantLoad: Bool {
@@ -249,7 +266,9 @@ struct ConversationRowView: View {
             displayNames: cachedBase.displayNames,
             photos: uncached.photos,
             formattedDisplayName: cachedBase.formattedDisplayName,
-            totalUniqueParticipants: cachedBase.totalUniqueParticipants
+            totalUniqueParticipants: cachedBase.totalUniqueParticipants,
+            avatarDisplayNames: cachedBase.avatarDisplayNames,
+            avatarPhotos: uncached.avatarPhotos
         )
     }
 

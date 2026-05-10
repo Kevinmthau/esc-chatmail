@@ -102,11 +102,138 @@ final class ParticipantLoaderTests: XCTestCase {
 
         let info = await loader.loadParticipants(
             from: conversation,
-            currentUserEmail: "me@example.com"
+            currentUserEmail: "me@example.com",
+            includePhotos: false
         )
 
         XCTAssertEqual(info.displayNames, ["Address Book Name"])
         XCTAssertEqual(info.formattedDisplayName, "Address Book Name")
+    }
+
+    func testLoadParticipants_noRealNameUsesUnknownContact() async throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("John Smith")
+            .build(in: context)
+
+        let participant = PersonBuilder()
+            .withEmail("john.smith@example.com")
+            .withDisplayName("John Smith")
+            .build(in: context)
+
+        addConversationParticipant(person: participant, to: conversation)
+        try context.save()
+
+        let loader = ParticipantLoader(
+            contactsResolver: MockContactsResolving(contactMap: [:]),
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { _ in [] },
+            rollupDependencyTracker: ParticipantRollupDependencyTracker()
+        )
+
+        let info = await loader.loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            participantHash: conversation.participantHash,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: false
+        )
+
+        XCTAssertEqual(info.displayNames, [])
+        XCTAssertEqual(info.formattedDisplayName, "Unknown Contact")
+    }
+
+    func testLoadParticipants_groupOmitsAddressDerivedNamesAndShowsCount() async throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("John & Sarah")
+            .build(in: context)
+
+        let john = PersonBuilder()
+            .withEmail("john.smith@example.com")
+            .withDisplayName("John Smith")
+            .build(in: context)
+        let sarah = PersonBuilder()
+            .withEmail("sarah@example.com")
+            .withDisplayName("Sarah Connor")
+            .build(in: context)
+
+        addConversationParticipant(person: john, to: conversation)
+        addConversationParticipant(person: sarah, to: conversation)
+        try context.save()
+
+        let loader = ParticipantLoader(
+            contactsResolver: MockContactsResolving(contactMap: [:]),
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { _ in [] },
+            rollupDependencyTracker: ParticipantRollupDependencyTracker()
+        )
+
+        let info = await loader.loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            participantHash: conversation.participantHash,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: false
+        )
+
+        XCTAssertEqual(info.displayNames, ["Sarah Connor"])
+        XCTAssertEqual(info.formattedDisplayName, "Sarah Connor +1")
+    }
+
+    func testLoadParticipants_keepsAvatarIdentitiesAlignedWhenGroupOmitsFakeNames() async throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("John & Sarah")
+            .build(in: context)
+
+        let john = PersonBuilder()
+            .withEmail("john.smith@example.com")
+            .withDisplayName("John Smith")
+            .build(in: context)
+        let sarah = PersonBuilder()
+            .withEmail("sarah@example.com")
+            .withDisplayName("Sarah Connor")
+            .build(in: context)
+
+        addConversationParticipant(person: john, to: conversation)
+        addConversationParticipant(person: sarah, to: conversation)
+        try context.save()
+
+        let loader = ParticipantLoader(
+            contactsResolver: MockContactsResolving(contactMap: [:]),
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { emails in
+                emails.map { email in
+                    ProfilePhoto(source: .cached, imageData: nil, url: "photo://\(email)")
+                }
+            },
+            rollupDependencyTracker: ParticipantRollupDependencyTracker()
+        )
+
+        let info = await loader.loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            participantHash: conversation.participantHash,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: true
+        )
+
+        XCTAssertEqual(info.displayNames, ["Sarah Connor"])
+        let namesByEmail = Dictionary(uniqueKeysWithValues: zip(info.emails, info.avatarDisplayNames))
+        XCTAssertEqual(namesByEmail["john.smith@example.com"], "Unknown Contact")
+        XCTAssertEqual(namesByEmail["sarah@example.com"], "Sarah Connor")
+        XCTAssertEqual(info.avatarPhotos.count, 2)
+        for (index, email) in info.emails.enumerated() {
+            XCTAssertEqual(info.avatarPhotos[index]?.url, "photo://\(email)")
+        }
+        XCTAssertEqual(info.formattedDisplayName, "Sarah Connor +1")
     }
 
     // MARK: - Contact Deduplication Tests
@@ -140,7 +267,8 @@ final class ParticipantLoaderTests: XCTestCase {
 
         let info = await loader.loadParticipants(
             from: conversation,
-            currentUserEmail: "me@example.com"
+            currentUserEmail: "me@example.com",
+            includePhotos: false
         )
 
         // Should only show one participant since both emails belong to the same contact
@@ -180,7 +308,8 @@ final class ParticipantLoaderTests: XCTestCase {
 
         let info = await loader.loadParticipants(
             from: conversation,
-            currentUserEmail: "me@example.com"
+            currentUserEmail: "me@example.com",
+            includePhotos: false
         )
 
         XCTAssertEqual(info.emails.count, 2)
@@ -215,7 +344,8 @@ final class ParticipantLoaderTests: XCTestCase {
 
         let info = await loader.loadParticipants(
             from: conversation,
-            currentUserEmail: "me@example.com"
+            currentUserEmail: "me@example.com",
+            includePhotos: false
         )
 
         // Both should be kept since unknown has no contact to deduplicate against
@@ -695,7 +825,7 @@ final class ParticipantLoaderTests: XCTestCase {
             includePhotos: false
         )
 
-        XCTAssertEqual(initial.formattedDisplayName, "Friend")
+        XCTAssertEqual(initial.formattedDisplayName, "Header Friend")
         XCTAssertEqual(updated.formattedDisplayName, "Address Book Friend")
         XCTAssertEqual(contactsResolver.lookupCount, 2)
     }

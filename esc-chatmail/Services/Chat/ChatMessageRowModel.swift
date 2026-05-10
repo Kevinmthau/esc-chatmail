@@ -145,7 +145,8 @@ struct ChatMessageRowModel: Equatable {
         return MessageBubbleSenderRequest(
             email: senderInfoEmail,
             personDisplayName: senderInfoDisplayName,
-            personAvatarURL: senderInfoAvatarURL
+            personAvatarURL: senderInfoAvatarURL,
+            headerDisplayName: senderName
         )
     }
 

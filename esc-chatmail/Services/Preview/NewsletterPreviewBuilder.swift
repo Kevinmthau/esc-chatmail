@@ -72,7 +72,11 @@ struct NewsletterPreviewBuilder {
         subject: String?
     ) -> NewsletterPreviewModel? {
         let sourceDomain = normalizedSourceDomain(from: senderEmail)
-        let sourceLabel = sourceLabel(senderName: senderName, sourceDomain: sourceDomain)
+        let sourceLabel = sourceLabel(
+            senderName: senderName,
+            senderEmail: senderEmail,
+            sourceDomain: sourceDomain
+        )
         let title = resolvedTitle(from: htmlSummary, subject: subject)
         let lines = cleanedPreviewLines(
             plainText: plainText,
@@ -601,8 +605,8 @@ struct NewsletterPreviewBuilder {
         return domain.isEmpty ? nil : domain
     }
 
-    private func sourceLabel(senderName: String?, sourceDomain: String?) -> String? {
-        if let senderName = normalizedSenderName(senderName) {
+    private func sourceLabel(senderName: String?, senderEmail: String?, sourceDomain: String?) -> String? {
+        if let senderName = normalizedSenderName(senderName, senderEmail: senderEmail) {
             return truncate(senderName, limit: 40)
         }
 
@@ -627,7 +631,14 @@ struct NewsletterPreviewBuilder {
         return primarySegment.capitalized
     }
 
-    private func normalizedSenderName(_ senderName: String?) -> String? {
+    private func normalizedSenderName(_ senderName: String?, senderEmail: String?) -> String? {
+        if let senderEmail {
+            return PersonDisplayNameResolver.sanitizedExplicitDisplayName(
+                senderName,
+                forEmail: senderEmail
+            )
+        }
+
         let normalized = normalizedText(senderName)
         guard !normalized.isEmpty,
               !normalized.contains("@") else {

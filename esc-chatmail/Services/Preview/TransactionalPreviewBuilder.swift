@@ -68,7 +68,11 @@ struct TransactionalPreviewBuilder {
         subject: String?
     ) -> TransactionalPreviewModel? {
         let sourceDomain = normalizedSourceDomain(from: senderEmail)
-        let sourceLabel = sourceLabel(senderName: senderName, sourceDomain: sourceDomain)
+        let sourceLabel = sourceLabel(
+            senderName: senderName,
+            senderEmail: senderEmail,
+            sourceDomain: sourceDomain
+        )
         let lines = cleanedPreviewLines(
             plainText: plainText,
             canonicalHTML: canonicalHTML,
@@ -841,8 +845,16 @@ struct TransactionalPreviewBuilder {
         return domain.isEmpty ? nil : domain
     }
 
-    private func sourceLabel(senderName: String?, sourceDomain: String?) -> String? {
-        let normalizedSenderName = normalizedText(senderName)
+    private func sourceLabel(senderName: String?, senderEmail: String?, sourceDomain: String?) -> String? {
+        let normalizedSenderName: String
+        if let senderEmail {
+            normalizedSenderName = PersonDisplayNameResolver.sanitizedExplicitDisplayName(
+                senderName,
+                forEmail: senderEmail
+            ) ?? ""
+        } else {
+            normalizedSenderName = normalizedText(senderName)
+        }
         if !normalizedSenderName.isEmpty, !normalizedSenderName.contains("@") {
             return truncate(normalizedSenderName, limit: 40)
         }

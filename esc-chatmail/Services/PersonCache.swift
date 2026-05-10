@@ -116,7 +116,10 @@ actor PersonCache: PeriodicCleanupHandler {
 
         // Check cache first
         if let cached = cache[normalized], !cached.isExpired {
-            return cached.displayName ?? fallbackDisplayName(for: email)
+            return PersonDisplayNameResolver.sanitizedRealDisplayName(
+                cached.displayName,
+                forEmail: email
+            ) ?? PersonDisplayNameResolver.fallbackConversationName()
         }
 
         // Fetch from Core Data in background to avoid blocking main thread
@@ -140,7 +143,10 @@ actor PersonCache: PeriodicCleanupHandler {
         // Enforce max size to prevent unbounded growth
         enforceMaxSize()
 
-        return displayName ?? fallbackDisplayName(for: email)
+        return PersonDisplayNameResolver.sanitizedRealDisplayName(
+            displayName,
+            forEmail: email
+        ) ?? PersonDisplayNameResolver.fallbackConversationName()
     }
 
     /// Clear expired cache entries
@@ -175,8 +181,4 @@ actor PersonCache: PeriodicCleanupHandler {
         ParticipantRollupDependencyTracker.shared.invalidate(email: normalized)
     }
 
-    /// Get fallback display name from email, formatted as a proper name
-    private func fallbackDisplayName(for email: String) -> String {
-        EmailNormalizer.formatAsDisplayName(email: email)
-    }
 }

@@ -156,21 +156,15 @@ actor ContactsResolver: ContactsResolving {
 
 extension ContactsResolver {
 
-    /// Resolves just the display name for an email, with fallback to email local part.
+    /// Resolves just the display name for an email, with a safe placeholder fallback.
     public func resolveDisplayName(for email: String) async -> String {
-        if let match = await lookup(email: email),
-           let displayName = match.displayName,
-           !displayName.isEmpty {
-            return displayName
-        }
-
-        // Fallback to email local part
-        let normalized = EmailNormalizer.normalize(email)
-        if let atIndex = normalized.firstIndex(of: "@") {
-            return String(normalized[..<atIndex])
-        }
-
-        return email
+        let match = await lookup(email: email)
+        return PersonDisplayNameResolver.participantDisplayName(
+            email: email,
+            contactDisplayName: match?.displayName,
+            headerDisplayName: nil,
+            storedDisplayName: nil
+        ).name
     }
 
     /// Resolves just the avatar data for an email.

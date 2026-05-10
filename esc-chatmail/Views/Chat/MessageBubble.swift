@@ -224,6 +224,7 @@ struct MessageBubble: View {
             contactRefreshToken: contactRefreshToken,
             senderEmail: message.senderInfoEmail,
             senderDisplayName: message.senderInfoDisplayName,
+            senderHeaderDisplayName: message.senderName,
             senderAvatarURL: message.senderInfoAvatarURL
         )
     }
@@ -241,6 +242,7 @@ struct MessageBubble: View {
         contactRefreshToken: Int,
         senderEmail: String? = nil,
         senderDisplayName: String? = nil,
+        senderHeaderDisplayName: String? = nil,
         senderAvatarURL: String? = nil
     ) -> String {
         [
@@ -252,6 +254,7 @@ struct MessageBubble: View {
             "contacts:\(contactRefreshToken)",
             "senderEmail:\(contentFingerprint(for: senderEmail))",
             "senderName:\(contentFingerprint(for: senderDisplayName))",
+            "senderHeaderName:\(contentFingerprint(for: senderHeaderDisplayName))",
             "senderAvatar:\(contentFingerprint(for: senderAvatarURL))"
         ].joined(separator: "|")
     }

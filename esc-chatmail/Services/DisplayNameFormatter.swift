@@ -66,7 +66,8 @@ enum DisplayNameFormatter {
         switch names.count {
         case 1:
             // Single participant: show full name
-            return names[0]
+            let remaining = totalCount - 1
+            return remaining > 0 ? "\(names[0]) +\(remaining)" : names[0]
         default:
             // Multiple participants: use first names only (Apple-style)
             // Show up to 4 names to fill available space

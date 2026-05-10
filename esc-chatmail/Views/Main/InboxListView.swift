@@ -164,7 +164,16 @@ struct MessageRow: View {
         }
         
         let fromParticipant = participants.first { $0.participantKind == .from }
-        return fromParticipant?.person?.displayName ?? fromParticipant?.person?.email ?? "Unknown"
+        guard let person = fromParticipant?.person else {
+            return PersonDisplayNameResolver.fallbackSenderName()
+        }
+
+        return PersonDisplayNameResolver.senderDisplayName(
+            email: person.email,
+            contactDisplayName: nil,
+            headerDisplayName: message.senderName,
+            storedDisplayName: person.displayName
+        )
     }
     
     private func formatDate(_ date: Date) -> String {

@@ -69,6 +69,11 @@ final class DisplayNameFormatterTests: XCTestCase {
         XCTAssertEqual(result, "John Smith")
     }
 
+    func testFormatForRow_singleNameWithOverflow_showsPlusCount() {
+        let result = DisplayNameFormatter.formatForRow(names: ["John Smith"], totalCount: 3, fallback: nil)
+        XCTAssertEqual(result, "John Smith +2")
+    }
+
     func testFormatForRow_twoNamesNoOverflow_returnsCommaSeparated() {
         let result = DisplayNameFormatter.formatForRow(names: ["John Smith", "Jane Doe"], totalCount: 2, fallback: nil)
         XCTAssertEqual(result, "John, Jane")

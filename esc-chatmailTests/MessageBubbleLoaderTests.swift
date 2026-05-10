@@ -2,6 +2,62 @@ import XCTest
 @testable import esc_chatmail
 
 final class MessageBubbleLoaderTests: XCTestCase {
+    func testLoadSenderInfo_noDisplayNameOrContactUsesUnknownSender() async {
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadSenderInfo(
+            from: MessageBubbleSenderRequest(
+                email: "john.smith@example.com",
+                personDisplayName: nil,
+                personAvatarURL: nil
+            )
+        )
+
+        XCTAssertEqual(result.name, "Unknown Sender")
+    }
+
+    func testLoadSenderInfo_usesExplicitHeaderDisplayName() async {
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadSenderInfo(
+            from: MessageBubbleSenderRequest(
+                email: "john.smith@example.com",
+                personDisplayName: nil,
+                personAvatarURL: nil,
+                headerDisplayName: "John Smith"
+            )
+        )
+
+        XCTAssertEqual(result.name, "John Smith")
+    }
+
+    func testLoadSenderInfo_contactNameOverridesMissingHeaderName() async {
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [
+                "john.smith@example.com": ContactMatch(
+                    displayName: "Address Book John",
+                    email: "john.smith@example.com",
+                    imageData: nil,
+                    contactIdentifier: "contact-john"
+                )
+            ])
+        )
+
+        let result = await loader.loadSenderInfo(
+            from: MessageBubbleSenderRequest(
+                email: "john.smith@example.com",
+                personDisplayName: nil,
+                personAvatarURL: nil
+            )
+        )
+
+        XCTAssertEqual(result.name, "Address Book John")
+    }
+
     func testLoadSenderInfo_prefersContactNameOverHeaderName() async {
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [
@@ -17,8 +73,9 @@ final class MessageBubbleLoaderTests: XCTestCase {
         let result = await loader.loadSenderInfo(
             from: MessageBubbleSenderRequest(
                 email: "bubble-priority@example.com",
-                personDisplayName: "Header Alias",
-                personAvatarURL: nil
+                personDisplayName: nil,
+                personAvatarURL: nil,
+                headerDisplayName: "Header Alias"
             )
         )
 

@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - Avatar Stack View
 
 struct AvatarStackView: View {
-    let avatarPhotos: [ProfilePhoto]
+    let avatarPhotos: [ProfilePhoto?]
     let participants: [String]
     let showsGroupAvatar: Bool
     let fallbackDisplayText: String?
@@ -14,7 +14,21 @@ struct AvatarStackView: View {
         showsGroupAvatar: Bool = false,
         fallbackDisplayText: String? = nil
     ) {
-        self.avatarPhotos = avatarPhotos
+        self.init(
+            alignedAvatarPhotos: avatarPhotos.map(Optional.some),
+            participants: participants,
+            showsGroupAvatar: showsGroupAvatar,
+            fallbackDisplayText: fallbackDisplayText
+        )
+    }
+
+    init(
+        alignedAvatarPhotos: [ProfilePhoto?],
+        participants: [String],
+        showsGroupAvatar: Bool = false,
+        fallbackDisplayText: String? = nil
+    ) {
+        self.avatarPhotos = alignedAvatarPhotos
         self.participants = participants
         self.showsGroupAvatar = showsGroupAvatar
         self.fallbackDisplayText = fallbackDisplayText
@@ -30,7 +44,7 @@ struct AvatarStackView: View {
         } else {
             // Single conversation - show single large avatar
             SingleAvatarView(
-                avatarPhoto: avatarPhotos.first,
+                avatarPhoto: avatarPhotos.first ?? nil,
                 participant: participants.first,
                 fallbackDisplayText: fallbackDisplayText
             )
@@ -173,14 +187,17 @@ extension SingleAvatarView {
 
     private static let placeholderDisplayNames: Set<String> = [
         "no participants",
-        "unknown"
+        "unknown",
+        "unknown contact",
+        "unknown contacts",
+        "unknown sender"
     ]
 }
 
 // MARK: - Group Avatar View (iMessage style)
 
 struct GroupAvatarView: View {
-    let avatarPhotos: [ProfilePhoto]
+    let avatarPhotos: [ProfilePhoto?]
     let participants: [String]
 
     private let mainSize: CGFloat = 44
@@ -204,16 +221,17 @@ struct GroupAvatarView: View {
 
             ForEach(0..<maxAvatars, id: \.self) { index in
                 ZStack {
-                    if index < avatarPhotos.count {
+                    if index < avatarPhotos.count, let avatarPhoto = avatarPhotos[index] {
                         // Show actual avatar image
                         SmallCachedAvatarView(
-                            photo: avatarPhotos[index],
+                            photo: avatarPhoto,
                             name: index < participants.count ? participants[index] : nil,
                             size: smallSize
                         )
-                    } else if index < participants.count {
+                    } else if index < participants.count,
+                              let initialsSource = SingleAvatarView.usableIdentityText(from: participants[index]) {
                         // Show initials
-                        InitialsAvatarView(name: participants[index], style: .compact)
+                        InitialsAvatarView(name: initialsSource, style: .compact)
                     } else {
                         // Fallback to person icon
                         Circle()

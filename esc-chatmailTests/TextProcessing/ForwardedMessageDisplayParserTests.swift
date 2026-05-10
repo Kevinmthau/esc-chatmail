@@ -42,7 +42,7 @@ final class ForwardedMessageDisplayParserTests: XCTestCase {
         )
 
         XCTAssertNil(result?.leadInText)
-        XCTAssertEqual(result?.senderDisplayName, "updates@example.com")
+        XCTAssertNil(result?.senderDisplayName)
         XCTAssertEqual(result?.senderEmail, "updates@example.com")
         XCTAssertEqual(result?.subject, "Status update")
         XCTAssertEqual(result?.recipientSummary, "Team Example")

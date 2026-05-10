@@ -109,6 +109,7 @@ final class ParticipantLoader {
 
     private struct ConversationParticipantSnapshot: Sendable {
         let emails: [String]
+        let storedDisplayNamesByEmail: [String: String]
         let fallbackDisplayName: String?
         let participantHash: String?
     }
@@ -181,13 +182,34 @@ final class ParticipantLoader {
         let emails: [String]
         let displayNames: [String]
         let photos: [ProfilePhoto]
+        let avatarDisplayNames: [String]
+        let avatarPhotos: [ProfilePhoto?]
         let formattedDisplayName: String
         let totalUniqueParticipants: Int
+
+        init(
+            emails: [String],
+            displayNames: [String],
+            photos: [ProfilePhoto],
+            formattedDisplayName: String,
+            totalUniqueParticipants: Int,
+            avatarDisplayNames: [String]? = nil,
+            avatarPhotos: [ProfilePhoto?]? = nil
+        ) {
+            self.emails = emails
+            self.displayNames = displayNames
+            self.photos = photos
+            self.avatarDisplayNames = avatarDisplayNames ?? displayNames
+            self.avatarPhotos = avatarPhotos ?? photos.map(Optional.some)
+            self.formattedDisplayName = formattedDisplayName
+            self.totalUniqueParticipants = totalUniqueParticipants
+        }
     }
 
     struct ResolvedParticipant: Equatable {
         let email: String
         let displayName: String
+        let isRealDisplayName: Bool
         let contactIdentifier: String?
     }
 
@@ -256,6 +278,7 @@ final class ParticipantLoader {
                 participantHash: conversation.participantHash,
                 currentUserEmail: currentUserEmail,
                 emails: participants,
+                storedDisplayNamesByEmail: Self.participantDisplayNamesByEmail(from: conversation),
                 fallbackDisplayName: conversation.displayName,
                 maxParticipants: maxParticipants,
                 includePhotos: includePhotos
@@ -330,6 +353,7 @@ final class ParticipantLoader {
             participantHash: effectiveParticipantHash,
             currentUserEmail: currentUserEmail,
             emails: snapshot.emails,
+            storedDisplayNamesByEmail: snapshot.storedDisplayNamesByEmail,
             fallbackDisplayName: snapshot.fallbackDisplayName,
             maxParticipants: maxParticipants,
             includePhotos: includePhotos
@@ -369,6 +393,18 @@ final class ParticipantLoader {
     /// Resolves display-ready participant records, deduplicating emails that belong to
     /// the same address book contact.
     func resolveParticipants(for emails: [String]) async -> [ResolvedParticipant] {
+        await resolveParticipants(
+            for: emails,
+            storedDisplayNamesByEmail: [:],
+            headerDisplayNamesByEmail: [:]
+        )
+    }
+
+    private func resolveParticipants(
+        for emails: [String],
+        storedDisplayNamesByEmail: [String: String],
+        headerDisplayNamesByEmail: [String: String]
+    ) async -> [ResolvedParticipant] {
         guard !emails.isEmpty else { return [] }
 
         await prefetchNamesIfNeeded(for: emails)
@@ -391,10 +427,17 @@ final class ParticipantLoader {
 
             guard seenParticipantKeys.insert(participantKey).inserted else { continue }
 
+            let resolvedDisplayName = await resolveDisplayName(
+                for: email,
+                match: match,
+                storedDisplayName: storedDisplayNamesByEmail[normalizedEmail],
+                headerDisplayName: headerDisplayNamesByEmail[normalizedEmail]
+            )
             resolvedParticipants.append(
                 ResolvedParticipant(
                     email: email,
-                    displayName: await resolveDisplayName(for: email, match: match),
+                    displayName: resolvedDisplayName.name,
+                    isRealDisplayName: resolvedDisplayName.isReal,
                     contactIdentifier: match?.contactIdentifier
                 )
             )
@@ -445,6 +488,26 @@ final class ParticipantLoader {
         return result
     }
 
+    nonisolated
+    private static func participantDisplayNamesByEmail(from conversation: Conversation) -> [String: String] {
+        guard let participants = conversation.participants else { return [:] }
+
+        var displayNames: [String: String] = [:]
+        for participant in participants {
+            guard let person = participant.person else { continue }
+            let normalizedEmail = EmailNormalizer.normalize(person.email)
+            guard !normalizedEmail.isEmpty,
+                  let displayName = person.displayName,
+                  !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                continue
+            }
+
+            displayNames[normalizedEmail] = displayName
+        }
+
+        return displayNames
+    }
+
     // MARK: - Private Helpers
 
     private func fetchConversationParticipantSnapshot(
@@ -458,6 +521,7 @@ final class ParticipantLoader {
                   !conversation.isDeleted else {
                 return ConversationParticipantSnapshot(
                     emails: [],
+                    storedDisplayNamesByEmail: [:],
                     fallbackDisplayName: fallbackDisplayName,
                     participantHash: nil
                 )
@@ -468,6 +532,7 @@ final class ParticipantLoader {
                     from: conversation,
                     currentUserEmail: currentUserEmail
                 ),
+                storedDisplayNamesByEmail: Self.participantDisplayNamesByEmail(from: conversation),
                 fallbackDisplayName: conversation.displayName ?? fallbackDisplayName,
                 participantHash: conversation.participantHash
             )
@@ -479,12 +544,16 @@ final class ParticipantLoader {
         participantHash: String?,
         currentUserEmail: String,
         emails: [String],
+        storedDisplayNamesByEmail: [String: String] = [:],
+        headerDisplayNamesByEmail: [String: String] = [:],
         fallbackDisplayName: String?,
         maxParticipants: Int,
         includePhotos: Bool
     ) async -> ParticipantInfo {
         let baseInfo = await buildParticipantInfo(
             emails: emails,
+            storedDisplayNamesByEmail: storedDisplayNamesByEmail,
+            headerDisplayNamesByEmail: headerDisplayNamesByEmail,
             fallbackDisplayName: fallbackDisplayName,
             maxParticipants: maxParticipants,
             includePhotos: false
@@ -513,38 +582,55 @@ final class ParticipantLoader {
 
     private func buildParticipantInfo(
         emails: [String],
+        storedDisplayNamesByEmail: [String: String],
+        headerDisplayNamesByEmail: [String: String],
         fallbackDisplayName: String?,
         maxParticipants: Int,
         includePhotos: Bool
     ) async -> ParticipantInfo {
-        let resolvedParticipants = await resolveParticipants(for: emails)
-        let topParticipants = Array(resolvedParticipants.prefix(maxParticipants))
-        let displayNames = topParticipants.map(\.displayName)
-        let formattedName = DisplayNameFormatter.formatForRow(
-            names: displayNames,
-            totalCount: resolvedParticipants.count,
-            fallback: fallbackDisplayName
+        let resolvedParticipants = await resolveParticipants(
+            for: emails,
+            storedDisplayNamesByEmail: storedDisplayNamesByEmail,
+            headerDisplayNamesByEmail: headerDisplayNamesByEmail
         )
-        let photos = includePhotos ? await loadPhotos(for: topParticipants.map(\.email)) : []
+        let topParticipants = Array(resolvedParticipants.prefix(maxParticipants))
+        let displayNames = Array(resolvedParticipants.compactMap { participant in
+            participant.isRealDisplayName ? participant.displayName : nil
+        }.prefix(maxParticipants))
+        let topParticipantEmails = topParticipants.map(\.email)
+        let avatarDisplayNames = topParticipants.map(\.displayName)
+        let formattedName = PersonDisplayNameResolver.rowDisplayName(
+            realNames: displayNames,
+            totalParticipantCount: resolvedParticipants.count,
+            fallback: fallbackDisplayName,
+            participantEmails: emails
+        )
+        let avatarPhotos = includePhotos ? await loadPhotoSlots(for: topParticipantEmails) : []
+        let photos = avatarPhotos.compactMap { $0 }
 
         return ParticipantInfo(
-            emails: topParticipants.map(\.email),
+            emails: topParticipantEmails,
             displayNames: displayNames,
             photos: photos,
             formattedDisplayName: formattedName,
-            totalUniqueParticipants: resolvedParticipants.count
+            totalUniqueParticipants: resolvedParticipants.count,
+            avatarDisplayNames: avatarDisplayNames,
+            avatarPhotos: avatarPhotos
         )
     }
 
     private func upgradeParticipantInfoWithPhotos(_ baseInfo: ParticipantInfo) async -> ParticipantInfo {
         guard !baseInfo.emails.isEmpty else { return baseInfo }
+        let avatarPhotos = await loadPhotoSlots(for: baseInfo.emails)
 
         return ParticipantInfo(
             emails: baseInfo.emails,
             displayNames: baseInfo.displayNames,
-            photos: await loadPhotos(for: baseInfo.emails),
+            photos: avatarPhotos.compactMap { $0 },
             formattedDisplayName: baseInfo.formattedDisplayName,
-            totalUniqueParticipants: baseInfo.totalUniqueParticipants
+            totalUniqueParticipants: baseInfo.totalUniqueParticipants,
+            avatarDisplayNames: baseInfo.avatarDisplayNames,
+            avatarPhotos: avatarPhotos
         )
     }
 
@@ -750,10 +836,20 @@ final class ParticipantLoader {
         await personCache.prefetch(emails: emails)
     }
 
-    private func resolveDisplayName(for email: String, match: ContactMatch?) async -> String {
-        let trimmedContactName = match?.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let trimmedContactName, !trimmedContactName.isEmpty {
-            return trimmedContactName
+    private func resolveDisplayName(
+        for email: String,
+        match: ContactMatch?,
+        storedDisplayName: String?,
+        headerDisplayName: String?
+    ) async -> (name: String, isReal: Bool) {
+        let resolvedFromSnapshot = PersonDisplayNameResolver.participantDisplayName(
+            email: email,
+            contactDisplayName: match?.displayName,
+            headerDisplayName: headerDisplayName,
+            storedDisplayName: storedDisplayName
+        )
+        if resolvedFromSnapshot.isReal {
+            return resolvedFromSnapshot
         }
 
         let cachedName: String?
@@ -762,25 +858,30 @@ final class ParticipantLoader {
         } else {
             cachedName = await personCache.getCachedDisplayName(for: email)
         }
-        let trimmedCachedName = cachedName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let trimmedCachedName, !trimmedCachedName.isEmpty {
-            return trimmedCachedName
+
+        let resolvedFromCache = PersonDisplayNameResolver.participantDisplayName(
+            email: email,
+            contactDisplayName: nil,
+            headerDisplayName: nil,
+            storedDisplayName: cachedName
+        )
+        if resolvedFromCache.isReal {
+            return resolvedFromCache
         }
 
-        return fallbackDisplayName(for: email)
+        return resolvedFromSnapshot
     }
 
-    private func fallbackDisplayName(for email: String) -> String {
-        EmailNormalizer.formatAsDisplayName(email: email)
-    }
-
-    private func loadPhotos(for emails: [String]) async -> [ProfilePhoto] {
+    private func loadPhotoSlots(for emails: [String]) async -> [ProfilePhoto?] {
         if let photoLoader {
-            return await photoLoader(emails)
+            let loadedPhotos = await photoLoader(emails)
+            return emails.indices.map { index in
+                index < loadedPhotos.count ? loadedPhotos[index] : nil
+            }
         }
 
         let photoResults = await photoResolver.resolvePhotos(for: emails)
-        return emails.compactMap { email in
+        return emails.map { email in
             photoResults[EmailNormalizer.normalize(email)]
         }
     }

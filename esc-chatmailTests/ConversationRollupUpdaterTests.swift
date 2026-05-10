@@ -123,4 +123,116 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(conversation.lastMessageDate, sentDate)
         XCTAssertEqual(conversation.snippet, "Latest outgoing")
     }
+
+    func testUpdateDisplayNameOnly_noRealNameUsesUnknownContact() throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("John Smith")
+            .build(in: context)
+        addConversationParticipant(
+            email: "john.smith@example.com",
+            displayName: "John Smith",
+            to: conversation
+        )
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "Unknown Contact")
+    }
+
+    func testUpdateDisplayNameOnly_usesExplicitHeaderDisplayName() throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Unknown Contact")
+            .build(in: context)
+        addConversationParticipant(
+            email: "john.smith@example.com",
+            displayName: "John Smith",
+            to: conversation
+        )
+        MessageBuilder()
+            .withSender(email: "john.smith@example.com", name: "John Smith")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "John Smith")
+    }
+
+    func testUpdateDisplayNameOnly_upgradesLegacyAddressDerivedNameToStoredRealName() throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("John Smith")
+            .build(in: context)
+        addConversationParticipant(
+            email: "john.smith@example.com",
+            displayName: "Address Book John",
+            to: conversation
+        )
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "Address Book John")
+    }
+
+    func testUpdateDisplayNameOnly_groupOmitsAddressDerivedNamesAndShowsCount() throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("John & Sarah")
+            .build(in: context)
+        addConversationParticipant(
+            email: "john.smith@example.com",
+            displayName: "John Smith",
+            to: conversation
+        )
+        addConversationParticipant(
+            email: "sarah@example.com",
+            displayName: "Sarah Connor",
+            to: conversation
+        )
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "Sarah Connor +1")
+    }
+
+    func testUpdateDisplayNameOnly_groupWithNoRealNamesUsesSafeCount() throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("John & Jane")
+            .build(in: context)
+        addConversationParticipant(
+            email: "john.smith@example.com",
+            displayName: "John Smith",
+            to: conversation
+        )
+        addConversationParticipant(
+            email: "jane.doe@example.com",
+            displayName: "Jane Doe",
+            to: conversation
+        )
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "2 Unknown Contacts")
+    }
+
+    @discardableResult
+    private func addConversationParticipant(
+        email: String,
+        displayName: String?,
+        to conversation: Conversation
+    ) -> Person {
+        let person = PersonBuilder()
+            .withEmail(email)
+            .withDisplayName(displayName)
+            .build(in: context)
+        let participant = ConversationParticipant(context: context)
+        participant.id = UUID()
+        participant.participantRole = .normal
+        participant.person = person
+        participant.conversation = conversation
+        return person
+    }
 }

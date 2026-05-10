@@ -61,7 +61,7 @@ struct ForwardedMessageCard: View {
     }
 
     private var senderLine: String? {
-        content.senderDisplayName ?? content.senderEmail
+        content.senderDisplayName ?? PersonDisplayNameResolver.fallbackSenderName()
     }
 
     private var subjectLine: String? {

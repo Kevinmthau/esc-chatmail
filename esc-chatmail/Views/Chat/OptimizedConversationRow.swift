@@ -10,10 +10,10 @@ struct OptimizedConversationRow: View {
     private let participantLoader: ParticipantLoader
     private let conversationObjectID: NSManagedObjectID
     private let conversationContext: NSManagedObjectContext?
-    private let fallbackDisplayName: String?
+    private let fallbackDisplayName: String
 
     @State private var displayName: String = ""
-    @State private var avatarPhotos: [ProfilePhoto] = []
+    @State private var avatarPhotos: [ProfilePhoto?] = []
     @State private var participantNames: [String] = []
 
     @MainActor
@@ -29,8 +29,17 @@ struct OptimizedConversationRow: View {
         self.onAppear = onAppear
         self.conversationObjectID = conversation.objectID
         self.conversationContext = conversation.managedObjectContext
-        self.fallbackDisplayName = snapshot.displayNameHint
-        self._displayName = State(initialValue: snapshot.displayNameHint ?? "")
+        let nonSelfParticipantEmails = snapshot.participantEmails.filter { email in
+            EmailNormalizer.normalize(email) != EmailNormalizer.normalize(currentUserEmail)
+        }
+        let fallbackDisplayName = PersonDisplayNameResolver.sanitizedConversationDisplayNameHint(
+            snapshot.displayNameHint,
+            participantEmails: nonSelfParticipantEmails
+        ) ?? PersonDisplayNameResolver.fallbackConversationName(
+            participantCount: nonSelfParticipantEmails.count
+        )
+        self.fallbackDisplayName = fallbackDisplayName
+        self._displayName = State(initialValue: fallbackDisplayName)
     }
 
     private var timeString: String {
@@ -42,7 +51,7 @@ struct OptimizedConversationRow: View {
         HStack(spacing: 16) {
             // Avatar stack with photo support
             AvatarStackView(
-                avatarPhotos: avatarPhotos,
+                alignedAvatarPhotos: avatarPhotos,
                 participants: participantNames,
                 showsGroupAvatar: snapshot.showsGroupAvatar,
                 fallbackDisplayText: fallbackDisplayName
@@ -52,7 +61,7 @@ struct OptimizedConversationRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 // Header
                 HStack {
-                    Text(displayName.isEmpty ? (snapshot.displayNameHint ?? "Unknown") : displayName)
+                    Text(displayName.isEmpty ? fallbackDisplayName : displayName)
                         .font(.headline)
                         .lineLimit(1)
 
@@ -106,7 +115,7 @@ struct OptimizedConversationRow: View {
         )
 
         displayName = info.formattedDisplayName
-        participantNames = info.displayNames
-        avatarPhotos = info.photos
+        participantNames = info.avatarDisplayNames
+        avatarPhotos = info.avatarPhotos
     }
 }

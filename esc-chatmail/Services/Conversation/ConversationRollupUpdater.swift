@@ -142,6 +142,7 @@ struct ConversationRollupUpdater: Sendable {
             let request = Conversation.fetchRequest()
             request.fetchBatchSize = 50
             request.relationshipKeyPathsForPrefetching = [
+                "messages",
                 "participants",
                 "participants.person"
             ]
@@ -173,6 +174,7 @@ struct ConversationRollupUpdater: Sendable {
             let request = Conversation.fetchRequest()
             request.predicate = NSPredicate(format: "SELF IN %@", conversationIDs)
             request.relationshipKeyPathsForPrefetching = [
+                "messages",
                 "participants",
                 "participants.person"
             ]
@@ -227,6 +229,8 @@ struct ConversationRollupUpdater: Sendable {
         // Deduplicate participants by normalized email
         var seenEmails = Set<String>()
         var names: [String] = []
+        var participantEmails: [String] = []
+        let headerDisplayNamesByEmail = headerDisplayNamesByEmail(from: conversation)
 
         for participant in participants {
             guard let person = participant.person else { continue }
@@ -250,29 +254,65 @@ struct ConversationRollupUpdater: Sendable {
             // Skip duplicates
             guard !seenEmails.contains(normalizedEmail) else { continue }
             seenEmails.insert(normalizedEmail)
+            participantEmails.append(email)
 
-            // Use displayName, fall back to formatted email, fall back to "Unknown"
-            let name: String
-            if let displayName = person.displayName, !displayName.isEmpty {
-                name = displayName
-            } else if !email.isEmpty {
-                name = EmailNormalizer.formatAsDisplayName(email: email)
-            } else {
-                name = "Unknown"
+            let resolvedName = PersonDisplayNameResolver.participantDisplayName(
+                email: email,
+                contactDisplayName: nil,
+                headerDisplayName: headerDisplayNamesByEmail[normalizedEmail],
+                storedDisplayName: person.displayName
+            )
+            guard resolvedName.isReal else {
+                Log.diagnostic(
+                    .conversationRollups,
+                    "Including unresolved participant placeholder for: \(email)",
+                    category: .conversation
+                )
+                continue
             }
-            Log.diagnostic(.conversationRollups, "Including participant: \(name)", category: .conversation)
-            names.append(name)
+            Log.diagnostic(.conversationRollups, "Including participant: \(resolvedName.name)", category: .conversation)
+            names.append(resolvedName.name)
         }
 
-        let finalDisplayName = DisplayNameFormatter.formatGroupNames(names)
+        let finalDisplayName = PersonDisplayNameResolver.conversationDisplayName(
+            realNames: names,
+            totalParticipantCount: participantEmails.count,
+            fallback: conversation.displayName,
+            participantEmails: participantEmails
+        )
         Log.diagnostic(
             .conversationRollups,
             "Final displayName: \(finalDisplayName), snippet: \(conversation.snippet ?? "nil")",
             category: .conversation
         )
-        // Ensure we never set an empty display name
-        let resolvedDisplayName = finalDisplayName.isEmpty ? "Unknown" : finalDisplayName
-        guard conversation.displayName != resolvedDisplayName else { return }
-        conversation.displayName = resolvedDisplayName
+        guard conversation.displayName != finalDisplayName else { return }
+        conversation.displayName = finalDisplayName
+    }
+
+    private func headerDisplayNamesByEmail(from conversation: Conversation) -> [String: String] {
+        guard let messages = conversation.messages else { return [:] }
+
+        var displayNames: [String: String] = [:]
+        for message in messages {
+            guard let senderEmail = message.senderEmail else { continue }
+            let normalizedEmail = EmailNormalizer.normalize(senderEmail)
+            guard !normalizedEmail.isEmpty,
+                  let displayName = PersonDisplayNameResolver.sanitizedExplicitDisplayName(
+                    message.senderName,
+                    forEmail: normalizedEmail
+                  ) else {
+                continue
+            }
+
+            if EmailNormalizer.isBetterDisplayName(
+                displayName,
+                than: displayNames[normalizedEmail],
+                forEmail: normalizedEmail
+            ) {
+                displayNames[normalizedEmail] = displayName
+            }
+        }
+
+        return displayNames
     }
 }

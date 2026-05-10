@@ -30,6 +30,16 @@ Default simulator:
 - `platform=iOS Simulator,name=iPhone 17 Pro`
 - Xcode 26.4.1 currently registers the iOS simulator runtime as `26.4`; do not pin `OS=26.4.1`.
 
+Codex wrapper commands:
+
+```bash
+./Scripts/codex-build.sh
+./Scripts/codex-test.sh
+./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/<SuiteName>'
+```
+
+Use these wrappers for routine Codex runs so the approval system can reuse stable command prefixes. They set `DESTINATION` and `DEVELOPER_DIR`, then delegate to the commands below.
+
 Exact build command:
 
 ```bash

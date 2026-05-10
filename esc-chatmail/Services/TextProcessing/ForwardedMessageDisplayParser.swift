@@ -188,9 +188,18 @@ enum ForwardedMessageDisplayParser {
             .trimmingCharacters(in: CharacterSet(charactersIn: "<>\"' "))
         let displayName = EmailNormalizer.extractDisplayName(from: rawValue)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let sanitizedDisplayName: String?
+        if let email {
+            sanitizedDisplayName = PersonDisplayNameResolver.sanitizedExplicitDisplayName(
+                displayName,
+                forEmail: email
+            )
+        } else {
+            sanitizedDisplayName = trimmed(displayName) ?? trimmed(rawValue)
+        }
 
         return (
-            trimmed(displayName) ?? trimmed(email) ?? trimmed(rawValue),
+            sanitizedDisplayName,
             trimmed(email)
         )
     }

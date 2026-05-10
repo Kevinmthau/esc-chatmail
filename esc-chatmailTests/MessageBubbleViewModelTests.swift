@@ -196,7 +196,7 @@ actor MockMessageBubbleLoader: MessageBubbleLoading {
             return senderResults.removeFirst()
         }
         return MessageBubbleSenderResult(
-            name: EmailNormalizer.formatAsDisplayName(email: request.email),
+            name: PersonDisplayNameResolver.fallbackSenderName(),
             avatarURL: request.personAvatarURL,
             imageData: nil
         )
@@ -284,6 +284,33 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
         XCTAssertNotEqual(firstSignature, secondSignature)
     }
 
+    func testContentSignature_changesWhenHeaderSenderNameChanges() {
+        let firstSignature = MessageBubble.contentSignature(
+            bodyStorageURI: nil,
+            bodyText: "Body",
+            snippet: "Snippet",
+            hasHTMLSource: false,
+            htmlSourceSignature: "missing",
+            contactRefreshToken: 0,
+            senderEmail: "john.smith@example.com",
+            senderDisplayName: nil,
+            senderHeaderDisplayName: nil
+        )
+        let secondSignature = MessageBubble.contentSignature(
+            bodyStorageURI: nil,
+            bodyText: "Body",
+            snippet: "Snippet",
+            hasHTMLSource: false,
+            htmlSourceSignature: "missing",
+            contactRefreshToken: 0,
+            senderEmail: "john.smith@example.com",
+            senderDisplayName: nil,
+            senderHeaderDisplayName: "John Smith"
+        )
+
+        XCTAssertNotEqual(firstSignature, secondSignature)
+    }
+
     func testResolvedProcessedText_fallsBackToProcessedSnippetWhenBodyCleansToNil() {
         let result = MessageContentView.resolvedProcessedText(
             bodyText: """
@@ -294,5 +321,25 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
         )
 
         XCTAssertEqual(result, "Tom & Jerry")
+    }
+}
+
+final class OriginalEmailMetadataFormatterTests: XCTestCase {
+    func testSenderLineWithEmailOnlyPreservesRawAddress() {
+        let senderLine = OriginalEmailMetadataFormatter.senderLine(
+            senderName: nil,
+            senderEmail: "john.smith@example.com"
+        )
+
+        XCTAssertEqual(senderLine, "john.smith@example.com")
+    }
+
+    func testSenderLineWithNameAndEmailIncludesBoth() {
+        let senderLine = OriginalEmailMetadataFormatter.senderLine(
+            senderName: "John Smith",
+            senderEmail: "john.smith@example.com"
+        )
+
+        XCTAssertEqual(senderLine, "John Smith <john.smith@example.com>")
     }
 }

@@ -60,11 +60,11 @@ struct ChatView: View {
                 viewModel.openFullMessage(messageObjectID: messageObjectID)
             }
         )
-        .navigationTitle(viewModel.resolvedDisplayName ?? conversation.displayName ?? "Chat")
+        .navigationTitle(navigationDisplayName)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
-                Text(viewModel.resolvedDisplayName ?? conversation.displayName ?? "Chat")
+                Text(navigationDisplayName)
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .contentShape(Rectangle())
@@ -168,5 +168,32 @@ struct ChatView: View {
                 )
             }
         }
+    }
+
+    private var navigationDisplayName: String {
+        if let resolvedDisplayName = viewModel.resolvedDisplayName {
+            return resolvedDisplayName
+        }
+
+        let participantEmails = conversation.participants?
+            .compactMap { participant -> String? in
+                guard let person = participant.person,
+                      !EmailNormalizer.isHideMyEmailDisplayName(person.displayName) else {
+                    return nil
+                }
+                return person.email
+            }
+            .filter { email in
+                EmailNormalizer.normalize(email) != EmailNormalizer.normalize(
+                    chatDependencies.session.authSession.userEmail ?? ""
+                )
+            } ?? []
+
+        return PersonDisplayNameResolver.sanitizedConversationDisplayNameHint(
+            conversation.displayName,
+            participantEmails: participantEmails
+        ) ?? PersonDisplayNameResolver.fallbackConversationName(
+            participantCount: participantEmails.count
+        )
     }
 }

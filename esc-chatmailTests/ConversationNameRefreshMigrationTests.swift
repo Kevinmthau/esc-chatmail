@@ -65,7 +65,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
             )
         }
         await waitUntil {
-            self.displayNameHints(in: viewModel) == ["Bob", "Alice"]
+            self.displayNameHints(in: viewModel) == ["Unknown Contact", "Unknown Contact"]
         }
 
         let refreshedAlice = try fetchConversation(alice.objectID)
@@ -73,15 +73,15 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
 
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [bob.objectID, alice.objectID])
         XCTAssertEqual(viewModel.filteredConversationItems.map(\.snapshot.snippet), ["Bob preview", "Old Alice preview"])
-        XCTAssertEqual(displayNameHints(in: viewModel), ["Bob", "Alice"])
+        XCTAssertEqual(displayNameHints(in: viewModel), ["Unknown Contact", "Unknown Contact"])
 
-        XCTAssertEqual(refreshedAlice.displayName, "Alice")
+        XCTAssertEqual(refreshedAlice.displayName, "Unknown Contact")
         XCTAssertEqual(refreshedAlice.lastMessageDate, aliceDate)
         XCTAssertEqual(refreshedAlice.snippet, "Old Alice preview")
         XCTAssertEqual(refreshedAlice.inboxUnreadCount, 7)
         XCTAssertNil(refreshedAlice.archivedAt)
 
-        XCTAssertEqual(refreshedBob.displayName, "Bob")
+        XCTAssertEqual(refreshedBob.displayName, "Unknown Contact")
         XCTAssertEqual(refreshedBob.lastMessageDate, bobDate)
         XCTAssertEqual(refreshedBob.snippet, "Bob preview")
         XCTAssertNil(refreshedBob.archivedAt)
@@ -122,11 +122,11 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         XCTAssertTrue(stack.saveIfNeeded(context: backgroundContext))
 
         await waitUntil {
-            (try? self.fetchConversation(conversation.objectID).displayName) == "Alice"
+            (try? self.fetchConversation(conversation.objectID).displayName) == "Unknown Contact"
         }
 
         let refreshed = try fetchConversation(conversation.objectID)
-        XCTAssertEqual(refreshed.displayName, "Alice")
+        XCTAssertEqual(refreshed.displayName, "Unknown Contact")
         XCTAssertEqual(refreshed.snippet, "Stable preview")
         XCTAssertEqual(refreshed.lastMessageDate, lastMessageDate)
         XCTAssertEqual(refreshed.inboxUnreadCount, 3)
@@ -171,11 +171,11 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         XCTAssertTrue(stack.saveIfNeeded(context: backgroundContext))
 
         await waitUntil {
-            (try? self.fetchConversation(conversation.objectID).displayName) == "Friend"
+            (try? self.fetchConversation(conversation.objectID).displayName) == "Unknown Contact"
         }
 
         let refreshed = try fetchConversation(conversation.objectID)
-        XCTAssertEqual(refreshed.displayName, "Friend")
+        XCTAssertEqual(refreshed.displayName, "Unknown Contact")
         XCTAssertEqual(refreshed.snippet, "Newest synced preview")
         XCTAssertEqual(refreshed.lastMessageDate, syncedDate)
         XCTAssertEqual(refreshed.inboxUnreadCount, 9)
