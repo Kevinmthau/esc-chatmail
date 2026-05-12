@@ -140,25 +140,51 @@ enum MessageBubbleTextPrecedence {
         comparedTo comparisonTexts: [String?]
     ) -> String? {
         guard let outgoingBodyText,
-              let candidateTokenCount = tokenCount(outgoingBodyText) else {
+              let candidate = comparableText(outgoingBodyText) else {
             return nil
         }
 
-        let comparisonTokenCounts = comparisonTexts.compactMap(tokenCount)
-        guard comparisonTokenCounts.allSatisfy({ candidateTokenCount > $0 }) else {
+        let comparisons = comparisonTexts.compactMap(comparableText)
+        guard comparisons.allSatisfy({ isRicher(candidate, than: $0) }) else {
             return nil
         }
 
         return outgoingBodyText
     }
 
-    private static func tokenCount(_ text: String?) -> Int? {
+    private static func isRicher(_ candidate: ComparableText, than comparison: ComparableText) -> Bool {
+        candidate.tokenCount > comparison.tokenCount ||
+            (
+                candidate.tokenCount == comparison.tokenCount &&
+                candidate.characterCount > comparison.characterCount &&
+                candidate.normalizedText.hasPrefix(comparison.normalizedText)
+            )
+    }
+
+    private static func comparableText(_ text: String?) -> ComparableText? {
         guard let text else { return nil }
 
-        let tokens = HTMLEntityDecoder.decode(text)
+        let normalizedText = HTMLEntityDecoder.decode(text)
             .components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
-        return tokens.isEmpty ? nil : tokens.count
+            .joined(separator: " ")
+            .lowercased()
+        guard !normalizedText.isEmpty else {
+            return nil
+        }
+
+        let tokenCount = normalizedText.split(separator: " ").count
+        return ComparableText(
+            normalizedText: normalizedText,
+            tokenCount: tokenCount,
+            characterCount: normalizedText.count
+        )
+    }
+
+    private struct ComparableText {
+        let normalizedText: String
+        let tokenCount: Int
+        let characterCount: Int
     }
 }
 

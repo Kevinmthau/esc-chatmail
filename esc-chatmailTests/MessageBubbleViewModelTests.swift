@@ -373,6 +373,22 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
 
         XCTAssertEqual(result, loadedText)
     }
+
+    func testResolvedVisibleText_outgoingLongSingleTokenBodyBeatsTruncatedPrefix() throws {
+        let fullURL = "https://example.com/shared/document/abcdefghijklmnopqrstuvwxyz"
+        let truncatedURL = "https://example.com/shared/document/abc"
+
+        let result = try XCTUnwrap(
+            MessageContentView.resolvedVisibleText(
+                fullTextContent: truncatedURL,
+                fallbackPreviewText: truncatedURL,
+                outgoingBodyText: fullURL,
+                isOutgoingPlainTextMessage: true
+            )
+        )
+
+        XCTAssertEqual(result, fullURL)
+    }
 }
 
 final class OriginalEmailMetadataFormatterTests: XCTestCase {

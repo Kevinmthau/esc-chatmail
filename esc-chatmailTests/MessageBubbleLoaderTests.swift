@@ -400,6 +400,47 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertNotEqual(visibleText, "Can we please see alts for:")
     }
 
+    func testLoadContent_outgoingLongSingleTokenBodyBeatsTruncatedPrefix() async throws {
+        let messageId = "bubble-outgoing-long-token-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let htmlURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bubble-outgoing-long-token-\(UUID().uuidString).html")
+        defer {
+            try? FileManager.default.removeItem(at: htmlURL)
+        }
+
+        let fullURL = "https://example.com/shared/document/abcdefghijklmnopqrstuvwxyz"
+        let truncatedURL = "https://example.com/shared/document/abc"
+        try "<html><body><p>\(truncatedURL)</p></body></html>"
+            .write(to: htmlURL, atomically: true, encoding: .utf8)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: fullURL,
+                bodyStorageURI: htmlURL.absoluteString,
+                cleanedSnippet: truncatedURL,
+                snippet: truncatedURL,
+                subject: "Shared link",
+                senderName: "Me",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: true,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "me@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, fullURL)
+    }
+
     func testLoadContent_outgoingForwardedMessageWithoutLeadIn_avoidsRawSnippetFallback() async {
         let messageId = "bubble-forwarded-empty-note-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
