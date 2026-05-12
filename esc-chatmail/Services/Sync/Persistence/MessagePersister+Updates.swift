@@ -58,6 +58,7 @@ extension MessagePersister {
             let previousBodyStorageURI = existingMessage.bodyStorageURI
             let previousSenderEmail = existingMessage.senderEmail
             let previousSenderName = existingMessage.senderName
+            let previousIsFromMe = existingMessage.isFromMe
             var senderHeaderDisplayNameUpdateEmails = Set<String>()
             var senderHeaderDisplayNameUpdateConversationIDs = Set<NSManagedObjectID>()
             let shouldPreserveLocalMailboxState = HistoryProcessor.hasPendingLocalModification(message: existingMessage)
@@ -102,7 +103,22 @@ extension MessagePersister {
             }
 
             if let plainText = processedMessage.plainTextBody, !plainText.isEmpty {
-                existingMessage.bodyText = plainText
+                let shouldPreserveOutgoingLocalBody = self.shouldPreserveOutgoingLocalBodyText(
+                    previousBodyText: previousBodyText,
+                    incomingBodyText: plainText,
+                    incomingSnippet: processedMessage.snippet,
+                    incomingCleanedSnippet: processedMessage.cleanedSnippet,
+                    wasFromMe: previousIsFromMe,
+                    isFromMe: processedMessage.headers.isFromMe
+                )
+                if shouldPreserveOutgoingLocalBody {
+                    Log.debug(
+                        "Preserving local outgoing body text for message \(processedMessage.id) over snippet-only sync body",
+                        category: .sync
+                    )
+                } else {
+                    existingMessage.bodyText = plainText
+                }
             }
 
             let participantDisplayNameUpdate = self.updateKnownParticipantDisplayNames(
@@ -261,6 +277,44 @@ extension MessagePersister {
         }
 
         return result.didUpdate
+    }
+
+    private func shouldPreserveOutgoingLocalBodyText(
+        previousBodyText: String?,
+        incomingBodyText: String,
+        incomingSnippet: String?,
+        incomingCleanedSnippet: String?,
+        wasFromMe: Bool,
+        isFromMe: Bool
+    ) -> Bool {
+        guard wasFromMe, isFromMe,
+              let previous = normalizedBodyComparisonText(previousBodyText),
+              let incoming = normalizedBodyComparisonText(incomingBodyText),
+              previous.count > incoming.count,
+              previous.hasPrefix(incoming) else {
+            return false
+        }
+
+        let snippetCandidates = [incomingSnippet, incomingCleanedSnippet]
+            .compactMap(normalizedBodyComparisonText)
+        guard !snippetCandidates.isEmpty else {
+            return false
+        }
+
+        return snippetCandidates.contains(incoming)
+    }
+
+    private func normalizedBodyComparisonText(_ text: String?) -> String? {
+        guard let text else { return nil }
+
+        let normalized = HTMLEntityDecoder.decode(
+            RawEmailSourceSanitizer.extractDisplayText(from: text)
+        )
+        .components(separatedBy: .whitespacesAndNewlines)
+        .filter { !$0.isEmpty }
+        .joined(separator: " ")
+
+        return normalized.isEmpty ? nil : normalized
     }
 
     nonisolated func matchingOptimisticLocalAttachment(

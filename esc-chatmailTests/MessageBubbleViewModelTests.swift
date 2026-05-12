@@ -322,6 +322,35 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
 
         XCTAssertEqual(result, "Tom & Jerry")
     }
+
+    func testResolvedVisibleText_outgoingReplyUsesFullBodyBeforeSnippet() throws {
+        let replyBody = """
+        Can we please see alts for:
+
+        Primary bedroom drapery
+        Kitchen backsplash
+
+        Thank you!
+
+        On Tue, Jan 2, 2026 at 9:41 AM Alice Example <alice@example.com> wrote:
+        > Original request that should stay out of the bubble.
+        """
+
+        let result = try XCTUnwrap(
+            MessageContentView.resolvedVisibleText(
+                fullTextContent: nil,
+                fallbackPreviewText: "Can we please see alts for:",
+                outgoingBodyText: replyBody,
+                isOutgoingPlainTextMessage: true
+            )
+        )
+
+        XCTAssertTrue(result.contains("Can we please see alts for:\n\nPrimary bedroom drapery"))
+        XCTAssertTrue(result.contains("Kitchen backsplash"))
+        XCTAssertTrue(result.contains("Thank you!"))
+        XCTAssertFalse(result.contains("Original request that should stay out of the bubble."))
+        XCTAssertNotEqual(result, "Can we please see alts for:")
+    }
 }
 
 final class OriginalEmailMetadataFormatterTests: XCTestCase {

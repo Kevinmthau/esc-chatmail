@@ -561,11 +561,12 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             from: request,
             resolvedHasHTMLSource: htmlAnalysis.hasHTMLSource
         )
+        let outgoingPlainTextContent = outgoingPlainTextContent(from: request)
 
         let fullTextContent =
             forwardedDisplayContent != nil
             ? forwardedDisplayContent?.leadInText
-            : loadedContent.plainText
+            : outgoingPlainTextContent ?? loadedContent.plainText
         let sharedDocumentLinkBodyText = forwardedDisplayContent == nil ? request.bodyText : nil
         let sharedDocumentLinkSnippet = forwardedDisplayContent == nil ? request.snippet : nil
 
@@ -580,6 +581,24 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             forwardedDisplayContent: forwardedDisplayContent,
             htmlAnalysis: htmlAnalysis
         )
+    }
+
+    private func outgoingPlainTextContent(from request: MessageBubbleContentRequest) -> String? {
+        guard request.isFromMe, !request.isForwardedEmail else {
+            return nil
+        }
+
+        let result = ChatBubbleTextProcessor.process(
+            content: request.bodyText,
+            options: ChatBubbleTextProcessorOptions(
+                inputKind: .autoDetectHTML,
+                sanitizeRawEmailSource: true,
+                decodeHTMLEntities: true,
+                formatSignOffLineBreaks: true,
+                classifyRichContent: false
+            )
+        )
+        return result.mainText
     }
 
     private func cachedHTMLAnalysis(for request: MessageBubbleContentRequest) async -> MessageBubbleHTMLAnalysis {

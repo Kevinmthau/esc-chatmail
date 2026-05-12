@@ -278,6 +278,72 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertFalse(saved.isUnread)
     }
 
+    func testUpdateExistingMessage_preservesOutgoingLocalBodyWhenSyncBodyIsSnippetOnly() async throws {
+        let conversation = ConversationBuilder.simple(in: context)
+        let replyBody = """
+        Can we please see alts for:
+
+        Primary bedroom drapery
+        Kitchen backsplash
+
+        Thank you!
+        """
+        let existingMessage = MessageBuilder()
+            .withId("outgoing-snippet-body-update")
+            .withThreadId("thread-outgoing-snippet-body-update")
+            .withSubject("Re: Finish options")
+            .withSender(email: "me@example.com", name: "Me")
+            .withSnippet("Can we please see alts for:")
+            .withBody(replyBody)
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        var headers = ProcessedHeaders()
+        headers.subject = "Re: Finish options"
+        headers.from = "Me <me@example.com>"
+        headers.to = [EmailAddress(email: "friend@example.com", displayName: nil)]
+        headers.isFromMe = true
+
+        let processedMessage = ProcessedMessage(
+            id: existingMessage.id,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: "Can we please see alts for:",
+            cleanedSnippet: "Can we please see alts for:",
+            internalDate: existingMessage.internalDate,
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: "Can we please see alts for:",
+            labelIds: ["SENT"],
+            isUnread: false,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertEqual(existingMessage.bodyText, replyBody)
+
+        try testStack.saveViewContext()
+        testStack.resetViewContext()
+
+        let fetch = Message.fetchRequest()
+        fetch.predicate = NSPredicate(format: "id == %@", processedMessage.id)
+        fetch.fetchLimit = 1
+
+        let saved = try XCTUnwrap(context.fetch(fetch).first)
+        XCTAssertEqual(saved.bodyText, replyBody)
+        XCTAssertEqual(saved.snippet, "Can we please see alts for:")
+        XCTAssertEqual(saved.cleanedSnippet, "Can we please see alts for:")
+    }
+
     func testUpdateExistingMessage_enrichesParticipantDisplayNameFromRefreshedFromHeader() async throws {
         let senderEmail = "info@bonbonwhims.com"
         let conversation = ConversationBuilder()

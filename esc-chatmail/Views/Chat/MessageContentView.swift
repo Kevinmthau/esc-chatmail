@@ -204,8 +204,13 @@ struct MessageContentView: View {
     }
 
     private var resolvedVisibleText: String? {
-        let sourceText = fullTextContent ?? fallbackPreviewText
-        return SharedDocumentLinkExtractor.removingLinks(from: sourceText, matching: sharedDocumentLinks)
+        Self.resolvedVisibleText(
+            fullTextContent: fullTextContent,
+            fallbackPreviewText: fallbackPreviewText,
+            outgoingBodyText: message.bodyText,
+            isOutgoingPlainTextMessage: message.isFromMe && !message.isForwardedEmail,
+            sharedDocumentLinks: sharedDocumentLinks
+        )
     }
 
     private var resolvedForwardedDisplayContent: ForwardedMessageDisplayContent? {
@@ -235,6 +240,20 @@ struct MessageContentView: View {
             return processedSnippet
         }
         return nil
+    }
+
+    static func resolvedVisibleText(
+        fullTextContent: String?,
+        fallbackPreviewText: String?,
+        outgoingBodyText: String?,
+        isOutgoingPlainTextMessage: Bool,
+        sharedDocumentLinks: [SharedDocumentLink] = []
+    ) -> String? {
+        let outgoingBodyFallback = isOutgoingPlainTextMessage
+            ? processedText(outgoingBodyText)
+            : nil
+        let sourceText = outgoingBodyFallback ?? fullTextContent ?? fallbackPreviewText
+        return SharedDocumentLinkExtractor.removingLinks(from: sourceText, matching: sharedDocumentLinks)
     }
 
     /// Processes text while preserving paragraph structure and decoding HTML entities
