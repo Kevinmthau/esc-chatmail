@@ -348,6 +348,58 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertNotEqual(visibleText, "Can we please see alts for:")
     }
 
+    func testLoadContent_outgoingSnippetBodyKeepsLoadedHTMLText() async throws {
+        let messageId = "bubble-outgoing-snippet-body-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let htmlURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bubble-outgoing-snippet-body-\(UUID().uuidString).html")
+        defer {
+            try? FileManager.default.removeItem(at: htmlURL)
+        }
+
+        try """
+        <html>
+        <body>
+          <p>Can we please see alts for:</p>
+          <p>Primary bedroom drapery</p>
+          <p>Kitchen backsplash</p>
+          <p>Thank you!</p>
+        </body>
+        </html>
+        """.write(to: htmlURL, atomically: true, encoding: .utf8)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: "Can we please see alts for:",
+                bodyStorageURI: htmlURL.absoluteString,
+                cleanedSnippet: "Can we please see alts for:",
+                snippet: "Can we please see alts for:",
+                subject: "Re: Finish options",
+                senderName: "Me",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: true,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "me@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        let visibleText = try XCTUnwrap(result.fullTextContent)
+        XCTAssertTrue(visibleText.contains("Can we please see alts for:"))
+        XCTAssertTrue(visibleText.contains("Primary bedroom drapery"))
+        XCTAssertTrue(visibleText.contains("Kitchen backsplash"))
+        XCTAssertTrue(visibleText.contains("Thank you!"))
+        XCTAssertNotEqual(visibleText, "Can we please see alts for:")
+    }
+
     func testLoadContent_outgoingForwardedMessageWithoutLeadIn_avoidsRawSnippetFallback() async {
         let messageId = "bubble-forwarded-empty-note-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)

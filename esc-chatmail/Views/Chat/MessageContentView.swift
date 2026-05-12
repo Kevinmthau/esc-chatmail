@@ -250,7 +250,13 @@ struct MessageContentView: View {
         sharedDocumentLinks: [SharedDocumentLink] = []
     ) -> String? {
         let outgoingBodyFallback = isOutgoingPlainTextMessage
-            ? processedText(outgoingBodyText)
+            ? MessageBubbleTextPrecedence.preferredOutgoingBodyFallback(
+                processedText(outgoingBodyText),
+                comparedTo: [
+                    fullTextContent,
+                    fallbackPreviewText
+                ]
+            )
             : nil
         let sourceText = outgoingBodyFallback ?? fullTextContent ?? fallbackPreviewText
         return SharedDocumentLinkExtractor.removingLinks(from: sourceText, matching: sharedDocumentLinks)

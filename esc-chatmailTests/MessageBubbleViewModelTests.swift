@@ -351,6 +351,28 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
         XCTAssertFalse(result.contains("Original request that should stay out of the bubble."))
         XCTAssertNotEqual(result, "Can we please see alts for:")
     }
+
+    func testResolvedVisibleText_outgoingSnippetBodyKeepsLoadedContent() throws {
+        let loadedText = """
+        Can we please see alts for:
+
+        Primary bedroom drapery
+        Kitchen backsplash
+
+        Thank you!
+        """
+
+        let result = try XCTUnwrap(
+            MessageContentView.resolvedVisibleText(
+                fullTextContent: loadedText,
+                fallbackPreviewText: "Can we please see alts for:",
+                outgoingBodyText: "Can we please see alts for:",
+                isOutgoingPlainTextMessage: true
+            )
+        )
+
+        XCTAssertEqual(result, loadedText)
+    }
 }
 
 final class OriginalEmailMetadataFormatterTests: XCTestCase {

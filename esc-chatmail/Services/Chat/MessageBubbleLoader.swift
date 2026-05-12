@@ -134,6 +134,34 @@ protocol MessageBubbleLoading: Sendable {
     func loadContent(from request: MessageBubbleContentRequest) async -> MessageBubbleContentResult
 }
 
+enum MessageBubbleTextPrecedence {
+    static func preferredOutgoingBodyFallback(
+        _ outgoingBodyText: String?,
+        comparedTo comparisonTexts: [String?]
+    ) -> String? {
+        guard let outgoingBodyText,
+              let candidateTokenCount = tokenCount(outgoingBodyText) else {
+            return nil
+        }
+
+        let comparisonTokenCounts = comparisonTexts.compactMap(tokenCount)
+        guard comparisonTokenCounts.allSatisfy({ candidateTokenCount > $0 }) else {
+            return nil
+        }
+
+        return outgoingBodyText
+    }
+
+    private static func tokenCount(_ text: String?) -> Int? {
+        guard let text else { return nil }
+
+        let tokens = HTMLEntityDecoder.decode(text)
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+        return tokens.isEmpty ? nil : tokens.count
+    }
+}
+
 enum MessageBubbleHTMLAnalysisBuilder {
     static func build(
         canonicalHTML: String?,
@@ -561,7 +589,10 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             from: request,
             resolvedHasHTMLSource: htmlAnalysis.hasHTMLSource
         )
-        let outgoingPlainTextContent = outgoingPlainTextContent(from: request)
+        let outgoingPlainTextContent = outgoingPlainTextContent(
+            from: request,
+            loadedPlainText: loadedContent.plainText
+        )
 
         let fullTextContent =
             forwardedDisplayContent != nil
@@ -583,7 +614,10 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         )
     }
 
-    private func outgoingPlainTextContent(from request: MessageBubbleContentRequest) -> String? {
+    private func outgoingPlainTextContent(
+        from request: MessageBubbleContentRequest,
+        loadedPlainText: String?
+    ) -> String? {
         guard request.isFromMe, !request.isForwardedEmail else {
             return nil
         }
@@ -598,7 +632,14 @@ actor MessageBubbleLoader: MessageBubbleLoading {
                 classifyRichContent: false
             )
         )
-        return result.mainText
+        return MessageBubbleTextPrecedence.preferredOutgoingBodyFallback(
+            result.mainText,
+            comparedTo: [
+                loadedPlainText,
+                request.cleanedSnippet,
+                request.snippet
+            ]
+        )
     }
 
     private func cachedHTMLAnalysis(for request: MessageBubbleContentRequest) async -> MessageBubbleHTMLAnalysis {
