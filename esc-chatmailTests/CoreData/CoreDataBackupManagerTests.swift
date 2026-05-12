@@ -121,6 +121,24 @@ final class CoreDataBackupManagerTests: XCTestCase {
         XCTAssertEqual(backups.last?.lastPathComponent, first.lastPathComponent)
     }
 
+    func testListBackups_sortsTimestampedBackupsByEmbeddedTimestamp() throws {
+        let backupsDir = tempDir.appendingPathComponent("Backups")
+        try FileManager.default.createDirectory(at: backupsDir, withIntermediateDirectories: true)
+
+        let newest = "Store.backup-2026-05-12T18-42-00Z.sqlite"
+        let oldest = "Store.backup-2026-05-12T18-40-00Z.sqlite"
+        let legacy = "legacy.sqlite"
+
+        try Data().write(to: backupsDir.appendingPathComponent(newest))
+        try Data().write(to: backupsDir.appendingPathComponent(legacy))
+        try Data().write(to: backupsDir.appendingPathComponent(oldest))
+
+        let backupNames = CoreDataBackupManager.listBackups(for: storeURL)
+            .map(\.lastPathComponent)
+
+        XCTAssertEqual(backupNames, [newest, oldest, legacy])
+    }
+
     // MARK: - Cleanup Old Backups
 
     func testCleanupOldBackups_underKeepCount_keepsAll() throws {

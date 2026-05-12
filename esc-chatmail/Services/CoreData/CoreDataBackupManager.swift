@@ -44,7 +44,7 @@ enum CoreDataBackupManager {
 
     /// Lists all available backups in the backups directory.
     /// - Parameter storeURL: The URL of the main SQLite store file
-    /// - Returns: Array of backup URLs sorted by creation date (newest first)
+    /// - Returns: Array of backup URLs sorted by embedded timestamp, then creation date (newest first)
     static func listBackups(for storeURL: URL) -> [URL] {
         let backupsDir = storeURL.deletingLastPathComponent().appendingPathComponent("Backups")
 
@@ -56,13 +56,25 @@ enum CoreDataBackupManager {
             return []
         }
 
-        let backups = contents.filter { $0.pathExtension == "sqlite" }
+        let backups = contents
+            .filter { $0.pathExtension == "sqlite" }
+            .map { BackupFile(url: $0, creationDate: creationDate(for: $0)) }
 
         return backups.sorted { url1, url2 in
-            let date1 = (try? url1.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
-            let date2 = (try? url2.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
-            return date1 > date2
-        }
+            if let timestamp1 = url1.timestamp, let timestamp2 = url2.timestamp, timestamp1 != timestamp2 {
+                return timestamp1 > timestamp2
+            }
+
+            if (url1.timestamp != nil) != (url2.timestamp != nil) {
+                return url1.timestamp != nil
+            }
+
+            if url1.creationDate != url2.creationDate {
+                return url1.creationDate > url2.creationDate
+            }
+
+            return url1.filename < url2.filename
+        }.map(\.url)
     }
 
     /// Cleans up old backups, keeping only the most recent ones.
@@ -85,6 +97,45 @@ enum CoreDataBackupManager {
     }
 
     // MARK: - Private Helpers
+
+    private struct BackupFile {
+        let url: URL
+        let timestamp: Date?
+        let creationDate: Date
+        let filename: String
+
+        init(url: URL, creationDate: Date) {
+            self.url = url
+            self.timestamp = CoreDataBackupManager.backupTimestamp(from: url)
+            self.creationDate = creationDate
+            self.filename = url.lastPathComponent
+        }
+    }
+
+    private static func creationDate(for url: URL) -> Date {
+        (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
+    }
+
+    private static func backupTimestamp(from url: URL) -> Date? {
+        let filename = url.lastPathComponent
+        let sqliteSuffix = ".sqlite"
+
+        guard filename.hasSuffix(sqliteSuffix),
+              let backupMarker = filename.range(of: ".backup-", options: .backwards) else {
+            return nil
+        }
+
+        let timestampEnd = filename.index(filename.endIndex, offsetBy: -sqliteSuffix.count)
+        guard backupMarker.upperBound < timestampEnd else { return nil }
+
+        let timestamp = String(filename[backupMarker.upperBound..<timestampEnd])
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd'T'HH-mm-ss'Z'"
+        return formatter.date(from: timestamp)
+    }
 
     private static func copyAssociatedFiles(for sourceURL: URL, to destinationURL: URL) {
         let walSource = URL(fileURLWithPath: sourceURL.path + "-wal")
