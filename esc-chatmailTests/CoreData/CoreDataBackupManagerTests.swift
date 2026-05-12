@@ -22,6 +22,20 @@ final class CoreDataBackupManagerTests: XCTestCase {
         try super.tearDownWithError()
     }
 
+    private func writeBackup(named filename: String, createdAt creationDate: Date? = nil) throws -> URL {
+        let backupsDir = tempDir.appendingPathComponent("Backups")
+        try FileManager.default.createDirectory(at: backupsDir, withIntermediateDirectories: true)
+
+        let url = backupsDir.appendingPathComponent(filename)
+        try Data().write(to: url)
+
+        if let creationDate {
+            try FileManager.default.setAttributes([.creationDate: creationDate], ofItemAtPath: url.path)
+        }
+
+        return url
+    }
+
     // MARK: - Backup Creation
 
     func testCreateTimestampedBackup_copiesMainStoreFile() throws {
@@ -122,21 +136,55 @@ final class CoreDataBackupManagerTests: XCTestCase {
     }
 
     func testListBackups_sortsTimestampedBackupsByEmbeddedTimestamp() throws {
-        let backupsDir = tempDir.appendingPathComponent("Backups")
-        try FileManager.default.createDirectory(at: backupsDir, withIntermediateDirectories: true)
-
         let newest = "Store.backup-2026-05-12T18-42-00Z.sqlite"
         let oldest = "Store.backup-2026-05-12T18-40-00Z.sqlite"
         let legacy = "legacy.sqlite"
 
-        try Data().write(to: backupsDir.appendingPathComponent(newest))
-        try Data().write(to: backupsDir.appendingPathComponent(legacy))
-        try Data().write(to: backupsDir.appendingPathComponent(oldest))
+        try writeBackup(named: newest)
+        try writeBackup(named: legacy)
+        try writeBackup(named: oldest)
 
         let backupNames = CoreDataBackupManager.listBackups(for: storeURL)
             .map(\.lastPathComponent)
 
         XCTAssertEqual(backupNames, [newest, oldest, legacy])
+    }
+
+    func testListBackups_createdTimestampedBackupSortsBeforeNewerLegacyBackup() throws {
+        let timestamped = try CoreDataBackupManager.createTimestampedBackup(at: storeURL)
+        let legacy = try writeBackup(named: "legacy.sqlite", createdAt: Date(timeIntervalSinceNow: 3_600))
+
+        let backupNames = CoreDataBackupManager.listBackups(for: storeURL)
+            .map(\.lastPathComponent)
+
+        XCTAssertEqual(backupNames, [timestamped.lastPathComponent, legacy.lastPathComponent])
+    }
+
+    func testListBackups_unparseableTimestampFallsBackToCreationDate() throws {
+        let newer = "Store.backup-not-a-date.sqlite"
+        let older = "legacy.sqlite"
+
+        try writeBackup(named: newer, createdAt: Date(timeIntervalSinceNow: 60))
+        try writeBackup(named: older, createdAt: Date(timeIntervalSinceNow: -60))
+
+        let backupNames = CoreDataBackupManager.listBackups(for: storeURL)
+            .map(\.lastPathComponent)
+
+        XCTAssertEqual(backupNames, [newer, older])
+    }
+
+    func testListBackups_equalTimestampAndCreationDateFallsBackToFilename() throws {
+        let creationDate = Date(timeIntervalSince1970: 1_800_000_000)
+        let first = "AStore.backup-2026-05-12T18-42-00Z.sqlite"
+        let second = "BStore.backup-2026-05-12T18-42-00Z.sqlite"
+
+        try writeBackup(named: first, createdAt: creationDate)
+        try writeBackup(named: second, createdAt: creationDate)
+
+        let backupNames = CoreDataBackupManager.listBackups(for: storeURL)
+            .map(\.lastPathComponent)
+
+        XCTAssertEqual(backupNames, [first, second])
     }
 
     // MARK: - Cleanup Old Backups

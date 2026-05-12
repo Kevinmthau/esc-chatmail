@@ -8,7 +8,7 @@ enum CoreDataBackupManager {
     /// - Returns: The URL of the created backup
     /// - Throws: File system errors if backup fails
     static func createTimestampedBackup(at storeURL: URL) throws -> URL {
-        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let timestamp = backupTimestampString(from: Date())
         let backupFilename = storeURL.deletingPathExtension()
             .appendingPathExtension("backup-\(timestamp).sqlite")
             .lastPathComponent
@@ -60,20 +60,24 @@ enum CoreDataBackupManager {
             .filter { $0.pathExtension == "sqlite" }
             .map { BackupFile(url: $0, creationDate: creationDate(for: $0)) }
 
-        return backups.sorted { url1, url2 in
-            if let timestamp1 = url1.timestamp, let timestamp2 = url2.timestamp, timestamp1 != timestamp2 {
-                return timestamp1 > timestamp2
+        return backups.sorted { lhs, rhs in
+            if let lhsTimestamp = lhs.timestamp, let rhsTimestamp = rhs.timestamp, lhsTimestamp != rhsTimestamp {
+                return lhsTimestamp > rhsTimestamp
             }
 
-            if (url1.timestamp != nil) != (url2.timestamp != nil) {
-                return url1.timestamp != nil
+            if lhs.timestamp != nil && rhs.timestamp == nil {
+                return true
             }
 
-            if url1.creationDate != url2.creationDate {
-                return url1.creationDate > url2.creationDate
+            if lhs.timestamp == nil && rhs.timestamp != nil {
+                return false
             }
 
-            return url1.filename < url2.filename
+            if lhs.creationDate != rhs.creationDate {
+                return lhs.creationDate > rhs.creationDate
+            }
+
+            return lhs.filename < rhs.filename
         }.map(\.url)
     }
 
@@ -116,6 +120,10 @@ enum CoreDataBackupManager {
         (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
     }
 
+    private static func backupTimestampString(from date: Date) -> String {
+        makeBackupTimestampFormatter().string(from: date)
+    }
+
     private static func backupTimestamp(from url: URL) -> Date? {
         let filename = url.lastPathComponent
         let sqliteSuffix = ".sqlite"
@@ -129,12 +137,16 @@ enum CoreDataBackupManager {
         guard backupMarker.upperBound < timestampEnd else { return nil }
 
         let timestamp = String(filename[backupMarker.upperBound..<timestampEnd])
+        return makeBackupTimestampFormatter().date(from: timestamp)
+    }
+
+    private static func makeBackupTimestampFormatter() -> DateFormatter {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "yyyy-MM-dd'T'HH-mm-ss'Z'"
-        return formatter.date(from: timestamp)
+        return formatter
     }
 
     private static func copyAssociatedFiles(for sourceURL: URL, to destinationURL: URL) {
