@@ -4,6 +4,12 @@ struct NewsletterPreviewBuilder {
     private let imageExtractor = EmailPreviewImageExtractor()
     private let urlSanitizer = HTMLURLSanitizer()
     private let trackingRemover = HTMLTrackingRemover()
+    private let lineProcessor = PreviewLineProcessor(
+        config: PreviewLineProcessorConfig(
+            footerStopPatterns: footerStopPatterns,
+            truncationTrailingMinDistance: 32
+        )
+    )
     private static let leadingPreviewURLRegex = try? NSRegularExpression(
         pattern: #"^\s*[\(\[\{<]?\s*((?:https?://|www\.)[^\s\)\]\}>]+)(?:\s*[\)\]\}>])?\s*"#,
         options: [.caseInsensitive]
@@ -71,7 +77,7 @@ struct NewsletterPreviewBuilder {
         senderEmail: String?,
         subject: String?
     ) -> NewsletterPreviewModel? {
-        let sourceDomain = normalizedSourceDomain(from: senderEmail)
+        let sourceDomain = PreviewTextUtilities.normalizedSourceDomain(from: senderEmail)
         let sourceLabel = sourceLabel(
             senderName: senderName,
             senderEmail: senderEmail,
@@ -96,7 +102,7 @@ struct NewsletterPreviewBuilder {
             return nil
         }
 
-        let normalizedSubject = normalizedText(subject)
+        let normalizedSubject = PreviewTextUtilities.normalizedText(subject)
         let fallbackSubject = normalizedSubject.isEmpty ? nil : normalizedSubject
         let resolvedTitle = title ?? fallbackSubject ?? sourceLabel ?? "Newsletter"
         let resolvedSnippet = snippet ?? subtitle ?? sourceDomain ?? "Open the full email to view the complete message."
@@ -104,7 +110,7 @@ struct NewsletterPreviewBuilder {
         return NewsletterPreviewModel(
             title: resolvedTitle,
             subtitle: subtitle,
-            snippet: truncate(resolvedSnippet, limit: 220),
+            snippet: lineProcessor.truncate(resolvedSnippet, limit: 220),
             heroImageURL: heroImageURL,
             heroImageDisplayMode: heroImage?.displayMode ?? .fill,
             sourceLabel: sourceLabel,
@@ -118,23 +124,23 @@ struct NewsletterPreviewBuilder {
             htmlSummary.h2Text,
             newsletterPreheaderText(htmlSummary.preheaderText),
             htmlSummary.titleText,
-            normalizedText(subject)
+            PreviewTextUtilities.normalizedText(subject)
         ]
 
         for candidate in candidates {
             guard let candidate, isMeaningfulTitle(candidate) else {
                 continue
             }
-            return truncate(candidate, limit: 120)
+            return lineProcessor.truncate(candidate, limit: 120)
         }
 
         return nil
     }
 
     private func newsletterPreheaderText(_ text: String?) -> String? {
-        guard let text = normalizedPreviewText(text),
+        guard let text = PreviewTextUtilities.normalizedPreviewText(text),
               !shouldSkipLine(text),
-              !shouldStopAtFooter(text) else {
+              !lineProcessor.shouldStopAtFooter(text) else {
             return nil
         }
 
@@ -142,10 +148,10 @@ struct NewsletterPreviewBuilder {
     }
 
     private func resolvedSubtitle(from lines: [String], excluding excluded: [String?]) -> String? {
-        let excludedValues = normalizedSet(from: excluded)
+        let excludedValues = PreviewTextUtilities.normalizedSet(from: excluded)
 
         for line in lines {
-            let comparable = normalizedComparableText(line)
+            let comparable = PreviewTextUtilities.normalizedComparableText(line)
             guard !excludedValues.contains(comparable),
                   !TextProcessing.isListItem(line),
                   line.count >= 18,
@@ -153,7 +159,7 @@ struct NewsletterPreviewBuilder {
                 continue
             }
 
-            return truncate(line, limit: 110)
+            return lineProcessor.truncate(line, limit: 110)
         }
 
         return nil
@@ -164,20 +170,20 @@ struct NewsletterPreviewBuilder {
         from lines: [String],
         excluding excluded: [String?]
     ) -> String? {
-        let excludedValues = normalizedSet(from: excluded)
+        let excludedValues = PreviewTextUtilities.normalizedSet(from: excluded)
 
         if let preferredSnippet = normalizedPreviewSummary(
             preferredSnippet,
             excluding: excluded,
             excludedValues: excludedValues
         ) {
-            return truncate(preferredSnippet, limit: 190)
+            return lineProcessor.truncate(preferredSnippet, limit: 190)
         }
 
         var collected: [String] = []
 
         for line in lines {
-            let comparable = normalizedComparableText(line)
+            let comparable = PreviewTextUtilities.normalizedComparableText(line)
             guard !excludedValues.contains(comparable) else {
                 continue
             }
@@ -189,12 +195,12 @@ struct NewsletterPreviewBuilder {
             collected.append(line)
             let joined = collected.joined(separator: " ")
             if joined.count >= 170 {
-                return truncate(joined, limit: 190)
+                return lineProcessor.truncate(joined, limit: 190)
             }
         }
 
         let joined = collected.joined(separator: " ")
-        return joined.isEmpty ? nil : truncate(joined, limit: 190)
+        return joined.isEmpty ? nil : lineProcessor.truncate(joined, limit: 190)
     }
 
     private func cleanedPreviewLines(
@@ -203,8 +209,8 @@ struct NewsletterPreviewBuilder {
         extractedText: String? = nil
     ) -> [String] {
         let bodyLines = previewLines(from: plainText ?? "")
-        let htmlText = normalizedPreviewText(extractedText)
-            ?? normalizedText(TextProcessing.extractPlainText(from: canonicalHTML))
+        let htmlText = PreviewTextUtilities.normalizedPreviewText(extractedText)
+            ?? PreviewTextUtilities.normalizedText(TextProcessing.extractPlainText(from: canonicalHTML))
         let htmlLines = previewLines(from: htmlText)
 
         guard !bodyLines.isEmpty else {
@@ -228,7 +234,7 @@ struct NewsletterPreviewBuilder {
         var leadingURLFallbackLines: [String] = []
 
         for line in rawLines {
-            let normalizedLine = normalizedText(line)
+            let normalizedLine = PreviewTextUtilities.normalizedText(line)
             guard !normalizedLine.isEmpty else {
                 continue
             }
@@ -241,7 +247,7 @@ struct NewsletterPreviewBuilder {
                 continue
             }
 
-            if shouldStopAtFooter(candidateLine), !lines.isEmpty || !leadingURLFallbackLines.isEmpty {
+            if lineProcessor.shouldStopAtFooter(candidateLine), !lines.isEmpty || !leadingURLFallbackLines.isEmpty {
                 break
             }
 
@@ -249,8 +255,8 @@ struct NewsletterPreviewBuilder {
                 continue
             }
 
-            if lines.contains(where: { normalizedComparableText($0) == normalizedComparableText(candidateLine) }) ||
-                leadingURLFallbackLines.contains(where: { normalizedComparableText($0) == normalizedComparableText(candidateLine) }) {
+            if lines.contains(where: { PreviewTextUtilities.normalizedComparableText($0) == PreviewTextUtilities.normalizedComparableText(candidateLine) }) ||
+                leadingURLFallbackLines.contains(where: { PreviewTextUtilities.normalizedComparableText($0) == PreviewTextUtilities.normalizedComparableText(candidateLine) }) {
                 continue
             }
 
@@ -429,11 +435,11 @@ struct NewsletterPreviewBuilder {
     }
 
     private func imageContextScore(fromFollowingText followingText: String) -> Int {
-        imageContextScore(fromPlainText: normalizedText(followingText))
+        imageContextScore(fromPlainText: PreviewTextUtilities.normalizedText(followingText))
     }
 
     private func isSubstantiveImageFollowupLine(_ line: String) -> Bool {
-        if shouldSkipLine(line) || shouldStopAtFooter(line) || isNavigationLikeImageFollowupLine(line) {
+        if shouldSkipLine(line) || lineProcessor.shouldStopAtFooter(line) || isNavigationLikeImageFollowupLine(line) {
             return false
         }
 
@@ -474,10 +480,10 @@ struct NewsletterPreviewBuilder {
         width: Int?,
         height: Int?
     ) -> String? {
-        let normalizedURL = normalizedText(rawURL)
+        let normalizedURL = PreviewTextUtilities.normalizedText(rawURL)
         let lowercasedURL = normalizedURL.lowercased()
 
-        guard isRenderableRemoteImageURL(normalizedURL),
+        guard PreviewTextUtilities.isRenderableRemoteImageURL(normalizedURL),
               urlSanitizer.isURLSafe(normalizedURL),
               !trackingRemover.isTrackingLikeImageURL(normalizedURL),
               !containsBlockedHeroHint(in: descriptor),
@@ -535,7 +541,7 @@ struct NewsletterPreviewBuilder {
         descriptor: String,
         url: String
     ) -> NewsletterPreviewHeroImageDisplayMode? {
-        guard let aspectRatio = aspectRatio(width: width, height: height) else {
+        guard let aspectRatio = PreviewTextUtilities.aspectRatio(width: width, height: height) else {
             return .fill
         }
 
@@ -559,55 +565,9 @@ struct NewsletterPreviewBuilder {
         return .fill
     }
 
-    private func aspectRatio(width: Int?, height: Int?) -> Double? {
-        guard let width, let height, width > 0, height > 0 else {
-            return nil
-        }
-
-        return Double(width) / Double(height)
-    }
-
-    private func isRenderableRemoteImageURL(_ url: String) -> Bool {
-        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lowercased = trimmed.lowercased()
-        guard !lowercased.isEmpty,
-              !lowercased.hasPrefix("cid:"),
-              !lowercased.hasPrefix("data:"),
-              !lowercased.contains("about:blank"),
-              let parsedURL = URL(string: trimmed),
-              let scheme = parsedURL.scheme?.lowercased(),
-              let host = parsedURL.host,
-              !host.isEmpty else {
-            return false
-        }
-
-        return scheme == "http" || scheme == "https"
-    }
-
-    private func normalizedSourceDomain(from senderEmail: String?) -> String? {
-        guard let senderEmail = senderEmail?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !senderEmail.isEmpty else {
-            return nil
-        }
-
-        let extractedEmail = EmailNormalizer.extractEmail(from: senderEmail) ?? senderEmail
-        guard let atIndex = extractedEmail.lastIndex(of: "@"),
-              atIndex < extractedEmail.index(before: extractedEmail.endIndex) else {
-            return nil
-        }
-
-        let domain = extractedEmail[extractedEmail.index(after: atIndex)...]
-            .lowercased()
-            .replacingOccurrences(of: "^www\\.", with: "", options: .regularExpression)
-            .trimmingCharacters(in: CharacterSet(charactersIn: " <>\"'()[],:;"))
-
-        return domain.isEmpty ? nil : domain
-    }
-
     private func sourceLabel(senderName: String?, senderEmail: String?, sourceDomain: String?) -> String? {
         if let senderName = normalizedSenderName(senderName, senderEmail: senderEmail) {
-            return truncate(senderName, limit: 40)
+            return lineProcessor.truncate(senderName, limit: 40)
         }
 
         guard let sourceDomain, !sourceDomain.isEmpty else {
@@ -639,7 +599,7 @@ struct NewsletterPreviewBuilder {
             )
         }
 
-        let normalized = normalizedText(senderName)
+        let normalized = PreviewTextUtilities.normalizedText(senderName)
         guard !normalized.isEmpty,
               !normalized.contains("@") else {
             return nil
@@ -648,24 +608,12 @@ struct NewsletterPreviewBuilder {
         return normalized
     }
 
-    private func normalizedSet(from strings: [String?]) -> Set<String> {
-        Set(strings.compactMap { value in
-            guard let value = value else { return nil }
-            let normalized = normalizedComparableText(value)
-            return normalized.isEmpty ? nil : normalized
-        })
-    }
-
-    private func normalizedComparableText(_ text: String) -> String {
-        normalizedText(text).lowercased()
-    }
-
     private func normalizedPreviewSummary(
         _ text: String?,
         excluding excluded: [String?],
         excludedValues: Set<String>
     ) -> String? {
-        var normalized = trimmedPreviewBoundaryText(normalizedText(text))
+        var normalized = trimmedPreviewBoundaryText(PreviewTextUtilities.normalizedText(text))
         normalized = trimmingLeadingPreviewURLNoise(from: normalized, requiringTrackingURL: true)
         normalized = trimmingLeadingExcludedText(from: normalized, excluded: excluded)
         normalized = trimmingFooterContent(from: normalized)
@@ -675,11 +623,11 @@ struct NewsletterPreviewBuilder {
               !lineLooksLikePreviewNoise(normalized),
               !looksLikeShortTitleCluster(normalized),
               !shouldSkipLine(normalized),
-              !shouldStopAtFooter(normalized) else {
+              !lineProcessor.shouldStopAtFooter(normalized) else {
             return nil
         }
 
-        let comparable = normalizedComparableText(normalized)
+        let comparable = PreviewTextUtilities.normalizedComparableText(normalized)
         guard !excludedValues.contains(comparable) else {
             return nil
         }
@@ -690,7 +638,7 @@ struct NewsletterPreviewBuilder {
     private func trimmingLeadingExcludedText(from text: String, excluded: [String?]) -> String {
         let candidates = excluded
             .compactMap { candidate -> String? in
-                let normalized = normalizedText(candidate)
+                let normalized = PreviewTextUtilities.normalizedText(candidate)
                 guard normalized.count >= 4 else {
                     return nil
                 }
@@ -740,15 +688,6 @@ struct NewsletterPreviewBuilder {
             .replacingOccurrences(of: "[\\s\\-:;,.!?|>*]+$", with: "", options: .regularExpression)
     }
 
-    private func normalizedText(_ text: String?) -> String {
-        EmailPreviewContentExtractor.normalizedText(text)
-    }
-
-    private func normalizedPreviewText(_ text: String?) -> String? {
-        let normalized = normalizedText(text)
-        return normalized.isEmpty ? nil : normalized
-    }
-
     private func shouldSkipLine(_ line: String) -> Bool {
         let lowercased = line.lowercased()
 
@@ -765,11 +704,6 @@ struct NewsletterPreviewBuilder {
         }
 
         return ignoredLinePatterns.contains { lowercased.contains($0) }
-    }
-
-    private func shouldStopAtFooter(_ line: String) -> Bool {
-        let lowercased = line.lowercased()
-        return footerStopPatterns.contains { lowercased.contains($0) }
     }
 
     private func lineLooksLikePreviewNoise(_ line: String) -> Bool {
@@ -812,7 +746,7 @@ struct NewsletterPreviewBuilder {
 
         let fragments = line
             .split { ".!?".contains($0) }
-            .map { normalizedText(String($0)) }
+            .map { PreviewTextUtilities.normalizedText(String($0)) }
             .filter { !$0.isEmpty }
 
         guard fragments.count >= 2 else {
@@ -932,10 +866,10 @@ struct NewsletterPreviewBuilder {
     }
 
     private func postURLTextLooksLikePreviewTeaser(_ text: String) -> Bool {
-        let normalized = normalizedText(text)
+        let normalized = PreviewTextUtilities.normalizedText(text)
         guard normalized.count >= 24,
               !shouldSkipLine(normalized),
-              !shouldStopAtFooter(normalized),
+              !lineProcessor.shouldStopAtFooter(normalized),
               !looksLikeNavigationLabelRun(normalized) else {
             return false
         }
@@ -971,7 +905,7 @@ struct NewsletterPreviewBuilder {
     }
 
     private func isMeaningfulTitle(_ title: String) -> Bool {
-        let normalized = normalizedText(title)
+        let normalized = PreviewTextUtilities.normalizedText(title)
         guard normalized.count >= 12 else {
             return false
         }
@@ -984,19 +918,6 @@ struct NewsletterPreviewBuilder {
         return true
     }
 
-    private func truncate(_ text: String, limit: Int) -> String {
-        guard text.count > limit else {
-            return text
-        }
-
-        let truncated = String(text.prefix(limit))
-        if let lastSpace = truncated.lastIndex(of: " "),
-           truncated.distance(from: truncated.startIndex, to: lastSpace) > limit - 32 {
-            return String(truncated[..<lastSpace]) + "..."
-        }
-
-        return truncated + "..."
-    }
 }
 
 private struct HeroImageCandidate {

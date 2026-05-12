@@ -4,6 +4,12 @@ struct TransactionalPreviewBuilder {
     private let imageExtractor = EmailPreviewImageExtractor()
     private let urlSanitizer = HTMLURLSanitizer()
     private let trackingRemover = HTMLTrackingRemover()
+    private let lineProcessor = PreviewLineProcessor(
+        config: PreviewLineProcessorConfig(
+            footerStopPatterns: transactionalFooterStopPatterns,
+            truncationTrailingMinDistance: 20
+        )
+    )
 
     func buildPreview(
         canonicalHTML: String,
@@ -67,7 +73,7 @@ struct TransactionalPreviewBuilder {
         senderEmail: String?,
         subject: String?
     ) -> TransactionalPreviewModel? {
-        let sourceDomain = normalizedSourceDomain(from: senderEmail)
+        let sourceDomain = PreviewTextUtilities.normalizedSourceDomain(from: senderEmail)
         let sourceLabel = sourceLabel(
             senderName: senderName,
             senderEmail: senderEmail,
@@ -141,7 +147,7 @@ struct TransactionalPreviewBuilder {
             guard let candidate, isMeaningfulTitle(candidate) else {
                 continue
             }
-            return truncate(candidate, limit: 90)
+            return lineProcessor.truncate(candidate, limit: 90)
         }
 
         return nil
@@ -157,7 +163,7 @@ struct TransactionalPreviewBuilder {
             subject,
             cleanedSnippet,
             lines.joined(separator: "\n"),
-            normalizedPreviewText(extractedText)
+            PreviewTextUtilities.normalizedPreviewText(extractedText)
         ]
 
         for candidate in candidates {
@@ -174,13 +180,13 @@ struct TransactionalPreviewBuilder {
         from lines: [String],
         excluding excluded: [String?]
     ) -> String? {
-        let excludedValues = normalizedSet(from: excluded)
+        let excludedValues = PreviewTextUtilities.normalizedSet(from: excluded)
 
         if let cleanedSnippet = normalizedCandidateLine(cleanedSnippet),
-           !excludedValues.contains(normalizedComparableText(cleanedSnippet)),
+           !excludedValues.contains(PreviewTextUtilities.normalizedComparableText(cleanedSnippet)),
            !restatesExcludedContent(cleanedSnippet, excluded: excluded),
            cleanedSnippet.count >= 14 {
-            return truncate(cleanedSnippet, limit: 90)
+            return lineProcessor.truncate(cleanedSnippet, limit: 90)
         }
 
         if let reservationSubtitle = resolvedReservationSubtitle(from: lines, excluding: excludedValues) {
@@ -192,7 +198,7 @@ struct TransactionalPreviewBuilder {
                 continue
             }
 
-            let comparable = normalizedComparableText(candidate)
+            let comparable = PreviewTextUtilities.normalizedComparableText(candidate)
             guard !excludedValues.contains(comparable),
                   !restatesExcludedContent(candidate, excluded: excluded),
                   candidate.count >= 14,
@@ -203,7 +209,7 @@ struct TransactionalPreviewBuilder {
                 continue
             }
 
-            return truncate(candidate, limit: 90)
+            return lineProcessor.truncate(candidate, limit: 90)
         }
 
         return nil
@@ -218,9 +224,9 @@ struct TransactionalPreviewBuilder {
             return status
         }
 
-        let excludedValues = normalizedSet(from: excluded)
+        let excludedValues = PreviewTextUtilities.normalizedSet(from: excluded)
         for line in lines {
-            let comparable = normalizedComparableText(line)
+            let comparable = PreviewTextUtilities.normalizedComparableText(line)
             guard !excludedValues.contains(comparable),
                   let status = normalizedStatus(line) else {
                 continue
@@ -260,20 +266,20 @@ struct TransactionalPreviewBuilder {
         }
 
         if !segments.isEmpty {
-            return truncate(segments.prefix(2).joined(separator: " • "), limit: 90)
+            return lineProcessor.truncate(segments.prefix(2).joined(separator: " • "), limit: 90)
         }
 
         if let reservationDetailLine = resolvedReservationDetailLine(from: lines) {
             return reservationDetailLine
         }
 
-        let excludedValues = normalizedSet(from: excluded + [status])
+        let excludedValues = PreviewTextUtilities.normalizedSet(from: excluded + [status])
         for line in lines {
             guard let candidate = normalizedCandidateLine(line) else {
                 continue
             }
 
-            let comparable = normalizedComparableText(candidate)
+            let comparable = PreviewTextUtilities.normalizedComparableText(candidate)
             guard !excludedValues.contains(comparable),
                   !restatesExcludedContent(candidate, excluded: excluded + [status]),
                   !looksLikeDateOrStatus(candidate),
@@ -283,7 +289,7 @@ struct TransactionalPreviewBuilder {
                 continue
             }
 
-            return truncate(candidate, limit: 90)
+            return lineProcessor.truncate(candidate, limit: 90)
         }
 
         return nil
@@ -301,7 +307,7 @@ struct TransactionalPreviewBuilder {
             }
 
             if preferredActionPatterns.contains(where: lowercased.contains) {
-                return truncate(candidate, limit: 32)
+                return lineProcessor.truncate(candidate, limit: 32)
             }
 
         }
@@ -315,8 +321,8 @@ struct TransactionalPreviewBuilder {
         extractedText: String? = nil
     ) -> [String] {
         let bodyLines = previewLines(from: plainText ?? "")
-        let htmlText = normalizedPreviewText(extractedText)
-            ?? normalizedText(TextProcessing.extractPlainText(from: canonicalHTML))
+        let htmlText = PreviewTextUtilities.normalizedPreviewText(extractedText)
+            ?? PreviewTextUtilities.normalizedText(TextProcessing.extractPlainText(from: canonicalHTML))
         let htmlLines = previewLines(from: htmlText)
 
         guard !bodyLines.isEmpty else {
@@ -339,12 +345,12 @@ struct TransactionalPreviewBuilder {
         var lines: [String] = []
 
         for line in rawLines {
-            let normalizedLine = normalizedText(line)
+            let normalizedLine = PreviewTextUtilities.normalizedText(line)
             guard !normalizedLine.isEmpty else {
                 continue
             }
 
-            if shouldStopAtFooter(normalizedLine), !lines.isEmpty {
+            if lineProcessor.shouldStopAtFooter(normalizedLine), !lines.isEmpty {
                 break
             }
 
@@ -352,8 +358,8 @@ struct TransactionalPreviewBuilder {
                 continue
             }
 
-            let comparable = normalizedComparableText(normalizedLine)
-            if lines.contains(where: { normalizedComparableText($0) == comparable }) {
+            let comparable = PreviewTextUtilities.normalizedComparableText(normalizedLine)
+            if lines.contains(where: { PreviewTextUtilities.normalizedComparableText($0) == comparable }) {
                 continue
             }
 
@@ -419,7 +425,7 @@ struct TransactionalPreviewBuilder {
     }
 
     private func canonicalDetailField(for label: String) -> String? {
-        let lowercased = normalizedComparableText(label)
+        let lowercased = PreviewTextUtilities.normalizedComparableText(label)
 
         for (key, patterns) in detailFieldPatterns {
             if patterns.contains(where: lowercased.contains) {
@@ -431,10 +437,10 @@ struct TransactionalPreviewBuilder {
     }
 
     private func transactionLine(from lines: [String], excluding excluded: [String?]) -> String? {
-        let excludedValues = normalizedSet(from: excluded)
+        let excludedValues = PreviewTextUtilities.normalizedSet(from: excluded)
 
         for line in lines {
-            let comparable = normalizedComparableText(line)
+            let comparable = PreviewTextUtilities.normalizedComparableText(line)
             guard !excludedValues.contains(comparable),
                   looksLikeTransactionalTitle(line) else {
                 continue
@@ -447,7 +453,7 @@ struct TransactionalPreviewBuilder {
     }
 
     private func looksLikeTransactionalTitle(_ line: String) -> Bool {
-        let lowercased = normalizedComparableText(line)
+        let lowercased = PreviewTextUtilities.normalizedComparableText(line)
 
         guard line.count >= 8,
               !transactionalPromotionalPatterns.contains(where: lowercased.contains),
@@ -480,7 +486,7 @@ struct TransactionalPreviewBuilder {
             }
 
             let lowercasedURL = safeURL.lowercased()
-            let aspectRatio = aspectRatio(width: width, height: height)
+            let aspectRatio = PreviewTextUtilities.aspectRatio(width: width, height: height)
             let looksSquare = aspectRatio.map { $0 >= 0.8 && $0 <= 1.25 } ?? false
             let impliesAvatar =
                 descriptor.contains("profile") ||
@@ -554,10 +560,10 @@ struct TransactionalPreviewBuilder {
     }
 
     private func safeImageURL(from rawURL: String, descriptor: String, width: Int?, height: Int?) -> String? {
-        let normalizedURL = normalizedText(rawURL)
+        let normalizedURL = PreviewTextUtilities.normalizedText(rawURL)
         let lowercasedURL = normalizedURL.lowercased()
 
-        guard isRenderableRemoteImageURL(normalizedURL),
+        guard PreviewTextUtilities.isRenderableRemoteImageURL(normalizedURL),
               urlSanitizer.isURLSafe(normalizedURL),
               !trackingRemover.isTrackingLikeImageURL(normalizedURL),
               !transactionalPromotionalPatterns.contains(where: descriptor.contains),
@@ -615,7 +621,7 @@ struct TransactionalPreviewBuilder {
     }
 
     private func sanitizedTransactionTitle(_ text: String?) -> String? {
-        let normalized = normalizedText(text)
+        let normalized = PreviewTextUtilities.normalizedText(text)
         guard !normalized.isEmpty else {
             return nil
         }
@@ -638,10 +644,10 @@ struct TransactionalPreviewBuilder {
     }
 
     private func normalizedCandidateLine(_ text: String?) -> String? {
-        let normalized = normalizedText(text)
+        let normalized = PreviewTextUtilities.normalizedText(text)
         guard !normalized.isEmpty,
               !shouldSkipLine(normalized),
-              !shouldStopAtFooter(normalized) else {
+              !lineProcessor.shouldStopAtFooter(normalized) else {
             return nil
         }
 
@@ -649,7 +655,7 @@ struct TransactionalPreviewBuilder {
     }
 
     private func normalizedStatus(_ text: String?) -> String? {
-        let normalized = normalizedText(text)
+        let normalized = PreviewTextUtilities.normalizedText(text)
         guard !normalized.isEmpty else {
             return nil
         }
@@ -695,7 +701,7 @@ struct TransactionalPreviewBuilder {
         var partyLineIndex: Int?
 
         for (index, line) in lines.enumerated() {
-            let normalized = normalizedText(line)
+            let normalized = PreviewTextUtilities.normalizedText(line)
             guard !normalized.isEmpty else {
                 continue
             }
@@ -713,7 +719,7 @@ struct TransactionalPreviewBuilder {
 
         var timeLine: String?
         for (index, line) in lines.enumerated() {
-            let normalized = normalizedText(line)
+            let normalized = PreviewTextUtilities.normalizedText(line)
             guard !normalized.isEmpty else {
                 continue
             }
@@ -735,7 +741,7 @@ struct TransactionalPreviewBuilder {
             return nil
         }
 
-        return truncate(segments.joined(separator: " • "), limit: 90)
+        return lineProcessor.truncate(segments.joined(separator: " • "), limit: 90)
     }
 
     private func resolvedReservationSubtitle(from lines: [String], excluding excludedValues: Set<String>) -> String? {
@@ -744,7 +750,7 @@ struct TransactionalPreviewBuilder {
                 continue
             }
 
-            let comparable = normalizedComparableText(candidate)
+            let comparable = PreviewTextUtilities.normalizedComparableText(candidate)
             let isReservationCancellation =
                 comparable.contains("reservation has been cancelled") ||
                 comparable.contains("reservation has been canceled")
@@ -753,7 +759,7 @@ struct TransactionalPreviewBuilder {
                 continue
             }
 
-            return truncate(candidate, limit: 90)
+            return lineProcessor.truncate(candidate, limit: 90)
         }
 
         return nil
@@ -810,39 +816,18 @@ struct TransactionalPreviewBuilder {
     }
 
     private func normalizedReservationPartyTimeLine(_ line: String) -> String {
-        normalizedText(line)
+        PreviewTextUtilities.normalizedText(line)
             .replacingOccurrences(of: "⋅", with: " • ")
             .replacingOccurrences(of: "·", with: " • ")
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
     }
 
     private func isDetailFieldLabel(_ text: String) -> Bool {
-        canonicalDetailField(for: text) != nil || normalizedComparableText(text) == "transaction details"
+        canonicalDetailField(for: text) != nil || PreviewTextUtilities.normalizedComparableText(text) == "transaction details"
     }
 
     private func containsLetter(_ text: String) -> Bool {
         text.rangeOfCharacter(from: .letters) != nil
-    }
-
-    private func normalizedSourceDomain(from senderEmail: String?) -> String? {
-        guard let senderEmail = senderEmail?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !senderEmail.isEmpty else {
-            return nil
-        }
-
-        let extractedEmail = EmailNormalizer.extractEmail(from: senderEmail) ?? senderEmail
-        guard let atIndex = extractedEmail.lastIndex(of: "@"),
-              atIndex < extractedEmail.index(before: extractedEmail.endIndex) else {
-            return nil
-        }
-
-        let domain = extractedEmail[extractedEmail.index(after: atIndex)...]
-            .lowercased()
-            .replacingOccurrences(of: "^www\\.", with: "", options: .regularExpression)
-            .trimmingCharacters(in: CharacterSet(charactersIn: " <>\"'()[],:;"))
-
-        return domain.isEmpty ? nil : domain
     }
 
     private func sourceLabel(senderName: String?, senderEmail: String?, sourceDomain: String?) -> String? {
@@ -853,10 +838,10 @@ struct TransactionalPreviewBuilder {
                 forEmail: senderEmail
             ) ?? ""
         } else {
-            normalizedSenderName = normalizedText(senderName)
+            normalizedSenderName = PreviewTextUtilities.normalizedText(senderName)
         }
         if !normalizedSenderName.isEmpty, !normalizedSenderName.contains("@") {
-            return truncate(normalizedSenderName, limit: 40)
+            return lineProcessor.truncate(normalizedSenderName, limit: 40)
         }
 
         guard let sourceDomain, !sourceDomain.isEmpty else {
@@ -880,20 +865,13 @@ struct TransactionalPreviewBuilder {
         return primarySegment.capitalized
     }
 
-    private func normalizedSet(from strings: [String?]) -> Set<String> {
-        Set(strings.compactMap { value in
-            let normalized = normalizedComparableText(value)
-            return normalized.isEmpty ? nil : normalized
-        })
-    }
-
     private func restatesExcludedContent(_ text: String, excluded: [String?]) -> Bool {
-        var remainder = normalizedComparableText(text)
+        var remainder = PreviewTextUtilities.normalizedComparableText(text)
         guard !remainder.isEmpty else {
             return false
         }
 
-        let excludedValues = normalizedSet(from: excluded)
+        let excludedValues = PreviewTextUtilities.normalizedSet(from: excluded)
             .sorted { $0.count > $1.count }
         var removedAny = false
 
@@ -911,19 +889,6 @@ struct TransactionalPreviewBuilder {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         return remainder.isEmpty
-    }
-
-    private func normalizedComparableText(_ text: String?) -> String {
-        normalizedText(text).lowercased()
-    }
-
-    private func normalizedText(_ text: String?) -> String {
-        EmailPreviewContentExtractor.normalizedText(text)
-    }
-
-    private func normalizedPreviewText(_ text: String?) -> String? {
-        let normalized = normalizedText(text)
-        return normalized.isEmpty ? nil : normalized
     }
 
     private func shouldSkipLine(_ line: String) -> Bool {
@@ -965,7 +930,7 @@ struct TransactionalPreviewBuilder {
     }
 
     private func looksLikeStandaloneActionLabel(_ text: String) -> Bool {
-        let normalized = normalizedText(text).lowercased()
+        let normalized = PreviewTextUtilities.normalizedText(text).lowercased()
         guard !normalized.isEmpty else {
             return false
         }
@@ -980,13 +945,8 @@ struct TransactionalPreviewBuilder {
         })
     }
 
-    private func shouldStopAtFooter(_ line: String) -> Bool {
-        let lowercased = line.lowercased()
-        return transactionalFooterStopPatterns.contains { lowercased.contains($0) }
-    }
-
     private func isMeaningfulTitle(_ title: String) -> Bool {
-        let normalized = normalizedText(title)
+        let normalized = PreviewTextUtilities.normalizedText(title)
         guard normalized.count >= 8,
               normalized.count <= 90 else {
             return false
@@ -994,7 +954,7 @@ struct TransactionalPreviewBuilder {
 
         let lowercased = normalized.lowercased()
         guard !shouldSkipLine(normalized),
-              !shouldStopAtFooter(normalized),
+              !lineProcessor.shouldStopAtFooter(normalized),
               !isDetailFieldLabel(normalized),
               !genericTransactionTitleValues.contains(lowercased),
               !ignoredTitlePatterns.contains(where: lowercased.contains) else {
@@ -1004,44 +964,6 @@ struct TransactionalPreviewBuilder {
         return true
     }
 
-    private func truncate(_ text: String, limit: Int) -> String {
-        guard text.count > limit else {
-            return text
-        }
-
-        let truncated = String(text.prefix(limit))
-        if let lastSpace = truncated.lastIndex(of: " "),
-           truncated.distance(from: truncated.startIndex, to: lastSpace) > limit - 20 {
-            return String(truncated[..<lastSpace]) + "..."
-        }
-
-        return truncated + "..."
-    }
-
-    private func aspectRatio(width: Int?, height: Int?) -> Double? {
-        guard let width, let height, width > 0, height > 0 else {
-            return nil
-        }
-
-        return Double(width) / Double(height)
-    }
-
-    private func isRenderableRemoteImageURL(_ url: String) -> Bool {
-        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lowercased = trimmed.lowercased()
-        guard !lowercased.isEmpty,
-              !lowercased.hasPrefix("cid:"),
-              !lowercased.hasPrefix("data:"),
-              !lowercased.contains("about:blank"),
-              let parsedURL = URL(string: trimmed),
-              let scheme = parsedURL.scheme?.lowercased(),
-              let host = parsedURL.host,
-              !host.isEmpty else {
-            return false
-        }
-
-        return scheme == "http" || scheme == "https"
-    }
 }
 
 private struct TransactionalImageCandidate {
