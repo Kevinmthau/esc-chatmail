@@ -16,6 +16,7 @@ extension ContactsResolver {
             CNContactGivenNameKey as CNKeyDescriptor,
             CNContactFamilyNameKey as CNKeyDescriptor,
             CNContactMiddleNameKey as CNKeyDescriptor,
+            CNContactOrganizationNameKey as CNKeyDescriptor,
             CNContactEmailAddressesKey as CNKeyDescriptor,
             CNContactImageDataAvailableKey as CNKeyDescriptor,
             CNContactThumbnailImageDataKey as CNKeyDescriptor,
@@ -101,7 +102,7 @@ extension ContactsResolver {
 
     /// Creates a ContactMatch from a CNContact.
     func createMatch(from contact: CNContact, email: String) -> ContactMatch {
-        let displayName = CNContactFormatter.string(from: contact, style: .fullName)
+        let displayName = contactDisplayName(from: contact)
 
         var imageData: Data?
         if contact.imageDataAvailable {
@@ -114,6 +115,21 @@ extension ContactsResolver {
             imageData: imageData,
             contactIdentifier: contact.identifier
         )
+    }
+
+    private func contactDisplayName(from contact: CNContact) -> String? {
+        if let fullName = CNContactFormatter.string(from: contact, style: .fullName)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !fullName.isEmpty {
+            return fullName
+        }
+
+        guard contact.isKeyAvailable(CNContactOrganizationNameKey) else {
+            return nil
+        }
+
+        let organizationName = contact.organizationName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return organizationName.isEmpty ? nil : organizationName
     }
 
     /// Performs batch contact lookup for avatar data.
