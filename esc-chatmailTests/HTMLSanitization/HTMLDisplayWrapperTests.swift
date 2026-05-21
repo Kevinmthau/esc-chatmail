@@ -944,6 +944,40 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=600"#))
     }
 
+    func testWrapHTMLForDisplay_originalPurposeUsesDeviceViewportForTestFlightTemplate() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            body {
+                margin: 0;
+                padding: 0;
+            }
+            @media only screen and (max-width: 580px) {
+                table[class="table"], td[class="cell"] {
+                    width: 100% !important;
+                }
+                body {
+                    margin: 0 15px;
+                }
+            }
+            </style>
+        </head>
+        <body>
+            <table class="table" border="0" cellspacing="0" cellpadding="0" align="center" width="580">
+                <tr><td class="cell"><h1>Inbox chat 1.0 (129) is ready to test on iOS.</h1></td></tr>
+            </table>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=580"#))
+    }
+
     func testWrapHTMLForDisplay_originalPurposeUsesDeviceViewportForResponsiveFixedWidthTables() {
         let html = """
         <!DOCTYPE html>

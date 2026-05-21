@@ -91,7 +91,7 @@ struct EmailPreviewClassifier {
             addSignal(.transactionalKeywords)
         }
 
-        if isAppStoreConnectBuildNotification(
+        if isAppleDeveloperBuildNotification(
             sender: lowercasedSender,
             subject: lowercasedSubject,
             html: lowercasedHTML,
@@ -178,6 +178,25 @@ struct EmailPreviewClassifier {
         patterns.contains { text.contains($0) }
     }
 
+    private func isAppleDeveloperBuildNotification(
+        sender: String,
+        subject: String,
+        html: String,
+        text: String
+    ) -> Bool {
+        isAppStoreConnectBuildNotification(
+            sender: sender,
+            subject: subject,
+            html: html,
+            text: text
+        ) || isTestFlightAvailabilityNotification(
+            sender: sender,
+            subject: subject,
+            html: html,
+            text: text
+        )
+    }
+
     private func isAppStoreConnectBuildNotification(
         sender: String,
         subject: String,
@@ -205,6 +224,30 @@ struct EmailPreviewClassifier {
              (text.contains("build number") || html.contains("build number")))
 
         return isAppleSender && mentionsAppStoreConnect && hasBuildLifecycleSignal
+    }
+
+    private func isTestFlightAvailabilityNotification(
+        sender: String,
+        subject: String,
+        html: String,
+        text: String
+    ) -> Bool {
+        let isAppleSender =
+            sender.contains("@email.apple.com") ||
+            sender.contains("@appstoreconnect.apple.com")
+        let mentionsTestFlight =
+            sender.contains("testflight") ||
+            subject.contains("testflight") ||
+            text.contains("testflight") ||
+            html.contains("testflight")
+        let hasAvailabilitySignal =
+            subject.contains("is now available to test") ||
+            text.contains("is now available to test") ||
+            html.contains("is now available to test") ||
+            text.contains("is ready to test") ||
+            html.contains("is ready to test")
+
+        return isAppleSender && mentionsTestFlight && hasAvailabilitySignal
     }
 }
 

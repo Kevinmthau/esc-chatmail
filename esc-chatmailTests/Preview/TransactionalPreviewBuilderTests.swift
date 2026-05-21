@@ -121,6 +121,53 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
         XCTAssertFalse(result?.subtitle?.localizedCaseInsensitiveContains("dear") == true)
     }
 
+    func testBuildPreview_extractsTestFlightAvailabilityMetadata() {
+        let subject = "Inbox chat 1.0 (129) for iOS is now available to test."
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table class="table" width="580">
+                <tr><td><h1>Inbox chat 1.0 (129) is ready to test on iOS.</h1></td></tr>
+                <tr><td><h2>What to Test</h2></td></tr>
+                <tr><td><pre>What Changed
+        - Gate App Store build labels
+        Changed Areas
+        - App behavior touched by this build</pre></td></tr>
+                <tr><td>To test this app, open <a href="https://testflight.apple.com/v1/app/123">TestFlight</a> on your iOS device using iOS 17.6 or later.</td></tr>
+                <tr><td>You can stop testing and manage notifications in the TestFlight app.</td></tr>
+            </table>
+        </body>
+        </html>
+        """
+        let bodyText = """
+        Inbox chat 1.0 (129) is ready to test on iOS.
+
+        What to Test
+        What Changed
+        - Gate App Store build labels
+
+        To test this app, open TestFlight on your iOS device using iOS 17.6 or later.
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: bodyText,
+            cleanedSnippet: "What Changed - Gate App Store build labels",
+            senderName: "Kevin Thau via TestFlight",
+            senderEmail: "testflight_no_reply@email.apple.com",
+            subject: subject
+        )
+
+        XCTAssertEqual(result?.title, subject)
+        XCTAssertEqual(result?.subtitle, "Inbox chat • Version 1.0 • Build 129 • iOS")
+        XCTAssertEqual(result?.status, "Ready")
+        XCTAssertEqual(result?.sourceLabel, "TestFlight")
+        XCTAssertEqual(result?.sourceDomain, "email.apple.com")
+        XCTAssertNil(result?.detailLine)
+        XCTAssertNil(result?.amount)
+    }
+
     func testBuildPreview_ignoresVenmoPromoBannerAndPrefersAvatarImage() {
         let html = """
         <!DOCTYPE html>

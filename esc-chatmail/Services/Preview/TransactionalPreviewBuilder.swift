@@ -84,16 +84,16 @@ struct TransactionalPreviewBuilder {
             canonicalHTML: canonicalHTML,
             extractedText: extractedText
         )
-        let appStoreBuildNotification = appStoreConnectBuildNotification(
+        let appleDeveloperNotification = appleDeveloperNotification(
             canonicalHTML: canonicalHTML,
             subject: subject,
             senderEmail: senderEmail,
             sourceDomain: sourceDomain,
             lines: lines
         )
-        let sourceLabel = appStoreBuildNotification?.sourceLabel ?? inferredSourceLabel
+        let sourceLabel = appleDeveloperNotification?.sourceLabel ?? inferredSourceLabel
         let detailFields = detailFields(from: lines)
-        let title = appStoreBuildNotification?.title ?? resolvedTitle(
+        let title = appleDeveloperNotification?.title ?? resolvedTitle(
             from: htmlSummary,
             subject: subject,
             lines: lines,
@@ -105,13 +105,13 @@ struct TransactionalPreviewBuilder {
             lines: lines,
             extractedText: extractedText
         )
-        let subtitle = appStoreBuildNotification?.metadataLine ?? resolvedSubtitle(
+        let subtitle = appleDeveloperNotification?.metadataLine ?? resolvedSubtitle(
             cleanedSnippet: cleanedSnippet,
             from: lines,
             excluding: [title, amount, sourceLabel, sourceDomain]
         )
-        let status = appStoreBuildNotification?.status ?? resolvedStatus(from: detailFields, lines: lines, excluding: [title, subtitle])
-        let detailLine = appStoreBuildNotification == nil
+        let status = appleDeveloperNotification?.status ?? resolvedStatus(from: detailFields, lines: lines, excluding: [title, subtitle])
+        let detailLine = appleDeveloperNotification == nil
             ? resolvedDetailLine(
                 from: detailFields,
                 lines: lines,
@@ -330,13 +330,35 @@ struct TransactionalPreviewBuilder {
         return nil
     }
 
+    private func appleDeveloperNotification(
+        canonicalHTML: String,
+        subject: String?,
+        senderEmail: String?,
+        sourceDomain: String?,
+        lines: [String]
+    ) -> AppleDeveloperNotification? {
+        appStoreConnectBuildNotification(
+            canonicalHTML: canonicalHTML,
+            subject: subject,
+            senderEmail: senderEmail,
+            sourceDomain: sourceDomain,
+            lines: lines
+        ) ?? testFlightAvailabilityNotification(
+            canonicalHTML: canonicalHTML,
+            subject: subject,
+            senderEmail: senderEmail,
+            sourceDomain: sourceDomain,
+            lines: lines
+        )
+    }
+
     private func appStoreConnectBuildNotification(
         canonicalHTML: String,
         subject: String?,
         senderEmail: String?,
         sourceDomain: String?,
         lines: [String]
-    ) -> AppStoreConnectBuildNotification? {
+    ) -> AppleDeveloperNotification? {
         let normalizedSubject = PreviewTextUtilities.normalizedText(subject)
         let lineText = lines.joined(separator: "\n")
         let lowercasedText = [normalizedSubject, lineText]
@@ -383,11 +405,74 @@ struct TransactionalPreviewBuilder {
         let title = sanitizedTransactionTitle(normalizedSubject)
             ?? (!normalizedSubject.isEmpty ? lineProcessor.truncate(normalizedSubject, limit: 90) : nil)
 
-        return AppStoreConnectBuildNotification(
+        return AppleDeveloperNotification(
             title: title,
             metadataLine: metadataLine,
             status: appStoreProcessingStatus(from: lowercasedText + "\n" + lowercasedHTML),
             sourceLabel: "App Store Connect"
+        )
+    }
+
+    private func testFlightAvailabilityNotification(
+        canonicalHTML: String,
+        subject: String?,
+        senderEmail: String?,
+        sourceDomain: String?,
+        lines: [String]
+    ) -> AppleDeveloperNotification? {
+        let normalizedSubject = PreviewTextUtilities.normalizedText(subject)
+        let lineText = lines.joined(separator: "\n")
+        let lowercasedText = [normalizedSubject, lineText]
+            .joined(separator: "\n")
+            .lowercased()
+        let lowercasedHTML = canonicalHTML.lowercased()
+        let lowercasedSender = senderEmail?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        let lowercasedDomain = sourceDomain?.lowercased() ?? ""
+
+        let isAppleSender =
+            lowercasedDomain == "email.apple.com" ||
+            lowercasedDomain == "appstoreconnect.apple.com" ||
+            lowercasedDomain.hasSuffix(".apple.com") ||
+            lowercasedSender.contains("@email.apple.com") ||
+            lowercasedSender.contains("@appstoreconnect.apple.com")
+        let mentionsTestFlight =
+            lowercasedSender.contains("testflight") ||
+            lowercasedText.contains("testflight") ||
+            lowercasedHTML.contains("testflight")
+        let hasAvailabilitySignal =
+            lowercasedText.contains("is now available to test") ||
+            lowercasedHTML.contains("is now available to test") ||
+            lowercasedText.contains("is ready to test") ||
+            lowercasedHTML.contains("is ready to test")
+
+        guard isAppleSender, mentionsTestFlight, hasAvailabilitySignal else {
+            return nil
+        }
+
+        let buildInfo = testFlightBuildInfo(subject: normalizedSubject, lines: lines)
+        let appName = buildInfo?.appName
+        let version = buildInfo?.version
+        let buildNumber = buildInfo?.buildNumber
+        let platform = buildInfo?.platform
+        let metadataSegments = [
+            appName,
+            version.map { "Version \($0)" },
+            buildNumber.map { "Build \($0)" },
+            platform
+        ].compactMap { $0 }
+        let metadataLine = metadataSegments.isEmpty
+            ? nil
+            : lineProcessor.truncate(metadataSegments.joined(separator: " • "), limit: 90)
+        let title = sanitizedTransactionTitle(normalizedSubject)
+            ?? (!normalizedSubject.isEmpty ? lineProcessor.truncate(normalizedSubject, limit: 90) : nil)
+
+        return AppleDeveloperNotification(
+            title: title,
+            metadataLine: metadataLine,
+            status: "Ready",
+            sourceLabel: "TestFlight"
         )
     }
 
@@ -415,6 +500,42 @@ struct TransactionalPreviewBuilder {
         }
 
         return normalizedAppStoreBuildNumber(appStoreValue(for: ["Build Number", "Build"], in: lines))
+    }
+
+    private func testFlightBuildInfo(subject: String, lines: [String]) -> TestFlightBuildInfo? {
+        let candidates = [subject] + lines
+        for candidate in candidates {
+            let normalized = PreviewTextUtilities.normalizedText(candidate)
+            guard !normalized.isEmpty else {
+                continue
+            }
+
+            if let captures = firstRegexCaptures(
+                in: normalized,
+                pattern: #"^(.+?)\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*\(([^)]+)\)\s+for\s+(.+?)\s+is\s+now\s+available\s+to\s+test\.?$"#
+            ), captures.count == 4 {
+                return TestFlightBuildInfo(
+                    appName: captures[0],
+                    version: captures[1],
+                    buildNumber: captures[2],
+                    platform: captures[3]
+                )
+            }
+
+            if let captures = firstRegexCaptures(
+                in: normalized,
+                pattern: #"^(.+?)\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*\(([^)]+)\)\s+is\s+ready\s+to\s+test\s+on\s+(.+?)\.?$"#
+            ), captures.count == 4 {
+                return TestFlightBuildInfo(
+                    appName: captures[0],
+                    version: captures[1],
+                    buildNumber: captures[2],
+                    platform: captures[3]
+                )
+            }
+        }
+
+        return nil
     }
 
     private func appStoreProcessingStatus(from text: String) -> String? {
@@ -497,6 +618,10 @@ struct TransactionalPreviewBuilder {
     }
 
     private func firstRegexCapture(in text: String, pattern: String) -> String? {
+        firstRegexCaptures(in: text, pattern: pattern)?.first
+    }
+
+    private func firstRegexCaptures(in text: String, pattern: String) -> [String]? {
         guard !text.isEmpty,
               let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
             return nil
@@ -504,13 +629,18 @@ struct TransactionalPreviewBuilder {
 
         let range = NSRange(text.startIndex..., in: text)
         guard let match = regex.firstMatch(in: text, options: [], range: range),
-              match.numberOfRanges > 1,
-              let captureRange = Range(match.range(at: 1), in: text) else {
+              match.numberOfRanges > 1 else {
             return nil
         }
 
-        let capture = PreviewTextUtilities.normalizedText(String(text[captureRange]))
-        return capture.isEmpty ? nil : capture
+        let captures = (1..<match.numberOfRanges).compactMap { index -> String? in
+            guard let captureRange = Range(match.range(at: index), in: text) else {
+                return nil
+            }
+            let capture = PreviewTextUtilities.normalizedText(String(text[captureRange]))
+            return capture.isEmpty ? nil : capture
+        }
+        return captures.isEmpty ? nil : captures
     }
 
     private func cleanedPreviewLines(
@@ -1181,11 +1311,18 @@ struct TransactionalPreviewBuilder {
 
 }
 
-private struct AppStoreConnectBuildNotification {
+private struct AppleDeveloperNotification {
     let title: String?
     let metadataLine: String?
     let status: String?
     let sourceLabel: String
+}
+
+private struct TestFlightBuildInfo {
+    let appName: String?
+    let version: String?
+    let buildNumber: String?
+    let platform: String?
 }
 
 private struct TransactionalImageCandidate {
