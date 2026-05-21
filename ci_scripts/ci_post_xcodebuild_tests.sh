@@ -100,6 +100,13 @@ assert_contains "${full_email_note}" "- HTML email rendering"
 assert_contains "${full_email_note}" "Open full HTML messages and verify the original email still renders faithfully."
 assert_not_contains "${full_email_note}" "- Email previews"
 
+html_message_repo="$(make_test_repo)"
+commit_file "${html_message_repo}" "esc-chatmail/Views/Chat/HTMLMessageView.swift" "Tune full message view"
+html_message_note="$(generated_note "${html_message_repo}")"
+assert_contains "${html_message_note}" "- HTML email rendering"
+assert_contains "${html_message_note}" "Open full HTML messages and verify the original email still renders faithfully."
+assert_not_contains "${html_message_note}" "- Chat"
+
 long_body=""
 for _ in {1..300}; do
   long_body+="Long release detail that should not hide tester instructions."$'\n'

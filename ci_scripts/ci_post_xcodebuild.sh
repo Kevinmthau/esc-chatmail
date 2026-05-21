@@ -37,6 +37,9 @@ function area_for_path() {
     esc-chatmail/Services/Security/*|esc-chatmail/Services/AuthSession.swift|esc-chatmail/Views/Main/SignInView.swift)
       print -r -- "Sign-in and session handling"
       ;;
+    esc-chatmail/Views/Components/EmailContent/BaseEmailWebView.swift|esc-chatmail/Views/Components/EmailContent/HTMLFullWebView.swift|esc-chatmail/Views/Chat/HTMLMessageView.swift|esc-chatmail/Services/HTML*|esc-chatmail/Services/HTMLSanitization/*)
+      print -r -- "HTML email rendering"
+      ;;
     esc-chatmail/Views/Chat/*|esc-chatmail/ViewModels/ChatViewModel.swift|esc-chatmail/Services/Chat/*)
       print -r -- "Chat"
       ;;
@@ -45,9 +48,6 @@ function area_for_path() {
       ;;
     esc-chatmail/Views/Main/*|esc-chatmail/ViewModels/ConversationListViewModel.swift|esc-chatmail/Services/ConversationList/*)
       print -r -- "Inbox and conversation list"
-      ;;
-    esc-chatmail/Views/Components/EmailContent/BaseEmailWebView.swift|esc-chatmail/Views/Components/EmailContent/HTMLFullWebView.swift|esc-chatmail/Views/Chat/HTMLMessageView.swift|esc-chatmail/Services/HTML*|esc-chatmail/Services/HTMLSanitization/*)
-      print -r -- "HTML email rendering"
       ;;
     esc-chatmail/Views/Components/EmailContent/*|esc-chatmail/Views/Components/EmailPreview/*|esc-chatmail/Services/Preview/*)
       print -r -- "Email previews"
