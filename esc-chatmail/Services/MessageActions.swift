@@ -88,11 +88,18 @@ final class MessageActions: ObservableObject {
         // Update local state and mark as locally modified for conflict detection
         message.isUnread = isUnread
         message.localModifiedAt = Date()
-        coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
+        let saved = coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
 
         // Update conversation unread count
         if let conversation = message.conversation {
             updateConversationInboxStatus(conversation)
+        }
+
+        // Only sync to Gmail if the optimistic change actually persisted locally.
+        // Pushing a remote mutation we failed to store would diverge Gmail from local state.
+        guard saved else {
+            Log.error("Not queuing \(actionType.rawValue) for message \(message.id): local save failed", category: .message)
+            return
         }
 
         // Queue sync to Gmail
@@ -116,7 +123,8 @@ final class MessageActions: ObservableObject {
             message.isUnread = false
             message.localModifiedAt = Date()
             let messageId = message.id
-            context.saveOrLog(operation: "mark message as read")
+            // Only return the id (and thus queue a remote markRead) if the local change persisted.
+            guard context.saveOrLog(operation: "mark message as read") else { return nil }
             return messageId
         }
 
@@ -164,7 +172,10 @@ final class MessageActions: ObservableObject {
                 conv.inboxUnreadCount = Int32((try? context.count(for: countRequest)) ?? 0)
             }
 
-            context.saveOrLog(operation: "batch mark messages as read")
+            // Don't sync to Gmail if the local batch update didn't persist.
+            guard context.saveOrLog(operation: "batch mark messages as read") else {
+                return ([], sourceConversationId)
+            }
             return (markedIds, sourceConversationId)
         }
 
@@ -197,10 +208,15 @@ final class MessageActions: ObservableObject {
         // Update local state and mark as locally modified for conflict detection
         message.removeFromLabels(inboxLabel)
         message.localModifiedAt = Date()
-        coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
+        let saved = coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
 
         if let conversation = message.conversation {
             updateConversationInboxStatus(conversation)
+        }
+
+        guard saved else {
+            Log.error("Not queuing archive for message \(message.id): local save failed", category: .message)
+            return
         }
 
         // Queue sync to Gmail (remove INBOX label)
@@ -245,11 +261,16 @@ final class MessageActions: ObservableObject {
         conversation.archivedAt = archiveDate
         Log.debug("Set archivedAt to \(archiveDate)", category: .message)
 
-        coreDataStack.saveIfNeeded(context: context)
+        let saved = coreDataStack.saveIfNeeded(context: context)
         Log.debug("Removed INBOX label from \(removedCount) messages, saved context", category: .message)
 
         updateConversationInboxStatus(conversation)
         Log.debug("Updated conversation inbox status - hasInbox: \(conversation.hasInbox)", category: .message)
+
+        guard saved else {
+            Log.error("Not queuing archiveConversation for '\(conversation.id)': local save failed", category: .message)
+            return
+        }
 
         // Queue sync to Gmail
         if !messageIds.isEmpty {
@@ -295,8 +316,13 @@ final class MessageActions: ObservableObject {
         }
 
         // Single Core Data save for all changes
-        coreDataStack.saveIfNeeded(context: context)
+        let saved = coreDataStack.saveIfNeeded(context: context)
         Log.info("Batch archived \(conversations.count) conversations (\(allMessageIds.count) messages)", category: .message)
+
+        guard saved else {
+            Log.error("Not queuing batch archiveConversation: local save failed", category: .message)
+            return
+        }
 
         // Queue single pending action with all message IDs
         guard let firstConversation = conversations.first else { return }
@@ -341,8 +367,13 @@ final class MessageActions: ObservableObject {
         }
 
         // Single Core Data save for all changes
-        coreDataStack.saveIfNeeded(context: context)
+        let saved = coreDataStack.saveIfNeeded(context: context)
         Log.info("Batch reported \(conversations.count) conversations as spam (\(allMessageIds.count) messages)", category: .message)
+
+        guard saved else {
+            Log.error("Not queuing batch reportSpam: local save failed", category: .message)
+            return
+        }
 
         // Queue single pending action with all message IDs
         guard let firstConversation = conversations.first else { return }
@@ -386,8 +417,13 @@ final class MessageActions: ObservableObject {
         // Archive the conversation locally and update rollup fields to prevent un-archiving
         applyArchivedConversationRollup(to: conversation, at: modificationDate)
 
-        coreDataStack.saveIfNeeded(context: context)
+        let saved = coreDataStack.saveIfNeeded(context: context)
         Log.debug("Marked \(messageIds.count) messages for spam, removed INBOX labels, archived conversation", category: .message)
+
+        guard saved else {
+            Log.error("Not queuing reportSpam for '\(conversation.id)': local save failed", category: .message)
+            return
+        }
 
         // Queue sync to Gmail
         if !messageIds.isEmpty {
@@ -552,7 +588,12 @@ final class MessageActions: ObservableObject {
         }
 
         message.localModifiedAt = Date()
-        coreDataStack.saveIfNeeded(context: coreDataStack.viewContext, caller: "updateStarState")
+        let saved = coreDataStack.saveIfNeeded(context: coreDataStack.viewContext, caller: "updateStarState")
+
+        guard saved else {
+            Log.error("Not queuing \(actionType.rawValue) for message \(message.id): local save failed", category: .message)
+            return
+        }
 
         let messageId = message.id
         if !messageId.isEmpty {

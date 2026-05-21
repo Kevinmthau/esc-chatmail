@@ -81,6 +81,27 @@ final class MessageActionsTests: XCTestCase {
         XCTAssertTrue(queuedActions.isEmpty)
     }
 
+    func testStar_doesNotQueuePendingActionWhenLocalSaveFails() async throws {
+        _ = LabelBuilder().starred().build(in: context)
+        let message = MessageBuilder()
+            .withId("message-save-fails")
+            .build(in: context)
+        try coreDataStack.saveViewContext()
+
+        let failingStack = FailingSaveCoreDataStack(wrapping: coreDataStack)
+        let actions = MessageActions(
+            coreDataStack: failingStack,
+            pendingActionsManager: pendingActionsManager
+        )
+
+        await actions.star(message: message)
+
+        // The optimistic in-memory change may still apply, but a remote sync must
+        // not be queued when we couldn't persist the change locally.
+        let queuedActions = await pendingActionsManager.queuedSingleActions
+        XCTAssertTrue(queuedActions.isEmpty, "Remote star must not be queued when the local save fails")
+    }
+
     func testMarkMessagesAsReadBatch_marksSnapshotUnreadMessagesOffMainThread() async throws {
         let conversation = ConversationBuilder()
             .visible()
@@ -242,6 +263,26 @@ final class MessageActionsTests: XCTestCase {
         }
 
         XCTFail("Timed out waiting for condition", file: file, line: line)
+    }
+}
+
+/// Wraps a real test stack but reports every `saveIfNeeded` as failed, to exercise the
+/// "don't sync remotely when the local save failed" gating in `MessageActions`.
+private final class FailingSaveCoreDataStack: MessageActionsCoreDataStacking {
+    private let wrapped: TestCoreDataStack
+
+    init(wrapping wrapped: TestCoreDataStack) {
+        self.wrapped = wrapped
+    }
+
+    var viewContext: NSManagedObjectContext { wrapped.viewContext }
+
+    func newBackgroundContext() -> NSManagedObjectContext {
+        wrapped.newBackgroundContext()
+    }
+
+    func saveIfNeeded(context: NSManagedObjectContext, caller: String) -> Bool {
+        false
     }
 }
 
