@@ -91,6 +91,16 @@ struct EmailPreviewClassifier {
             addSignal(.transactionalKeywords)
         }
 
+        if isAppStoreConnectBuildNotification(
+            sender: lowercasedSender,
+            subject: lowercasedSubject,
+            html: lowercasedHTML,
+            text: lowercasedText
+        ) {
+            transactionalScore += 20
+            addSignal(.transactionalKeywords)
+        }
+
         if containsAny(noReplySenderPatterns, in: lowercasedSender) {
             transactionalScore += 12
             addSignal(.senderNoReply)
@@ -167,6 +177,35 @@ struct EmailPreviewClassifier {
     private func containsAny(_ patterns: [String], in text: String) -> Bool {
         patterns.contains { text.contains($0) }
     }
+
+    private func isAppStoreConnectBuildNotification(
+        sender: String,
+        subject: String,
+        html: String,
+        text: String
+    ) -> Bool {
+        let isAppleSender =
+            sender.contains("@email.apple.com") ||
+            sender.contains("@appstoreconnect.apple.com")
+        let mentionsAppStoreConnect =
+            subject.contains("app store connect") ||
+            text.contains("app store connect") ||
+            html.contains("app store connect") ||
+            subject.contains("testflight") ||
+            text.contains("testflight") ||
+            html.contains("testflight")
+        let hasBuildLifecycleSignal =
+            subject.contains("has completed processing") ||
+            text.contains("has completed processing") ||
+            html.contains("has completed processing") ||
+            subject.contains("build has completed processing") ||
+            text.contains("build has completed processing") ||
+            html.contains("build has completed processing") ||
+            ((text.contains("version number") || html.contains("version number")) &&
+             (text.contains("build number") || html.contains("build number")))
+
+        return isAppleSender && mentionsAppStoreConnect && hasBuildLifecycleSignal
+    }
 }
 
 private struct HTMLMetrics {
@@ -229,6 +268,7 @@ private let newsletterSenderPatterns = [
 private let noReplySenderPatterns = [
     "noreply@",
     "no-reply@",
+    "no_reply@",
     "donotreply@",
     "do-not-reply@",
     "notifications@",
@@ -294,6 +334,10 @@ private let transactionalPatterns = [
     "deposit completed",
     "daily deposit limit",
     "mobile check deposit",
+    "has completed processing",
+    "build has completed processing",
+    "version number",
+    "build number",
     "transaction details",
     "transaction id",
     "payment method",

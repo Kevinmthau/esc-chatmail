@@ -66,6 +66,61 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
         XCTAssertEqual(result?.sourceLabel, "Example National Bank")
     }
 
+    func testBuildPreview_extractsAppStoreConnectBuildMetadataAndSkipsGreeting() {
+        let subject = "App Store Connect: Version 1.0 (37) for Stickys has completed processing."
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table><tr><td>App Store Connect</td></tr></table>
+            <table><tr><td>Dear Kevin Thau,</td></tr></table>
+            <table><tr><td>Version 1.0 (37) for Stickys has completed processing.</td></tr></table>
+            <table>
+                <tr><td>App Name:</td><td>Stickys</td></tr>
+                <tr><td>Version Number:</td><td>1.0</td></tr>
+                <tr><td>Build Number:</td><td>37</td></tr>
+            </table>
+            <p>You can now use this build for TestFlight testing or submit it to the App Store.</p>
+            <p><a href="https://appstoreconnect.apple.com">View in App Store Connect</a></p>
+            <p><a href="https://developer.apple.com/contact">Contact us</a></p>
+            <p>Privacy Policy | All rights reserved</p>
+        </body>
+        </html>
+        """
+        let bodyText = """
+        App Store Connect
+
+        Dear Kevin Thau,
+
+        Version 1.0 (37) for Stickys has completed processing.
+
+        App Name: Stickys
+        Version Number: 1.0
+        Build Number: 37
+
+        You can now use this build for TestFlight testing or submit it to the App Store.
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: bodyText,
+            cleanedSnippet: "Dear Kevin Thau,",
+            senderName: nil,
+            senderEmail: "no_reply@email.apple.com",
+            subject: subject
+        )
+
+        XCTAssertEqual(result?.title, subject)
+        XCTAssertEqual(result?.subtitle, "Stickys • Version 1.0 • Build 37")
+        XCTAssertEqual(result?.status, "Completed")
+        XCTAssertNil(result?.detailLine)
+        XCTAssertNil(result?.amount)
+        XCTAssertNil(result?.actionLabel)
+        XCTAssertEqual(result?.sourceLabel, "App Store Connect")
+        XCTAssertEqual(result?.sourceDomain, "email.apple.com")
+        XCTAssertFalse(result?.subtitle?.localizedCaseInsensitiveContains("dear") == true)
+    }
+
     func testBuildPreview_ignoresVenmoPromoBannerAndPrefersAvatarImage() {
         let html = """
         <!DOCTYPE html>

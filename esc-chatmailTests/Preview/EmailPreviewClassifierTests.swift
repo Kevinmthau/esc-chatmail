@@ -69,6 +69,43 @@ final class EmailPreviewClassifierTests: XCTestCase {
         XCTAssertTrue(result.signals.contains(.senderNoReply))
     }
 
+    func testClassifyAppStoreConnectBuildProcessingEmail_returnsTransactional() {
+        let footerLinks = (1...10)
+            .map { "<a href=\"https://email.apple.com/footer/\($0)\">Footer \($0)</a>" }
+            .joined(separator: " ")
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table><tr><td>App Store Connect</td></tr></table>
+            <table><tr><td>Dear Kevin Thau,</td></tr></table>
+            <table><tr><td>Version 1.0 (37) for Stickys has completed processing.</td></tr></table>
+            <table>
+                <tr><td>App Name:</td><td>Stickys</td></tr>
+                <tr><td>Version Number:</td><td>1.0</td></tr>
+                <tr><td>Build Number:</td><td>37</td></tr>
+            </table>
+            <p>You can now use this build for TestFlight testing or submit it to the App Store.</p>
+            <p><a href="https://appstoreconnect.apple.com">View in App Store Connect</a></p>
+            <p>Privacy Policy | All rights reserved | Contact us</p>
+            <p>\(footerLinks)</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.classify(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderEmail: "no_reply@email.apple.com",
+            subject: "App Store Connect: Version 1.0 (37) for Stickys has completed processing."
+        )
+
+        XCTAssertEqual(result.kind, .transactional)
+        XCTAssertTrue(result.signals.contains(.transactionalKeywords))
+        XCTAssertTrue(result.signals.contains(.senderNoReply))
+        XCTAssertTrue(result.signals.contains(.manyLinks))
+    }
+
     func testClassifySingleTableDepositDeclinedHTML_returnsTransactional() {
         let html = """
         <table border="0" cellpadding="0" cellspacing="0" id="tblHeader">
