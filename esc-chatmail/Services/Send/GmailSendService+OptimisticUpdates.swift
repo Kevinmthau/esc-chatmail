@@ -100,6 +100,130 @@ extension GmailSendService {
         )
     }
 
+    @MainActor
+    func remoteCommittedSendResult(optimisticMessageID: String) -> SendResult? {
+        fetchOptimisticSendMutationSnapshot(messageID: optimisticMessageID)?.remoteCommittedResult
+    }
+
+    @MainActor
+    func recordRemoteCommittedSend(
+        optimisticMessageID: String,
+        result: SendResult
+    ) throws {
+        guard let coordinator = viewContext.persistentStoreCoordinator else {
+            throw SendError.optimisticCreationFailed
+        }
+
+        let context = NSManagedObjectContext(concurrencyType: .privateQueueConcurrencyType)
+        context.persistentStoreCoordinator = coordinator
+        context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+
+        try context.performAndWait {
+            let record = fetchOptimisticSendMutationRecords(
+                messageID: optimisticMessageID,
+                in: context
+            ).first ?? OutboundSendMutationRecord(context: context)
+
+            if record.isInserted {
+                initializeFallbackOptimisticSendMutationRecord(
+                    record,
+                    optimisticMessageID: optimisticMessageID
+                )
+            }
+
+            record.remoteCommittedMessageId = result.messageId
+            record.remoteCommittedThreadId = result.threadId
+
+            if context.hasChanges {
+                try context.save()
+            }
+        }
+    }
+
+    @MainActor
+    @discardableResult
+    func reconcileRemoteCommittedSend(
+        optimisticMessageID: String,
+        result: SendResult
+    ) throws -> Bool {
+        if fetchMessageSync(byID: result.messageId) != nil {
+            deleteSupersededOptimisticMessageIfNeeded(messageID: optimisticMessageID)
+            try deleteOptimisticSendMutationRecordAndSave(messageID: optimisticMessageID)
+            return true
+        }
+
+        guard let message = fetchMessageSync(byID: optimisticMessageID) else {
+            Log.warning(
+                "Remote committed send \(optimisticMessageID) has no local optimistic message; clearing mutation record and relying on sync",
+                category: .message
+            )
+            try deleteOptimisticSendMutationRecordAndSave(messageID: optimisticMessageID)
+            return false
+        }
+
+        let originalMessageID = message.id
+        let originalThreadID = message.gmThreadId
+        let localAttachments = message.attachmentsArray.filter(\.isLocalAttachment)
+        let originalAttachmentStates = localAttachments.map { ($0, $0.state) }
+
+        message.id = result.messageId
+        message.gmThreadId = result.threadId
+        for attachment in localAttachments {
+            attachment.state = .uploaded
+        }
+
+        do {
+            if viewContext.hasChanges {
+                try viewContext.save()
+            }
+        } catch {
+            message.id = originalMessageID
+            message.gmThreadId = originalThreadID
+            for (attachment, state) in originalAttachmentStates {
+                attachment.state = state
+            }
+            Log.error("Failed to reconcile optimistic message with Gmail ID", category: .message, error: error)
+            throw error
+        }
+
+        do {
+            try deleteOptimisticSendMutationRecordAndSave(messageID: optimisticMessageID)
+        } catch {
+            Log.error("Failed to clear reconciled optimistic send mutation record", category: .message, error: error)
+        }
+
+        return true
+    }
+
+    @MainActor
+    private func deleteSupersededOptimisticMessageIfNeeded(messageID: String) {
+        guard let message = fetchMessageSync(byID: messageID) else {
+            return
+        }
+
+        let conversation = message.conversation
+        let wasInsertedConversation = conversation?.isInserted ?? false
+        viewContext.delete(message)
+        viewContext.processPendingChanges()
+
+        guard let conversation,
+              conversation.managedObjectContext != nil,
+              !conversation.isDeleted else {
+            return
+        }
+
+        let remainingMessages = conversation.messages?.filter { !$0.isDeleted } ?? []
+        if wasInsertedConversation && remainingMessages.isEmpty {
+            viewContext.delete(conversation)
+            return
+        }
+
+        ConversationRollupUpdater().updateRollups(
+            for: conversation,
+            myEmail: authSession.userEmail ?? ""
+        )
+    }
+
     /// Fetches a message by its ID (async to avoid blocking main thread).
     func fetchMessage(byID messageID: String) async -> Message? {
         await viewContext.perform { [viewContext] in
@@ -136,15 +260,8 @@ extension GmailSendService {
     /// Updates an optimistic message with the actual Gmail IDs after successful send.
     @MainActor
     func updateOptimisticMessage(_ message: Message, with result: SendResult) {
-        let optimisticMessageID = message.id
-        deleteOptimisticSendMutationRecord(messageID: optimisticMessageID)
-        message.id = result.messageId
-        message.gmThreadId = result.threadId
-
         do {
-            if viewContext.hasChanges {
-                try viewContext.save()
-            }
+            try reconcileRemoteCommittedSend(optimisticMessageID: message.id, result: result)
         } catch {
             Log.error("Failed to update message with Gmail ID", category: .message, error: error)
         }
@@ -386,15 +503,31 @@ extension GmailSendService {
     @MainActor
     @discardableResult
     func reconcileAbandonedOptimisticSendMutations() -> Bool {
-        let messageIDs = fetchAllOptimisticSendMutationRecords().map(\.id)
-        guard !messageIDs.isEmpty else { return false }
+        let snapshots = fetchAllOptimisticSendMutationRecords()
+            .map(OptimisticSendMutationSnapshot.init(record:))
+        guard !snapshots.isEmpty else { return false }
 
-        Log.info("Reconciling \(messageIDs.count) abandoned optimistic send mutation(s)", category: .message)
-        for messageID in messageIDs {
-            handleFailedOptimisticMessage(
-                byID: messageID,
-                fallbackAttachmentReferences: []
-            )
+        Log.info("Reconciling \(snapshots.count) abandoned optimistic send mutation(s)", category: .message)
+        for snapshot in snapshots {
+            if let remoteCommittedResult = snapshot.remoteCommittedResult {
+                do {
+                    try reconcileRemoteCommittedSend(
+                        optimisticMessageID: snapshot.optimisticMessageID,
+                        result: remoteCommittedResult
+                    )
+                } catch {
+                    Log.error(
+                        "Failed to reconcile remote committed optimistic send \(snapshot.optimisticMessageID)",
+                        category: .message,
+                        error: error
+                    )
+                }
+            } else {
+                handleFailedOptimisticMessage(
+                    byID: snapshot.optimisticMessageID,
+                    fallbackAttachmentReferences: []
+                )
+            }
         }
         return true
     }
@@ -468,6 +601,24 @@ extension GmailSendService {
         for record in fetchOptimisticSendMutationRecords(messageID: messageID) {
             viewContext.delete(record)
         }
+    }
+
+    @MainActor
+    private func deleteOptimisticSendMutationRecordAndSave(messageID: String) throws {
+        deleteOptimisticSendMutationRecord(messageID: messageID)
+        if viewContext.hasChanges {
+            try viewContext.save()
+        }
+    }
+
+    private func initializeFallbackOptimisticSendMutationRecord(
+        _ record: OutboundSendMutationRecord,
+        optimisticMessageID: String
+    ) {
+        record.id = optimisticMessageID
+        record.createdAt = Date()
+        record.hidden = false
+        record.newlyInsertedConversation = false
     }
 
     @MainActor
@@ -548,6 +699,22 @@ private struct OptimisticSendMutationSnapshot {
     let lastMessageDate: Date?
     let snippet: String?
     let newlyInsertedConversation: Bool
+    let remoteCommittedMessageId: String?
+    let remoteCommittedThreadId: String?
+
+    var remoteCommittedResult: GmailSendService.SendResult? {
+        guard let remoteCommittedMessageId,
+              let remoteCommittedThreadId,
+              !remoteCommittedMessageId.isEmpty,
+              !remoteCommittedThreadId.isEmpty else {
+            return nil
+        }
+
+        return GmailSendService.SendResult(
+            messageId: remoteCommittedMessageId,
+            threadId: remoteCommittedThreadId
+        )
+    }
 
     @MainActor
     init(optimisticMessageID: String, conversation: Conversation) {
@@ -570,6 +737,8 @@ private struct OptimisticSendMutationSnapshot {
         self.lastMessageDate = Self.dateValue(from: committedValues["lastMessageDate"])
         self.snippet = Self.stringValue(from: committedValues["snippet"])
         self.newlyInsertedConversation = newlyInsertedConversation
+        self.remoteCommittedMessageId = nil
+        self.remoteCommittedThreadId = nil
     }
 
     init(record: OutboundSendMutationRecord) {
@@ -583,6 +752,8 @@ private struct OptimisticSendMutationSnapshot {
         self.lastMessageDate = record.lastMessageDate
         self.snippet = record.snippet
         self.newlyInsertedConversation = record.newlyInsertedConversation
+        self.remoteCommittedMessageId = record.remoteCommittedMessageId
+        self.remoteCommittedThreadId = record.remoteCommittedThreadId
     }
 
     func apply(to record: OutboundSendMutationRecord) {
@@ -596,6 +767,8 @@ private struct OptimisticSendMutationSnapshot {
         record.lastMessageDate = lastMessageDate
         record.snippet = snippet
         record.newlyInsertedConversation = newlyInsertedConversation
+        record.remoteCommittedMessageId = remoteCommittedMessageId
+        record.remoteCommittedThreadId = remoteCommittedThreadId
     }
 
     @MainActor

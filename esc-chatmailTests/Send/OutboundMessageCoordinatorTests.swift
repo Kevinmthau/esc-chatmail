@@ -475,6 +475,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
     private let context: NSManagedObjectContext
     private let queue = DispatchQueue(label: "OutboundMessageCoordinatorTests.MockSendService")
     private var optimisticMessages: [String: Message] = [:]
+    private var remoteCommittedResults: [String: GmailSendService.SendResult] = [:]
     private var createCalls: [CreateOptimisticCall] = []
     private var newCalls: [SendNewCall] = []
     private var replyCalls: [SendReplyCall] = []
@@ -622,6 +623,40 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
             messageId: "sent-\(UUID().uuidString)",
             threadId: "thread-\(UUID().uuidString)"
         )
+    }
+
+    @MainActor
+    func remoteCommittedSendResult(optimisticMessageID: String) -> GmailSendService.SendResult? {
+        queue.sync {
+            remoteCommittedResults[optimisticMessageID]
+        }
+    }
+
+    @MainActor
+    func recordRemoteCommittedSend(
+        optimisticMessageID: String,
+        result: GmailSendService.SendResult
+    ) throws {
+        queue.sync {
+            remoteCommittedResults[optimisticMessageID] = result
+        }
+    }
+
+    @MainActor
+    func reconcileRemoteCommittedSend(
+        optimisticMessageID: String,
+        result: GmailSendService.SendResult
+    ) throws -> Bool {
+        remoteCommittedResults[optimisticMessageID] = nil
+        guard let message = optimisticMessages[optimisticMessageID] else {
+            return false
+        }
+
+        optimisticMessages[optimisticMessageID] = nil
+        message.id = result.messageId
+        message.gmThreadId = result.threadId
+        optimisticMessages[result.messageId] = message
+        return true
     }
 
     @MainActor

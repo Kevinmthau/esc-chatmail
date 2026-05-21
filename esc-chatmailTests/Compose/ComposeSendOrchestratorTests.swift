@@ -161,6 +161,43 @@ final class ComposeSendOrchestratorTests: XCTestCase {
         XCTAssertEqual(snapshot.failedAttachmentReferences, [attachmentReference])
     }
 
+    func testExecuteInBackground_remoteCommittedRetrySkipsRemoteSendAndReconcilesLocally() async {
+        let sendService = MockComposeSendService()
+        sendService.reconcileRemoteCommittedSendError = GmailSendService.SendError.optimisticCreationFailed
+        let syncPerformer = MockIncrementalSyncPerformer()
+        let orchestrator = ComposeSendOrchestrator(sendService: sendService, syncPerformer: syncPerformer)
+
+        let firstTask = orchestrator.executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [],
+            optimisticMessageID: "optimistic-remote-committed"
+        )
+        await firstTask.value
+
+        var snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.sendNewCalls, 1)
+        XCTAssertEqual(snapshot.recordRemoteCommittedSendCalls, ["optimistic-remote-committed"])
+        XCTAssertEqual(snapshot.reconcileRemoteCommittedSendCalls, ["optimistic-remote-committed"])
+        XCTAssertEqual(snapshot.handleFailedCalls, 0)
+
+        sendService.reconcileRemoteCommittedSendError = nil
+
+        let retryTask = orchestrator.executeInBackground(
+            input: makeInput(),
+            attachmentReferences: [],
+            optimisticMessageID: "optimistic-remote-committed"
+        )
+        await retryTask.value
+
+        snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.sendNewCalls, 1, "Retry must not send a second Gmail message")
+        XCTAssertEqual(
+            snapshot.reconcileRemoteCommittedSendCalls,
+            ["optimistic-remote-committed", "optimistic-remote-committed"]
+        )
+        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 2)
+    }
+
     private func makeInput(
         body: String = "hello",
         replyMetadata: OutboundMessageRequest.ReplyMetadata? = nil
@@ -194,6 +231,8 @@ private final class MockComposeSendService: ComposeSendServicing {
         let updateOptimisticCalls: Int
         let markFailedCalls: Int
         let handleFailedCalls: Int
+        let recordRemoteCommittedSendCalls: [String]
+        let reconcileRemoteCommittedSendCalls: [String]
         let uploadedAttachmentReferences: [LocalAttachmentReference]
         let failedAttachmentReferences: [LocalAttachmentReference]
     }
@@ -203,6 +242,7 @@ private final class MockComposeSendService: ComposeSendServicing {
     var sendDelayNanoseconds: UInt64 = 0
     var sendNewError: Error?
     var sendReplyError: Error?
+    var reconcileRemoteCommittedSendError: Error?
 
     private var _markUploadedCalls = 0
     private var _sendNewCalls = 0
@@ -210,6 +250,9 @@ private final class MockComposeSendService: ComposeSendServicing {
     private var _updateOptimisticCalls = 0
     private var _markFailedCalls = 0
     private var _handleFailedCalls = 0
+    private var _recordRemoteCommittedSendCalls: [String] = []
+    private var _reconcileRemoteCommittedSendCalls: [String] = []
+    private var _remoteCommittedResults: [String: GmailSendService.SendResult] = [:]
     private var _uploadedAttachmentReferences: [LocalAttachmentReference] = []
     private var _failedAttachmentReferences: [LocalAttachmentReference] = []
 
@@ -222,6 +265,8 @@ private final class MockComposeSendService: ComposeSendServicing {
                 updateOptimisticCalls: _updateOptimisticCalls,
                 markFailedCalls: _markFailedCalls,
                 handleFailedCalls: _handleFailedCalls,
+                recordRemoteCommittedSendCalls: _recordRemoteCommittedSendCalls,
+                reconcileRemoteCommittedSendCalls: _reconcileRemoteCommittedSendCalls,
                 uploadedAttachmentReferences: _uploadedAttachmentReferences,
                 failedAttachmentReferences: _failedAttachmentReferences
             )
@@ -274,6 +319,40 @@ private final class MockComposeSendService: ComposeSendServicing {
             throw sendNewError
         }
         return GmailSendService.SendResult(messageId: "sent-id", threadId: "thread-id")
+    }
+
+    @MainActor
+    func remoteCommittedSendResult(optimisticMessageID: String) -> GmailSendService.SendResult? {
+        queue.sync {
+            _remoteCommittedResults[optimisticMessageID]
+        }
+    }
+
+    @MainActor
+    func recordRemoteCommittedSend(
+        optimisticMessageID: String,
+        result: GmailSendService.SendResult
+    ) throws {
+        queue.sync {
+            _recordRemoteCommittedSendCalls.append(optimisticMessageID)
+            _remoteCommittedResults[optimisticMessageID] = result
+        }
+    }
+
+    @MainActor
+    func reconcileRemoteCommittedSend(
+        optimisticMessageID: String,
+        result: GmailSendService.SendResult
+    ) throws -> Bool {
+        try queue.sync {
+            _reconcileRemoteCommittedSendCalls.append(optimisticMessageID)
+            if let reconcileRemoteCommittedSendError {
+                throw reconcileRemoteCommittedSendError
+            }
+
+            _remoteCommittedResults[optimisticMessageID] = nil
+            return true
+        }
     }
 
     @MainActor

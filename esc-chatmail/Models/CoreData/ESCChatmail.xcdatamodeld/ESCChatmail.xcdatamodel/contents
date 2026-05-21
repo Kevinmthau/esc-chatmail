@@ -96,6 +96,8 @@
         <attribute name="id" attributeType="String"/>
         <attribute name="lastMessageDate" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="newlyInsertedConversation" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="remoteCommittedMessageId" optional="YES" attributeType="String"/>
+        <attribute name="remoteCommittedThreadId" optional="YES" attributeType="String"/>
         <attribute name="snippet" optional="YES" attributeType="String"/>
         <fetchIndex name="byOutboundSendMessageIndex">
             <fetchIndexElement property="id" type="Binary" order="ascending"/>

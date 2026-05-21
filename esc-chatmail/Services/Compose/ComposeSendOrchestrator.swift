@@ -28,8 +28,15 @@ protocol ComposeSendServicing: AnyObject {
         attachmentInfos: [GmailSendService.AttachmentInfo],
         inlineAttachmentInfos: [GmailSendService.AttachmentInfo]
     ) async throws -> GmailSendService.SendResult
-    @MainActor func fetchMessageSync(byID messageID: String) -> Message?
-    @MainActor func updateOptimisticMessage(_ message: Message, with result: GmailSendService.SendResult)
+    @MainActor func remoteCommittedSendResult(optimisticMessageID: String) -> GmailSendService.SendResult?
+    @MainActor func recordRemoteCommittedSend(
+        optimisticMessageID: String,
+        result: GmailSendService.SendResult
+    ) throws
+    @MainActor func reconcileRemoteCommittedSend(
+        optimisticMessageID: String,
+        result: GmailSendService.SendResult
+    ) throws -> Bool
     @MainActor func handleFailedOptimisticMessage(
         byID messageID: String,
         fallbackAttachmentReferences: [LocalAttachmentReference]
@@ -74,41 +81,76 @@ struct ComposeSendOrchestrator {
         // Send in background - don't wait for completion
         return Task.detached(priority: .userInitiated) {
             do {
-                let sendTask = Task.detached(priority: .userInitiated) {
-                    let result: GmailSendService.SendResult
+                let result: GmailSendService.SendResult
+                if let committedResult = await MainActor.run(body: {
+                    sendService.remoteCommittedSendResult(optimisticMessageID: optimisticMessageID)
+                }) {
+                    result = committedResult
+                    Log.info(
+                        "Skipping Gmail send for already committed optimistic message \(optimisticMessageID)",
+                        category: .message
+                    )
+                } else {
+                    let sendTask = Task.detached(priority: .userInitiated) {
+                        let result: GmailSendService.SendResult
 
-                    if let replyMetadata = input.replyMetadata,
-                       let threadId = replyMetadata.threadId,
-                       !threadId.isEmpty {
-                        result = try await sendService.sendReply(
-                            to: replyMetadata.recipientEmails,
-                            body: input.body,
-                            subject: replyMetadata.subject ?? "",
-                            threadId: threadId,
-                            inReplyTo: replyMetadata.inReplyTo,
-                            references: replyMetadata.references,
-                            originalMessage: replyMetadata.originalMessage,
-                            attachmentInfos: input.attachmentInfos
-                        )
-                    } else {
-                        result = try await sendService.sendNew(
-                            to: input.recipientEmails,
-                            body: input.body,
-                            htmlBody: input.htmlBody,
-                            subject: input.subject,
-                            attachmentInfos: input.attachmentInfos,
-                            inlineAttachmentInfos: input.inlineAttachmentInfos
+                        if let replyMetadata = input.replyMetadata,
+                           let threadId = replyMetadata.threadId,
+                           !threadId.isEmpty {
+                            result = try await sendService.sendReply(
+                                to: replyMetadata.recipientEmails,
+                                body: input.body,
+                                subject: replyMetadata.subject ?? "",
+                                threadId: threadId,
+                                inReplyTo: replyMetadata.inReplyTo,
+                                references: replyMetadata.references,
+                                originalMessage: replyMetadata.originalMessage,
+                                attachmentInfos: input.attachmentInfos
+                            )
+                        } else {
+                            result = try await sendService.sendNew(
+                                to: input.recipientEmails,
+                                body: input.body,
+                                htmlBody: input.htmlBody,
+                                subject: input.subject,
+                                attachmentInfos: input.attachmentInfos,
+                                inlineAttachmentInfos: input.inlineAttachmentInfos
+                            )
+                        }
+
+                        return result
+                    }
+                    result = try await sendTask.value
+
+                    do {
+                        try await MainActor.run {
+                            try sendService.recordRemoteCommittedSend(
+                                optimisticMessageID: optimisticMessageID,
+                                result: result
+                            )
+                        }
+                    } catch {
+                        Log.error(
+                            "Remote send succeeded but failed to persist commit for optimistic message \(optimisticMessageID)",
+                            category: .message,
+                            error: error
                         )
                     }
-
-                    return result
                 }
-                let result = try await sendTask.value
 
                 // Update optimistic message with real IDs (on MainActor to avoid Sendable issues)
                 await MainActor.run {
-                    if let message = sendService.fetchMessageSync(byID: optimisticMessageID) {
-                        sendService.updateOptimisticMessage(message, with: result)
+                    do {
+                        _ = try sendService.reconcileRemoteCommittedSend(
+                            optimisticMessageID: optimisticMessageID,
+                            result: result
+                        )
+                    } catch {
+                        Log.error(
+                            "Remote send succeeded but local reconciliation failed for optimistic message \(optimisticMessageID)",
+                            category: .message,
+                            error: error
+                        )
                     }
                     sendService.markAttachmentsAsUploaded(references: attachmentReferences)
                     reconciliationHooks.onSuccess?(

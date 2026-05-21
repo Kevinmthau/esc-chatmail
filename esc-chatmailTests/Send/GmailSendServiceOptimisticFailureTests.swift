@@ -245,6 +245,75 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertNotNil(sendService.fetchMessageSync(byID: "gmail-success-id"))
     }
 
+    func testReconcileAbandonedOptimisticSendMutations_remoteCommittedRecordReconcilesWithoutFailureCleanup() async throws {
+        let context = coreDataStack.viewContext
+        let recipient = "remote-committed@example.com"
+        let remoteResult = GmailSendService.SendResult(
+            messageId: "gmail-remote-committed-id",
+            threadId: "gmail-remote-thread-id"
+        )
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Remote send already committed",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail(recipient)])
+            )
+        )
+        XCTAssertNotNil(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+
+        try sendService.recordRemoteCommittedSend(
+            optimisticMessageID: handle.optimisticMessageID,
+            result: remoteResult
+        )
+
+        sendService.reconcileAbandonedOptimisticSendMutations()
+
+        XCTAssertNil(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        let reconciled = try XCTUnwrap(sendService.fetchMessageSync(byID: remoteResult.messageId))
+        XCTAssertEqual(reconciled.gmThreadId, remoteResult.threadId)
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
+        XCTAssertEqual(try conversationCount(in: context), 1)
+    }
+
+    func testReconcileAbandonedOptimisticSendMutations_remoteMessageAlreadyFetchedDeletesOptimisticDuplicate() async throws {
+        let context = coreDataStack.viewContext
+        let recipient = "remote-fetched@example.com"
+        let remoteResult = GmailSendService.SendResult(
+            messageId: "gmail-already-fetched-id",
+            threadId: "gmail-already-fetched-thread-id"
+        )
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Remote send already committed and fetched",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail(recipient)])
+            )
+        )
+        let optimisticMessage = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        let conversation = try XCTUnwrap(optimisticMessage.conversation)
+
+        try sendService.recordRemoteCommittedSend(
+            optimisticMessageID: handle.optimisticMessageID,
+            result: remoteResult
+        )
+        _ = MessageBuilder()
+            .withId(remoteResult.messageId)
+            .withThreadId(remoteResult.threadId)
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        try coreDataStack.saveViewContext()
+
+        sendService.reconcileAbandonedOptimisticSendMutations()
+
+        XCTAssertNil(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertNotNil(sendService.fetchMessageSync(byID: remoteResult.messageId))
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
+        XCTAssertEqual(try messageCount(in: context), 1)
+    }
+
     func testReconcileAbandonedOptimisticSendMutations_deletesPersistedNewEmptyConversation() async throws {
         let context = coreDataStack.viewContext
         let recipient = "abandoned-new-thread@example.com"
@@ -360,6 +429,12 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
 
     private func optimisticMutationRecordCount(in context: NSManagedObjectContext) throws -> Int {
         let request = OutboundSendMutationRecord.fetchRequest()
+        request.includesPendingChanges = true
+        return try context.count(for: request)
+    }
+
+    private func messageCount(in context: NSManagedObjectContext) throws -> Int {
+        let request = Message.fetchRequest()
         request.includesPendingChanges = true
         return try context.count(for: request)
     }

@@ -124,6 +124,8 @@ extension OutboundSendMutationRecord {
     @NSManaged public var id: String
     @NSManaged public var lastMessageDate: Date?
     @NSManaged public var newlyInsertedConversation: Bool
+    @NSManaged public var remoteCommittedMessageId: String?
+    @NSManaged public var remoteCommittedThreadId: String?
     @NSManaged public var snippet: String?
 }
 
