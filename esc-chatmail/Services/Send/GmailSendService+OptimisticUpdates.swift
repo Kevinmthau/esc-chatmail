@@ -102,7 +102,7 @@ extension GmailSendService {
 
     @MainActor
     func remoteCommittedSendResult(optimisticMessageID: String) -> SendResult? {
-        fetchOptimisticSendMutationSnapshot(messageID: optimisticMessageID)?.remoteCommittedResult
+        fetchFreshOptimisticSendMutationSnapshot(messageID: optimisticMessageID)?.remoteCommittedResult
     }
 
     @MainActor
@@ -201,8 +201,9 @@ extension GmailSendService {
             return
         }
 
+        let mutationSnapshot = fetchFreshOptimisticSendMutationSnapshot(messageID: messageID)
         let conversation = message.conversation
-        let wasInsertedConversation = conversation?.isInserted ?? false
+        let wasInsertedConversation = mutationSnapshot?.newlyInsertedConversation ?? conversation?.isInserted ?? false
         viewContext.delete(message)
         viewContext.processPendingChanges()
 
@@ -559,6 +560,26 @@ extension GmailSendService {
     @MainActor
     private func fetchOptimisticSendMutationSnapshot(messageID: String) -> OptimisticSendMutationSnapshot? {
         fetchOptimisticSendMutationRecords(messageID: messageID).first.map(OptimisticSendMutationSnapshot.init(record:))
+    }
+
+    @MainActor
+    private func fetchFreshOptimisticSendMutationSnapshot(messageID: String) -> OptimisticSendMutationSnapshot? {
+        guard let coordinator = viewContext.persistentStoreCoordinator else {
+            return nil
+        }
+
+        let context = NSManagedObjectContext(concurrencyType: .privateQueueConcurrencyType)
+        context.persistentStoreCoordinator = coordinator
+        context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+
+        var snapshot: OptimisticSendMutationSnapshot?
+        context.performAndWait {
+            snapshot = fetchOptimisticSendMutationRecords(
+                messageID: messageID,
+                in: context
+            ).first.map(OptimisticSendMutationSnapshot.init(record:))
+        }
+        return snapshot
     }
 
     @MainActor

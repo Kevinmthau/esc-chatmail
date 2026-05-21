@@ -245,6 +245,41 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertNotNil(sendService.fetchMessageSync(byID: "gmail-success-id"))
     }
 
+    func testRemoteCommittedSendResultReadsFreshStoreState() async throws {
+        let context = coreDataStack.viewContext
+        context.automaticallyMergesChangesFromParent = false
+
+        let recipient = "fresh-remote-commit@example.com"
+        let remoteResult = GmailSendService.SendResult(
+            messageId: "gmail-fresh-remote-commit-id",
+            threadId: "gmail-fresh-remote-thread-id"
+        )
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Remote committed before retry",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail(recipient)])
+            )
+        )
+        let staleRecord = try XCTUnwrap(
+            optimisticMutationRecord(in: context, id: handle.optimisticMessageID)
+        )
+        XCTAssertNil(staleRecord.remoteCommittedMessageId)
+
+        try sendService.recordRemoteCommittedSend(
+            optimisticMessageID: handle.optimisticMessageID,
+            result: remoteResult
+        )
+
+        XCTAssertNil(staleRecord.remoteCommittedMessageId)
+        let committedResult = try XCTUnwrap(
+            sendService.remoteCommittedSendResult(optimisticMessageID: handle.optimisticMessageID)
+        )
+        XCTAssertEqual(committedResult.messageId, remoteResult.messageId)
+        XCTAssertEqual(committedResult.threadId, remoteResult.threadId)
+    }
+
     func testReconcileAbandonedOptimisticSendMutations_remoteCommittedRecordReconcilesWithoutFailureCleanup() async throws {
         let context = coreDataStack.viewContext
         let recipient = "remote-committed@example.com"
@@ -312,6 +347,48 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertNotNil(sendService.fetchMessageSync(byID: remoteResult.messageId))
         XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
         XCTAssertEqual(try messageCount(in: context), 1)
+    }
+
+    func testReconcileAbandonedOptimisticSendMutations_remoteMessageInDifferentConversationDeletesPersistedOptimisticConversation() async throws {
+        let context = coreDataStack.viewContext
+        let recipient = "remote-fetched-different-conversation@example.com"
+        let participantHash = calculateParticipantHash(from: [normalizedEmail(recipient)])
+        let remoteResult = GmailSendService.SendResult(
+            messageId: "gmail-fetched-different-conversation-id",
+            threadId: "gmail-fetched-different-conversation-thread-id"
+        )
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Remote send fetched into another conversation",
+            optimisticConversation: .participantHash(participantHash)
+        )
+        try coreDataStack.saveViewContext()
+
+        try sendService.recordRemoteCommittedSend(
+            optimisticMessageID: handle.optimisticMessageID,
+            result: remoteResult
+        )
+        let fetchedConversation = ConversationBuilder()
+            .withParticipantHash("remote-fetched-different-conversation-hash")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        _ = MessageBuilder()
+            .withId(remoteResult.messageId)
+            .withThreadId(remoteResult.threadId)
+            .fromMe()
+            .inConversation(fetchedConversation)
+            .build(in: context)
+        try coreDataStack.saveViewContext()
+        coreDataStack.resetViewContext()
+
+        sendService.reconcileAbandonedOptimisticSendMutations()
+
+        XCTAssertNil(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertNotNil(sendService.fetchMessageSync(byID: remoteResult.messageId))
+        XCTAssertEqual(try optimisticMutationRecordCount(in: context), 0)
+        XCTAssertEqual(try conversationCount(in: context), 1)
     }
 
     func testReconcileAbandonedOptimisticSendMutations_deletesPersistedNewEmptyConversation() async throws {
@@ -431,6 +508,17 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         let request = OutboundSendMutationRecord.fetchRequest()
         request.includesPendingChanges = true
         return try context.count(for: request)
+    }
+
+    private func optimisticMutationRecord(
+        in context: NSManagedObjectContext,
+        id: String
+    ) throws -> OutboundSendMutationRecord? {
+        let request = OutboundSendMutationRecord.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", id)
+        request.fetchLimit = 1
+        request.includesPendingChanges = true
+        return try context.fetch(request).first
     }
 
     private func messageCount(in context: NSManagedObjectContext) throws -> Int {
