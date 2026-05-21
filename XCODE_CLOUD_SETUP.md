@@ -4,7 +4,7 @@ This repository now includes the project-side requirements to build and distribu
 
 - A shared `esc-chatmail` scheme at `esc-chatmail.xcodeproj/xcshareddata/xcschemes/esc-chatmail.xcscheme`
 - `ci_scripts/ci_post_clone.sh` to generate `Debug.xcconfig` and `Release.xcconfig` from Xcode Cloud environment variables when you need to override the repository defaults
-- `ci_scripts/ci_post_xcodebuild.sh` to generate TestFlight "What to Test" notes from the triggering commit message
+- `ci_scripts/ci_post_xcodebuild.sh` to generate TestFlight "What to Test" notes from the triggering commit message, changed areas, and matching smoke-test prompts
 - `Info.plist` wired to `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` so TestFlight uploads use the target version/build settings instead of hardcoded values
 
 ## 1. App Store Connect prerequisites
@@ -43,7 +43,10 @@ If you want a faster internal-only lane, create a second workflow that distribut
 
 ## 4. TestFlight behavior to expect
 
-- Xcode Cloud will generate TestFlight "What to Test" text from the latest commit subject.
+- Xcode Cloud will generate TestFlight "What to Test" text with:
+  - the latest commit subject and body under `What Changed`
+  - app areas inferred from changed files under `Changed Areas`
+  - matching smoke-test prompts under `What to Test`
 - Builds produced by Xcode Cloud still need to be added to tester groups in App Store Connect.
 - If you already uploaded build `1` for version `1.0`, increment `CURRENT_PROJECT_VERSION` before your first cloud upload to avoid a duplicate build number rejection.
 
