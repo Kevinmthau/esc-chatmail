@@ -19,14 +19,15 @@ struct BatchProcessor {
     ///   - batchSize: Size of each batch
     ///   - messageFetcher: The fetcher to use for batch retrieval
     ///   - progressHandler: Called after each batch with (processedCount, totalCount)
-    ///   - messageHandler: Called for each successfully fetched message
+    ///   - messageHandler: Called with each successfully fetched group of messages,
+    ///     sorted into chronological order
     /// - Returns: BatchProcessingResult with success/failure counts
     static func processMessages(
         messageIds: [String],
         batchSize: Int,
         messageFetcher: MessageFetcher,
         progressHandler: @escaping (Int, Int) async -> Void,
-        messageHandler: @escaping (GmailMessage) async -> Void,
+        messageHandler: @escaping ([GmailMessage]) async -> Void,
         batchCompletion: (() async throws -> Void)? = nil
     ) async throws -> BatchProcessingResult {
         var totalProcessed = 0
@@ -36,8 +37,8 @@ struct BatchProcessor {
         for batch in messageIds.chunked(into: batchSize) {
             try Task.checkCancellation()
 
-            let failedIds = await messageFetcher.fetchBatch(batch) { message in
-                await messageHandler(message)
+            let failedIds = await messageFetcher.fetchBatch(batch) { messages in
+                await messageHandler(messages)
             }
 
             let successCount = batch.count - failedIds.count
@@ -62,19 +63,20 @@ struct BatchProcessor {
     /// - Parameters:
     ///   - failedIds: IDs that failed in the initial attempt
     ///   - messageFetcher: The fetcher to use
-    ///   - messageHandler: Handler for successfully fetched messages
+    ///   - messageHandler: Handler for successfully fetched groups of messages,
+    ///     sorted into chronological order
     /// - Returns: IDs that still failed after retry
     static func retryFailedMessages(
         failedIds: [String],
         messageFetcher: MessageFetcher,
-        messageHandler: @escaping (GmailMessage) async -> Void
+        messageHandler: @escaping ([GmailMessage]) async -> Void
     ) async -> [String] {
         guard !failedIds.isEmpty else { return [] }
 
         Log.debug("Retrying \(failedIds.count) failed messages...", category: .sync)
 
-        let stillFailedIds = await messageFetcher.fetchBatch(failedIds) { message in
-            await messageHandler(message)
+        let stillFailedIds = await messageFetcher.fetchBatch(failedIds) { messages in
+            await messageHandler(messages)
         }
 
         if stillFailedIds.isEmpty {

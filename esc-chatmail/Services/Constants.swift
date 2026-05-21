@@ -95,6 +95,12 @@ struct SyncConfig {
     /// Maximum concurrent message fetch requests to prevent resource exhaustion
     static let maxConcurrentMessageFetches = 15
 
+    /// Maximum concurrent message *processing* operations (HTML/text extraction,
+    /// classification, large-body fetches). Processing is largely CPU-bound, so this
+    /// is capped near the core count to parallelize without thrashing. Persistence of
+    /// the processed result remains serialized to preserve conversation-routing order.
+    static let maxConcurrentMessageProcessing = max(2, min(ProcessInfo.processInfo.activeProcessorCount, 6))
+
     /// Delay before retrying failed message fetches (in seconds)
     static let retryDelaySeconds: UInt64 = 1_000_000_000
 

@@ -43,14 +43,15 @@ struct MessageListPaginator {
     ///   - query: Gmail search query
     ///   - messageFetcher: The fetcher to use for API calls
     ///   - progressHandler: Called after each batch with (processedCount, totalCount)
-    ///   - messageHandler: Called for each successfully fetched message
+    ///   - messageHandler: Called with each successfully fetched group of messages,
+    ///     sorted into chronological order
     /// - Returns: BatchProcessingResult with success/failure counts
     /// - Throws: Cancellation errors or API errors
     static func fetchAndProcess(
         query: String,
         messageFetcher: MessageFetcher,
         progressHandler: @escaping (Int, Int) async -> Void,
-        messageHandler: @escaping (GmailMessage) async -> Void
+        messageHandler: @escaping ([GmailMessage]) async -> Void
     ) async throws -> BatchProcessingResult {
         let allMessageIds = try await fetchAllMessageIds(query: query, using: messageFetcher)
 
@@ -70,14 +71,15 @@ struct MessageListPaginator {
     ///   - batchSize: Number of messages to process per batch
     ///   - messageFetcher: The fetcher to use for API calls
     ///   - progressHandler: Called after each batch with (processedCount, totalCount)
-    ///   - messageHandler: Called for each successfully fetched message
+    ///   - messageHandler: Called with each successfully fetched group of messages,
+    ///     sorted into chronological order
     /// - Returns: BatchProcessingResult with success/failure counts
     static func fetchAndProcess(
         query: String,
         batchSize: Int,
         messageFetcher: MessageFetcher,
         progressHandler: @escaping (Int, Int) async -> Void,
-        messageHandler: @escaping (GmailMessage) async -> Void
+        messageHandler: @escaping ([GmailMessage]) async -> Void
     ) async throws -> BatchProcessingResult {
         let allMessageIds = try await fetchAllMessageIds(query: query, using: messageFetcher)
 
