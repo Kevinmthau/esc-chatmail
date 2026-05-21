@@ -47,6 +47,7 @@ If you want a faster internal-only lane, create a second workflow that distribut
   - the latest commit subject and body under `What Changed`
   - app areas inferred from changed files under `Changed Areas`
   - matching smoke-test prompts under `What to Test`
+  - truncated details when needed to stay within App Store Connect's 4000-character note limit
 - Builds produced by Xcode Cloud still need to be added to tester groups in App Store Connect.
 - If you already uploaded build `1` for version `1.0`, increment `CURRENT_PROJECT_VERSION` before your first cloud upload to avoid a duplicate build number rejection.
 

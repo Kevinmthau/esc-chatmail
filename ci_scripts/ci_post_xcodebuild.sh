@@ -9,6 +9,7 @@ script_dir="${0:A:h}"
 repo_root="${script_dir:h}"
 testflight_dir="${repo_root}/TestFlight"
 what_to_test_file="${testflight_dir}/WhatToTest.en-US.txt"
+max_what_to_test_length=4000
 git_repo=(git -C "${repo_root}")
 commit="${CI_COMMIT:-HEAD}"
 
@@ -33,6 +34,9 @@ function area_for_path() {
   local file_path="$1"
 
   case "${file_path}" in
+    esc-chatmail/Services/Security/*|esc-chatmail/Services/AuthSession.swift|esc-chatmail/Views/Main/SignInView.swift)
+      print -r -- "Sign-in and session handling"
+      ;;
     esc-chatmail/Views/Chat/*|esc-chatmail/ViewModels/ChatViewModel.swift|esc-chatmail/Services/Chat/*)
       print -r -- "Chat"
       ;;
@@ -42,20 +46,17 @@ function area_for_path() {
     esc-chatmail/Views/Main/*|esc-chatmail/ViewModels/ConversationListViewModel.swift|esc-chatmail/Services/ConversationList/*)
       print -r -- "Inbox and conversation list"
       ;;
+    esc-chatmail/Views/Components/EmailContent/BaseEmailWebView.swift|esc-chatmail/Views/Components/EmailContent/HTMLFullWebView.swift|esc-chatmail/Views/Chat/HTMLMessageView.swift|esc-chatmail/Services/HTML*|esc-chatmail/Services/HTMLSanitization/*)
+      print -r -- "HTML email rendering"
+      ;;
     esc-chatmail/Views/Components/EmailContent/*|esc-chatmail/Views/Components/EmailPreview/*|esc-chatmail/Services/Preview/*)
       print -r -- "Email previews"
-      ;;
-    esc-chatmail/Services/HTML*|esc-chatmail/Services/HTMLSanitization/*)
-      print -r -- "HTML email rendering"
       ;;
     esc-chatmail/Services/Sync/*|esc-chatmail/Services/API/GmailAPIClient+History.swift|esc-chatmail/Services/API/GmailAPIClient+Messages.swift)
       print -r -- "Mail sync"
       ;;
     esc-chatmail/Services/CoreData/*|esc-chatmail/Models/CoreData/*)
       print -r -- "Local database"
-      ;;
-    esc-chatmail/Services/Security/*|esc-chatmail/Services/AuthSession.swift|esc-chatmail/Views/Main/SignInView.swift)
-      print -r -- "Sign-in and session handling"
       ;;
     esc-chatmailTests/*)
       print -r -- "Tests"
@@ -115,6 +116,56 @@ function test_prompt_for_area() {
   esac
 }
 
+function print_changed_areas_section() {
+  if [[ "${#changed_areas[@]}" -eq 0 ]]; then
+    return
+  fi
+
+  print -r -- ""
+  print -r -- "Changed Areas"
+  for area in "${changed_areas[@]}"; do
+    print -r -- "- ${area}"
+  done
+}
+
+function print_what_to_test_section() {
+  print -r -- ""
+  print -r -- "What to Test"
+  if [[ "${#changed_areas[@]}" -gt 0 ]]; then
+    for area in "${changed_areas[@]}"; do
+      print -r -- "- $(test_prompt_for_area "${area}")"
+    done
+  else
+    print -r -- "- Install the build and smoke test the changed flow."
+  fi
+}
+
+function truncated_details() {
+  local details="$1"
+  local max_length="$2"
+  local notice="[Details truncated to fit TestFlight limit.]"
+  local details_length
+
+  if [[ "${max_length}" -le 0 ]]; then
+    return
+  fi
+
+  if [[ "${#details}" -le "${max_length}" ]]; then
+    print -rn -- "${details}"
+    return
+  fi
+
+  details_length="${max_length}"
+  if [[ "${max_length}" -gt "$(( ${#notice} + 1 ))" ]]; then
+    details_length="$(( max_length - ${#notice} - 1 ))"
+    print -rn -- "${details[1,details_length]}"
+    print -rn -- $'\n'
+    print -rn -- "${notice}"
+  else
+    print -rn -- "${details[1,details_length]}"
+  fi
+}
+
 commit_subject="$("${git_repo[@]}" log -1 --pretty=format:"%s" "${commit}")"
 commit_body="$("${git_repo[@]}" log -1 --pretty=format:"%b" "${commit}" | sed '/^[[:space:]]*$/d')"
 changed_files=()
@@ -139,31 +190,28 @@ done
 
 mkdir -p "${testflight_dir}"
 
-{
+note_intro="$(
   print -r -- "What Changed"
   print -r -- "- ${commit_subject}"
+)"
+note_suffix="$(
+  print_changed_areas_section
+  print_what_to_test_section
+)"
+details_section=""
 
-  if [[ -n "${commit_body}" ]]; then
-    print -r -- ""
-    print -r -- "Details"
-    print -r -- "${commit_body}"
+if [[ -n "${commit_body}" ]]; then
+  details_header=$'\n\nDetails\n'
+  available_details_length="$(( max_what_to_test_length - ${#note_intro} - ${#note_suffix} - ${#details_header} ))"
+  details_text="$(truncated_details "${commit_body}" "${available_details_length}")"
+  if [[ -n "${details_text}" ]]; then
+    details_section="${details_header}${details_text}"
   fi
+fi
 
-  if [[ "${#changed_areas[@]}" -gt 0 ]]; then
-    print -r -- ""
-    print -r -- "Changed Areas"
-    for area in "${changed_areas[@]}"; do
-      print -r -- "- ${area}"
-    done
-  fi
+note="${note_intro}${details_section}${note_suffix}"
+if [[ "${#note}" -gt "${max_what_to_test_length}" ]]; then
+  note="${note[1,max_what_to_test_length]}"
+fi
 
-  print -r -- ""
-  print -r -- "What to Test"
-  if [[ "${#changed_areas[@]}" -gt 0 ]]; then
-    for area in "${changed_areas[@]}"; do
-      print -r -- "- $(test_prompt_for_area "${area}")"
-    done
-  else
-    print -r -- "- Install the build and smoke test the changed flow."
-  fi
-} >! "${what_to_test_file}"
+print -rn -- "${note}" >! "${what_to_test_file}"
