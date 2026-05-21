@@ -106,6 +106,25 @@ final class EmailPreviewClassifierTests: XCTestCase {
         XCTAssertTrue(result.signals.contains(.manyLinks))
     }
 
+    func testClassifyGenericBuildLabelsWithoutAppStoreSignal_staysPersonToPerson() {
+        let cases = [
+            "Could you bump the version number before tomorrow?",
+            "Could you update the build number before tomorrow?"
+        ]
+
+        for body in cases {
+            let result = sut.classify(
+                canonicalHTML: "<html><body><p>\(body)</p></body></html>",
+                bodyText: nil,
+                senderEmail: "dev@example.com",
+                subject: "Release prep"
+            )
+
+            XCTAssertEqual(result.kind, .personToPerson, body)
+            XCTAssertFalse(result.signals.contains(.transactionalKeywords), body)
+        }
+    }
+
     func testClassifySingleTableDepositDeclinedHTML_returnsTransactional() {
         let html = """
         <table border="0" cellpadding="0" cellspacing="0" id="tblHeader">

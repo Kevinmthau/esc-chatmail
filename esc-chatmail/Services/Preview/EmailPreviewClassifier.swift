@@ -336,8 +336,6 @@ private let transactionalPatterns = [
     "mobile check deposit",
     "has completed processing",
     "build has completed processing",
-    "version number",
-    "build number",
     "transaction details",
     "transaction id",
     "payment method",
