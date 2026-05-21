@@ -15,6 +15,7 @@ struct ChatMessagesView: View {
     let onOpenFullMessage: (NSManagedObjectID) -> Void
     @StateObject private var scrollState: VirtualScrollState
     @StateObject private var coordinator: ChatMessagesCoordinator
+    @State private var replyBarHeight: CGFloat = 0
 
     @ObservedObject private var keyboard = KeyboardResponder.shared
 
@@ -57,55 +58,63 @@ struct ChatMessagesView: View {
     var body: some View {
         ScrollViewReader { proxy in
             let displayedMessages = scrollState.visibleMessages
+            let keyboardOffset = keyboardAvoidanceOffset()
+            let bottomContentInset = max(1, replyBarHeight + keyboardOffset)
 
-            ScrollView {
-                LazyVStack(spacing: 8) {
-                    ForEach(Array(displayedMessages.enumerated()), id: \.element.objectID) { index, message in
-                        let absoluteIndex = scrollState.absoluteIndex(forVisibleIndex: index) ?? index
-                        let nextMessage = messageRow(atAbsoluteIndex: absoluteIndex + 1)
-                        let isLastFromSender = ChatMessageRowGrouping.isLastFromSender(
-                            current: message,
-                            next: nextMessage,
-                            senderRunKey: senderRunKey(for:)
-                        )
+            ZStack(alignment: .bottom) {
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(Array(displayedMessages.enumerated()), id: \.element.objectID) { index, message in
+                            let absoluteIndex = scrollState.absoluteIndex(forVisibleIndex: index) ?? index
+                            let nextMessage = messageRow(atAbsoluteIndex: absoluteIndex + 1)
+                            let isLastFromSender = ChatMessageRowGrouping.isLastFromSender(
+                                current: message,
+                                next: nextMessage,
+                                senderRunKey: senderRunKey(for:)
+                            )
 
-                        MessageBubble(
-                            message: message,
-                            messageBubbleLoader: chatDependencies.content.makeMessageBubbleLoader(),
-                            htmlContentHandler: chatDependencies.content.htmlContentHandler,
-                            isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
-                            contactRefreshToken: coordinator.contactRefreshToken,
-                            isLastFromSender: isLastFromSender,
-                            onOpenFullMessage: onOpenFullMessage
-                        )
-                        .id(message.objectID)
-                        .contentShape(Rectangle())
-                        .contextMenu {
-                            messageContextMenu(for: message)
-                        } preview: {
-                            // Lightweight preview - just show the text content without triggering loads
-                            MessageContextMenuPreview(message: message)
+                            MessageBubble(
+                                message: message,
+                                messageBubbleLoader: chatDependencies.content.makeMessageBubbleLoader(),
+                                htmlContentHandler: chatDependencies.content.htmlContentHandler,
+                                isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
+                                contactRefreshToken: coordinator.contactRefreshToken,
+                                isLastFromSender: isLastFromSender,
+                                onOpenFullMessage: onOpenFullMessage
+                            )
+                            .id(message.objectID)
+                            .contentShape(Rectangle())
+                            .contextMenu {
+                                messageContextMenu(for: message)
+                            } preview: {
+                                // Lightweight preview - just show the text content without triggering loads
+                                MessageContextMenuPreview(message: message)
+                            }
+                            .onAppear {
+                                scrollState.markIndexVisible(absoluteIndex)
+                            }
                         }
-                        .onAppear {
-                            scrollState.markIndexVisible(absoluteIndex)
-                        }
+
+                        Color.clear
+                            .frame(height: bottomContentInset)
+                            .id(bottomID)
                     }
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        isTextFieldFocused.wrappedValue = false
+                    }
+                }
+                // Keep short conversations top-aligned; explicit scrollTo calls still
+                // move longer threads to the newest message when needed.
+                .defaultScrollAnchor(.top)
+                .scrollDismissesKeyboard(.interactively)
 
-                    Color.clear
-                        .frame(height: 1)
-                        .id(bottomID)
-                }
-                .padding(.horizontal)
-                .padding(.top, 8)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    isTextFieldFocused.wrappedValue = false
-                }
+                replyBarOverlay
+                    .padding(.bottom, keyboardOffset)
             }
-            // Keep short conversations top-aligned; explicit scrollTo calls still
-            // move longer threads to the newest message when needed.
-            .defaultScrollAnchor(.top)
-            .scrollDismissesKeyboard(.interactively)
+            .ignoresSafeArea(.keyboard, edges: .bottom)
             .onAppear {
                 if let first = messages.first, let last = messages.last {
                     Log.diagnostic(
@@ -188,22 +197,49 @@ struct ChatMessagesView: View {
                     senderGroupingMessages: groupingMessages
                 )
             }
-            .safeAreaInset(edge: .bottom) {
-                VStack(spacing: 0) {
-                    Divider()
-                    ChatReplyBar(
-                        replyText: $viewModel.replyText,
-                        replyingTo: $viewModel.replyingTo,
-                        conversation: conversation,
-                        onSend: { attachments in
-                            await viewModel.sendReply(with: attachments)
-                        },
-                        focusBinding: isTextFieldFocused
-                    )
-                    .background(Color(UIColor.systemBackground))
-                }
-            }
         }
+    }
+
+    private var replyBarOverlay: some View {
+        VStack(spacing: 0) {
+            Divider()
+            ChatReplyBar(
+                replyText: $viewModel.replyText,
+                replyingTo: $viewModel.replyingTo,
+                conversation: conversation,
+                onSend: { attachments in
+                    await viewModel.sendReply(with: attachments)
+                },
+                focusBinding: isTextFieldFocused
+            )
+        }
+        .background(Color(UIColor.systemBackground))
+        .background(
+            GeometryReader { geometry in
+                Color.clear
+                    .onAppear {
+                        replyBarHeight = geometry.size.height
+                    }
+                    .onChange(of: geometry.size.height) { _, newHeight in
+                        replyBarHeight = newHeight
+                    }
+            }
+        )
+    }
+
+    private func keyboardAvoidanceOffset() -> CGFloat {
+        guard keyboard.isKeyboardVisible else {
+            return 0
+        }
+
+        return max(0, keyboard.currentHeight - currentBottomSafeAreaInset)
+    }
+
+    private var currentBottomSafeAreaInset: CGFloat {
+        let windowScenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let activeScene = windowScenes.first { $0.activationState == .foregroundActive } ?? windowScenes.first
+        let activeWindow = activeScene?.windows.first { $0.isKeyWindow } ?? activeScene?.windows.first
+        return activeWindow?.safeAreaInsets.bottom ?? 0
     }
 
     @ViewBuilder

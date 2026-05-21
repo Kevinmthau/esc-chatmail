@@ -44,19 +44,25 @@ final class KeyboardResponder: ObservableObject {
         // Use default duration if not provided
         let animationDuration = userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
 
+        let visibleKeyboardHeight = Self.visibleHeight(for: keyboardFrame)
         let keyboardHeight: CGFloat
-        if notification.name == UIResponder.keyboardWillHideNotification {
+        if notification.name == UIResponder.keyboardWillHideNotification || visibleKeyboardHeight <= 0 {
             keyboardHeight = 0
             isKeyboardVisible = false
         } else {
-            // Don't subtract safe area - we want full keyboard height
-            keyboardHeight = keyboardFrame.height
+            keyboardHeight = visibleKeyboardHeight
             isKeyboardVisible = true
         }
 
         withAnimation(.easeOut(duration: max(animationDuration, 0.25))) {
             self.currentHeight = keyboardHeight
         }
+    }
+
+    private static func visibleHeight(for keyboardFrame: CGRect) -> CGFloat {
+        let screenBottom = UIScreen.main.bounds.maxY
+        let visibleHeight = max(0, screenBottom - keyboardFrame.minY)
+        return min(keyboardFrame.height, visibleHeight)
     }
 
     deinit {
