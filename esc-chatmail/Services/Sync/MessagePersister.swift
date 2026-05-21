@@ -47,6 +47,16 @@ actor MessagePersister {
         }
     }
 
+    /// Outcome of the side-effect-free preparation phase, ready for serialized persistence.
+    enum PreparedMessage: Sendable {
+        /// Message belongs to an excluded mailbox (spam/draft/trash) and should be removed locally.
+        case excludedMailbox(id: String, label: String)
+        /// Message was processed and is ready to be created or updated.
+        case processed(ProcessedMessage)
+        /// Processing failed; nothing to persist.
+        case unprocessable(id: String)
+    }
+
     // MARK: - Message Persistence
 
     /// Saves a Gmail message to Core Data.
@@ -62,15 +72,57 @@ actor MessagePersister {
         modificationTransaction: ModificationTracker.Transaction? = nil,
         in context: NSManagedObjectContext
     ) async {
-        if let messageLabelIds = gmailMessage.labelIds,
-           let excludedMailboxLabel = messageLabelIds.first(where: Self.excludedMailboxLabelIDs.contains) {
-            await deleteExistingMessageIfPresent(
-                id: gmailMessage.id,
+        let prepared = await prepareMessage(gmailMessage, myAliases: myAliases)
+        await persist(
+            prepared,
+            labelIds: labelIds,
+            myAliases: myAliases,
+            modificationTransaction: modificationTransaction,
+            in: context
+        )
+    }
+
+    /// Saves a batch of Gmail messages to Core Data.
+    ///
+    /// The expensive, side-effect-free preparation (`processGmailMessage`: HTML/text
+    /// extraction, classification, large-body fetches) runs concurrently across the
+    /// batch. Persistence then runs sequentially in the supplied order so that
+    /// conversation routing (which reads already-persisted messages by `gmThreadId`)
+    /// remains deterministic. Callers should pass messages already sorted into the
+    /// desired persistence order (typically chronological).
+    func saveMessages(
+        _ gmailMessages: [GmailMessage],
+        labelIds: Set<String>? = nil,
+        myAliases: Set<String>,
+        modificationTransaction: ModificationTracker.Transaction? = nil,
+        in context: NSManagedObjectContext
+    ) async {
+        guard !gmailMessages.isEmpty else { return }
+
+        let prepared = await prepareMessagesConcurrently(gmailMessages, myAliases: myAliases)
+
+        for outcome in prepared {
+            await persist(
+                outcome,
+                labelIds: labelIds,
+                myAliases: myAliases,
                 modificationTransaction: modificationTransaction,
                 in: context
             )
-            Log.debug("Skipping \(excludedMailboxLabel.lowercased()) message: \(gmailMessage.id)", category: .sync)
-            return
+        }
+    }
+
+    // MARK: - Preparation (concurrency-safe, no Core Data writes)
+
+    /// Processes a Gmail message into a `PreparedMessage`. Performs no Core Data writes,
+    /// so it is safe to run concurrently across many messages.
+    nonisolated func prepareMessage(
+        _ gmailMessage: GmailMessage,
+        myAliases: Set<String>
+    ) async -> PreparedMessage {
+        if let messageLabelIds = gmailMessage.labelIds,
+           let excludedMailboxLabel = messageLabelIds.first(where: Self.excludedMailboxLabelIDs.contains) {
+            return .excludedMailbox(id: gmailMessage.id, label: excludedMailboxLabel)
         }
 
         // Debug: Log incoming message details
@@ -83,31 +135,94 @@ actor MessagePersister {
             gmailMessage,
             myAliases: myAliases
         ) else {
-            Log.warning("Failed to process message: \(gmailMessage.id)", category: .sync)
-            return
+            return .unprocessable(id: gmailMessage.id)
         }
 
-        // Check for existing message and update if needed
-        if await updateExistingMessage(
-            processedMessage,
-            labelIds: labelIds,
-            modificationTransaction: modificationTransaction,
-            in: context
-        ) {
-            return
-        }
+        return .processed(processedMessage)
+    }
 
-        // Create new message
-        do {
-            try await createNewMessage(
-                processedMessage,
-                labelIds: labelIds,
-                myAliases: myAliases,
+    /// Prepares messages concurrently with bounded parallelism, preserving input order.
+    nonisolated func prepareMessagesConcurrently(
+        _ gmailMessages: [GmailMessage],
+        myAliases: Set<String>
+    ) async -> [PreparedMessage] {
+        let maxConcurrent = max(1, min(SyncConfig.maxConcurrentMessageProcessing, gmailMessages.count))
+
+        return await withTaskGroup(of: (Int, PreparedMessage).self) { group in
+            var results = [PreparedMessage?](repeating: nil, count: gmailMessages.count)
+            var nextIndex = 0
+
+            while nextIndex < maxConcurrent {
+                let index = nextIndex
+                let message = gmailMessages[index]
+                group.addTask { [self] in
+                    (index, await self.prepareMessage(message, myAliases: myAliases))
+                }
+                nextIndex += 1
+            }
+
+            for await (index, prepared) in group {
+                results[index] = prepared
+                if nextIndex < gmailMessages.count {
+                    let refillIndex = nextIndex
+                    let message = gmailMessages[refillIndex]
+                    group.addTask { [self] in
+                        (refillIndex, await self.prepareMessage(message, myAliases: myAliases))
+                    }
+                    nextIndex += 1
+                }
+            }
+
+            return results.compactMap { $0 }
+        }
+    }
+
+    // MARK: - Persistence (serialized on the actor)
+
+    /// Persists a prepared message. Must run serially per context to keep conversation
+    /// routing deterministic.
+    private func persist(
+        _ prepared: PreparedMessage,
+        labelIds: Set<String>?,
+        myAliases: Set<String>,
+        modificationTransaction: ModificationTracker.Transaction?,
+        in context: NSManagedObjectContext
+    ) async {
+        switch prepared {
+        case .excludedMailbox(let id, let label):
+            await deleteExistingMessageIfPresent(
+                id: id,
                 modificationTransaction: modificationTransaction,
                 in: context
             )
-        } catch {
-            Log.error("Failed to create message \(gmailMessage.id): \(error)", category: .sync)
+            Log.debug("Skipping \(label.lowercased()) message: \(id)", category: .sync)
+
+        case .unprocessable(let id):
+            Log.warning("Failed to process message: \(id)", category: .sync)
+
+        case .processed(let processedMessage):
+            // Check for existing message and update if needed
+            if await updateExistingMessage(
+                processedMessage,
+                labelIds: labelIds,
+                modificationTransaction: modificationTransaction,
+                in: context
+            ) {
+                return
+            }
+
+            // Create new message
+            do {
+                try await createNewMessage(
+                    processedMessage,
+                    labelIds: labelIds,
+                    myAliases: myAliases,
+                    modificationTransaction: modificationTransaction,
+                    in: context
+                )
+            } catch {
+                Log.error("Failed to create message \(processedMessage.id): \(error)", category: .sync)
+            }
         }
     }
 }

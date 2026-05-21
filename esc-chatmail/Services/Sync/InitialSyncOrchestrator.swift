@@ -270,10 +270,10 @@ final class InitialSyncOrchestrator {
             await MainActor.run {
                 progressHandler(progress, "Processing messages... \(processed)/\(total)")
             }
-        } messageHandler: { [messagePersister, myAliases] message in
+        } messageHandler: { [messagePersister, myAliases] messages in
             // Capture dependencies strongly to prevent message loss if orchestrator is deallocated
-            await messagePersister.saveMessage(
-                message,
+            await messagePersister.saveMessages(
+                messages,
                 labelIds: labelIds,
                 myAliases: myAliases,
                 modificationTransaction: modificationTransaction,
@@ -299,10 +299,10 @@ final class InitialSyncOrchestrator {
             let stillFailedIds = await BatchProcessor.retryFailedMessages(
                 failedIds: result.failedIds,
                 messageFetcher: messageFetcher
-            ) { [messagePersister, myAliases] message in
+            ) { [messagePersister, myAliases] messages in
                 // Capture dependencies strongly to prevent message loss if orchestrator is deallocated
-                await messagePersister.saveMessage(
-                    message,
+                await messagePersister.saveMessages(
+                    messages,
                     labelIds: labelIds,
                     myAliases: myAliases,
                     modificationTransaction: modificationTransaction,

@@ -2,7 +2,10 @@ import Foundation
 import CoreData
 import CryptoKit
 
-class MessageProcessor {
+/// `@unchecked Sendable`: all stored state is immutable (`let`) and Sendable, so instances
+/// are safe to share across concurrency domains. Kept non-final so tests can subclass and
+/// stub `processGmailMessage`; subclasses must likewise only add immutable Sendable state.
+class MessageProcessor: @unchecked Sendable {
     private let emailTextProcessor = EmailTextProcessor.self
     private let emailNormalizer = EmailNormalizer.self
     private let previewClassifier = EmailPreviewClassifier()

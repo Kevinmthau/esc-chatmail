@@ -338,10 +338,10 @@ final class IncrementalSyncOrchestrator {
                 await MainActor.run {
                     progressHandler(progress, "Recovering... \(processed)/\(total)")
                 }
-            } messageHandler: { [messagePersister, myAliases] message in
+            } messageHandler: { [messagePersister, myAliases] messages in
                 // Capture dependencies strongly to prevent message loss if orchestrator is deallocated
-                await messagePersister.saveMessage(
-                    message,
+                await messagePersister.saveMessages(
+                    messages,
                     labelIds: labelIds,
                     myAliases: myAliases,
                     modificationTransaction: modificationTransaction,

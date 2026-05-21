@@ -57,9 +57,9 @@ struct ReconciliationPhase: SyncPhase {
             let failedMissedIds = await BatchProcessor.retryFailedMessages(
                 failedIds: missedIds,
                 messageFetcher: messageFetcher
-            ) { [messagePersister] message in
-                await messagePersister.saveMessage(
-                    message,
+            ) { [messagePersister] messages in
+                await messagePersister.saveMessages(
+                    messages,
                     labelIds: context.labelIds,
                     myAliases: context.myAliases,
                     modificationTransaction: context.modificationTransaction,

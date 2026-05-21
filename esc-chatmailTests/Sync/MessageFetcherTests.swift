@@ -12,8 +12,10 @@ final class MessageFetcherTests: XCTestCase {
         let fetcher = await MainActor.run { MessageFetcher(apiClient: mockAPI) }
         let successes = SuccessCollector()
 
-        let failedIds = await fetcher.fetchBatch(["ok", "transient", "missing"]) { message in
-            await successes.append(message.id)
+        let failedIds = await fetcher.fetchBatch(["ok", "transient", "missing"]) { messages in
+            for message in messages {
+                await successes.append(message.id)
+            }
         }
 
         let successfulIds = await successes.values()

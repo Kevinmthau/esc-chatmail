@@ -163,28 +163,30 @@ final class MessageFetcher: @unchecked Sendable {
         )
     }
 
-    /// Sorts messages by internalDate and invokes callback for each in chronological order.
+    /// Sorts messages by internalDate and hands the whole batch to the persister in
+    /// chronological order. Persisting as a batch lets the persister parallelize the
+    /// expensive per-message processing while keeping writes ordered.
     private func persistInChronologicalOrder(
         _ messages: [GmailMessage],
-        onSuccess: @escaping @Sendable (GmailMessage) async -> Void
+        persist: @escaping @Sendable ([GmailMessage]) async -> Void
     ) async {
+        guard !messages.isEmpty else { return }
         // internalDate is milliseconds since epoch as a string; nil sorts to beginning
         let sortedMessages = messages.sorted {
             ($0.internalDate ?? "0") < ($1.internalDate ?? "0")
         }
-        for message in sortedMessages {
-            await onSuccess(message)
-        }
+        await persist(sortedMessages)
     }
 
     /// Fetches a batch of messages by ID with automatic retry on failure
     /// - Parameters:
     ///   - ids: Array of Gmail message IDs to fetch
-    ///   - onSuccess: Callback for each successfully fetched message
+    ///   - persist: Callback invoked with each successfully fetched group of messages,
+    ///     sorted into chronological order
     /// - Returns: Array of message IDs that failed to fetch after retries
     func fetchBatch(
         _ ids: [String],
-        onSuccess: @escaping @Sendable (GmailMessage) async -> Void
+        persist: @escaping @Sendable ([GmailMessage]) async -> Void
     ) async -> [String] {
         guard !Task.isCancelled else {
             Log.debug("Batch processing cancelled", category: .sync)
@@ -202,7 +204,7 @@ final class MessageFetcher: @unchecked Sendable {
             Log.warning("Non-retriable error for message \(id)", category: .sync)
         }
 
-        await persistInChronologicalOrder(initialResult.successfulMessages, onSuccess: onSuccess)
+        await persistInChronologicalOrder(initialResult.successfulMessages, persist: persist)
 
         var currentFailedIds = initialResult.retriableFailedIds
 
@@ -238,7 +240,7 @@ final class MessageFetcher: @unchecked Sendable {
 
             permanentlyFailed.append(contentsOf: retryResult.permanentlyFailedIds)
             exhaustedRetries.append(contentsOf: retryResult.exhaustedRetryIds)
-            await persistInChronologicalOrder(retryResult.successfulMessages, onSuccess: onSuccess)
+            await persistInChronologicalOrder(retryResult.successfulMessages, persist: persist)
 
             currentFailedIds = retryResult.retriableFailedIds
         }

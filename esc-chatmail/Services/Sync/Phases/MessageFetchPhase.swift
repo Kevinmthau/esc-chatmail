@@ -41,9 +41,9 @@ struct MessageFetchPhase: SyncPhase {
             await MainActor.run {
                 context.reportProgress(progress, status: "Processing messages... \(processed)/\(total)", phase: self)
             }
-        } messageHandler: { [messagePersister] message in
-            await messagePersister.saveMessage(
-                message,
+        } messageHandler: { [messagePersister] messages in
+            await messagePersister.saveMessages(
+                messages,
                 labelIds: context.labelIds,
                 myAliases: context.myAliases,
                 modificationTransaction: context.modificationTransaction,
