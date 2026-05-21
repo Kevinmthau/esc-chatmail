@@ -148,6 +148,7 @@ final class ParticipantLoader {
     private let personCache: PersonCache
     private let photoResolver: ProfilePhotoResolver
     private let contactsResolver: any ContactsResolving
+    private let currentUserAliasesProvider: ((NSManagedObjectContext?, String) async -> Set<String>)?
     private let prefetchDisplayNames: (@Sendable ([String]) async -> Void)?
     private let cachedDisplayNameProvider: (@Sendable (String) async -> String?)?
     private let photoLoader: (@Sendable ([String]) async -> [ProfilePhoto])?
@@ -160,6 +161,7 @@ final class ParticipantLoader {
         personCache: PersonCache = .shared,
         photoResolver: ProfilePhotoResolver = .shared,
         contactsResolver: any ContactsResolving = ContactsResolver.shared,
+        currentUserAliasesProvider: ((NSManagedObjectContext?, String) async -> Set<String>)? = nil,
         prefetchDisplayNames: (@Sendable ([String]) async -> Void)? = nil,
         cachedDisplayNameProvider: (@Sendable (String) async -> String?)? = nil,
         photoLoader: (@Sendable ([String]) async -> [ProfilePhoto])? = nil,
@@ -170,6 +172,7 @@ final class ParticipantLoader {
         self.personCache = personCache
         self.photoResolver = photoResolver
         self.contactsResolver = contactsResolver
+        self.currentUserAliasesProvider = currentUserAliasesProvider
         self.prefetchDisplayNames = prefetchDisplayNames
         self.cachedDisplayNameProvider = cachedDisplayNameProvider
         self.photoLoader = photoLoader
@@ -262,6 +265,11 @@ final class ParticipantLoader {
         maxParticipants: Int = 4,
         includePhotos: Bool = true
     ) async -> ParticipantInfo {
+        let currentUserAliases = await loadCurrentUserAliases(
+            currentUserEmail: currentUserEmail,
+            context: conversation.managedObjectContext
+        )
+
         if let cachedInfo = cachedParticipantInfo(
             conversationObjectID: conversation.objectID,
             participantHash: conversation.participantHash,
@@ -277,7 +285,8 @@ final class ParticipantLoader {
         guard let context = conversation.managedObjectContext else {
             let participants = extractNonMeParticipants(
                 from: conversation,
-                currentUserEmail: currentUserEmail
+                currentUserEmail: currentUserEmail,
+                currentUserAliases: currentUserAliases
             )
 
             return await buildAndCacheParticipantInfo(
@@ -314,6 +323,11 @@ final class ParticipantLoader {
         fallbackDisplayName: String? = nil,
         includePhotos: Bool = true
     ) async -> ParticipantInfo {
+        let currentUserAliases = await loadCurrentUserAliases(
+            currentUserEmail: currentUserEmail,
+            context: context
+        )
+
         if let cachedInfo = cachedParticipantInfo(
             conversationObjectID: conversationObjectID,
             participantHash: participantHash,
@@ -342,6 +356,7 @@ final class ParticipantLoader {
             conversationObjectID: conversationObjectID,
             in: context,
             currentUserEmail: currentUserEmail,
+            currentUserAliases: currentUserAliases,
             fallbackDisplayName: fallbackDisplayName
         )
 
@@ -479,18 +494,38 @@ final class ParticipantLoader {
     ) -> [String] {
         Self.extractNonMeParticipants(
             from: conversation,
-            currentUserEmail: currentUserEmail
+            currentUserEmail: currentUserEmail,
+            currentUserAliases: [currentUserEmail]
+        )
+    }
+
+    nonisolated
+    func extractNonMeParticipants(
+        from conversation: Conversation,
+        currentUserEmail: String,
+        currentUserAliases: Set<String>
+    ) -> [String] {
+        Self.extractNonMeParticipants(
+            from: conversation,
+            currentUserEmail: currentUserEmail,
+            currentUserAliases: currentUserAliases
         )
     }
 
     nonisolated
     private static func extractNonMeParticipants(
         from conversation: Conversation,
-        currentUserEmail: String
+        currentUserEmail: String,
+        currentUserAliases: Set<String>
     ) -> [String] {
         guard let participants = conversation.participants else { return [] }
 
+        var normalizedSelfAliases = normalizedAliasSet(from: currentUserAliases)
         let normalizedMyEmail = EmailNormalizer.normalize(currentUserEmail)
+        if !normalizedMyEmail.isEmpty {
+            normalizedSelfAliases.insert(normalizedMyEmail)
+        }
+
         var seenEmails = Set<String>()
         var result: [String] = []
 
@@ -503,7 +538,8 @@ final class ParticipantLoader {
             let email = person.email
             let normalized = EmailNormalizer.normalize(email)
 
-            guard normalized != normalizedMyEmail,
+            guard !normalized.isEmpty,
+                  !normalizedSelfAliases.contains(normalized),
                   !seenEmails.contains(normalized) else { continue }
 
             seenEmails.insert(normalized)
@@ -539,6 +575,7 @@ final class ParticipantLoader {
         conversationObjectID: NSManagedObjectID,
         in context: NSManagedObjectContext,
         currentUserEmail: String,
+        currentUserAliases: Set<String>,
         fallbackDisplayName: String?
     ) async -> ConversationParticipantSnapshot {
         await context.perform {
@@ -555,7 +592,8 @@ final class ParticipantLoader {
 
             let emails = Self.extractNonMeParticipants(
                 from: conversation,
-                currentUserEmail: currentUserEmail
+                currentUserEmail: currentUserEmail,
+                currentUserAliases: currentUserAliases
             )
 
             return ConversationParticipantSnapshot(
@@ -612,6 +650,36 @@ final class ParticipantLoader {
         )
 
         return fullInfo ?? baseInfo
+    }
+
+    private func loadCurrentUserAliases(
+        currentUserEmail: String,
+        context: NSManagedObjectContext?
+    ) async -> Set<String> {
+        var aliases = Self.normalizedAliasSet(from: [currentUserEmail])
+
+        if let currentUserAliasesProvider {
+            aliases.formUnion(
+                Self.normalizedAliasSet(
+                    from: await currentUserAliasesProvider(context, currentUserEmail)
+                )
+            )
+        } else if let context {
+            aliases.formUnion(await AliasManager.shared.getAliases(from: context))
+        } else {
+            aliases.formUnion(await AliasManager.shared.getCachedAliases())
+        }
+
+        return aliases
+    }
+
+    nonisolated
+    private static func normalizedAliasSet(from aliases: some Sequence<String>) -> Set<String> {
+        Set(
+            aliases
+                .map(EmailNormalizer.normalize)
+                .filter { !$0.isEmpty }
+        )
     }
 
     private func buildParticipantInfo(

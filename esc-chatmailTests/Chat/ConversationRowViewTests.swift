@@ -61,17 +61,34 @@ final class ConversationRowViewTests: XCTestCase {
         XCTAssertEqual(resolved?.photos.first?.url, "file:///tmp/avatar.jpg")
     }
 
+    func testResolvedShowsGroupAvatarPrefersResolvedParticipantCount() {
+        let participantInfo = makeParticipantInfo(
+            displayNames: ["Friend"],
+            photos: [],
+            formattedDisplayName: "Friend",
+            totalUniqueParticipants: 1
+        )
+
+        let showsGroupAvatar = ConversationRowView.resolvedShowsGroupAvatar(
+            snapshotShowsGroupAvatar: true,
+            participantInfo: participantInfo
+        )
+
+        XCTAssertFalse(showsGroupAvatar)
+    }
+
     private func makeParticipantInfo(
         displayNames: [String],
         photos: [ProfilePhoto],
-        formattedDisplayName: String
+        formattedDisplayName: String,
+        totalUniqueParticipants: Int = 1
     ) -> ParticipantLoader.ParticipantInfo {
         ParticipantLoader.ParticipantInfo(
             emails: ["friend@example.com"],
             displayNames: displayNames,
             photos: photos,
             formattedDisplayName: formattedDisplayName,
-            totalUniqueParticipants: 1
+            totalUniqueParticipants: totalUniqueParticipants
         )
     }
 }

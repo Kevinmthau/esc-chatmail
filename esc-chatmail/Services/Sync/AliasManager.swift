@@ -10,9 +10,12 @@ import CoreData
 actor AliasManager {
     static let shared = AliasManager()
 
+    private let selfAliasProvider: any SelfAliasProviding
     private var cachedAliases: Set<String>?
 
-    private init() {}
+    init(selfAliasProvider: any SelfAliasProviding = ContactsSelfAliasProvider.shared) {
+        self.selfAliasProvider = selfAliasProvider
+    }
 
     // MARK: - Public API
 
@@ -21,12 +24,17 @@ actor AliasManager {
     /// - Parameter context: Core Data context to load from
     /// - Returns: Set of normalized user email aliases
     func getAliases(from context: NSManagedObjectContext) async -> Set<String> {
-        if let cached = cachedAliases {
+        if let cached = cachedAliases, !cached.isEmpty {
             return cached
         }
 
-        let aliases = await loadFromCoreData(in: context)
+        let accountAliases = await loadFromCoreData(in: context)
+        let aliases = await aliasesIncludingSelfContactAliases(
+            normalizedAliases: accountAliases.normalized,
+            rawEmails: accountAliases.raw
+        )
         cachedAliases = aliases
+        ParticipantRollupDependencyTracker.shared.invalidateAll()
         return aliases
     }
 
@@ -40,14 +48,23 @@ actor AliasManager {
     /// Call this after fetching profile from API during initial sync.
     ///
     /// - Parameter aliases: The new set of normalized email aliases
-    func setAliases(_ aliases: Set<String>) {
+    @discardableResult
+    func setAliases(_ aliases: Set<String>) async -> Set<String> {
+        let normalizedAliases = normalizeAliases(aliases)
+        let aliases = await aliasesIncludingSelfContactAliases(
+            normalizedAliases: normalizedAliases,
+            rawEmails: Array(aliases)
+        )
         cachedAliases = aliases
+        ParticipantRollupDependencyTracker.shared.invalidateAll()
+        return aliases
     }
 
     /// Clears the cached aliases.
     /// Call this on sign out or account change.
     func invalidate() {
         cachedAliases = nil
+        ParticipantRollupDependencyTracker.shared.invalidateAll()
     }
 
     /// Returns true if aliases are currently cached.
@@ -57,23 +74,41 @@ actor AliasManager {
 
     // MARK: - Private
 
-    private func loadFromCoreData(in context: NSManagedObjectContext) async -> Set<String> {
+    private struct AccountAliases: Sendable {
+        let normalized: Set<String>
+        let raw: [String]
+    }
+
+    private func loadFromCoreData(in context: NSManagedObjectContext) async -> AccountAliases {
         await context.perform {
             let request = Account.fetchRequest()
             request.fetchLimit = 1
 
             guard let account = try? context.fetch(request).first else {
-                return Set<String>()
+                return AccountAliases(normalized: [], raw: [])
             }
 
-            let aliases = ([account.email] + account.aliasesArray).map(normalizedEmail)
-            return Set(aliases)
+            let rawAliases = [account.email] + account.aliasesArray
+            return AccountAliases(
+                normalized: normalizeAliases(rawAliases),
+                raw: rawAliases
+            )
         }
+    }
+
+    private func aliasesIncludingSelfContactAliases(
+        normalizedAliases: Set<String>,
+        rawEmails: [String]
+    ) async -> Set<String> {
+        let selfContactAliases = await selfAliasProvider.aliases(knownEmails: rawEmails)
+        return normalizedAliases.union(normalizeAliases(selfContactAliases))
     }
 }
 
-/// Global function for email normalization (consistent with existing codebase pattern)
-private func normalizedEmail(_ email: String?) -> String {
-    guard let email = email else { return "" }
-    return EmailNormalizer.normalize(email)
+private func normalizeAliases(_ aliases: some Sequence<String>) -> Set<String> {
+    Set(
+        aliases
+            .map(EmailNormalizer.normalize)
+            .filter { !$0.isEmpty }
+    )
 }

@@ -99,7 +99,7 @@ struct ConversationRowView: View {
             AvatarStackView(
                 alignedAvatarPhotos: avatarPhotos,
                 participants: participantNames,
-                showsGroupAvatar: snapshot.showsGroupAvatar,
+                showsGroupAvatar: showsGroupAvatar,
                 fallbackDisplayText: fallbackDisplayName
             )
                 .frame(width: 44, height: 44)
@@ -220,6 +220,13 @@ struct ConversationRowView: View {
         effectiveParticipantInfo?.avatarPhotos ?? []
     }
 
+    private var showsGroupAvatar: Bool {
+        Self.resolvedShowsGroupAvatar(
+            snapshotShowsGroupAvatar: snapshot.showsGroupAvatar,
+            participantInfo: effectiveParticipantInfo
+        )
+    }
+
     private var fallbackDisplayName: String {
         PersonDisplayNameResolver.sanitizedConversationDisplayNameHint(
             snapshot.displayNameHint,
@@ -270,6 +277,17 @@ struct ConversationRowView: View {
             avatarDisplayNames: cachedBase.avatarDisplayNames,
             avatarPhotos: uncached.avatarPhotos
         )
+    }
+
+    static func resolvedShowsGroupAvatar(
+        snapshotShowsGroupAvatar: Bool,
+        participantInfo: ParticipantLoader.ParticipantInfo?
+    ) -> Bool {
+        if let participantInfo {
+            return participantInfo.totalUniqueParticipants > 1
+        }
+
+        return snapshotShowsGroupAvatar
     }
 
     private func loadContactInfo(for participantInfoKey: String) async {

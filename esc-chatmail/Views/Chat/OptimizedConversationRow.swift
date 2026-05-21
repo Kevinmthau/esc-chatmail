@@ -15,6 +15,7 @@ struct OptimizedConversationRow: View {
     @State private var displayName: String = ""
     @State private var avatarPhotos: [ProfilePhoto?] = []
     @State private var participantNames: [String] = []
+    @State private var showsGroupAvatar: Bool
 
     @MainActor
     init(
@@ -40,6 +41,7 @@ struct OptimizedConversationRow: View {
         )
         self.fallbackDisplayName = fallbackDisplayName
         self._displayName = State(initialValue: fallbackDisplayName)
+        self._showsGroupAvatar = State(initialValue: snapshot.showsGroupAvatar)
     }
 
     private var timeString: String {
@@ -53,7 +55,7 @@ struct OptimizedConversationRow: View {
             AvatarStackView(
                 alignedAvatarPhotos: avatarPhotos,
                 participants: participantNames,
-                showsGroupAvatar: snapshot.showsGroupAvatar,
+                showsGroupAvatar: showsGroupAvatar,
                 fallbackDisplayText: fallbackDisplayName
             )
                 .frame(width: 44, height: 44)
@@ -117,5 +119,6 @@ struct OptimizedConversationRow: View {
         displayName = info.formattedDisplayName
         participantNames = info.avatarDisplayNames
         avatarPhotos = info.avatarPhotos
+        showsGroupAvatar = info.totalUniqueParticipants > 1
     }
 }

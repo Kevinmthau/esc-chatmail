@@ -53,6 +53,57 @@ final class ParticipantLoaderTests: XCTestCase {
         XCTAssertEqual(emails, ["tickets@sfballet.org"])
     }
 
+    func testLoadParticipants_excludesSelfAliasesFromUniqueParticipantCount() async throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Friend, Kevin")
+            .build(in: context)
+
+        let friend = PersonBuilder()
+            .withEmail("friend@example.com")
+            .withDisplayName("Friend")
+            .build(in: context)
+
+        let meGmail = PersonBuilder()
+            .withEmail("kmthau@gmail.com")
+            .withDisplayName("Kevin Thau")
+            .build(in: context)
+
+        let meICloud = PersonBuilder()
+            .withEmail("kthau@me.com")
+            .withDisplayName("Kevin Thau")
+            .build(in: context)
+
+        addConversationParticipant(person: friend, to: conversation)
+        addConversationParticipant(person: meGmail, to: conversation)
+        addConversationParticipant(person: meICloud, to: conversation)
+        _ = MessageBuilder()
+            .withSender(email: "friend@example.com", name: "Friend")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        let loader = ParticipantLoader(
+            contactsResolver: MockContactsResolving(contactMap: [:]),
+            currentUserAliasesProvider: { _, _ in
+                ["kmthau@gmail.com", "kthau@me.com"]
+            },
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { _ in [] },
+            rollupDependencyTracker: ParticipantRollupDependencyTracker()
+        )
+
+        let info = await loader.loadParticipants(
+            from: conversation,
+            currentUserEmail: "kmthau@gmail.com",
+            includePhotos: false
+        )
+
+        XCTAssertEqual(info.emails, ["friend@example.com"])
+        XCTAssertEqual(info.totalUniqueParticipants, 1)
+        XCTAssertEqual(info.formattedDisplayName, "Friend")
+    }
+
     func testLoadParticipants_deletedConversationObjectID_returnsFallback() async throws {
         let conversation = ConversationBuilder()
             .withDisplayName("Fallback Name")

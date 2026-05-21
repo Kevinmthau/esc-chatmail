@@ -87,8 +87,7 @@ final class InitialSyncOrchestrator {
             progressHandler(0.05, "Fetching profile...")
             let profileTimer = timing.start("profileAndAliases")
             let (profile, aliases) = try await fetchProfileAndAliases()
-            myAliases = Set(([profile.emailAddress] + aliases).map(normalizedEmail))
-            await AliasManager.shared.setAliases(myAliases)
+            myAliases = await AliasManager.shared.setAliases(Set([profile.emailAddress] + aliases))
             try await messagePersister.saveAccount(
                 profile: profile,
                 aliases: aliases,
