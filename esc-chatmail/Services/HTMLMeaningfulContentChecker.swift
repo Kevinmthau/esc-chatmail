@@ -1,6 +1,8 @@
 import Foundation
 
 enum HTMLMeaningfulContentChecker {
+    private static let maxHiddenElementStripPasses = 4
+
     private static let hiddenElementRegexes: [NSRegularExpression] = {
         let patterns = [
             // Explicit hidden attribute.
@@ -63,11 +65,13 @@ enum HTMLMeaningfulContentChecker {
             )
 
         for regex in hiddenElementRegexes {
-            var didChange = true
-            while didChange {
+            for _ in 0..<maxHiddenElementStripPasses {
                 let range = NSRange(location: 0, length: filtered.utf16.count)
                 let updated = regex.stringByReplacingMatches(in: filtered, options: [], range: range, withTemplate: "")
-                didChange = updated != filtered
+                guard updated != filtered else {
+                    break
+                }
+
                 filtered = updated
             }
         }
