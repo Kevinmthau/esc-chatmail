@@ -6,7 +6,8 @@ struct EmailPreviewClassifier {
         bodyText: String?,
         extractedText: String? = nil,
         senderEmail: String?,
-        subject: String? = nil
+        subject: String? = nil,
+        includeTestFlightAvailabilitySignal: Bool = true
     ) -> EmailPreviewClassification {
         let lowercasedHTML = canonicalHTML.lowercased()
         let previewText = normalizedBodyText(bodyText)
@@ -91,12 +92,17 @@ struct EmailPreviewClassifier {
             addSignal(.transactionalKeywords)
         }
 
-        if isAppleDeveloperBuildNotification(
+        if isAppStoreConnectBuildNotification(
             sender: lowercasedSender,
             subject: lowercasedSubject,
             html: lowercasedHTML,
             text: lowercasedText
-        ) {
+        ) || (includeTestFlightAvailabilitySignal && isTestFlightAvailabilityNotification(
+            sender: lowercasedSender,
+            subject: lowercasedSubject,
+            html: lowercasedHTML,
+            text: lowercasedText
+        )) {
             transactionalScore += 20
             addSignal(.transactionalKeywords)
         }
@@ -176,25 +182,6 @@ struct EmailPreviewClassifier {
 
     private func containsAny(_ patterns: [String], in text: String) -> Bool {
         patterns.contains { text.contains($0) }
-    }
-
-    private func isAppleDeveloperBuildNotification(
-        sender: String,
-        subject: String,
-        html: String,
-        text: String
-    ) -> Bool {
-        isAppStoreConnectBuildNotification(
-            sender: sender,
-            subject: subject,
-            html: html,
-            text: text
-        ) || isTestFlightAvailabilityNotification(
-            sender: sender,
-            subject: subject,
-            html: html,
-            text: text
-        )
     }
 
     private func isAppStoreConnectBuildNotification(

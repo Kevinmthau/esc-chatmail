@@ -135,6 +135,31 @@ final class EmailPreviewClassifierTests: XCTestCase {
         XCTAssertTrue(result.signals.contains(.transactionalKeywords))
     }
 
+    func testClassifyTestFlightAvailabilityEmail_withoutPreviewSignalDoesNotForceTransactional() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table class="table" width="580">
+                <tr><td><h1>Inbox chat 1.0 (129) is ready to test on iOS.</h1></td></tr>
+                <tr><td>To test this app, open <a href="https://testflight.apple.com/v1/app/123">TestFlight</a> on your iOS device.</td></tr>
+            </table>
+        </body>
+        </html>
+        """
+
+        let result = sut.classify(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderEmail: "testflight_no_reply@email.apple.com",
+            subject: "Inbox chat 1.0 (129) for iOS is now available to test.",
+            includeTestFlightAvailabilitySignal: false
+        )
+
+        XCTAssertEqual(result.kind, .personToPerson)
+        XCTAssertFalse(result.signals.contains(.transactionalKeywords))
+    }
+
     func testClassifyGenericBuildLabelsWithoutAppStoreSignal_staysPersonToPerson() {
         let cases = [
             "Could you bump the version number before tomorrow?",

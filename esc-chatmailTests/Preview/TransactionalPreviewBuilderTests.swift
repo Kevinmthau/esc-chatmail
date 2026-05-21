@@ -133,7 +133,8 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
                 <tr><td><pre>What Changed
         - Gate App Store build labels
         Changed Areas
-        - App behavior touched by this build</pre></td></tr>
+        - App behavior touched by this build
+        - Mention a $0.99 test purchase in release notes</pre></td></tr>
                 <tr><td>To test this app, open <a href="https://testflight.apple.com/v1/app/123">TestFlight</a> on your iOS device using iOS 17.6 or later.</td></tr>
                 <tr><td>You can stop testing and manage notifications in the TestFlight app.</td></tr>
             </table>
@@ -146,6 +147,7 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
         What to Test
         What Changed
         - Gate App Store build labels
+        - Mention a $0.99 test purchase in release notes
 
         To test this app, open TestFlight on your iOS device using iOS 17.6 or later.
         """

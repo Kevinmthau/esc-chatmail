@@ -99,12 +99,14 @@ struct TransactionalPreviewBuilder {
             lines: lines,
             sourceLabel: sourceLabel
         )
-        let amount = resolvedAmount(
-            subject: subject,
-            cleanedSnippet: cleanedSnippet,
-            lines: lines,
-            extractedText: extractedText
-        )
+        let amount = appleDeveloperNotification?.suppressesAmountExtraction == true
+            ? nil
+            : resolvedAmount(
+                subject: subject,
+                cleanedSnippet: cleanedSnippet,
+                lines: lines,
+                extractedText: extractedText
+            )
         let subtitle = appleDeveloperNotification?.metadataLine ?? resolvedSubtitle(
             cleanedSnippet: cleanedSnippet,
             from: lines,
@@ -409,7 +411,8 @@ struct TransactionalPreviewBuilder {
             title: title,
             metadataLine: metadataLine,
             status: appStoreProcessingStatus(from: lowercasedText + "\n" + lowercasedHTML),
-            sourceLabel: "App Store Connect"
+            sourceLabel: "App Store Connect",
+            suppressesAmountExtraction: false
         )
     }
 
@@ -472,7 +475,8 @@ struct TransactionalPreviewBuilder {
             title: title,
             metadataLine: metadataLine,
             status: "Ready",
-            sourceLabel: "TestFlight"
+            sourceLabel: "TestFlight",
+            suppressesAmountExtraction: true
         )
     }
 
@@ -1316,6 +1320,7 @@ private struct AppleDeveloperNotification {
     let metadataLine: String?
     let status: String?
     let sourceLabel: String
+    let suppressesAmountExtraction: Bool
 }
 
 private struct TestFlightBuildInfo {

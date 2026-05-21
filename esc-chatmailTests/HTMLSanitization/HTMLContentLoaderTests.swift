@@ -823,6 +823,51 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertTrue(result.nativeText?.contains("https://example.com/open") == true)
     }
 
+    func testLoadContent_originalDisplay_keepsModeratelyComplexTestFlightHTML() async {
+        let messageId = "html-loader-testflight-original-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let detailTables = (1...10)
+            .map { "<table width=\"100%\"><tr><td>Build detail row \($0)</td></tr></table>" }
+            .joined(separator: "\n")
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <table width="100%"><tr><td>Inbox chat 1.0 (129) is ready to test on iOS.</td></tr></table>
+          \(detailTables)
+          <table width="100%"><tr><td><a href="https://testflight.apple.com/v1/app/123">Open TestFlight</a></td></tr></table>
+        </body>
+        </html>
+        """
+        let bodyText = """
+        Inbox chat 1.0 (129) is ready to test on iOS.
+        Build detail row 1
+        Build detail row 2
+        Build detail row 3
+        Build detail row 4
+        Build detail row 5
+        Open TestFlight
+        https://testflight.apple.com/v1/app/123
+        """
+        _ = contentHandler.saveHTML(html, for: messageId)
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: bodyText,
+            senderEmail: "testflight_no_reply@email.apple.com",
+            subject: "Inbox chat 1.0 (129) for iOS is now available to test.",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        XCTAssertEqual(result.presentation, .html)
+        XCTAssertNil(result.nativeText)
+        XCTAssertTrue(result.html?.contains("Inbox chat 1.0 (129) is ready to test on iOS.") == true)
+    }
+
     func testLoadReplyQuotedOriginalHTML_returnsSanitizedHTML() {
         let messageId = "html-loader-reply-sanitized-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }

@@ -35,7 +35,8 @@ struct EmailRenderQualityEvaluator {
             canonicalHTML: trimmedHTML,
             bodyText: plainText,
             senderEmail: senderEmail,
-            subject: subject
+            subject: subject,
+            includeTestFlightAvailabilitySignal: false
         )
 
         let renderableHTML = HTMLMeaningfulContentChecker.renderableHTML(from: trimmedHTML)
