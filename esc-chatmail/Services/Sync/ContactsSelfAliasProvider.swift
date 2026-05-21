@@ -5,17 +5,64 @@ protocol SelfAliasProviding: Sendable {
     func aliases(knownEmails: [String]) async -> Set<String>
 }
 
+protocol SelfAliasContactStore: Sendable {
+    func unifiedContacts(
+        matching predicate: NSPredicate,
+        keysToFetch: [CNKeyDescriptor]
+    ) throws -> [CNContact]
+
+    func enumerateContacts(
+        with fetchRequest: CNContactFetchRequest,
+        usingBlock block: @escaping (CNContact, UnsafeMutablePointer<ObjCBool>) -> Void
+    ) throws
+
+#if os(macOS)
+    func unifiedMeContact(withKeysToFetch keys: [CNKeyDescriptor]) throws -> CNContact
+#endif
+}
+
+private final class DefaultSelfAliasContactStore: SelfAliasContactStore, @unchecked Sendable {
+    private let contactStore = CNContactStore()
+
+    func unifiedContacts(
+        matching predicate: NSPredicate,
+        keysToFetch: [CNKeyDescriptor]
+    ) throws -> [CNContact] {
+        try contactStore.unifiedContacts(matching: predicate, keysToFetch: keysToFetch)
+    }
+
+    func enumerateContacts(
+        with fetchRequest: CNContactFetchRequest,
+        usingBlock block: @escaping (CNContact, UnsafeMutablePointer<ObjCBool>) -> Void
+    ) throws {
+        try contactStore.enumerateContacts(with: fetchRequest, usingBlock: block)
+    }
+
+#if os(macOS)
+    func unifiedMeContact(withKeysToFetch keys: [CNKeyDescriptor]) throws -> CNContact {
+        try contactStore.unifiedMeContact(withKeysToFetch: keys)
+    }
+#endif
+}
+
 actor ContactsSelfAliasProvider: SelfAliasProviding {
     static let shared = ContactsSelfAliasProvider()
 
-    private let contactStore: CNContactStore
+    private let contactStore: any SelfAliasContactStore
+    private let authorizationStatusProvider: @Sendable () -> CNAuthorizationStatus
 
-    init(contactStore: CNContactStore = CNContactStore()) {
+    init(
+        contactStore: any SelfAliasContactStore = DefaultSelfAliasContactStore(),
+        authorizationStatusProvider: @escaping @Sendable () -> CNAuthorizationStatus = {
+            CNContactStore.authorizationStatus(for: .contacts)
+        }
+    ) {
         self.contactStore = contactStore
+        self.authorizationStatusProvider = authorizationStatusProvider
     }
 
     func aliases(knownEmails: [String]) async -> Set<String> {
-        guard Self.canReadContacts else {
+        guard Self.canReadContacts(status: authorizationStatusProvider()) else {
             return []
         }
 
@@ -26,6 +73,12 @@ actor ContactsSelfAliasProvider: SelfAliasProviding {
 
         let keysToFetch = [CNContactEmailAddressesKey as CNKeyDescriptor]
         var aliases = Set<String>()
+        let gmailTargets = Set(
+            searchEmails
+                .filter(EmailNormalizer.isGmailAddress)
+                .map(EmailNormalizer.normalize)
+                .filter { !$0.isEmpty }
+        )
 
         #if os(macOS)
         if let contact = try? contactStore.unifiedMeContact(withKeysToFetch: keysToFetch) {
@@ -47,11 +100,40 @@ actor ContactsSelfAliasProvider: SelfAliasProviding {
             }
         }
 
+        let unresolvedGmailTargets = gmailTargets.subtracting(aliases)
+        if !unresolvedGmailTargets.isEmpty {
+            aliases.formUnion(
+                aliasesByEnumeratingContacts(
+                    matchingNormalizedEmails: unresolvedGmailTargets,
+                    keysToFetch: keysToFetch
+                )
+            )
+        }
+
         return aliases
     }
 
-    private static var canReadContacts: Bool {
-        let status = CNContactStore.authorizationStatus(for: .contacts)
+    private func aliasesByEnumeratingContacts(
+        matchingNormalizedEmails normalizedEmails: Set<String>,
+        keysToFetch: [CNKeyDescriptor]
+    ) -> Set<String> {
+        let request = CNContactFetchRequest(keysToFetch: keysToFetch)
+        var aliases = Set<String>()
+
+        do {
+            try contactStore.enumerateContacts(with: request) { contact, _ in
+                let contactAliases = Self.normalizedEmails(from: contact)
+                guard !contactAliases.isDisjoint(with: normalizedEmails) else { return }
+                aliases.formUnion(contactAliases)
+            }
+        } catch {
+            Log.error("Contact enumeration failed for self aliases", category: .general, error: error)
+        }
+
+        return aliases
+    }
+
+    private static func canReadContacts(status: CNAuthorizationStatus) -> Bool {
         if status == .authorized {
             return true
         }

@@ -54,15 +54,70 @@ final class AliasManagerTests: XCTestCase {
             "send-as@example.com"
         ])
     }
+
+    func testGetAliasesRecomputesSelfContactAliasesWhenContactDependenciesChange() async throws {
+        let selfAliasProvider = StubSelfAliasProvider(aliases: [])
+        let rollupDependencyTracker = StubRollupDependencyTracker()
+        let manager = AliasManager(
+            selfAliasProvider: selfAliasProvider,
+            rollupDependencyTracker: rollupDependencyTracker
+        )
+
+        let cachedAliases = await manager.setAliases(["me@example.com"])
+
+        XCTAssertEqual(cachedAliases, ["me@example.com"])
+        XCTAssertEqual(selfAliasProvider.searchCount, 1)
+
+        selfAliasProvider.setAliases(["me@icloud.com"])
+        rollupDependencyTracker.simulateContactDependencyChange()
+
+        let refreshedAliases = await manager.getAliases(from: context)
+
+        XCTAssertEqual(refreshedAliases, [
+            "me@example.com",
+            "me@icloud.com"
+        ])
+        XCTAssertEqual(selfAliasProvider.searchCount, 2)
+        XCTAssertEqual(selfAliasProvider.searchedEmails, ["me@example.com"])
+    }
+
+    func testGetCachedAliasesRecomputesSelfContactAliasesWhenContactDependenciesChange() async throws {
+        let selfAliasProvider = StubSelfAliasProvider(aliases: [])
+        let rollupDependencyTracker = StubRollupDependencyTracker()
+        let manager = AliasManager(
+            selfAliasProvider: selfAliasProvider,
+            rollupDependencyTracker: rollupDependencyTracker
+        )
+
+        _ = await manager.setAliases(["me@example.com"])
+
+        selfAliasProvider.setAliases(["me@icloud.com"])
+        rollupDependencyTracker.simulateContactDependencyChange()
+
+        let refreshedAliases = await manager.getCachedAliases()
+
+        XCTAssertEqual(refreshedAliases, [
+            "me@example.com",
+            "me@icloud.com"
+        ])
+        XCTAssertEqual(selfAliasProvider.searchCount, 2)
+    }
 }
 
 private final class StubSelfAliasProvider: SelfAliasProviding, @unchecked Sendable {
-    private let aliases: Set<String>
     private let lock = NSLock()
+    private var aliases: Set<String>
     private var _searchedEmails: [String] = []
+    private var _searchCount = 0
 
     init(aliases: Set<String>) {
         self.aliases = aliases
+    }
+
+    func setAliases(_ aliases: Set<String>) {
+        lock.lock()
+        self.aliases = aliases
+        lock.unlock()
     }
 
     var searchedEmails: [String] {
@@ -71,10 +126,48 @@ private final class StubSelfAliasProvider: SelfAliasProviding, @unchecked Sendab
         return _searchedEmails
     }
 
+    var searchCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return _searchCount
+    }
+
     func aliases(knownEmails: [String]) async -> Set<String> {
         lock.lock()
         _searchedEmails = knownEmails
+        _searchCount += 1
+        let aliases = aliases
         lock.unlock()
         return aliases
+    }
+}
+
+private final class StubRollupDependencyTracker: ParticipantRollupDependencyTracking, @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+
+    func fingerprint(for emails: [String]) -> ParticipantRollupDependencyFingerprint {
+        lock.lock()
+        defer { lock.unlock() }
+
+        return ParticipantRollupDependencyFingerprint(
+            globalGeneration: generation,
+            emailGenerations: [:],
+            contactsAuthorizationStatusRawValue: 0
+        )
+    }
+
+    func invalidate(email: String) {
+        simulateContactDependencyChange()
+    }
+
+    func invalidateAll() {
+        simulateContactDependencyChange()
+    }
+
+    func simulateContactDependencyChange() {
+        lock.lock()
+        generation &+= 1
+        lock.unlock()
     }
 }

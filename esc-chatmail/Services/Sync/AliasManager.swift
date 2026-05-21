@@ -11,10 +11,17 @@ actor AliasManager {
     static let shared = AliasManager()
 
     private let selfAliasProvider: any SelfAliasProviding
+    private let rollupDependencyTracker: any ParticipantRollupDependencyTracking
     private var cachedAliases: Set<String>?
+    private var cachedAccountAliases: AccountAliases?
+    private var cachedDependencyFingerprint: ParticipantRollupDependencyFingerprint?
 
-    init(selfAliasProvider: any SelfAliasProviding = ContactsSelfAliasProvider.shared) {
+    init(
+        selfAliasProvider: any SelfAliasProviding = ContactsSelfAliasProvider.shared,
+        rollupDependencyTracker: any ParticipantRollupDependencyTracking = ParticipantRollupDependencyTracker.shared
+    ) {
         self.selfAliasProvider = selfAliasProvider
+        self.rollupDependencyTracker = rollupDependencyTracker
     }
 
     // MARK: - Public API
@@ -24,24 +31,36 @@ actor AliasManager {
     /// - Parameter context: Core Data context to load from
     /// - Returns: Set of normalized user email aliases
     func getAliases(from context: NSManagedObjectContext) async -> Set<String> {
-        if let cached = cachedAliases, !cached.isEmpty {
+        if let cached = cachedAliases,
+           let accountAliases = cachedAccountAliases,
+           !cached.isEmpty,
+           cachedDependencyFingerprint == rollupDependencyTracker.fingerprint(for: accountAliases.raw) {
             return cached
         }
 
-        let accountAliases = await loadFromCoreData(in: context)
-        let aliases = await aliasesIncludingSelfContactAliases(
-            normalizedAliases: accountAliases.normalized,
-            rawEmails: accountAliases.raw
-        )
-        cachedAliases = aliases
-        ParticipantRollupDependencyTracker.shared.invalidateAll()
-        return aliases
+        let accountAliases: AccountAliases
+        if let cachedAccountAliases {
+            accountAliases = cachedAccountAliases
+        } else {
+            accountAliases = await loadFromCoreData(in: context)
+        }
+        return await cacheAliases(for: accountAliases)
     }
 
     /// Returns cached aliases without loading from Core Data.
     /// Returns empty set if no aliases are cached.
-    func getCachedAliases() -> Set<String> {
-        cachedAliases ?? []
+    func getCachedAliases() async -> Set<String> {
+        guard let accountAliases = cachedAccountAliases else {
+            return cachedAliases ?? []
+        }
+
+        if let cached = cachedAliases,
+           !cached.isEmpty,
+           cachedDependencyFingerprint == rollupDependencyTracker.fingerprint(for: accountAliases.raw) {
+            return cached
+        }
+
+        return await cacheAliases(for: accountAliases)
     }
 
     /// Updates the cached aliases.
@@ -50,21 +69,20 @@ actor AliasManager {
     /// - Parameter aliases: The new set of normalized email aliases
     @discardableResult
     func setAliases(_ aliases: Set<String>) async -> Set<String> {
-        let normalizedAliases = normalizeAliases(aliases)
-        let aliases = await aliasesIncludingSelfContactAliases(
-            normalizedAliases: normalizedAliases,
-            rawEmails: Array(aliases)
+        let accountAliases = AccountAliases(
+            normalized: normalizeAliases(aliases),
+            raw: Array(aliases)
         )
-        cachedAliases = aliases
-        ParticipantRollupDependencyTracker.shared.invalidateAll()
-        return aliases
+        return await cacheAliases(for: accountAliases)
     }
 
     /// Clears the cached aliases.
     /// Call this on sign out or account change.
     func invalidate() {
         cachedAliases = nil
-        ParticipantRollupDependencyTracker.shared.invalidateAll()
+        cachedAccountAliases = nil
+        cachedDependencyFingerprint = nil
+        rollupDependencyTracker.invalidateAll()
     }
 
     /// Returns true if aliases are currently cached.
@@ -77,6 +95,23 @@ actor AliasManager {
     private struct AccountAliases: Sendable {
         let normalized: Set<String>
         let raw: [String]
+    }
+
+    private func cacheAliases(for accountAliases: AccountAliases) async -> Set<String> {
+        let aliases = await aliasesIncludingSelfContactAliases(
+            normalizedAliases: accountAliases.normalized,
+            rawEmails: accountAliases.raw
+        )
+        let previousAliases = cachedAliases
+
+        cachedAccountAliases = accountAliases
+        cachedAliases = aliases
+
+        if previousAliases != aliases {
+            rollupDependencyTracker.invalidateAll()
+        }
+        cachedDependencyFingerprint = rollupDependencyTracker.fingerprint(for: accountAliases.raw)
+        return aliases
     }
 
     private func loadFromCoreData(in context: NSManagedObjectContext) async -> AccountAliases {
