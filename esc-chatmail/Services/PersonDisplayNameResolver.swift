@@ -195,7 +195,8 @@ enum PersonDisplayNameResolver {
         guard domainLabels.count > 1 else { return false }
 
         let localPartKey = localPart.lowercased()
-        return domainLabels.dropLast().contains { $0 == localPartKey }
+        guard let organizationLabel = domainLabels.dropLast().last else { return false }
+        return organizationLabel == localPartKey
     }
 
     private static func isLikelyAddressDerivedGroupName(
