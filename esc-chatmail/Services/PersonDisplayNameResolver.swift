@@ -195,8 +195,26 @@ enum PersonDisplayNameResolver {
         guard domainLabels.count > 1 else { return false }
 
         let localPartKey = localPart.lowercased()
-        guard let organizationLabel = domainLabels.dropLast().last else { return false }
+        guard let organizationLabel = organizationLabel(in: domainLabels) else { return false }
         return organizationLabel == localPartKey
+    }
+
+    private static func organizationLabel(in domainLabels: [Substring]) -> Substring? {
+        let suffixLabelCount = publicSuffixLabelCount(for: domainLabels)
+        let organizationLabelIndex = domainLabels.count - suffixLabelCount - 1
+        guard organizationLabelIndex >= 0 else { return nil }
+        return domainLabels[organizationLabelIndex]
+    }
+
+    private static func publicSuffixLabelCount(for domainLabels: [Substring]) -> Int {
+        guard let topLevelLabel = domainLabels.last,
+              topLevelLabel.count == 2,
+              let secondLevelLabel = domainLabels.dropLast().last,
+              commonCountryCodeSecondLevelPublicSuffixLabels.contains(String(secondLevelLabel)) else {
+            return 1
+        }
+
+        return 2
     }
 
     private static func isLikelyAddressDerivedGroupName(
@@ -255,5 +273,31 @@ enum PersonDisplayNameResolver {
         "unknown contact",
         "unknown contacts",
         "unknown sender"
+    ]
+
+    private static let commonCountryCodeSecondLevelPublicSuffixLabels: Set<String> = [
+        "ac",
+        "asn",
+        "co",
+        "com",
+        "edu",
+        "ed",
+        "firm",
+        "gen",
+        "go",
+        "gob",
+        "gov",
+        "govt",
+        "id",
+        "ind",
+        "ltd",
+        "me",
+        "ne",
+        "net",
+        "or",
+        "org",
+        "plc",
+        "sch",
+        "school"
     ]
 }

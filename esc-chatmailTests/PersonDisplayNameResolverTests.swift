@@ -20,6 +20,23 @@ final class PersonDisplayNameResolverTests: XCTestCase {
         XCTAssertEqual(result, "github")
     }
 
+    func testSanitizedExplicitDisplayName_preservesBrandMatchingOrganizationLabelUnderMultiLabelPublicSuffix() {
+        XCTAssertEqual(
+            PersonDisplayNameResolver.sanitizedExplicitDisplayName(
+                "github",
+                forEmail: "github@updates.github.co.uk"
+            ),
+            "github"
+        )
+        XCTAssertEqual(
+            PersonDisplayNameResolver.sanitizedExplicitDisplayName(
+                "github",
+                forEmail: "github@updates.github.com.au"
+            ),
+            "github"
+        )
+    }
+
     func testSanitizedExplicitDisplayName_omitsPlainRawLocalPartWithoutBrandSignal() {
         XCTAssertNil(PersonDisplayNameResolver.sanitizedExplicitDisplayName(
             "john",
@@ -39,6 +56,17 @@ final class PersonDisplayNameResolverTests: XCTestCase {
         XCTAssertNil(PersonDisplayNameResolver.sanitizedExplicitDisplayName(
             "support",
             forEmail: "support@support.company.com"
+        ))
+    }
+
+    func testSanitizedExplicitDisplayName_omitsRoleLocalPartMirroredBySubdomainUnderMultiLabelPublicSuffix() {
+        XCTAssertNil(PersonDisplayNameResolver.sanitizedExplicitDisplayName(
+            "noreply",
+            forEmail: "noreply@noreply.example.co.uk"
+        ))
+        XCTAssertNil(PersonDisplayNameResolver.sanitizedExplicitDisplayName(
+            "support",
+            forEmail: "support@support.company.com.au"
         ))
     }
 
