@@ -21,20 +21,25 @@ final class PersonDisplayNameResolverTests: XCTestCase {
     }
 
     func testSanitizedExplicitDisplayName_preservesBrandMatchingOrganizationLabelUnderMultiLabelPublicSuffix() {
-        XCTAssertEqual(
-            PersonDisplayNameResolver.sanitizedExplicitDisplayName(
+        let emails = [
+            "github@updates.github.co.uk",
+            "github@updates.github.com.au",
+            "github@updates.github.co.nz",
+            "github@updates.github.co.jp",
+            "github@updates.github.com.br",
+            "github@updates.github.co.za"
+        ]
+
+        for email in emails {
+            XCTAssertEqual(
+                PersonDisplayNameResolver.sanitizedExplicitDisplayName(
+                    "github",
+                    forEmail: email
+                ),
                 "github",
-                forEmail: "github@updates.github.co.uk"
-            ),
-            "github"
-        )
-        XCTAssertEqual(
-            PersonDisplayNameResolver.sanitizedExplicitDisplayName(
-                "github",
-                forEmail: "github@updates.github.com.au"
-            ),
-            "github"
-        )
+                email
+            )
+        }
     }
 
     func testSanitizedExplicitDisplayName_omitsPlainRawLocalPartWithoutBrandSignal() {

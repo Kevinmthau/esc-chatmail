@@ -210,7 +210,8 @@ enum PersonDisplayNameResolver {
         guard let topLevelLabel = domainLabels.last,
               topLevelLabel.count == 2,
               let secondLevelLabel = domainLabels.dropLast().last,
-              knownCountryCodeSecondLevelPublicSuffixes.contains("\(secondLevelLabel).\(topLevelLabel)") else {
+              let publicSuffixTLDs = knownCountryCodeSecondLevelPublicSuffixTLDs[String(secondLevelLabel)],
+              publicSuffixTLDs.contains(String(topLevelLabel)) else {
             return 1
         }
 
@@ -275,22 +276,132 @@ enum PersonDisplayNameResolver {
         "unknown sender"
     ]
 
-    private static let knownCountryCodeSecondLevelPublicSuffixes: Set<String> = [
-        "ac.uk",
-        "asn.au",
-        "co.uk",
-        "com.au",
-        "edu.au",
-        "gov.au",
-        "gov.uk",
-        "id.au",
-        "ltd.uk",
-        "me.uk",
-        "net.au",
-        "net.uk",
-        "org.au",
-        "org.uk",
-        "plc.uk",
-        "sch.uk"
+    // Exact ICANN public suffix pairs for the generic ccTLD labels this resolver recognizes.
+    // Broad label-only matching misclassifies registrable pairs like com.ch and com.se.
+    private static let knownCountryCodeSecondLevelPublicSuffixTLDs: [String: Set<String>] = [
+        "ac": [
+            "ae", "at", "bd", "be", "bw", "ci", "cn", "cr", "cy", "eg", "fj", "gn", "id", "il",
+            "im", "in", "ir", "jp", "ke", "kr", "lk", "ls", "ma", "me", "ml", "mu", "mw", "mz",
+            "ni", "nz", "pa", "pk", "pr", "rs", "rw", "se", "sz", "th", "tj", "tz", "ug", "uk",
+            "vn", "za", "zm", "zw"
+        ],
+        "asn": [
+            "au", "lv"
+        ],
+        "co": [
+            "ae", "ag", "am", "ao", "at", "az", "bb", "bd", "bi", "bj", "bw", "bz", "ci", "cl",
+            "cm", "cr", "dm", "gg", "gl", "gy", "hu", "id", "il", "im", "in", "io", "ir", "it",
+            "je", "jp", "ke", "kr", "lc", "ls", "ma", "me", "mg", "mu", "mw", "mz", "na", "ni",
+            "nz", "om", "pn", "rs", "rw", "ss", "st", "sz", "th", "tj", "tm", "tt", "tz", "ug",
+            "uk", "us", "uz", "ve", "vi", "za", "zm", "zw"
+        ],
+        "com": [
+            "ac", "af", "ag", "ai", "al", "am", "ar", "au", "aw", "az", "ba", "bb", "bd", "bh",
+            "bi", "bj", "bm", "bn", "bo", "br", "bs", "bt", "by", "bz", "ci", "cm", "cn", "co",
+            "cu", "cv", "cw", "cy", "dm", "do", "dz", "ec", "ee", "eg", "es", "et", "fj", "fm",
+            "fr", "ge", "gh", "gi", "gl", "gn", "gp", "gr", "gt", "gu", "gy", "hk", "hn", "hr",
+            "ht", "im", "in", "io", "iq", "jo", "kg", "kh", "ki", "km", "kp", "kw", "ky", "kz",
+            "la", "lb", "lc", "lk", "lr", "lv", "ly", "mg", "mk", "ml", "mo", "ms", "mt", "mu",
+            "mv", "mw", "mx", "my", "na", "nf", "ng", "ni", "nr", "om", "pa", "pe", "pf", "ph",
+            "pk", "pl", "pr", "ps", "pt", "py", "qa", "re", "ro", "sa", "sb", "sc", "sd", "sg",
+            "sh", "sl", "sn", "so", "ss", "st", "sv", "sy", "tj", "tm", "tn", "to", "tr", "tt",
+            "tw", "ua", "ug", "uy", "uz", "vc", "ve", "vi", "vn", "vu", "ws", "ye", "zm"
+        ],
+        "ed": [
+            "ao", "ci", "cr", "jp"
+        ],
+        "edu": [
+            "ac", "af", "al", "ao", "ar", "au", "az", "ba", "bb", "bd", "bh", "bi", "bj", "bm",
+            "bn", "bo", "br", "bs", "bt", "bz", "ci", "cn", "co", "cu", "cv", "cw", "dm", "do",
+            "dz", "ec", "ee", "eg", "es", "et", "fj", "fm", "gd", "ge", "gh", "gi", "gl", "gn",
+            "gp", "gr", "gt", "gu", "gy", "hk", "hn", "ht", "in", "io", "iq", "it", "jo", "kg",
+            "kh", "ki", "km", "kn", "kp", "kw", "ky", "kz", "la", "lb", "lc", "lk", "lr", "ls",
+            "lv", "ly", "me", "mg", "mk", "ml", "mn", "mo", "ms", "mt", "mv", "mw", "mx", "my",
+            "mz", "ng", "ni", "nr", "om", "pa", "pe", "pf", "ph", "pk", "pl", "pn", "pr", "ps",
+            "pt", "py", "qa", "rs", "sa", "sb", "sc", "sd", "sg", "sl", "sn", "so", "ss", "st",
+            "sv", "sy", "tj", "tm", "to", "tr", "tt", "tw", "ua", "ug", "uy", "vc", "ve", "vg",
+            "vn", "vu", "ws", "ye", "za", "zm"
+        ],
+        "firm": [
+            "ht", "in", "nf", "ro", "ve"
+        ],
+        "gen": [
+            "in", "nz", "tr"
+        ],
+        "go": [
+            "ci", "cr", "id", "it", "jp", "ke", "kr", "th", "tj", "tz", "ug"
+        ],
+        "gob": [
+            "ar", "bo", "cl", "cu", "do", "ec", "es", "gt", "hn", "mx", "ni", "pa", "pe", "pk",
+            "sv", "ve"
+        ],
+        "gov": [
+            "ac", "ae", "af", "al", "ao", "ar", "as", "au", "az", "ba", "bb", "bd", "bf", "bh",
+            "bm", "bn", "br", "bs", "bt", "bw", "by", "bz", "cd", "cl", "cm", "cn", "co", "cx",
+            "cy", "cz", "dm", "do", "dz", "ec", "ee", "eg", "et", "fj", "gd", "ge", "gh", "gi",
+            "gn", "gr", "gu", "gy", "hk", "ie", "il", "in", "io", "iq", "ir", "it", "jo", "kg",
+            "kh", "ki", "km", "kn", "kp", "kw", "kz", "la", "lb", "lc", "lk", "lr", "ls", "lt",
+            "lv", "ly", "ma", "me", "mg", "mk", "ml", "mn", "mo", "mr", "ms", "mu", "mv", "mw",
+            "my", "mz", "na", "ng", "nr", "om", "ph", "pk", "pl", "pn", "pr", "ps", "pt", "pw",
+            "py", "qa", "rs", "rw", "sa", "sb", "sc", "sd", "sg", "sh", "sl", "so", "ss", "sx",
+            "sy", "tj", "tl", "tm", "tn", "to", "tr", "tt", "tw", "ua", "ug", "uk", "vc", "ve",
+            "vn", "ws", "ye", "za", "zm", "zw"
+        ],
+        "govt": [
+            "nz"
+        ],
+        "id": [
+            "au", "bd", "cv", "fj", "ir", "lv", "ly", "us", "vn"
+        ],
+        "ind": [
+            "br", "gt", "in", "kw", "tn"
+        ],
+        "ltd": [
+            "cy", "gi", "lk", "uk"
+        ],
+        "me": [
+            "eg", "in", "it", "ke", "kr", "so", "ss", "tz", "uk", "us"
+        ],
+        "ne": [
+            "jp", "ke", "kr", "tz", "ug", "us"
+        ],
+        "net": [
+            "ac", "ae", "af", "ag", "ai", "al", "am", "ar", "au", "az", "ba", "bb", "bd", "bh",
+            "bj", "bm", "bn", "bo", "br", "bs", "bt", "bw", "bz", "ci", "cm", "cn", "co", "cu",
+            "cv", "cw", "cy", "dm", "do", "dz", "ec", "eg", "et", "fj", "fm", "ge", "gg", "gh",
+            "gl", "gn", "gp", "gr", "gt", "gu", "gy", "hk", "hn", "ht", "id", "il", "im", "in",
+            "io", "iq", "ir", "je", "jo", "kg", "kh", "ki", "kn", "kw", "ky", "kz", "la", "lb",
+            "lc", "lk", "lr", "ls", "lv", "ly", "ma", "me", "mk", "ml", "mo", "ms", "mt", "mu",
+            "mv", "mw", "mx", "my", "mz", "na", "nf", "ng", "ni", "nr", "nz", "om", "pa", "pe",
+            "ph", "pk", "pl", "pn", "pr", "ps", "pt", "py", "qa", "rw", "sa", "sb", "sc", "sd",
+            "sg", "sh", "sl", "so", "ss", "st", "sy", "th", "tj", "tm", "tn", "to", "tr", "tt",
+            "tw", "ua", "uk", "uy", "uz", "vc", "ve", "vi", "vn", "vu", "ws", "ye", "za", "zm"
+        ],
+        "or": [
+            "at", "bi", "ci", "cr", "id", "it", "jp", "ke", "kr", "mu", "th", "tz", "ug", "us"
+        ],
+        "org": [
+            "ac", "ae", "af", "ag", "ai", "al", "am", "ao", "ar", "au", "az", "ba", "bb", "bd",
+            "bh", "bi", "bj", "bm", "bn", "bo", "br", "bs", "bt", "bw", "bz", "ci", "cn", "co",
+            "cu", "cv", "cw", "cy", "dm", "do", "dz", "ec", "ee", "eg", "es", "et", "fj", "fm",
+            "ge", "gg", "gh", "gi", "gl", "gn", "gp", "gr", "gt", "gu", "gy", "hk", "hn", "ht",
+            "hu", "il", "im", "in", "io", "iq", "ir", "je", "jo", "kg", "kh", "ki", "km", "kn",
+            "kp", "kw", "ky", "kz", "la", "lb", "lc", "lk", "lr", "ls", "lv", "ly", "ma", "me",
+            "mg", "mk", "ml", "mn", "mo", "ms", "mt", "mu", "mv", "mw", "mx", "my", "mz", "na",
+            "ng", "ni", "nr", "nz", "om", "pa", "pe", "pf", "ph", "pk", "pl", "pn", "pr", "ps",
+            "pt", "py", "qa", "ro", "rs", "rw", "sa", "sb", "sc", "sd", "se", "sg", "sh", "sk",
+            "sl", "sn", "so", "ss", "st", "sv", "sy", "sz", "tj", "tm", "tn", "to", "tr", "tt",
+            "tw", "ua", "ug", "uk", "uy", "uz", "vc", "ve", "vi", "vn", "vu", "ws", "ye", "za",
+            "zm", "zw"
+        ],
+        "plc": [
+            "ly", "uk"
+        ],
+        "sch": [
+            "ae", "bd", "id", "ir", "jo", "lk", "ly", "ng", "qa", "sa", "ss", "zm"
+        ],
+        "school": [
+            "ge", "nz", "za"
+        ]
     ]
 }
