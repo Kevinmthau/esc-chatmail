@@ -299,6 +299,46 @@ final class ParticipantLoaderTests: XCTestCase {
         XCTAssertEqual(info.formattedDisplayName, "a16z")
     }
 
+    func testLoadParticipants_usesStoredNameWhenHeaderIsPlainRawLocalPart() async throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Unknown Contact")
+            .withParticipantHash(calculateParticipantHash(from: ["john@example.com"]))
+            .build(in: context)
+
+        let participant = PersonBuilder()
+            .withEmail("john@example.com")
+            .withDisplayName("John Appleseed")
+            .build(in: context)
+
+        addConversationParticipant(person: participant, to: conversation)
+        _ = MessageBuilder()
+            .withSender(email: "john@example.com", name: "john")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        let loader = ParticipantLoader(
+            contactsResolver: MockContactsResolving(contactMap: [:]),
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { _ in [] },
+            rollupDependencyTracker: ParticipantRollupDependencyTracker()
+        )
+
+        let info = await loader.loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            participantHash: conversation.participantHash,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: false
+        )
+
+        XCTAssertEqual(info.displayNames, ["John Appleseed"])
+        XCTAssertEqual(info.formattedDisplayName, "John Appleseed")
+    }
+
     func testLoadParticipants_omitsExplicitRawLocalPartWithSeparator() async throws {
         let conversation = ConversationBuilder()
             .withDisplayName("John Smith")

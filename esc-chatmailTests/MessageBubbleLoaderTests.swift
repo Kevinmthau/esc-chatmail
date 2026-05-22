@@ -35,6 +35,49 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertEqual(result.name, "John Smith")
     }
 
+    func testLoadSenderInfo_preservesExplicitBrandNameMatchingEmailLocalPart() async {
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadSenderInfo(
+            from: MessageBubbleSenderRequest(
+                email: "a16z@substack.com",
+                personDisplayName: nil,
+                personAvatarURL: nil,
+                headerDisplayName: "a16z"
+            )
+        )
+
+        XCTAssertEqual(result.name, "a16z")
+    }
+
+    func testLoadSenderInfo_omitsPlainRawLocalPartHeaderName() async {
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let storedNameResult = await loader.loadSenderInfo(
+            from: MessageBubbleSenderRequest(
+                email: "john@example.com",
+                personDisplayName: "John Appleseed",
+                personAvatarURL: nil,
+                headerDisplayName: "john"
+            )
+        )
+        let fallbackResult = await loader.loadSenderInfo(
+            from: MessageBubbleSenderRequest(
+                email: "noreply@example.com",
+                personDisplayName: nil,
+                personAvatarURL: nil,
+                headerDisplayName: "noreply"
+            )
+        )
+
+        XCTAssertEqual(storedNameResult.name, "John Appleseed")
+        XCTAssertEqual(fallbackResult.name, "Unknown Sender")
+    }
+
     func testLoadSenderInfo_contactNameOverridesMissingHeaderName() async {
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [

@@ -155,8 +155,33 @@ enum PersonDisplayNameResolver {
 
         let separatorCharacters = CharacterSet(charactersIn: "._-+")
         let localPartUsesAddressSeparators = localPart.rangeOfCharacter(from: separatorCharacters) != nil
-        guard localPartUsesAddressSeparators else { return false }
-        return displayName.caseInsensitiveCompare(localPart) == .orderedSame
+        if displayName == localPart {
+            return !isLikelyBrandLocalPart(localPart)
+        }
+        return localPartUsesAddressSeparators && displayName.caseInsensitiveCompare(localPart) == .orderedSame
+    }
+
+    private static func isLikelyBrandLocalPart(_ localPart: String) -> Bool {
+        let scalars = Array(localPart.unicodeScalars)
+        guard !scalars.isEmpty,
+              scalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) }) else {
+            return false
+        }
+
+        var sawLetter = false
+        var sawDigitAfterLetter = false
+        for scalar in scalars {
+            if CharacterSet.letters.contains(scalar) {
+                if sawDigitAfterLetter {
+                    return true
+                }
+                sawLetter = true
+            } else if CharacterSet.decimalDigits.contains(scalar), sawLetter {
+                sawDigitAfterLetter = true
+            }
+        }
+
+        return false
     }
 
     private static func isLikelyAddressDerivedGroupName(

@@ -180,6 +180,26 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(conversation.displayName, "a16z")
     }
 
+    func testUpdateDisplayNameOnly_usesStoredNameWhenHeaderIsPlainRawLocalPart() throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Unknown Contact")
+            .build(in: context)
+        addConversationParticipant(
+            email: "john@example.com",
+            displayName: "John Appleseed",
+            to: conversation
+        )
+        _ = MessageBuilder()
+            .withSender(email: "john@example.com", name: "john")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "John Appleseed")
+    }
+
     func testUpdateDisplayNameOnly_upgradesLegacyAddressDerivedNameToStoredRealName() throws {
         let conversation = ConversationBuilder()
             .withDisplayName("John Smith")
