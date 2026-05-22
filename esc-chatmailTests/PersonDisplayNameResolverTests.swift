@@ -27,6 +27,7 @@ final class PersonDisplayNameResolverTests: XCTestCase {
             "github@updates.github.co.nz",
             "github@updates.github.co.jp",
             "github@updates.github.com.br",
+            "github@updates.github.com.in",
             "github@updates.github.co.za"
         ]
 
@@ -79,10 +80,6 @@ final class PersonDisplayNameResolverTests: XCTestCase {
         XCTAssertNil(PersonDisplayNameResolver.sanitizedExplicitDisplayName(
             "brand",
             forEmail: "brand@updates.brand.com.ch"
-        ))
-        XCTAssertNil(PersonDisplayNameResolver.sanitizedExplicitDisplayName(
-            "brand",
-            forEmail: "brand@updates.brand.com.in"
         ))
         XCTAssertNil(PersonDisplayNameResolver.sanitizedExplicitDisplayName(
             "brand",
