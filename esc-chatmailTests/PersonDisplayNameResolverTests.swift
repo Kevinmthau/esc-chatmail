@@ -70,6 +70,17 @@ final class PersonDisplayNameResolverTests: XCTestCase {
         ))
     }
 
+    func testSanitizedExplicitDisplayName_omitsMirroredLocalPartWhenSecondLevelLabelIsRegistrable() {
+        XCTAssertNil(PersonDisplayNameResolver.sanitizedExplicitDisplayName(
+            "brand",
+            forEmail: "brand@updates.brand.com.ch"
+        ))
+        XCTAssertNil(PersonDisplayNameResolver.sanitizedExplicitDisplayName(
+            "brand",
+            forEmail: "brand@updates.brand.com.se"
+        ))
+    }
+
     func testSenderDisplayName_usesExplicitAllLetterBrandMatchingEmailLocalPart() {
         let result = PersonDisplayNameResolver.senderDisplayName(
             email: "github@github.com",

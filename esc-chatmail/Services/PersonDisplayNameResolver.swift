@@ -210,7 +210,7 @@ enum PersonDisplayNameResolver {
         guard let topLevelLabel = domainLabels.last,
               topLevelLabel.count == 2,
               let secondLevelLabel = domainLabels.dropLast().last,
-              commonCountryCodeSecondLevelPublicSuffixLabels.contains(String(secondLevelLabel)) else {
+              knownCountryCodeSecondLevelPublicSuffixes.contains("\(secondLevelLabel).\(topLevelLabel)") else {
             return 1
         }
 
@@ -275,29 +275,22 @@ enum PersonDisplayNameResolver {
         "unknown sender"
     ]
 
-    private static let commonCountryCodeSecondLevelPublicSuffixLabels: Set<String> = [
-        "ac",
-        "asn",
-        "co",
-        "com",
-        "edu",
-        "ed",
-        "firm",
-        "gen",
-        "go",
-        "gob",
-        "gov",
-        "govt",
-        "id",
-        "ind",
-        "ltd",
-        "me",
-        "ne",
-        "net",
-        "or",
-        "org",
-        "plc",
-        "sch",
-        "school"
+    private static let knownCountryCodeSecondLevelPublicSuffixes: Set<String> = [
+        "ac.uk",
+        "asn.au",
+        "co.uk",
+        "com.au",
+        "edu.au",
+        "gov.au",
+        "gov.uk",
+        "id.au",
+        "ltd.uk",
+        "me.uk",
+        "net.au",
+        "net.uk",
+        "org.au",
+        "org.uk",
+        "plc.uk",
+        "sch.uk"
     ]
 }
