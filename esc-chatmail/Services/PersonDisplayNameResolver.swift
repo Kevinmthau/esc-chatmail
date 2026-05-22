@@ -300,7 +300,7 @@ enum PersonDisplayNameResolver {
             "bi", "bj", "bm", "bn", "bo", "br", "bs", "bt", "by", "bz", "ci", "cm", "cn", "co",
             "cu", "cv", "cw", "cy", "dm", "do", "dz", "ec", "ee", "eg", "es", "et", "fj", "fm",
             "fr", "ge", "gh", "gi", "gl", "gn", "gp", "gr", "gt", "gu", "gy", "hk", "hn", "hr",
-            "ht", "im", "in", "io", "iq", "jo", "kg", "kh", "ki", "km", "kp", "kw", "ky", "kz",
+            "ht", "im", "io", "iq", "jo", "kg", "kh", "ki", "km", "kp", "kw", "ky", "kz",
             "la", "lb", "lc", "lk", "lr", "lv", "ly", "mg", "mk", "ml", "mo", "ms", "mt", "mu",
             "mv", "mw", "mx", "my", "na", "nf", "ng", "ni", "nr", "om", "pa", "pe", "pf", "ph",
             "pk", "pl", "pr", "ps", "pt", "py", "qa", "re", "ro", "sa", "sb", "sc", "sd", "sg",

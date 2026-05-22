@@ -82,6 +82,10 @@ final class PersonDisplayNameResolverTests: XCTestCase {
         ))
         XCTAssertNil(PersonDisplayNameResolver.sanitizedExplicitDisplayName(
             "brand",
+            forEmail: "brand@updates.brand.com.in"
+        ))
+        XCTAssertNil(PersonDisplayNameResolver.sanitizedExplicitDisplayName(
+            "brand",
             forEmail: "brand@updates.brand.com.se"
         ))
     }
