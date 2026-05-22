@@ -21,6 +21,7 @@ The repo uses:
 - Work on `main` by default.
 - Do not create new branches or worktrees for routine work unless the user explicitly asks for one.
 - After branch-specific work is finished, return the repo to `main` unless the user asks to stay on a different branch.
+- Always commit completed work with a concise message unless the user explicitly asks not to commit.
 
 ## Default Build And Test Commands
 

@@ -156,12 +156,12 @@ enum PersonDisplayNameResolver {
         let separatorCharacters = CharacterSet(charactersIn: "._-+")
         let localPartUsesAddressSeparators = localPart.rangeOfCharacter(from: separatorCharacters) != nil
         if displayName == localPart {
-            return !isLikelyBrandLocalPart(localPart)
+            return !isLikelyBrandLocalPart(localPart, forEmail: trimmedEmail)
         }
         return localPartUsesAddressSeparators && displayName.caseInsensitiveCompare(localPart) == .orderedSame
     }
 
-    private static func isLikelyBrandLocalPart(_ localPart: String) -> Bool {
+    private static func isLikelyBrandLocalPart(_ localPart: String, forEmail email: String) -> Bool {
         let scalars = Array(localPart.unicodeScalars)
         guard !scalars.isEmpty,
               scalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) }) else {
@@ -181,7 +181,21 @@ enum PersonDisplayNameResolver {
             }
         }
 
+        if localPartMatchesDomainBrand(localPart, forEmail: email) {
+            return true
+        }
+
         return false
+    }
+
+    private static func localPartMatchesDomainBrand(_ localPart: String, forEmail email: String) -> Bool {
+        guard let atIndex = email.firstIndex(of: "@") else { return false }
+        let domain = email[email.index(after: atIndex)...].lowercased()
+        let domainLabels = domain.split(separator: ".")
+        guard domainLabels.count > 1 else { return false }
+
+        let localPartKey = localPart.lowercased()
+        return domainLabels.dropLast().contains { $0 == localPartKey }
     }
 
     private static func isLikelyAddressDerivedGroupName(
