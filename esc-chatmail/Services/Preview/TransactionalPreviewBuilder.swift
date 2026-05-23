@@ -386,6 +386,10 @@ struct TransactionalPreviewBuilder {
             lowercasedHTML.contains("has completed processing") ||
             lowercasedText.contains("build has completed processing") ||
             lowercasedHTML.contains("build has completed processing") ||
+            lowercasedText.contains("approved for beta testing") ||
+            lowercasedHTML.contains("approved for beta testing") ||
+            lowercasedText.contains("approved for testflight beta testing") ||
+            lowercasedHTML.contains("approved for testflight beta testing") ||
             (lowercasedText.contains("version number") && lowercasedText.contains("build number")) ||
             (lowercasedHTML.contains("version number") && lowercasedHTML.contains("build number"))
 
@@ -495,7 +499,12 @@ struct TransactionalPreviewBuilder {
             return version
         }
 
-        return normalizedAppStoreVersion(appStoreValue(for: ["Version Number", "Version"], in: lines))
+        return normalizedAppStoreVersion(
+            appStoreValue(
+                for: ["Version Number", "Bundle Version Short String", "Bundle Version", "Version"],
+                in: lines
+            )
+        )
     }
 
     private func appStoreBuildNumber(subject: String, lines: [String]) -> String? {
@@ -543,6 +552,11 @@ struct TransactionalPreviewBuilder {
     }
 
     private func appStoreProcessingStatus(from text: String) -> String? {
+        if text.contains("approved for beta testing") ||
+            text.contains("approved for testflight beta testing") {
+            return "Approved"
+        }
+
         if text.contains("has completed processing") || text.contains("completed processing") {
             return "Completed"
         }
@@ -616,6 +630,8 @@ struct TransactionalPreviewBuilder {
             "app name",
             "version",
             "version number",
+            "bundle version",
+            "bundle version short string",
             "build",
             "build number"
         ].contains(comparable)

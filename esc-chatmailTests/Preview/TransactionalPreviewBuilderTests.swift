@@ -121,6 +121,63 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
         XCTAssertFalse(result?.subtitle?.localizedCaseInsensitiveContains("dear") == true)
     }
 
+    func testBuildPreview_extractsAppStoreConnectBetaApprovalMetadata() {
+        let subject = "Stickys (ios) has been approved for beta testing."
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table><tr><td>App Store Connect</td></tr></table>
+            <p>Hello Kevin Thau,</p>
+            <p>Build 1.0 (41) of your app has been approved for TestFlight beta testing.</p>
+            <table id="details">
+                <tr><td>App Name: Stickys</td></tr>
+                <tr><td>App Apple ID: 6761548293</td></tr>
+                <tr><td>Bundle Version Short String: 1.0</td></tr>
+                <tr><td>Build Number: 41</td></tr>
+                <tr><td>Platform: iOS</td></tr>
+                <tr><td>SKU: 123</td></tr>
+            </table>
+            <p>If you haven't already invited testers, go to <a href="https://appstoreconnect.apple.com/apps/6761548293/testflight">build 1.0 (41)</a> in the TestFlight section of App Store Connect.</p>
+            <p>Best regards,<br/>App Review</p>
+        </body>
+        </html>
+        """
+        let bodyText = """
+        App Store Connect
+
+        Hello Kevin Thau,
+
+        Build 1.0 (41) of your app has been approved for TestFlight beta testing.
+
+        App Name: Stickys
+        App Apple ID: 6761548293
+        Bundle Version Short String: 1.0
+        Build Number: 41
+        Platform: iOS
+        SKU: 123
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: bodyText,
+            cleanedSnippet: "Hello Kevin Thau,",
+            senderName: nil,
+            senderEmail: "no_reply@email.apple.com",
+            subject: subject
+        )
+
+        XCTAssertEqual(result?.title, subject)
+        XCTAssertEqual(result?.subtitle, "Stickys • Version 1.0 • Build 41")
+        XCTAssertEqual(result?.status, "Approved")
+        XCTAssertNil(result?.detailLine)
+        XCTAssertNil(result?.amount)
+        XCTAssertNil(result?.actionLabel)
+        XCTAssertEqual(result?.sourceLabel, "App Store Connect")
+        XCTAssertEqual(result?.sourceDomain, "email.apple.com")
+        XCTAssertFalse(result?.subtitle?.localizedCaseInsensitiveContains("hello") == true)
+    }
+
     func testBuildPreview_extractsTestFlightAvailabilityMetadata() {
         let subject = "Inbox chat 1.0 (129) for iOS is now available to test."
         let html = """

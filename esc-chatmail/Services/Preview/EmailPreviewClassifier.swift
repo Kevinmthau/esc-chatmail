@@ -207,6 +207,12 @@ struct EmailPreviewClassifier {
             subject.contains("build has completed processing") ||
             text.contains("build has completed processing") ||
             html.contains("build has completed processing") ||
+            subject.contains("approved for beta testing") ||
+            text.contains("approved for beta testing") ||
+            html.contains("approved for beta testing") ||
+            subject.contains("approved for testflight beta testing") ||
+            text.contains("approved for testflight beta testing") ||
+            html.contains("approved for testflight beta testing") ||
             ((text.contains("version number") || html.contains("version number")) &&
              (text.contains("build number") || html.contains("build number")))
 

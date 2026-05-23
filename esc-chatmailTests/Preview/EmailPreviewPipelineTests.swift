@@ -137,6 +137,75 @@ final class EmailPreviewPipelineTests: XCTestCase {
         XCTAssertEqual(model.sourceDomain, "email.apple.com")
     }
 
+    func testLoadPreview_buildsTransactionalCardForAppStoreConnectBetaApprovalEmail() async throws {
+        let messageId = "preview-pipeline-app-store-connect-beta-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let subject = "Stickys (ios) has been approved for beta testing."
+        _ = contentHandler.saveHTML(
+            """
+            <!DOCTYPE html>
+            <html>
+            <body>
+              <table><tr><td>App Store Connect</td></tr></table>
+              <p>Hello Kevin Thau,</p>
+              <p>Build 1.0 (41) of your app has been approved for TestFlight beta testing.</p>
+              <table id="details">
+                <tr><td>App Name: Stickys</td></tr>
+                <tr><td>App Apple ID: 6761548293</td></tr>
+                <tr><td>Bundle Version Short String: 1.0</td></tr>
+                <tr><td>Build Number: 41</td></tr>
+                <tr><td>Platform: iOS</td></tr>
+              </table>
+              <p>If you haven't already invited testers, go to <a href="https://appstoreconnect.apple.com/apps/6761548293/testflight">build 1.0 (41)</a> in the TestFlight section of App Store Connect.</p>
+              <p><a href="https://developer.apple.com/app-store/review/guidelines/">App Store Review Guidelines</a></p>
+            </body>
+            </html>
+            """,
+            for: messageId
+        )
+
+        let loadedPreview = await pipeline.loadPreview(
+            request: EmailPreviewPipelineRequest(
+                messageId: messageId,
+                bodyStorageURI: nil,
+                bodyText: """
+                App Store Connect
+
+                Hello Kevin Thau,
+
+                Build 1.0 (41) of your app has been approved for TestFlight beta testing.
+
+                App Name: Stickys
+                App Apple ID: 6761548293
+                Bundle Version Short String: 1.0
+                Build Number: 41
+                Platform: iOS
+                """,
+                cleanedSnippet: "Hello Kevin Thau,",
+                senderName: nil,
+                senderEmail: "no_reply@email.apple.com",
+                subject: subject,
+                isNewsletter: false,
+                isForwardedEmail: false,
+                cleanupMode: .none,
+                isDarkMode: false
+            )
+        )
+        let preview = try XCTUnwrap(loadedPreview)
+
+        guard case .transactional(let model) = preview else {
+            XCTFail("Expected transactional preview, got \(preview)")
+            return
+        }
+
+        XCTAssertEqual(model.title, subject)
+        XCTAssertEqual(model.subtitle, "Stickys • Version 1.0 • Build 41")
+        XCTAssertEqual(model.status, "Approved")
+        XCTAssertEqual(model.sourceLabel, "App Store Connect")
+        XCTAssertEqual(model.sourceDomain, "email.apple.com")
+    }
+
     func testLoadPreview_unusableStoredHTMLFallsBackToPlainTextPreview() async throws {
         let messageId = "preview-pipeline-plain-fallback-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }

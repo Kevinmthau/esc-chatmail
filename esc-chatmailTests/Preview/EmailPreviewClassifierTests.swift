@@ -106,6 +106,39 @@ final class EmailPreviewClassifierTests: XCTestCase {
         XCTAssertTrue(result.signals.contains(.manyLinks))
     }
 
+    func testClassifyAppStoreConnectBetaApprovalEmail_returnsTransactional() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table><tr><td>App Store Connect</td></tr></table>
+            <p>Hello Kevin Thau,</p>
+            <p>Build 1.0 (41) of your app has been approved for TestFlight beta testing.</p>
+            <table id="details">
+                <tr><td>App Name: Stickys</td></tr>
+                <tr><td>Bundle Version Short String: 1.0</td></tr>
+                <tr><td>Build Number: 41</td></tr>
+                <tr><td>Platform: iOS</td></tr>
+            </table>
+            <p>If you haven't already invited testers, go to <a href="https://appstoreconnect.apple.com/apps/6761548293/testflight">build 1.0 (41)</a> in the TestFlight section of App Store Connect.</p>
+            <p><a href="https://developer.apple.com/app-store/review/guidelines/">App Store Review Guidelines</a></p>
+            <p><a href="https://www.apple.com/legal/privacy/">Privacy Policy</a></p>
+        </body>
+        </html>
+        """
+
+        let result = sut.classify(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderEmail: "no_reply@email.apple.com",
+            subject: "Stickys (ios) has been approved for beta testing."
+        )
+
+        XCTAssertEqual(result.kind, .transactional)
+        XCTAssertTrue(result.signals.contains(.transactionalKeywords))
+        XCTAssertTrue(result.signals.contains(.senderNoReply))
+    }
+
     func testClassifyTestFlightAvailabilityEmail_returnsTransactional() {
         let html = """
         <!DOCTYPE html>
