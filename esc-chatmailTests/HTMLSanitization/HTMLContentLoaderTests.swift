@@ -1502,6 +1502,19 @@ final class HTMLContentLoaderTests: XCTestCase {
             remoteImageAttachmentFallback: remoteImageFallback
         )
 
+        let warmNotification = expectation(description: "Remote image fallback warm notification")
+        let observer = NotificationCenter.default.addObserver(
+            forName: HTMLContentLoader.remoteImageAttachmentFallbackDidWarmNotification,
+            object: nil,
+            queue: .main
+        ) { notification in
+            guard notification.userInfo?[HTMLContentLoader.remoteImageAttachmentFallbackMessageIdUserInfoKey] as? String == messageId else {
+                return
+            }
+            warmNotification.fulfill()
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
         let html = """
         <!DOCTYPE html>
         <html>
@@ -1524,6 +1537,8 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertNotNil(result.html)
         XCTAssertTrue((result.html ?? "").contains("Visible body text"))
         XCTAssertFalse((result.html ?? "").contains("src=\"data:image/"))
+
+        await fulfillment(of: [warmNotification], timeout: 1.0)
 
         for _ in 0..<20 {
             let snapshot = await recorder.snapshot()

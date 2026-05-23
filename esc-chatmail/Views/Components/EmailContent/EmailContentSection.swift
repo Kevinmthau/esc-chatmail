@@ -14,6 +14,7 @@ struct EmailContentSection: View {
     @State private var renderedPreview: EmailPreviewRenderModel?
     @State private var isLoading = true
     @State private var loadGeneration = 0
+    @State private var remoteImageFallbackReloadTask: Task<Void, Never>?
     private let previewPipeline = EmailPreviewPipeline.shared
 
     private var loadKey: String {
@@ -101,12 +102,29 @@ struct EmailContentSection: View {
             let generation = await beginLoad()
             await loadHTML(generation: generation)
         }
+        .onReceive(NotificationCenter.default.publisher(for: HTMLContentLoader.remoteImageAttachmentFallbackDidWarmNotification)) { notification in
+            reloadIfRemoteImageFallbackWarmed(notification)
+        }
+        .onDisappear {
+            remoteImageFallbackReloadTask?.cancel()
+            remoteImageFallbackReloadTask = nil
+        }
     }
 
     private func beginLoad() async -> Int {
         await MainActor.run {
             loadGeneration &+= 1
             isLoading = true
+            return loadGeneration
+        }
+    }
+
+    private func beginBackgroundReload() async -> Int {
+        await MainActor.run {
+            loadGeneration &+= 1
+            if renderedPreview == nil {
+                isLoading = true
+            }
             return loadGeneration
         }
     }
@@ -147,6 +165,19 @@ struct EmailContentSection: View {
 
             renderedPreview = preview
             isLoading = false
+        }
+    }
+
+    private func reloadIfRemoteImageFallbackWarmed(_ notification: Notification) {
+        guard let warmedMessageId = notification.userInfo?[HTMLContentLoader.remoteImageAttachmentFallbackMessageIdUserInfoKey] as? String,
+              warmedMessageId == message.id else {
+            return
+        }
+
+        remoteImageFallbackReloadTask?.cancel()
+        remoteImageFallbackReloadTask = Task {
+            let generation = await beginBackgroundReload()
+            await loadHTML(generation: generation)
         }
     }
 

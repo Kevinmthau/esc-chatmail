@@ -81,6 +81,8 @@ private enum PreparedLoadResult {
 /// Service for loading HTML content from various sources
 final class HTMLContentLoader {
     static let shared = HTMLContentLoader()
+    static let remoteImageAttachmentFallbackDidWarmNotification = Notification.Name("HTMLContentLoader.remoteImageAttachmentFallbackDidWarm")
+    static let remoteImageAttachmentFallbackMessageIdUserInfoKey = "messageId"
 
     private let contentHandler: HTMLContentHandler
     private let sanitizer: HTMLSanitizerService
@@ -987,6 +989,13 @@ final class HTMLContentLoader {
                     "Warmed attachment-style remote image fallback for message \(messageId)",
                     category: .ui
                 )
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: Self.remoteImageAttachmentFallbackDidWarmNotification,
+                        object: self,
+                        userInfo: [Self.remoteImageAttachmentFallbackMessageIdUserInfoKey: messageId]
+                    )
+                }
             }
         }
     }
