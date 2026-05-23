@@ -96,6 +96,54 @@ final class HTMLRemoteImageAttachmentFallbackTests: XCTestCase {
         XCTAssertEqual(snapshot.referers, ["https://brambles.golf/", "https://brambles.golf/"])
     }
 
+    func testPreviewInlineAttachmentStyleImages_boundsEagerSalesforceProbesAcrossDocument() async {
+        let recorder = RequestRecorder()
+        let imageData = onePixelPNG
+        let service = HTMLRemoteImageAttachmentFallback(
+            requestExecutor: { request in
+                await recorder.record(request)
+                try? await Task.sleep(nanoseconds: 300_000_000)
+
+                let response = HTTPURLResponse(
+                    url: request.url ?? URL(string: "https://d3t000000dywoeaq.file.force.com/file-asset-public/Asset")!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: [
+                        "Content-Type": "image/png",
+                        "Content-Disposition": "attachment; filename=\"asset.png\"",
+                        "Content-Length": "\(imageData.count)"
+                    ]
+                )!
+
+                if request.httpMethod == "HEAD" {
+                    return (Data(), response)
+                }
+
+                return (imageData, response)
+            },
+            previewEagerResolutionTimeout: 0.05
+        )
+
+        let imageTags = (0..<6)
+            .map { index in
+                #"<img src="https://d3t000000dywoeaq.file.force.com/file-asset-public/Asset\#(index)?oid=00D3t000000dywO">"#
+            }
+            .joined()
+        let html = "<html><body>\(imageTags)</body></html>"
+
+        let startedAt = Date()
+        let result = await service.previewInlineAttachmentStyleImages(
+            in: html,
+            senderEmail: "thomas@brambles.golf"
+        )
+        let elapsed = Date().timeIntervalSince(startedAt)
+
+        XCTAssertEqual(result.html, html)
+        XCTAssertTrue(result.hasPendingUpdates)
+        XCTAssertTrue(result.needsWarmup)
+        XCTAssertLessThan(elapsed, 0.25)
+    }
+
     func testPreviewInlineAttachmentStyleImages_keepsGenericDynamicImagesLazy() async {
         let service = HTMLRemoteImageAttachmentFallback { _ in
             XCTFail("Generic dynamic preview image URLs should warm in the background, not block preview rewriting")

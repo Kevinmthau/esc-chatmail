@@ -226,6 +226,7 @@ actor HTMLRemoteImageAttachmentFallback {
         var rewrittenURLs: [String: String] = [:]
         var hasPendingUpdates = false
         var needsWarmup = false
+        var eagerResolutionURLs: [String] = []
 
         for urlString in candidateURLs {
             let cacheKey = cacheKey(for: urlString, senderBaseURL: senderBaseURL)
@@ -248,11 +249,16 @@ actor HTMLRemoteImageAttachmentFallback {
                 continue
             }
 
-            switch await previewResolvedDataURL(
-                for: urlString,
-                senderBaseURL: senderBaseURL,
-                timeoutNanoseconds: previewEagerResolutionTimeoutNanoseconds
-            ) {
+            eagerResolutionURLs.append(urlString)
+        }
+
+        let eagerResults = await previewResolvedDataURLs(
+            for: eagerResolutionURLs,
+            senderBaseURL: senderBaseURL,
+            timeoutNanoseconds: previewEagerResolutionTimeoutNanoseconds
+        )
+        for urlString in eagerResolutionURLs {
+            switch eagerResults[urlString] ?? .pending {
             case .rewritten(let dataURL):
                 rewrittenURLs[urlString] = dataURL
             case .unchanged:
@@ -288,6 +294,36 @@ actor HTMLRemoteImageAttachmentFallback {
         guard !rewrittenURLs.isEmpty else { return html }
 
         return Self.rewritingHTML(html, matches: matches, replacements: rewrittenURLs)
+    }
+
+    private func previewResolvedDataURLs(
+        for urlStrings: [String],
+        senderBaseURL: URL?,
+        timeoutNanoseconds: UInt64
+    ) async -> [String: PreviewDataURLResolutionResult] {
+        guard !urlStrings.isEmpty else { return [:] }
+
+        return await withTaskGroup(
+            of: (String, PreviewDataURLResolutionResult).self,
+            returning: [String: PreviewDataURLResolutionResult].self
+        ) { group in
+            for urlString in urlStrings {
+                group.addTask { [self, senderBaseURL] in
+                    let result = await previewResolvedDataURL(
+                        for: urlString,
+                        senderBaseURL: senderBaseURL,
+                        timeoutNanoseconds: timeoutNanoseconds
+                    )
+                    return (urlString, result)
+                }
+            }
+
+            var results: [String: PreviewDataURLResolutionResult] = [:]
+            for await (urlString, result) in group {
+                results[urlString] = result
+            }
+            return results
+        }
     }
 
     private func previewResolvedDataURL(
