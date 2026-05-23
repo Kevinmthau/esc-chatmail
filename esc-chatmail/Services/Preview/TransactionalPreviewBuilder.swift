@@ -501,7 +501,7 @@ struct TransactionalPreviewBuilder {
 
         return normalizedAppStoreVersion(
             appStoreValue(
-                for: ["Version Number", "Bundle Version Short String", "Bundle Version", "Version"],
+                for: ["Version Number", "Bundle Version Short String", "Version"],
                 in: lines
             )
         )
@@ -512,7 +512,7 @@ struct TransactionalPreviewBuilder {
             return buildNumber
         }
 
-        return normalizedAppStoreBuildNumber(appStoreValue(for: ["Build Number", "Build"], in: lines))
+        return normalizedAppStoreBuildNumber(appStoreValue(for: ["Build Number", "Bundle Version", "Build"], in: lines))
     }
 
     private func testFlightBuildInfo(subject: String, lines: [String]) -> TestFlightBuildInfo? {
@@ -552,8 +552,7 @@ struct TransactionalPreviewBuilder {
     }
 
     private func appStoreProcessingStatus(from text: String) -> String? {
-        if text.contains("approved for beta testing") ||
-            text.contains("approved for testflight beta testing") {
+        if containsPositiveAppStoreBetaApproval(in: text) {
             return "Approved"
         }
 
@@ -570,6 +569,26 @@ struct TransactionalPreviewBuilder {
         }
 
         return nil
+    }
+
+    private func containsPositiveAppStoreBetaApproval(in text: String) -> Bool {
+        guard !containsNegatedAppStoreBetaApproval(in: text) else {
+            return false
+        }
+
+        return text.contains("approved for beta testing") ||
+            text.contains("approved for testflight beta testing")
+    }
+
+    private func containsNegatedAppStoreBetaApproval(in text: String) -> Bool {
+        let patterns = [
+            #"\bnot\s+(?:yet\s+)?(?:been\s+)?approved\s+for\s+(?:testflight\s+)?beta\s+testing\b"#,
+            #"\b(?:isn['’]?t|wasn['’]?t|hasn['’]?t|haven['’]?t)\s+(?:been\s+)?approved\s+for\s+(?:testflight\s+)?beta\s+testing\b"#
+        ]
+
+        return patterns.contains { pattern in
+            text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+        }
     }
 
     private func appStoreValue(for labels: [String], in lines: [String]) -> String? {

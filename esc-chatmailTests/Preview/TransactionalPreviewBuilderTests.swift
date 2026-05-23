@@ -178,6 +178,86 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
         XCTAssertFalse(result?.subtitle?.localizedCaseInsensitiveContains("hello") == true)
     }
 
+    func testBuildPreview_treatsAppStoreConnectBundleVersionAsBuildNumber() {
+        let subject = "Stickys (ios) has been approved for beta testing."
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table><tr><td>App Store Connect</td></tr></table>
+            <p>Build 1.0 (41) of your app has been approved for TestFlight beta testing.</p>
+            <table id="details">
+                <tr><td>App Name: Stickys</td></tr>
+                <tr><td>Bundle Version Short String: 1.0</td></tr>
+                <tr><td>Bundle Version: 41</td></tr>
+                <tr><td>Platform: iOS</td></tr>
+            </table>
+        </body>
+        </html>
+        """
+        let bodyText = """
+        App Store Connect
+
+        Build 1.0 (41) of your app has been approved for TestFlight beta testing.
+
+        App Name: Stickys
+        Bundle Version Short String: 1.0
+        Bundle Version: 41
+        Platform: iOS
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: bodyText,
+            senderName: nil,
+            senderEmail: "no_reply@email.apple.com",
+            subject: subject
+        )
+
+        XCTAssertEqual(result?.subtitle, "Stickys • Version 1.0 • Build 41")
+        XCTAssertEqual(result?.status, "Approved")
+    }
+
+    func testBuildPreview_doesNotMarkNegatedBetaReviewAsApproved() throws {
+        let subject = "Stickys (ios) has not been approved for beta testing."
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table><tr><td>App Store Connect</td></tr></table>
+            <p>Build 1.0 (41) of your app has not been approved for TestFlight beta testing.</p>
+            <table id="details">
+                <tr><td>App Name: Stickys</td></tr>
+                <tr><td>Bundle Version Short String: 1.0</td></tr>
+                <tr><td>Build Number: 41</td></tr>
+                <tr><td>Platform: iOS</td></tr>
+            </table>
+        </body>
+        </html>
+        """
+        let bodyText = """
+        App Store Connect
+
+        Build 1.0 (41) of your app has not been approved for TestFlight beta testing.
+
+        App Name: Stickys
+        Bundle Version Short String: 1.0
+        Build Number: 41
+        Platform: iOS
+        """
+
+        let result = try XCTUnwrap(sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: bodyText,
+            senderName: nil,
+            senderEmail: "no_reply@email.apple.com",
+            subject: subject
+        ))
+
+        XCTAssertEqual(result.sourceLabel, "App Store Connect")
+        XCTAssertFalse(result.status == "Approved")
+    }
+
     func testBuildPreview_extractsTestFlightAvailabilityMetadata() {
         let subject = "Inbox chat 1.0 (129) for iOS is now available to test."
         let html = """
