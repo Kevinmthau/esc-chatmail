@@ -407,6 +407,47 @@ final class VirtualScrollStateTests: XCTestCase {
         }
     }
 
+    func testLoadLatestWindowIfNeeded_refreshesWhenKnownTotalCountIsAhead() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        let initialIDs = Array(messages.suffix(4)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
+        }
+
+        let newMessage = makeMessage(
+            id: "virtual-scroll-persisted-latest",
+            date: 8,
+            conversation: conversation
+        )
+        try viewContext.save()
+
+        await state.loadLatestWindowIfNeeded(knownTotalCount: 9)
+
+        let expectedIDs = Array(messages.suffix(3)).map(\.objectID) + [newMessage.objectID]
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == expectedIDs &&
+                state.totalMessageCount == 9 &&
+                !state.isLoadingMore
+        }
+    }
+
     func testVisibleMessages_refreshWhenVisibleMessageReadStateChanges() async throws {
         let conversation = ConversationBuilder()
             .visible()

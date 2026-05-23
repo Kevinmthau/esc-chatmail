@@ -20,13 +20,14 @@ final class ChatMessagesCoordinator: ObservableObject {
     typealias BottomAnchorAction = @MainActor (BottomAnchorStep) -> Void
     typealias SenderGroupingLoader = ([String]) async -> [String: String]
     typealias AsyncAction = () async -> Void
+    typealias LatestWindowLoader = (Int?) async -> Void
     typealias Sleep = (UInt64) async -> Void
 
     @Published private(set) var isReadyToShow = false
     @Published private(set) var contactRefreshToken = 0
     @Published private(set) var senderGroupingKeysByEmail: [String: String] = [:]
 
-    private let loadLatestWindowIfNeeded: AsyncAction
+    private let loadLatestWindowIfNeeded: LatestWindowLoader
     private let markConversationAsReadIfNeeded: () -> Void
     private let initializeReplyingTo: (Message?) -> Void
     private let updateReplyingToIfNewSubject: (Message?) -> Void
@@ -47,8 +48,8 @@ final class ChatMessagesCoordinator: ObservableObject {
             try? await Task.sleep(nanoseconds: nanoseconds)
         }
     ) {
-        self.loadLatestWindowIfNeeded = {
-            await scrollState.loadLatestWindowIfNeeded()
+        self.loadLatestWindowIfNeeded = { knownTotalCount in
+            await scrollState.loadLatestWindowIfNeeded(knownTotalCount: knownTotalCount)
         }
         self.markConversationAsReadIfNeeded = {
             viewModel.markConversationAsReadIfNeeded()
@@ -77,7 +78,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     }
 
     init(
-        loadLatestWindowIfNeeded: @escaping AsyncAction,
+        loadLatestWindowIfNeeded: @escaping LatestWindowLoader,
         markConversationAsReadIfNeeded: @escaping () -> Void,
         initializeReplyingTo: @escaping (Message?) -> Void,
         updateReplyingToIfNewSubject: @escaping (Message?) -> Void,
@@ -162,6 +163,7 @@ final class ChatMessagesCoordinator: ObservableObject {
                 messageCount: newCount,
                 delay: UIConfig.contentChangeScrollDelay,
                 includeStabilizationStep: stabilizeBottomAnchor,
+                knownTotalCount: newCount,
                 scrollAction: scrollAction
             )
         }
@@ -320,6 +322,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         messageCount: Int,
         delay: TimeInterval,
         includeStabilizationStep: Bool = false,
+        knownTotalCount: Int? = nil,
         scrollAction: @escaping BottomAnchorAction
     ) {
         guard shouldUseBottomAnchoring(for: messageCount) else { return }
@@ -344,6 +347,7 @@ final class ChatMessagesCoordinator: ObservableObject {
 
         scheduleBottomAnchor(
             taskKey: TaskKey.bottomAnchor,
+            knownTotalCount: knownTotalCount,
             steps: steps,
             scrollAction: scrollAction
         )
@@ -351,11 +355,12 @@ final class ChatMessagesCoordinator: ObservableObject {
 
     private func scheduleBottomAnchor(
         taskKey: String,
+        knownTotalCount: Int? = nil,
         steps: [BottomAnchorStep],
         scrollAction: @escaping BottomAnchorAction
     ) {
         taskManager.run(taskKey) { [loadLatestWindowIfNeeded, sleep] in
-            await loadLatestWindowIfNeeded()
+            await loadLatestWindowIfNeeded(knownTotalCount)
 
             for step in steps {
                 if step.delay > 0 {

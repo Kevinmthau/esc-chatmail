@@ -38,7 +38,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
 
         let coordinator = ChatMessagesCoordinator(
-            loadLatestWindowIfNeeded: {
+            loadLatestWindowIfNeeded: { _ in
                 loadLatestWindowCount += 1
             },
             markConversationAsReadIfNeeded: {
@@ -157,7 +157,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
 
         let coordinator = ChatMessagesCoordinator(
-            loadLatestWindowIfNeeded: {},
+            loadLatestWindowIfNeeded: { _ in },
             markConversationAsReadIfNeeded: {},
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
@@ -202,7 +202,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         var groupingRequests: [[String]] = []
 
         let coordinator = ChatMessagesCoordinator(
-            loadLatestWindowIfNeeded: {},
+            loadLatestWindowIfNeeded: { _ in },
             markConversationAsReadIfNeeded: {},
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
@@ -262,7 +262,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         var groupingRequests: [[String]] = []
 
         let coordinator = ChatMessagesCoordinator(
-            loadLatestWindowIfNeeded: {},
+            loadLatestWindowIfNeeded: { _ in },
             markConversationAsReadIfNeeded: {},
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
@@ -307,13 +307,15 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         let rows = messages.map { ChatMessageRowModelMapper.map($0) }
 
         var loadLatestWindowCount = 0
+        var latestWindowKnownCounts: [Int?] = []
         var updatedReplyTargets: [String?] = []
         var loadResolvedDisplayNameCount = 0
         var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
 
         let coordinator = ChatMessagesCoordinator(
-            loadLatestWindowIfNeeded: {
+            loadLatestWindowIfNeeded: { knownTotalCount in
                 loadLatestWindowCount += 1
+                latestWindowKnownCounts.append(knownTotalCount)
             },
             markConversationAsReadIfNeeded: {},
             initializeReplyingTo: { _ in },
@@ -362,6 +364,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
 
         XCTAssertEqual(loadLatestWindowCount, 1)
+        XCTAssertEqual(latestWindowKnownCounts, [2])
         XCTAssertEqual(updatedReplyTargets, [messages.last?.id])
         XCTAssertEqual(loadResolvedDisplayNameCount, 1)
         XCTAssertEqual(
@@ -387,7 +390,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
 
         let coordinator = ChatMessagesCoordinator(
-            loadLatestWindowIfNeeded: {
+            loadLatestWindowIfNeeded: { _ in
                 loadLatestWindowCount += 1
             },
             markConversationAsReadIfNeeded: {},
@@ -452,7 +455,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
 
         let coordinator = ChatMessagesCoordinator(
-            loadLatestWindowIfNeeded: {
+            loadLatestWindowIfNeeded: { _ in
                 loadLatestWindowCount += 1
             },
             markConversationAsReadIfNeeded: {},
@@ -553,7 +556,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
 
         let coordinator = ChatMessagesCoordinator(
-            loadLatestWindowIfNeeded: {},
+            loadLatestWindowIfNeeded: { _ in },
             markConversationAsReadIfNeeded: {},
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
@@ -633,7 +636,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         var groupingRequests: [[String]] = []
 
         let coordinator = ChatMessagesCoordinator(
-            loadLatestWindowIfNeeded: {},
+            loadLatestWindowIfNeeded: { _ in },
             markConversationAsReadIfNeeded: {},
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },

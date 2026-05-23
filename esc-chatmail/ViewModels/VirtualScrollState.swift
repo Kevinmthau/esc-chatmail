@@ -158,8 +158,12 @@ final class VirtualScrollState: ObservableObject {
         }
     }
 
-    func loadLatestWindowIfNeeded() async {
-        guard !isShowingLatestWindow || visibleMessages.isEmpty || hasPendingInsertedMessagesInConversation else {
+    func loadLatestWindowIfNeeded(knownTotalCount: Int? = nil) async {
+        let knownCountIsAhead = knownTotalCount.map { $0 > totalMessageCount } ?? false
+        guard knownCountIsAhead ||
+            !isShowingLatestWindow ||
+            visibleMessages.isEmpty ||
+            hasPendingInsertedMessagesInConversation else {
             return
         }
 
