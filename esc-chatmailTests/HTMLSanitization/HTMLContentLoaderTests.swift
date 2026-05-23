@@ -1465,7 +1465,7 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertTrue(snapshot.methods.isEmpty)
     }
 
-    func testLoadContent_warmsAttachmentStyleRemoteImagesAfterInitialRender() async throws {
+    func testLoadContent_previewRewritesSalesforceAttachmentImagesOnFirstRender() async throws {
         let messageId = "html-loader-remote-attachment-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }
 
@@ -1502,6 +1502,121 @@ final class HTMLContentLoaderTests: XCTestCase {
             remoteImageAttachmentFallback: remoteImageFallback
         )
 
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <img src="https://d3t000000dywoeaq.file.force.com/file-asset-public/Brambles_Banner?oid=00D3t000000dywO" alt="Banner">
+          <p>Visible body text</p>
+        </body>
+        </html>
+        """
+        _ = contentHandler.saveHTML(html, for: messageId)
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            senderEmail: "thomas@brambles.golf",
+            isDarkMode: false,
+            cleanupMode: .none
+        )
+
+        XCTAssertNotNil(result.html)
+        XCTAssertTrue((result.html ?? "").contains("Visible body text"))
+        XCTAssertTrue((result.html ?? "").contains("src=\"data:image/"))
+        XCTAssertTrue((result.html ?? "").contains("background-color: #f2f2f7"))
+        XCTAssertFalse((result.html ?? "").contains("https://d3t000000dywoeaq.file.force.com/file-asset-public/Brambles_Banner?oid=00D3t000000dywO"))
+
+        let snapshot = await recorder.snapshot()
+        XCTAssertEqual(snapshot.methods, ["HEAD", "GET"])
+        XCTAssertEqual(snapshot.referers, ["https://brambles.golf/", "https://brambles.golf/"])
+    }
+
+    func testLoadContent_previewDoesNotProbeOrdinaryImageExtensions() async {
+        let messageId = "html-loader-normal-image-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let remoteImageFallback = HTMLRemoteImageAttachmentFallback { _ in
+            XCTFail("Ordinary image URLs should not be probed during preview preparation")
+            return (
+                Data(),
+                HTTPURLResponse(url: URL(string: "https://cdn.example.com/banner.png")!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        }
+
+        loader = HTMLContentLoader(
+            contentHandler: contentHandler,
+            sanitizer: .shared,
+            remoteImageAttachmentFallback: remoteImageFallback
+        )
+
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <img src="https://cdn.example.com/banner.png" alt="Banner">
+          <p>Visible body text</p>
+        </body>
+        </html>
+        """
+        _ = contentHandler.saveHTML(html, for: messageId)
+
+        let result = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            senderEmail: "sender@example.com",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .preview
+        )
+
+        XCTAssertNotNil(result.html)
+        XCTAssertTrue((result.html ?? "").contains("Visible body text"))
+        XCTAssertTrue((result.html ?? "").contains("https://cdn.example.com/banner.png"))
+        XCTAssertFalse((result.html ?? "").contains("src=\"data:image/"))
+    }
+
+    func testLoadContent_slowPreviewSalesforceRewriteFallsBackAndWarms() async throws {
+        let messageId = "html-loader-slow-salesforce-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let recorder = RequestRecorder()
+        let imageData = onePixelPNG
+        let remoteImageFallback = HTMLRemoteImageAttachmentFallback(
+            requestExecutor: { request in
+                await recorder.record(request)
+                try? await Task.sleep(nanoseconds: 120_000_000)
+
+                let headers = [
+                    "Content-Type": "image/png",
+                    "Content-Disposition": "attachment; filename=\"Brambles_Banner.png\"",
+                    "Content-Length": "\(imageData.count)"
+                ]
+
+                let response = try XCTUnwrap(
+                    HTTPURLResponse(
+                        url: try XCTUnwrap(request.url),
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: headers
+                    )
+                )
+
+                if request.httpMethod == "HEAD" {
+                    return (Data(), response)
+                }
+
+                return (imageData, response)
+            },
+            previewEagerResolutionTimeout: 0.02
+        )
+
+        loader = HTMLContentLoader(
+            contentHandler: contentHandler,
+            sanitizer: .shared,
+            remoteImageAttachmentFallback: remoteImageFallback
+        )
+
         let warmNotification = expectation(description: "Remote image fallback warm notification")
         let observer = NotificationCenter.default.addObserver(
             forName: HTMLContentLoader.remoteImageAttachmentFallbackDidWarmNotification,
@@ -1526,27 +1641,21 @@ final class HTMLContentLoaderTests: XCTestCase {
         """
         _ = contentHandler.saveHTML(html, for: messageId)
 
-        let result = await loader.loadContent(
+        let first = await loader.loadContent(
             messageId: messageId,
             bodyStorageURI: nil,
             senderEmail: "thomas@brambles.golf",
             isDarkMode: false,
-            cleanupMode: .none
+            cleanupMode: .none,
+            displayPurpose: .preview
         )
 
-        XCTAssertNotNil(result.html)
-        XCTAssertTrue((result.html ?? "").contains("Visible body text"))
-        XCTAssertFalse((result.html ?? "").contains("src=\"data:image/"))
+        XCTAssertNotNil(first.html)
+        XCTAssertTrue((first.html ?? "").contains("Visible body text"))
+        XCTAssertTrue((first.html ?? "").contains("https://d3t000000dywoeaq.file.force.com/file-asset-public/Brambles_Banner?oid=00D3t000000dywO"))
+        XCTAssertFalse((first.html ?? "").contains("src=\"data:image/"))
 
         await fulfillment(of: [warmNotification], timeout: 1.0)
-
-        for _ in 0..<20 {
-            let snapshot = await recorder.snapshot()
-            if snapshot.methods == ["HEAD", "GET"] {
-                break
-            }
-            try? await Task.sleep(nanoseconds: 20_000_000)
-        }
 
         var warmedHTML: String?
         for _ in 0..<20 {
@@ -1555,7 +1664,8 @@ final class HTMLContentLoaderTests: XCTestCase {
                 bodyStorageURI: nil,
                 senderEmail: "thomas@brambles.golf",
                 isDarkMode: false,
-                cleanupMode: .none
+                cleanupMode: .none,
+                displayPurpose: .preview
             )
 
             if let html = warmedResult.html,

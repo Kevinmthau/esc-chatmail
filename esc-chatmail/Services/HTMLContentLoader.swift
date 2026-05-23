@@ -947,7 +947,7 @@ final class HTMLContentLoader {
             )
             shouldCache = true
         case .preview:
-            let cachedRewrite = await remoteImageAttachmentFallback.cachedInlineAttachmentStyleImages(
+            let cachedRewrite = await remoteImageAttachmentFallback.previewInlineAttachmentStyleImages(
                 in: sanitizedHTML,
                 senderEmail: senderEmail
             )

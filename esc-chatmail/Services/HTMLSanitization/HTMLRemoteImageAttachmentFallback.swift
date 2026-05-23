@@ -26,6 +26,36 @@ actor HTMLRemoteImageAttachmentFallback {
         case transientFailure(String)
     }
 
+    private enum FinalizedDataURLResolutionResult: Sendable {
+        case rewritten(String)
+        case unchanged
+        case transientFailure
+    }
+
+    private enum PreviewDataURLResolutionResult: Sendable {
+        case rewritten(String)
+        case unchanged
+        case pending
+    }
+
+    private final class PreviewResolutionContinuation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<PreviewDataURLResolutionResult, Never>?
+
+        init(_ continuation: CheckedContinuation<PreviewDataURLResolutionResult, Never>) {
+            self.continuation = continuation
+        }
+
+        func resume(returning result: PreviewDataURLResolutionResult) {
+            lock.lock()
+            let continuation = self.continuation
+            self.continuation = nil
+            lock.unlock()
+
+            continuation?.resume(returning: result)
+        }
+    }
+
     private struct CostBoundedStringCache: Sendable {
         private var values: [String: String] = [:]
         private var costs: [String: Int] = [:]
@@ -122,19 +152,22 @@ actor HTMLRemoteImageAttachmentFallback {
     private var inFlightResolutions: [String: Task<DataURLResolutionResult, Never>] = [:]
     private let maxCandidatesPerDocument = 6
     private let maxInlineBytes = 2 * 1024 * 1024
+    private let previewEagerResolutionTimeoutNanoseconds: UInt64
 
     init(
         requestExecutor: @escaping RequestExecutor = { request in
             try await SSRFGuardingURLSession.shared.data(for: request)
         },
         rewrittenDataURLCacheMaxEntries: Int = 32,
-        rewrittenDataURLCacheMaxBytes: Int = 8 * 1024 * 1024
+        rewrittenDataURLCacheMaxBytes: Int = 8 * 1024 * 1024,
+        previewEagerResolutionTimeout: TimeInterval = 0.3
     ) {
         self.requestExecutor = requestExecutor
         self.rewrittenDataURLCache = CostBoundedStringCache(
             maxEntries: rewrittenDataURLCacheMaxEntries,
             maxTotalCost: rewrittenDataURLCacheMaxBytes
         )
+        self.previewEagerResolutionTimeoutNanoseconds = UInt64(max(0, previewEagerResolutionTimeout) * 1_000_000_000)
     }
 
     func cachedInlineAttachmentStyleImages(in html: String, senderEmail: String?) -> CachedRewriteResult {
@@ -178,6 +211,65 @@ actor HTMLRemoteImageAttachmentFallback {
         )
     }
 
+    func previewInlineAttachmentStyleImages(in html: String, senderEmail: String?) async -> CachedRewriteResult {
+        let matches = Self.imageSourceMatches(in: html)
+        guard !matches.isEmpty else {
+            return CachedRewriteResult(html: html, hasPendingUpdates: false, needsWarmup: false)
+        }
+
+        let senderBaseURL = EmailSenderBaseURLResolver.baseURL(from: senderEmail)
+        let candidateURLs = eligibleCandidateURLs(from: matches)
+        guard !candidateURLs.isEmpty else {
+            return CachedRewriteResult(html: html, hasPendingUpdates: false, needsWarmup: false)
+        }
+
+        var rewrittenURLs: [String: String] = [:]
+        var hasPendingUpdates = false
+        var needsWarmup = false
+
+        for urlString in candidateURLs {
+            let cacheKey = cacheKey(for: urlString, senderBaseURL: senderBaseURL)
+
+            if let cached = rewrittenDataURLCache.value(forKey: cacheKey) {
+                rewrittenURLs[urlString] = cached
+                continue
+            }
+
+            if unchangedURLCache.contains(cacheKey) {
+                continue
+            }
+
+            guard let url = URL(string: urlString),
+                  Self.isHighConfidenceAttachmentImageURL(url) else {
+                hasPendingUpdates = true
+                if inFlightResolutions[cacheKey] == nil {
+                    needsWarmup = true
+                }
+                continue
+            }
+
+            switch await previewResolvedDataURL(
+                for: urlString,
+                senderBaseURL: senderBaseURL,
+                timeoutNanoseconds: previewEagerResolutionTimeoutNanoseconds
+            ) {
+            case .rewritten(let dataURL):
+                rewrittenURLs[urlString] = dataURL
+            case .unchanged:
+                continue
+            case .pending:
+                hasPendingUpdates = true
+                needsWarmup = true
+            }
+        }
+
+        return CachedRewriteResult(
+            html: Self.rewritingHTML(html, matches: matches, replacements: rewrittenURLs),
+            hasPendingUpdates: hasPendingUpdates,
+            needsWarmup: needsWarmup
+        )
+    }
+
     func inlineAttachmentStyleImages(in html: String, senderEmail: String?) async -> String {
         let matches = Self.imageSourceMatches(in: html)
         guard !matches.isEmpty else { return html }
@@ -196,6 +288,46 @@ actor HTMLRemoteImageAttachmentFallback {
         guard !rewrittenURLs.isEmpty else { return html }
 
         return Self.rewritingHTML(html, matches: matches, replacements: rewrittenURLs)
+    }
+
+    private func previewResolvedDataURL(
+        for urlString: String,
+        senderBaseURL: URL?,
+        timeoutNanoseconds: UInt64
+    ) async -> PreviewDataURLResolutionResult {
+        let cacheKey = cacheKey(for: urlString, senderBaseURL: senderBaseURL)
+        if let cached = rewrittenDataURLCache.value(forKey: cacheKey) {
+            return .rewritten(cached)
+        }
+        if unchangedURLCache.contains(cacheKey) {
+            return .unchanged
+        }
+
+        guard let task = dataURLResolutionTask(for: urlString, senderBaseURL: senderBaseURL, cacheKey: cacheKey) else {
+            return .unchanged
+        }
+
+        return await withCheckedContinuation { continuation in
+            let gate = PreviewResolutionContinuation(continuation)
+
+            Task { [self] in
+                let result = await task.value
+                let finalized = await finalizeResolution(result, cacheKey: cacheKey)
+                switch finalized {
+                case .rewritten(let dataURL):
+                    gate.resume(returning: .rewritten(dataURL))
+                case .unchanged:
+                    gate.resume(returning: .unchanged)
+                case .transientFailure:
+                    gate.resume(returning: .pending)
+                }
+            }
+
+            Task {
+                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                gate.resume(returning: .pending)
+            }
+        }
     }
 
     private func eligibleCandidateURLs(from matches: [ImageSourceMatch]) -> [String] {
@@ -226,8 +358,26 @@ actor HTMLRemoteImageAttachmentFallback {
         if unchangedURLCache.contains(cacheKey) {
             return nil
         }
+
+        guard let task = dataURLResolutionTask(for: urlString, senderBaseURL: senderBaseURL, cacheKey: cacheKey) else {
+            return nil
+        }
+
+        switch await finalizeResolution(task, cacheKey: cacheKey) {
+        case .rewritten(let dataURL):
+            return dataURL
+        case .unchanged, .transientFailure:
+            return nil
+        }
+    }
+
+    private func dataURLResolutionTask(
+        for urlString: String,
+        senderBaseURL: URL?,
+        cacheKey: String
+    ) -> Task<DataURLResolutionResult, Never>? {
         if let inFlightTask = inFlightResolutions[cacheKey] {
-            return await finalizeResolution(inFlightTask, cacheKey: cacheKey)
+            return inFlightTask
         }
 
         guard let url = URL(string: urlString) else {
@@ -246,25 +396,34 @@ actor HTMLRemoteImageAttachmentFallback {
             )
         }
         inFlightResolutions[cacheKey] = task
-
-        return await finalizeResolution(task, cacheKey: cacheKey)
+        return task
     }
 
-    private func finalizeResolution(_ task: Task<DataURLResolutionResult, Never>, cacheKey: String) async -> String? {
+    private func finalizeResolution(
+        _ task: Task<DataURLResolutionResult, Never>,
+        cacheKey: String
+    ) async -> FinalizedDataURLResolutionResult {
         let result = await task.value
+        return finalizeResolution(result, cacheKey: cacheKey)
+    }
+
+    private func finalizeResolution(
+        _ result: DataURLResolutionResult,
+        cacheKey: String
+    ) -> FinalizedDataURLResolutionResult {
         inFlightResolutions[cacheKey] = nil
 
         switch result {
         case .rewritten(let dataURL):
             rewrittenDataURLCache.insert(dataURL, forKey: cacheKey, cost: dataURL.utf8.count)
             unchangedURLCache.remove(cacheKey)
-            return dataURL
+            return .rewritten(dataURL)
         case .unchanged:
             unchangedURLCache.insert(cacheKey)
-            return nil
+            return .unchanged
         case .transientFailure(let description):
             Log.debug("Attachment-style remote image fallback failed: \(description)", category: .ui)
-            return nil
+            return .transientFailure
         }
     }
 
@@ -464,6 +623,12 @@ actor HTMLRemoteImageAttachmentFallback {
         }
 
         return false
+    }
+
+    private static func isHighConfidenceAttachmentImageURL(_ url: URL) -> Bool {
+        let host = url.host?.lowercased() ?? ""
+        let path = url.path.lowercased()
+        return host.hasSuffix("file.force.com") || path.contains("/file-asset-public/")
     }
 
     private static func imageSourceMatches(in html: String) -> [ImageSourceMatch] {

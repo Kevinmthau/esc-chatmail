@@ -49,6 +49,70 @@ final class HTMLRemoteImageAttachmentFallbackTests: XCTestCase {
         XCTAssertEqual(snapshot.referers, ["https://brambles.golf/", "https://brambles.golf/"])
     }
 
+    func testPreviewInlineAttachmentStyleImages_eagerlyRewritesSalesforceStyleAttachmentImage() async throws {
+        let recorder = RequestRecorder()
+        let imageData = onePixelPNG
+        let service = HTMLRemoteImageAttachmentFallback { request in
+            await recorder.record(request)
+
+            let headers: [String: String] = [
+                "Content-Type": "image/png",
+                "Content-Disposition": "attachment; filename=\"Brambles_Banner.png\"",
+                "Content-Length": "\(imageData.count)"
+            ]
+
+            let response = try XCTUnwrap(
+                HTTPURLResponse(
+                    url: try XCTUnwrap(request.url),
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: headers
+                )
+            )
+
+            if request.httpMethod == "HEAD" {
+                return (Data(), response)
+            }
+
+            return (imageData, response)
+        }
+
+        let html = """
+        <html><body><img src="https://d3t000000dywoeaq.file.force.com/file-asset-public/Brambles_Banner?oid=00D3t000000dywO"></body></html>
+        """
+
+        let result = await service.previewInlineAttachmentStyleImages(
+            in: html,
+            senderEmail: "thomas@brambles.golf"
+        )
+
+        XCTAssertTrue(result.html.contains("src=\"data:image/"))
+        XCTAssertFalse(result.html.contains("https://d3t000000dywoeaq.file.force.com/file-asset-public/Brambles_Banner?oid=00D3t000000dywO"))
+        XCTAssertFalse(result.hasPendingUpdates)
+        XCTAssertFalse(result.needsWarmup)
+
+        let snapshot = await recorder.snapshot()
+        XCTAssertEqual(snapshot.methods, ["HEAD", "GET"])
+        XCTAssertEqual(snapshot.referers, ["https://brambles.golf/", "https://brambles.golf/"])
+    }
+
+    func testPreviewInlineAttachmentStyleImages_keepsGenericDynamicImagesLazy() async {
+        let service = HTMLRemoteImageAttachmentFallback { _ in
+            XCTFail("Generic dynamic preview image URLs should warm in the background, not block preview rewriting")
+            return (
+                Data(),
+                HTTPURLResponse(url: URL(string: "https://cdn.example.com/open.php")!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        }
+
+        let html = #"<img src="https://cdn.example.com/open.php?id=hero" alt="hero">"#
+        let result = await service.previewInlineAttachmentStyleImages(in: html, senderEmail: "sender@example.com")
+
+        XCTAssertEqual(result.html, html)
+        XCTAssertTrue(result.hasPendingUpdates)
+        XCTAssertTrue(result.needsWarmup)
+    }
+
     func testInlineAttachmentStyleImages_leavesNormalFileExtensionImagesUntouched() async {
         let service = HTMLRemoteImageAttachmentFallback { _ in
             XCTFail("Normal image URLs should not be probed by the fallback")
