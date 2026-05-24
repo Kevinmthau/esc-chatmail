@@ -437,11 +437,15 @@ extension GmailSendService {
 
     @MainActor
     private func optimisticConversationDisplayName(for recipients: [String]) -> String {
-        PersonDisplayNameResolver.conversationDisplayName(
+        let myEmailKey = EmailNormalizer.normalize(authSession.userEmail ?? "")
+        let nonSelfRecipients = recipients.filter { recipient in
+            EmailNormalizer.normalize(recipient) != myEmailKey
+        }
+        return PersonDisplayNameResolver.conversationDisplayName(
             realNames: [],
-            totalParticipantCount: recipients.count,
+            totalParticipantCount: nonSelfRecipients.count,
             fallback: nil,
-            participantEmails: recipients
+            participantEmails: nonSelfRecipients
         )
     }
 

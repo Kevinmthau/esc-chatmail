@@ -30,8 +30,24 @@ enum PersonDisplayNameResolver {
         unknownContactName
     }
 
-    static func fallbackConversationName(participantCount: Int) -> String {
-        participantCount > 1 ? "\(participantCount) Unknown Contacts" : unknownContactName
+    static func fallbackConversationName(participantEmails: [String]) -> String {
+        var seenKeys = Set<String>()
+        var unique: [String] = []
+        for email in participantEmails {
+            let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = EmailNormalizer.normalize(trimmed)
+            guard !key.isEmpty, seenKeys.insert(key).inserted else { continue }
+            unique.append(trimmed)
+        }
+        guard !unique.isEmpty else { return unknownContactName }
+        unique.sort { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        let maxVisible = 3
+        guard unique.count > maxVisible else {
+            return unique.joined(separator: ", ")
+        }
+        let visible = unique.prefix(maxVisible).joined(separator: ", ")
+        return "\(visible) +\(unique.count - maxVisible)"
     }
 
     static func senderDisplayName(
@@ -79,7 +95,7 @@ enum PersonDisplayNameResolver {
         let names = uniqueNames(realNames)
         if names.isEmpty {
             return sanitizedConversationDisplayNameHint(fallback, participantEmails: participantEmails)
-                ?? fallbackConversationName(participantCount: totalParticipantCount)
+                ?? fallbackConversationName(participantEmails: participantEmails)
         }
 
         let baseName = DisplayNameFormatter.formatGroupNames(names)
@@ -97,7 +113,7 @@ enum PersonDisplayNameResolver {
         let names = uniqueNames(realNames)
         if names.isEmpty {
             return sanitizedConversationDisplayNameHint(fallback, participantEmails: participantEmails)
-                ?? fallbackConversationName(participantCount: totalParticipantCount)
+                ?? fallbackConversationName(participantEmails: participantEmails)
         }
 
         return DisplayNameFormatter.formatForRow(

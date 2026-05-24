@@ -37,7 +37,7 @@ struct OptimizedConversationRow: View {
             snapshot.displayNameHint,
             participantEmails: nonSelfParticipantEmails
         ) ?? PersonDisplayNameResolver.fallbackConversationName(
-            participantCount: nonSelfParticipantEmails.count
+            participantEmails: nonSelfParticipantEmails
         )
         self.fallbackDisplayName = fallbackDisplayName
         self._displayName = State(initialValue: fallbackDisplayName)

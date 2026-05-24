@@ -124,7 +124,7 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(conversation.snippet, "Latest outgoing")
     }
 
-    func testUpdateDisplayNameOnly_noRealNameUsesUnknownContact() throws {
+    func testUpdateDisplayNameOnly_noRealNameUsesEmailAddress() throws {
         let conversation = ConversationBuilder()
             .withDisplayName("John Smith")
             .build(in: context)
@@ -137,7 +137,7 @@ final class ConversationRollupUpdaterTests: XCTestCase {
 
         updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
 
-        XCTAssertEqual(conversation.displayName, "Unknown Contact")
+        XCTAssertEqual(conversation.displayName, "john.smith@example.com")
     }
 
     func testUpdateDisplayNameOnly_usesExplicitHeaderDisplayName() throws {
@@ -237,7 +237,7 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(conversation.displayName, "Sarah Connor +1")
     }
 
-    func testUpdateDisplayNameOnly_groupWithNoRealNamesUsesSafeCount() throws {
+    func testUpdateDisplayNameOnly_groupWithNoRealNamesUsesEmailAddresses() throws {
         let conversation = ConversationBuilder()
             .withDisplayName("John & Jane")
             .build(in: context)
@@ -255,7 +255,7 @@ final class ConversationRollupUpdaterTests: XCTestCase {
 
         updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
 
-        XCTAssertEqual(conversation.displayName, "2 Unknown Contacts")
+        XCTAssertEqual(conversation.displayName, "jane.doe@example.com, john.smith@example.com")
     }
 
     @discardableResult
