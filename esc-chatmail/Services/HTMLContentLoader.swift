@@ -937,9 +937,11 @@ final class HTMLContentLoader {
             // Full-message rendering should avoid handing risky WEBP/AVIF URLs to WKWebView on the
             // first open. Resolve the attachment-style fallback eagerly so the original reader is
             // closer to Apple Mail behavior instead of showing broken images and decoder errors.
+            // Cap each candidate so a single stalled CDN host can't pin the reader on "Loading…".
             let originalSafeHTML = await remoteImageAttachmentFallback.inlineAttachmentStyleImages(
                 in: sanitizedHTML,
-                senderEmail: senderEmail
+                senderEmail: senderEmail,
+                perURLTimeoutNanoseconds: HTMLRemoteImageAttachmentFallback.originalViewPerURLTimeoutNanoseconds
             )
             rewrittenHTML = sanitizer.sanitize(
                 originalSafeHTML,

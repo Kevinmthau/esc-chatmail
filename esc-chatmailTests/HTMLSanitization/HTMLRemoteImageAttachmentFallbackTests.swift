@@ -331,6 +331,141 @@ final class HTMLRemoteImageAttachmentFallbackTests: XCTestCase {
 
         XCTAssertEqual(firstURLRequests, ["HEAD", "GET", "HEAD", "GET"])
     }
+
+    func testInlineAttachmentStyleImages_returnsWithinBudgetWhenRequestExecutorHangs() async {
+        let service = HTMLRemoteImageAttachmentFallback { _ in
+            try? await Task.sleep(nanoseconds: 60_000_000_000)
+            throw URLError(.timedOut)
+        }
+
+        let html = #"<img src="https://cdn.example.com/open.php?id=hero">"#
+
+        let startedAt = Date()
+        let result = await service.inlineAttachmentStyleImages(
+            in: html,
+            senderEmail: "sender@example.com",
+            perURLTimeoutNanoseconds: 500_000_000
+        )
+        let elapsed = Date().timeIntervalSince(startedAt)
+
+        XCTAssertEqual(result, html)
+        XCTAssertLessThan(elapsed, 2.0)
+    }
+
+    func testInlineAttachmentStyleImages_resolvesCandidateURLsInParallel() async {
+        let perRequestDelayNanoseconds: UInt64 = 400_000_000
+        let imageData = onePixelPNG
+        let service = HTMLRemoteImageAttachmentFallback { request in
+            try? await Task.sleep(nanoseconds: perRequestDelayNanoseconds)
+
+            let response = HTTPURLResponse(
+                url: request.url ?? URL(string: "https://d3t000000dywoeaq.file.force.com/file-asset-public/Asset")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [
+                    "Content-Type": "image/png",
+                    "Content-Disposition": "attachment; filename=\"asset.png\"",
+                    "Content-Length": "\(imageData.count)"
+                ]
+            )!
+
+            if request.httpMethod == "HEAD" {
+                return (Data(), response)
+            }
+
+            return (imageData, response)
+        }
+
+        let imageTags = (0..<6)
+            .map { index in
+                #"<img src="https://d3t000000dywoeaq.file.force.com/file-asset-public/Asset\#(index)?oid=00D3t000000dywO">"#
+            }
+            .joined()
+        let html = "<html><body>\(imageTags)</body></html>"
+
+        let startedAt = Date()
+        let result = await service.inlineAttachmentStyleImages(
+            in: html,
+            senderEmail: "thomas@brambles.golf"
+        )
+        let elapsed = Date().timeIntervalSince(startedAt)
+
+        XCTAssertEqual(result.components(separatedBy: "src=\"data:image/").count - 1, 6)
+
+        // Sequential would take 6 * (HEAD + GET) = 12 * 0.4s = ~4.8s. Parallel pairs HEAD+GET per
+        // URL ≈ 0.8s wall-clock. Allow generous headroom for CI scheduling jitter.
+        XCTAssertLessThan(elapsed, 2.5)
+    }
+
+    func testInlineAttachmentStyleImages_callerTimeoutDoesNotPoisonCache() async {
+        let gate = SlowRequestGate()
+        let imageData = onePixelPNG
+
+        let service = HTMLRemoteImageAttachmentFallback { request in
+            await gate.waitIfNeeded()
+
+            let response = HTTPURLResponse(
+                url: request.url ?? URL(string: "https://cdn.example.com/open.php?id=hero")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [
+                    "Content-Type": "image/png",
+                    "Content-Disposition": "attachment; filename=\"hero.png\"",
+                    "Content-Length": "\(imageData.count)"
+                ]
+            )!
+
+            if request.httpMethod == "HEAD" {
+                return (Data(), response)
+            }
+
+            return (imageData, response)
+        }
+
+        let html = #"<img src="https://cdn.example.com/open.php?id=hero">"#
+
+        // First call: tight per-URL budget while the executor is gated — the caller times out and
+        // returns the unrewritten HTML. The cached resolution task is still running in the background.
+        let timedOut = await service.inlineAttachmentStyleImages(
+            in: html,
+            senderEmail: "sender@example.com",
+            perURLTimeoutNanoseconds: 100_000_000
+        )
+        XCTAssertEqual(timedOut, html)
+
+        // Release the executor and let the in-flight task drain into the cache.
+        await gate.open()
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        // Second call: the URL must still resolve. If the first caller had poisoned the cache by
+        // recording a transient failure, this call would return unchanged HTML.
+        let resolved = await service.inlineAttachmentStyleImages(
+            in: html,
+            senderEmail: "sender@example.com"
+        )
+        XCTAssertTrue(resolved.contains("src=\"data:image/"))
+    }
+}
+
+private actor SlowRequestGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func waitIfNeeded() async {
+        if isOpen { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func open() {
+        isOpen = true
+        let pending = waiters
+        waiters.removeAll()
+        for continuation in pending {
+            continuation.resume()
+        }
+    }
 }
 
 private actor RequestRecorder {

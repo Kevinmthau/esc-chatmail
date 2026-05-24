@@ -38,15 +38,15 @@ actor HTMLRemoteImageAttachmentFallback {
         case pending
     }
 
-    private final class PreviewResolutionContinuation: @unchecked Sendable {
+    private final class ResolutionGate<T: Sendable>: @unchecked Sendable {
         private let lock = NSLock()
-        private var continuation: CheckedContinuation<PreviewDataURLResolutionResult, Never>?
+        private var continuation: CheckedContinuation<T, Never>?
 
-        init(_ continuation: CheckedContinuation<PreviewDataURLResolutionResult, Never>) {
+        init(_ continuation: CheckedContinuation<T, Never>) {
             self.continuation = continuation
         }
 
-        func resume(returning result: PreviewDataURLResolutionResult) {
+        func resume(returning result: T) {
             lock.lock()
             let continuation = self.continuation
             self.continuation = nil
@@ -145,6 +145,11 @@ actor HTMLRemoteImageAttachmentFallback {
 
     private static let mobileUserAgent =
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
+
+    /// Per-URL budget the full original-email reader uses when resolving remote image fallbacks.
+    /// Combined with parallel fan-out, this bounds the whole pass to ~this duration regardless of
+    /// how many candidate URLs the sender included.
+    static let originalViewPerURLTimeoutNanoseconds: UInt64 = 2_500_000_000
 
     private let requestExecutor: RequestExecutor
     private var rewrittenDataURLCache: CostBoundedStringCache
@@ -276,7 +281,11 @@ actor HTMLRemoteImageAttachmentFallback {
         )
     }
 
-    func inlineAttachmentStyleImages(in html: String, senderEmail: String?) async -> String {
+    func inlineAttachmentStyleImages(
+        in html: String,
+        senderEmail: String?,
+        perURLTimeoutNanoseconds: UInt64? = nil
+    ) async -> String {
         let matches = Self.imageSourceMatches(in: html)
         guard !matches.isEmpty else { return html }
 
@@ -284,16 +293,43 @@ actor HTMLRemoteImageAttachmentFallback {
         let candidateURLs = eligibleCandidateURLs(from: matches)
         guard !candidateURLs.isEmpty else { return html }
 
-        var rewrittenURLs: [String: String] = [:]
-        for url in candidateURLs {
-            if let dataURL = await resolvedDataURL(for: url, senderBaseURL: senderBaseURL) {
-                rewrittenURLs[url] = dataURL
-            }
-        }
+        let rewrittenURLs = await resolveCandidateDataURLs(
+            candidateURLs,
+            senderBaseURL: senderBaseURL,
+            perURLTimeoutNanoseconds: perURLTimeoutNanoseconds
+        )
 
         guard !rewrittenURLs.isEmpty else { return html }
 
         return Self.rewritingHTML(html, matches: matches, replacements: rewrittenURLs)
+    }
+
+    private func resolveCandidateDataURLs(
+        _ candidateURLs: [String],
+        senderBaseURL: URL?,
+        perURLTimeoutNanoseconds: UInt64?
+    ) async -> [String: String] {
+        await withTaskGroup(of: (String, String?).self) { group in
+            for url in candidateURLs {
+                if Task.isCancelled { break }
+                group.addTask { [self, senderBaseURL] in
+                    let dataURL = await self.resolvedDataURL(
+                        for: url,
+                        senderBaseURL: senderBaseURL,
+                        timeoutNanoseconds: perURLTimeoutNanoseconds
+                    )
+                    return (url, dataURL)
+                }
+            }
+
+            var rewrittenURLs: [String: String] = [:]
+            for await (url, dataURL) in group {
+                if let dataURL {
+                    rewrittenURLs[url] = dataURL
+                }
+            }
+            return rewrittenURLs
+        }
     }
 
     private func previewResolvedDataURLs(
@@ -344,7 +380,7 @@ actor HTMLRemoteImageAttachmentFallback {
         }
 
         return await withCheckedContinuation { continuation in
-            let gate = PreviewResolutionContinuation(continuation)
+            let gate = ResolutionGate<PreviewDataURLResolutionResult>(continuation)
 
             Task { [self] in
                 let result = await task.value
@@ -386,7 +422,11 @@ actor HTMLRemoteImageAttachmentFallback {
         return candidates
     }
 
-    private func resolvedDataURL(for urlString: String, senderBaseURL: URL?) async -> String? {
+    private func resolvedDataURL(
+        for urlString: String,
+        senderBaseURL: URL?,
+        timeoutNanoseconds: UInt64? = nil
+    ) async -> String? {
         let cacheKey = cacheKey(for: urlString, senderBaseURL: senderBaseURL)
         if let cached = rewrittenDataURLCache.value(forKey: cacheKey) {
             return cached
@@ -399,11 +439,45 @@ actor HTMLRemoteImageAttachmentFallback {
             return nil
         }
 
+        if let timeoutNanoseconds {
+            return await racedResolvedDataURL(
+                task: task,
+                cacheKey: cacheKey,
+                timeoutNanoseconds: timeoutNanoseconds
+            )
+        }
+
         switch await finalizeResolution(task, cacheKey: cacheKey) {
         case .rewritten(let dataURL):
             return dataURL
         case .unchanged, .transientFailure:
             return nil
+        }
+    }
+
+    private func racedResolvedDataURL(
+        task: Task<DataURLResolutionResult, Never>,
+        cacheKey: String,
+        timeoutNanoseconds: UInt64
+    ) async -> String? {
+        await withCheckedContinuation { continuation in
+            let gate = ResolutionGate<String?>(continuation)
+
+            Task { [self] in
+                let result = await task.value
+                let finalized = await finalizeResolution(result, cacheKey: cacheKey)
+                switch finalized {
+                case .rewritten(let dataURL):
+                    gate.resume(returning: dataURL)
+                case .unchanged, .transientFailure:
+                    gate.resume(returning: nil)
+                }
+            }
+
+            Task {
+                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                gate.resume(returning: nil)
+            }
         }
     }
 
