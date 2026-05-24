@@ -232,7 +232,7 @@ struct ConversationRowView: View {
             snapshot.displayNameHint,
             participantEmails: nonSelfParticipantEmails
         ) ?? PersonDisplayNameResolver.fallbackConversationName(
-            participantCount: nonSelfParticipantEmails.count
+            participantEmails: nonSelfParticipantEmails
         )
     }
 

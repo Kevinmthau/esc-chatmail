@@ -30,8 +30,12 @@ enum PersonDisplayNameResolver {
         unknownContactName
     }
 
-    static func fallbackConversationName(participantCount: Int) -> String {
-        participantCount > 1 ? "\(participantCount) Unknown Contacts" : unknownContactName
+    static func fallbackConversationName(participantEmails: [String]) -> String {
+        let normalized = participantEmails
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !normalized.isEmpty else { return unknownContactName }
+        return Array(Set(normalized)).sorted().joined(separator: ", ")
     }
 
     static func senderDisplayName(
@@ -79,7 +83,7 @@ enum PersonDisplayNameResolver {
         let names = uniqueNames(realNames)
         if names.isEmpty {
             return sanitizedConversationDisplayNameHint(fallback, participantEmails: participantEmails)
-                ?? fallbackConversationName(participantCount: totalParticipantCount)
+                ?? fallbackConversationName(participantEmails: participantEmails)
         }
 
         let baseName = DisplayNameFormatter.formatGroupNames(names)
@@ -97,7 +101,7 @@ enum PersonDisplayNameResolver {
         let names = uniqueNames(realNames)
         if names.isEmpty {
             return sanitizedConversationDisplayNameHint(fallback, participantEmails: participantEmails)
-                ?? fallbackConversationName(participantCount: totalParticipantCount)
+                ?? fallbackConversationName(participantEmails: participantEmails)
         }
 
         return DisplayNameFormatter.formatForRow(

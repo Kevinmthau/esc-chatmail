@@ -193,7 +193,7 @@ struct ChatView: View {
             conversation.displayName,
             participantEmails: participantEmails
         ) ?? PersonDisplayNameResolver.fallbackConversationName(
-            participantCount: participantEmails.count
+            participantEmails: participantEmails
         )
     }
 }

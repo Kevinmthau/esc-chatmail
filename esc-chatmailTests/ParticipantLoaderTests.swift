@@ -161,7 +161,7 @@ final class ParticipantLoaderTests: XCTestCase {
         XCTAssertEqual(info.formattedDisplayName, "Address Book Name")
     }
 
-    func testLoadParticipants_noRealNameUsesUnknownContact() async throws {
+    func testLoadParticipants_noRealNameUsesEmailAddress() async throws {
         let conversation = ConversationBuilder()
             .withDisplayName("John Smith")
             .build(in: context)
@@ -193,7 +193,7 @@ final class ParticipantLoaderTests: XCTestCase {
         )
 
         XCTAssertEqual(info.displayNames, [])
-        XCTAssertEqual(info.formattedDisplayName, "Unknown Contact")
+        XCTAssertEqual(info.formattedDisplayName, "john.smith@example.com")
     }
 
     func testLoadParticipants_preservesExplicitHeaderNameWhenStoredNameLooksAddressDerived() async throws {
@@ -376,7 +376,7 @@ final class ParticipantLoaderTests: XCTestCase {
         )
 
         XCTAssertEqual(info.displayNames, [])
-        XCTAssertEqual(info.formattedDisplayName, "Unknown Contact")
+        XCTAssertEqual(info.formattedDisplayName, "john.smith@example.com")
     }
 
     func testLoadParticipants_doesNotCacheHeaderOnlyNameAfterHeaderRemoved() async throws {
@@ -429,7 +429,7 @@ final class ParticipantLoaderTests: XCTestCase {
 
         XCTAssertEqual(withHeader.formattedDisplayName, "John Smith")
         XCTAssertEqual(withoutHeader.displayNames, [])
-        XCTAssertEqual(withoutHeader.formattedDisplayName, "Unknown Contact")
+        XCTAssertEqual(withoutHeader.formattedDisplayName, "john.smith@example.com")
     }
 
     func testLoadParticipants_groupOmitsAddressDerivedNamesAndShowsCount() async throws {
