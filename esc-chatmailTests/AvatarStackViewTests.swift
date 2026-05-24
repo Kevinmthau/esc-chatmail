@@ -84,4 +84,13 @@ final class AvatarStackViewTests: XCTestCase {
 
         XCTAssertNil(result)
     }
+
+    func testInitialsSource_ignoresCountedUnknownContactsPlaceholder() {
+        let result = SingleAvatarView.initialsSource(
+            participant: nil,
+            fallbackDisplayText: "2 Unknown Contacts"
+        )
+
+        XCTAssertNil(result)
+    }
 }

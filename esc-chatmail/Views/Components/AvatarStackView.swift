@@ -166,7 +166,7 @@ extension SingleAvatarView {
             options: .regularExpression
         )
 
-        guard !placeholderDisplayNames.contains(normalizedWhitespace.lowercased()) else {
+        guard !isPlaceholderDisplayName(normalizedWhitespace) else {
             return nil
         }
 
@@ -183,6 +183,15 @@ extension SingleAvatarView {
         }
 
         return normalizedWhitespace
+    }
+
+    private static func isPlaceholderDisplayName(_ value: String) -> Bool {
+        let lowercased = value.lowercased()
+        return placeholderDisplayNames.contains(lowercased)
+            || lowercased.range(
+                of: #"^\d+\s+unknown contacts?$"#,
+                options: .regularExpression
+            ) != nil
     }
 
     private static let placeholderDisplayNames: Set<String> = [

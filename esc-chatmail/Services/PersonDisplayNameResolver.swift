@@ -147,13 +147,22 @@ enum PersonDisplayNameResolver {
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
 
         guard !normalized.isEmpty,
-              !placeholderDisplayNames.contains(normalized.lowercased()),
+              !isPlaceholderDisplayName(normalized),
               !EmailNormalizer.isHideMyEmailDisplayName(normalized),
               !looksLikeEmailAddress(normalized) else {
             return nil
         }
 
         return normalized
+    }
+
+    private static func isPlaceholderDisplayName(_ value: String) -> Bool {
+        let lowercased = value.lowercased()
+        return placeholderDisplayNames.contains(lowercased)
+            || lowercased.range(
+                of: #"^\d+\s+unknown contacts?$"#,
+                options: .regularExpression
+            ) != nil
     }
 
     private static func looksLikeEmailAddress(_ value: String) -> Bool {

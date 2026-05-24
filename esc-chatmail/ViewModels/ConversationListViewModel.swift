@@ -22,7 +22,7 @@ enum ConversationFilter: String, CaseIterable {
 /// Composes specialized services for search, selection, and filtering
 @MainActor
 final class ConversationListViewModel: ObservableObject {
-    static let conversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV4"
+    static let conversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV5"
 
     // MARK: - Composed Services
 
@@ -258,7 +258,7 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     func refreshConversationNames() {
-        // V4: refresh stored conversation display names only. Rollup metadata stays sync-owned.
+        // V5: refresh stored conversation display names only. Rollup metadata stays sync-owned.
         let hasRefreshedKey = Self.conversationNameRefreshMigrationKey
         guard !UserDefaults.standard.bool(forKey: hasRefreshedKey) else { return }
         guard hasExistingConversationsForNameRefresh() else {
@@ -272,7 +272,7 @@ final class ConversationListViewModel: ObservableObject {
             await conversationManager.updateAllConversationDisplayNames(in: context)
             guard storage.saveIfNeeded(context) else { return }
             UserDefaults.standard.set(true, forKey: hasRefreshedKey)
-            Log.info("Refreshed conversation display names (V4)", category: .conversation)
+            Log.info("Refreshed conversation display names (V5)", category: .conversation)
         }
     }
 

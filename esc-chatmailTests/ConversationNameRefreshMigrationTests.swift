@@ -4,6 +4,8 @@ import CoreData
 
 @MainActor
 final class ConversationNameRefreshMigrationTests: XCTestCase {
+    private static let legacyConversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV4"
+
     private var stack: TestCoreDataStack!
     private var context: NSManagedObjectContext!
 
@@ -12,11 +14,17 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         stack = TestCoreDataStack()
         context = stack.viewContext
         UserDefaults.standard.removeObject(
+            forKey: Self.legacyConversationNameRefreshMigrationKey
+        )
+        UserDefaults.standard.removeObject(
             forKey: ConversationListViewModel.conversationNameRefreshMigrationKey
         )
     }
 
     override func tearDown() {
+        UserDefaults.standard.removeObject(
+            forKey: Self.legacyConversationNameRefreshMigrationKey
+        )
         UserDefaults.standard.removeObject(
             forKey: ConversationListViewModel.conversationNameRefreshMigrationKey
         )
@@ -85,6 +93,34 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         XCTAssertEqual(refreshedBob.lastMessageDate, bobDate)
         XCTAssertEqual(refreshedBob.snippet, "Bob preview")
         XCTAssertNil(refreshedBob.archivedAt)
+    }
+
+    func testRefreshConversationNames_runsWhenLegacyV4MigrationCompleted() async throws {
+        UserDefaults.standard.set(
+            true,
+            forKey: Self.legacyConversationNameRefreshMigrationKey
+        )
+        let conversation = ConversationBuilder()
+            .withDisplayName("Unknown Contact")
+            .visible()
+            .build(in: context)
+        addConversationParticipant(email: "alice@example.com", to: conversation)
+        try context.save()
+
+        let viewModel = makeViewModel()
+        viewModel.refreshConversationNames()
+
+        await waitUntil {
+            UserDefaults.standard.bool(
+                forKey: ConversationListViewModel.conversationNameRefreshMigrationKey
+            )
+        }
+        await waitUntil {
+            (try? self.fetchConversation(conversation.objectID).displayName) == "alice@example.com"
+        }
+
+        let refreshed = try fetchConversation(conversation.objectID)
+        XCTAssertEqual(refreshed.displayName, "alice@example.com")
     }
 
     func testRefreshConversationNames_marksMigrationCompleteWhenStoreIsEmpty() {

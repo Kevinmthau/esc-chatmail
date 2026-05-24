@@ -168,4 +168,24 @@ final class PersonDisplayNameResolverTests: XCTestCase {
 
         XCTAssertEqual(result, "john.doe@gmail.com")
     }
+
+    func testConversationDisplayName_ignoresCountedUnknownContactsFallback() {
+        let result = PersonDisplayNameResolver.conversationDisplayName(
+            realNames: [],
+            totalParticipantCount: 2,
+            fallback: "2 Unknown Contacts",
+            participantEmails: ["bob@example.com", "alice@example.com"]
+        )
+
+        XCTAssertEqual(result, "alice@example.com, bob@example.com")
+    }
+
+    func testSanitizedConversationDisplayNameHint_rejectsSingularCountedUnknownContactFallback() {
+        let result = PersonDisplayNameResolver.sanitizedConversationDisplayNameHint(
+            "1 Unknown Contact",
+            participantEmails: ["alice@example.com"]
+        )
+
+        XCTAssertNil(result)
+    }
 }
