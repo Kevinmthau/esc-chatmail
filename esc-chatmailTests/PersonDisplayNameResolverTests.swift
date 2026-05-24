@@ -109,4 +109,63 @@ final class PersonDisplayNameResolverTests: XCTestCase {
         XCTAssertEqual(result.name, "github")
         XCTAssertTrue(result.isReal)
     }
+
+    func testFallbackConversationName_emptyArrayReturnsUnknownContact() {
+        XCTAssertEqual(
+            PersonDisplayNameResolver.fallbackConversationName(participantEmails: []),
+            "Unknown Contact"
+        )
+    }
+
+    func testFallbackConversationName_whitespaceOnlyReturnsUnknownContact() {
+        XCTAssertEqual(
+            PersonDisplayNameResolver.fallbackConversationName(participantEmails: ["", "   ", "\n"]),
+            "Unknown Contact"
+        )
+    }
+
+    func testFallbackConversationName_singleEmailReturnsEmailVerbatim() {
+        XCTAssertEqual(
+            PersonDisplayNameResolver.fallbackConversationName(participantEmails: ["alice@example.com"]),
+            "alice@example.com"
+        )
+    }
+
+    func testFallbackConversationName_dedupesMixedCaseDuplicatesPreservingFirstSeen() {
+        let result = PersonDisplayNameResolver.fallbackConversationName(
+            participantEmails: ["Bob@Example.com", "bob@example.com", "BOB@example.com"]
+        )
+
+        XCTAssertEqual(result, "Bob@Example.com")
+    }
+
+    func testFallbackConversationName_sortsCaseInsensitively() {
+        let result = PersonDisplayNameResolver.fallbackConversationName(
+            participantEmails: ["Bob@example.com", "alice@example.com"]
+        )
+
+        XCTAssertEqual(result, "alice@example.com, Bob@example.com")
+    }
+
+    func testFallbackConversationName_capsAtThreeWithOverflowIndicator() {
+        let result = PersonDisplayNameResolver.fallbackConversationName(
+            participantEmails: [
+                "e@example.com",
+                "d@example.com",
+                "c@example.com",
+                "b@example.com",
+                "a@example.com"
+            ]
+        )
+
+        XCTAssertEqual(result, "a@example.com, b@example.com, c@example.com +2")
+    }
+
+    func testFallbackConversationName_collapsesGmailDotAliasesAsDuplicates() {
+        let result = PersonDisplayNameResolver.fallbackConversationName(
+            participantEmails: ["john.doe@gmail.com", "johndoe@gmail.com"]
+        )
+
+        XCTAssertEqual(result, "john.doe@gmail.com")
+    }
 }
