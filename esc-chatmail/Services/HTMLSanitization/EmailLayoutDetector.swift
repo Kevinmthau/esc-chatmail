@@ -36,7 +36,8 @@ enum EmailLayoutDetector {
         let candidates = [
             largestLayoutWidth(in: liveHTML, pattern: #"<table[^>]*?\bwidth\s*=\s*["']?([0-9]{3,4})"#),
             largestLayoutWidth(in: layoutCSSHTML, pattern: #"(?:^|[;{"'=])\s*width\s*:\s*([0-9]{3,4})\s*px"#),
-            largestLayoutWidth(in: layoutCSSHTML, pattern: #"(?:^|[;{"'=])\s*min-width\s*:\s*([0-9]{3,4})\s*px"#)
+            largestLayoutWidth(in: layoutCSSHTML, pattern: #"(?:^|[;{"'=])\s*min-width\s*:\s*([0-9]{3,4})\s*px"#),
+            largestTableMaxLayoutWidth(in: layoutCSSHTML)
         ].compactMap { $0 }
 
         guard let fixedWidth = candidates.max() else {
@@ -141,6 +142,44 @@ enum EmailLayoutDetector {
         String(query).lowercased().filter { !$0.isWhitespace }
     }
 
+    private static func largestTableMaxLayoutWidth(in html: String) -> Int? {
+        tableMaxWidthCSSSelectorTargets(in: html, fixedWidth: nil)
+            .map { $0.width }
+            .max()
+    }
+
+    private static func tableMaxWidthCSSSelectorTargets(
+        in html: String,
+        fixedWidth: Int?
+    ) -> [(width: Int, target: LayoutSelectorTarget)] {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"([^{}@]+)\{[^{}]*(?<!-)\bmax-width\s*:\s*([0-9]{3,4})\s*px\b"#,
+            options: [.caseInsensitive]
+        ) else {
+            return []
+        }
+
+        let range = NSRange(html.startIndex..<html.endIndex, in: html)
+        return regex.matches(in: html, range: range).flatMap { match -> [(width: Int, target: LayoutSelectorTarget)] in
+            guard let selectorsRange = Range(match.range(at: 1), in: html),
+                  let valueRange = Range(match.range(at: 2), in: html),
+                  let width = validLayoutWidth(String(html[valueRange])),
+                  fixedWidth == nil || fixedWidth == width else {
+                return []
+            }
+
+            return String(html[selectorsRange]).split(separator: ",").compactMap { selector -> (width: Int, target: LayoutSelectorTarget)? in
+                let selector = CSSParser.cssSelectorText(from: String(selector))
+                guard let target = HTMLSelectorMatcher.selectorTarget(in: selector),
+                      target.tagName == "table" else {
+                    return nil
+                }
+
+                return (width: width, target: target)
+            }
+        }
+    }
+
     private static func fixedLayoutSelectorTargets(
         in html: String,
         layoutCSSHTML: String,
@@ -153,6 +192,7 @@ enum EmailLayoutDetector {
 
         return fixedInlineStyleSelectorTargets(in: html, fixedWidth: fixedWidth)
             + fixedCSSSelectorTargets(in: layoutCSSHTML, fixedWidth: fixedWidth)
+            + tableMaxWidthCSSSelectorTargets(in: layoutCSSHTML, fixedWidth: fixedWidth).map { $0.target }
     }
 
     private static func fixedTableSelectorTargets(in html: String, fixedWidth: Int) -> [LayoutSelectorTarget] {
@@ -422,13 +462,21 @@ enum EmailLayoutDetector {
         return regex.matches(in: html, range: range).compactMap { match -> Int? in
             guard match.numberOfRanges > 1,
                   let valueRange = Range(match.range(at: 1), in: html),
-                  let width = Int(html[valueRange]),
-                  width >= HTMLDisplayWrapper.minimumFixedLayoutViewportWidth,
-                  width <= HTMLDisplayWrapper.maximumFixedLayoutViewportWidth else {
+                  let width = validLayoutWidth(String(html[valueRange])) else {
                 return nil
             }
 
             return width
         }.max()
+    }
+
+    private static func validLayoutWidth(_ text: String) -> Int? {
+        guard let width = Int(text),
+              width >= HTMLDisplayWrapper.minimumFixedLayoutViewportWidth,
+              width <= HTMLDisplayWrapper.maximumFixedLayoutViewportWidth else {
+            return nil
+        }
+
+        return width
     }
 }
