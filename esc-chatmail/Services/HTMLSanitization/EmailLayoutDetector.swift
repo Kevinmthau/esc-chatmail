@@ -196,6 +196,7 @@ enum EmailLayoutDetector {
         guard let target = HTMLSelectorMatcher.selectorTarget(in: selector) else {
             return nil
         }
+        let requiresConcreteNonFluidTable = target.tagName != "table"
 
         if HTMLSelectorMatcher.selectorContainsCombinator(selector) {
             let matchingTables = HTMLSelectorMatcher.htmlElementSelectorTargets(
@@ -203,7 +204,7 @@ enum EmailLayoutDetector {
                 in: selectorElements
             )?.filter { $0.tagName == "table" } ?? []
             if let matchingTable = matchingTables.first(where: {
-                !fluidWidthTableTargets.containsTargetMatching($0)
+                !requiresConcreteNonFluidTable || !fluidWidthTableTargets.containsTargetMatching($0)
             }) {
                 return matchingTable
             }
@@ -219,7 +220,7 @@ enum EmailLayoutDetector {
                 && HTMLSelectorMatcher.selectorTarget(target, matches: elementTarget)
         }
         if let matchingTable = matchingTables.first(where: {
-            !fluidWidthTableTargets.containsTargetMatching($0)
+            !requiresConcreteNonFluidTable || !fluidWidthTableTargets.containsTargetMatching($0)
         }) {
             return matchingTable
         }
