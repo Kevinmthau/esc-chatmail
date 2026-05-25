@@ -59,29 +59,29 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         isDarkMode: Bool,
         timeout: TimeInterval = 5.0
     ) async -> OriginalEmailSource? {
-        await withTaskGroup(of: OriginalEmailSource?.self) { group in
-            group.addTask {
-                await self.loadOriginalEmailSourceWithoutTimeout(
-                    messageId: messageId,
-                    bodyStorageURI: bodyStorageURI,
-                    bodyText: bodyText,
-                    senderEmail: senderEmail,
-                    subject: subject,
-                    isDarkMode: isDarkMode
-                )
-            }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                return nil
-            }
-
-            for await result in group {
-                group.cancelAll()
-                return result
-            }
-
-            return nil
+        // Soft timeout: if the load can't finish in `timeout` seconds, return nil
+        // so the modal stops showing "Loading..." and falls through to the
+        // "No Content" placeholder. The underlying work keeps running and warms
+        // caches (recoveryTasks, inFlightResolutions) so a re-open succeeds.
+        //
+        // We use withSoftTimeout instead of withTaskGroup because withTaskGroup
+        // implicitly awaits every child task, and the loading branch contains
+        // awaits (notably HTMLContentRecoveryService.recoverHTMLContent's
+        // `await task.value` on Gmail API requests) that ignore cooperative
+        // cancellation — so a withTaskGroup-based race would leave the spinner
+        // up indefinitely. The outer flatten with `??` collapses the two `nil`
+        // cases ("timed out" and "loader said no content") into one.
+        let result = await withSoftTimeout(seconds: timeout) {
+            await self.loadOriginalEmailSourceWithoutTimeout(
+                messageId: messageId,
+                bodyStorageURI: bodyStorageURI,
+                bodyText: bodyText,
+                senderEmail: senderEmail,
+                subject: subject,
+                isDarkMode: isDarkMode
+            )
         }
+        return result ?? nil
     }
 
     private func loadOriginalEmailSourceWithoutTimeout(

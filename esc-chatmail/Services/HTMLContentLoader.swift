@@ -299,7 +299,14 @@ final class HTMLContentLoader {
         return HTMLLoadResult(html: nil, source: .notFound)
     }
 
-    /// Loads content with timeout support
+    /// Loads content with timeout support.
+    ///
+    /// Uses `withSoftTimeout` instead of `withTaskGroup`: `loadContent` awaits
+    /// shared `Task<_, Never>` recovery work that ignores cooperative
+    /// cancellation, so a `withTaskGroup`-based race would still block until
+    /// the work finished. The soft timeout returns `.notFound` to the caller on
+    /// deadline while the underlying work continues to warm caches for the next
+    /// open. Mirrors the change in `OriginalEmailSourceLoader.loadOriginalEmailSource`.
     func loadContentWithTimeout(
         messageId: String,
         bodyStorageURI: String?,
@@ -312,36 +319,20 @@ final class HTMLContentLoader {
         originalHTMLPreference: OriginalEmailHTMLPreference = .automatic,
         timeout: TimeInterval = 5.0
     ) async -> HTMLLoadResult {
-        return await withTaskGroup(of: HTMLLoadResult?.self) { group in
-            // Content loading task
-            group.addTask {
-                await self.loadContent(
-                    messageId: messageId,
-                    bodyStorageURI: bodyStorageURI,
-                    bodyText: bodyText,
-                    senderEmail: senderEmail,
-                    subject: subject,
-                    isDarkMode: isDarkMode,
-                    cleanupMode: cleanupMode,
-                    displayPurpose: displayPurpose,
-                    originalHTMLPreference: originalHTMLPreference
-                )
-            }
-
-            // Timeout task
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                return nil // Timeout indicator
-            }
-
-            // Return first completed result
-            for await result in group {
-                group.cancelAll()
-                return result ?? HTMLLoadResult(html: nil, source: .notFound)
-            }
-
-            return HTMLLoadResult(html: nil, source: .notFound)
+        let result = await withSoftTimeout(seconds: timeout) {
+            await self.loadContent(
+                messageId: messageId,
+                bodyStorageURI: bodyStorageURI,
+                bodyText: bodyText,
+                senderEmail: senderEmail,
+                subject: subject,
+                isDarkMode: isDarkMode,
+                cleanupMode: cleanupMode,
+                displayPurpose: displayPurpose,
+                originalHTMLPreference: originalHTMLPreference
+            )
         }
+        return result ?? HTMLLoadResult(html: nil, source: .notFound)
     }
 
     /// Loads canonical HTML content without preview/full-message wrapping.

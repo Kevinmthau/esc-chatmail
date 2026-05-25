@@ -32,8 +32,14 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
         self.noHTMLMissCacheTTL = noHTMLMissCacheTTL
     }
 
-    /// Recovers HTML content for a message by fetching from Gmail API
-    /// Returns the HTML content if successful, nil otherwise
+    /// Recovers HTML content for a message by fetching from Gmail API.
+    /// Returns the HTML content if successful, nil otherwise.
+    ///
+    /// This call can take arbitrarily long if the Gmail API is slow: the
+    /// `await task.value` below ignores cooperative cancellation. Callers that
+    /// surface this to UI (notably the "Original Email" modal via
+    /// `OriginalEmailSourceLoader.loadOriginalEmailSource`) MUST wrap this in
+    /// a `withSoftTimeout` so the user isn't pinned on a "Loading…" spinner.
     func recoverHTMLContent(messageId: String) async -> String? {
         guard !isCachedNoHTMLMiss(messageId) else {
             return nil
