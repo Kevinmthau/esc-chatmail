@@ -188,6 +188,8 @@ struct ChatMessagesView: View {
                     oldCount: oldCount,
                     newCount: newCount,
                     lastMessage: messages.last,
+                    visibleMessages: scrollState.visibleMessages,
+                    totalMessageCount: scrollState.totalMessageCount,
                     stabilizeBottomAnchor: keyboard.currentHeight > 0 || isTextFieldFocused.wrappedValue,
                     isInitialWindowLoaded: scrollState.isInitialLoadComplete
                 ) { step in

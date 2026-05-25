@@ -195,6 +195,8 @@ final class ChatMessagesCoordinator: ObservableObject {
         oldCount: Int,
         newCount: Int,
         lastMessage: Message?,
+        visibleMessages: [ChatMessageRowModel],
+        totalMessageCount: Int,
         stabilizeBottomAnchor: Bool,
         isInitialWindowLoaded: Bool,
         scrollAction: @escaping BottomAnchorAction
@@ -202,10 +204,13 @@ final class ChatMessagesCoordinator: ObservableObject {
         if oldCount == 0 && newCount > 0 {
             updateReplyingToIfNewSubject(lastMessage)
             if hasStartedInitialAnchor && !initialAnchorWasForEmptyConversation {
+                if isInitialWindowLoaded {
+                    requestLatestWindowIfNeeded(knownTotalCount: newCount)
+                }
                 Log.diagnostic(
                     .chatView,
                     level: .info,
-                    "ChatView empty-to-loaded count change ignored because initial anchoring already started messages=\(newCount)",
+                    "ChatView empty-to-loaded count change refreshes latest window because initial anchoring already started messages=\(newCount)",
                     category: .ui
                 )
             } else {
@@ -215,6 +220,14 @@ final class ChatMessagesCoordinator: ObservableObject {
                 if isInitialWindowLoaded {
                     requestLatestWindowIfNeeded(knownTotalCount: newCount)
                 }
+                startInitialAnchorIfPossible(
+                    messageCount: newCount,
+                    visibleMessages: visibleMessages,
+                    totalMessageCount: max(totalMessageCount, newCount),
+                    isInitialWindowLoaded: isInitialWindowLoaded,
+                    reason: "message-count-change",
+                    scrollAction: scrollAction
+                )
                 Log.diagnostic(
                     .chatView,
                     level: .info,
@@ -232,10 +245,21 @@ final class ChatMessagesCoordinator: ObservableObject {
                 )
             }
         } else if !isReadyToShow && newCount > 0 {
+            if newCount > oldCount {
+                requestLatestWindowIfNeeded(knownTotalCount: newCount)
+            }
+            startInitialAnchorIfPossible(
+                messageCount: newCount,
+                visibleMessages: visibleMessages,
+                totalMessageCount: max(totalMessageCount, newCount),
+                isInitialWindowLoaded: isInitialWindowLoaded,
+                reason: "message-count-change",
+                scrollAction: scrollAction
+            )
             Log.diagnostic(
                 .chatView,
                 level: .info,
-                "ChatView ignoring count-change initial anchor until visible rows publish messages=\(newCount)",
+                "ChatView handling count-change before initial reveal completes messages=\(newCount)",
                 category: .ui
             )
         } else if isReadyToShow && newCount > oldCount {
