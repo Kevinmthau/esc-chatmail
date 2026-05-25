@@ -47,6 +47,8 @@ struct MessageContentView: View {
     private var textContent: some View {
         if let forwardedDisplay = resolvedForwardedDisplayContent {
             forwardedTextContent(for: forwardedDisplay)
+        } else if message.isForwardedEmail && !hasLoadedContent {
+            loadingPlaceholder
         } else if hasHTMLSource && !hasLoadedContent {
             // Avoid flashing raw/partial HTML-derived text while async content detection is still running.
             loadingPlaceholder
@@ -132,7 +134,8 @@ struct MessageContentView: View {
 
                 ForwardedMessageCard(
                     content: content,
-                    subjectFallback: message.forwardedDisplaySubject
+                    subjectFallback: message.forwardedDisplaySubject,
+                    isFromMe: message.isFromMe
                 )
             }
             .padding(style.bubblePadding)

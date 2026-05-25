@@ -335,6 +335,126 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertTrue(result.sharedDocumentLinks.isEmpty)
     }
 
+    func testLoadContent_incomingForwardedMessage_returnsStructuredForwardPreview() async {
+        let messageId = "bubble-incoming-forwarded-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: """
+                Sent from my iPhone.
+
+                Begin forwarded message:
+
+                From: Jane Example <jane@example.com>
+                Date: Wed, Apr 22, 2026 at 8:12 AM
+                To: Kevin Thau <kevin@example.com>
+                Subject: Dinner reservation
+
+                Your table is confirmed for 7:30 PM.
+                """,
+                bodyStorageURI: nil,
+                cleanedSnippet: "Sent from my iPhone. Begin forwarded message:",
+                snippet: "Sent from my iPhone. Begin forwarded message: From: Jane Example",
+                subject: "Fwd: Dinner reservation",
+                senderName: "Alice Example",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: true,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "Sent from my iPhone.")
+        XCTAssertFalse(result.hasRichHTMLContent)
+        XCTAssertEqual(result.forwardedDisplayContent?.senderDisplayName, "Jane Example")
+        XCTAssertEqual(result.forwardedDisplayContent?.senderEmail, "jane@example.com")
+        XCTAssertEqual(result.forwardedDisplayContent?.subject, "Dinner reservation")
+        XCTAssertEqual(result.forwardedDisplayContent?.recipientSummary, "Kevin Thau")
+        XCTAssertEqual(
+            result.forwardedDisplayContent?.previewSnippet,
+            "Your table is confirmed for 7:30 PM."
+        )
+        XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)
+    }
+
+    func testLoadContent_forwardedMessageUsesCleanedSnippetBeforeSnippet() async {
+        let messageId = "bubble-forwarded-cleaned-snippet-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: nil,
+                bodyStorageURI: nil,
+                cleanedSnippet: "FYI ---------- Forwarded message --------- From: Jane Example <jane@example.com> Date: Wed, Apr 22, 2026 at 8:12 AM Subject: Dinner reservation To: Kevin Thau <kevin@example.com> Your table is confirmed for 7:30 PM.",
+                snippet: "FYI",
+                subject: "Fwd: Dinner reservation",
+                senderName: "Alice Example",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: true,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "FYI")
+        XCTAssertEqual(result.forwardedDisplayContent?.senderDisplayName, "Jane Example")
+        XCTAssertEqual(result.forwardedDisplayContent?.subject, "Dinner reservation")
+        XCTAssertEqual(result.forwardedDisplayContent?.recipientSummary, "Kevin Thau")
+        XCTAssertEqual(
+            result.forwardedDisplayContent?.previewSnippet,
+            "Your table is confirmed for 7:30 PM."
+        )
+    }
+
+    func testLoadContent_forwardedMessageWithUnparseableBodyDoesNotProduceStructuredPreview() async {
+        let messageId = "bubble-unparseable-forwarded-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: "Can you take a look at this?",
+                bodyStorageURI: nil,
+                cleanedSnippet: "Can you take a look at this?",
+                snippet: "Can you take a look at this?",
+                subject: "Fwd: Dinner reservation",
+                senderName: "Alice Example",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: true,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertNil(result.forwardedDisplayContent)
+        XCTAssertEqual(result.fullTextContent, "Can you take a look at this?")
+        XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)
+    }
+
     func testLoadContent_outgoingReplyPrefersFullBodyOverSnippetAndStoredHTML() async throws {
         let messageId = "bubble-outgoing-reply-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)

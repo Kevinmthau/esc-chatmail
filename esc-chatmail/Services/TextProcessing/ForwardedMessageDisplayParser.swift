@@ -56,7 +56,7 @@ enum ForwardedMessageDisplayParser {
         )
     }()
 
-    static func parseOutgoingForward(from text: String?) -> ForwardedMessageDisplayContent? {
+    static func parseForward(from text: String?) -> ForwardedMessageDisplayContent? {
         guard let text = normalized(text), !text.isEmpty else {
             return nil
         }
@@ -88,6 +88,10 @@ enum ForwardedMessageDisplayParser {
         )
 
         return content.hasVisibleSummary ? content : nil
+    }
+
+    static func parseOutgoingForward(from text: String?) -> ForwardedMessageDisplayContent? {
+        parseForward(from: text)
     }
 
     private static func markerRange(in text: String) -> Range<String.Index>? {
@@ -137,7 +141,14 @@ enum ForwardedMessageDisplayParser {
                 classifyRichContent: false
             )
         )
-        return trimmed(result.mainText)
+        if let mainText = trimmed(result.mainText) {
+            return mainText
+        }
+
+        let fallbackText = RawEmailSourceSanitizer.extractDisplayText(from: text)
+        let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: fallbackText)
+        let formatted = TextProcessing.formatSignOffLineBreaks(in: unwrapped)
+        return trimmed(formatted)
     }
 
     private static func cleanedHeaderValue(_ value: String?) -> String? {

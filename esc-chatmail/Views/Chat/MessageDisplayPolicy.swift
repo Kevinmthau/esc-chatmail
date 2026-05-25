@@ -2,8 +2,8 @@ import Foundation
 
 enum MessageDisplayPolicy {
     /// Personal email should stay in chat bubbles.
-    /// Incoming forwarded mail should use the full preview card so the user can
-    /// see the forwarded context without also reading a duplicate chat bubble.
+    /// Incoming forwarded mail falls back to the full preview card when no
+    /// structured forward summary is available.
     /// Newsletter messages can still use HTML preview cards.
     /// Rich HTML previews are conservative in one-to-one *reply threads* to avoid
     /// treating person-to-person replies like newsletters, but should still show

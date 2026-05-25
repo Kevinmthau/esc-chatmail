@@ -605,12 +605,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
 
     func loadContent(from request: MessageBubbleContentRequest) async -> MessageBubbleContentResult {
         let htmlAnalysis = await cachedHTMLAnalysis(for: request)
-        let forwardedDisplayContent =
-            request.isFromMe && request.isForwardedEmail
-            ? ForwardedMessageDisplayParser.parseOutgoingForward(
-                from: request.bodyText ?? request.snippet
-            )
-            : nil
+        let forwardedDisplayContent = forwardedDisplayContent(from: request)
         let loadedContent = await loadProcessedContent(
             from: request,
             resolvedHasHTMLSource: htmlAnalysis.hasHTMLSource
@@ -638,6 +633,22 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             forwardedDisplayContent: forwardedDisplayContent,
             htmlAnalysis: htmlAnalysis
         )
+    }
+
+    private func forwardedDisplayContent(
+        from request: MessageBubbleContentRequest
+    ) -> ForwardedMessageDisplayContent? {
+        guard request.isForwardedEmail else {
+            return nil
+        }
+
+        for text in [request.bodyText, request.cleanedSnippet, request.snippet] {
+            if let content = ForwardedMessageDisplayParser.parseForward(from: text) {
+                return content
+            }
+        }
+
+        return nil
     }
 
     private func outgoingPlainTextContent(

@@ -20,7 +20,15 @@ struct MessageBubble: View {
     let onOpenFullMessage: (NSManagedObjectID) -> Void
 
     private var showHTMLPreview: Bool {
-        MessageDisplayPolicy.shouldShowHTMLPreview(
+        guard resolvedForwardedDisplayContent == nil else {
+            return false
+        }
+
+        guard !(message.isForwardedEmail && !viewModel.hasLoadedContent) else {
+            return false
+        }
+
+        return MessageDisplayPolicy.shouldShowHTMLPreview(
             hasHTMLSource: viewModel.htmlAnalysis.hasHTMLSource,
             isForwardedEmail: message.isForwardedEmail,
             isNewsletter: message.isNewsletter,
@@ -33,7 +41,7 @@ struct MessageBubble: View {
         )
     }
 
-    private var outgoingForwardedDisplayContent: ForwardedMessageDisplayContent? {
+    private var resolvedForwardedDisplayContent: ForwardedMessageDisplayContent? {
         viewModel.forwardedDisplayContent ?? message.outgoingForwardedDisplayContent
     }
 
@@ -87,7 +95,7 @@ struct MessageBubble: View {
                     fallbackPreviewText: message.fallbackPreviewText,
                     sharedDocumentLinks: viewModel.sharedDocumentLinks,
                     hasLoadedContent: viewModel.hasLoadedContent,
-                    forwardedDisplayContent: outgoingForwardedDisplayContent,
+                    forwardedDisplayContent: resolvedForwardedDisplayContent,
                     onOpenFullMessage: openFullMessage
                 )
 
@@ -139,7 +147,7 @@ struct MessageBubble: View {
 
     @ViewBuilder
     private func subjectView(showsCalendarInvitePreviewCard: Bool) -> some View {
-        if outgoingForwardedDisplayContent == nil,
+        if resolvedForwardedDisplayContent == nil,
            !(showHTMLPreview && (message.isNewsletter || showsCalendarInvitePreviewCard)),
            let subject = message.subject, !subject.isEmpty {
             Text(subject)
@@ -215,6 +223,7 @@ struct MessageBubble: View {
         Self.contentSignature(
             bodyStorageURI: message.bodyStorageURI,
             bodyText: message.bodyText,
+            cleanedSnippet: message.cleanedSnippet,
             snippet: message.snippet,
             hasHTMLSource: message.hasHTMLSource,
             htmlSourceSignature: htmlContentHandler.htmlSourceSignature(
@@ -236,6 +245,7 @@ struct MessageBubble: View {
     static func contentSignature(
         bodyStorageURI: String?,
         bodyText: String?,
+        cleanedSnippet: String? = nil,
         snippet: String?,
         hasHTMLSource: Bool,
         htmlSourceSignature: String,
@@ -248,6 +258,7 @@ struct MessageBubble: View {
         [
             bodyStorageURI ?? "",
             contentFingerprint(for: bodyText),
+            contentFingerprint(for: cleanedSnippet),
             contentFingerprint(for: snippet),
             String(hasHTMLSource),
             "source:\(htmlSourceSignature)",

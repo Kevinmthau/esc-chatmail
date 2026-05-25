@@ -52,6 +52,32 @@ final class ForwardedMessageDisplayParserTests: XCTestCase {
         XCTAssertTrue(result?.timestampText?.contains("9:15") == true)
     }
 
+    func testParseForward_incomingIPhoneStyleForward_extractsStructuredSummary() {
+        let result = ForwardedMessageDisplayParser.parseForward(
+            from: """
+            Sent from my iPhone.
+
+            Begin forwarded message:
+
+            From: Jane Example <jane@example.com>
+            Date: Wed, Apr 22, 2026 at 8:12 AM
+            To: Kevin Thau <kevin@example.com>
+            Subject: Dinner reservation
+
+            Your table is confirmed for 7:30 PM.
+            """
+        )
+
+        XCTAssertEqual(result?.leadInText, "Sent from my iPhone.")
+        XCTAssertEqual(result?.senderDisplayName, "Jane Example")
+        XCTAssertEqual(result?.senderEmail, "jane@example.com")
+        XCTAssertEqual(result?.subject, "Dinner reservation")
+        XCTAssertEqual(result?.recipientSummary, "Kevin Thau")
+        XCTAssertEqual(result?.previewSnippet, "Your table is confirmed for 7:30 PM.")
+        XCTAssertTrue(result?.timestampText?.contains("Apr 22") == true)
+        XCTAssertTrue(result?.timestampText?.contains("8:12") == true)
+    }
+
     func testParseOutgoingForward_weirdHeaderPrefixStillParsesFromLine() {
         let result = ForwardedMessageDisplayParser.parseOutgoingForward(
             from: """
