@@ -8,6 +8,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     private enum TaskKey {
         static let bottomAnchor = "bottomAnchor"
         static let initialBottomAnchor = "initialBottomAnchor"
+        static let latestWindow = "latestWindow"
     }
 
     struct BottomAnchorStep: Equatable {
@@ -39,6 +40,8 @@ final class ChatMessagesCoordinator: ObservableObject {
     private let clearPersonCache: AsyncAction
     private let sleep: Sleep
     private let taskManager = ViewModelTaskManager()
+    private var hasStartedInitialAnchor = false
+    private var initialAnchorWasForEmptyConversation = false
 
     init(
         scrollState: VirtualScrollState,
@@ -109,18 +112,47 @@ final class ChatMessagesCoordinator: ObservableObject {
         visibleMessages: [ChatMessageRowModel],
         senderGroupingMessages: [ChatMessageRowModel],
         totalMessageCount: Int,
+        isInitialWindowLoaded: Bool,
         scrollAction: @escaping BottomAnchorAction
     ) {
         markConversationAsReadIfNeeded()
         initializeReplyingTo(lastMessage)
 
-        if !isReadyToShow && !visibleMessages.isEmpty {
-            performInitialScroll(messageCount: messageCount, scrollAction: scrollAction)
-        } else if messageCount == 0 && totalMessageCount == 0 {
-            isReadyToShow = true
-        }
+        startInitialAnchorIfPossible(
+            messageCount: messageCount,
+            visibleMessages: visibleMessages,
+            totalMessageCount: totalMessageCount,
+            isInitialWindowLoaded: isInitialWindowLoaded,
+            reason: "appear",
+            scrollAction: scrollAction
+        )
 
         loadResolvedDisplayName()
+        prefetchVisibleContent(from: visibleMessages)
+        refreshSenderGroupingKeys(using: senderGroupingMessages)
+    }
+
+    func handleInitialWindowLoaded(
+        messageCount: Int,
+        visibleMessages: [ChatMessageRowModel],
+        senderGroupingMessages: [ChatMessageRowModel],
+        totalMessageCount: Int,
+        scrollAction: @escaping BottomAnchorAction
+    ) {
+        Log.diagnostic(
+            .chatView,
+            level: .info,
+            "ChatView initial window loaded messages=\(messageCount) visible=\(visibleMessages.count) total=\(totalMessageCount)",
+            category: .ui
+        )
+        startInitialAnchorIfPossible(
+            messageCount: messageCount,
+            visibleMessages: visibleMessages,
+            totalMessageCount: totalMessageCount,
+            isInitialWindowLoaded: true,
+            reason: "initial-window-loaded",
+            scrollAction: scrollAction
+        )
         prefetchVisibleContent(from: visibleMessages)
         refreshSenderGroupingKeys(using: senderGroupingMessages)
     }
@@ -128,6 +160,10 @@ final class ChatMessagesCoordinator: ObservableObject {
     func handleDisappear() {
         taskManager.cancelAll()
         cancelPrefetch()
+        if !isReadyToShow {
+            hasStartedInitialAnchor = false
+            initialAnchorWasForEmptyConversation = false
+        }
     }
 
     func handleDisplayedMessagesChange(
@@ -136,11 +172,18 @@ final class ChatMessagesCoordinator: ObservableObject {
         visibleMessages: [ChatMessageRowModel],
         senderGroupingMessages: [ChatMessageRowModel],
         messageCount: Int,
+        totalMessageCount: Int,
+        isInitialWindowLoaded: Bool,
         scrollAction: @escaping BottomAnchorAction
     ) {
-        if !isReadyToShow && !newIDs.isEmpty {
-            performInitialScroll(messageCount: messageCount, scrollAction: scrollAction)
-        }
+        startInitialAnchorIfPossible(
+            messageCount: messageCount,
+            visibleMessages: visibleMessages,
+            totalMessageCount: totalMessageCount,
+            isInitialWindowLoaded: isInitialWindowLoaded,
+            reason: "displayed-messages-change",
+            scrollAction: scrollAction
+        )
 
         if oldIDs != newIDs {
             prefetchVisibleContent(from: visibleMessages)
@@ -153,10 +196,48 @@ final class ChatMessagesCoordinator: ObservableObject {
         newCount: Int,
         lastMessage: Message?,
         stabilizeBottomAnchor: Bool,
+        isInitialWindowLoaded: Bool,
         scrollAction: @escaping BottomAnchorAction
     ) {
-        if !isReadyToShow && newCount > 0 {
-            performInitialScroll(messageCount: newCount, scrollAction: scrollAction)
+        if oldCount == 0 && newCount > 0 {
+            updateReplyingToIfNewSubject(lastMessage)
+            if hasStartedInitialAnchor && !initialAnchorWasForEmptyConversation {
+                Log.diagnostic(
+                    .chatView,
+                    level: .info,
+                    "ChatView empty-to-loaded count change ignored because initial anchoring already started messages=\(newCount)",
+                    category: .ui
+                )
+            } else {
+                isReadyToShow = false
+                hasStartedInitialAnchor = false
+                initialAnchorWasForEmptyConversation = false
+                if isInitialWindowLoaded {
+                    requestLatestWindowIfNeeded(knownTotalCount: newCount)
+                }
+                Log.diagnostic(
+                    .chatView,
+                    level: .info,
+                    "ChatView empty-to-loaded count change uses initial anchoring messages=\(newCount) initialWindowLoaded=\(isInitialWindowLoaded)",
+                    category: .ui
+                )
+            }
+        } else if !isInitialWindowLoaded {
+            if newCount > oldCount {
+                Log.diagnostic(
+                    .chatView,
+                    level: .info,
+                    "ChatView deferring message-count bottom anchor until initial window loads old=\(oldCount) new=\(newCount)",
+                    category: .ui
+                )
+            }
+        } else if !isReadyToShow && newCount > 0 {
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView ignoring count-change initial anchor until visible rows publish messages=\(newCount)",
+                category: .ui
+            )
         } else if isReadyToShow && newCount > oldCount {
             updateReplyingToIfNewSubject(lastMessage)
             scrollToBottom(
@@ -175,8 +256,19 @@ final class ChatMessagesCoordinator: ObservableObject {
         oldHeight: CGFloat,
         newHeight: CGFloat,
         messageCount: Int,
+        isInitialWindowLoaded: Bool,
         scrollAction: @escaping BottomAnchorAction
     ) {
+        guard isInitialWindowLoaded, isReadyToShow else {
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView skipping keyboard bottom anchor before initial reveal loaded=\(isInitialWindowLoaded) ready=\(isReadyToShow)",
+                category: .ui
+            )
+            return
+        }
+
         if newHeight > 0 || (oldHeight > 0 && newHeight == 0) {
             scrollToBottom(
                 messageCount: messageCount,
@@ -189,8 +281,19 @@ final class ChatMessagesCoordinator: ObservableObject {
     func handleTextFieldFocusChange(
         isFocused: Bool,
         messageCount: Int,
+        isInitialWindowLoaded: Bool,
         scrollAction: @escaping BottomAnchorAction
     ) {
+        guard isInitialWindowLoaded, isReadyToShow else {
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView skipping focus bottom anchor before initial reveal loaded=\(isInitialWindowLoaded) ready=\(isReadyToShow)",
+                category: .ui
+            )
+            return
+        }
+
         if !isFocused {
             scrollToBottom(
                 messageCount: messageCount,
@@ -275,15 +378,88 @@ final class ChatMessagesCoordinator: ObservableObject {
         return nil
     }
 
-    private func performInitialScroll(
+    private func startInitialAnchorIfPossible(
         messageCount: Int,
+        visibleMessages: [ChatMessageRowModel],
+        totalMessageCount: Int,
+        isInitialWindowLoaded: Bool,
+        reason: String,
         scrollAction: @escaping BottomAnchorAction
     ) {
-        guard shouldUseBottomAnchoring(for: messageCount) else {
+        guard !isReadyToShow else { return }
+
+        let anchorMessageCount = max(messageCount, totalMessageCount)
+
+        guard anchorMessageCount > 0 else {
+            hasStartedInitialAnchor = true
+            initialAnchorWasForEmptyConversation = true
             isReadyToShow = true
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView initial anchor skipped for empty conversation reason=\(reason)",
+                category: .ui
+            )
             return
         }
 
+        guard isInitialWindowLoaded else {
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView initial anchor deferred until virtual window loads reason=\(reason) messages=\(messageCount) visible=\(visibleMessages.count) total=\(totalMessageCount)",
+                category: .ui
+            )
+            return
+        }
+
+        guard !visibleMessages.isEmpty else {
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView initial anchor waiting for visible rows reason=\(reason) messages=\(messageCount) total=\(totalMessageCount)",
+                category: .ui
+            )
+            return
+        }
+
+        performInitialScroll(messageCount: anchorMessageCount, reason: reason, scrollAction: scrollAction)
+    }
+
+    private func performInitialScroll(
+        messageCount: Int,
+        reason: String,
+        scrollAction: @escaping BottomAnchorAction
+    ) {
+        guard !hasStartedInitialAnchor else {
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView initial anchor already scheduled reason=\(reason) messages=\(messageCount)",
+                category: .ui
+            )
+            return
+        }
+
+        hasStartedInitialAnchor = true
+        initialAnchorWasForEmptyConversation = false
+        guard shouldUseBottomAnchoring(for: messageCount) else {
+            isReadyToShow = true
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView initial anchor skipped for short conversation reason=\(reason) messages=\(messageCount)",
+                category: .ui
+            )
+            return
+        }
+
+        Log.diagnostic(
+            .chatView,
+            level: .info,
+            "ChatView initial anchor scheduled reason=\(reason) messages=\(messageCount)",
+            category: .ui
+        )
         scheduleBottomAnchor(
             taskKey: TaskKey.initialBottomAnchor,
             steps: [
@@ -316,6 +492,12 @@ final class ChatMessagesCoordinator: ObservableObject {
             ],
             scrollAction: scrollAction
         )
+    }
+
+    private func requestLatestWindowIfNeeded(knownTotalCount: Int?) {
+        taskManager.run(TaskKey.latestWindow) { [loadLatestWindowIfNeeded] in
+            await loadLatestWindowIfNeeded(knownTotalCount)
+        }
     }
 
     private func scrollToBottom(
@@ -372,6 +554,14 @@ final class ChatMessagesCoordinator: ObservableObject {
 
                 if step.marksReady {
                     self.isReadyToShow = true
+                    if taskKey == TaskKey.initialBottomAnchor {
+                        Log.diagnostic(
+                            .chatView,
+                            level: .info,
+                            "ChatView initial anchor completed",
+                            category: .ui
+                        )
+                    }
                 }
             }
         }

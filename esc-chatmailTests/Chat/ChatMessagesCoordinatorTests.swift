@@ -77,7 +77,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             lastMessage: messages.last,
             visibleMessages: rows,
             senderGroupingMessages: rows,
-            totalMessageCount: messages.count
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
         ) { step in
             anchorSteps.append(step)
         }
@@ -145,6 +146,99 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
+    func testHandleAppear_defersInitialBottomAnchorUntilInitialWindowLoaded() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com",
+            "third@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+
+        var loadLatestWindowCount = 0
+        var markConversationAsReadCount = 0
+        var initializedReplyTargets: [String?] = []
+        var loadResolvedDisplayNameCount = 0
+        var prefetchedMessageBatches: [[String]] = []
+        var groupingRequests: [[String]] = []
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { _ in
+                loadLatestWindowCount += 1
+            },
+            markConversationAsReadIfNeeded: {
+                markConversationAsReadCount += 1
+            },
+            initializeReplyingTo: { lastMessage in
+                initializedReplyTargets.append(lastMessage?.id)
+            },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {
+                loadResolvedDisplayNameCount += 1
+            },
+            prefetchRecentContent: { messageIds, _ in
+                prefetchedMessageBatches.append(messageIds)
+            },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { senderEmails in
+                groupingRequests.append(senderEmails)
+                return [:]
+            },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: [],
+            senderGroupingMessages: [],
+            totalMessageCount: 0,
+            isInitialWindowLoaded: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await waitUntil {
+            groupingRequests.count == 1
+        }
+
+        XCTAssertFalse(coordinator.isReadyToShow)
+        XCTAssertTrue(anchorSteps.isEmpty)
+        XCTAssertEqual(loadLatestWindowCount, 0)
+        XCTAssertEqual(markConversationAsReadCount, 1)
+        XCTAssertEqual(initializedReplyTargets, [messages.last?.id])
+        XCTAssertEqual(loadResolvedDisplayNameCount, 1)
+        XCTAssertEqual(prefetchedMessageBatches, [[]])
+        XCTAssertEqual(groupingRequests, [[]])
+
+        coordinator.handleInitialWindowLoaded(
+            messageCount: messages.count,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await waitUntil {
+            coordinator.isReadyToShow && anchorSteps.count == 5
+        }
+
+        XCTAssertEqual(loadLatestWindowCount, 1)
+        XCTAssertEqual(
+            anchorSteps.map(\.logMessage),
+            [
+                "ChatView initial scroll -> bottom anchor",
+                "ChatView follow-up scroll -> bottom anchor",
+                "ChatView stabilization scroll (0.25s) -> bottom anchor",
+                "ChatView stabilization scroll (0.75s) -> bottom anchor",
+                "ChatView stabilization scroll (1.5s) -> bottom anchor"
+            ]
+        )
+    }
+
     func testHandleDisplayedMessagesChange_prefetchesTrailingVisibleWindow() async throws {
         let senderEmails = (0..<35).map { index in
             "sender-\(index)@example.com"
@@ -178,7 +272,9 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             newIDs: rows.map(\.objectID),
             visibleMessages: rows,
             senderGroupingMessages: rows,
-            messageCount: messages.count
+            messageCount: messages.count,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
         ) { step in
             anchorSteps.append(step)
         }
@@ -190,6 +286,68 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         let expectedPrefetchMessages = Array(messages.suffix(30))
         XCTAssertEqual(prefetchedMessageBatches, [expectedPrefetchMessages.map(\.id)])
         XCTAssertEqual(prefetchedSenderEmailBatches, [expectedPrefetchMessages.compactMap(\.senderEmail)])
+    }
+
+    func testScrollHandlers_doNotScheduleBottomAnchorsBeforeInitialWindowLoaded() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com",
+            "third@example.com"
+        ])
+
+        var loadLatestWindowCount = 0
+        var loadResolvedDisplayNameCount = 0
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { _ in
+                loadLatestWindowCount += 1
+            },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {
+                loadResolvedDisplayNameCount += 1
+            },
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        coordinator.handleMessageCountChange(
+            oldCount: 2,
+            newCount: 3,
+            lastMessage: messages.last,
+            stabilizeBottomAnchor: true,
+            isInitialWindowLoaded: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        coordinator.handleKeyboardHeightChange(
+            oldHeight: 0,
+            newHeight: 240,
+            messageCount: 3,
+            isInitialWindowLoaded: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        coordinator.handleTextFieldFocusChange(
+            isFocused: false,
+            messageCount: 3,
+            isInitialWindowLoaded: false
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        XCTAssertTrue(anchorSteps.isEmpty)
+        XCTAssertEqual(loadLatestWindowCount, 0)
+        XCTAssertEqual(loadResolvedDisplayNameCount, 1)
+        XCTAssertFalse(coordinator.isReadyToShow)
     }
 
     func testHandleAppear_refreshesGroupingAcrossVisibleWindowBoundary() async throws {
@@ -227,7 +385,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             lastMessage: messages.last,
             visibleMessages: Array(rows.prefix(2)),
             senderGroupingMessages: Array(rows.prefix(3)),
-            totalMessageCount: rows.count
+            totalMessageCount: rows.count,
+            isInitialWindowLoaded: true
         ) { _ in }
 
         await waitUntil {
@@ -338,7 +497,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             lastMessage: messages.first,
             visibleMessages: [rows.first].compactMap { $0 },
             senderGroupingMessages: [rows.first].compactMap { $0 },
-            totalMessageCount: 1
+            totalMessageCount: 1,
+            isInitialWindowLoaded: true
         ) { _ in
             XCTFail("Single-message appear should not schedule bottom anchoring")
         }
@@ -354,7 +514,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             oldCount: 1,
             newCount: 2,
             lastMessage: messages.last,
-            stabilizeBottomAnchor: false
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true
         ) { step in
             anchorSteps.append(step)
         }
@@ -410,7 +571,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             lastMessage: messages.first,
             visibleMessages: [rows.first].compactMap { $0 },
             senderGroupingMessages: [rows.first].compactMap { $0 },
-            totalMessageCount: 1
+            totalMessageCount: 1,
+            isInitialWindowLoaded: true
         ) { _ in
             XCTFail("Single-message appear should not schedule bottom anchoring")
         }
@@ -423,7 +585,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             oldCount: 1,
             newCount: 2,
             lastMessage: messages.last,
-            stabilizeBottomAnchor: true
+            stabilizeBottomAnchor: true,
+            isInitialWindowLoaded: true
         ) { step in
             anchorSteps.append(step)
         }
@@ -470,10 +633,24 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             sleep: { _ in }
         )
 
+        coordinator.handleAppear(
+            messageCount: 0,
+            lastMessage: nil,
+            visibleMessages: [],
+            senderGroupingMessages: [],
+            totalMessageCount: 0,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("Empty appear should not schedule bottom anchoring")
+        }
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+
         coordinator.handleKeyboardHeightChange(
             oldHeight: 0,
             newHeight: 240,
-            messageCount: 2
+            messageCount: 2,
+            isInitialWindowLoaded: true
         ) { step in
             anchorSteps.append(step)
         }
@@ -499,7 +676,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         coordinator.handleKeyboardHeightChange(
             oldHeight: 240,
             newHeight: 0,
-            messageCount: 2
+            messageCount: 2,
+            isInitialWindowLoaded: true
         ) { step in
             anchorSteps.append(step)
         }
@@ -524,7 +702,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
         coordinator.handleTextFieldFocusChange(
             isFocused: false,
-            messageCount: 2
+            messageCount: 2,
+            isInitialWindowLoaded: true
         ) { step in
             anchorSteps.append(step)
         }
@@ -576,7 +755,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             lastMessage: messages.last,
             visibleMessages: rows,
             senderGroupingMessages: rows,
-            totalMessageCount: messages.count
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
         ) { step in
             anchorSteps.append(step)
         }
@@ -584,7 +764,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         coordinator.handleKeyboardHeightChange(
             oldHeight: 0,
             newHeight: 240,
-            messageCount: messages.count
+            messageCount: messages.count,
+            isInitialWindowLoaded: true
         ) { step in
             anchorSteps.append(step)
         }
@@ -605,7 +786,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             oldCount: messages.count,
             newCount: messages.count + 1,
             lastMessage: messages.last,
-            stabilizeBottomAnchor: true
+            stabilizeBottomAnchor: true,
+            isInitialWindowLoaded: true
         ) { step in
             anchorSteps.append(step)
         }

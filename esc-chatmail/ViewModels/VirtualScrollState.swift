@@ -27,6 +27,7 @@ final class VirtualScrollState: ObservableObject {
     @Published var totalMessageCount = 0
     @Published var scrollPosition: Int = 0
     @Published var isLoadingMore = false
+    @Published private(set) var isInitialLoadComplete = false
     @Published var placeholderIndices: Set<Int> = []
 
     private let configuration: VirtualScrollConfiguration
@@ -121,7 +122,14 @@ final class VirtualScrollState: ObservableObject {
     }
 
     private func loadInitialMessages() {
+        isInitialLoadComplete = false
         isLoadingMore = true
+        Log.diagnostic(
+            .chatView,
+            level: .info,
+            "VirtualScroll initial load start conv=\(conversationId) position=\(initialWindowPosition.diagnosticName)",
+            category: .ui
+        )
 
         taskManager.run("loadInitial") { [weak self] in
             guard let self = self else { return }
@@ -130,6 +138,12 @@ final class VirtualScrollState: ObservableObject {
                 self.initialWindowPosition == .end && self.hasPendingInsertedMessagesInConversation
             let initialRange = await self.initialMessageRange(
                 preferPendingConversationMessages: preferPendingConversationMessages
+            )
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "VirtualScroll initial load request conv=\(self.conversationId) range=\(initialRange.lowerBound)..<\(initialRange.upperBound)",
+                category: .ui
             )
             let page = await self.loadPage(
                 initialRange,
@@ -155,6 +169,13 @@ final class VirtualScrollState: ObservableObject {
             self.setMessageWindow(window)
             self.visibleMessages = messages
             self.isLoadingMore = false
+            self.isInitialLoadComplete = true
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "VirtualScroll initial load complete conv=\(self.conversationId) requested=\(initialRange.lowerBound)..<\(initialRange.upperBound) loaded=\(page.messageIDs.count) total=\(page.totalCount) window=\(window.startIndex)..<\(window.endIndex)",
+                category: .ui
+            )
         }
     }
 
@@ -655,6 +676,17 @@ final class VirtualScrollState: ObservableObject {
                 messageIDs: messages.map(\.objectID),
                 totalCount: totalCount
             )
+        }
+    }
+}
+
+private extension VirtualScrollState.InitialWindowPosition {
+    var diagnosticName: String {
+        switch self {
+        case .beginning:
+            return "beginning"
+        case .end:
+            return "end"
         }
     }
 }

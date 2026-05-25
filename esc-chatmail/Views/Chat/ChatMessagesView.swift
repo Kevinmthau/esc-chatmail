@@ -60,56 +60,68 @@ struct ChatMessagesView: View {
             let displayedMessages = scrollState.visibleMessages
             let keyboardOffset = keyboardAvoidanceOffset()
             let bottomContentInset = max(1, replyBarHeight + keyboardOffset)
+            let isWaitingForInitialWindow = messages.count > 0 && !scrollState.isInitialLoadComplete
+            let isHidingInitialContent = !coordinator.isReadyToShow && !displayedMessages.isEmpty
+            let showsInitialPlaceholder = isWaitingForInitialWindow || isHidingInitialContent
 
             ZStack(alignment: .bottom) {
-                ScrollView {
-                    LazyVStack(spacing: 8) {
-                        ForEach(Array(displayedMessages.enumerated()), id: \.element.objectID) { index, message in
-                            let absoluteIndex = scrollState.absoluteIndex(forVisibleIndex: index) ?? index
-                            let nextMessage = messageRow(atAbsoluteIndex: absoluteIndex + 1)
-                            let isLastFromSender = ChatMessageRowGrouping.isLastFromSender(
-                                current: message,
-                                next: nextMessage,
-                                senderRunKey: senderRunKey(for:)
-                            )
+                ZStack {
+                    if !isWaitingForInitialWindow {
+                        ScrollView {
+                            LazyVStack(spacing: 8) {
+                                ForEach(Array(displayedMessages.enumerated()), id: \.element.objectID) { index, message in
+                                    let absoluteIndex = scrollState.absoluteIndex(forVisibleIndex: index) ?? index
+                                    let nextMessage = messageRow(atAbsoluteIndex: absoluteIndex + 1)
+                                    let isLastFromSender = ChatMessageRowGrouping.isLastFromSender(
+                                        current: message,
+                                        next: nextMessage,
+                                        senderRunKey: senderRunKey(for:)
+                                    )
 
-                            MessageBubble(
-                                message: message,
-                                messageBubbleLoader: chatDependencies.content.makeMessageBubbleLoader(),
-                                htmlContentHandler: chatDependencies.content.htmlContentHandler,
-                                isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
-                                contactRefreshToken: coordinator.contactRefreshToken,
-                                isLastFromSender: isLastFromSender,
-                                onOpenFullMessage: onOpenFullMessage
-                            )
-                            .id(message.objectID)
-                            .contentShape(Rectangle())
-                            .contextMenu {
-                                messageContextMenu(for: message)
-                            } preview: {
-                                // Lightweight preview - just show the text content without triggering loads
-                                MessageContextMenuPreview(message: message)
+                                    MessageBubble(
+                                        message: message,
+                                        messageBubbleLoader: chatDependencies.content.makeMessageBubbleLoader(),
+                                        htmlContentHandler: chatDependencies.content.htmlContentHandler,
+                                        isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
+                                        contactRefreshToken: coordinator.contactRefreshToken,
+                                        isLastFromSender: isLastFromSender,
+                                        onOpenFullMessage: onOpenFullMessage
+                                    )
+                                    .id(message.objectID)
+                                    .contentShape(Rectangle())
+                                    .contextMenu {
+                                        messageContextMenu(for: message)
+                                    } preview: {
+                                        // Lightweight preview - just show the text content without triggering loads
+                                        MessageContextMenuPreview(message: message)
+                                    }
+                                    .onAppear {
+                                        scrollState.markIndexVisible(absoluteIndex)
+                                    }
+                                }
+
+                                Color.clear
+                                    .frame(height: bottomContentInset)
+                                    .id(bottomID)
                             }
-                            .onAppear {
-                                scrollState.markIndexVisible(absoluteIndex)
+                            .padding(.horizontal)
+                            .padding(.top, 8)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                isTextFieldFocused.wrappedValue = false
                             }
                         }
-
-                        Color.clear
-                            .frame(height: bottomContentInset)
-                            .id(bottomID)
+                        // Keep short conversations top-aligned; explicit scrollTo calls still
+                        // move longer threads to the newest message when needed.
+                        .defaultScrollAnchor(.top)
+                        .scrollDismissesKeyboard(.interactively)
+                        .opacity(isHidingInitialContent ? 0 : 1)
                     }
-                    .padding(.horizontal)
-                    .padding(.top, 8)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        isTextFieldFocused.wrappedValue = false
+
+                    if showsInitialPlaceholder {
+                        initialLoadPlaceholder(bottomInset: bottomContentInset)
                     }
                 }
-                // Keep short conversations top-aligned; explicit scrollTo calls still
-                // move longer threads to the newest message when needed.
-                .defaultScrollAnchor(.top)
-                .scrollDismissesKeyboard(.interactively)
 
                 replyBarOverlay
                     .padding(.bottom, keyboardOffset)
@@ -136,7 +148,8 @@ struct ChatMessagesView: View {
                     lastMessage: messages.last,
                     visibleMessages: scrollState.visibleMessages,
                     senderGroupingMessages: senderGroupingMessages(for: scrollState.visibleMessages),
-                    totalMessageCount: scrollState.totalMessageCount
+                    totalMessageCount: scrollState.totalMessageCount,
+                    isInitialWindowLoaded: scrollState.isInitialLoadComplete || messages.count == 0
                 ) { step in
                     performBottomAnchor(step, proxy: proxy)
                 }
@@ -150,7 +163,22 @@ struct ChatMessagesView: View {
                     newIDs: newIDs,
                     visibleMessages: displayedMessages,
                     senderGroupingMessages: senderGroupingMessages(for: displayedMessages),
-                    messageCount: messages.count
+                    messageCount: messages.count,
+                    totalMessageCount: scrollState.totalMessageCount,
+                    isInitialWindowLoaded: scrollState.isInitialLoadComplete
+                ) { step in
+                    performBottomAnchor(step, proxy: proxy)
+                }
+            }
+            .onChange(of: scrollState.isInitialLoadComplete) { _, isComplete in
+                guard isComplete else { return }
+
+                let visibleMessages = scrollState.visibleMessages
+                coordinator.handleInitialWindowLoaded(
+                    messageCount: messages.count,
+                    visibleMessages: visibleMessages,
+                    senderGroupingMessages: senderGroupingMessages(for: visibleMessages),
+                    totalMessageCount: scrollState.totalMessageCount
                 ) { step in
                     performBottomAnchor(step, proxy: proxy)
                 }
@@ -160,7 +188,8 @@ struct ChatMessagesView: View {
                     oldCount: oldCount,
                     newCount: newCount,
                     lastMessage: messages.last,
-                    stabilizeBottomAnchor: keyboard.currentHeight > 0 || isTextFieldFocused.wrappedValue
+                    stabilizeBottomAnchor: keyboard.currentHeight > 0 || isTextFieldFocused.wrappedValue,
+                    isInitialWindowLoaded: scrollState.isInitialLoadComplete
                 ) { step in
                     performBottomAnchor(step, proxy: proxy)
                 }
@@ -169,7 +198,8 @@ struct ChatMessagesView: View {
                 coordinator.handleKeyboardHeightChange(
                     oldHeight: oldHeight,
                     newHeight: newHeight,
-                    messageCount: messages.count
+                    messageCount: messages.count,
+                    isInitialWindowLoaded: scrollState.isInitialLoadComplete
                 ) { step in
                     performBottomAnchor(step, proxy: proxy)
                 }
@@ -177,7 +207,8 @@ struct ChatMessagesView: View {
             .onChange(of: isTextFieldFocused.wrappedValue) { _, isFocused in
                 coordinator.handleTextFieldFocusChange(
                     isFocused: isFocused,
-                    messageCount: messages.count
+                    messageCount: messages.count,
+                    isInitialWindowLoaded: scrollState.isInitialLoadComplete
                 ) { step in
                     performBottomAnchor(step, proxy: proxy)
                 }
@@ -225,6 +256,13 @@ struct ChatMessagesView: View {
                     }
             }
         )
+    }
+
+    private func initialLoadPlaceholder(bottomInset: CGFloat) -> some View {
+        ProgressView()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.bottom, bottomInset)
+            .accessibilityLabel("Loading messages")
     }
 
     private func keyboardAvoidanceOffset() -> CGFloat {

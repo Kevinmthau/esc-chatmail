@@ -43,6 +43,47 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertTrue(page.messageIDs.isEmpty)
     }
 
+    func testInitialLoadCompletionStartsFalseAndPublishesAfterVisibleWindow() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 6)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 3,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+
+        let delayedLoader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            return await VirtualScrollState.loadMessagePage(
+                conversationId: conversationId,
+                range: range,
+                in: context
+            )
+        }
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            pageLoader: delayedLoader
+        )
+        defer { state.cleanup() }
+
+        XCTAssertFalse(state.isInitialLoadComplete)
+
+        let expectedIDs = Array(messages.prefix(3)).map(\.objectID)
+        await waitUntil {
+            state.isInitialLoadComplete &&
+                state.visibleMessages.map(\.objectID) == expectedIDs &&
+                !state.isLoadingMore
+        }
+
+        XCTAssertEqual(state.totalMessageCount, 6)
+        XCTAssertEqual(state.visibleMessages.map(\.id), Array(messages.prefix(3)).map(\.id))
+    }
+
     func testLoadMessagePage_omitsExcludedLabelMessagesFromPageIDs() async throws {
         let conversation = ConversationBuilder()
             .visible()
@@ -116,7 +157,9 @@ final class VirtualScrollStateTests: XCTestCase {
 
         let expectedIDs = Array(messages.prefix(4)).map(\.objectID)
         await waitUntil {
-            state.visibleMessages.map(\.objectID) == expectedIDs && !state.isLoadingMore
+            state.visibleMessages.map(\.objectID) == expectedIDs &&
+                state.isInitialLoadComplete &&
+                !state.isLoadingMore
         }
 
         XCTAssertEqual(state.totalMessageCount, 8)
@@ -144,7 +187,9 @@ final class VirtualScrollStateTests: XCTestCase {
 
         let expectedIDs = Array(messages.suffix(4)).map(\.objectID)
         await waitUntil {
-            state.visibleMessages.map(\.objectID) == expectedIDs && !state.isLoadingMore
+            state.visibleMessages.map(\.objectID) == expectedIDs &&
+                state.isInitialLoadComplete &&
+                !state.isLoadingMore
         }
 
         XCTAssertEqual(state.visibleRangeStartIndex, 4)
