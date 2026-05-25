@@ -1141,6 +1141,107 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=device-width"#))
     }
 
+    func testWrapHTMLForDisplay_originalPurposeUsesFixedViewportForClassOnlyTableMaxWidthLayout() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            .outer-wrap {
+                max-width: 568px;
+                width: 100%;
+            }
+            @media only screen and (max-width: 480px) {
+                .cardcol {
+                    display: block !important;
+                    width: 100% !important;
+                }
+            }
+            </style>
+        </head>
+        <body>
+            <table class="outer-wrap" align="center" role="presentation">
+                <tr>
+                    <td class="story" width="50%">Image column</td>
+                    <td class="story" width="50%">Text column</td>
+                </tr>
+            </table>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=568, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=device-width"#))
+    }
+
+    func testWrapHTMLForDisplay_originalPurposeUsesFixedViewportForIDOnlyTableMaxWidthLayout() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            #outer-wrap {
+                max-width: 568px;
+                width: 100%;
+            }
+            @media only screen and (max-width: 480px) {
+                .cardcol {
+                    display: block !important;
+                    width: 100% !important;
+                }
+            }
+            </style>
+        </head>
+        <body>
+            <table id="outer-wrap" align="center" role="presentation">
+                <tr>
+                    <td class="story" width="50%">Image column</td>
+                    <td class="story" width="50%">Text column</td>
+                </tr>
+            </table>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=568, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=device-width"#))
+    }
+
+    func testWrapHTMLForDisplay_originalPurposeUsesDeviceViewportForResponsiveClassOnlyTableMaxWidthLayout() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+            .outer-wrap {
+                max-width: 568px;
+                width: 100%;
+            }
+            @media only screen and (max-width: 480px) {
+                .outer-wrap {
+                    width: 100% !important;
+                }
+            }
+            </style>
+        </head>
+        <body>
+            <table class="outer-wrap" align="center" role="presentation">
+                <tr><td>Responsive newsletter layout</td></tr>
+            </table>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .original)
+
+        XCTAssertTrue(result.contains(#"<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">"#))
+        XCTAssertFalse(result.contains(#"<meta name="viewport" content="width=568"#))
+    }
+
     func testWrapHTMLForDisplay_originalPurposeUsesDeviceViewportForResponsiveTableMaxWidthLayout() {
         let html = """
         <!DOCTYPE html>

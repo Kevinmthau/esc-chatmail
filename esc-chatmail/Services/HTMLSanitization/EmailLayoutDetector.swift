@@ -159,6 +159,9 @@ enum EmailLayoutDetector {
             return []
         }
 
+        let selectorElements = HTMLSelectorMatcher.htmlSelectorElements(in: html)
+        let elementTargets = selectorElements.map(\.target)
+        let fluidWidthTableTargets = fluidWidthTableTargets(in: html)
         let range = NSRange(html.startIndex..<html.endIndex, in: html)
         return regex.matches(in: html, range: range).flatMap { match -> [(width: Int, target: LayoutSelectorTarget)] in
             guard let selectorsRange = Range(match.range(at: 1), in: html),
@@ -170,13 +173,84 @@ enum EmailLayoutDetector {
 
             return String(html[selectorsRange]).split(separator: ",").compactMap { selector -> (width: Int, target: LayoutSelectorTarget)? in
                 let selector = CSSParser.cssSelectorText(from: String(selector))
-                guard let target = HTMLSelectorMatcher.selectorTarget(in: selector),
-                      target.tagName == "table" else {
+                guard let target = tableSelectorTarget(
+                    for: selector,
+                    selectorElements: selectorElements,
+                    elementTargets: elementTargets,
+                    fluidWidthTableTargets: fluidWidthTableTargets
+                ) else {
                     return nil
                 }
 
                 return (width: width, target: target)
             }
+        }
+    }
+
+    private static func tableSelectorTarget(
+        for selector: String,
+        selectorElements: [HTMLSelectorElement],
+        elementTargets: [LayoutSelectorTarget],
+        fluidWidthTableTargets: [LayoutSelectorTarget]
+    ) -> LayoutSelectorTarget? {
+        guard let target = HTMLSelectorMatcher.selectorTarget(in: selector) else {
+            return nil
+        }
+
+        if HTMLSelectorMatcher.selectorContainsCombinator(selector) {
+            let matchingTables = HTMLSelectorMatcher.htmlElementSelectorTargets(
+                matchingComplexSelector: selector,
+                in: selectorElements
+            )?.filter { $0.tagName == "table" } ?? []
+            if let matchingTable = matchingTables.first(where: {
+                !fluidWidthTableTargets.containsTargetMatching($0)
+            }) {
+                return matchingTable
+            }
+            if !matchingTables.isEmpty {
+                return nil
+            }
+
+            return target.tagName == "table" ? target : nil
+        }
+
+        let matchingTables = elementTargets.filter { elementTarget in
+            elementTarget.tagName == "table"
+                && HTMLSelectorMatcher.selectorTarget(target, matches: elementTarget)
+        }
+        if let matchingTable = matchingTables.first(where: {
+            !fluidWidthTableTargets.containsTargetMatching($0)
+        }) {
+            return matchingTable
+        }
+        if !matchingTables.isEmpty {
+            return nil
+        }
+
+        return target.tagName == "table" ? target : nil
+    }
+
+    private static func fluidWidthTableTargets(in html: String) -> [LayoutSelectorTarget] {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"<table\b(?=[^>]*?\bwidth\s*=)[^>]*>"#,
+            options: [.caseInsensitive, .dotMatchesLineSeparators]
+        ) else {
+            return []
+        }
+
+        let range = NSRange(html.startIndex..<html.endIndex, in: html)
+        return regex.matches(in: html, range: range).compactMap { match in
+            guard let tagRange = Range(match.range(at: 0), in: html) else {
+                return nil
+            }
+
+            let tagHTML = String(html[tagRange])
+            guard HTMLSelectorMatcher.attributeValue(named: "width", in: tagHTML)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) == "100%" else {
+                return nil
+            }
+
+            return HTMLSelectorMatcher.htmlElementSelectorTarget(tagName: "table", tagHTML: tagHTML)
         }
     }
 
@@ -478,5 +552,14 @@ enum EmailLayoutDetector {
         }
 
         return width
+    }
+}
+
+private extension Array where Element == LayoutSelectorTarget {
+    func containsTargetMatching(_ target: LayoutSelectorTarget) -> Bool {
+        contains { candidate in
+            HTMLSelectorMatcher.selectorTarget(candidate, matches: target)
+                && HTMLSelectorMatcher.selectorTarget(target, matches: candidate)
+        }
     }
 }
