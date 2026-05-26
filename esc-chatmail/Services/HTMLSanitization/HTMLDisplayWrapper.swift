@@ -1,4 +1,5 @@
 import Foundation
+import SwiftSoup
 
 enum HTMLDisplayPurpose: String, CaseIterable, Sendable {
     case preview
@@ -123,6 +124,13 @@ struct HTMLDisplayWrapper {
         </style>
         """
 
+        if let wrapped = wrapExistingDocumentWithDOM(
+            html,
+            injectedHead: injectedHead
+        ) {
+            return wrapped
+        }
+
         var result = html
 
         // Try to inject after existing <head> tag
@@ -148,6 +156,47 @@ struct HTMLDisplayWrapper {
         }
 
         return result
+    }
+
+    private func wrapExistingDocumentWithDOM(
+        _ html: String,
+        injectedHead: String
+    ) -> String? {
+        do {
+            let document = try SwiftSoup.parse(html)
+            document.outputSettings().prettyPrint(pretty: false)
+
+            let head = try existingOrInsertedHead(in: document)
+            try head.prepend("\n" + injectedHead + "\n")
+
+            var result = normalizeSerializedHeadHTML(try document.outerHtml())
+            if !result.lowercased().contains("<!doctype") {
+                result = "<!DOCTYPE html>\n" + result
+            }
+            return result
+        } catch {
+            return nil
+        }
+    }
+
+    private func existingOrInsertedHead(in document: Document) throws -> Element {
+        if let head = document.head() {
+            return head
+        }
+
+        if let htmlElement = try document.select("html").first() {
+            return try htmlElement.prependElement("head")
+        }
+
+        return try document.prependElement("head")
+    }
+
+    private func normalizeSerializedHeadHTML(_ html: String) -> String {
+        html.replacingOccurrences(
+            of: #"<meta\b([^>]*)\s/>"#,
+            with: #"<meta$1>"#,
+            options: .regularExpression
+        )
     }
 
     /// Wraps partial HTML (no document structure) with our full template
