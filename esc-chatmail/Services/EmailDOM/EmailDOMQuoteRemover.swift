@@ -47,8 +47,10 @@ enum EmailDOMQuoteRemover {
 
         do {
             try removeQuotedContainers(in: document)
-            try truncateAtStructuralBoundaries(in: document)
-            try truncateAtTextMarkers(in: document)
+            let didTruncateAtStructuralBoundary = try truncateAtStructuralBoundaries(in: document)
+            if !didTruncateAtStructuralBoundary {
+                try truncateAtTextMarkers(in: document)
+            }
             if mode == .quotedAndSignatures {
                 try removeSignatureWrappers(in: document)
                 try removeFooterContainers(in: document)
@@ -142,12 +144,12 @@ enum EmailDOMQuoteRemover {
         "[id*=mail-editor-reference-message-container]"
     ]
 
-    private static func truncateAtStructuralBoundaries(in document: Document) throws {
+    private static func truncateAtStructuralBoundaries(in document: Document) throws -> Bool {
         for selector in structuralQuoteSelectors {
             let elements = try document.select(selector)
             if let first = elements.first() {
                 try removeFromHereForward(first)
-                return
+                return true
             }
         }
 
@@ -165,8 +167,10 @@ enum EmailDOMQuoteRemover {
                   lower.contains("subject:"),
                   lower.contains("to:") else { continue }
             try removeFromHereForward(element)
-            return
+            return true
         }
+
+        return false
     }
 
     // MARK: - Text markers ("On … wrote:")
@@ -223,9 +227,93 @@ enum EmailDOMQuoteRemover {
         for selector in signatureWrapperSelectors {
             let elements = try document.select(selector)
             for element in elements.array() {
-                try element.remove()
+                let replacement = preservedSignOffHTML(fromSignatureElement: element)
+                if replacement.isEmpty {
+                    try element.remove()
+                } else {
+                    try element.before(replacement)
+                    try element.remove()
+                }
             }
         }
+    }
+
+    private static func preservedSignOffHTML(fromSignatureElement element: Element) -> String {
+        var lines = EmailDOMTextExtractor.paragraphAwareText(from: element)
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        if lines.first == "--" {
+            lines.removeFirst()
+        }
+
+        guard !lines.isEmpty else { return "" }
+
+        if isLikelyCombinedSignOffAndNameLine(lines[0]) {
+            return "<div>\(escapedHTML(lines[0]))</div>"
+        }
+
+        guard isLikelySignOffLine(lines[0]) else { return "" }
+
+        var preserved = [lines[0]]
+        if lines.count > 1, looksLikeNameLine(lines[1]) {
+            preserved.append(lines[1])
+        }
+
+        return preserved
+            .map { "<div>\(escapedHTML($0))</div>" }
+            .joined()
+    }
+
+    private static func isLikelySignOffLine(_ line: String) -> Bool {
+        let normalized = line
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: .punctuationCharacters)
+
+        return signOffPhrases.contains(normalized)
+    }
+
+    private static func isLikelyCombinedSignOffAndNameLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count <= 60 else { return false }
+
+        let lowercased = trimmed.lowercased()
+        for signOff in signOffPhrasesForPrefixMatching {
+            for separator in [",", " "] {
+                let prefix = signOff + separator
+                guard lowercased.hasPrefix(prefix) else { continue }
+                let remainder = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                return looksLikeNameLine(remainder)
+            }
+        }
+
+        return false
+    }
+
+    private static func looksLikeNameLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 40 else { return false }
+        guard trimmed.rangeOfCharacter(from: .letters) != nil else { return false }
+        guard trimmed.rangeOfCharacter(from: .decimalDigits) == nil else { return false }
+
+        let lowercased = trimmed.lowercased()
+        let disallowedFragments = ["@", "http", "www.", "|", "tel:", "fax", "mobile", "office", "cell", "phone"]
+        guard !disallowedFragments.contains(where: { lowercased.contains($0) }) else { return false }
+
+        let words = trimmed.split(whereSeparator: \.isWhitespace)
+        guard (1...4).contains(words.count) else { return false }
+
+        return true
+    }
+
+    private static func escapedHTML(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
     }
 
     // MARK: - Footer containers (newsletter unsubscribe, social icons)
@@ -271,6 +359,30 @@ enum EmailDOMQuoteRemover {
             try? NSRegularExpression(pattern: $0, options: [.caseInsensitive])
         }
     }()
+
+    private static let signOffPhrases: Set<String> = [
+        "all the best",
+        "best",
+        "best regards",
+        "best wishes",
+        "cheers",
+        "kind regards",
+        "many thanks",
+        "regards",
+        "sincerely",
+        "thank you",
+        "thanks",
+        "warm regards",
+        "warmly",
+        "yours truly"
+    ]
+
+    private static let signOffPhrasesForPrefixMatching: [String] = signOffPhrases.sorted {
+        if $0.count == $1.count {
+            return $0 < $1
+        }
+        return $0.count > $1.count
+    }
 
     private static func truncateAtSignatureMarkers(in document: Document) throws {
         guard let body = document.body() else { return }
