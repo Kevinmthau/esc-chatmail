@@ -170,6 +170,7 @@ struct HTMLDisplayWrapper {
             try head.prepend("\n" + injectedHead + "\n")
 
             var result = normalizeSerializedHeadHTML(try document.outerHtml())
+            result = preserveOriginalDoctypeCasing(in: result, originalHTML: html)
             if !result.lowercased().contains("<!doctype") {
                 result = "<!DOCTYPE html>\n" + result
             }
@@ -197,6 +198,17 @@ struct HTMLDisplayWrapper {
             with: #"<meta$1>"#,
             options: .regularExpression
         )
+    }
+
+    private func preserveOriginalDoctypeCasing(in wrappedHTML: String, originalHTML: String) -> String {
+        guard let originalRange = originalHTML.range(of: "<!doctype", options: .caseInsensitive),
+              let wrappedRange = wrappedHTML.range(of: "<!doctype", options: .caseInsensitive) else {
+            return wrappedHTML
+        }
+
+        var restored = wrappedHTML
+        restored.replaceSubrange(wrappedRange, with: originalHTML[originalRange])
+        return restored
     }
 
     /// Wraps partial HTML (no document structure) with our full template

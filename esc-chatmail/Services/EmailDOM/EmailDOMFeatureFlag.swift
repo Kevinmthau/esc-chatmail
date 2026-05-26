@@ -31,6 +31,13 @@ enum EmailDOMFeatureFlag {
         defaults.bool(forKey: "EmailDOM_InlineContentIDExtraction")
     }
 
+    /// When true, `HTMLSanitizerService` removes dangerous elements and event
+    /// handler attributes through SwiftSoup before running the existing URL,
+    /// tracking-pixel, and CSS sanitizers.
+    static var useDOMHTMLSanitization: Bool {
+        defaults.bool(forKey: "EmailDOM_HTMLSanitization")
+    }
+
     /// Master switch: enables all DOM-based paths in one go. Useful for
     /// QA passes and for the eventual default flip.
     static var useDOMPipelineAll: Bool {
@@ -47,5 +54,9 @@ enum EmailDOMFeatureFlag {
 
     static func isInlineContentIDExtractionEnabled() -> Bool {
         useDOMInlineContentIDExtraction || useDOMPipelineAll
+    }
+
+    static func isHTMLSanitizationEnabled() -> Bool {
+        useDOMHTMLSanitization || useDOMPipelineAll
     }
 }

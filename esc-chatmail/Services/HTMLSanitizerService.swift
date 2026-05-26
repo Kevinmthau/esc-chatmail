@@ -19,13 +19,7 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
 
     // MARK: - Dangerous Tags Configuration
 
-    private static let dangerousTags = [
-        "script", "noscript", "object", "embed", "applet",
-        "frame", "frameset", "iframe", "base", "basefont",
-        "form", "input", "button", "select", "textarea",
-        "option", "optgroup", "fieldset", "legend", "label",
-        "meta", "link"
-    ]
+    private static let dangerousTags = EmailDOMHTMLSanitizer.dangerousTags
 
     // Pre-compiled regex patterns for dangerous tag removal (performance optimization)
     private static let compiledDangerousTagPatterns: [NSRegularExpression] = {
@@ -50,16 +44,7 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
     }
 
     func sanitize(_ html: String, rewriteModernImageFormatHints: Bool) -> String {
-        var sanitized = html
-
-        // Remove dangerous elements (script, form, iframe, etc.) using pre-compiled patterns
-        sanitized = removeDangerousElements(sanitized)
-
-        // Note: We intentionally preserve <style> tags to keep responsive CSS/media queries
-        // Marketing emails need these for proper mobile layouts
-
-        // Remove event handlers
-        sanitized = removeEventHandlers(sanitized)
+        var sanitized = removeDangerousElementsAndEventHandlers(html)
 
         // Sanitize URLs (delegated)
         sanitized = urlSanitizer.sanitizeURLs(
@@ -77,6 +62,33 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
     }
 
     // MARK: - Specific Sanitization Methods
+
+    private func removeDangerousElementsAndEventHandlers(_ html: String) -> String {
+        if EmailDOMFeatureFlag.isHTMLSanitizationEnabled() {
+            do {
+                return try EmailDOMHTMLSanitizer.removeDangerousElementsAndEventHandlers(from: html)
+            } catch {
+                return removeDangerousElementsAndEventHandlersWithLegacyRegex(html)
+            }
+        }
+
+        return removeDangerousElementsAndEventHandlersWithLegacyRegex(html)
+    }
+
+    private func removeDangerousElementsAndEventHandlersWithLegacyRegex(_ html: String) -> String {
+        var sanitized = html
+
+        // Remove dangerous elements (script, form, iframe, etc.) using pre-compiled patterns
+        sanitized = removeDangerousElements(sanitized)
+
+        // Note: We intentionally preserve <style> tags to keep responsive CSS/media queries
+        // Marketing emails need these for proper mobile layouts
+
+        // Remove event handlers
+        sanitized = removeEventHandlers(sanitized)
+
+        return sanitized
+    }
 
     private func removeDangerousElements(_ html: String) -> String {
         RegexSanitizer.removeTags(from: html, compiledPatterns: Self.compiledDangerousTagPatterns)

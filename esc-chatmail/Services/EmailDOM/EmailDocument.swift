@@ -456,3 +456,91 @@ final class EmailDocument {
     ].joined(separator: ",")
 
 }
+
+/// Parses standalone table-section fragments with their required parent
+/// context so SwiftSoup does not foster their cells into plain body text.
+enum EmailDOMFragmentParser {
+    static func parse(_ html: String, inputIsFragment: Bool) throws -> Document {
+        if inputIsFragment, let contextTagName = tableFragmentContextTagName(for: html) {
+            return try parseFragment(html, contextTagName: contextTagName)
+        }
+
+        if inputIsFragment {
+            return try SwiftSoup.parseBodyFragment(html)
+        }
+        return try SwiftSoup.parse(html)
+    }
+
+    private static func parseFragment(_ html: String, contextTagName: String) throws -> Document {
+        let document = Document.createShell("")
+        guard let body = document.body() else {
+            return try SwiftSoup.parseBodyFragment(html)
+        }
+
+        let context = try Element(Tag.valueOf(contextTagName), "")
+        let nodes = try Parser.parseFragment(html, context, [UInt8]())
+        for node in nodes {
+            try body.appendChild(node)
+        }
+        return document
+    }
+
+    private static func tableFragmentContextTagName(for html: String) -> String? {
+        guard let tagName = leadingOpeningTagName(in: html) else {
+            return nil
+        }
+
+        switch tagName {
+        case "caption", "colgroup", "tbody", "tfoot", "thead":
+            return "table"
+        case "col":
+            return "colgroup"
+        case "tr":
+            return "tbody"
+        case "td", "th":
+            return "tr"
+        default:
+            return nil
+        }
+    }
+
+    private static func leadingOpeningTagName(in html: String) -> String? {
+        var index = html.startIndex
+
+        while index < html.endIndex {
+            while index < html.endIndex, html[index].isWhitespace {
+                index = html.index(after: index)
+            }
+            guard index < html.endIndex else { return nil }
+            guard html[index] == "<" else { return nil }
+
+            let afterOpen = html.index(after: index)
+            guard afterOpen < html.endIndex else { return nil }
+
+            if html[afterOpen...].hasPrefix("!--") {
+                guard let commentEnd = html[afterOpen...].range(of: "-->")?.upperBound else {
+                    return nil
+                }
+                index = commentEnd
+                continue
+            }
+
+            guard html[afterOpen].isLetter else {
+                return nil
+            }
+
+            var nameEnd = afterOpen
+            while nameEnd < html.endIndex, isTagNameCharacter(html[nameEnd]) {
+                nameEnd = html.index(after: nameEnd)
+            }
+
+            return String(html[afterOpen..<nameEnd]).lowercased()
+        }
+
+        return nil
+    }
+
+    private static func isTagNameCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || character == "-" || character == ":" || character == "_"
+    }
+}

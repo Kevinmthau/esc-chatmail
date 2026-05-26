@@ -165,6 +165,37 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
                        "Fragment input should not gain <body> wrapper, got: \(result)")
     }
 
+    func testRemoveQuotes_fragmentWithHeaderElement_returnsFragmentNotWrappedDocument() {
+        let html = """
+        <header><p>Body.</p></header>
+        <div class="gmail_quote"><p>Quote</p></div>
+        """
+
+        let result = EmailDOMQuoteRemover.removeQuotes(from: html) ?? ""
+
+        XCTAssertFalse(result.lowercased().contains("<html"),
+                       "Fragment input should not gain <html> wrapper, got: \(result)")
+        XCTAssertFalse(result.lowercased().contains("<body"),
+                       "Fragment input should not gain <body> wrapper, got: \(result)")
+        XCTAssertTrue(result.contains("<header>"))
+        XCTAssertTrue(result.contains("<p>Body.</p>"))
+        XCTAssertFalse(result.contains("Quote"))
+    }
+
+    func testRemoveQuotes_standaloneTableRowFragmentPreservesLayout() {
+        let html = "<tr><td>Visible body.</td></tr>"
+
+        let result = EmailDOMQuoteRemover.removeQuotes(from: html) ?? ""
+        let lowercasedResult = result.lowercased()
+
+        XCTAssertFalse(lowercasedResult.contains("<html"),
+                       "Fragment input should not gain <html> wrapper, got: \(result)")
+        XCTAssertFalse(lowercasedResult.contains("<body"),
+                       "Fragment input should not gain <body> wrapper, got: \(result)")
+        XCTAssertTrue(lowercasedResult.contains("<tr"))
+        XCTAssertTrue(result.contains("<td>Visible body.</td>"))
+    }
+
     func testRemoveQuotes_documentInput_returnsFullDocument() {
         let html = """
         <!DOCTYPE html>
@@ -176,6 +207,29 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         let result = EmailDOMQuoteRemover.removeQuotes(from: html) ?? ""
         XCTAssertTrue(result.lowercased().contains("<html"),
                       "Document input should keep <html> wrapper, got: \(result)")
+    }
+
+    func testRemoveQuotes_lateBodyDocumentPreservesBodyAttributes() throws {
+        let preheader = String(repeating: "Hidden preheader text. ", count: 120)
+        let html = #"""
+        <!-- \#(preheader) -->
+        <body class="promo" style="margin:0" bgcolor="#f4f4f4">
+          <p>Body.</p>
+          <div class="gmail_quote"><p>Quote</p></div>
+        </body>
+        """#
+        let bodyRange = try XCTUnwrap(html.range(of: "<body"))
+        XCTAssertGreaterThan(html.distance(from: html.startIndex, to: bodyRange.lowerBound), 2048)
+
+        let result = EmailDOMQuoteRemover.removeQuotes(from: html) ?? ""
+        let lowercasedResult = result.lowercased()
+
+        XCTAssertTrue(lowercasedResult.contains("<body"))
+        XCTAssertTrue(result.contains(#"class="promo""#))
+        XCTAssertTrue(result.contains(#"style="margin:0""#))
+        XCTAssertTrue(result.contains("bgcolor=\"#f4f4f4\""))
+        XCTAssertTrue(result.contains("<p>Body.</p>"))
+        XCTAssertFalse(result.contains("Quote"))
     }
 
     // MARK: - Idempotence

@@ -30,17 +30,20 @@ enum EmailDOMQuoteRemover {
     /// being a meaningful representation.
     static func removeQuotes(from html: String?, mode: RemovalMode = .quotedAndSignatures) -> String? {
         guard let html else { return nil }
-        guard let document = try? SwiftSoup.parse(html) else {
+
+        // Match legacy contract: if the input was a fragment (no document
+        // structure), emit a fragment by returning body's inner HTML. Otherwise
+        // emit the full document. Compose-time reply quoting depends on this —
+        // wrapping a fragment with `<html><body>` would corrupt outgoing MIME
+        // parts.
+        let inputIsFragment = !hasDocumentWrapper(html)
+        guard let document = try? EmailDOMFragmentParser.parse(
+            html,
+            inputIsFragment: inputIsFragment
+        ) else {
             return html
         }
         document.outputSettings().prettyPrint(pretty: false)
-
-        // Match legacy contract: if the input was a fragment (no `<html>` or
-        // `<!doctype>`), emit a fragment by returning body's inner HTML.
-        // Otherwise emit the full document. Compose-time reply quoting depends
-        // on this — wrapping a fragment with `<html><body>` would corrupt
-        // outgoing MIME parts.
-        let inputIsFragment = !hasDocumentWrapper(html)
 
         do {
             try removeQuotedContainers(in: document)
@@ -64,8 +67,32 @@ enum EmailDOMQuoteRemover {
     }
 
     private static func hasDocumentWrapper(_ html: String) -> Bool {
-        let prefix = html.prefix(2048).lowercased()
-        return prefix.contains("<!doctype") || prefix.contains("<html")
+        containsTagPrefix("<!doctype", in: html) ||
+            containsTagPrefix("<html", in: html) ||
+            containsTagPrefix("<head", in: html) ||
+            containsTagPrefix("<body", in: html)
+    }
+
+    private static func containsTagPrefix(_ prefix: String, in html: String) -> Bool {
+        var searchStart = html.startIndex
+
+        while let range = html.range(
+            of: prefix,
+            options: .caseInsensitive,
+            range: searchStart..<html.endIndex
+        ) {
+            let boundaryIndex = range.upperBound
+            if boundaryIndex == html.endIndex || !isTagNameCharacter(html[boundaryIndex]) {
+                return true
+            }
+            searchStart = boundaryIndex
+        }
+
+        return false
+    }
+
+    private static func isTagNameCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || character == "-" || character == ":" || character == "_"
     }
 
     // MARK: - Containers (provider-specific)
