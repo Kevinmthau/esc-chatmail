@@ -27,6 +27,13 @@ enum TextProcessing {
         return regex.firstMatch(in: line, options: [], range: range) != nil
     }
     static func extractPlainText(from html: String) -> String {
+        if EmailDOMFeatureFlag.isTextExtractionEnabled() {
+            if let document = EmailDocument.tryParse(html) {
+                return document.plainText(preserveParagraphs: true)
+            }
+            // Fall through to the legacy regex pipeline on parser failure.
+        }
+
         var text = html
 
         // Avoid leaking <head> metadata (title tags, MSO conditionals) into bubble text.

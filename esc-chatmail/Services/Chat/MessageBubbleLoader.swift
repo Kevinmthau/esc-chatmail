@@ -330,6 +330,11 @@ enum MessageBubbleHTMLAnalysisBuilder {
     private static func extractReferencedContentIDs(from html: String?) -> Set<String> {
         guard let html else { return [] }
 
+        if EmailDOMFeatureFlag.isInlineContentIDExtractionEnabled(),
+           let document = EmailDocument.tryParse(html) {
+            return document.referencedInlineContentIDs()
+        }
+
         var referencedCIDs = Set<String>()
         let cidPrefix = "cid:"
         var searchRange = html.startIndex..<html.endIndex

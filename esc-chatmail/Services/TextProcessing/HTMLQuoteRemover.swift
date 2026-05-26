@@ -208,6 +208,13 @@ enum HTMLQuoteRemover {
     static func removeQuotes(from html: String?, mode: RemovalMode = .quotedAndSignatures) -> String? {
         guard let html = html else { return nil }
 
+        // When the DOM pipeline is enabled at runtime, delegate to the DOM-based
+        // implementation. The legacy regex pipeline below remains the default to
+        // preserve behavior until parity is verified by the existing test suites.
+        if EmailDOMFeatureFlag.isQuoteRemovalEnabled() {
+            return EmailDOMQuoteRemover.removeQuotes(from: html, mode: mode)
+        }
+
         var cleanedHTML = html
 
         // Remove quote block patterns using pre-compiled regex.

@@ -388,3 +388,40 @@ The repo already has the right harness. For each shipped change:
 ## Bottom line
 
 The current architecture is **functionally correct and impressively thorough**, but pays a heavy complexity tax for regex-based HTML manipulation. The single highest-leverage change is **adopting a DOM parser (recommendation #1)** — it directly collapses ~2,000 LOC of regex-based code and unlocks downstream simplifications (#2, #3, #7). The single highest-UX-stability change is **#4 (snapshot-based MiniEmailWebView replacement)** — independent and shippable on its own.
+
+---
+
+## Implementation status — recommendation #1
+
+Initial foundation landed on branch `claude/email-chat-architecture-EddMs`.
+
+### What's in:
+
+1. **SwiftSoup added as Swift Package dependency** (`esc-chatmail.xcodeproj/project.pbxproj`). Pin: `https://github.com/scinfu/SwiftSoup.git`, minimum version `2.7.0`. Xcode resolves on first build; `Package.resolved` left for Xcode to populate.
+
+2. **DOM abstraction layer** (`esc-chatmail/Services/EmailDOM/`):
+   - `EmailDocument.swift` — value-free reference type wrapping `SwiftSoup.Document`. Hides SwiftSoup from downstream callers. Exposes: `parse`, `tryParse`, `outerHTML`, `bodyInnerHTML`, `plainText(preserveParagraphs:)`, `referencedInlineContentIDs()`, `normalizedContentID()`.
+   - `EmailDOMTextExtractor.swift` — single-pass DOM walker that emits paragraph-aware plain text. Replaces ~80 lines of cascading regex in `TextProcessing.extractPlainText`.
+   - `EmailDOMQuoteRemover.swift` — DOM-based replacement for `HTMLQuoteRemover.removeQuotes(from:mode:)`. Removes Gmail / Apple Mail / Outlook / Mozilla quote containers by CSS selector, truncates at structural boundaries and text markers ("On ... wrote:", "-----Original Message-----"). Preserves the fragment-vs-document nature of the input so compose-time reply quoting still emits clean MIME parts.
+   - `EmailDOMFeatureFlag.swift` — `UserDefaults`-backed toggles. Default OFF for every path. Enable per-component (`EmailDOM_QuoteRemoval`, `EmailDOM_TextExtraction`, `EmailDOM_InlineContentIDExtraction`) or all at once (`EmailDOM_All`).
+
+3. **Feature-flagged delegation** wired into three call sites with no behavior change by default:
+   - `HTMLQuoteRemover.removeQuotes(from:mode:)` — delegates to `EmailDOMQuoteRemover` when `EmailDOM_QuoteRemoval` is set.
+   - `TextProcessing.extractPlainText(from:)` — delegates to `EmailDocument.plainText` when `EmailDOM_TextExtraction` is set.
+   - `MessageBubbleHTMLAnalysisBuilder.extractReferencedContentIDs` — delegates to `EmailDocument.referencedInlineContentIDs` when `EmailDOM_InlineContentIDExtraction` is set.
+
+4. **Tests** (`esc-chatmailTests/EmailDOM/`):
+   - `EmailDocumentTests.swift` — wrapper unit tests (parsing, plain-text extraction, cid: enumeration, normalization).
+   - `EmailDOMQuoteRemoverTests.swift` — semantic tests covering Gmail / Apple Mail / Outlook patterns, structural truncation, text markers, signature mode, fragment-vs-document preservation, idempotence.
+   - `EmailDOMQuoteRemoverParityTests.swift` — runs representative fixtures through both pipelines and asserts identical visible/hidden-text outcomes. Treat parity failures as blockers before flipping the default.
+
+### What's still to do (in priority order):
+
+- **Validate build on Mac.** This branch was developed in a Linux container without `xcodebuild` access; first Xcode build will resolve SwiftSoup and surface any selector/typing issues. Run the full test suite via `bash Scripts/run-tests.sh`.
+- **Verify parity at runtime.** With both default-off and `EmailDOM_All=YES` schemes, run the rendering test suites (`HTMLQuoteRemoverTests`, `HTMLContentLoaderTests`, `MessageBubbleLoaderTests`, `EmailPreviewClassifierTests`, etc.). Investigate any regressions; the DOM implementations have less coverage than the regex code at the moment.
+- **Migrate `EmailRenderQualityEvaluator`** — its tag counts, image counts, table counts, footer-line ratios become DOM queries. (Currently ~150 LOC of regex passes.)
+- **Migrate `HTMLDisplayWrapper.wrapExistingDocument`** — head/style injection by string-searching for `<head>` becomes node insertion. Easier reasoning, no edge cases with malformed input.
+- **Migrate `HTMLSanitizerService`** — replace regex tag stripping with SwiftSoup `Whitelist`-based sanitization. Security-sensitive; do this with careful test corpus.
+- **Migrate preview builders** (`NewsletterPreviewBuilder` / `TransactionalPreviewBuilder`) — expose a shared `EmailDOMQuery` API for hero image / CTA button / first paragraph extraction.
+- **Flip default to DOM** for the migrated paths once parity tests are green for at least one full release cycle.
+- **Delete the legacy code paths** once the DOM path is the default and stable.

@@ -10,6 +10,7 @@
 		A1B2C3D4E5F6789012345678 /* esc_chatmailUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E5F67890123456789A /* esc_chatmailUITests.swift */; };
 		F939A03B2E674AB400A7578D /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = F939A03A2E674AB400A7578D /* GoogleSignIn */; };
 		F939A03D2E674AB400A7578D /* GoogleSignInSwift in Frameworks */ = {isa = PBXBuildFile; productRef = F939A03C2E674AB400A7578D /* GoogleSignInSwift */; };
+		F9550001AB00000000000001 /* SwiftSoup in Frameworks */ = {isa = PBXBuildFile; productRef = F9550000AB00000000000001 /* SwiftSoup */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -73,6 +74,7 @@
 			files = (
 				F939A03B2E674AB400A7578D /* GoogleSignIn in Frameworks */,
 				F939A03D2E674AB400A7578D /* GoogleSignInSwift in Frameworks */,
+				F9550001AB00000000000001 /* SwiftSoup in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -143,6 +145,7 @@
 			packageProductDependencies = (
 				F939A03A2E674AB400A7578D /* GoogleSignIn */,
 				F939A03C2E674AB400A7578D /* GoogleSignInSwift */,
+				F9550000AB00000000000001 /* SwiftSoup */,
 			);
 			productName = "esc-chatmail";
 			productReference = F9399FE12E66521800A7578D /* esc-chatmail.app */;
@@ -225,6 +228,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				F939A0392E674AB400A7578D /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */,
+				F95500AAAB00000000000001 /* XCRemoteSwiftPackageReference "SwiftSoup" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = F9399FE22E66521800A7578D /* Products */;
@@ -628,6 +632,14 @@
 				minimumVersion = 9.0.0;
 			};
 		};
+		F95500AAAB00000000000001 /* XCRemoteSwiftPackageReference "SwiftSoup" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/scinfu/SwiftSoup.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.7.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -640,6 +652,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = F939A0392E674AB400A7578D /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */;
 			productName = GoogleSignInSwift;
+		};
+		F9550000AB00000000000001 /* SwiftSoup */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F95500AAAB00000000000001 /* XCRemoteSwiftPackageReference "SwiftSoup" */;
+			productName = SwiftSoup;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
