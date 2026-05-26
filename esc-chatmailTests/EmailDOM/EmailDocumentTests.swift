@@ -96,6 +96,60 @@ final class EmailDocumentTests: XCTestCase {
         XCTAssertTrue(ids.contains("bg.png"))
     }
 
+    // MARK: - Render quality metrics
+
+    func testRenderQualityMetrics_countsRenderableDOMElements() throws {
+        let html = """
+        <body>
+          <p>Visible statement ready. <a href="https://example.com/open">Open</a></p>
+          <table><tr><td>Invoice total</td></tr></table>
+          <img src="https://example.com/logo.png" alt="">
+          <p>Privacy Policy</p>
+        </body>
+        """
+
+        let metrics = try XCTUnwrap(EmailDocument.tryParse(html)).renderQualityMetrics(
+            footerLineHints: ["privacy policy"],
+            primaryContentHints: ["action", "button", "cta", "primary"]
+        )
+
+        XCTAssertEqual(metrics.imageCount, 1)
+        XCTAssertEqual(metrics.tableCount, 1)
+        XCTAssertEqual(metrics.linkCount, 1)
+        XCTAssertEqual(metrics.semanticElementCount, 2)
+        XCTAssertGreaterThanOrEqual(metrics.elementCount, 7)
+        XCTAssertEqual(metrics.footerLineRatio, 1.0 / 3.0, accuracy: 0.001)
+    }
+
+    func testRenderQualityMetrics_detectsSpacerAndHiddenPrimarySignals() throws {
+        let html = """
+        <html>
+        <head>
+          <style>
+            .primaryCTA { display: none; }
+            @media screen { .actionButton table { visibility: hidden; } }
+          </style>
+        </head>
+        <body>
+          <table class="primaryCTA"><tr><td><a href="https://example.com/verify">Verify</a></td></tr></table>
+          <table class="actionButton"><tr><td>Open account</td></tr></table>
+          <table><tr><td height="72">&nbsp;</td></tr></table>
+          <div style="min-height: 50px"></div>
+          <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</p>
+          <a href="https://example.com/hidden" style="display: none">Hidden link</a>
+        </body>
+        </html>
+        """
+
+        let metrics = try XCTUnwrap(EmailDocument.tryParse(html)).renderQualityMetrics(
+            footerLineHints: [],
+            primaryContentHints: ["action", "button", "cta", "primary"]
+        )
+
+        XCTAssertGreaterThanOrEqual(metrics.largeSpacerSignalCount, 3)
+        XCTAssertGreaterThanOrEqual(metrics.hiddenPrimaryContentCount, 3)
+    }
+
     // MARK: - Normalization helper
 
     func testNormalizedContentID_strips_angle_brackets_and_lowercases() {

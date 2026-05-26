@@ -40,19 +40,27 @@ struct EmailRenderQualityEvaluator {
         )
 
         let renderableHTML = HTMLMeaningfulContentChecker.renderableHTML(from: trimmedHTML)
-        let visibleHTMLText = normalizedText(TextProcessing.extractPlainText(from: renderableHTML))
+        let document = EmailDocument.tryParse(trimmedHTML)
+        let renderableDocument = EmailDocument.tryParse(renderableHTML)
+        let renderableMetrics = renderableDocument?.renderQualityMetrics(
+            footerLineHints: Self.footerLineHints,
+            primaryContentHints: Self.primaryContentHints
+        ) ?? .empty
+        let visibleTextSource = renderableDocument?.plainText(preserveParagraphs: true)
+            ?? TextProcessing.extractPlainText(from: renderableHTML)
+        let visibleHTMLText = normalizedText(visibleTextSource)
         let normalizedPlainText = normalizedText(plainText ?? "")
-        let lowercasedRenderableHTML = renderableHTML.lowercased()
 
-        let tableCount = countOccurrences(of: "<table", in: lowercasedRenderableHTML)
-        let imageCount = countOccurrences(of: "<img", in: lowercasedRenderableHTML)
-        let semanticTagCount = countSemanticTags(in: lowercasedRenderableHTML)
-        let tagCount = countTagLikeMarkup(in: renderableHTML)
-        let spacerSignalCount = countRegexMatches(Self.largeSpacerRegexes, in: renderableHTML)
-        let hiddenPrimaryContentCount =
-            countRegexMatches(Self.hiddenPrimaryContentDocumentRegexes, in: trimmedHTML) +
-            countRegexMatches(Self.hiddenPrimaryContentRenderableRegexes, in: renderableHTML)
-        let footerLineRatio = ratioOfFooterLikeLines(in: visibleHTMLText)
+        let tableCount = renderableMetrics.tableCount
+        let imageCount = renderableMetrics.imageCount
+        let linkCount = renderableMetrics.linkCount
+        let semanticTagCount = renderableMetrics.semanticElementCount
+        let tagCount = renderableMetrics.elementCount
+        let spacerSignalCount = renderableMetrics.largeSpacerSignalCount
+        let hiddenPrimaryContentCount = document?.hiddenPrimaryContentCount(
+            primaryContentHints: Self.primaryContentHints
+        ) ?? renderableMetrics.hiddenPrimaryContentCount
+        let footerLineRatio = renderableMetrics.footerLineRatio
         let markupToVisibleTextRatio = Double(renderableHTML.count) / Double(max(visibleHTMLText.count, 1))
         let plainTextScore = scoreTextCandidate(normalizedPlainText, kind: classification.kind)
         let visibleHTMLTextScore = scoreTextCandidate(visibleHTMLText, kind: classification.kind)
@@ -140,7 +148,8 @@ struct EmailRenderQualityEvaluator {
             fallbackText,
             summary: """
             fallback risk=\(htmlRiskScore) threshold=\(threshold) kind=\(classification.kind.rawValue) \
-            tables=\(tableCount) markup_ratio=\(Int(markupToVisibleTextRatio.rounded())) \
+            tables=\(tableCount) images=\(imageCount) links=\(linkCount) \
+            markup_ratio=\(Int(markupToVisibleTextRatio.rounded())) \
             spacers=\(spacerSignalCount) hidden_primary=\(hiddenPrimaryContentCount) \
             plain_score=\(plainTextScore) html_text_score=\(visibleHTMLTextScore)
             """
@@ -254,21 +263,6 @@ struct EmailRenderQualityEvaluator {
         return max(score, 0)
     }
 
-    private func countSemanticTags(in lowercasedHTML: String) -> Int {
-        Self.semanticTags.reduce(into: 0) { count, token in
-            count += countOccurrences(of: token, in: lowercasedHTML)
-        }
-    }
-
-    private func countTagLikeMarkup(in html: String) -> Int {
-        countRegexMatches(Self.tagRegex, in: html)
-    }
-
-    private func countOccurrences(of token: String, in text: String) -> Int {
-        guard !token.isEmpty else { return 0 }
-        return text.components(separatedBy: token).count - 1
-    }
-
     private func ratioOfFooterLikeLines(in text: String) -> Double {
         let lines = text
             .components(separatedBy: .newlines)
@@ -284,33 +278,6 @@ struct EmailRenderQualityEvaluator {
         return Double(footerLines) / Double(lines.count)
     }
 
-    private func countRegexMatches(_ regexes: [NSRegularExpression], in text: String) -> Int {
-        regexes.reduce(into: 0) { count, regex in
-            count += countRegexMatches(regex, in: text)
-        }
-    }
-
-    private func countRegexMatches(_ regex: NSRegularExpression, in text: String) -> Int {
-        let range = NSRange(text.startIndex..., in: text)
-        return regex.numberOfMatches(in: text, options: [], range: range)
-    }
-
-    private static let semanticTags = [
-        "<p",
-        "<h1",
-        "<h2",
-        "<h3",
-        "<h4",
-        "<h5",
-        "<h6",
-        "<li",
-        "<ul",
-        "<ol",
-        "<article",
-        "<section",
-        "<main"
-    ]
-
     private static let footerLineHints = [
         "unsubscribe",
         "manage preferences",
@@ -323,6 +290,13 @@ struct EmailRenderQualityEvaluator {
         "mailing address",
         "terms of use",
         "security center"
+    ]
+
+    private static let primaryContentHints = [
+        "action",
+        "button",
+        "cta",
+        "primary"
     ]
 
     private static let transactionFieldHints = [
@@ -340,54 +314,10 @@ struct EmailRenderQualityEvaluator {
         "payment"
     ]
 
-    private static let tagRegex: NSRegularExpression = {
-        // swiftlint:disable:next force_try
-        try! NSRegularExpression(pattern: "<[a-zA-Z][^>]*>", options: [])
-    }()
-
     private static let urlOnlyLineRegex: NSRegularExpression = {
         // swiftlint:disable:next force_try
         try! NSRegularExpression(pattern: #"^\s*https?://\S+\s*$"#, options: [.caseInsensitive])
     }()
-
-    private static let largeSpacerRegexes: [NSRegularExpression] = [
-        // swiftlint:disable:next force_try
-        try! NSRegularExpression(
-            pattern: #"<(?:td|tr|div|table|p)\b[^>]*\bheight\s*=\s*["']?(?:4[0-9]|[5-9][0-9]|\d{3,})"#,
-            options: [.caseInsensitive]
-        ),
-        // swiftlint:disable:next force_try
-        try! NSRegularExpression(
-            pattern: #"style\s*=\s*["'][^"']*(?:min-)?height\s*:\s*(?:4[0-9]|[5-9][0-9]|\d{3,})px"#,
-            options: [.caseInsensitive]
-        ),
-        // swiftlint:disable:next force_try
-        try! NSRegularExpression(
-            pattern: #"<(?:td|div|p)\b[^>]*>\s*(?:&nbsp;|&#160;|\s|<br\s*/?>){8,}\s*</(?:td|div|p)>"#,
-            options: [.caseInsensitive]
-        )
-    ]
-
-    private static let hiddenPrimaryContentDocumentRegexes: [NSRegularExpression] = [
-        // swiftlint:disable:next force_try
-        try! NSRegularExpression(
-            pattern: #"(?:\.|#)[^{}\n>]*(?:action|button|cta|primary)[^{}\n>]*\{[^}]*display\s*:\s*none"#,
-            options: [.caseInsensitive]
-        )
-    ]
-
-    private static let hiddenPrimaryContentRenderableRegexes: [NSRegularExpression] = [
-        // swiftlint:disable:next force_try
-        try! NSRegularExpression(
-            pattern: #"<(?:a|table|div|td)\b[^>]*(?:class|id)\s*=\s*["'][^"']*(?:action|button|cta|primary)[^"']*["'][^>]*style\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden)"#,
-            options: [.caseInsensitive]
-        ),
-        // swiftlint:disable:next force_try
-        try! NSRegularExpression(
-            pattern: #"<a\b[^>]*style\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden)"#,
-            options: [.caseInsensitive]
-        )
-    ]
 }
 
 private extension EmailRenderQualityEvaluation {

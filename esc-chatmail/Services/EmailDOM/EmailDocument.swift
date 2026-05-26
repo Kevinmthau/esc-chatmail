@@ -1,6 +1,28 @@
 import Foundation
 import SwiftSoup
 
+struct EmailDocumentRenderQualityMetrics: Equatable, Sendable {
+    let imageCount: Int
+    let tableCount: Int
+    let linkCount: Int
+    let semanticElementCount: Int
+    let elementCount: Int
+    let largeSpacerSignalCount: Int
+    let hiddenPrimaryContentCount: Int
+    let footerLineRatio: Double
+
+    static let empty = Self(
+        imageCount: 0,
+        tableCount: 0,
+        linkCount: 0,
+        semanticElementCount: 0,
+        elementCount: 0,
+        largeSpacerSignalCount: 0,
+        hiddenPrimaryContentCount: 0,
+        footerLineRatio: 0
+    )
+}
+
 /// A parsed HTML email document with DOM-based operations.
 ///
 /// `EmailDocument` is the canonical DOM representation used by the new HTML
@@ -129,6 +151,39 @@ final class EmailDocument {
         return result
     }
 
+    // MARK: - Render quality metrics
+
+    func renderQualityMetrics(
+        footerLineHints: [String],
+        primaryContentHints: [String]
+    ) -> EmailDocumentRenderQualityMetrics {
+        let bodyRoot = document.body() ?? document
+
+        return EmailDocumentRenderQualityMetrics(
+            imageCount: selectedElements("img", root: bodyRoot).count,
+            tableCount: selectedElements("table", root: bodyRoot).count,
+            linkCount: selectedElements("a[href]", root: bodyRoot).count,
+            semanticElementCount: selectedElements(Self.semanticElementSelector, root: bodyRoot).count,
+            elementCount: selectedElements("*", root: bodyRoot).count,
+            largeSpacerSignalCount: largeSpacerSignalCount(in: bodyRoot),
+            hiddenPrimaryContentCount: hiddenPrimaryContentCount(
+                in: bodyRoot,
+                primaryContentHints: primaryContentHints
+            ),
+            footerLineRatio: Self.footerLineRatio(
+                in: plainText(preserveParagraphs: true),
+                hints: footerLineHints
+            )
+        )
+    }
+
+    func hiddenPrimaryContentCount(primaryContentHints: [String]) -> Int {
+        hiddenPrimaryContentCount(
+            in: document.body() ?? document,
+            primaryContentHints: primaryContentHints
+        )
+    }
+
     /// Normalizes a `cid:` URL or raw Content-ID to a lowercase identifier
     /// suitable for matching against `Attachment.contentId`. Mirrors the
     /// semantics of `MessageBubbleHTMLAnalysisBuilder.normalizedContentID`.
@@ -151,5 +206,253 @@ final class EmailDocument {
         let identifier = String(trimmed.dropFirst(4))
         return normalizedContentID(identifier)
     }
+
+    private func selectedElements(_ selector: String, root: Element? = nil) -> [Element] {
+        let root = root ?? document
+        return ((try? root.select(selector)) ?? Elements()).array()
+    }
+
+    private func largeSpacerSignalCount(in root: Element) -> Int {
+        selectedElements("td,tr,div,table,p", root: root).filter(Self.isLargeSpacerElement).count
+    }
+
+    private func hiddenPrimaryContentCount(
+        in root: Element,
+        primaryContentHints: [String]
+    ) -> Int {
+        let inlineHiddenPrimaryCount = selectedElements("a,table,div,td", root: root).filter { element in
+            guard Self.elementIdentifierContainsHint(element, hints: primaryContentHints) else {
+                return false
+            }
+            return Self.isHiddenByInlineStyle(element)
+        }.count
+
+        let hiddenLinkCount = selectedElements("a", root: root).filter(Self.isHiddenByInlineStyle).count
+
+        return inlineHiddenPrimaryCount + hiddenLinkCount + stylesheetHiddenPrimaryContentCount(
+            root: root,
+            primaryContentHints: primaryContentHints
+        )
+    }
+
+    private func stylesheetHiddenPrimaryContentCount(
+        root: Element,
+        primaryContentHints: [String]
+    ) -> Int {
+        selectedElements("style").reduce(into: 0) { count, styleElement in
+            let css = Self.removingCSSComments(from: (try? styleElement.html()) ?? "")
+            var searchIndex = css.startIndex
+
+            while let openBrace = css[searchIndex...].firstIndex(of: "{") {
+                let selectorStart = Self.selectorStart(in: css, before: openBrace)
+                let closeBrace = css[openBrace...].firstIndex(of: "}") ?? css.endIndex
+                let declarationStart = css.index(after: openBrace)
+                let selector = String(css[selectorStart..<openBrace])
+                let declaration = String(css[declarationStart..<closeBrace])
+
+                if Self.selectorContainsHint(selector, hints: primaryContentHints),
+                   Self.styleDeclarationHidesContent(declaration) {
+                    let matchingElements = matchingElementCount(for: selector, root: root)
+                    count += max(matchingElements, 1)
+                }
+
+                searchIndex = css.index(after: openBrace)
+            }
+        }
+    }
+
+    private func matchingElementCount(for selectorText: String, root: Element) -> Int {
+        selectorText
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .reduce(into: 0) { count, selector in
+                count += ((try? root.select(selector)) ?? Elements()).array().count
+            }
+    }
+
+    private static func isLargeSpacerElement(_ element: Element) -> Bool {
+        if numericAttribute("height", in: element).map({ $0 >= 40 }) == true {
+            return true
+        }
+
+        let style = ((try? element.attr("style")) ?? "").lowercased()
+        if cssPixelValue(in: style, for: ["height", "min-height"]).map({ $0 >= 40 }) == true {
+            return true
+        }
+
+        let tagName = element.tagName().lowercased()
+        guard tagName == "td" || tagName == "div" || tagName == "p" else {
+            return false
+        }
+        return containsOnlySpacerContent(element)
+    }
+
+    private static func containsOnlySpacerContent(_ element: Element) -> Bool {
+        var spacerUnits = 0
+        var sawContent = false
+
+        for child in element.getChildNodes() {
+            if let textNode = child as? TextNode {
+                for character in textNode.text() {
+                    guard character.isWhitespace || character == "\u{00A0}" else {
+                        return false
+                    }
+                    spacerUnits += 1
+                    sawContent = true
+                }
+                continue
+            }
+
+            if let childElement = child as? Element,
+               childElement.tagName().lowercased() == "br" {
+                spacerUnits += 2
+                sawContent = true
+                continue
+            }
+
+            return false
+        }
+
+        return sawContent && spacerUnits >= 8
+    }
+
+    private static func numericAttribute(_ name: String, in element: Element) -> Double? {
+        let rawValue = ((try? element.attr(name)) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return leadingNumber(in: rawValue)
+    }
+
+    private static func cssPixelValue(in style: String, for propertyNames: Set<String>) -> Double? {
+        for declaration in style.split(separator: ";", omittingEmptySubsequences: false) {
+            let parts = declaration.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { continue }
+
+            let property = parts[0]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard propertyNames.contains(property) else { continue }
+
+            let value = parts[1]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard value.contains("px") else { continue }
+
+            if let number = leadingNumber(in: value) {
+                return number
+            }
+        }
+
+        return nil
+    }
+
+    private static func leadingNumber(in text: String) -> Double? {
+        var number = ""
+        var hasDecimalPoint = false
+
+        for character in text {
+            if character.isNumber {
+                number.append(character)
+                continue
+            }
+
+            if character == ".", !hasDecimalPoint {
+                number.append(character)
+                hasDecimalPoint = true
+                continue
+            }
+
+            break
+        }
+
+        guard !number.isEmpty, number != "." else {
+            return nil
+        }
+        return Double(number)
+    }
+
+    private static func elementIdentifierContainsHint(_ element: Element, hints: [String]) -> Bool {
+        let identifiers = [
+            (try? element.attr("class")) ?? "",
+            (try? element.attr("id")) ?? ""
+        ]
+        .joined(separator: " ")
+        .lowercased()
+
+        return hints.contains { identifiers.contains($0) }
+    }
+
+    private static func selectorContainsHint(_ selector: String, hints: [String]) -> Bool {
+        let lowercased = selector.lowercased()
+        guard lowercased.contains(".") || lowercased.contains("#") else {
+            return false
+        }
+        return hints.contains { lowercased.contains($0) }
+    }
+
+    private static func isHiddenByInlineStyle(_ element: Element) -> Bool {
+        styleDeclarationHidesContent((try? element.attr("style")) ?? "")
+    }
+
+    private static func styleDeclarationHidesContent(_ style: String) -> Bool {
+        let compact = style.lowercased().filter { !$0.isWhitespace }
+        return compact.contains("display:none") ||
+            compact.contains("visibility:hidden")
+    }
+
+    private static func removingCSSComments(from css: String) -> String {
+        var result = css
+        while let start = result.range(of: "/*") {
+            guard let end = result.range(of: "*/", range: start.upperBound..<result.endIndex) else {
+                result.removeSubrange(start.lowerBound..<result.endIndex)
+                break
+            }
+            result.removeSubrange(start.lowerBound..<end.upperBound)
+        }
+        return result
+    }
+
+    private static func selectorStart(in css: String, before openBrace: String.Index) -> String.Index {
+        var index = openBrace
+        while index > css.startIndex {
+            let previous = css.index(before: index)
+            if css[previous] == "{" || css[previous] == "}" {
+                return css.index(after: previous)
+            }
+            index = previous
+        }
+        return css.startIndex
+    }
+
+    private static func footerLineRatio(in text: String, hints: [String]) -> Double {
+        let lines = text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+
+        guard !lines.isEmpty else { return 0 }
+
+        let footerLines = lines.filter { line in
+            hints.contains { line.contains($0) }
+        }.count
+
+        return Double(footerLines) / Double(lines.count)
+    }
+
+    private static let semanticElementSelector = [
+        "p",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "li",
+        "ul",
+        "ol",
+        "article",
+        "section",
+        "main"
+    ].joined(separator: ",")
 
 }
