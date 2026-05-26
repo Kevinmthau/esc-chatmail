@@ -299,7 +299,7 @@ enum EmailDOMQuoteRemover {
         while let node = current {
             if node.tagNameNormal() == "body" { break }
             try removeAllSiblingsAfter(node)
-            current = node.parent() as? Element
+            current = node.parent()
         }
 
         // Trim or remove the text node based on whether a meaningful prefix exists.
@@ -324,11 +324,11 @@ enum EmailDOMQuoteRemover {
         // Walk up: at each ancestor (but not body), remove its later siblings.
         // Keep the ancestor itself because earlier-in-document content above
         // our target lives inside the ancestor chain.
-        var current: Element? = element.parent() as? Element
+        var current: Element? = element.parent()
         while let node = current {
             if node.tagNameNormal() == "body" { break }
             try removeAllSiblingsAfter(node)
-            current = node.parent() as? Element
+            current = node.parent()
         }
 
         // Finally remove the element itself (parent links are still valid because
@@ -336,8 +336,8 @@ enum EmailDOMQuoteRemover {
         try element.remove()
     }
 
-    private static func removeAllSiblingsAfter(_ element: Element) throws {
-        guard let parent = element.parent() as? Element else { return }
+    private static func removeAllSiblingsAfter(_ node: Node) throws {
+        guard let parent = node.parent() as? Element else { return }
         var found = false
         let children = parent.getChildNodes()
         for child in children {
@@ -345,7 +345,7 @@ enum EmailDOMQuoteRemover {
                 try child.remove()
                 continue
             }
-            if child === element {
+            if child === node {
                 found = true
             }
         }

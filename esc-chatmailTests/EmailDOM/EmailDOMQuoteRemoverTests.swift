@@ -115,6 +115,18 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         XCTAssertFalse(text.contains("Earlier message"))
     }
 
+    func testRemoveQuotes_onDateWroteInsideTextNode_removesFollowingNodes() {
+        let html = """
+        <p>Hello. On Mon, Jan 15, 2024 at 10:30 AM John wrote:<span>inline quote</span></p>
+        <p>Older message</p>
+        """
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+        XCTAssertTrue(text.contains("Hello."))
+        XCTAssertFalse(text.contains("John wrote"))
+        XCTAssertFalse(text.contains("inline quote"))
+        XCTAssertFalse(text.contains("Older message"))
+    }
+
     // MARK: - Signature mode
 
     func testRemoveQuotes_signatureMode_removesGmailSignature() {
