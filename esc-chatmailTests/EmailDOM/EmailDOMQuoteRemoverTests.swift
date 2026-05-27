@@ -155,6 +155,22 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         XCTAssertFalse(text.contains("tolkien@example.com"))
     }
 
+    func testRemoveQuotes_signatureMode_preservesSignOffNameLineBreakAndTail() {
+        let html = """
+        <div>Body.</div>
+        <div class="gmail_signature">
+            <div>
+                <div>Best,<br>Janet</div>
+                <div><table><tr><td>617.221.4242</td></tr></table></div>
+            </div>
+        </div>
+        <div>P.S. one more thing.</div>
+        """
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+        XCTAssertEqual(text, "Body.\n\nBest,\nJanet\n\nP.S. one more thing.")
+        XCTAssertFalse(text.contains("617.221.4242"))
+    }
+
     func testRemoveQuotes_quotedOnly_keepsSignature() {
         // In .quotedOnly mode the signature should remain, so callers using
         // the lighter mode can still see compose-time signatures.

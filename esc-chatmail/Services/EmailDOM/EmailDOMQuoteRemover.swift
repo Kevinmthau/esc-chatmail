@@ -261,9 +261,7 @@ enum EmailDOMQuoteRemover {
             preserved.append(lines[1])
         }
 
-        return preserved
-            .map { "<div>\(escapedHTML($0))</div>" }
-            .joined()
+        return "<div>\(preserved.map(escapedHTML).joined(separator: "<br>"))</div>"
     }
 
     private static func isLikelySignOffLine(_ line: String) -> Bool {
