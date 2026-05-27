@@ -376,6 +376,39 @@ final class EmailDOMHTMLSanitizerParityTests: XCTestCase {
             """,
             visibleSubstrings: ["<style", ".content", "class=\"layout\"", "width=\"600\"", "cellpadding=\"0\"", "Body"],
             hiddenSubstrings: ["<script", "onclick"]
+        ),
+        Case(
+            name: "specialized URL tracking and CSS sanitizers still run",
+            html: #"""
+            <p onclick="steal()">Body</p>
+            <a href="java%73cript:alert('xss')">Bad link</a>
+            <img src="cid:image001.png@01D12345.67890ABC" onerror="hack()" alt="Inline">
+            <img src="https://tracking.example.com/open.gif" alt="Tracker">
+            <style>
+            .hero { background: url('javascript:alert(1)'); }
+            @import url("https://evil.example/styles.css");
+            </style>
+            <p style="color: red; behavior: url(#default#time2);">Styled body</p>
+            """#,
+            visibleSubstrings: [
+                "Body",
+                "href=\"#\"",
+                "cid:image001.png@01D12345.67890ABC",
+                "alt=\"Inline\"",
+                "<style",
+                "color: red",
+                "Styled body"
+            ],
+            hiddenSubstrings: [
+                "onclick",
+                "onerror",
+                "java%73cript",
+                "javascript:",
+                "tracking.example.com",
+                "alt=\"Tracker\"",
+                "@import",
+                "behavior:"
+            ]
         )
     ]
 
@@ -493,12 +526,74 @@ final class EmailDOMHTMLSanitizerParityTests: XCTestCase {
         XCTAssertTrue(allFlagResult.contains("bgcolor=\"#f4f4f4\""))
     }
 
-    private func sanitizedWithDOMFlag(_ enabled: Bool, html: String) -> String {
+    func testFeatureFlag_fullPipelineKeepsSpecializedSanitizersAfterDOMFirstPass() {
+        let html = #"""
+        <p onclick="steal()">Body</p>
+        <a href="java%73cript:alert('xss')">Bad link</a>
+        <img src="cid:image001.png@01D12345.67890ABC" onerror="hack()" alt="Inline">
+        <img src="https://tracking.example.com/open.gif" alt="Tracker">
+        <img src="https://content.example/cdn-cgi/image/width=650,format=auto/photo.jpeg" alt="Hero">
+        <style>
+        .hero { background: url('javascript:alert(1)'); }
+        @import url("https://evil.example/styles.css");
+        </style>
+        <p style="color: red; behavior: url(#default#time2);">Styled body</p>
+        """#
+
+        assertFullSanitizationInvariants(
+            sanitizedWithDOMFlag(false, html: html, rewriteModernImageFormatHints: true)
+        )
+        assertFullSanitizationInvariants(
+            sanitizedWithDOMFlag(true, html: html, rewriteModernImageFormatHints: true)
+        )
+
+        clearDOMSanitizerFlags()
+        UserDefaults.standard.set(true, forKey: "EmailDOM_All")
+        assertFullSanitizationInvariants(
+            HTMLSanitizerService.shared.sanitize(html)
+        )
+    }
+
+    private func assertFullSanitizationInvariants(
+        _ result: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let lowercasedResult = result.lowercased()
+
+        XCTAssertTrue(result.contains("Body"), file: file, line: line)
+        XCTAssertTrue(result.contains("Styled body"), file: file, line: line)
+        XCTAssertTrue(result.contains("href=\"#\""), file: file, line: line)
+        XCTAssertTrue(
+            result.contains("cid:image001.png@01D12345.67890ABC"),
+            file: file,
+            line: line
+        )
+        XCTAssertTrue(result.contains("format=jpeg"), file: file, line: line)
+        XCTAssertTrue(result.contains("alt=\"Hero\""), file: file, line: line)
+        XCTAssertTrue(result.contains("<style"), file: file, line: line)
+        XCTAssertTrue(result.contains("color: red"), file: file, line: line)
+
+        XCTAssertFalse(lowercasedResult.contains("onclick"), file: file, line: line)
+        XCTAssertFalse(lowercasedResult.contains("onerror"), file: file, line: line)
+        XCTAssertFalse(lowercasedResult.contains("java%73cript"), file: file, line: line)
+        XCTAssertFalse(lowercasedResult.contains("javascript:"), file: file, line: line)
+        XCTAssertFalse(lowercasedResult.contains("tracking.example.com"), file: file, line: line)
+        XCTAssertFalse(result.contains("alt=\"Tracker\""), file: file, line: line)
+        XCTAssertFalse(lowercasedResult.contains("@import"), file: file, line: line)
+        XCTAssertFalse(lowercasedResult.contains("behavior:"), file: file, line: line)
+    }
+
+    private func sanitizedWithDOMFlag(
+        _ enabled: Bool,
+        html: String,
+        rewriteModernImageFormatHints: Bool = false
+    ) -> String {
         clearDOMSanitizerFlags()
         UserDefaults.standard.set(enabled, forKey: "EmailDOM_HTMLSanitization")
         return HTMLSanitizerService.shared.sanitize(
             html,
-            rewriteModernImageFormatHints: false
+            rewriteModernImageFormatHints: rewriteModernImageFormatHints
         )
     }
 

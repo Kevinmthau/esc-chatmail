@@ -406,9 +406,11 @@ The current architecture is **functionally correct and impressively thorough**, 
 
 Current status (2026-05-27): the DOM foundation exists, the switchable
 migration paths remain feature-flagged/default-off, and the current DOM-backed
-infrastructure has passed targeted Mac build/test validation. It is not ready to
-flip the remaining migration paths default-on until broader `EmailDOM_All`
-parity and runtime mailbox checks are clean.
+infrastructure has passed targeted Mac build/test validation, broader
+`EmailDOM_All` parity validation, and a real-device mailbox check. The DOM
+sanitizer rollout coverage now also verifies that URL, tracking-pixel, and CSS
+sanitizers still run after the DOM first pass. Defaults are still unchanged
+pending the desired release-cycle soak.
 
 Initial foundation landed on branch `claude/email-chat-architecture-EddMs`.
 
@@ -448,10 +450,18 @@ Initial foundation landed on branch `claude/email-chat-architecture-EddMs`.
    - `./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/HTMLSanitization/HTMLSanitizerServiceTests'`
    - `./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/HTMLSanitization/HTMLDisplayWrapperTests'`
 
+7. **Broader parity and sanitizer rollout validation completed on 2026-05-27**:
+   - `./Scripts/codex-test.sh` parity run across quote removal, text extraction,
+     HTML sanitization/display, content loading, render quality, bubble loading,
+     display policy, preview classification/builders, calendar invites, and
+     golden corpus replay with defaults off.
+   - The same parity run with `EmailDOM_All=YES`.
+   - Real-device mailbox validation reported clean with `EmailDOM_All=YES`.
+   - `EmailDOMHTMLSanitizerTests` now covers the full sanitizer pipeline with
+     legacy, `EmailDOM_HTMLSanitization`, and `EmailDOM_All` paths.
+
 ### What's still to do (in priority order):
 
-- **Verify broader parity at runtime.** With both default-off and `EmailDOM_All=YES` launch defaults, run the remaining rendering/message suites (`HTMLQuoteRemoverTests`, `HTMLContentLoaderTests`, `MessageBubbleLoaderTests`, `EmailPreviewClassifierTests`, etc.) and a full seeded mailbox simulator pass. Investigate any visible regressions before changing defaults.
-- **Harden DOM sanitizer rollout coverage.** The DOM path currently replaces dangerous-element and event-handler stripping only. Keep the URL, tracking-pixel, and CSS sanitizers specialized, and broaden fixtures before defaulting the DOM sanitizer path on.
 - **Migrate preview builders** (`NewsletterPreviewBuilder` / `TransactionalPreviewBuilder`) — expose a shared `EmailDOMQuery` API for hero image / CTA button / first paragraph extraction.
 - **Flip default to DOM** for the migrated paths once parity tests are green for at least one full release cycle.
 - **Delete the legacy code paths** once the DOM path is the default and stable.
