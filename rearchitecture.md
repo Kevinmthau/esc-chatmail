@@ -275,6 +275,17 @@ The snapshot is produced once per message per dark-mode-state and stored under C
 
 This is the biggest UX-stability win in the list and the most independent: it can ship without #1.
 
+Current status (2026-05-27): the snapshot rendering path exists behind
+`EmailPreviewSnapshots_Enabled`, remains default-off, and still allows live
+`MiniEmailWebView` fallback through `EmailPreviewSnapshots_FallbackToLiveWebView`.
+Automated validation passed for the snapshot cache/renderer, preview scale
+calculation, message display policy, and a standalone Debug build on iPhone 17
+Pro. The remaining rollout blocker is a manual rich-thread simulator pass with
+real or seeded mailbox data; the available local simulator only reaches an empty
+authenticated UI test state, so snapshot scroll stability across mixed rich
+HTML/newsletter/transactional/inline-image messages was not verified here.
+Do not flip the default on until that manual corpus pass is clean.
+
 ### 5. **Unify rendering caches behind a single coordinator**
 
 **Effort: medium.** **Impact: medium (clarity > raw perf).**
@@ -393,35 +404,54 @@ The current architecture is **functionally correct and impressively thorough**, 
 
 ## Implementation status — recommendation #1
 
+Current status (2026-05-27): the DOM foundation exists, the switchable
+migration paths remain feature-flagged/default-off, and the current DOM-backed
+infrastructure has passed targeted Mac build/test validation. It is not ready to
+flip the remaining migration paths default-on until broader `EmailDOM_All`
+parity and runtime mailbox checks are clean.
+
 Initial foundation landed on branch `claude/email-chat-architecture-EddMs`.
 
 ### What's in:
 
-1. **SwiftSoup added as Swift Package dependency** (`esc-chatmail.xcodeproj/project.pbxproj`). Pin: `https://github.com/scinfu/SwiftSoup.git`, minimum version `2.7.0`. Xcode resolves on first build; `Package.resolved` left for Xcode to populate.
+1. **SwiftSoup added as Swift Package dependency** (`esc-chatmail.xcodeproj/project.pbxproj`). Pin: `https://github.com/scinfu/SwiftSoup.git`, minimum version `2.7.0`. `Package.resolved` is populated under the project workspace.
 
 2. **DOM abstraction layer** (`esc-chatmail/Services/EmailDOM/`):
-   - `EmailDocument.swift` — value-free reference type wrapping `SwiftSoup.Document`. Hides SwiftSoup from downstream callers. Exposes: `parse`, `tryParse`, `outerHTML`, `bodyInnerHTML`, `plainText(preserveParagraphs:)`, `referencedInlineContentIDs()`, `normalizedContentID()`.
+   - `EmailDocument.swift` — value-free reference type wrapping `SwiftSoup.Document`. Hides SwiftSoup from downstream callers. Exposes: `parse`, `tryParse`, `outerHTML`, `bodyInnerHTML`, `plainText(preserveParagraphs:)`, `referencedInlineContentIDs()`, `renderQualityMetrics(...)`, `hiddenPrimaryContentCount(...)`, `normalizedContentID()`.
    - `EmailDOMTextExtractor.swift` — single-pass DOM walker that emits paragraph-aware plain text. Replaces ~80 lines of cascading regex in `TextProcessing.extractPlainText`.
    - `EmailDOMQuoteRemover.swift` — DOM-based replacement for `HTMLQuoteRemover.removeQuotes(from:mode:)`. Removes Gmail / Apple Mail / Outlook / Mozilla quote containers by CSS selector, truncates at structural boundaries and text markers ("On ... wrote:", "-----Original Message-----"). Preserves the fragment-vs-document nature of the input so compose-time reply quoting still emits clean MIME parts.
-   - `EmailDOMFeatureFlag.swift` — `UserDefaults`-backed toggles. Default OFF for every path. Enable per-component (`EmailDOM_QuoteRemoval`, `EmailDOM_TextExtraction`, `EmailDOM_InlineContentIDExtraction`) or all at once (`EmailDOM_All`).
+   - `EmailDOMHTMLSanitizer.swift` — SwiftSoup-backed dangerous-element and event-handler removal that preserves fragment/document shape before the existing URL, tracking-pixel, and CSS sanitizers run.
+   - `EmailDOMFeatureFlag.swift` — `UserDefaults`-backed toggles. Default OFF for user-visible migration paths. Enable per-component (`EmailDOM_QuoteRemoval`, `EmailDOM_TextExtraction`, `EmailDOM_InlineContentIDExtraction`, `EmailDOM_HTMLSanitization`) or all at once (`EmailDOM_All`).
 
-3. **Feature-flagged delegation** wired into three call sites with no behavior change by default:
+3. **Feature-flagged delegation** wired into four call sites with no behavior change by default:
    - `HTMLQuoteRemover.removeQuotes(from:mode:)` — delegates to `EmailDOMQuoteRemover` when `EmailDOM_QuoteRemoval` is set.
    - `TextProcessing.extractPlainText(from:)` — delegates to `EmailDocument.plainText` when `EmailDOM_TextExtraction` is set.
    - `MessageBubbleHTMLAnalysisBuilder.extractReferencedContentIDs` — delegates to `EmailDocument.referencedInlineContentIDs` when `EmailDOM_InlineContentIDExtraction` is set.
+   - `HTMLSanitizerService` — delegates dangerous-element and event-handler removal to `EmailDOMHTMLSanitizer` when `EmailDOM_HTMLSanitization` is set, then continues through the existing specialized URL, tracking-pixel, and CSS sanitizers.
 
-4. **Tests** (`esc-chatmailTests/EmailDOM/`):
+4. **DOM-backed infrastructure already migrated outside the rollout flags**:
+   - `EmailRenderQualityEvaluator` uses `EmailDocument` for render-quality counts, visible text, spacer signals, footer ratios, and hidden primary-content detection.
+   - `HTMLDisplayWrapper.wrapExistingDocument` inserts preview/display CSS through SwiftSoup and keeps the legacy string-injection path as a parse-failure fallback.
+
+5. **Tests** (`esc-chatmailTests/EmailDOM/`):
    - `EmailDocumentTests.swift` — wrapper unit tests (parsing, plain-text extraction, cid: enumeration, normalization).
    - `EmailDOMQuoteRemoverTests.swift` — semantic tests covering Gmail / Apple Mail / Outlook patterns, structural truncation, text markers, signature mode, fragment-vs-document preservation, idempotence.
    - `EmailDOMQuoteRemoverParityTests.swift` — runs representative fixtures through both pipelines and asserts identical visible/hidden-text outcomes. Treat parity failures as blockers before flipping the default.
+   - `EmailDOMHTMLSanitizerTests.swift` — DOM sanitizer parity and fragment-preservation tests, including `EmailDOM_All` coverage through `HTMLSanitizerService`.
+   - `EmailDOMFeatureFlagIntegrationTests.swift` — public-path coverage proving `EmailDOM_All` enables quote removal, text extraction, inline CID extraction, and sanitizer feature flags together.
+
+6. **Validation completed on 2026-05-27**:
+   - `./Scripts/codex-build.sh`
+   - `./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/EmailDOM/EmailDocumentTests' -only-testing 'esc-chatmailTests/EmailDOM/EmailDOMQuoteRemoverTests' -only-testing 'esc-chatmailTests/EmailDOM/EmailDOMQuoteRemoverParityTests' -only-testing 'esc-chatmailTests/EmailDOM/EmailDOMHTMLSanitizerTests'`
+   - `./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/EmailDOM/EmailDOMFeatureFlagIntegrationTests'`
+   - `./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/EmailRenderQualityEvaluatorTests'`
+   - `./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/HTMLSanitization/HTMLSanitizerServiceTests'`
+   - `./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/HTMLSanitization/HTMLDisplayWrapperTests'`
 
 ### What's still to do (in priority order):
 
-- **Validate build on Mac.** This branch was developed in a Linux container without `xcodebuild` access; first Xcode build will resolve SwiftSoup and surface any selector/typing issues. Run the full test suite via `bash Scripts/run-tests.sh`.
-- **Verify parity at runtime.** With both default-off and `EmailDOM_All=YES` schemes, run the rendering test suites (`HTMLQuoteRemoverTests`, `HTMLContentLoaderTests`, `MessageBubbleLoaderTests`, `EmailPreviewClassifierTests`, etc.). Investigate any regressions; the DOM implementations have less coverage than the regex code at the moment.
-- **Migrate `EmailRenderQualityEvaluator`** — its tag counts, image counts, table counts, footer-line ratios become DOM queries. (Currently ~150 LOC of regex passes.)
-- **Migrate `HTMLDisplayWrapper.wrapExistingDocument`** — head/style injection by string-searching for `<head>` becomes node insertion. Easier reasoning, no edge cases with malformed input.
-- **Migrate `HTMLSanitizerService`** — replace regex tag stripping with SwiftSoup `Whitelist`-based sanitization. Security-sensitive; do this with careful test corpus.
+- **Verify broader parity at runtime.** With both default-off and `EmailDOM_All=YES` launch defaults, run the remaining rendering/message suites (`HTMLQuoteRemoverTests`, `HTMLContentLoaderTests`, `MessageBubbleLoaderTests`, `EmailPreviewClassifierTests`, etc.) and a full seeded mailbox simulator pass. Investigate any visible regressions before changing defaults.
+- **Harden DOM sanitizer rollout coverage.** The DOM path currently replaces dangerous-element and event-handler stripping only. Keep the URL, tracking-pixel, and CSS sanitizers specialized, and broaden fixtures before defaulting the DOM sanitizer path on.
 - **Migrate preview builders** (`NewsletterPreviewBuilder` / `TransactionalPreviewBuilder`) — expose a shared `EmailDOMQuery` API for hero image / CTA button / first paragraph extraction.
 - **Flip default to DOM** for the migrated paths once parity tests are green for at least one full release cycle.
 - **Delete the legacy code paths** once the DOM path is the default and stable.
