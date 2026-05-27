@@ -1,6 +1,5 @@
 import SwiftUI
 import CoreData
-import CryptoKit
 
 struct MessageBubble: View {
     let message: ChatMessageRowModel
@@ -69,6 +68,7 @@ struct MessageBubble: View {
     }
 
     var body: some View {
+        let currentLoadSignature = loadSignature
         let htmlAnalysis = viewModel.htmlAnalysis
         let showsCalendarInvitePreviewCard = showHTMLPreview && htmlAnalysis.supportsCalendarInvitePreviewCard
 
@@ -113,8 +113,8 @@ struct MessageBubble: View {
                 Spacer()
             }
         }
-        .task(id: loadSignature) {
-            await viewModel.loadIfNeeded(using: loadContext)
+        .task(id: currentLoadSignature) {
+            await viewModel.loadIfNeeded(using: loadContext(contentSignature: currentLoadSignature))
         }
     }
 
@@ -209,10 +209,10 @@ struct MessageBubble: View {
         message.makeSenderRequest()
     }
 
-    private var loadContext: MessageBubbleLoadContext {
+    private func loadContext(contentSignature: String) -> MessageBubbleLoadContext {
         MessageBubbleLoadContext(
             messageID: message.id,
-            contentSignature: loadSignature,
+            contentSignature: contentSignature,
             prefetchedSenderName: prefetchedSenderName,
             senderRequest: senderRequest,
             contentRequest: message.makeContentRequest()
@@ -220,21 +220,12 @@ struct MessageBubble: View {
     }
 
     private var loadSignature: String {
-        Self.contentSignature(
-            bodyStorageURI: message.bodyStorageURI,
-            bodyText: message.bodyText,
-            cleanedSnippet: message.cleanedSnippet,
-            snippet: message.snippet,
-            hasHTMLSource: message.hasHTMLSource,
+        message.loadSignatureComponents.signature(
             htmlSourceSignature: htmlContentHandler.htmlSourceSignature(
                 messageId: message.id,
                 bodyStorageURI: message.bodyStorageURI
             ),
-            contactRefreshToken: contactRefreshToken,
-            senderEmail: message.senderInfoEmail,
-            senderDisplayName: message.senderInfoDisplayName,
-            senderHeaderDisplayName: message.senderName,
-            senderAvatarURL: message.senderInfoAvatarURL
+            contactRefreshToken: contactRefreshToken
         )
     }
 
@@ -255,25 +246,18 @@ struct MessageBubble: View {
         senderHeaderDisplayName: String? = nil,
         senderAvatarURL: String? = nil
     ) -> String {
-        [
-            bodyStorageURI ?? "",
-            contentFingerprint(for: bodyText),
-            contentFingerprint(for: cleanedSnippet),
-            contentFingerprint(for: snippet),
-            String(hasHTMLSource),
-            "source:\(htmlSourceSignature)",
-            "contacts:\(contactRefreshToken)",
-            "senderEmail:\(contentFingerprint(for: senderEmail))",
-            "senderName:\(contentFingerprint(for: senderDisplayName))",
-            "senderHeaderName:\(contentFingerprint(for: senderHeaderDisplayName))",
-            "senderAvatar:\(contentFingerprint(for: senderAvatarURL))"
-        ].joined(separator: "|")
-    }
-
-    private static func contentFingerprint(for text: String?) -> String {
-        guard let text else { return "nil" }
-        return SHA256.hash(data: Data(text.utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
+        MessageBubbleLoadSignatureComponents.signature(
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            cleanedSnippet: cleanedSnippet,
+            snippet: snippet,
+            hasHTMLSource: hasHTMLSource,
+            htmlSourceSignature: htmlSourceSignature,
+            contactRefreshToken: contactRefreshToken,
+            senderEmail: senderEmail,
+            senderDisplayName: senderDisplayName,
+            senderHeaderDisplayName: senderHeaderDisplayName,
+            senderAvatarURL: senderAvatarURL
+        )
     }
 }

@@ -1,10 +1,100 @@
 import Foundation
 import CoreData
+import CryptoKit
 
 private enum ChatMessageAttachmentDeduplicationKey: Hashable {
     case contentId(String)
     case file(filename: String, mimeType: String, byteSize: Int64)
     case objectID(NSManagedObjectID)
+}
+
+struct MessageBubbleLoadSignatureComponents: Equatable {
+    let bodyStorageURI: String?
+    private let bodyTextFingerprint: String
+    private let cleanedSnippetFingerprint: String
+    private let snippetFingerprint: String
+    private let hasHTMLSource: Bool
+    private let senderEmailFingerprint: String
+    private let senderDisplayNameFingerprint: String
+    private let senderHeaderDisplayNameFingerprint: String
+    private let senderAvatarURLFingerprint: String
+
+    init(
+        bodyStorageURI: String?,
+        bodyText: String?,
+        cleanedSnippet: String?,
+        snippet: String?,
+        hasHTMLSource: Bool,
+        senderEmail: String? = nil,
+        senderDisplayName: String? = nil,
+        senderHeaderDisplayName: String? = nil,
+        senderAvatarURL: String? = nil
+    ) {
+        self.bodyStorageURI = bodyStorageURI
+        self.bodyTextFingerprint = Self.contentFingerprint(for: bodyText)
+        self.cleanedSnippetFingerprint = Self.contentFingerprint(for: cleanedSnippet)
+        self.snippetFingerprint = Self.contentFingerprint(for: snippet)
+        self.hasHTMLSource = hasHTMLSource
+        self.senderEmailFingerprint = Self.contentFingerprint(for: senderEmail)
+        self.senderDisplayNameFingerprint = Self.contentFingerprint(for: senderDisplayName)
+        self.senderHeaderDisplayNameFingerprint = Self.contentFingerprint(for: senderHeaderDisplayName)
+        self.senderAvatarURLFingerprint = Self.contentFingerprint(for: senderAvatarURL)
+    }
+
+    func signature(
+        htmlSourceSignature: String,
+        contactRefreshToken: Int
+    ) -> String {
+        [
+            bodyStorageURI ?? "",
+            bodyTextFingerprint,
+            cleanedSnippetFingerprint,
+            snippetFingerprint,
+            String(hasHTMLSource),
+            "source:\(htmlSourceSignature)",
+            "contacts:\(contactRefreshToken)",
+            "senderEmail:\(senderEmailFingerprint)",
+            "senderName:\(senderDisplayNameFingerprint)",
+            "senderHeaderName:\(senderHeaderDisplayNameFingerprint)",
+            "senderAvatar:\(senderAvatarURLFingerprint)"
+        ].joined(separator: "|")
+    }
+
+    static func signature(
+        bodyStorageURI: String?,
+        bodyText: String?,
+        cleanedSnippet: String? = nil,
+        snippet: String?,
+        hasHTMLSource: Bool,
+        htmlSourceSignature: String,
+        contactRefreshToken: Int,
+        senderEmail: String? = nil,
+        senderDisplayName: String? = nil,
+        senderHeaderDisplayName: String? = nil,
+        senderAvatarURL: String? = nil
+    ) -> String {
+        Self(
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            cleanedSnippet: cleanedSnippet,
+            snippet: snippet,
+            hasHTMLSource: hasHTMLSource,
+            senderEmail: senderEmail,
+            senderDisplayName: senderDisplayName,
+            senderHeaderDisplayName: senderHeaderDisplayName,
+            senderAvatarURL: senderAvatarURL
+        ).signature(
+            htmlSourceSignature: htmlSourceSignature,
+            contactRefreshToken: contactRefreshToken
+        )
+    }
+
+    private static func contentFingerprint(for text: String?) -> String {
+        guard let text else { return "nil" }
+        return SHA256.hash(data: Data(text.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
 }
 
 struct ChatMessageAttachmentModel: Equatable {
@@ -128,6 +218,8 @@ struct ChatMessageRowModel: Equatable {
     let hasFailedLocalAttachmentUploads: Bool
     let forwardedDisplaySubject: String?
     let outgoingForwardedDisplayContent: ForwardedMessageDisplayContent?
+    /// Precomputed so MessageBubble body recomputation does not hash message text.
+    let loadSignatureComponents: MessageBubbleLoadSignatureComponents
 
     var objectID: NSManagedObjectID {
         messageObjectID
@@ -330,7 +422,18 @@ enum ChatMessageRowModelMapper {
             isSendingLocalAttachments: message.isSendingLocalAttachments,
             hasFailedLocalAttachmentUploads: message.hasFailedLocalAttachmentUploads,
             forwardedDisplaySubject: message.forwardedDisplaySubject,
-            outgoingForwardedDisplayContent: message.outgoingForwardedDisplayContent
+            outgoingForwardedDisplayContent: message.outgoingForwardedDisplayContent,
+            loadSignatureComponents: MessageBubbleLoadSignatureComponents(
+                bodyStorageURI: message.bodyStorageURI,
+                bodyText: message.bodyTextValue,
+                cleanedSnippet: message.cleanedSnippet,
+                snippet: message.snippet,
+                hasHTMLSource: message.hasHTMLSource,
+                senderEmail: senderPerson?.email,
+                senderDisplayName: senderPerson?.displayName,
+                senderHeaderDisplayName: message.senderName,
+                senderAvatarURL: senderPerson?.avatarURL
+            )
         )
     }
 
