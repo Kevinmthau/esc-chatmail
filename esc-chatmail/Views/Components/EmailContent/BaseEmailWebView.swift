@@ -280,115 +280,7 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
 
         private func wrapWithScale(_ html: String, scale: CGFloat) -> String {
-            // Avoid nesting full HTML documents inside another <html> wrapper; that can produce blank
-            // previews or render only partial/head content. Instead, inject a tiny stylesheet that scales
-            // the existing document when the input already contains <html>/<doctype>.
-            if html.range(of: "<!doctype", options: .caseInsensitive) != nil ||
-                html.range(of: "<html", options: .caseInsensitive) != nil {
-                return injectScaleStyles(into: html, scale: scale)
-            }
-
-            // Partial fragments (no document structure): wrap in our own container without adding theme CSS.
-            return wrapPartialHTMLWithScale(html, scale: scale)
-        }
-
-        private func injectScaleStyles(into html: String, scale: CGFloat) -> String {
-            // Scale the rendered page without touching the email's DOM structure.
-            // Keep rules minimal to avoid overriding the email's own layout/CSS.
-            let injected = """
-            <style id="esc-preview-scale">
-                html, body {
-                    overflow: hidden !important;
-                    min-height: 1px !important;
-                }
-                /* Use higher specificity + !important so template body rules don't override preview scaling. */
-                html body {
-                    -webkit-text-size-adjust: 100% !important;
-                    transform: scale(\(scale)) !important;
-                    transform-origin: top left !important;
-                    width: \(100.0 / scale)% !important;
-                    min-width: 0 !important;
-                    min-height: 1px !important;
-                    display: block !important;
-                }
-                img { max-width: 100%; height: auto; }
-                table { max-width: 100%; }
-            </style>
-            """
-
-            // Don't double-inject if the HTML already contains our scale styles.
-            if html.range(of: "id=\"esc-preview-scale\"", options: .caseInsensitive) != nil {
-                return ensureDoctype(html)
-            }
-
-            var result = html
-
-            if let headRange = result.range(of: "<head>", options: .caseInsensitive) {
-                result.insert(contentsOf: "\n" + injected + "\n", at: headRange.upperBound)
-                return ensureDoctype(result)
-            }
-
-            if let headStart = result.range(of: "<head", options: .caseInsensitive),
-               let closing = result[headStart.lowerBound...].firstIndex(of: ">") {
-                let insertIndex = result.index(after: closing)
-                result.insert(contentsOf: "\n" + injected + "\n", at: insertIndex)
-                return ensureDoctype(result)
-            }
-
-            // No <head>: inject one immediately after the opening <html ...> tag.
-            if let htmlStart = result.range(of: "<html", options: .caseInsensitive),
-               let closing = result[htmlStart.lowerBound...].firstIndex(of: ">") {
-                let insertIndex = result.index(after: closing)
-                result.insert(contentsOf: "\n<head>\n" + injected + "\n</head>\n", at: insertIndex)
-                return ensureDoctype(result)
-            }
-
-            // Worst-case fallback: wrap as a fragment.
-            return wrapPartialHTMLWithScale(result, scale: scale)
-        }
-
-        private func wrapPartialHTMLWithScale(_ html: String, scale: CGFloat) -> String {
-            return """
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-                <style>
-                    * { box-sizing: border-box; }
-                    html, body {
-                        margin: 0;
-                        padding: 0;
-                        overflow: hidden;
-                        -webkit-text-size-adjust: 100%;
-                        min-height: 1px;
-                    }
-                    .scale-wrapper {
-                        transform: scale(\(scale));
-                        transform-origin: top left;
-                        width: \(100.0 / scale)%;
-                        min-height: 1px;
-                        display: inline-block;
-                    }
-                    /* Only constrain, don't force widths */
-                    img { max-width: 100%; height: auto; }
-                    table { max-width: 100%; }
-                </style>
-            </head>
-            <body>
-                <div class="scale-wrapper">
-                    \(html)
-                </div>
-            </body>
-            </html>
-            """
-        }
-
-        private func ensureDoctype(_ html: String) -> String {
-            if html.range(of: "<!doctype", options: .caseInsensitive) != nil {
-                return html
-            }
-            return "<!DOCTYPE html>\n" + html
+            HTMLPreviewScalingWrapper.wrap(html, scale: scale)
         }
 
         // MARK: - WKNavigationDelegate
@@ -515,37 +407,7 @@ struct BaseEmailWebView: UIViewRepresentable {
                 return
             }
 
-            let measurementScript = """
-            (function() {
-                var heights = [];
-                function push(value) {
-                    if (typeof value === 'number' && isFinite(value) && value > 0) {
-                        heights.push(value);
-                    }
-                }
-
-                var wrapper = document.querySelector('.scale-wrapper');
-                if (wrapper) {
-                    push(wrapper.getBoundingClientRect().height);
-                    push(wrapper.scrollHeight * \(scale));
-                    push(wrapper.offsetHeight * \(scale));
-                }
-
-                if (document.body) {
-                    push(document.body.getBoundingClientRect().height);
-                    push(document.body.scrollHeight * \(scale));
-                    push(document.body.offsetHeight * \(scale));
-                }
-
-                if (document.documentElement) {
-                    push(document.documentElement.getBoundingClientRect().height);
-                    push(document.documentElement.scrollHeight * \(scale));
-                    push(document.documentElement.offsetHeight * \(scale));
-                }
-
-                return heights.length ? Math.ceil(Math.max.apply(null, heights)) : 0;
-            })();
-            """
+            let measurementScript = HTMLPreviewHeightMeasurementScript.script(scale: scale)
 
             webView.evaluateJavaScript(measurementScript) { [weak self] result, error in
                 guard let self else {

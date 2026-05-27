@@ -16,9 +16,6 @@ struct MiniEmailWebView: View {
 
     private let previewHeightCacheKey: String
 
-    private static let defaultPreviewHeight: CGFloat = 180
-    private static let minimumPreviewHeight: CGFloat = 120
-    private static let maximumPreviewHeight: CGFloat = 320
     private static let previewHeightCache = MiniEmailPreviewHeightCache()
 
     init(
@@ -68,11 +65,11 @@ struct MiniEmailWebView: View {
     }
 
     private var clampedPreviewHeight: CGFloat {
-        min(max(measuredHeight, Self.minimumPreviewHeight), Self.maximumPreviewHeight)
+        HTMLPreviewSizing.clampedHeight(measuredHeight)
     }
 
     private func updateMeasuredHeight(_ height: CGFloat) {
-        let clampedHeight = min(max(height, Self.minimumPreviewHeight), Self.maximumPreviewHeight)
+        let clampedHeight = HTMLPreviewSizing.clampedHeight(height)
         guard abs(clampedHeight - measuredHeight) > 1 else {
             return
         }
@@ -93,8 +90,8 @@ struct MiniEmailWebView: View {
     }
 
     private static func cachedPreviewHeight(for key: String) -> CGFloat {
-        let cachedHeight = previewHeightCache.height(forKey: key) ?? defaultPreviewHeight
-        return min(max(cachedHeight, minimumPreviewHeight), maximumPreviewHeight)
+        let cachedHeight = previewHeightCache.height(forKey: key) ?? HTMLPreviewSizing.defaultPreviewHeight
+        return HTMLPreviewSizing.clampedHeight(cachedHeight)
     }
 }
 

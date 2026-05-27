@@ -214,19 +214,40 @@ struct EmailContentSection: View {
             .accessibilityHint("Opens the full original email")
         case .html(let payload):
             Button(action: onOpenFullMessage) {
-                MiniEmailWebView(
-                    htmlContent: payload.html,
-                    previewCacheKey: payload.previewCacheKey,
-                    isDarkMode: colorScheme == .dark,
-                    senderEmail: message.senderEmail,
-                    message: resolvedMessageForInlineAttachments
-                )
-                    .allowsHitTesting(false)
-                    .emailPreviewCardChrome()
+                htmlFallbackPreview(payload)
             }
             .buttonStyle(.plain)
             .accessibilityLabel(transactionalPreviewAccessibilityLabel)
             .accessibilityHint("Opens the full original email")
+        }
+    }
+
+    @ViewBuilder
+    private func htmlFallbackPreview(_ payload: HTMLPreviewPayload) -> some View {
+        let isDarkMode = colorScheme == .dark
+        let messageForInlineAttachments = resolvedMessageForInlineAttachments
+
+        if EmailPreviewSnapshotFeatureFlag.isEnabled {
+            EmailPreviewSnapshotView(
+                htmlContent: payload.html,
+                previewCacheKey: payload.previewCacheKey,
+                isDarkMode: isDarkMode,
+                senderEmail: message.senderEmail,
+                message: messageForInlineAttachments,
+                fallbackToLiveWebView: EmailPreviewSnapshotFeatureFlag.fallbackToLiveWebView
+            )
+            .allowsHitTesting(false)
+            .emailPreviewCardChrome()
+        } else {
+            MiniEmailWebView(
+                htmlContent: payload.html,
+                previewCacheKey: payload.previewCacheKey,
+                isDarkMode: isDarkMode,
+                senderEmail: message.senderEmail,
+                message: messageForInlineAttachments
+            )
+            .allowsHitTesting(false)
+            .emailPreviewCardChrome()
         }
     }
 
