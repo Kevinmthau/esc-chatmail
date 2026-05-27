@@ -793,6 +793,30 @@ final class NewsletterPreviewBuilderTests: XCTestCase {
         XCTAssertFalse(result?.snippet.contains("&#8202;") == true)
     }
 
+    func testBuildPreview_usesDOMSummaryForUnquotedPreheader() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head><title>Weekly Dispatch</title></head>
+        <body>
+            <div class=preheader>Studio visits and new gallery openings</div>
+            <p>A sharper edit of exhibitions, artist talks, and editions worth tracking this week.</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderName: "Design Weekly",
+            senderEmail: "dispatch@example.com",
+            subject: "Weekly Dispatch"
+        )
+
+        XCTAssertEqual(result?.title, "Studio visits and new gallery openings")
+        XCTAssertTrue(result?.snippet.contains("exhibitions") == true)
+    }
+
     func testBuildPreviewFromSourceUsesSnapshotSummaryInsteadOfReparsingHTMLTitle() {
         let source = EmailPreviewSource(
             messageId: "newsletter-source-snapshot",

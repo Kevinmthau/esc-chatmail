@@ -576,6 +576,32 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
         XCTAssertEqual(result?.detailLine, "Wednesday, April 29, 2026 • 4 guests")
     }
 
+    func testBuildPreview_usesDOMSummaryForNestedActionLinkText() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <h1>Your statement is ready</h1>
+            <p>Account ending in 1234</p>
+            <p>Date</p>
+            <p>May 20, 2026</p>
+            <a href=https://example.com/statement><span>View <strong>statement</strong></span></a>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderName: "Example Bank",
+            senderEmail: "alerts@examplebank.com",
+            subject: nil
+        )
+
+        XCTAssertEqual(result?.title, "Your statement is ready")
+        XCTAssertEqual(result?.actionLabel, "View statement")
+    }
+
     func testBuildPreviewFromSourceUsesSnapshotActionLinksInsteadOfReparsingHTMLAnchors() {
         let source = EmailPreviewSource(
             messageId: "transactional-source-snapshot",

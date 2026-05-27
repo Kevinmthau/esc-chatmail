@@ -159,11 +159,12 @@ enum EmailPreviewContentExtractor {
         bodyText: String?,
         imageExtractor: EmailPreviewImageExtractor = EmailPreviewImageExtractor()
     ) -> EmailPreviewExtractedContent {
-        EmailPreviewExtractedContent(
+        let domQuery = EmailPreviewDOMQuery(html: canonicalHTML)
+        return EmailPreviewExtractedContent(
             plainText: normalizedPlainText(from: bodyText),
-            htmlText: normalizedHTMLText(from: canonicalHTML),
+            htmlText: normalizedHTMLText(from: canonicalHTML, domQuery: domQuery),
             images: imageExtractor.extractImages(from: canonicalHTML),
-            htmlSummary: htmlSummary(from: canonicalHTML)
+            htmlSummary: htmlSummary(from: canonicalHTML, domQuery: domQuery)
         )
     }
 
@@ -177,6 +178,18 @@ enum EmailPreviewContentExtractor {
     }
 
     static func normalizedHTMLText(from html: String) -> String? {
+        normalizedHTMLText(from: html, domQuery: EmailPreviewDOMQuery(html: html))
+    }
+
+    private static func normalizedHTMLText(from html: String, domQuery: EmailPreviewDOMQuery?) -> String? {
+        if let domText = domQuery?.plainText() {
+            return domText
+        }
+
+        return legacyNormalizedHTMLText(from: html)
+    }
+
+    private static func legacyNormalizedHTMLText(from html: String) -> String? {
         let normalized = normalizedText(TextProcessing.extractPlainText(from: html))
         return normalized.isEmpty ? nil : normalized
     }
@@ -235,7 +248,15 @@ enum EmailPreviewContentExtractor {
         }
     }
 
-    private static func htmlSummary(from html: String) -> EmailPreviewHTMLSummary {
+    private static func htmlSummary(from html: String, domQuery: EmailPreviewDOMQuery?) -> EmailPreviewHTMLSummary {
+        if let domQuery {
+            return domQuery.htmlSummary()
+        }
+
+        return legacyHTMLSummary(from: html)
+    }
+
+    private static func legacyHTMLSummary(from html: String) -> EmailPreviewHTMLSummary {
         EmailPreviewHTMLSummary(
             h1Text: firstTagText("h1", in: html),
             h2Text: firstTagText("h2", in: html),
@@ -254,7 +275,7 @@ enum EmailPreviewContentExtractor {
             return nil
         }
 
-        return normalizedHTMLText(from: String(html[range]))
+        return legacyNormalizedHTMLText(from: String(html[range]))
     }
 
     private static func firstPreheaderText(in html: String) -> String? {
@@ -266,7 +287,7 @@ enum EmailPreviewContentExtractor {
             return nil
         }
 
-        return normalizedHTMLText(from: String(html[range]))
+        return legacyNormalizedHTMLText(from: String(html[range]))
     }
 
     private static func actionLinkTexts(in html: String, maxLinks: Int = 12, maxScannedLinks: Int = 48) -> [String] {
@@ -292,7 +313,7 @@ enum EmailPreviewContentExtractor {
                 return
             }
 
-            if let text = normalizedHTMLText(from: String(html[range])) {
+            if let text = legacyNormalizedHTMLText(from: String(html[range])) {
                 linkTexts.append(text)
             }
 
@@ -327,6 +348,14 @@ struct EmailPreviewImageExtractor {
 
     func extractImages(from canonicalHTML: String, maxImages: Int = 12) -> [EmailPreviewImage] {
         let sanitizedHTML = sanitizer.sanitize(canonicalHTML)
+        if let domQuery = EmailPreviewDOMQuery(html: sanitizedHTML) {
+            return domQuery.images(maxImages: maxImages)
+        }
+
+        return legacyExtractImages(from: sanitizedHTML, maxImages: maxImages)
+    }
+
+    private func legacyExtractImages(from sanitizedHTML: String, maxImages: Int) -> [EmailPreviewImage] {
         guard let regex = try? NSRegularExpression(pattern: "<img\\b[^>]*>", options: [.caseInsensitive]) else {
             return []
         }
