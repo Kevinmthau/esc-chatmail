@@ -186,12 +186,8 @@ enum EmailPreviewContentExtractor {
             return domText
         }
 
-        return legacyNormalizedHTMLText(from: html)
-    }
-
-    private static func legacyNormalizedHTMLText(from html: String) -> String? {
-        let normalized = normalizedText(TextProcessing.extractPlainText(from: html))
-        return normalized.isEmpty ? nil : normalized
+        let recoveredText = normalizedText(TextProcessing.extractPlainText(from: html))
+        return recoveredText.isEmpty ? nil : recoveredText
     }
 
     static func normalizedOptionalText(_ text: String?) -> String? {
@@ -248,81 +244,14 @@ enum EmailPreviewContentExtractor {
         }
     }
 
-    private static func htmlSummary(from html: String, domQuery: EmailPreviewDOMQuery?) -> EmailPreviewHTMLSummary {
-        if let domQuery {
-            return domQuery.htmlSummary()
-        }
-
-        return legacyHTMLSummary(from: html)
-    }
-
-    private static func legacyHTMLSummary(from html: String) -> EmailPreviewHTMLSummary {
-        EmailPreviewHTMLSummary(
-            h1Text: firstTagText("h1", in: html),
-            h2Text: firstTagText("h2", in: html),
-            titleText: firstTagText("title", in: html),
-            preheaderText: firstPreheaderText(in: html),
-            actionLinkTexts: actionLinkTexts(in: html)
+    private static func htmlSummary(from _: String, domQuery: EmailPreviewDOMQuery?) -> EmailPreviewHTMLSummary {
+        domQuery?.htmlSummary() ?? EmailPreviewHTMLSummary(
+            h1Text: nil,
+            h2Text: nil,
+            titleText: nil,
+            preheaderText: nil,
+            actionLinkTexts: []
         )
-    }
-
-    private static func firstTagText(_ tagName: String, in html: String) -> String? {
-        let pattern = "<\(tagName)\\b[^>]*>([\\s\\S]*?)</\(tagName)>"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
-              let match = regex.firstMatch(in: html, options: [], range: NSRange(html.startIndex..., in: html)),
-              match.numberOfRanges > 1,
-              let range = Range(match.range(at: 1), in: html) else {
-            return nil
-        }
-
-        return legacyNormalizedHTMLText(from: String(html[range]))
-    }
-
-    private static func firstPreheaderText(in html: String) -> String? {
-        let pattern = "<(?:div|span)\\b[^>]*(?:class\\s*=\\s*[\"'][^\"']*preheader[^\"']*[\"']|id\\s*=\\s*[\"'][^\"']*preheader[^\"']*[\"'])[^>]*>([\\s\\S]*?)</(?:div|span)>"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
-              let match = regex.firstMatch(in: html, options: [], range: NSRange(html.startIndex..., in: html)),
-              match.numberOfRanges > 1,
-              let range = Range(match.range(at: 1), in: html) else {
-            return nil
-        }
-
-        return legacyNormalizedHTMLText(from: String(html[range]))
-    }
-
-    private static func actionLinkTexts(in html: String, maxLinks: Int = 12, maxScannedLinks: Int = 48) -> [String] {
-        let pattern = "<a\\b[^>]*>([\\s\\S]*?)</a>"
-        guard maxLinks > 0, maxScannedLinks > 0 else {
-            return []
-        }
-
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return []
-        }
-
-        var linkTexts: [String] = []
-        var scannedLinks = 0
-        regex.enumerateMatches(in: html, options: [], range: NSRange(html.startIndex..., in: html)) { match, _, stop in
-            scannedLinks += 1
-            guard let match,
-                  match.numberOfRanges > 1,
-                  let range = Range(match.range(at: 1), in: html) else {
-                if scannedLinks >= maxScannedLinks {
-                    stop.pointee = true
-                }
-                return
-            }
-
-            if let text = legacyNormalizedHTMLText(from: String(html[range])) {
-                linkTexts.append(text)
-            }
-
-            if linkTexts.count >= maxLinks || scannedLinks >= maxScannedLinks {
-                stop.pointee = true
-            }
-        }
-
-        return linkTexts
     }
 }
 
@@ -348,172 +277,6 @@ struct EmailPreviewImageExtractor {
 
     func extractImages(from canonicalHTML: String, maxImages: Int = 12) -> [EmailPreviewImage] {
         let sanitizedHTML = sanitizer.sanitize(canonicalHTML)
-        if let domQuery = EmailPreviewDOMQuery(html: sanitizedHTML) {
-            return domQuery.images(maxImages: maxImages)
-        }
-
-        return legacyExtractImages(from: sanitizedHTML, maxImages: maxImages)
-    }
-
-    private func legacyExtractImages(from sanitizedHTML: String, maxImages: Int) -> [EmailPreviewImage] {
-        guard let regex = try? NSRegularExpression(pattern: "<img\\b[^>]*>", options: [.caseInsensitive]) else {
-            return []
-        }
-
-        let matches = regex.matches(
-            in: sanitizedHTML,
-            options: [],
-            range: NSRange(sanitizedHTML.startIndex..., in: sanitizedHTML)
-        )
-        let candidateMatches = Array(matches.prefix(maxImages))
-
-        return candidateMatches.enumerated().compactMap { index, match in
-            guard let range = Range(match.range, in: sanitizedHTML) else {
-                return nil
-            }
-
-            let tag = String(sanitizedHTML[range])
-            guard let sourceURL = attributeValue(named: "src", in: tag) else {
-                return nil
-            }
-
-            let descriptor = [
-                attributeValue(named: "alt", in: tag),
-                attributeValue(named: "class", in: tag)
-            ]
-            .compactMap { $0?.lowercased() }
-            .joined(separator: " ")
-
-            return EmailPreviewImage(
-                sourceURL: sourceURL,
-                width: numericAttribute(named: "width", in: tag),
-                height: numericAttribute(named: "height", in: tag),
-                descriptor: descriptor,
-                followingText: followingTextAfterImage(
-                    at: index,
-                    in: sanitizedHTML,
-                    matches: candidateMatches
-                ),
-                index: index
-            )
-        }
-    }
-
-    private func followingTextAfterImage(
-        at index: Int,
-        in html: String,
-        matches: [NSTextCheckingResult]
-    ) -> String {
-        guard index < matches.count,
-              let currentRange = Range(matches[index].range, in: html) else {
-            return ""
-        }
-
-        let segmentStart = currentRange.upperBound
-        let nextImageStart = nextImageStartIndex(after: index, in: html, matches: matches)
-        let maximumEnd = html.index(segmentStart, offsetBy: 2_500, limitedBy: nextImageStart) ?? nextImageStart
-        guard segmentStart < maximumEnd else {
-            return ""
-        }
-
-        let segment = String(html[segmentStart..<maximumEnd])
-        return normalizedText(TextProcessing.extractPlainText(from: segment))
-    }
-
-    private func nextImageStartIndex(
-        after index: Int,
-        in html: String,
-        matches: [NSTextCheckingResult]
-    ) -> String.Index {
-        let nextIndex = index + 1
-        guard nextIndex < matches.count,
-              let nextRange = Range(matches[nextIndex].range, in: html) else {
-            return html.endIndex
-        }
-
-        return nextRange.lowerBound
-    }
-
-    private func attributeValue(named attribute: String, in tag: String) -> String? {
-        let pattern = "\(attribute)\\s*=\\s*(?:\"([^\"]+)\"|'([^']+)'|([^\\s>]+))"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
-              let match = regex.firstMatch(in: tag, options: [], range: NSRange(tag.startIndex..., in: tag)) else {
-            return nil
-        }
-
-        for index in 1..<match.numberOfRanges {
-            guard let range = Range(match.range(at: index), in: tag) else {
-                continue
-            }
-
-            let value = normalizedText(String(tag[range]))
-            if !value.isEmpty {
-                return value
-            }
-        }
-
-        return nil
-    }
-
-    private func numericAttribute(named attribute: String, in tag: String) -> Int? {
-        guard let value = attributeValue(named: attribute, in: tag) else {
-            return nil
-        }
-
-        guard let regex = try? NSRegularExpression(
-            pattern: #"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)"#,
-            options: []
-        ),
-              let match = regex.firstMatch(in: value, options: [], range: NSRange(value.startIndex..., in: value)),
-              let range = Range(match.range, in: value) else {
-            return nil
-        }
-
-        return roundedPositiveInteger(from: String(value[range]))
-    }
-
-    private func roundedPositiveInteger(from numericValue: String) -> Int? {
-        var value = numericValue
-        if value.hasPrefix("-") {
-            return nil
-        }
-
-        if value.hasPrefix("+") {
-            value.removeFirst()
-        }
-
-        let parts = value.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
-        let integerPart = parts.first.map(String.init) ?? ""
-        let fractionPart = parts.count > 1 ? String(parts[1]) : ""
-        let integerDigits = integerPart.drop { $0 == "0" }
-        let normalizedInteger = integerDigits.isEmpty ? "0" : String(integerDigits)
-        let maxInteger = String(Int.max)
-
-        guard normalizedInteger.count < maxInteger.count
-                || (normalizedInteger.count == maxInteger.count && normalizedInteger <= maxInteger),
-              var rounded = Int(normalizedInteger) else {
-            return nil
-        }
-
-        if let firstFractionDigit = fractionPart.first,
-           (firstFractionDigit.wholeNumberValue ?? 0) >= 5 {
-            guard rounded < Int.max else {
-                return nil
-            }
-            rounded += 1
-        }
-
-        guard rounded > 0 else {
-            return nil
-        }
-        return rounded
-    }
-
-    private func normalizedText(_ text: String) -> String {
-        HTMLEntityDecoder.decode(text)
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return EmailPreviewDOMQuery(html: sanitizedHTML)?.images(maxImages: maxImages) ?? []
     }
 }

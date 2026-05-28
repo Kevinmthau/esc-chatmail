@@ -1,9 +1,8 @@
 import XCTest
 @testable import esc_chatmail
 
-/// Tests for the DOM-based quote remover. These intentionally mirror a subset
-/// of `HTMLQuoteRemoverTests` so that the DOM implementation can be validated
-/// for behavioral parity with the legacy regex implementation.
+/// Tests for the DOM-based quote remover. These intentionally cover the
+/// provider-specific structures that `HTMLQuoteRemover` delegates here.
 ///
 /// Unlike `HTMLQuoteRemoverTests`, these tests don't compare HTML strings
 /// directly (SwiftSoup re-emits HTML with normalized attribute order, which

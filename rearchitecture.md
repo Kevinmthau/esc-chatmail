@@ -403,14 +403,14 @@ The current architecture is **functionally correct and impressively thorough**, 
 
 ## Implementation status — recommendation #1
 
-Current status (2026-05-27): the DOM foundation exists, the migrated processing
-paths now default to DOM, and the legacy regex pipeline remains available as an
-explicit opt-out through `EmailDOM_All=NO` or per-component `EmailDOM_*` flags.
-Snapshot-based rich HTML previews are enabled by default. The current DOM-backed
-infrastructure has passed targeted Mac build/test validation, broader
-`EmailDOM_All` parity validation, and a real-device mailbox check. The DOM
-sanitizer rollout coverage now also verifies that URL, tracking-pixel, and CSS
-sanitizers still run after the DOM first pass.
+Current status (2026-05-28): the DOM rollout is complete for the migrated
+processing paths. Quote removal, HTML text extraction, inline `cid:` enumeration,
+preview extraction, and dangerous-element/event-handler sanitization now use the
+DOM path unconditionally. The `EmailDOM_*` rollback flags and preview regex
+fallback helpers have been removed. Snapshot-based rich HTML previews remain the
+default path, and the live `MiniEmailWebView` fallback remains available when
+snapshot rendering fails. The sanitizer pipeline still runs the specialized URL,
+tracking-pixel, and CSS sanitizers after the DOM first pass.
 
 Initial foundation landed on branch `claude/email-chat-architecture-EddMs`.
 
@@ -423,13 +423,13 @@ Initial foundation landed on branch `claude/email-chat-architecture-EddMs`.
    - `EmailDOMTextExtractor.swift` — single-pass DOM walker that emits paragraph-aware plain text. Replaces ~80 lines of cascading regex in `TextProcessing.extractPlainText`.
    - `EmailDOMQuoteRemover.swift` — DOM-based replacement for `HTMLQuoteRemover.removeQuotes(from:mode:)`. Removes Gmail / Apple Mail / Outlook / Mozilla quote containers by CSS selector, truncates at structural boundaries and text markers ("On ... wrote:", "-----Original Message-----"). Preserves the fragment-vs-document nature of the input so compose-time reply quoting still emits clean MIME parts.
    - `EmailDOMHTMLSanitizer.swift` — SwiftSoup-backed dangerous-element and event-handler removal that preserves fragment/document shape before the existing URL, tracking-pixel, and CSS sanitizers run.
-   - `EmailDOMFeatureFlag.swift` — `UserDefaults`-backed toggles. DOM is default ON for the migrated paths. Disable per-component (`EmailDOM_QuoteRemoval`, `EmailDOM_TextExtraction`, `EmailDOM_InlineContentIDExtraction`, `EmailDOM_HTMLSanitization`) or force all paths on/off with `EmailDOM_All`.
 
-3. **Feature-flagged delegation** wired into four migrated call sites:
-   - `HTMLQuoteRemover.removeQuotes(from:mode:)` — delegates to `EmailDOMQuoteRemover` unless `EmailDOM_QuoteRemoval=NO` or `EmailDOM_All=NO`.
-   - `TextProcessing.extractPlainText(from:)` — delegates to `EmailDocument.plainText` unless `EmailDOM_TextExtraction=NO` or `EmailDOM_All=NO`.
-   - `MessageBubbleHTMLAnalysisBuilder.extractReferencedContentIDs` — delegates to `EmailDocument.referencedInlineContentIDs` unless `EmailDOM_InlineContentIDExtraction=NO` or `EmailDOM_All=NO`.
-   - `HTMLSanitizerService` — delegates dangerous-element and event-handler removal to `EmailDOMHTMLSanitizer` unless `EmailDOM_HTMLSanitization=NO` or `EmailDOM_All=NO`, then continues through the existing specialized URL, tracking-pixel, and CSS sanitizers.
+3. **Unconditional DOM delegation** wired into the migrated call sites:
+   - `HTMLQuoteRemover.removeQuotes(from:mode:)` — delegates to `EmailDOMQuoteRemover`.
+   - `TextProcessing.extractPlainText(from:)` — delegates HTML input to `EmailDocument.plainText`, with a small malformed-HTML recovery path for parser-empty edge cases.
+   - `MessageBubbleHTMLAnalysisBuilder.extractReferencedContentIDs` — delegates to `EmailDocument.referencedInlineContentIDs`.
+   - `HTMLSanitizerService` — delegates dangerous-element and event-handler removal to `EmailDOMHTMLSanitizer`, then continues through the existing specialized URL, tracking-pixel, and CSS sanitizers.
+   - `EmailPreviewSourceLoader` / `EmailPreviewImageExtractor` — use SwiftSoup-backed preview extraction without legacy regex fallback helpers.
 
 4. **DOM-backed infrastructure already migrated outside the rollout flags**:
    - `EmailRenderQualityEvaluator` uses `EmailDocument` for render-quality counts, visible text, spacer signals, footer ratios, and hidden primary-content detection.
@@ -438,30 +438,19 @@ Initial foundation landed on branch `claude/email-chat-architecture-EddMs`.
 5. **Tests** (`esc-chatmailTests/EmailDOM/`):
    - `EmailDocumentTests.swift` — wrapper unit tests (parsing, plain-text extraction, cid: enumeration, normalization).
    - `EmailDOMQuoteRemoverTests.swift` — semantic tests covering Gmail / Apple Mail / Outlook patterns, structural truncation, text markers, signature mode, fragment-vs-document preservation, idempotence.
-   - `EmailDOMQuoteRemoverParityTests.swift` — runs representative fixtures through both pipelines and asserts identical visible/hidden-text outcomes. Treat parity failures as blockers before deleting the legacy fallback.
-   - `EmailDOMHTMLSanitizerTests.swift` — DOM sanitizer parity and fragment-preservation tests, including `EmailDOM_All` coverage through `HTMLSanitizerService`.
-   - `EmailDOMFeatureFlagIntegrationTests.swift` — public-path coverage proving default-enabled DOM routing plus `EmailDOM_All` and per-component rollback overrides.
+   - `EmailDOMHTMLSanitizerTests.swift` — DOM sanitizer and service-pipeline tests, including fragment preservation and post-DOM URL/tracking/CSS sanitizer coverage.
+   - `EmailDOMPublicPathTests.swift` — public-path coverage proving quote removal, text extraction, inline `cid:` enumeration, and sanitizer routing use the DOM-backed paths.
 
-6. **Validation completed on 2026-05-27**:
+6. **Validation completed on 2026-05-28**:
    - `./Scripts/codex-build.sh`
-   - `./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/EmailDOM/EmailDocumentTests' -only-testing 'esc-chatmailTests/EmailDOM/EmailDOMQuoteRemoverTests' -only-testing 'esc-chatmailTests/EmailDOM/EmailDOMQuoteRemoverParityTests' -only-testing 'esc-chatmailTests/EmailDOM/EmailDOMHTMLSanitizerTests'`
-   - `./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/EmailDOM/EmailDOMFeatureFlagIntegrationTests'`
-   - `./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/EmailRenderQualityEvaluatorTests'`
-   - `./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/HTMLSanitization/HTMLSanitizerServiceTests'`
-   - `./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/HTMLSanitization/HTMLDisplayWrapperTests'`
-
-7. **Broader parity and sanitizer rollout validation completed before the default flip on 2026-05-27**:
-   - `./Scripts/codex-test.sh` parity run across quote removal, text extraction,
-     HTML sanitization/display, content loading, render quality, bubble loading,
-     display policy, preview classification/builders, calendar invites, and
-     golden corpus replay with defaults off.
-   - The same parity run with `EmailDOM_All=YES`.
-   - Real-device mailbox validation reported clean with `EmailDOM_All=YES`.
-   - `EmailDOMHTMLSanitizerTests` now covers the full sanitizer pipeline with
-     legacy, `EmailDOM_HTMLSanitization`, and `EmailDOM_All` paths.
+   - `./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/EmailDOM'`
+   - `./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/HTMLSanitization'`
+   - `./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/Preview'`
+   - `./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/MessageBubbleLoaderTests' -only-testing 'esc-chatmailTests/MessageBubbleViewModelTests'`
+   - `./Scripts/codex-test.sh`
 
 ### What's still to do (in priority order):
 
-- **Migrate preview builders** (`NewsletterPreviewBuilder` / `TransactionalPreviewBuilder`) — expose a shared `EmailDOMQuery` API for hero image / CTA button / first paragraph extraction.
-- **Soak the DOM default** with the legacy opt-out path available for QA rollback.
-- **Delete the legacy code paths** once the DOM default is stable.
+- **Canonicalize preview text at ingest** so runtime chat bubble rendering can consume one persisted source instead of recomputing precedence.
+- **Simplify visible-text precedence** in `MessageContentView.resolvedVisibleText` and `MessageBubbleTextPrecedence` after the ingest source exists.
+- **Defer unified rendering-cache work** until it no longer has to support both legacy and DOM branches.

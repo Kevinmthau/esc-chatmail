@@ -25,7 +25,7 @@ struct EmailDocumentRenderQualityMetrics: Equatable, Sendable {
 
 /// A parsed HTML email document with DOM-based operations.
 ///
-/// `EmailDocument` is the canonical DOM representation used by the new HTML
+/// `EmailDocument` is the canonical DOM representation used by the HTML
 /// processing pipeline. It wraps `SwiftSoup.Document` behind a Swift-native API
 /// so callers do not need to import SwiftSoup directly and so call sites read
 /// declaratively instead of as regex string surgery.
@@ -54,17 +54,14 @@ final class EmailDocument {
     static func parse(_ html: String?) throws -> EmailDocument? {
         guard let html else { return nil }
         let document = try SwiftSoup.parse(html)
-        // Disable pretty-printing so emitted HTML stays close to the input. This
-        // matters because the legacy regex pipeline preserves whitespace
-        // exactly; reflowed output would diverge for whitespace-sensitive
-        // comparisons in tests.
+        // Disable pretty-printing so emitted HTML stays close to the input for
+        // whitespace-sensitive callers and tests.
         document.outputSettings().prettyPrint(pretty: false)
         return EmailDocument(document: document)
     }
 
     /// Convenience: parses HTML, returning nil on any failure (including throws).
-    /// Use this at boundaries where graceful degradation is wanted; the caller
-    /// can fall back to the legacy regex path on `nil`.
+    /// Use this at boundaries where graceful degradation is wanted.
     static func tryParse(_ html: String?) -> EmailDocument? {
         guard let html else { return nil }
         do {
@@ -111,9 +108,9 @@ final class EmailDocument {
 
     // MARK: - Inline content IDs
 
-    /// Returns the set of `cid:` references found in `src` / `background` /
-    /// `href` attributes, normalized to lowercase identifiers without the
-    /// `cid:` prefix.
+    /// Returns the set of `cid:` references found in image/link attributes and
+    /// raw inline HTML, normalized to lowercase identifiers without the `cid:`
+    /// prefix.
     func referencedInlineContentIDs() -> Set<String> {
         var result = Set<String>()
         let attributes = ["src", "background", "href", "xlink:href"]
@@ -128,6 +125,12 @@ final class EmailDocument {
                 result.insert(cid)
             }
         }
+        let srcsetElements = (try? document.select("[srcset]")) ?? Elements()
+        for element in srcsetElements.array() {
+            let value = (try? element.attr("srcset")) ?? ""
+            result.formUnion(Self.cidIdentifiers(inSrcset: value))
+        }
+
         // Also search inline style="...url(cid:...)" patterns. Doing this once
         // against the rendered HTML is OK; the call is bounded by document
         // size and avoids walking every node's style attribute.
@@ -140,7 +143,8 @@ final class EmailDocument {
             var end = valueStart
             while end < lowerHTML.endIndex {
                 let char = lowerHTML[end]
-                if char == "\"" || char == "'" || char == " " || char == ")" || char == ">" || char == "<" {
+                if char == "\"" || char == "'" || char == " " || char == "," ||
+                    char == ")" || char == ">" || char == "<" {
                     break
                 }
                 end = lowerHTML.index(after: end)
@@ -210,6 +214,19 @@ final class EmailDocument {
         guard trimmed.lowercased().hasPrefix("cid:") else { return nil }
         let identifier = String(trimmed.dropFirst(4))
         return normalizedContentID(identifier)
+    }
+
+    private static func cidIdentifiers(inSrcset srcset: String) -> Set<String> {
+        srcset
+            .split(separator: ",")
+            .reduce(into: Set<String>()) { result, candidate in
+                let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let url = trimmed.split(whereSeparator: { $0.isWhitespace }).first,
+                      let cid = cidIdentifier(from: String(url)) else {
+                    return
+                }
+                result.insert(cid)
+            }
     }
 
     private func selectedElements(_ selector: String, root: Element? = nil) -> [Element] {

@@ -330,11 +330,13 @@ enum MessageBubbleHTMLAnalysisBuilder {
     private static func extractReferencedContentIDs(from html: String?) -> Set<String> {
         guard let html else { return [] }
 
-        if EmailDOMFeatureFlag.isInlineContentIDExtractionEnabled(),
-           let document = EmailDocument.tryParse(html) {
+        if let document = EmailDocument.tryParse(html) {
             return document.referencedInlineContentIDs()
         }
+        return extractRawReferencedContentIDs(from: html)
+    }
 
+    private static func extractRawReferencedContentIDs(from html: String) -> Set<String> {
         var referencedCIDs = Set<String>()
         let cidPrefix = "cid:"
         var searchRange = html.startIndex..<html.endIndex
@@ -344,17 +346,16 @@ enum MessageBubbleHTMLAnalysisBuilder {
             var endOfCID = startOfCID
             while endOfCID < html.endIndex {
                 let char = html[endOfCID]
-                if char == "\"" || char == "'" || char == " " || char == ">" || char == "<" {
+                if char == "\"" || char == "'" || char == " " || char == "," ||
+                    char == ">" || char == "<" {
                     break
                 }
                 endOfCID = html.index(after: endOfCID)
             }
 
-            if startOfCID < endOfCID {
-                let contentId = String(html[startOfCID..<endOfCID])
-                if let normalizedContentId = normalizedContentID(from: contentId) {
-                    referencedCIDs.insert(normalizedContentId)
-                }
+            if startOfCID < endOfCID,
+               let normalizedContentId = normalizedContentID(from: String(html[startOfCID..<endOfCID])) {
+                referencedCIDs.insert(normalizedContentId)
             }
 
             searchRange = endOfCID..<html.endIndex
@@ -394,7 +395,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
 
             while endOfCID < html.endIndex {
                 let char = html[endOfCID]
-                if char == "\"" || char == "'" || char == " " || char == ">" || char == "<" {
+                if char == "\"" || char == "'" || char == " " || char == "," ||
+                    char == ">" || char == "<" {
                     break
                 }
                 endOfCID = html.index(after: endOfCID)

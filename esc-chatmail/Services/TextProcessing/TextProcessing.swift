@@ -28,26 +28,23 @@ enum TextProcessing {
     }
     static func extractPlainText(from html: String) -> String {
         if containsUnclosedOpeningTag(html) {
-            return extractPlainTextWithLegacyPipeline(from: html)
+            return recoverPlainTextFromMalformedHTML(from: html)
         }
 
         guard containsLikelyHTMLMarkup(html) else {
             return normalizePlainTextInput(html)
         }
 
-        if EmailDOMFeatureFlag.isTextExtractionEnabled() {
-            if let document = EmailDocument.tryParse(html) {
-                let text = document.plainText(preserveParagraphs: true, divsAsLineBreaks: true)
-                if !text.isEmpty {
-                    return text
-                }
-                // SwiftSoup can parse a truncated opening tag into an empty
-                // body. Let the legacy cleanup recover visible text after it.
+        if let document = EmailDocument.tryParse(html) {
+            let text = document.plainText(preserveParagraphs: true, divsAsLineBreaks: true)
+            if !text.isEmpty {
+                return text
             }
-            // Fall through to the legacy regex pipeline on parser failure.
+            // SwiftSoup can parse malformed fragments into an empty body. Let
+            // the existing malformed-HTML recovery recover visible text after it.
         }
 
-        return extractPlainTextWithLegacyPipeline(from: html)
+        return recoverPlainTextFromMalformedHTML(from: html)
     }
 
     private static func normalizePlainTextInput(_ text: String) -> String {
@@ -67,7 +64,7 @@ enum TextProcessing {
         return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func extractPlainTextWithLegacyPipeline(from html: String) -> String {
+    private static func recoverPlainTextFromMalformedHTML(from html: String) -> String {
         var text = html
 
         // Avoid leaking <head> metadata (title tags, MSO conditionals) into bubble text.

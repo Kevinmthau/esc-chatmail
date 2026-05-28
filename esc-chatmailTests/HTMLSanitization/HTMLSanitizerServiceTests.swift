@@ -119,6 +119,27 @@ final class HTMLSanitizerServiceTests: XCTestCase {
         XCTAssertFalse(result.contains("alert"))
     }
 
+    func testSanitize_domDangerousMarkupFailureFallsBackToLegacyRemoval() {
+        let failingSUT = HTMLSanitizerService(dangerousMarkupSanitizer: { _ in
+            throw NSError(domain: "HTMLSanitizerServiceTests", code: 1)
+        })
+        let html = """
+        <p>Hello</p>
+        <script>alert('xss')</script>
+        <img src="x" onerror="stealCookies()">
+        """
+
+        let result = failingSUT.sanitize(html)
+        let lowercasedResult = result.lowercased()
+
+        XCTAssertTrue(result.contains("<p>Hello</p>"))
+        XCTAssertTrue(lowercasedResult.contains("<img"))
+        XCTAssertFalse(lowercasedResult.contains("<script"))
+        XCTAssertFalse(result.contains("alert('xss')"))
+        XCTAssertFalse(lowercasedResult.contains("onerror"))
+        XCTAssertFalse(result.contains("stealCookies"))
+    }
+
     func testSanitize_cloudflareImageDirectiveInSrc_preservesDirectiveAndRewritesFormat() {
         let html = """
         <img src="https://content.app-us1.com/cdn-cgi/image/onerror=redirect,width=650,dpr=2,fit=scale-down,format=auto/NvzAv/2026/02/24/73b955fe-1bf1-4daa-b38c-fc1d230937e2.jpeg" alt="">

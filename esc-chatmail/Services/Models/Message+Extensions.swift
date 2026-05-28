@@ -350,7 +350,8 @@ extension Message {
             var endOfCID = startOfCID
             while endOfCID < html.endIndex {
                 let char = html[endOfCID]
-                if char == "\"" || char == "'" || char == " " || char == ">" || char == "<" {
+                if char == "\"" || char == "'" || char == " " || char == "," ||
+                    char == ">" || char == "<" {
                     break
                 }
                 endOfCID = html.index(after: endOfCID)
@@ -402,7 +403,8 @@ extension Message {
 
             while endOfCID < html.endIndex {
                 let char = html[endOfCID]
-                if char == "\"" || char == "'" || char == " " || char == ">" || char == "<" {
+                if char == "\"" || char == "'" || char == " " || char == "," ||
+                    char == ">" || char == "<" {
                     break
                 }
                 endOfCID = html.index(after: endOfCID)

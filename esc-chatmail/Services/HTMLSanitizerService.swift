@@ -14,8 +14,7 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
     private let attributedConverter = HTMLAttributedStringConverter()
     private let complexityAnalyzer = HTMLComplexityAnalyzer()
     private let displayWrapper = HTMLDisplayWrapper()
-
-    private init() {}
+    private let dangerousMarkupSanitizer: (String) throws -> String
 
     // MARK: - Dangerous Tags Configuration
 
@@ -36,6 +35,13 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
             options: .caseInsensitive
         )
     }()
+
+    init(
+        dangerousMarkupSanitizer: @escaping (String) throws -> String =
+            EmailDOMHTMLSanitizer.removeDangerousElementsAndEventHandlers
+    ) {
+        self.dangerousMarkupSanitizer = dangerousMarkupSanitizer
+    }
 
     // MARK: - Main Sanitization Method
 
@@ -64,29 +70,23 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
     // MARK: - Specific Sanitization Methods
 
     private func removeDangerousElementsAndEventHandlers(_ html: String) -> String {
-        if EmailDOMFeatureFlag.isHTMLSanitizationEnabled() {
-            do {
-                return try EmailDOMHTMLSanitizer.removeDangerousElementsAndEventHandlers(from: html)
-            } catch {
-                return removeDangerousElementsAndEventHandlersWithLegacyRegex(html)
-            }
+        do {
+            return try dangerousMarkupSanitizer(html)
+        } catch {
+            return removeDangerousElementsAndEventHandlersWithLegacyRegex(html)
         }
-
-        return removeDangerousElementsAndEventHandlersWithLegacyRegex(html)
     }
 
     private func removeDangerousElementsAndEventHandlersWithLegacyRegex(_ html: String) -> String {
         var sanitized = html
 
-        // Remove dangerous elements (script, form, iframe, etc.) using pre-compiled patterns
+        // Remove dangerous elements (script, form, iframe, etc.) using pre-compiled patterns.
         sanitized = removeDangerousElements(sanitized)
 
-        // Note: We intentionally preserve <style> tags to keep responsive CSS/media queries
-        // Marketing emails need these for proper mobile layouts
+        // Note: We intentionally preserve <style> tags to keep responsive CSS/media queries.
+        // Marketing emails need these for proper mobile layouts.
 
-        // Remove event handlers
         sanitized = removeEventHandlers(sanitized)
-
         return sanitized
     }
 

@@ -17,8 +17,8 @@ import SwiftSoup
 ///    (gmail_signature, ms-outlook-signature) and footer/unsubscribe
 ///    sections.
 ///
-/// API parity with `HTMLQuoteRemover.removeQuotes(from:mode:)` is the goal.
-/// When parity is reached behind the feature flag, this becomes the default.
+/// `HTMLQuoteRemover.removeQuotes(from:mode:)` delegates here for the public
+/// quote-removal path.
 enum EmailDOMQuoteRemover {
 
     typealias RemovalMode = HTMLQuoteRemover.RemovalMode

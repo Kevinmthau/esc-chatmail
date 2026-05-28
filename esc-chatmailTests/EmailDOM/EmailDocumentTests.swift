@@ -110,6 +110,18 @@ final class EmailDocumentTests: XCTestCase {
         XCTAssertTrue(ids.contains("bg.png"))
     }
 
+    func testReferencedInlineContentIDs_findsSrcsetCandidates() {
+        let html = """
+        <picture>
+          <source srcset="cid:Hero-Image 1x, cid:Hero-Image-2x 2x">
+          <img srcset="cid:Fallback-Image, https://example.com/external.png 2x" alt="">
+        </picture>
+        """
+        let ids = EmailDocument.tryParse(html)?.referencedInlineContentIDs() ?? []
+
+        XCTAssertEqual(ids, ["hero-image", "hero-image-2x", "fallback-image"])
+    }
+
     // MARK: - Render quality metrics
 
     func testRenderQualityMetrics_countsRenderableDOMElements() throws {

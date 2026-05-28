@@ -344,150 +344,18 @@ final class EmailDOMHTMLSanitizerTests: XCTestCase {
     }
 }
 
-final class EmailDOMHTMLSanitizerParityTests: XCTestCase {
-    private struct Case {
-        let name: String
-        let html: String
-        let visibleSubstrings: [String]
-        let hiddenSubstrings: [String]
-    }
-
-    private let parityCases: [Case] = [
-        Case(
-            name: "script and event handlers",
-            html: """
-            <p>Hello</p><a href="https://example.com" onclick="steal()">Link</a><script>alert('xss')</script><p>World</p>
-            """,
-            visibleSubstrings: ["Hello", "Link", "World"],
-            hiddenSubstrings: ["<script", "alert('xss')", "onclick", "steal()"]
-        ),
-        Case(
-            name: "Cloudflare path directive survives event stripping",
-            html: """
-            <img src="https://content.example/cdn-cgi/image/onerror=redirect,width=650,dpr=2,format=auto/photo.jpeg" onerror="alert('xss')" alt="Photo">
-            """,
-            visibleSubstrings: ["onerror=redirect,width=650", "alt=\"Photo\""],
-            hiddenSubstrings: [" onerror=", "alert('xss')"]
-        ),
-        Case(
-            name: "style tag and layout attributes survive",
-            html: """
-            <style>.content { width: 100%; }</style><table class="layout" width="600" cellpadding="0"><tr><td><p>Body</p></td></tr></table>
-            """,
-            visibleSubstrings: ["<style", ".content", "class=\"layout\"", "width=\"600\"", "cellpadding=\"0\"", "Body"],
-            hiddenSubstrings: ["<script", "onclick"]
-        ),
-        Case(
-            name: "specialized URL tracking and CSS sanitizers still run",
-            html: #"""
-            <p onclick="steal()">Body</p>
-            <a href="java%73cript:alert('xss')">Bad link</a>
-            <img src="cid:image001.png@01D12345.67890ABC" onerror="hack()" alt="Inline">
-            <img src="https://tracking.example.com/open.gif" alt="Tracker">
-            <style>
-            .hero { background: url('javascript:alert(1)'); }
-            @import url("https://evil.example/styles.css");
-            </style>
-            <p style="color: red; behavior: url(#default#time2);">Styled body</p>
-            """#,
-            visibleSubstrings: [
-                "Body",
-                "href=\"#\"",
-                "cid:image001.png@01D12345.67890ABC",
-                "alt=\"Inline\"",
-                "<style",
-                "color: red",
-                "Styled body"
-            ],
-            hiddenSubstrings: [
-                "onclick",
-                "onerror",
-                "java%73cript",
-                "javascript:",
-                "tracking.example.com",
-                "alt=\"Tracker\"",
-                "@import",
-                "behavior:"
-            ]
-        )
-    ]
-
-    override func tearDown() {
-        clearDOMSanitizerFlags()
-        super.tearDown()
-    }
-
-    func testParity_securityOutcomesMatchAcrossLegacyAndDOMFirstPasses() {
-        for parityCase in parityCases {
-            let legacyResult = sanitizedWithDOMFlag(false, html: parityCase.html)
-            let domResult = sanitizedWithDOMFlag(true, html: parityCase.html)
-
-            for visibleSubstring in parityCase.visibleSubstrings {
-                XCTAssertTrue(
-                    legacyResult.contains(visibleSubstring),
-                    "[\(parityCase.name)] legacy lost expected visible substring: \(visibleSubstring)\n\(legacyResult)"
-                )
-                XCTAssertTrue(
-                    domResult.contains(visibleSubstring),
-                    "[\(parityCase.name)] DOM lost expected visible substring: \(visibleSubstring)\n\(domResult)"
-                )
-            }
-
-            for hiddenSubstring in parityCase.hiddenSubstrings {
-                XCTAssertFalse(
-                    legacyResult.contains(hiddenSubstring),
-                    "[\(parityCase.name)] legacy leaked hidden substring: \(hiddenSubstring)\n\(legacyResult)"
-                )
-                XCTAssertFalse(
-                    domResult.contains(hiddenSubstring),
-                    "[\(parityCase.name)] DOM leaked hidden substring: \(hiddenSubstring)\n\(domResult)"
-                )
-            }
-        }
-    }
-
-    func testFeatureFlag_defaultAndOverridesControlHTMLSanitization() {
-        clearDOMSanitizerFlags()
-        XCTAssertTrue(EmailDOMFeatureFlag.isHTMLSanitizationEnabled())
-
-        UserDefaults.standard.set(false, forKey: "EmailDOM_HTMLSanitization")
-        XCTAssertFalse(EmailDOMFeatureFlag.isHTMLSanitizationEnabled())
-
-        UserDefaults.standard.set(true, forKey: "EmailDOM_HTMLSanitization")
-        XCTAssertTrue(EmailDOMFeatureFlag.isHTMLSanitizationEnabled())
-
-        UserDefaults.standard.removeObject(forKey: "EmailDOM_HTMLSanitization")
-        XCTAssertTrue(EmailDOMFeatureFlag.isHTMLSanitizationEnabled())
-
-        UserDefaults.standard.set(false, forKey: "EmailDOM_All")
-        XCTAssertFalse(EmailDOMFeatureFlag.isHTMLSanitizationEnabled())
-
-        UserDefaults.standard.set(true, forKey: "EmailDOM_HTMLSanitization")
-        XCTAssertFalse(EmailDOMFeatureFlag.isHTMLSanitizationEnabled())
-
-        UserDefaults.standard.set(true, forKey: "EmailDOM_All")
-        XCTAssertTrue(EmailDOMFeatureFlag.isHTMLSanitizationEnabled())
-    }
-
-    func testFeatureFlag_plainTextAngleBracketEmailAddressPreserved() {
+final class EmailDOMHTMLSanitizerPipelineTests: XCTestCase {
+    func testPlainTextAngleBracketEmailAddressPreserved() {
         let text = "Contact <alice@example.com> for details"
 
-        XCTAssertEqual(sanitizedWithDOMFlag(false, html: text), text)
-        XCTAssertEqual(sanitizedWithDOMFlag(true, html: text), text)
-
-        clearDOMSanitizerFlags()
-        UserDefaults.standard.set(true, forKey: "EmailDOM_All")
         XCTAssertEqual(
             HTMLSanitizerService.shared.sanitize(text, rewriteModernImageFormatHints: false),
             text
         )
     }
 
-    func testFeatureFlag_allPreservesStandaloneTableRowFragment() {
+    func testServicePreservesStandaloneTableRowFragment() {
         let html = #"<tr onclick="steal()"><td>Cell</td></tr>"#
-
-        clearDOMSanitizerFlags()
-        UserDefaults.standard.set(true, forKey: "EmailDOM_All")
 
         let result = HTMLSanitizerService.shared.sanitize(
             html,
@@ -502,7 +370,7 @@ final class EmailDOMHTMLSanitizerParityTests: XCTestCase {
         XCTAssertFalse(lowercasedResult.contains("onclick"))
     }
 
-    func testFeatureFlag_bodyOnlyDocumentPreservesBodyAttributes() {
+    func testServiceBodyOnlyDocumentPreservesBodyAttributes() {
         let html = #"""
         <body class="promo" style="margin:0" bgcolor="#f4f4f4" onload="steal()">
           <p>Offer</p>
@@ -510,7 +378,10 @@ final class EmailDOMHTMLSanitizerParityTests: XCTestCase {
         </body>
         """#
 
-        let result = sanitizedWithDOMFlag(true, html: html)
+        let result = HTMLSanitizerService.shared.sanitize(
+            html,
+            rewriteModernImageFormatHints: false
+        )
         let lowercasedResult = result.lowercased()
 
         XCTAssertTrue(lowercasedResult.contains("<body"))
@@ -521,21 +392,9 @@ final class EmailDOMHTMLSanitizerParityTests: XCTestCase {
         XCTAssertFalse(lowercasedResult.contains("onload"))
         XCTAssertFalse(lowercasedResult.contains("<script"))
         XCTAssertFalse(result.contains("alert('xss')"))
-
-        clearDOMSanitizerFlags()
-        UserDefaults.standard.set(true, forKey: "EmailDOM_All")
-
-        let allFlagResult = HTMLSanitizerService.shared.sanitize(
-            html,
-            rewriteModernImageFormatHints: false
-        )
-        XCTAssertTrue(allFlagResult.lowercased().contains("<body"))
-        XCTAssertTrue(allFlagResult.contains(#"class="promo""#))
-        XCTAssertTrue(allFlagResult.contains(#"style="margin:0""#))
-        XCTAssertTrue(allFlagResult.contains("bgcolor=\"#f4f4f4\""))
     }
 
-    func testFeatureFlag_fullPipelineKeepsSpecializedSanitizersAfterDOMFirstPass() {
+    func testFullPipelineKeepsSpecializedSanitizersAfterDOMFirstPass() {
         let html = #"""
         <p onclick="steal()">Body</p>
         <a href="java%73cript:alert('xss')">Bad link</a>
@@ -549,18 +408,7 @@ final class EmailDOMHTMLSanitizerParityTests: XCTestCase {
         <p style="color: red; behavior: url(#default#time2);">Styled body</p>
         """#
 
-        assertFullSanitizationInvariants(
-            sanitizedWithDOMFlag(false, html: html, rewriteModernImageFormatHints: true)
-        )
-        assertFullSanitizationInvariants(
-            sanitizedWithDOMFlag(true, html: html, rewriteModernImageFormatHints: true)
-        )
-
-        clearDOMSanitizerFlags()
-        UserDefaults.standard.set(true, forKey: "EmailDOM_All")
-        assertFullSanitizationInvariants(
-            HTMLSanitizerService.shared.sanitize(html)
-        )
+        assertFullSanitizationInvariants(HTMLSanitizerService.shared.sanitize(html))
     }
 
     private func assertFullSanitizationInvariants(
@@ -591,23 +439,5 @@ final class EmailDOMHTMLSanitizerParityTests: XCTestCase {
         XCTAssertFalse(result.contains("alt=\"Tracker\""), file: file, line: line)
         XCTAssertFalse(lowercasedResult.contains("@import"), file: file, line: line)
         XCTAssertFalse(lowercasedResult.contains("behavior:"), file: file, line: line)
-    }
-
-    private func sanitizedWithDOMFlag(
-        _ enabled: Bool,
-        html: String,
-        rewriteModernImageFormatHints: Bool = false
-    ) -> String {
-        clearDOMSanitizerFlags()
-        UserDefaults.standard.set(enabled, forKey: "EmailDOM_HTMLSanitization")
-        return HTMLSanitizerService.shared.sanitize(
-            html,
-            rewriteModernImageFormatHints: rewriteModernImageFormatHints
-        )
-    }
-
-    private func clearDOMSanitizerFlags() {
-        UserDefaults.standard.removeObject(forKey: "EmailDOM_HTMLSanitization")
-        UserDefaults.standard.removeObject(forKey: "EmailDOM_All")
     }
 }

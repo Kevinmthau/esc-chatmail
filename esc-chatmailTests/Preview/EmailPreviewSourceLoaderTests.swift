@@ -2,6 +2,21 @@ import XCTest
 @testable import esc_chatmail
 
 final class EmailPreviewSourceLoaderTests: XCTestCase {
+    func testContentExtractorRecoversTextAfterTruncatedOpeningTag() {
+        let html = """
+        <div style="color: red; font-family: sans-serif
+        Visible text after damaged tag
+        """
+
+        let content = EmailPreviewContentExtractor.extract(
+            canonicalHTML: html,
+            bodyText: nil
+        )
+
+        XCTAssertNil(content.plainText)
+        XCTAssertEqual(content.htmlText, "Visible text after damaged tag")
+    }
+
     func testLoadPreviewSourceExtractsTextImagesAndClassification() async throws {
         let messageId = "preview-source-newsletter-\(UUID().uuidString)"
         defer {

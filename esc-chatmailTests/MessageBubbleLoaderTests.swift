@@ -741,6 +741,35 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertEqual(result.htmlAnalysis.referencedInlineContentIDs, ["hero-image"])
     }
 
+    func testHTMLAnalysisBuilder_detectsInlineContentIDsInSrcsetOnlyMarkup() {
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: """
+            <html>
+            <body>
+              <picture>
+                <source srcset="cid:hero-image 1x, cid:hero-image-2x 2x">
+                <img alt="Hero image">
+              </picture>
+            </body>
+            </html>
+            """,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: nil,
+            senderName: nil,
+            senderEmail: nil,
+            subject: nil,
+            attachmentSnapshots: []
+        )
+
+        XCTAssertEqual(
+            analysis.referencedInlineContentIDs,
+            ["hero-image", "hero-image-2x"]
+        )
+    }
+
     func testLoadContent_sourceSignatureRefreshesProcessedTextWhenStoredHTMLChanges() async throws {
         let messageId = "bubble-source-refresh-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
