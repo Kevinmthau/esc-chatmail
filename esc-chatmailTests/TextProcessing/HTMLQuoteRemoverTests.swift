@@ -246,6 +246,23 @@ final class HTMLQuoteRemoverTests: XCTestCase {
         XCTAssertFalse(result?.contains("Kevin and Brynn would like to move forward with a call.") ?? true)
     }
 
+    func testRemoveQuotes_strongFromSubjectHeaderWithoutContainer_truncatesQuotedThread() {
+        let html = """
+        <div>Current reply.</div>
+        <div><strong>From:</strong> Alice Example</div>
+        <div><strong>Sent:</strong> Monday, January 1, 2026 9:00 AM</div>
+        <div><strong>To:</strong> Bob Example</div>
+        <div><strong>Subject:</strong> Re: Planning</div>
+        <div>Older thread should be hidden.</div>
+        """
+
+        let result = HTMLQuoteRemover.removeQuotes(from: html)
+
+        XCTAssertTrue(result?.contains("Current reply.") ?? false)
+        XCTAssertFalse(result?.contains("Alice Example") ?? true)
+        XCTAssertFalse(result?.contains("Older thread should be hidden.") ?? true)
+    }
+
     // MARK: - Blockquote Patterns
 
     func testRemoveQuotes_blockquote_removesQuote() {
@@ -334,6 +351,19 @@ final class HTMLQuoteRemoverTests: XCTestCase {
         """
         let result = HTMLQuoteRemover.removeQuotes(from: html)
         XCTAssertTrue(result?.contains("Sounds good!") ?? false)
+        XCTAssertFalse(result?.contains("Original message here") ?? true)
+    }
+
+    func testRemoveQuotes_onWroteSplitAcrossInlineNodesAfterBR_truncates() {
+        let html = """
+        <div>Current reply.<br>On Jan 1 <b>John</b> wrote:</div>
+        <div>Original message here</div>
+        """
+
+        let result = HTMLQuoteRemover.removeQuotes(from: html)
+
+        XCTAssertTrue(result?.contains("Current reply.") ?? false)
+        XCTAssertFalse(result?.contains("John") ?? true)
         XCTAssertFalse(result?.contains("Original message here") ?? true)
     }
 
@@ -455,6 +485,19 @@ final class HTMLQuoteRemoverTests: XCTestCase {
         """
         let result = HTMLQuoteRemover.removeQuotes(from: html)
         XCTAssertTrue(result?.contains("working on the project") ?? false)
+        XCTAssertFalse(result?.contains("Original message here") ?? true)
+    }
+
+    func testRemoveQuotes_onWroteMidSentence_preservesCurrentContent() {
+        let html = """
+        <p>Following up on what John wrote: I agree with the plan.</p>
+        <p>Current message should remain visible.</p>
+        <p>On Monday, January 15, 2024, John Doe wrote:</p>
+        <p>Original message here</p>
+        """
+        let result = HTMLQuoteRemover.removeQuotes(from: html)
+        XCTAssertTrue(result?.contains("Following up on what John wrote: I agree with the plan.") ?? false)
+        XCTAssertTrue(result?.contains("Current message should remain visible.") ?? false)
         XCTAssertFalse(result?.contains("Original message here") ?? true)
     }
 

@@ -97,11 +97,16 @@ final class EmailDocument {
     /// `<br>`, block elements, list items and whitespace collapsing.
     /// If `preserveParagraphs` is true, block-level boundaries are emitted as
     /// `\n\n`; otherwise SwiftSoup's default single-space joining is used.
-    func plainText(preserveParagraphs: Bool = true) -> String {
+    /// `divsAsLineBreaks` keeps Gmail-style line-per-div HTML compatible with
+    /// downstream email line unwrapping.
+    func plainText(preserveParagraphs: Bool = true, divsAsLineBreaks: Bool = false) -> String {
         guard preserveParagraphs else {
             return (try? document.text()) ?? ""
         }
-        return EmailDOMTextExtractor.paragraphAwareText(from: document)
+        return EmailDOMTextExtractor.paragraphAwareText(
+            from: document,
+            divsAsLineBreaks: divsAsLineBreaks
+        )
     }
 
     // MARK: - Inline content IDs

@@ -29,7 +29,12 @@ enum TextProcessing {
     static func extractPlainText(from html: String) -> String {
         if EmailDOMFeatureFlag.isTextExtractionEnabled() {
             if let document = EmailDocument.tryParse(html) {
-                return document.plainText(preserveParagraphs: true)
+                let text = document.plainText(preserveParagraphs: true, divsAsLineBreaks: true)
+                if !text.isEmpty {
+                    return text
+                }
+                // SwiftSoup can parse a truncated opening tag into an empty
+                // body. Let the legacy cleanup recover visible text after it.
             }
             // Fall through to the legacy regex pipeline on parser failure.
         }

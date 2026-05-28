@@ -11,6 +11,9 @@ import SwiftSoup
 ///   browser behavior). Legacy code sometimes left double spaces around tags.
 /// - Block elements (`p`, `div`, `h1-6`, `li`, `tr`, `table`, etc.) emit a
 ///   trailing newline; consecutive block boundaries collapse to at most two.
+///   Callers that run `TextProcessing.unwrapEmailLineBreaks` can opt into
+///   single-line `<div>` boundaries so Gmail-style line-per-div replies retain
+///   legacy unwrapping behavior.
 /// - `<br>` emits a newline; consecutive `<br>` pairs emit a paragraph break.
 /// - `<script>`, `<style>`, `<head>`, and HTML comments are skipped entirely.
 /// - HTML entities are decoded by SwiftSoup as part of `text()`, so the
@@ -18,17 +21,23 @@ import SwiftSoup
 enum EmailDOMTextExtractor {
 
     /// Extracts paragraph-aware plain text from an entire parsed document.
-    static func paragraphAwareText(from document: SwiftSoup.Document) -> String {
+    static func paragraphAwareText(
+        from document: SwiftSoup.Document,
+        divsAsLineBreaks: Bool = false
+    ) -> String {
         let root: Element = document.body() ?? document
         let buffer = TextBuffer()
-        walk(node: root, into: buffer)
+        walk(node: root, into: buffer, divsAsLineBreaks: divsAsLineBreaks)
         return normalize(buffer.string)
     }
 
     /// Extracts paragraph-aware plain text from a subtree.
-    static func paragraphAwareText(from element: Element) -> String {
+    static func paragraphAwareText(
+        from element: Element,
+        divsAsLineBreaks: Bool = false
+    ) -> String {
         let buffer = TextBuffer()
-        walk(node: element, into: buffer)
+        walk(node: element, into: buffer, divsAsLineBreaks: divsAsLineBreaks)
         return normalize(buffer.string)
     }
 
@@ -50,7 +59,7 @@ enum EmailDOMTextExtractor {
         "script", "style", "head", "title", "meta", "link", "noscript", "template"
     ]
 
-    private static func walk(node: Node, into buffer: TextBuffer) {
+    private static func walk(node: Node, into buffer: TextBuffer, divsAsLineBreaks: Bool) {
         if let textNode = node as? TextNode {
             // SwiftSoup's TextNode.text() returns decoded text.
             buffer.appendText(textNode.text())
@@ -83,15 +92,20 @@ enum EmailDOMTextExtractor {
         }
 
         let isBlock = blockTags.contains(tag)
+        let usesLineBoundary = divsAsLineBreaks && tag == "div"
         let isCell = cellTags.contains(tag)
 
         if isBlock {
             buffer.flushPendingInlineSpace()
-            buffer.markBlockBoundary()
+            if usesLineBoundary {
+                buffer.markLineBoundary()
+            } else {
+                buffer.markBlockBoundary()
+            }
         }
 
         for child in element.getChildNodes() {
-            walk(node: child, into: buffer)
+            walk(node: child, into: buffer, divsAsLineBreaks: divsAsLineBreaks)
         }
 
         if isCell {
@@ -100,7 +114,11 @@ enum EmailDOMTextExtractor {
             buffer.appendInlineSpace()
         }
         if isBlock {
-            buffer.markBlockBoundary()
+            if usesLineBoundary {
+                buffer.markLineBoundary()
+            } else {
+                buffer.markBlockBoundary()
+            }
         }
     }
 
@@ -191,6 +209,16 @@ enum EmailDOMTextExtractor {
             } else {
                 string.append("\n\n")
             }
+            blockBoundary = true
+        }
+
+        func markLineBoundary() {
+            pendingInlineSpace = false
+            if string.isEmpty || string.hasSuffix("\n") {
+                blockBoundary = true
+                return
+            }
+            string.append("\n")
             blockBoundary = true
         }
 

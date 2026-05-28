@@ -446,14 +446,23 @@ final class EmailDOMHTMLSanitizerParityTests: XCTestCase {
         }
     }
 
-    func testFeatureFlag_specificFlagOrAllEnablesHTMLSanitization() {
+    func testFeatureFlag_defaultAndOverridesControlHTMLSanitization() {
         clearDOMSanitizerFlags()
+        XCTAssertTrue(EmailDOMFeatureFlag.isHTMLSanitizationEnabled())
+
+        UserDefaults.standard.set(false, forKey: "EmailDOM_HTMLSanitization")
         XCTAssertFalse(EmailDOMFeatureFlag.isHTMLSanitizationEnabled())
 
         UserDefaults.standard.set(true, forKey: "EmailDOM_HTMLSanitization")
         XCTAssertTrue(EmailDOMFeatureFlag.isHTMLSanitizationEnabled())
 
         UserDefaults.standard.removeObject(forKey: "EmailDOM_HTMLSanitization")
+        XCTAssertTrue(EmailDOMFeatureFlag.isHTMLSanitizationEnabled())
+
+        UserDefaults.standard.set(false, forKey: "EmailDOM_All")
+        XCTAssertFalse(EmailDOMFeatureFlag.isHTMLSanitizationEnabled())
+
+        UserDefaults.standard.set(true, forKey: "EmailDOM_HTMLSanitization")
         XCTAssertFalse(EmailDOMFeatureFlag.isHTMLSanitizationEnabled())
 
         UserDefaults.standard.set(true, forKey: "EmailDOM_All")

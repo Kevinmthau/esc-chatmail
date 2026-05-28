@@ -101,6 +101,23 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         XCTAssertFalse(text.contains("Quote"))
     }
 
+    func testRemoveQuotes_strongFromSubjectHeaderWithoutReferenceContainer_truncates() {
+        let html = """
+        <div>Current reply.</div>
+        <div><strong>From:</strong> Alice Example</div>
+        <div><strong>Sent:</strong> Monday, January 1, 2026 9:00 AM</div>
+        <div><strong>To:</strong> Bob Example</div>
+        <div><strong>Subject:</strong> Re: Planning</div>
+        <div>Older thread should be hidden.</div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+
+        XCTAssertTrue(text.contains("Current reply."))
+        XCTAssertFalse(text.contains("Alice Example"))
+        XCTAssertFalse(text.contains("Older thread should be hidden."))
+    }
+
     // MARK: - Text marker ("On ... wrote:")
 
     func testRemoveQuotes_onDateWrote_truncatesAtMarker() {
@@ -115,14 +132,91 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         XCTAssertFalse(text.contains("Earlier message"))
     }
 
-    func testRemoveQuotes_onDateWroteInsideTextNode_removesFollowingNodes() {
+    func testRemoveQuotes_onDateWroteAfterLineBreakInsideTextNode_removesFollowingNodes() {
         let html = """
-        <p>Hello. On Mon, Jan 15, 2024 at 10:30 AM John wrote:<span>inline quote</span></p>
+        <p>Hello.
+        On Mon, Jan 15, 2024 at 10:30 AM John wrote:<span>inline quote</span></p>
         <p>Older message</p>
         """
         let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
         XCTAssertTrue(text.contains("Hello."))
         XCTAssertFalse(text.contains("John wrote"))
+        XCTAssertFalse(text.contains("inline quote"))
+        XCTAssertFalse(text.contains("Older message"))
+    }
+
+    func testRemoveQuotes_inlineSplitOnDateWrote_truncatesAtMarker() {
+        let html = """
+        <div>Current reply.</div>
+        <div>On Jan 1 <b>John</b> wrote:</div>
+        <div>Old thread should be hidden.</div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+
+        XCTAssertTrue(text.contains("Current reply."))
+        XCTAssertFalse(text.contains("John"))
+        XCTAssertFalse(text.contains("Old thread should be hidden."))
+    }
+
+    func testRemoveQuotes_inlineSplitOnDateWroteAfterBR_truncatesAtMarker() {
+        let html = """
+        <div>Current reply.<br>On Jan 1 <b>John</b> wrote:</div>
+        <div>Old thread should be hidden.</div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+
+        XCTAssertTrue(text.contains("Current reply."))
+        XCTAssertFalse(text.contains("John"))
+        XCTAssertFalse(text.contains("Old thread should be hidden."))
+    }
+
+    func testRemoveQuotes_midSentenceOnWrote_preservesCurrentContent() {
+        let html = """
+        <p>Following up on what John wrote: I agree with the plan.</p>
+        <p>Current message should remain visible.</p>
+        <p>On Mon, Jan 15, 2024 at 10:30 AM John wrote:</p>
+        <p>Older message</p>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+
+        XCTAssertTrue(text.contains("Following up on what John wrote: I agree with the plan."))
+        XCTAssertTrue(text.contains("Current message should remain visible."))
+        XCTAssertFalse(text.contains("Older message"))
+    }
+
+    func testRemoveQuotes_inlineSplitMarkerBeforeSingleNodeMarker_truncatesAtEarlierSplitMarker() {
+        let html = """
+        <div>Current reply.</div>
+        <div>On Jan 1 <b>John</b> wrote:</div>
+        <div>Nested reply should be hidden.</div>
+        <div>On Dec 31 Jane wrote:</div>
+        <div>Older thread should also be hidden.</div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+
+        XCTAssertTrue(text.contains("Current reply."))
+        XCTAssertFalse(text.contains("On Jan 1"))
+        XCTAssertFalse(text.contains("John"))
+        XCTAssertFalse(text.contains("Nested reply should be hidden."))
+        XCTAssertFalse(text.contains("Jane"))
+        XCTAssertFalse(text.contains("Older thread should also be hidden."))
+    }
+
+    func testRemoveQuotes_inlineSplitOnDateWrote_preservesPrefixBeforeMarker() {
+        let html = """
+        <p>Hello.
+        On Jan 1 <b>John</b> wrote:<span>inline quote</span></p>
+        <p>Older message</p>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+
+        XCTAssertEqual(text, "Hello.")
+        XCTAssertFalse(text.contains("John"))
         XCTAssertFalse(text.contains("inline quote"))
         XCTAssertFalse(text.contains("Older message"))
     }

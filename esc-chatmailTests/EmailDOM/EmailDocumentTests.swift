@@ -39,6 +39,20 @@ final class EmailDocumentTests: XCTestCase {
         XCTAssertTrue(text.contains("\n\n"), "Paragraph break should be preserved between blocks: \(text)")
     }
 
+    func testPlainText_divsAsLineBreaks_usesSingleLineBoundariesForAdjacentDivs() {
+        let html = """
+        <div>Upon approval, we will charge the card on file.</div>
+        <div>Best,</div>
+        <div>Janet</div>
+        """
+        let text = EmailDocument.tryParse(html)?.plainText(
+            preserveParagraphs: true,
+            divsAsLineBreaks: true
+        ) ?? ""
+
+        XCTAssertEqual(text, "Upon approval, we will charge the card on file.\nBest,\nJanet")
+    }
+
     func testPlainText_brTag_producesNewline() {
         let html = "<div>Line one<br>Line two</div>"
         let text = EmailDocument.tryParse(html)?.plainText(preserveParagraphs: true) ?? ""
