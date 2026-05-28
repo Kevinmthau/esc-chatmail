@@ -275,16 +275,15 @@ The snapshot is produced once per message per dark-mode-state and stored under C
 
 This is the biggest UX-stability win in the list and the most independent: it can ship without #1.
 
-Current status (2026-05-27): the snapshot rendering path exists behind
-`EmailPreviewSnapshots_Enabled`, remains default-off, and still allows live
-`MiniEmailWebView` fallback through `EmailPreviewSnapshots_FallbackToLiveWebView`.
-Automated validation passed for the snapshot cache/renderer, preview scale
-calculation, message display policy, and a standalone Debug build on iPhone 17
-Pro. The remaining rollout blocker is a manual rich-thread simulator pass with
-real or seeded mailbox data; the available local simulator only reaches an empty
-authenticated UI test state, so snapshot scroll stability across mixed rich
-HTML/newsletter/transactional/inline-image messages was not verified here.
-Do not flip the default on until that manual corpus pass is clean.
+Current status (2026-05-28): the snapshot rendering path is the default rich
+HTML preview path and still falls back to live `MiniEmailWebView` rendering if
+snapshot generation fails. Earlier automated validation covered the snapshot
+cache/renderer, preview scale calculation, message display policy, and a
+standalone Debug build on iPhone 17 Pro. This flag removal reran the snapshot
+cache/renderer suite. The local
+simulator smoke covered unauthenticated launch and an empty authenticated
+UI-test shell; it did not cover scroll stability across a mixed real/seeded
+rich-thread mailbox because no mailbox data was available on the simulator.
 
 ### 5. **Unify rendering caches behind a single coordinator**
 
@@ -407,8 +406,7 @@ The current architecture is **functionally correct and impressively thorough**, 
 Current status (2026-05-27): the DOM foundation exists, the migrated processing
 paths now default to DOM, and the legacy regex pipeline remains available as an
 explicit opt-out through `EmailDOM_All=NO` or per-component `EmailDOM_*` flags.
-Snapshot-based rich HTML previews are not part of this flip and remain
-default-off behind `EmailPreviewSnapshots_Enabled`. The current DOM-backed
+Snapshot-based rich HTML previews are enabled by default. The current DOM-backed
 infrastructure has passed targeted Mac build/test validation, broader
 `EmailDOM_All` parity validation, and a real-device mailbox check. The DOM
 sanitizer rollout coverage now also verifies that URL, tracking-pixel, and CSS

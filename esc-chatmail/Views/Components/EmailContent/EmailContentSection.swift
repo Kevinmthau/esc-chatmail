@@ -227,28 +227,15 @@ struct EmailContentSection: View {
         let isDarkMode = colorScheme == .dark
         let messageForInlineAttachments = resolvedMessageForInlineAttachments
 
-        if EmailPreviewSnapshotFeatureFlag.isEnabled {
-            EmailPreviewSnapshotView(
-                htmlContent: payload.html,
-                previewCacheKey: payload.previewCacheKey,
-                isDarkMode: isDarkMode,
-                senderEmail: message.senderEmail,
-                message: messageForInlineAttachments,
-                fallbackToLiveWebView: EmailPreviewSnapshotFeatureFlag.fallbackToLiveWebView
-            )
-            .allowsHitTesting(false)
-            .emailPreviewCardChrome()
-        } else {
-            MiniEmailWebView(
-                htmlContent: payload.html,
-                previewCacheKey: payload.previewCacheKey,
-                isDarkMode: isDarkMode,
-                senderEmail: message.senderEmail,
-                message: messageForInlineAttachments
-            )
-            .allowsHitTesting(false)
-            .emailPreviewCardChrome()
-        }
+        EmailPreviewSnapshotView(
+            htmlContent: payload.html,
+            previewCacheKey: payload.previewCacheKey,
+            isDarkMode: isDarkMode,
+            senderEmail: message.senderEmail,
+            message: messageForInlineAttachments
+        )
+        .allowsHitTesting(false)
+        .emailPreviewCardChrome()
     }
 
     private var transactionalPreviewAccessibilityLabel: String {

@@ -10,29 +10,14 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         tempDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("EmailPreviewSnapshotCacheTests-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
-        resetFeatureFlags()
     }
 
     override func tearDown() {
-        resetFeatureFlags()
         if let tempDirectory {
             try? FileManager.default.removeItem(at: tempDirectory)
         }
         tempDirectory = nil
         super.tearDown()
-    }
-
-    func testFeatureFlagsDefaultToSnapshotsDisabledAndFallbackEnabled() {
-        XCTAssertFalse(EmailPreviewSnapshotFeatureFlag.isEnabled)
-        XCTAssertTrue(EmailPreviewSnapshotFeatureFlag.fallbackToLiveWebView)
-    }
-
-    func testFeatureFlagsReadExplicitValues() {
-        UserDefaults.standard.set(true, forKey: "EmailPreviewSnapshots_Enabled")
-        UserDefaults.standard.set(false, forKey: "EmailPreviewSnapshots_FallbackToLiveWebView")
-
-        XCTAssertTrue(EmailPreviewSnapshotFeatureFlag.isEnabled)
-        XCTAssertFalse(EmailPreviewSnapshotFeatureFlag.fallbackToLiveWebView)
     }
 
     func testSnapshotAppearanceUsesExplicitRequestColorScheme() {
@@ -255,10 +240,5 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
             blue: CGFloat(pixel[2]) / 255,
             alpha: CGFloat(pixel[3]) / 255
         )
-    }
-
-    private func resetFeatureFlags() {
-        UserDefaults.standard.removeObject(forKey: "EmailPreviewSnapshots_Enabled")
-        UserDefaults.standard.removeObject(forKey: "EmailPreviewSnapshots_FallbackToLiveWebView")
     }
 }

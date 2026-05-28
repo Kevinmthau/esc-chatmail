@@ -7,7 +7,6 @@ struct EmailPreviewSnapshotView: View {
     let isDarkMode: Bool
     let senderEmail: String?
     let message: Message?
-    let fallbackToLiveWebView: Bool
 
     @State private var snapshotImage: UIImage?
     @State private var displayHeight: CGFloat = HTMLPreviewSizing.defaultPreviewHeight
@@ -16,7 +15,7 @@ struct EmailPreviewSnapshotView: View {
     @State private var didFail = false
 
     private let cache: EmailPreviewSnapshotCache
-    private let renderer: EmailPreviewSnapshotRenderer
+    private let renderer: EmailPreviewSnapshotRenderer?
 
     init(
         htmlContent: String,
@@ -24,16 +23,14 @@ struct EmailPreviewSnapshotView: View {
         isDarkMode: Bool,
         senderEmail: String?,
         message: Message?,
-        fallbackToLiveWebView: Bool = true,
         cache: EmailPreviewSnapshotCache = .shared,
-        renderer: EmailPreviewSnapshotRenderer = .shared
+        renderer: EmailPreviewSnapshotRenderer? = nil
     ) {
         self.htmlContent = htmlContent
         self.previewCacheKey = previewCacheKey
         self.isDarkMode = isDarkMode
         self.senderEmail = senderEmail
         self.message = message
-        self.fallbackToLiveWebView = fallbackToLiveWebView
         self.cache = cache
         self.renderer = renderer
     }
@@ -44,7 +41,7 @@ struct EmailPreviewSnapshotView: View {
 
     @ViewBuilder
     private var contentView: some View {
-        if didFail, fallbackToLiveWebView {
+        if didFail {
             MiniEmailWebView(
                 htmlContent: htmlContent,
                 previewCacheKey: previewCacheKey,
@@ -83,8 +80,6 @@ struct EmailPreviewSnapshotView: View {
                 .scaledToFill()
                 .frame(width: max(width, 1), height: displayHeight)
                 .clipped()
-        } else if didFail {
-            unavailablePreview
         } else {
             loadingPreview
         }
@@ -97,25 +92,6 @@ struct EmailPreviewSnapshotView: View {
             ProgressView()
                 .controlSize(.small)
         }
-    }
-
-    private var unavailablePreview: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "envelope.fill")
-                .font(.callout)
-                .foregroundColor(.blue)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Open original email")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(.primary)
-                Text("Preview unavailable")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
     }
 
     private func loadIdentity(for width: CGFloat) -> String {
@@ -166,6 +142,7 @@ struct EmailPreviewSnapshotView: View {
         }
 
         do {
+            let renderer = renderer ?? EmailPreviewSnapshotRenderer.shared
             let result = try await renderer.render(
                 request: EmailPreviewSnapshotRequest(
                     html: htmlContent,
