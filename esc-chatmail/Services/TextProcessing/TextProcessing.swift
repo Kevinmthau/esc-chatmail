@@ -27,6 +27,14 @@ enum TextProcessing {
         return regex.firstMatch(in: line, options: [], range: range) != nil
     }
     static func extractPlainText(from html: String) -> String {
+        if containsUnclosedOpeningTag(html) {
+            return extractPlainTextWithLegacyPipeline(from: html)
+        }
+
+        guard containsLikelyHTMLMarkup(html) else {
+            return normalizePlainTextInput(html)
+        }
+
         if EmailDOMFeatureFlag.isTextExtractionEnabled() {
             if let document = EmailDocument.tryParse(html) {
                 let text = document.plainText(preserveParagraphs: true, divsAsLineBreaks: true)
@@ -39,6 +47,27 @@ enum TextProcessing {
             // Fall through to the legacy regex pipeline on parser failure.
         }
 
+        return extractPlainTextWithLegacyPipeline(from: html)
+    }
+
+    private static func normalizePlainTextInput(_ text: String) -> String {
+        var normalized = decodeHTMLEntities(text)
+
+        normalized = normalized.unicodeScalars.filter { scalar in
+            scalar.value != 0x200B && scalar.value != 0x200C && scalar.value != 0x200D
+        }.map { String($0) }.joined()
+
+        normalized = normalized.replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression, range: nil)
+        normalized = normalized.replacingOccurrences(of: "\\n[ \\t]*\\n", with: "\n\n", options: .regularExpression, range: nil)
+        normalized = normalized.replacingOccurrences(of: "(\\s*\\n\\s*){2,}", with: "\n\n", options: .regularExpression, range: nil)
+        normalized = normalized.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .joined(separator: "\n")
+
+        return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func extractPlainTextWithLegacyPipeline(from html: String) -> String {
         var text = html
 
         // Avoid leaking <head> metadata (title tags, MSO conditionals) into bubble text.
@@ -117,6 +146,210 @@ enum TextProcessing {
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         return text
+    }
+
+    private static let knownHTMLTagNames: Set<String> = [
+        "a", "abbr", "address", "area", "article", "aside", "audio",
+        "b", "bdi", "bdo", "blockquote", "body", "br",
+        "caption", "center", "cite", "code", "col", "colgroup",
+        "data", "datalist", "dd", "del", "details", "dfn", "dialog", "dir", "div", "dl", "dt",
+        "em", "figcaption", "figure", "font", "footer", "form",
+        "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hgroup", "hr", "html",
+        "i", "iframe", "img", "input", "ins", "kbd", "li", "link", "main", "map", "mark", "menu", "meta", "meter",
+        "nav", "noscript", "object", "ol", "p", "picture", "pre", "progress",
+        "q", "rp", "rt", "ruby", "s", "samp", "script", "section", "small", "source", "span", "strike",
+        "strong", "style", "sub", "summary", "sup", "svg",
+        "table", "tbody", "td", "template", "textarea", "tfoot", "th", "thead", "time", "title", "tr", "track",
+        "u", "ul", "var", "video", "wbr"
+    ]
+
+    private static func containsLikelyHTMLMarkup(_ html: String) -> Bool {
+        var index = html.startIndex
+
+        while let tagStart = html[index...].firstIndex(of: "<") {
+            let nextIndex = html.index(after: tagStart)
+            guard nextIndex < html.endIndex else { return false }
+
+            let firstCharacter = html[nextIndex]
+            if firstCharacter.isLetter,
+               let tagEnd = tagEndIndex(in: html, from: nextIndex) {
+                let tagNameStart = nextIndex
+                var tagNameEnd = tagNameStart
+                while tagNameEnd < html.endIndex, isTagNameCharacter(html[tagNameEnd]) {
+                    tagNameEnd = html.index(after: tagNameEnd)
+                }
+
+                let tagName = String(html[tagNameStart..<tagNameEnd]).lowercased()
+                if knownHTMLTagNames.contains(tagName) ||
+                    tagHasAttributes(in: html, nameEnd: tagNameEnd, tagEnd: tagEnd) ||
+                    hasExplicitCloseTag(named: tagName, in: html, after: html.index(after: tagEnd)) {
+                    return true
+                }
+            } else if firstCharacter == "!",
+                      html[nextIndex...].lowercased().hasPrefix("!doctype"),
+                      tagEndIndex(in: html, from: nextIndex) != nil {
+                return true
+            }
+            if firstCharacter == "!",
+               html[nextIndex...].hasPrefix("!--"),
+               html[nextIndex...].range(of: "-->") != nil {
+                return true
+            }
+
+            if firstCharacter == "/" {
+                let nameStart = html.index(after: nextIndex)
+                var nameEnd = nameStart
+                while nameEnd < html.endIndex, isTagNameCharacter(html[nameEnd]) {
+                    nameEnd = html.index(after: nameEnd)
+                }
+
+                let tagName = String(html[nameStart..<nameEnd]).lowercased()
+                if nameStart < html.endIndex,
+                   html[nameStart].isLetter,
+                   knownHTMLTagNames.contains(tagName),
+                   tagEndIndex(in: html, from: nameEnd) != nil {
+                    return true
+                }
+            }
+
+            index = nextIndex
+        }
+
+        return false
+    }
+
+    private static func containsUnclosedOpeningTag(_ html: String) -> Bool {
+        var index = html.startIndex
+
+        while let tagStart = html[index...].firstIndex(of: "<") {
+            let nameStart = html.index(after: tagStart)
+            guard nameStart < html.endIndex else { return false }
+
+            if html[nameStart].isLetter, tagEndIndex(in: html, from: nameStart) == nil {
+                return true
+            }
+
+            index = nameStart
+        }
+
+        return false
+    }
+
+    private static func tagEndIndex(in html: String, from startIndex: String.Index) -> String.Index? {
+        var index = startIndex
+        var quote: Character?
+
+        while index < html.endIndex {
+            let character = html[index]
+            if let activeQuote = quote {
+                if character == activeQuote {
+                    quote = nil
+                }
+            } else if character == "\"" || character == "'" {
+                quote = character
+            } else if character == ">" {
+                return index
+            }
+
+            index = html.index(after: index)
+        }
+
+        return nil
+    }
+
+    private static func tagHasAttributes(in html: String, nameEnd: String.Index, tagEnd: String.Index) -> Bool {
+        var index = nameEnd
+        var hasAttributeSeparator = false
+
+        while index < tagEnd {
+            if html[index].isWhitespace {
+                hasAttributeSeparator = true
+                index = html.index(after: index)
+                continue
+            }
+
+            guard hasAttributeSeparator, html[index] != "/" else {
+                return false
+            }
+
+            let attributeNameStart = index
+            while index < tagEnd, isAttributeNameCharacter(html[index]) {
+                index = html.index(after: index)
+            }
+
+            guard attributeNameStart < index else {
+                return false
+            }
+
+            while index < tagEnd, html[index].isWhitespace {
+                index = html.index(after: index)
+            }
+
+            if index < tagEnd, html[index] == "=" {
+                return true
+            }
+
+            hasAttributeSeparator = false
+        }
+
+        return false
+    }
+
+    private static func hasExplicitCloseTag(
+        named tagName: String,
+        in html: String,
+        after startIndex: String.Index
+    ) -> Bool {
+        var index = startIndex
+
+        while let tagStart = html[index...].firstIndex(of: "<") {
+            let afterOpen = html.index(after: tagStart)
+            guard afterOpen < html.endIndex else { return false }
+
+            guard html[afterOpen] == "/" else {
+                index = afterOpen
+                continue
+            }
+
+            let nameStart = html.index(after: afterOpen)
+            var nameEnd = nameStart
+            while nameEnd < html.endIndex, isTagNameCharacter(html[nameEnd]) {
+                nameEnd = html.index(after: nameEnd)
+            }
+
+            guard String(html[nameStart..<nameEnd]).caseInsensitiveCompare(tagName) == .orderedSame,
+                  let tagEnd = tagEndIndex(in: html, from: nameEnd) else {
+                index = nameEnd
+                continue
+            }
+
+            var closeRemainder = nameEnd
+            while closeRemainder < tagEnd, html[closeRemainder].isWhitespace {
+                closeRemainder = html.index(after: closeRemainder)
+            }
+
+            if closeRemainder == tagEnd {
+                return true
+            }
+
+            index = html.index(after: tagEnd)
+        }
+
+        return false
+    }
+
+    private static func isTagNameCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || character == "-" || character == ":" || character == "_"
+    }
+
+    private static func isAttributeNameCharacter(_ character: Character) -> Bool {
+        !character.isWhitespace &&
+            character != "/" &&
+            character != ">" &&
+            character != "=" &&
+            character != "\"" &&
+            character != "'" &&
+            character != "<"
     }
 
     static func stripQuotedText(from text: String) -> String {

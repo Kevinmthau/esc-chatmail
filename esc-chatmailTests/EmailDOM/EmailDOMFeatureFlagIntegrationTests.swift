@@ -124,6 +124,22 @@ final class EmailDOMFeatureFlagIntegrationTests: XCTestCase {
         XCTAssertEqual(text, "Visible text")
     }
 
+    func testDefaultPlainTextExtractionFallsBackForPartiallyParsedTruncatedOpeningTag() {
+        let html = "Intro text <div style=\"font-family: Arial;\nVisible text"
+
+        let text = TextProcessing.extractPlainText(from: html)
+
+        XCTAssertEqual(text, "Intro text\nVisible text")
+    }
+
+    func testDefaultPlainTextExtractionPreservesAngleBracketEmailAddress() {
+        let text = "Contact <alice@example.com> for details"
+
+        let extracted = TextProcessing.extractPlainText(from: text)
+
+        XCTAssertEqual(extracted, text)
+    }
+
     func testDefaultRoutesInlineContentIDExtractionThroughDOMPath() {
         let html = """
         <html>

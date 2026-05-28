@@ -13,6 +13,16 @@ import XCTest
 /// before flipping the feature flag default.
 final class EmailDOMQuoteRemoverParityTests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        clearDOMFlags()
+    }
+
+    override func tearDown() {
+        clearDOMFlags()
+        super.tearDown()
+    }
+
     private struct Case {
         let name: String
         let html: String
@@ -81,12 +91,14 @@ final class EmailDOMQuoteRemoverParityTests: XCTestCase {
     func test_parity_visibleAndHiddenTextMatchesAcrossImplementations() {
         for parityCase in parityCases {
             // Reference: legacy regex pipeline
-            let legacyHTML = HTMLQuoteRemover.removeQuotes(from: parityCase.html, mode: parityCase.mode)
-            let legacyText = plainText(legacyHTML)
+            let legacyHTML = withDOMPipelineAll(false) {
+                HTMLQuoteRemover.removeQuotes(from: parityCase.html, mode: parityCase.mode)
+            }
+            let legacyText = legacyPlainText(legacyHTML)
 
             // New: DOM pipeline
             let domHTML = EmailDOMQuoteRemover.removeQuotes(from: parityCase.html, mode: parityCase.mode)
-            let domText = plainText(domHTML)
+            let domText = legacyPlainText(domHTML)
 
             for substring in parityCase.visibleTextSubstrings {
                 XCTAssertTrue(
@@ -113,10 +125,31 @@ final class EmailDOMQuoteRemoverParityTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func plainText(_ html: String?) -> String {
+    private func legacyPlainText(_ html: String?) -> String {
         guard let html else { return "" }
-        // Extract through the legacy regex extractor so this helper doesn't
-        // depend on the DOM text extractor we are also exercising.
-        return TextProcessing.extractPlainText(from: html)
+        return withDOMPipelineAll(false) {
+            TextProcessing.extractPlainText(from: html)
+        }
+    }
+
+    private func withDOMPipelineAll<T>(_ enabled: Bool, operation: () -> T) -> T {
+        let previous = UserDefaults.standard.object(forKey: "EmailDOM_All")
+        UserDefaults.standard.set(enabled, forKey: "EmailDOM_All")
+        defer {
+            if let previous {
+                UserDefaults.standard.set(previous, forKey: "EmailDOM_All")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "EmailDOM_All")
+            }
+        }
+        return operation()
+    }
+
+    private func clearDOMFlags() {
+        UserDefaults.standard.removeObject(forKey: "EmailDOM_QuoteRemoval")
+        UserDefaults.standard.removeObject(forKey: "EmailDOM_TextExtraction")
+        UserDefaults.standard.removeObject(forKey: "EmailDOM_InlineContentIDExtraction")
+        UserDefaults.standard.removeObject(forKey: "EmailDOM_HTMLSanitization")
+        UserDefaults.standard.removeObject(forKey: "EmailDOM_All")
     }
 }
