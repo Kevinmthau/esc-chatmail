@@ -249,6 +249,29 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
         XCTAssertNotEqual(firstSignature, secondSignature)
     }
 
+    func testContentSignature_changesWhenChatPreviewTextChanges() {
+        let firstSignature = MessageBubble.contentSignature(
+            bodyStorageURI: nil,
+            bodyText: "Body",
+            chatPreviewText: "First chat preview",
+            snippet: "Snippet",
+            hasHTMLSource: false,
+            htmlSourceSignature: "missing",
+            contactRefreshToken: 0
+        )
+        let secondSignature = MessageBubble.contentSignature(
+            bodyStorageURI: nil,
+            bodyText: "Body",
+            chatPreviewText: "Second chat preview",
+            snippet: "Snippet",
+            hasHTMLSource: false,
+            htmlSourceSignature: "missing",
+            contactRefreshToken: 0
+        )
+
+        XCTAssertNotEqual(firstSignature, secondSignature)
+    }
+
     func testContentSignature_changesWhenCanonicalHTMLFileChangesWithoutBodyStorageURIChange() {
         let messageId = "bubble-signature-\(UUID().uuidString)"
         let handler = HTMLContentHandler.shared
@@ -372,6 +395,42 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
         )
 
         XCTAssertEqual(result, loadedText)
+    }
+
+    func testResolvedVisibleText_prefersChatPreviewBeforeLegacyFallback() throws {
+        let result = try XCTUnwrap(
+            MessageContentView.resolvedVisibleText(
+                fullTextContent: nil,
+                fallbackPreviewText: "Legacy compact fallback",
+                chatPreviewText: "Canonical chat preview\n\nSecond line",
+                outgoingBodyText: nil,
+                isOutgoingPlainTextMessage: false
+            )
+        )
+
+        XCTAssertEqual(result, "Canonical chat preview\n\nSecond line")
+    }
+
+    func testResolvedVisibleText_removesSharedDocumentLinksFromChatPreviewText() throws {
+        let url = try XCTUnwrap(URL(string: "https://docs.google.com/document/d/abc123/edit"))
+        let link = SharedDocumentLink(
+            id: SharedDocumentLinkExtractor.dedupeKey(for: url, kind: .googleDoc),
+            url: url,
+            kind: .googleDoc
+        )
+
+        let result = try XCTUnwrap(
+            MessageContentView.resolvedVisibleText(
+                fullTextContent: nil,
+                fallbackPreviewText: nil,
+                chatPreviewText: "Here is the doc: https://docs.google.com/document/d/abc123/edit",
+                outgoingBodyText: nil,
+                isOutgoingPlainTextMessage: false,
+                sharedDocumentLinks: [link]
+            )
+        )
+
+        XCTAssertEqual(result, "Here is the doc:")
     }
 
     func testResolvedVisibleText_outgoingLongSingleTokenBodyBeatsTruncatedPrefix() throws {

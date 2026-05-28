@@ -210,6 +210,7 @@ struct MessageContentView: View {
         Self.resolvedVisibleText(
             fullTextContent: fullTextContent,
             fallbackPreviewText: fallbackPreviewText,
+            chatPreviewText: message.chatPreviewText,
             outgoingBodyText: message.bodyText,
             isOutgoingPlainTextMessage: message.isFromMe && !message.isForwardedEmail,
             sharedDocumentLinks: sharedDocumentLinks
@@ -248,6 +249,7 @@ struct MessageContentView: View {
     static func resolvedVisibleText(
         fullTextContent: String?,
         fallbackPreviewText: String?,
+        chatPreviewText: String? = nil,
         outgoingBodyText: String?,
         isOutgoingPlainTextMessage: Bool,
         sharedDocumentLinks: [SharedDocumentLink] = []
@@ -257,11 +259,11 @@ struct MessageContentView: View {
                 processedText(outgoingBodyText),
                 comparedTo: [
                     fullTextContent,
-                    fallbackPreviewText
+                    chatPreviewText
                 ]
             )
             : nil
-        let sourceText = outgoingBodyFallback ?? fullTextContent ?? fallbackPreviewText
+        let sourceText = outgoingBodyFallback ?? fullTextContent ?? chatPreviewText ?? fallbackPreviewText
         return SharedDocumentLinkExtractor.removingLinks(from: sourceText, matching: sharedDocumentLinks)
     }
 

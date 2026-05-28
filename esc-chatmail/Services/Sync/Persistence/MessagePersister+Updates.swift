@@ -55,6 +55,7 @@ extension MessagePersister {
             let previousHadInboxLabel = existingMessage.labels?.contains { $0.id == "INBOX" } ?? false
             let previousSnippet = existingMessage.snippet
             let previousBodyText = existingMessage.bodyText
+            let previousChatPreviewText = existingMessage.chatPreviewText
             let previousBodyStorageURI = existingMessage.bodyStorageURI
             let previousSenderEmail = existingMessage.senderEmail
             let previousSenderName = existingMessage.senderName
@@ -74,6 +75,7 @@ extension MessagePersister {
             existingMessage.hasAttachments = processedMessage.hasAttachments
             existingMessage.snippet = processedMessage.snippet
             existingMessage.cleanedSnippet = processedMessage.cleanedSnippet
+            existingMessage.chatPreviewText = processedMessage.chatPreviewText
             existingMessage.setValue(processedMessage.headers.messageId, forKey: "messageId")
             existingMessage.setValue(
                 processedMessage.headers.references.isEmpty ? nil : processedMessage.headers.references.joined(separator: " "),
@@ -242,6 +244,7 @@ extension MessagePersister {
 
             let bodyStorageURIChanged = existingMessage.bodyStorageURI != previousBodyStorageURI
             let bodyTextChanged = existingMessage.bodyText != previousBodyText
+            let chatPreviewTextChanged = existingMessage.chatPreviewText != previousChatPreviewText
             let snippetChanged = existingMessage.snippet != previousSnippet
 
             Log.debug("Updated existing message: \(processedMessage.id)", category: .sync)
@@ -249,7 +252,7 @@ extension MessagePersister {
             return MessageUpdateResult(
                 didUpdate: true,
                 modifiedConversationID: modifiedConversationID,
-                shouldInvalidateRenderedContent: bodyStorageURIChanged || bodyTextChanged || snippetChanged,
+                shouldInvalidateRenderedContent: bodyStorageURIChanged || bodyTextChanged || chatPreviewTextChanged || snippetChanged,
                 participantDisplayNameUpdateEmails: displayNameUpdateEmails,
                 participantDisplayNameUpdateConversationIDs: displayNameUpdateConversationIDs
             )

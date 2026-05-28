@@ -11,6 +11,7 @@ private enum ChatMessageAttachmentDeduplicationKey: Hashable {
 struct MessageBubbleLoadSignatureComponents: Equatable {
     let bodyStorageURI: String?
     private let bodyTextFingerprint: String
+    private let chatPreviewTextFingerprint: String
     private let cleanedSnippetFingerprint: String
     private let snippetFingerprint: String
     private let hasHTMLSource: Bool
@@ -22,6 +23,7 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
     init(
         bodyStorageURI: String?,
         bodyText: String?,
+        chatPreviewText: String? = nil,
         cleanedSnippet: String?,
         snippet: String?,
         hasHTMLSource: Bool,
@@ -32,6 +34,7 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
     ) {
         self.bodyStorageURI = bodyStorageURI
         self.bodyTextFingerprint = Self.contentFingerprint(for: bodyText)
+        self.chatPreviewTextFingerprint = Self.contentFingerprint(for: chatPreviewText)
         self.cleanedSnippetFingerprint = Self.contentFingerprint(for: cleanedSnippet)
         self.snippetFingerprint = Self.contentFingerprint(for: snippet)
         self.hasHTMLSource = hasHTMLSource
@@ -48,6 +51,7 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
         [
             bodyStorageURI ?? "",
             bodyTextFingerprint,
+            chatPreviewTextFingerprint,
             cleanedSnippetFingerprint,
             snippetFingerprint,
             String(hasHTMLSource),
@@ -63,6 +67,7 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
     static func signature(
         bodyStorageURI: String?,
         bodyText: String?,
+        chatPreviewText: String? = nil,
         cleanedSnippet: String? = nil,
         snippet: String?,
         hasHTMLSource: Bool,
@@ -76,6 +81,7 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
         Self(
             bodyStorageURI: bodyStorageURI,
             bodyText: bodyText,
+            chatPreviewText: chatPreviewText,
             cleanedSnippet: cleanedSnippet,
             snippet: snippet,
             hasHTMLSource: hasHTMLSource,
@@ -198,6 +204,7 @@ struct ChatMessageRowModel: Equatable {
     let subject: String?
     let snippet: String?
     let cleanedSnippet: String?
+    let chatPreviewText: String?
     let bodyText: String?
     let bodyStorageURI: String?
     let senderName: String?
@@ -246,6 +253,7 @@ struct ChatMessageRowModel: Equatable {
         MessageBubbleContentRequest(
             messageID: id,
             bodyText: bodyText,
+            chatPreviewText: chatPreviewText,
             bodyStorageURI: bodyStorageURI,
             cleanedSnippet: cleanedSnippet,
             snippet: snippet,
@@ -403,6 +411,7 @@ enum ChatMessageRowModelMapper {
             subject: message.subject,
             snippet: message.snippet,
             cleanedSnippet: message.cleanedSnippet,
+            chatPreviewText: message.chatPreviewTextValue,
             bodyText: message.bodyTextValue,
             bodyStorageURI: message.bodyStorageURI,
             senderName: message.senderName,
@@ -426,6 +435,7 @@ enum ChatMessageRowModelMapper {
             loadSignatureComponents: MessageBubbleLoadSignatureComponents(
                 bodyStorageURI: message.bodyStorageURI,
                 bodyText: message.bodyTextValue,
+                chatPreviewText: message.chatPreviewTextValue,
                 cleanedSnippet: message.cleanedSnippet,
                 snippet: message.snippet,
                 hasHTMLSource: message.hasHTMLSource,

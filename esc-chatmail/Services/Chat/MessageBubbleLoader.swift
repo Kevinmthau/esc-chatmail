@@ -99,6 +99,7 @@ struct MessageBubbleHTMLAnalysis: Sendable, Equatable {
 struct MessageBubbleContentRequest: Sendable {
     let messageID: String
     let bodyText: String?
+    let chatPreviewText: String?
     let bodyStorageURI: String?
     let cleanedSnippet: String?
     let snippet: String?
@@ -111,6 +112,40 @@ struct MessageBubbleContentRequest: Sendable {
     let isLikelyCalendarInvite: Bool
     let effectiveSenderEmail: String?
     let attachmentSnapshots: [MessageBubbleAttachmentSnapshot]
+
+    init(
+        messageID: String,
+        bodyText: String?,
+        chatPreviewText: String? = nil,
+        bodyStorageURI: String?,
+        cleanedSnippet: String?,
+        snippet: String?,
+        subject: String?,
+        senderName: String?,
+        hasHTMLSource: Bool,
+        hasAttachments: Bool,
+        isFromMe: Bool,
+        isForwardedEmail: Bool,
+        isLikelyCalendarInvite: Bool,
+        effectiveSenderEmail: String?,
+        attachmentSnapshots: [MessageBubbleAttachmentSnapshot]
+    ) {
+        self.messageID = messageID
+        self.bodyText = bodyText
+        self.chatPreviewText = chatPreviewText
+        self.bodyStorageURI = bodyStorageURI
+        self.cleanedSnippet = cleanedSnippet
+        self.snippet = snippet
+        self.subject = subject
+        self.senderName = senderName
+        self.hasHTMLSource = hasHTMLSource
+        self.hasAttachments = hasAttachments
+        self.isFromMe = isFromMe
+        self.isForwardedEmail = isForwardedEmail
+        self.isLikelyCalendarInvite = isLikelyCalendarInvite
+        self.effectiveSenderEmail = effectiveSenderEmail
+        self.attachmentSnapshots = attachmentSnapshots
+    }
 }
 
 struct MessageBubbleContentResult: Sendable, Equatable {
@@ -622,10 +657,16 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             loadedPlainText: loadedContent.plainText
         )
 
-        let fullTextContent =
-            forwardedDisplayContent != nil
-            ? forwardedDisplayContent?.leadInText
-            : outgoingPlainTextContent ?? loadedContent.plainText
+        let fullTextContent: String?
+        if let forwardedDisplayContent {
+            fullTextContent = forwardedDisplayContent.leadInText
+        } else if request.isFromMe {
+            fullTextContent = outgoingPlainTextContent ?? loadedContent.plainText ?? request.chatPreviewText
+        } else if loadedContent.prefersLoadedTextOverStoredPreview {
+            fullTextContent = loadedContent.plainText ?? request.chatPreviewText
+        } else {
+            fullTextContent = request.chatPreviewText ?? loadedContent.plainText
+        }
         let sharedDocumentLinkBodyText = forwardedDisplayContent == nil ? request.bodyText : nil
         let sharedDocumentLinkSnippet = forwardedDisplayContent == nil ? request.snippet : nil
 
@@ -649,7 +690,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             return nil
         }
 
-        for text in [request.bodyText, request.cleanedSnippet, request.snippet] {
+        for text in [request.bodyText, request.chatPreviewText, request.cleanedSnippet, request.snippet] {
             if let content = ForwardedMessageDisplayParser.parseForward(from: text) {
                 return content
             }
@@ -680,8 +721,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             result.mainText,
             comparedTo: [
                 loadedPlainText,
-                request.cleanedSnippet,
-                request.snippet
+                request.chatPreviewText
             ]
         )
     }
@@ -790,7 +830,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
     private func loadProcessedContent(
         from request: MessageBubbleContentRequest,
         resolvedHasHTMLSource: Bool
-    ) async -> (plainText: String?, hasRichContent: Bool) {
+    ) async -> (plainText: String?, hasRichContent: Bool, prefersLoadedTextOverStoredPreview: Bool) {
         let sourceSignature = ProcessedTextCache.contentSourceSignature(
             messageId: request.messageID,
             bodyStorageURI: request.bodyStorageURI,
@@ -841,7 +881,17 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             )
 
             if !requiresURIRecompute && !requiresBodyFallbackRecompute && !shouldBypassCachedNewsletterFallback {
-                return (cached.plainText, cached.hasRichContent)
+                let prefersCachedLoadedText =
+                    cached.prefersLoadedTextOverStoredPreview ||
+                    shouldPreferLoadedTextOverStoredPreview(
+                        sourceSignature: sourceSignature,
+                        plainText: cached.plainText
+                    )
+                return (
+                    cached.plainText,
+                    cached.hasRichContent,
+                    prefersCachedLoadedText
+                )
             }
         }
 
@@ -863,7 +913,11 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             )
 
             if !requiresURIRecompute && !shouldBypassCachedNewsletterFallback {
-                return (cached.plainText, cached.hasRichContent)
+                return (
+                    cached.plainText,
+                    cached.hasRichContent,
+                    cached.prefersLoadedTextOverStoredPreview
+                )
             }
         }
 
@@ -916,15 +970,25 @@ actor MessageBubbleLoader: MessageBubbleLoading {
                 previewMode: ProcessedTextCache.chatBubblePreviewMode,
                 plainText: recoveredResult.mainText,
                 hasRichContent: recoveredHasRichContent,
-                quotedParts: recoveredResult.quotedParts
+                quotedParts: recoveredResult.quotedParts,
+                prefersLoadedTextOverStoredPreview: recoveredResult.mainText != nil
             )
 
             if recoveredResult.mainText != nil || recoveredHasRichContent {
-                result = (recoveredResult.mainText, recoveredHasRichContent)
+                result = (recoveredResult.mainText, recoveredHasRichContent, recoveredResult.mainText != nil)
             }
         }
 
         return result
+    }
+
+    private func shouldPreferLoadedTextOverStoredPreview(
+        sourceSignature: String,
+        plainText: String?
+    ) -> Bool {
+        sourceSignature.hasPrefix("html:") &&
+        plainText != nil &&
+        !looksLikeNewsletterFallbackText(plainText)
     }
 
     private func looksLikeNewsletterFallbackText(_ text: String?) -> Bool {
@@ -960,13 +1024,17 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         from request: MessageBubbleContentRequest,
         sourceSignature: String,
         fallbackSourceSignature: String
-    ) async -> (plainText: String?, hasRichContent: Bool) {
+    ) async -> (plainText: String?, hasRichContent: Bool, prefersLoadedTextOverStoredPreview: Bool) {
         var processedResult = ProcessedTextCache.processMessage(
             messageId: request.messageID,
             bodyStorageURI: request.bodyStorageURI,
             handler: htmlContentHandler
         )
         var cacheSourceSignature = sourceSignature
+        var prefersLoadedTextOverStoredPreview = shouldPreferLoadedTextOverStoredPreview(
+            sourceSignature: sourceSignature,
+            plainText: processedResult.plainText
+        )
 
         if processedResult.plainText == nil, let text = request.bodyText {
             let fallbackContent = RawEmailSourceSanitizer.extractHTMLText(from: text) ?? text
@@ -995,6 +1063,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
                 fallbackResult.quotedParts
             )
             cacheSourceSignature = fallbackSourceSignature
+            prefersLoadedTextOverStoredPreview = false
         }
 
         await processedTextCache.set(
@@ -1003,10 +1072,15 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             previewMode: ProcessedTextCache.chatBubblePreviewMode,
             plainText: processedResult.plainText,
             hasRichContent: processedResult.hasRichContent,
-            quotedParts: processedResult.quotedParts
+            quotedParts: processedResult.quotedParts,
+            prefersLoadedTextOverStoredPreview: prefersLoadedTextOverStoredPreview
         )
 
-        return (processedResult.plainText, processedResult.hasRichContent)
+        return (
+            processedResult.plainText,
+            processedResult.hasRichContent,
+            prefersLoadedTextOverStoredPreview
+        )
     }
 
     private func extractSharedDocumentLinks(

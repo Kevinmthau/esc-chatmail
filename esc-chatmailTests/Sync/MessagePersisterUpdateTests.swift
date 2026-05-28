@@ -55,6 +55,84 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertTrue(existingMessage.isNewsletter)
     }
 
+    func testCreateNewMessage_persistsChatPreviewText() async throws {
+        var headers = ProcessedHeaders()
+        headers.subject = "Chat preview"
+        headers.from = "Sender <sender@example.com>"
+        headers.to = [EmailAddress(email: "recipient@example.com", displayName: nil)]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: "message-chat-preview-create",
+            gmThreadId: "thread-chat-preview-create",
+            snippet: "Line one. Line two.",
+            cleanedSnippet: "Line one. Line two.",
+            chatPreviewText: "Line one.\n\nLine two.",
+            internalDate: Date(),
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: "Line one.\n\nLine two.",
+            labelIds: ["INBOX"],
+            isUnread: true,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        try await persister.createNewMessage(
+            processedMessage,
+            labelIds: nil,
+            myAliases: [normalizedEmail("recipient@example.com")],
+            in: context
+        )
+
+        let saved = try XCTUnwrap(fetchMessage(id: processedMessage.id))
+        XCTAssertEqual(saved.chatPreviewText, "Line one.\n\nLine two.")
+        XCTAssertEqual(saved.cleanedSnippet, "Line one. Line two.")
+    }
+
+    func testUpdateExistingMessage_updatesChatPreviewText() async throws {
+        let conversation = ConversationBuilder.simple(in: context)
+        let existingMessage = MessageBuilder()
+            .withId("message-chat-preview-update")
+            .inConversation(conversation)
+            .build(in: context)
+        existingMessage.chatPreviewText = "Old preview"
+
+        var headers = ProcessedHeaders()
+        headers.subject = existingMessage.subject
+        headers.from = "Sender <sender@example.com>"
+        headers.to = [EmailAddress(email: "recipient@example.com", displayName: nil)]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: existingMessage.id,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: "Updated preview.",
+            cleanedSnippet: "Updated preview.",
+            chatPreviewText: "Updated preview.\n\nSecond line.",
+            internalDate: existingMessage.internalDate,
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: "Updated preview.\n\nSecond line.",
+            labelIds: [],
+            isUnread: false,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertEqual(existingMessage.chatPreviewText, "Updated preview.\n\nSecond line.")
+        XCTAssertEqual(existingMessage.cleanedSnippet, "Updated preview.")
+    }
+
     func testSaveMessage_newHTMLMessage_savesHTMLOnce() async throws {
         var headers = ProcessedHeaders()
         headers.subject = "HTML message"

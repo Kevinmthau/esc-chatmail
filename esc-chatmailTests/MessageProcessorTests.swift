@@ -190,6 +190,82 @@ final class MessageProcessorTests: XCTestCase {
         XCTAssertFalse(processed.cleanedSnippet?.contains(trailingText) == true)
     }
 
+    func testProcessGmailMessage_populatesChatPreviewTextFromHTMLPreservingParagraphs() async throws {
+        let html = """
+        <html>
+        <body>
+          <p>First paragraph.</p>
+          <p>Second paragraph. Thanks, Kevin</p>
+        </body>
+        </html>
+        """
+        let plainText = "Plain fallback should not win"
+
+        let message = makeMultipartAlternativeMessage(
+            id: "chat-preview-html-paragraphs",
+            plainText: plainText,
+            html: html,
+            plainFirst: true
+        )
+
+        let processedMessage = await processor.processGmailMessage(message, myAliases: [])
+        let processed = try XCTUnwrap(processedMessage)
+        let chatPreviewText = try XCTUnwrap(processed.chatPreviewText)
+
+        XCTAssertTrue(chatPreviewText.contains("First paragraph."))
+        XCTAssertTrue(chatPreviewText.contains("\n\nSecond paragraph."))
+        XCTAssertTrue(chatPreviewText.contains("Thanks"))
+        XCTAssertTrue(chatPreviewText.contains("\nKevin"))
+        XCTAssertFalse(chatPreviewText.contains(plainText))
+        XCTAssertFalse(processed.cleanedSnippet?.contains("\n") == true)
+    }
+
+    func testProcessGmailMessage_chatPreviewTextStripsQuotedHTMLContent() async throws {
+        let html = """
+        <html>
+        <body>
+          <div>Fresh reply body.</div>
+          <blockquote>
+            <div>QUOTED_ORIGINAL_TOKEN</div>
+          </blockquote>
+        </body>
+        </html>
+        """
+
+        let message = makeMultipartAlternativeMessage(
+            id: "chat-preview-strips-quoted-html",
+            plainText: "Fresh reply body.\n\n> QUOTED_ORIGINAL_TOKEN",
+            html: html,
+            plainFirst: false
+        )
+
+        let processedMessage = await processor.processGmailMessage(message, myAliases: [])
+        let processed = try XCTUnwrap(processedMessage)
+
+        XCTAssertEqual(processed.chatPreviewText, "Fresh reply body.")
+        XCTAssertFalse(processed.chatPreviewText?.contains("QUOTED_ORIGINAL_TOKEN") == true)
+    }
+
+    func testProcessGmailMessage_cleanedSnippetRemainsCompactWhenChatPreviewHasLineBreaks() async throws {
+        let plainText = """
+        Line one.
+
+        Line two.
+        """
+
+        let message = GmailMessageBuilder()
+            .withId("chat-preview-plain-compact-snippet")
+            .withSnippet("Line one. Line two.")
+            .withBodyText(plainText)
+            .build()
+
+        let processedMessage = await processor.processGmailMessage(message, myAliases: [])
+        let processed = try XCTUnwrap(processedMessage)
+
+        XCTAssertEqual(processed.chatPreviewText, "Line one.\n\nLine two.")
+        XCTAssertEqual(processed.cleanedSnippet, "Line one. Line two.")
+    }
+
     // MARK: - Gmail Category Labels
 
     func testIsNewsletter_gmailPromotionsLabel_doesNotFlagAlone() {

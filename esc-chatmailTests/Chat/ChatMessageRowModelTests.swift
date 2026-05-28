@@ -38,6 +38,7 @@ final class ChatMessageRowModelTests: XCTestCase {
             .inConversation(conversation)
             .build(in: viewContext)
         message.cleanedSnippet = "Cleaned Snippet"
+        message.chatPreviewText = "Chat preview\n\nText"
 
         let participant = MessageParticipant(context: viewContext)
         participant.id = UUID()
@@ -73,10 +74,13 @@ final class ChatMessageRowModelTests: XCTestCase {
         XCTAssertEqual(row.senderInfoDisplayName, "Participant Person")
         XCTAssertEqual(row.senderInfoAvatarURL, "file:///avatar.png")
         XCTAssertEqual(row.fallbackPreviewText, "Cleaned Snippet")
+        XCTAssertEqual(row.chatPreviewText, "Chat preview\n\nText")
         XCTAssertEqual(row.attachments.count, 1)
         XCTAssertEqual(row.attachments.first?.objectID, attachment.objectID)
         XCTAssertEqual(row.attachments.first?.previewURL, "Previews/photo.png")
-        XCTAssertEqual(row.makeContentRequest().attachmentSnapshots.count, 1)
+        let contentRequest = row.makeContentRequest()
+        XCTAssertEqual(contentRequest.chatPreviewText, "Chat preview\n\nText")
+        XCTAssertEqual(contentRequest.attachmentSnapshots.count, 1)
     }
 
     func testMap_preservesOutgoingForwardedAffordances() throws {

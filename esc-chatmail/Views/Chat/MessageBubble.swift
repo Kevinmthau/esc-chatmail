@@ -236,6 +236,7 @@ struct MessageBubble: View {
     static func contentSignature(
         bodyStorageURI: String?,
         bodyText: String?,
+        chatPreviewText: String? = nil,
         cleanedSnippet: String? = nil,
         snippet: String?,
         hasHTMLSource: Bool,
@@ -249,6 +250,7 @@ struct MessageBubble: View {
         MessageBubbleLoadSignatureComponents.signature(
             bodyStorageURI: bodyStorageURI,
             bodyText: bodyText,
+            chatPreviewText: chatPreviewText,
             cleanedSnippet: cleanedSnippet,
             snippet: snippet,
             hasHTMLSource: hasHTMLSource,

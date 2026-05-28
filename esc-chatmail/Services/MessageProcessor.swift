@@ -41,6 +41,11 @@ class MessageProcessor: @unchecked Sendable {
             html: content.html
         )
         processedMessage.cleanedSnippet = createCleanedSnippet(html: content.html, plainText: content.plainText, snippet: gmailMessage.snippet, isFromMe: processedMessage.headers.isFromMe)
+        processedMessage.chatPreviewText = createChatPreviewText(
+            html: content.html,
+            plainText: content.plainText,
+            snippet: gmailMessage.snippet
+        )
 
         // Process labels
         if let labelIds = gmailMessage.labelIds {
@@ -671,6 +676,48 @@ class MessageProcessor: @unchecked Sendable {
         return nil
     }
 
+    private func createChatPreviewText(html: String?, plainText: String?, snippet: String?) -> String? {
+        if let htmlPreview = processedChatPreviewText(
+            content: html,
+            inputKind: .html,
+            sanitizeRawEmailSource: false
+        ) {
+            return htmlPreview
+        }
+
+        if let plainPreview = processedChatPreviewText(
+            content: plainText,
+            inputKind: .plainText,
+            sanitizeRawEmailSource: true
+        ) {
+            return plainPreview
+        }
+
+        return processedChatPreviewText(
+            content: snippet,
+            inputKind: .plainText,
+            sanitizeRawEmailSource: true
+        )
+    }
+
+    private func processedChatPreviewText(
+        content: String?,
+        inputKind: ChatBubbleTextInputKind,
+        sanitizeRawEmailSource: Bool
+    ) -> String? {
+        let result = ChatBubbleTextProcessor.process(
+            content: content,
+            options: ChatBubbleTextProcessorOptions(
+                inputKind: inputKind,
+                sanitizeRawEmailSource: sanitizeRawEmailSource,
+                decodeHTMLEntities: true,
+                formatSignOffLineBreaks: true,
+                classifyRichContent: false
+            )
+        )
+        return result.mainText
+    }
+
     /// Prepares HTML for snippet extraction by removing metadata and hidden preheaders
     /// that frequently pollute conversation list previews (e.g., title tags, Outlook comments).
     private func prepareHTMLForSnippet(_ html: String) -> String {
@@ -862,6 +909,7 @@ struct ProcessedMessage: Sendable {
     var gmThreadId: String = ""
     var snippet: String?
     var cleanedSnippet: String?
+    var chatPreviewText: String?
     var internalDate: Date = Date()
     var headers: ProcessedHeaders = ProcessedHeaders()
     var canonicalContent: CanonicalEmailContent?

@@ -50,6 +50,7 @@ extension MessagePersister {
             message.gmThreadId = processedMessage.gmThreadId
             message.snippet = processedMessage.snippet
             message.cleanedSnippet = processedMessage.cleanedSnippet
+            message.chatPreviewText = processedMessage.chatPreviewText
             message.conversation = conversation
             message.internalDate = processedMessage.internalDate
             message.subject = processedMessage.headers.subject

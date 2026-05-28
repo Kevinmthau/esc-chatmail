@@ -125,6 +125,81 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertEqual(result.name, "Address Book Name")
     }
 
+    func testLoadContent_incomingMessagePrefersChatPreviewTextOverRuntimeBodyText() async {
+        let messageId = "bubble-chat-preview-primary-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: "Runtime body fallback",
+                chatPreviewText: "Canonical chat preview\n\nSecond line",
+                bodyStorageURI: nil,
+                cleanedSnippet: "List-safe fallback",
+                snippet: "Snippet fallback",
+                subject: "Chat preview",
+                senderName: "Alice Example",
+                hasHTMLSource: false,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "Canonical chat preview\n\nSecond line")
+        XCTAssertFalse(result.hasRichHTMLContent)
+    }
+
+    func testLoadContent_incomingMessagePrefersRecoveredHTMLTextOverStoredChatPreview() async {
+        let messageId = "bubble-recovered-preview-primary-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        HTMLContentHandler.shared.deleteHTML(for: messageId)
+        defer {
+            HTMLContentHandler.shared.deleteHTML(for: messageId)
+        }
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlContentRecoveryService: MockHTMLContentRecoverer(
+                recoveredHTMLByMessageID: [
+                    messageId: "<html><body><p>Recovered HTML body</p></body></html>"
+                ]
+            ),
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache()
+        )
+
+        let request = MessageBubbleContentRequest(
+            messageID: messageId,
+            bodyText: nil,
+            chatPreviewText: "Stale stored preview",
+            bodyStorageURI: nil,
+            cleanedSnippet: "Stale stored preview",
+            snippet: "Stale stored preview",
+            subject: "Recovered preview",
+            senderName: "Alice Example",
+            hasHTMLSource: true,
+            hasAttachments: false,
+            isFromMe: false,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            effectiveSenderEmail: "alice@example.com",
+            attachmentSnapshots: []
+        )
+
+        let first = await loader.loadContent(from: request)
+        let second = await loader.loadContent(from: request)
+
+        XCTAssertEqual(first.fullTextContent, "Recovered HTML body")
+        XCTAssertEqual(second.fullTextContent, "Recovered HTML body")
+    }
+
     func testLoadContent_rawEmailSourceWithEmbeddedHTML_marksRichContent() async {
         let messageId = "bubble-raw-html-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
@@ -563,6 +638,48 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertNotEqual(visibleText, "Can we please see alts for:")
     }
 
+    func testLoadContent_outgoingReplyUsesBodyWhenRicherThanChatPreviewText() async throws {
+        let messageId = "bubble-outgoing-chat-preview-comparison-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let replyBody = """
+        Can we please see alts for:
+
+        Primary bedroom drapery
+        Kitchen backsplash
+        """
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: replyBody,
+                chatPreviewText: "Can we please see alts for:",
+                bodyStorageURI: nil,
+                cleanedSnippet: "Can we please see alts for:",
+                snippet: "Can we please see alts for:",
+                subject: "Re: Finish options",
+                senderName: "Me",
+                hasHTMLSource: false,
+                hasAttachments: false,
+                isFromMe: true,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "me@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        let visibleText = try XCTUnwrap(result.fullTextContent)
+        XCTAssertTrue(visibleText.contains("Can we please see alts for:"))
+        XCTAssertTrue(visibleText.contains("Primary bedroom drapery"))
+        XCTAssertTrue(visibleText.contains("Kitchen backsplash"))
+        XCTAssertNotEqual(visibleText, "Can we please see alts for:")
+    }
+
     func testLoadContent_outgoingLongSingleTokenBodyBeatsTruncatedPrefix() async throws {
         let messageId = "bubble-outgoing-long-token-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
@@ -790,6 +907,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
             MessageBubbleContentRequest(
                 messageID: messageId,
                 bodyText: nil,
+                chatPreviewText: "Stale stored preview",
                 bodyStorageURI: nil,
                 cleanedSnippet: nil,
                 snippet: nil,
@@ -815,8 +933,10 @@ final class MessageBubbleLoaderTests: XCTestCase {
         let second = await loader.loadContent(from: makeRequest())
 
         XCTAssertTrue(first.fullTextContent?.contains("FIRST_BODY_TOKEN") == true)
+        XCTAssertFalse(first.fullTextContent?.contains("Stale stored preview") == true)
         XCTAssertFalse(first.fullTextContent?.contains("SECOND_BODY_TOKEN") == true)
         XCTAssertTrue(second.fullTextContent?.contains("SECOND_BODY_TOKEN") == true)
+        XCTAssertFalse(second.fullTextContent?.contains("Stale stored preview") == true)
         XCTAssertFalse(second.fullTextContent?.contains("FIRST_BODY_TOKEN") == true)
     }
 

@@ -172,11 +172,18 @@ actor ProcessedTextCache: MemoryWarningHandler {
         let plainText: String?
         let hasRichContent: Bool
         let quotedParts: [QuotedPart]
+        let prefersLoadedTextOverStoredPreview: Bool
 
-        init(plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart] = []) {
+        init(
+            plainText: String?,
+            hasRichContent: Bool,
+            quotedParts: [QuotedPart] = [],
+            prefersLoadedTextOverStoredPreview: Bool = false
+        ) {
             self.plainText = plainText
             self.hasRichContent = hasRichContent
             self.quotedParts = quotedParts
+            self.prefersLoadedTextOverStoredPreview = prefersLoadedTextOverStoredPreview
         }
     }
 
@@ -252,23 +259,42 @@ actor ProcessedTextCache: MemoryWarningHandler {
         messageId: String,
         sourceSignature: String,
         previewMode: String
-    ) async -> (plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart])? {
+    ) async -> (
+        plainText: String?,
+        hasRichContent: Bool,
+        quotedParts: [QuotedPart],
+        prefersLoadedTextOverStoredPreview: Bool
+    )? {
         let key = Self.cacheKey(
             for: messageId,
             sourceSignature: sourceSignature,
             previewMode: previewMode
         )
         guard let entry = await cache.get(key) else { return nil }
-        return (entry.plainText, entry.hasRichContent, entry.quotedParts)
+        return (
+            entry.plainText,
+            entry.hasRichContent,
+            entry.quotedParts,
+            entry.prefersLoadedTextOverStoredPreview
+        )
     }
 
-    func set(messageId: String, plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart] = []) async {
+    func set(
+        messageId: String,
+        plainText: String?,
+        hasRichContent: Bool,
+        quotedParts: [QuotedPart] = []
+    ) async {
         let size = Self.estimateSize(plainText, hasRichContent, quotedParts)
         let key = Self.cacheKey(for: messageId)
         beginTrackedCacheWrite(key, for: messageId)
         await cache.set(
             key,
-            value: CachedText(plainText: plainText, hasRichContent: hasRichContent, quotedParts: quotedParts),
+            value: CachedText(
+                plainText: plainText,
+                hasRichContent: hasRichContent,
+                quotedParts: quotedParts
+            ),
             sizeBytes: size
         )
         finishTrackedCacheWrite()
@@ -281,7 +307,8 @@ actor ProcessedTextCache: MemoryWarningHandler {
         previewMode: String,
         plainText: String?,
         hasRichContent: Bool,
-        quotedParts: [QuotedPart] = []
+        quotedParts: [QuotedPart] = [],
+        prefersLoadedTextOverStoredPreview: Bool = false
     ) async {
         let size = Self.estimateSize(plainText, hasRichContent, quotedParts)
         let key = Self.cacheKey(
@@ -292,7 +319,12 @@ actor ProcessedTextCache: MemoryWarningHandler {
         beginTrackedCacheWrite(key, for: messageId)
         await cache.set(
             key,
-            value: CachedText(plainText: plainText, hasRichContent: hasRichContent, quotedParts: quotedParts),
+            value: CachedText(
+                plainText: plainText,
+                hasRichContent: hasRichContent,
+                quotedParts: quotedParts,
+                prefersLoadedTextOverStoredPreview: prefersLoadedTextOverStoredPreview
+            ),
             sizeBytes: size
         )
         finishTrackedCacheWrite()

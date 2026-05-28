@@ -18,6 +18,7 @@ extension Message {
     @NSManaged public var subject: String?
     @NSManaged public var snippet: String?
     @NSManaged public var cleanedSnippet: String?
+    @NSManaged public var chatPreviewText: String?
     @NSManaged public var isFromMe: Bool
     @NSManaged public var isUnread: Bool
     @NSManaged public var isNewsletter: Bool
@@ -586,6 +587,11 @@ extension Message {
     /// Type-safe accessor for bodyText (alias for consistency)
     var bodyTextValue: String? {
         bodyText
+    }
+
+    /// Type-safe accessor for chatPreviewText (alias for consistency)
+    var chatPreviewTextValue: String? {
+        chatPreviewText
     }
 
     /// Type-safe accessor for senderName (alias for consistency)
