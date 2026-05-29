@@ -375,6 +375,26 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
         XCTAssertNotEqual(result, "Can we please see alts for:")
     }
 
+    func testResolvedVisibleText_outgoingBodyDoesNotCompareAgainstLegacyFallback() throws {
+        let result = try XCTUnwrap(
+            MessageContentView.resolvedVisibleText(
+                fullTextContent: nil,
+                fallbackPreviewText: "Legacy compact fallback",
+                outgoingBodyText: """
+                Different body text with more words than the legacy fallback.
+
+                On Tue, Jan 2, 2026 at 9:41 AM Alice Example <alice@example.com> wrote:
+                > Quoted content that should stay out of the bubble.
+                """,
+                isOutgoingPlainTextMessage: true
+            )
+        )
+
+        XCTAssertTrue(result.contains("Different body text with more words than the legacy fallback."))
+        XCTAssertFalse(result.contains("Quoted content that should stay out of the bubble."))
+        XCTAssertNotEqual(result, "Legacy compact fallback")
+    }
+
     func testResolvedVisibleText_outgoingSnippetBodyKeepsLoadedContent() throws {
         let loadedText = """
         Can we please see alts for:
@@ -409,6 +429,24 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
         )
 
         XCTAssertEqual(result, "Canonical chat preview\n\nSecond line")
+    }
+
+    func testResolvedVisibleText_outgoingStoredChatPreviewAvoidsRenderTimeBodyFallback() throws {
+        let result = try XCTUnwrap(
+            MessageContentView.resolvedVisibleText(
+                fullTextContent: nil,
+                fallbackPreviewText: "Legacy compact fallback",
+                chatPreviewText: "Canonical chat preview",
+                outgoingBodyText: """
+                Canonical chat preview
+
+                Additional body text that the async loader can recover.
+                """,
+                isOutgoingPlainTextMessage: true
+            )
+        )
+
+        XCTAssertEqual(result, "Canonical chat preview")
     }
 
     func testResolvedVisibleText_removesSharedDocumentLinksFromChatPreviewText() throws {

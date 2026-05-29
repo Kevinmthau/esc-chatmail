@@ -187,13 +187,16 @@ enum MessageBubbleTextPrecedence {
         return outgoingBodyText
     }
 
+    static func isEquivalent(_ lhs: String?, to rhs: String?) -> Bool {
+        comparableText(lhs)?.normalizedText == comparableText(rhs)?.normalizedText
+    }
+
     private static func isRicher(_ candidate: ComparableText, than comparison: ComparableText) -> Bool {
-        candidate.tokenCount > comparison.tokenCount ||
-            (
-                candidate.tokenCount == comparison.tokenCount &&
-                candidate.characterCount > comparison.characterCount &&
-                candidate.normalizedText.hasPrefix(comparison.normalizedText)
-            )
+        guard candidate.normalizedText.hasPrefix(comparison.normalizedText) else {
+            return false
+        }
+        return candidate.tokenCount > comparison.tokenCount ||
+            candidate.characterCount > comparison.characterCount
     }
 
     private static func comparableText(_ text: String?) -> ComparableText? {
@@ -656,16 +659,17 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             from: request,
             loadedPlainText: loadedContent.plainText
         )
+        let storedChatPreviewText = nonEmptyText(request.chatPreviewText)
 
         let fullTextContent: String?
         if let forwardedDisplayContent {
             fullTextContent = forwardedDisplayContent.leadInText
         } else if request.isFromMe {
-            fullTextContent = outgoingPlainTextContent ?? loadedContent.plainText ?? request.chatPreviewText
+            fullTextContent = outgoingPlainTextContent ?? storedChatPreviewText ?? loadedContent.plainText
         } else if loadedContent.prefersLoadedTextOverStoredPreview {
-            fullTextContent = loadedContent.plainText ?? request.chatPreviewText
+            fullTextContent = loadedContent.plainText ?? storedChatPreviewText
         } else {
-            fullTextContent = request.chatPreviewText ?? loadedContent.plainText
+            fullTextContent = storedChatPreviewText ?? loadedContent.plainText
         }
         let sharedDocumentLinkBodyText = forwardedDisplayContent == nil ? request.bodyText : nil
         let sharedDocumentLinkSnippet = forwardedDisplayContent == nil ? request.snippet : nil
@@ -717,12 +721,12 @@ actor MessageBubbleLoader: MessageBubbleLoading {
                 classifyRichContent: false
             )
         )
+        let comparisonTexts: [String?] = MessageBubbleTextPrecedence.isEquivalent(result.mainText, to: loadedPlainText)
+            ? [request.chatPreviewText]
+            : [loadedPlainText, request.chatPreviewText]
         return MessageBubbleTextPrecedence.preferredOutgoingBodyFallback(
             result.mainText,
-            comparedTo: [
-                loadedPlainText,
-                request.chatPreviewText
-            ]
+            comparedTo: comparisonTexts
         )
     }
 
@@ -747,6 +751,14 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         )
         htmlAnalysisCache.setValue(analysis, forKey: cacheKey)
         return analysis
+    }
+
+    private func nonEmptyText(_ text: String?) -> String? {
+        guard let text,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return text
     }
 
     private func canonicalHTMLForAnalysisIfNeeded(for request: MessageBubbleContentRequest) async -> String? {

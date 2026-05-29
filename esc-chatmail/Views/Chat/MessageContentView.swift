@@ -254,17 +254,25 @@ struct MessageContentView: View {
         isOutgoingPlainTextMessage: Bool,
         sharedDocumentLinks: [SharedDocumentLink] = []
     ) -> String? {
-        let outgoingBodyFallback = isOutgoingPlainTextMessage
+        let storedChatPreviewText = nonEmptyText(chatPreviewText)
+        let outgoingBodyFallback = isOutgoingPlainTextMessage && storedChatPreviewText == nil
             ? MessageBubbleTextPrecedence.preferredOutgoingBodyFallback(
                 processedText(outgoingBodyText),
                 comparedTo: [
-                    fullTextContent,
-                    chatPreviewText
+                    fullTextContent
                 ]
             )
             : nil
-        let sourceText = outgoingBodyFallback ?? fullTextContent ?? chatPreviewText ?? fallbackPreviewText
+        let sourceText = outgoingBodyFallback ?? fullTextContent ?? storedChatPreviewText ?? fallbackPreviewText
         return SharedDocumentLinkExtractor.removingLinks(from: sourceText, matching: sharedDocumentLinks)
+    }
+
+    private static func nonEmptyText(_ text: String?) -> String? {
+        guard let text,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return text
     }
 
     /// Processes text while preserving paragraph structure and decoding HTML entities
