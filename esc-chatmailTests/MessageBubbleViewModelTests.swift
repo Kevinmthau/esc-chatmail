@@ -346,56 +346,7 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
         XCTAssertEqual(result, "Tom & Jerry")
     }
 
-    func testResolvedVisibleText_outgoingReplyUsesFullBodyBeforeSnippet() throws {
-        let replyBody = """
-        Can we please see alts for:
-
-        Primary bedroom drapery
-        Kitchen backsplash
-
-        Thank you!
-
-        On Tue, Jan 2, 2026 at 9:41 AM Alice Example <alice@example.com> wrote:
-        > Original request that should stay out of the bubble.
-        """
-
-        let result = try XCTUnwrap(
-            MessageContentView.resolvedVisibleText(
-                fullTextContent: nil,
-                fallbackPreviewText: "Can we please see alts for:",
-                outgoingBodyText: replyBody,
-                isOutgoingPlainTextMessage: true
-            )
-        )
-
-        XCTAssertTrue(result.contains("Can we please see alts for:\n\nPrimary bedroom drapery"))
-        XCTAssertTrue(result.contains("Kitchen backsplash"))
-        XCTAssertTrue(result.contains("Thank you!"))
-        XCTAssertFalse(result.contains("Original request that should stay out of the bubble."))
-        XCTAssertNotEqual(result, "Can we please see alts for:")
-    }
-
-    func testResolvedVisibleText_outgoingBodyDoesNotCompareAgainstLegacyFallback() throws {
-        let result = try XCTUnwrap(
-            MessageContentView.resolvedVisibleText(
-                fullTextContent: nil,
-                fallbackPreviewText: "Legacy compact fallback",
-                outgoingBodyText: """
-                Different body text with more words than the legacy fallback.
-
-                On Tue, Jan 2, 2026 at 9:41 AM Alice Example <alice@example.com> wrote:
-                > Quoted content that should stay out of the bubble.
-                """,
-                isOutgoingPlainTextMessage: true
-            )
-        )
-
-        XCTAssertTrue(result.contains("Different body text with more words than the legacy fallback."))
-        XCTAssertFalse(result.contains("Quoted content that should stay out of the bubble."))
-        XCTAssertNotEqual(result, "Legacy compact fallback")
-    }
-
-    func testResolvedVisibleText_outgoingSnippetBodyKeepsLoadedContent() throws {
+    func testResolvedVisibleText_prefersFullTextContentBeforeChatPreviewAndFallback() throws {
         let loadedText = """
         Can we please see alts for:
 
@@ -409,8 +360,7 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
             MessageContentView.resolvedVisibleText(
                 fullTextContent: loadedText,
                 fallbackPreviewText: "Can we please see alts for:",
-                outgoingBodyText: "Can we please see alts for:",
-                isOutgoingPlainTextMessage: true
+                chatPreviewText: "Canonical chat preview"
             )
         )
 
@@ -422,31 +372,23 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
             MessageContentView.resolvedVisibleText(
                 fullTextContent: nil,
                 fallbackPreviewText: "Legacy compact fallback",
-                chatPreviewText: "Canonical chat preview\n\nSecond line",
-                outgoingBodyText: nil,
-                isOutgoingPlainTextMessage: false
+                chatPreviewText: "Canonical chat preview\n\nSecond line"
             )
         )
 
         XCTAssertEqual(result, "Canonical chat preview\n\nSecond line")
     }
 
-    func testResolvedVisibleText_outgoingStoredChatPreviewAvoidsRenderTimeBodyFallback() throws {
+    func testResolvedVisibleText_ignoresBlankChatPreviewBeforeLegacyFallback() throws {
         let result = try XCTUnwrap(
             MessageContentView.resolvedVisibleText(
                 fullTextContent: nil,
                 fallbackPreviewText: "Legacy compact fallback",
-                chatPreviewText: "Canonical chat preview",
-                outgoingBodyText: """
-                Canonical chat preview
-
-                Additional body text that the async loader can recover.
-                """,
-                isOutgoingPlainTextMessage: true
+                chatPreviewText: " \n\t "
             )
         )
 
-        XCTAssertEqual(result, "Canonical chat preview")
+        XCTAssertEqual(result, "Legacy compact fallback")
     }
 
     func testResolvedVisibleText_removesSharedDocumentLinksFromChatPreviewText() throws {
@@ -462,29 +404,11 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
                 fullTextContent: nil,
                 fallbackPreviewText: nil,
                 chatPreviewText: "Here is the doc: https://docs.google.com/document/d/abc123/edit",
-                outgoingBodyText: nil,
-                isOutgoingPlainTextMessage: false,
                 sharedDocumentLinks: [link]
             )
         )
 
         XCTAssertEqual(result, "Here is the doc:")
-    }
-
-    func testResolvedVisibleText_outgoingLongSingleTokenBodyBeatsTruncatedPrefix() throws {
-        let fullURL = "https://example.com/shared/document/abcdefghijklmnopqrstuvwxyz"
-        let truncatedURL = "https://example.com/shared/document/abc"
-
-        let result = try XCTUnwrap(
-            MessageContentView.resolvedVisibleText(
-                fullTextContent: truncatedURL,
-                fallbackPreviewText: truncatedURL,
-                outgoingBodyText: fullURL,
-                isOutgoingPlainTextMessage: true
-            )
-        )
-
-        XCTAssertEqual(result, fullURL)
     }
 }
 

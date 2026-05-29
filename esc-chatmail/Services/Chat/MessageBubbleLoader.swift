@@ -169,7 +169,7 @@ protocol MessageBubbleLoading: Sendable {
     func loadContent(from request: MessageBubbleContentRequest) async -> MessageBubbleContentResult
 }
 
-enum MessageBubbleTextPrecedence {
+private enum MessageBubbleTextPrecedence {
     static func preferredOutgoingBodyFallback(
         _ outgoingBodyText: String?,
         comparedTo comparisonTexts: [String?]
@@ -185,10 +185,6 @@ enum MessageBubbleTextPrecedence {
         }
 
         return outgoingBodyText
-    }
-
-    static func isEquivalent(_ lhs: String?, to rhs: String?) -> Bool {
-        comparableText(lhs)?.normalizedText == comparableText(rhs)?.normalizedText
     }
 
     private static func isRicher(_ candidate: ComparableText, than comparison: ComparableText) -> Bool {
@@ -655,21 +651,16 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             from: request,
             resolvedHasHTMLSource: htmlAnalysis.hasHTMLSource
         )
-        let outgoingPlainTextContent = outgoingPlainTextContent(
-            from: request,
-            loadedPlainText: loadedContent.plainText
-        )
         let storedChatPreviewText = nonEmptyText(request.chatPreviewText)
+        let outgoingBodyFallback = storedChatPreviewText == nil
+            ? outgoingPlainTextContent(from: request, loadedPlainText: loadedContent.plainText)
+            : nil
 
         let fullTextContent: String?
         if let forwardedDisplayContent {
             fullTextContent = forwardedDisplayContent.leadInText
-        } else if request.isFromMe {
-            fullTextContent = outgoingPlainTextContent ?? storedChatPreviewText ?? loadedContent.plainText
-        } else if loadedContent.prefersLoadedTextOverStoredPreview {
-            fullTextContent = loadedContent.plainText ?? storedChatPreviewText
         } else {
-            fullTextContent = storedChatPreviewText ?? loadedContent.plainText
+            fullTextContent = outgoingBodyFallback ?? storedChatPreviewText ?? loadedContent.plainText
         }
         let sharedDocumentLinkBodyText = forwardedDisplayContent == nil ? request.bodyText : nil
         let sharedDocumentLinkSnippet = forwardedDisplayContent == nil ? request.snippet : nil
@@ -721,12 +712,11 @@ actor MessageBubbleLoader: MessageBubbleLoading {
                 classifyRichContent: false
             )
         )
-        let comparisonTexts: [String?] = MessageBubbleTextPrecedence.isEquivalent(result.mainText, to: loadedPlainText)
-            ? [request.chatPreviewText]
-            : [loadedPlainText, request.chatPreviewText]
         return MessageBubbleTextPrecedence.preferredOutgoingBodyFallback(
             result.mainText,
-            comparedTo: comparisonTexts
+            comparedTo: [
+                loadedPlainText
+            ]
         )
     }
 
@@ -842,7 +832,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
     private func loadProcessedContent(
         from request: MessageBubbleContentRequest,
         resolvedHasHTMLSource: Bool
-    ) async -> (plainText: String?, hasRichContent: Bool, prefersLoadedTextOverStoredPreview: Bool) {
+    ) async -> (plainText: String?, hasRichContent: Bool) {
         let sourceSignature = ProcessedTextCache.contentSourceSignature(
             messageId: request.messageID,
             bodyStorageURI: request.bodyStorageURI,
@@ -893,16 +883,9 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             )
 
             if !requiresURIRecompute && !requiresBodyFallbackRecompute && !shouldBypassCachedNewsletterFallback {
-                let prefersCachedLoadedText =
-                    cached.prefersLoadedTextOverStoredPreview ||
-                    shouldPreferLoadedTextOverStoredPreview(
-                        sourceSignature: sourceSignature,
-                        plainText: cached.plainText
-                    )
                 return (
                     cached.plainText,
-                    cached.hasRichContent,
-                    prefersCachedLoadedText
+                    cached.hasRichContent
                 )
             }
         }
@@ -927,8 +910,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             if !requiresURIRecompute && !shouldBypassCachedNewsletterFallback {
                 return (
                     cached.plainText,
-                    cached.hasRichContent,
-                    cached.prefersLoadedTextOverStoredPreview
+                    cached.hasRichContent
                 )
             }
         }
@@ -982,25 +964,18 @@ actor MessageBubbleLoader: MessageBubbleLoading {
                 previewMode: ProcessedTextCache.chatBubblePreviewMode,
                 plainText: recoveredResult.mainText,
                 hasRichContent: recoveredHasRichContent,
-                quotedParts: recoveredResult.quotedParts,
-                prefersLoadedTextOverStoredPreview: recoveredResult.mainText != nil
+                quotedParts: recoveredResult.quotedParts
             )
 
             if recoveredResult.mainText != nil || recoveredHasRichContent {
-                result = (recoveredResult.mainText, recoveredHasRichContent, recoveredResult.mainText != nil)
+                result = (
+                    plainText: recoveredResult.mainText,
+                    hasRichContent: recoveredHasRichContent
+                )
             }
         }
 
         return result
-    }
-
-    private func shouldPreferLoadedTextOverStoredPreview(
-        sourceSignature: String,
-        plainText: String?
-    ) -> Bool {
-        sourceSignature.hasPrefix("html:") &&
-        plainText != nil &&
-        !looksLikeNewsletterFallbackText(plainText)
     }
 
     private func looksLikeNewsletterFallbackText(_ text: String?) -> Bool {
@@ -1036,17 +1011,13 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         from request: MessageBubbleContentRequest,
         sourceSignature: String,
         fallbackSourceSignature: String
-    ) async -> (plainText: String?, hasRichContent: Bool, prefersLoadedTextOverStoredPreview: Bool) {
+    ) async -> (plainText: String?, hasRichContent: Bool) {
         var processedResult = ProcessedTextCache.processMessage(
             messageId: request.messageID,
             bodyStorageURI: request.bodyStorageURI,
             handler: htmlContentHandler
         )
         var cacheSourceSignature = sourceSignature
-        var prefersLoadedTextOverStoredPreview = shouldPreferLoadedTextOverStoredPreview(
-            sourceSignature: sourceSignature,
-            plainText: processedResult.plainText
-        )
 
         if processedResult.plainText == nil, let text = request.bodyText {
             let fallbackContent = RawEmailSourceSanitizer.extractHTMLText(from: text) ?? text
@@ -1075,7 +1046,6 @@ actor MessageBubbleLoader: MessageBubbleLoading {
                 fallbackResult.quotedParts
             )
             cacheSourceSignature = fallbackSourceSignature
-            prefersLoadedTextOverStoredPreview = false
         }
 
         await processedTextCache.set(
@@ -1084,14 +1054,12 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             previewMode: ProcessedTextCache.chatBubblePreviewMode,
             plainText: processedResult.plainText,
             hasRichContent: processedResult.hasRichContent,
-            quotedParts: processedResult.quotedParts,
-            prefersLoadedTextOverStoredPreview: prefersLoadedTextOverStoredPreview
+            quotedParts: processedResult.quotedParts
         )
 
         return (
-            processedResult.plainText,
-            processedResult.hasRichContent,
-            prefersLoadedTextOverStoredPreview
+            plainText: processedResult.plainText,
+            hasRichContent: processedResult.hasRichContent
         )
     }
 

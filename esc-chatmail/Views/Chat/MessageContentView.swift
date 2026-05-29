@@ -211,8 +211,6 @@ struct MessageContentView: View {
             fullTextContent: fullTextContent,
             fallbackPreviewText: fallbackPreviewText,
             chatPreviewText: message.chatPreviewText,
-            outgoingBodyText: message.bodyText,
-            isOutgoingPlainTextMessage: message.isFromMe && !message.isForwardedEmail,
             sharedDocumentLinks: sharedDocumentLinks
         )
     }
@@ -250,20 +248,10 @@ struct MessageContentView: View {
         fullTextContent: String?,
         fallbackPreviewText: String?,
         chatPreviewText: String? = nil,
-        outgoingBodyText: String?,
-        isOutgoingPlainTextMessage: Bool,
         sharedDocumentLinks: [SharedDocumentLink] = []
     ) -> String? {
         let storedChatPreviewText = nonEmptyText(chatPreviewText)
-        let outgoingBodyFallback = isOutgoingPlainTextMessage && storedChatPreviewText == nil
-            ? MessageBubbleTextPrecedence.preferredOutgoingBodyFallback(
-                processedText(outgoingBodyText),
-                comparedTo: [
-                    fullTextContent
-                ]
-            )
-            : nil
-        let sourceText = outgoingBodyFallback ?? fullTextContent ?? storedChatPreviewText ?? fallbackPreviewText
+        let sourceText = fullTextContent ?? storedChatPreviewText ?? fallbackPreviewText
         return SharedDocumentLinkExtractor.removingLinks(from: sourceText, matching: sharedDocumentLinks)
     }
 

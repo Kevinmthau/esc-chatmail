@@ -200,7 +200,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertEqual(second.fullTextContent, "Recovered HTML body")
     }
 
-    func testLoadContent_incomingMessagePrefersRecoveredHTMLTextOverStaleStoredChatPreview() async {
+    func testLoadContent_incomingMessageKeepsStoredChatPreviewWhenRecoveryFindsHTML() async {
         let messageId = "bubble-recovered-preview-primary-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
         HTMLContentHandler.shared.deleteHTML(for: messageId)
@@ -239,8 +239,8 @@ final class MessageBubbleLoaderTests: XCTestCase {
         let first = await loader.loadContent(from: request)
         let second = await loader.loadContent(from: request)
 
-        XCTAssertEqual(first.fullTextContent, "Recovered HTML body")
-        XCTAssertEqual(second.fullTextContent, "Recovered HTML body")
+        XCTAssertEqual(first.fullTextContent, "Stale stored preview")
+        XCTAssertEqual(second.fullTextContent, "Stale stored preview")
     }
 
     func testLoadContent_rawEmailSourceWithEmbeddedHTML_marksRichContent() async {
@@ -573,7 +573,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)
     }
 
-    func testLoadContent_outgoingReplyPrefersFullBodyOverSnippetAndStoredHTML() async throws {
+    func testLoadContent_outgoingReplyPrefersFullBodyOverStoredHTMLWhenChatPreviewMissing() async throws {
         let messageId = "bubble-outgoing-reply-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
 
@@ -681,7 +681,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertNotEqual(visibleText, "Can we please see alts for:")
     }
 
-    func testLoadContent_outgoingReplyUsesBodyWhenRicherThanChatPreviewText() async throws {
+    func testLoadContent_outgoingStoredChatPreviewWinsOverRicherBodyText() async throws {
         let messageId = "bubble-outgoing-chat-preview-comparison-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
 
@@ -716,11 +716,7 @@ final class MessageBubbleLoaderTests: XCTestCase {
             )
         )
 
-        let visibleText = try XCTUnwrap(result.fullTextContent)
-        XCTAssertTrue(visibleText.contains("Can we please see alts for:"))
-        XCTAssertTrue(visibleText.contains("Primary bedroom drapery"))
-        XCTAssertTrue(visibleText.contains("Kitchen backsplash"))
-        XCTAssertNotEqual(visibleText, "Can we please see alts for:")
+        XCTAssertEqual(result.fullTextContent, "Can we please see alts for:")
     }
 
     func testLoadContent_outgoingStoredChatPreviewWinsWhenBodyIsNotPrefixExpansion() async throws {
@@ -759,12 +755,54 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertEqual(result.fullTextContent, "Canonical chat preview")
     }
 
-    func testLoadContent_outgoingLongSingleTokenBodyBeatsTruncatedPrefix() async throws {
+    func testLoadContent_outgoingStoredChatPreviewWinsOverTruncatedLoadedPrefix() async throws {
         let messageId = "bubble-outgoing-long-token-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
 
         let htmlURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("bubble-outgoing-long-token-\(UUID().uuidString).html")
+        defer {
+            try? FileManager.default.removeItem(at: htmlURL)
+        }
+
+        let fullURL = "https://example.com/shared/document/abcdefghijklmnopqrstuvwxyz"
+        let truncatedURL = "https://example.com/shared/document/abc"
+        try "<html><body><p>\(truncatedURL)</p></body></html>"
+            .write(to: htmlURL, atomically: true, encoding: .utf8)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: "Runtime body should not replace the canonical preview.",
+                chatPreviewText: fullURL,
+                bodyStorageURI: htmlURL.absoluteString,
+                cleanedSnippet: truncatedURL,
+                snippet: truncatedURL,
+                subject: "Shared link",
+                senderName: "Me",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: true,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "me@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, fullURL)
+    }
+
+    func testLoadContent_outgoingLongSingleTokenBodyBeatsTruncatedLoadedPrefixWhenChatPreviewMissing() async throws {
+        let messageId = "bubble-outgoing-long-token-no-preview-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let htmlURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bubble-outgoing-long-token-no-preview-\(UUID().uuidString).html")
         defer {
             try? FileManager.default.removeItem(at: htmlURL)
         }
