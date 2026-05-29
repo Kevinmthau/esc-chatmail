@@ -37,9 +37,8 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
     ///
     /// This call can take arbitrarily long if the Gmail API is slow: the
     /// `await task.value` below ignores cooperative cancellation. Callers that
-    /// surface this to UI (notably the "Original Email" modal via
-    /// `OriginalEmailSourceLoader.loadOriginalEmailSource`) MUST wrap this in
-    /// a `withSoftTimeout` so the user isn't pinned on a "Loading…" spinner.
+    /// surface this to UI should either wrap this in a `withSoftTimeout` or show
+    /// a non-terminal recovery state while the underlying work completes.
     func recoverHTMLContent(messageId: String) async -> String? {
         guard !isCachedNoHTMLMiss(messageId) else {
             return nil

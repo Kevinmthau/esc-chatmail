@@ -146,11 +146,6 @@ actor HTMLRemoteImageAttachmentFallback {
     private static let mobileUserAgent =
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
 
-    /// Per-URL budget the full original-email reader uses when resolving remote image fallbacks.
-    /// Combined with parallel fan-out, this bounds the whole pass to ~this duration regardless of
-    /// how many candidate URLs the sender included.
-    static let originalViewPerURLTimeoutNanoseconds: UInt64 = 2_500_000_000
-
     private let requestExecutor: RequestExecutor
     private var rewrittenDataURLCache: CostBoundedStringCache
     private var unchangedURLCache = BoundedSet<String>(maxSize: 500, prunePercentage: 0.2)

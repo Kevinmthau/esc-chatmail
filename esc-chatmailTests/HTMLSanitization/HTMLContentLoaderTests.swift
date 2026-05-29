@@ -317,18 +317,16 @@ final class HTMLContentLoaderTests: XCTestCase {
             requestExecutor: { request in
                 await recorder.record(request)
 
-                let response = try XCTUnwrap(
-                    HTTPURLResponse(
-                        url: try XCTUnwrap(request.url),
-                        statusCode: 200,
-                        httpVersion: nil,
-                        headerFields: [
-                            "Content-Type": "image/webp",
-                            "Content-Disposition": "inline; filename=\"hero.webp\"",
-                            "Content-Length": "\(imageData.count)"
-                        ]
-                    )
-                )
+                let response = HTTPURLResponse(
+                    url: request.url ?? URL(string: "https://cdn.example.com/banner.jpg")!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: [
+                        "Content-Type": "image/webp",
+                        "Content-Disposition": "inline; filename=\"hero.webp\"",
+                        "Content-Length": "\(imageData.count)"
+                    ]
+                )!
 
                 if request.httpMethod == "HEAD" {
                     return (Data(), response)
@@ -337,7 +335,7 @@ final class HTMLContentLoaderTests: XCTestCase {
                 return (imageData, response)
             },
             rewrittenDataURLCacheMaxEntries: 1,
-            rewrittenDataURLCacheMaxBytes: 1
+            rewrittenDataURLCacheMaxBytes: 16 * 1024
         )
 
         loader = HTMLContentLoader(
@@ -345,6 +343,19 @@ final class HTMLContentLoaderTests: XCTestCase {
             sanitizer: .shared,
             remoteImageAttachmentFallback: remoteImageFallback
         )
+
+        let warmNotification = expectation(description: "Original remote image fallback warm notification")
+        let observer = NotificationCenter.default.addObserver(
+            forName: HTMLContentLoader.remoteImageAttachmentFallbackDidWarmNotification,
+            object: nil,
+            queue: .main
+        ) { notification in
+            guard notification.userInfo?[HTMLContentLoader.remoteImageAttachmentFallbackMessageIdUserInfoKey] as? String == messageId else {
+                return
+            }
+            warmNotification.fulfill()
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
 
         let first = await loader.loadContent(
             messageId: messageId,
@@ -355,6 +366,13 @@ final class HTMLContentLoaderTests: XCTestCase {
             displayPurpose: .original
         )
 
+        XCTAssertEqual(first.source, .storageURI)
+        XCTAssertTrue((first.html ?? "").contains("STORAGE_FALLBACK_TOKEN"))
+        XCTAssertTrue((first.html ?? "").contains("format=webp"))
+        XCTAssertFalse((first.html ?? "").contains("src=\"data:image/"))
+
+        await fulfillment(of: [warmNotification], timeout: 1.0)
+
         let second = await loader.loadContent(
             messageId: messageId,
             bodyStorageURI: storageURL.absoluteString,
@@ -364,7 +382,6 @@ final class HTMLContentLoaderTests: XCTestCase {
             displayPurpose: .original
         )
 
-        XCTAssertEqual(first.source, .storageURI)
         XCTAssertEqual(second.source, .storageURI)
         XCTAssertTrue((second.html ?? "").contains("STORAGE_FALLBACK_TOKEN"))
         XCTAssertTrue((second.html ?? "").contains("src=\"data:image/"))
@@ -1480,14 +1497,12 @@ final class HTMLContentLoaderTests: XCTestCase {
                 "Content-Length": "\(imageData.count)"
             ]
 
-            let response = try XCTUnwrap(
-                HTTPURLResponse(
-                    url: try XCTUnwrap(request.url),
-                    statusCode: 200,
-                    httpVersion: nil,
-                    headerFields: headers
-                )
-            )
+            let response = HTTPURLResponse(
+                url: request.url ?? URL(string: "https://cdn.example.com/banner.png")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: headers
+            )!
 
             if request.httpMethod == "HEAD" {
                 return (Data(), response)
@@ -1593,14 +1608,12 @@ final class HTMLContentLoaderTests: XCTestCase {
                     "Content-Length": "\(imageData.count)"
                 ]
 
-                let response = try XCTUnwrap(
-                    HTTPURLResponse(
-                        url: try XCTUnwrap(request.url),
-                        statusCode: 200,
-                        httpVersion: nil,
-                        headerFields: headers
-                    )
-                )
+                let response = HTTPURLResponse(
+                    url: request.url ?? URL(string: "https://d3t000000dywoeaq.file.force.com/file-asset-public/Brambles_Banner")!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: headers
+                )!
 
                 if request.httpMethod == "HEAD" {
                     return (Data(), response)
@@ -1685,7 +1698,7 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertEqual(snapshot.referers, ["https://brambles.golf/", "https://brambles.golf/"])
     }
 
-    func testLoadContent_originalDisplayPurposeRewritesRiskyModernImagesOnFirstRender() async throws {
+    func testLoadContent_originalDisplayPurposeWarmsRiskyModernImagesAfterFirstRender() async throws {
         let messageId = "html-loader-original-webp-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }
 
@@ -1694,18 +1707,16 @@ final class HTMLContentLoaderTests: XCTestCase {
         let remoteImageFallback = HTMLRemoteImageAttachmentFallback { request in
             await recorder.record(request)
 
-            let response = try XCTUnwrap(
-                HTTPURLResponse(
-                    url: try XCTUnwrap(request.url),
-                    statusCode: 200,
-                    httpVersion: nil,
-                    headerFields: [
-                        "Content-Type": "image/webp",
-                        "Content-Disposition": "inline; filename=\"hero.webp\"",
-                        "Content-Length": "\(imageData.count)"
-                    ]
-                )
-            )
+            let response = HTTPURLResponse(
+                url: request.url ?? URL(string: "https://cdn.example.com/banner.jpg")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [
+                    "Content-Type": "image/webp",
+                    "Content-Disposition": "inline; filename=\"hero.webp\"",
+                    "Content-Length": "\(imageData.count)"
+                ]
+            )!
 
             if request.httpMethod == "HEAD" {
                 return (Data(), response)
@@ -1719,6 +1730,19 @@ final class HTMLContentLoaderTests: XCTestCase {
             sanitizer: .shared,
             remoteImageAttachmentFallback: remoteImageFallback
         )
+
+        let warmNotification = expectation(description: "Original remote image fallback warm notification")
+        let observer = NotificationCenter.default.addObserver(
+            forName: HTMLContentLoader.remoteImageAttachmentFallbackDidWarmNotification,
+            object: nil,
+            queue: .main
+        ) { notification in
+            guard notification.userInfo?[HTMLContentLoader.remoteImageAttachmentFallbackMessageIdUserInfoKey] as? String == messageId else {
+                return
+            }
+            warmNotification.fulfill()
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
 
         let html = """
         <!DOCTYPE html>
@@ -1741,13 +1765,281 @@ final class HTMLContentLoaderTests: XCTestCase {
         )
 
         XCTAssertNotNil(result.html)
-        XCTAssertTrue((result.html ?? "").contains("Visible body text"))
-        XCTAssertTrue((result.html ?? "").contains("src=\"data:image/"))
-        XCTAssertFalse((result.html ?? "").contains("format=webp"))
+        XCTAssertTrue((result.html ?? "").contains("Visible body text"), String((result.html ?? "").suffix(1500)))
+        XCTAssertTrue((result.html ?? "").contains("format=webp"), String((result.html ?? "").suffix(1500)))
+        XCTAssertFalse((result.html ?? "").contains("src=\"data:image/"))
+
+        await fulfillment(of: [warmNotification], timeout: 1.0)
+
+        let warmedResult = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            senderEmail: "sender@example.com",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        XCTAssertTrue((warmedResult.html ?? "").contains("src=\"data:image/"))
+        XCTAssertFalse((warmedResult.html ?? "").contains("format=webp"))
 
         let snapshot = await recorder.snapshot()
         XCTAssertEqual(snapshot.methods, ["HEAD", "GET"])
         XCTAssertEqual(snapshot.referers, ["https://example.com/", "https://example.com/"])
+    }
+
+    func testLoadContent_originalDisplayPurposeNotifiesMessageWaitingOnExistingInFlightWarmup() async throws {
+        let firstMessageId = "html-loader-original-shared-webp-a-\(UUID().uuidString)"
+        let secondMessageId = "html-loader-original-shared-webp-b-\(UUID().uuidString)"
+        defer {
+            contentHandler.deleteHTML(for: firstMessageId)
+            contentHandler.deleteHTML(for: secondMessageId)
+        }
+
+        let gate = SlowRequestGate()
+        let headStarted = expectation(description: "Shared remote image HEAD started")
+        headStarted.assertForOverFulfill = false
+        let recorder = RequestRecorder()
+        let imageData = onePixelPNG
+        let remoteImageFallback = HTMLRemoteImageAttachmentFallback { request in
+            await recorder.record(request)
+
+            let response = HTTPURLResponse(
+                url: request.url ?? URL(string: "https://cdn.example.com/shared.jpg")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [
+                    "Content-Type": "image/webp",
+                    "Content-Disposition": "inline; filename=\"shared.webp\"",
+                    "Content-Length": "\(imageData.count)"
+                ]
+            )!
+
+            if request.httpMethod == "HEAD" {
+                headStarted.fulfill()
+                await gate.waitIfNeeded()
+                return (Data(), response)
+            }
+
+            return (imageData, response)
+        }
+
+        loader = HTMLContentLoader(
+            contentHandler: contentHandler,
+            sanitizer: .shared,
+            remoteImageAttachmentFallback: remoteImageFallback
+        )
+
+        let secondWarmNotification = expectation(description: "Second message receives warm notification")
+        let observer = NotificationCenter.default.addObserver(
+            forName: HTMLContentLoader.remoteImageAttachmentFallbackDidWarmNotification,
+            object: nil,
+            queue: .main
+        ) { notification in
+            guard notification.userInfo?[HTMLContentLoader.remoteImageAttachmentFallbackMessageIdUserInfoKey] as? String == secondMessageId else {
+                return
+            }
+            secondWarmNotification.fulfill()
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <img src="https://cdn.example.com/shared.jpg?format=webp&width=600" alt="Shared">
+          <p>Visible body text</p>
+        </body>
+        </html>
+        """
+        _ = contentHandler.saveHTML(html, for: firstMessageId)
+        _ = contentHandler.saveHTML(html, for: secondMessageId)
+
+        let first = await loader.loadContent(
+            messageId: firstMessageId,
+            bodyStorageURI: nil,
+            senderEmail: "sender@example.com",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+        XCTAssertTrue((first.html ?? "").contains("format=webp"))
+        XCTAssertFalse((first.html ?? "").contains("src=\"data:image/"))
+
+        await fulfillment(of: [headStarted], timeout: 1.0)
+
+        let second = await loader.loadContent(
+            messageId: secondMessageId,
+            bodyStorageURI: nil,
+            senderEmail: "sender@example.com",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+        XCTAssertTrue((second.html ?? "").contains("format=webp"))
+        XCTAssertFalse((second.html ?? "").contains("src=\"data:image/"))
+
+        await gate.open()
+        await fulfillment(of: [secondWarmNotification], timeout: 1.0)
+
+        let warmedSecond = await loader.loadContent(
+            messageId: secondMessageId,
+            bodyStorageURI: nil,
+            senderEmail: "sender@example.com",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+        XCTAssertTrue((warmedSecond.html ?? "").contains("src=\"data:image/"))
+
+        let snapshot = await recorder.snapshot()
+        XCTAssertEqual(snapshot.methods, ["HEAD", "GET"])
+    }
+
+    func testLoadContent_originalDisplayPurposeDoesNotNotifyWhenWarmupLeavesPendingFailures() async throws {
+        let messageId = "html-loader-original-partial-webp-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let imageData = onePixelPNG
+        let remoteImageFallback = HTMLRemoteImageAttachmentFallback { request in
+            guard request.url?.absoluteString.contains("flaky") != true else {
+                throw URLError(.timedOut)
+            }
+
+            let response = HTTPURLResponse(
+                url: request.url ?? URL(string: "https://cdn.example.com/good.jpg")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [
+                    "Content-Type": "image/webp",
+                    "Content-Disposition": "inline; filename=\"good.webp\"",
+                    "Content-Length": "\(imageData.count)"
+                ]
+            )!
+
+            if request.httpMethod == "HEAD" {
+                return (Data(), response)
+            }
+
+            return (imageData, response)
+        }
+
+        let seededHTML = #"<img src="https://cdn.example.com/good.jpg?format=webp&width=600" alt="Good">"#
+        let seeded = await remoteImageFallback.inlineAttachmentStyleImages(
+            in: seededHTML,
+            senderEmail: "sender@example.com"
+        )
+        XCTAssertTrue(seeded.contains("src=\"data:image/"))
+
+        loader = HTMLContentLoader(
+            contentHandler: contentHandler,
+            sanitizer: .shared,
+            remoteImageAttachmentFallback: remoteImageFallback
+        )
+
+        let unexpectedWarmNotification = expectation(description: "No warm notification while failures remain pending")
+        unexpectedWarmNotification.isInverted = true
+        let observer = NotificationCenter.default.addObserver(
+            forName: HTMLContentLoader.remoteImageAttachmentFallbackDidWarmNotification,
+            object: nil,
+            queue: .main
+        ) { notification in
+            guard notification.userInfo?[HTMLContentLoader.remoteImageAttachmentFallbackMessageIdUserInfoKey] as? String == messageId else {
+                return
+            }
+            unexpectedWarmNotification.fulfill()
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        _ = contentHandler.saveHTML(
+            """
+            <!DOCTYPE html>
+            <html>
+            <body>
+              <img src="https://cdn.example.com/good.jpg?format=webp&width=600" alt="Good">
+              <img src="https://cdn.example.com/flaky.jpg?format=webp&width=600" alt="Flaky">
+              <p>Visible body text</p>
+            </body>
+            </html>
+            """,
+            for: messageId
+        )
+
+        let loaded = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            senderEmail: "sender@example.com",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+
+        XCTAssertTrue((loaded.html ?? "").contains("src=\"data:image/"))
+        XCTAssertTrue((loaded.html ?? "").contains("flaky.jpg?format=webp"))
+        await fulfillment(of: [unexpectedWarmNotification], timeout: 0.3)
+    }
+
+    func testLoadContent_originalDisplayPurposeDoesNotBlockOnSlowRemoteImageFallback() async throws {
+        let messageId = "html-loader-original-slow-webp-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let recorder = RequestRecorder()
+        let imageData = onePixelPNG
+        let remoteImageFallback = HTMLRemoteImageAttachmentFallback { request in
+            await recorder.record(request)
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+
+            let response = HTTPURLResponse(
+                url: request.url ?? URL(string: "https://cdn.example.com/banner.jpg")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [
+                    "Content-Type": "image/webp",
+                    "Content-Disposition": "inline; filename=\"hero.webp\"",
+                    "Content-Length": "\(imageData.count)"
+                ]
+            )!
+
+            if request.httpMethod == "HEAD" {
+                return (Data(), response)
+            }
+
+            return (imageData, response)
+        }
+
+        loader = HTMLContentLoader(
+            contentHandler: contentHandler,
+            sanitizer: .shared,
+            remoteImageAttachmentFallback: remoteImageFallback
+        )
+
+        _ = contentHandler.saveHTML(
+            """
+            <!DOCTYPE html>
+            <html>
+            <body>
+              <img src="https://cdn.example.com/banner.jpg?format=webp&width=600" alt="Banner">
+              <p>Visible body text</p>
+            </body>
+            </html>
+            """,
+            for: messageId
+        )
+
+        let startedAt = Date()
+        let loaded = await loader.loadContent(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            senderEmail: "sender@example.com",
+            isDarkMode: false,
+            cleanupMode: .none,
+            displayPurpose: .original
+        )
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 0.5)
+        XCTAssertNotNil(loaded.html)
+        XCTAssertTrue((loaded.html ?? "").contains("Visible body text"))
+        XCTAssertTrue((loaded.html ?? "").contains("format=webp"))
+        XCTAssertFalse((loaded.html ?? "").contains("src=\"data:image/"))
     }
 
     private func loadFixture(named name: String) throws -> String {
@@ -1773,6 +2065,27 @@ private actor RequestRecorder {
 
     func snapshot() -> (methods: [String], referers: [String?]) {
         (methods, referers)
+    }
+}
+
+private actor SlowRequestGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func waitIfNeeded() async {
+        if isOpen { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func open() {
+        isOpen = true
+        let pending = waiters
+        waiters.removeAll()
+        for continuation in pending {
+            continuation.resume()
+        }
     }
 }
 

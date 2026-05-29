@@ -60,9 +60,8 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         timeout: TimeInterval = 5.0
     ) async -> OriginalEmailSource? {
         // Soft timeout: if the load can't finish in `timeout` seconds, return nil
-        // so the modal stops showing "Loading..." and falls through to the
-        // "No Content" placeholder. The underlying work keeps running and warms
-        // caches (recoveryTasks, inFlightResolutions) so a re-open succeeds.
+        // while the underlying work keeps running and warms caches
+        // (recoveryTasks, inFlightResolutions) so a later load can succeed.
         //
         // We use withSoftTimeout instead of withTaskGroup because withTaskGroup
         // implicitly awaits every child task, and the loading branch contains
@@ -72,7 +71,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         // up indefinitely. The outer flatten with `??` collapses the two `nil`
         // cases ("timed out" and "loader said no content") into one.
         let result = await withSoftTimeout(seconds: timeout) {
-            await self.loadOriginalEmailSourceWithoutTimeout(
+            await self.loadOriginalEmailSourceToCompletion(
                 messageId: messageId,
                 bodyStorageURI: bodyStorageURI,
                 bodyText: bodyText,
@@ -84,7 +83,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         return result ?? nil
     }
 
-    private func loadOriginalEmailSourceWithoutTimeout(
+    func loadOriginalEmailSourceToCompletion(
         messageId: String,
         bodyStorageURI: String?,
         bodyText: String?,

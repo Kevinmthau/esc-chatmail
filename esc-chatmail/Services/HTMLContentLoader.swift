@@ -925,27 +925,35 @@ final class HTMLContentLoader {
         let shouldCache: Bool
         switch displayPurpose {
         case .original:
-            // Full-message rendering should avoid handing risky WEBP/AVIF URLs to WKWebView on the
-            // first open. Resolve the attachment-style fallback eagerly so the original reader is
-            // closer to Apple Mail behavior instead of showing broken images and decoder errors.
-            // Cap each candidate so a single stalled CDN host can't pin the reader on "Loading…".
-            let originalSafeHTML = await remoteImageAttachmentFallback.inlineAttachmentStyleImages(
+            let cachedRewrite = await remoteImageAttachmentFallback.cachedInlineAttachmentStyleImages(
                 in: sanitizedHTML,
-                senderEmail: senderEmail,
-                perURLTimeoutNanoseconds: HTMLRemoteImageAttachmentFallback.originalViewPerURLTimeoutNanoseconds
+                senderEmail: senderEmail
             )
+            if cachedRewrite.hasPendingUpdates {
+                warmRemoteImageAttachmentFallback(
+                    in: sanitizedHTML,
+                    currentHTML: cachedRewrite.html,
+                    messageId: messageId,
+                    senderEmail: senderEmail
+                )
+            }
             rewrittenHTML = sanitizer.sanitize(
-                originalSafeHTML,
+                cachedRewrite.html,
                 rewriteModernImageFormatHints: rewriteImageHints
             )
-            shouldCache = true
+            shouldCache = !cachedRewrite.hasPendingUpdates
         case .preview:
             let cachedRewrite = await remoteImageAttachmentFallback.previewInlineAttachmentStyleImages(
                 in: sanitizedHTML,
                 senderEmail: senderEmail
             )
-            if cachedRewrite.needsWarmup {
-                warmRemoteImageAttachmentFallback(in: sanitizedHTML, messageId: messageId, senderEmail: senderEmail)
+            if cachedRewrite.hasPendingUpdates {
+                warmRemoteImageAttachmentFallback(
+                    in: sanitizedHTML,
+                    currentHTML: cachedRewrite.html,
+                    messageId: messageId,
+                    senderEmail: senderEmail
+                )
             }
             rewrittenHTML = cachedRewrite.html
             shouldCache = !cachedRewrite.hasPendingUpdates
@@ -967,17 +975,26 @@ final class HTMLContentLoader {
         return .html(WrappedHTMLResult(html: wrapped, shouldCache: shouldCache))
     }
 
-    private func warmRemoteImageAttachmentFallback(in html: String, messageId: String, senderEmail: String?) {
+    private func warmRemoteImageAttachmentFallback(
+        in html: String,
+        currentHTML: String,
+        messageId: String,
+        senderEmail: String?
+    ) {
         let remoteImageAttachmentFallback = self.remoteImageAttachmentFallback
         // Warm rewritten image data promptly so a near-immediate reopen can pick up the cached
         // result instead of waiting behind low-priority detached work.
         Task(priority: .userInitiated) {
-            let rewrittenHTML = await remoteImageAttachmentFallback.inlineAttachmentStyleImages(
+            _ = await remoteImageAttachmentFallback.inlineAttachmentStyleImages(
+                in: html,
+                senderEmail: senderEmail
+            )
+            let warmedRewrite = await remoteImageAttachmentFallback.cachedInlineAttachmentStyleImages(
                 in: html,
                 senderEmail: senderEmail
             )
 
-            if rewrittenHTML != html {
+            if !warmedRewrite.hasPendingUpdates, warmedRewrite.html != currentHTML {
                 Log.debug(
                     "Warmed attachment-style remote image fallback for message \(messageId)",
                     category: .ui

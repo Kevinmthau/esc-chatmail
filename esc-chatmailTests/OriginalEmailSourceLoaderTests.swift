@@ -291,6 +291,64 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
         XCTAssertTrue(contentHandler.loadHTML(for: messageId)?.contains("Recovered HTML") == true)
     }
 
+    func testLoadOriginalEmailSourceToCompletionReturnsRecoveredHTMLAfterSoftTimeout() async throws {
+        let messageId = "original-timeout-recovery-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let delayedRecovery = DelayedRecoveryService(
+            contentHandler: contentHandler,
+            html: newsletterHTML(title: "Delayed recovered original"),
+            delayNanoseconds: 80_000_000
+        )
+        let delayedLoader = OriginalEmailSourceLoader(
+            canonicalContentLoader: CanonicalEmailContentLoader(
+                contentHandler: contentHandler,
+                recoveryService: delayedRecovery
+            ),
+            htmlContentLoader: HTMLContentLoader(contentHandler: contentHandler, sanitizer: .shared)
+        )
+
+        let timedOut = await delayedLoader.loadOriginalEmailSource(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: nil,
+            senderEmail: "newsletter@example.com",
+            subject: "Delayed",
+            isDarkMode: false,
+            timeout: 0.01
+        )
+        XCTAssertNil(timedOut)
+
+        let recoveredSource = await delayedLoader.loadOriginalEmailSourceToCompletion(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: nil,
+            senderEmail: "newsletter@example.com",
+            subject: "Delayed",
+            isDarkMode: false
+        )
+        let recovered = try XCTUnwrap(recoveredSource)
+
+        XCTAssertEqual(recovered.presentation, .html)
+        XCTAssertEqual(recovered.sourceKind, .recoveredHTML)
+        XCTAssertTrue(recovered.html?.contains("Delayed recovered original") == true)
+    }
+
+    func testLoadOriginalEmailSourceToCompletionReturnsNilForTrueUnavailableContent() async {
+        let messageId = "original-unavailable-\(UUID().uuidString)"
+
+        let loadedSource = await loader.loadOriginalEmailSourceToCompletion(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: nil,
+            senderEmail: "person@example.com",
+            subject: "Missing",
+            isDarkMode: false
+        )
+
+        XCTAssertNil(loadedSource)
+    }
+
     private func newsletterHTML(title: String) -> String {
         """
         <!DOCTYPE html>
@@ -352,6 +410,28 @@ private final class MutableRecoveryService: HTMLContentRecovering, @unchecked Se
         lock.lock()
         let html = htmlByMessageID[messageId]
         lock.unlock()
+
+        if let html {
+            _ = contentHandler.saveHTML(html, for: messageId)
+        }
+
+        return html
+    }
+}
+
+private final class DelayedRecoveryService: HTMLContentRecovering, @unchecked Sendable {
+    private let contentHandler: HTMLContentHandler
+    private let html: String?
+    private let delayNanoseconds: UInt64
+
+    init(contentHandler: HTMLContentHandler, html: String?, delayNanoseconds: UInt64) {
+        self.contentHandler = contentHandler
+        self.html = html
+        self.delayNanoseconds = delayNanoseconds
+    }
+
+    func recoverHTMLContent(messageId: String) async -> String? {
+        try? await Task.sleep(nanoseconds: delayNanoseconds)
 
         if let html {
             _ = contentHandler.saveHTML(html, for: messageId)

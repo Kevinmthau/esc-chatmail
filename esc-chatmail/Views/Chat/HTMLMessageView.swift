@@ -87,44 +87,40 @@ private enum OriginalEmailLoadedContent {
     case plainText(String)
 }
 
+private enum OriginalEmailLoadState {
+    case loading
+    case recovering
+    case loaded(OriginalEmailLoadedContent)
+    case unavailable
+
+    var hasLoadedContent: Bool {
+        if case .loaded = self {
+            return true
+        }
+        return false
+    }
+}
+
 struct HTMLMessageView: View {
     let message: Message
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
-    @State private var loadedContent: OriginalEmailLoadedContent?
-    @State private var isLoading = true
+    @State private var loadState: OriginalEmailLoadState = .loading
+    @State private var activeBaseLoadKey: String?
+    @State private var activeLoadTaskKey: String?
+    @State private var reloadGeneration = 0
 
     private let originalEmailSourceLoader = OriginalEmailSourceLoader.shared
-    private var loadKey: String {
+    private var baseLoadKey: String {
         "\(message.id)|\(message.bodyStorageURI ?? "")|\(message.bodyText?.hashValue ?? 0)|\(message.subject?.hashValue ?? 0)|\(message.senderEmail?.hashValue ?? 0)|\(colorScheme == .dark)"
+    }
+    private var loadKey: String {
+        "\(baseLoadKey)|reload:\(reloadGeneration)"
     }
 
     var body: some View {
         NavigationStack {
-            Group {
-                if isLoading {
-                    ProgressView("Loading...")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if let loadedContent {
-                    switch loadedContent {
-                    case .html(let html):
-                        HTMLWebView(
-                            htmlContent: html,
-                            isDarkMode: colorScheme == .dark,
-                            message: message
-                        )
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    case .plainText(let text):
-                        OriginalEmailReadableView(message: message, text: text)
-                    }
-                } else {
-                    ContentUnavailableView(
-                        "No Content",
-                        systemImage: "doc.text",
-                        description: Text("The original email content is not available")
-                    )
-                }
-            }
+            content
             .navigationTitle("Original Email")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -135,25 +131,82 @@ struct HTMLMessageView: View {
                 }
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: HTMLContentLoader.remoteImageAttachmentFallbackDidWarmNotification)) { notification in
+            reloadIfRemoteImageFallbackWarmed(notification)
+        }
         .task(id: loadKey) {
             await loadHTMLContent()
         }
     }
 
+    @ViewBuilder
+    private var content: some View {
+        switch loadState {
+        case .loading:
+            ProgressView("Loading...")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .recovering:
+            ProgressView("Recovering original email...")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .loaded(let loadedContent):
+            switch loadedContent {
+            case .html(let html):
+                HTMLWebView(
+                    htmlContent: html,
+                    isDarkMode: colorScheme == .dark,
+                    message: message
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .plainText(let text):
+                OriginalEmailReadableView(message: message, text: text)
+            }
+        case .unavailable:
+            ContentUnavailableView(
+                "No Content",
+                systemImage: "doc.text",
+                description: Text("The original email content is not available")
+            )
+        }
+    }
+
     private func loadHTMLContent() async {
+        let taskBaseLoadKey = baseLoadKey
+        let taskLoadKey = loadKey
+
         await MainActor.run {
-            isLoading = true
+            let shouldReset = activeBaseLoadKey != taskBaseLoadKey
+            activeBaseLoadKey = taskBaseLoadKey
+            activeLoadTaskKey = taskLoadKey
+
+            if shouldReset || !loadState.hasLoadedContent {
+                loadState = .loading
+            }
         }
 
+        let recoveringTask = Task {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled else {
+                return
+            }
+            await MainActor.run {
+                guard activeLoadTaskKey == taskLoadKey else {
+                    return
+                }
+                if case .loading = loadState {
+                    loadState = .recovering
+                }
+            }
+        }
+        defer { recoveringTask.cancel() }
+
         Log.diagnostic(.htmlPreview, level: .info, "HTMLMessageView loading message \(message.id)", category: .ui)
-        let source = await originalEmailSourceLoader.loadOriginalEmailSource(
+        let source = await originalEmailSourceLoader.loadOriginalEmailSourceToCompletion(
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
             bodyText: message.bodyText,
             senderEmail: message.senderEmail,
             subject: message.subject,
-            isDarkMode: colorScheme == .dark,
-            timeout: 5.0
+            isDarkMode: colorScheme == .dark
         )
 
         guard !Task.isCancelled else {
@@ -180,15 +233,26 @@ struct HTMLMessageView: View {
         }
 
         await MainActor.run {
+            guard activeLoadTaskKey == taskLoadKey else {
+                return
+            }
+
             switch source?.presentation {
             case .html:
-                self.loadedContent = source?.html.map(OriginalEmailLoadedContent.html)
+                if let html = source?.html {
+                    loadState = .loaded(.html(html))
+                } else {
+                    loadState = .unavailable
+                }
             case .nativePlainText:
-                self.loadedContent = source?.plainText.map(OriginalEmailLoadedContent.plainText)
+                if let plainText = source?.plainText {
+                    loadState = .loaded(.plainText(plainText))
+                } else {
+                    loadState = .unavailable
+                }
             case nil:
-                self.loadedContent = nil
+                loadState = .unavailable
             }
-            self.isLoading = false
         }
 
         if let source {
@@ -199,6 +263,15 @@ struct HTMLMessageView: View {
                 category: .ui
             )
         }
+    }
+
+    private func reloadIfRemoteImageFallbackWarmed(_ notification: Notification) {
+        guard let warmedMessageId = notification.userInfo?[HTMLContentLoader.remoteImageAttachmentFallbackMessageIdUserInfoKey] as? String,
+              warmedMessageId == message.id else {
+            return
+        }
+
+        reloadGeneration &+= 1
     }
 }
 
