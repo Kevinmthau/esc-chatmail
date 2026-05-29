@@ -10,7 +10,7 @@ esc-chatmail renders Gmail messages as chat bubbles while preserving original-me
 
 The codebase is large and mature: ~65,000 LOC of app code + ~40,000 LOC of tests across 342 Swift files. The pipeline has been heavily iterated and shows strong defensive thinking (CSP injection, tracking-pixel removal, multi-source fallbacks, classification scoring, memory-pressure handling). But it has also accumulated significant complexity, much of it concentrated in regex-based HTML manipulation, and `AGENTS.md` itself flags several known-fragile paths.
 
-This document identifies what's working, where the architecture is paying a complexity tax, and a prioritized set of improvements ranging from quick wins to a meaningful rearchitecture. No code changes are proposed inline — this is a decision document.
+This document identifies what's working, where the architecture is paying a complexity tax, and a prioritized set of improvements ranging from quick wins to a meaningful rearchitecture. It started as a decision document and now also records implementation status for shipped phases so remaining work can be planned from the current architecture.
 
 ---
 
@@ -49,7 +49,8 @@ MessageBubble (SwiftUI)                              (Views/Chat/MessageBubble.s
 MessageDisplayPolicy.shouldShowHTMLPreview           (Views/Chat/MessageDisplayPolicy.swift:11)
    │
    ├── false → MessageContentView.textBubble          (Views/Chat/MessageContentView.swift:110)
-   │             ChatBubbleTextProcessor (HTML → text, quote/sig strip)
+   │             uses persisted Message.chatPreviewText / loaded fullTextContent when available
+   │             legacy fallback: ChatBubbleTextProcessor (HTML → text, quote/sig strip)
    │
    └── true  → EmailContentSection                    (Views/Components/EmailContent/EmailContentSection.swift:84)
                  EmailPreviewPipeline.loadPreview     (Services/Preview/EmailPreviewPipeline.swift:61)
@@ -64,7 +65,7 @@ MessageDisplayPolicy.shouldShowHTMLPreview           (Views/Chat/MessageDisplayP
 
 ```
 HTMLMessageView                                      (Views/Chat/HTMLMessageView.swift)
-   ↓ OriginalEmailSourceLoader.loadOriginalEmailSource(Services/OriginalEmailSourceLoader.swift)
+   ↓ OriginalEmailSourceLoader.loadOriginalEmailSourceToCompletion(Services/OriginalEmailSourceLoader.swift)
    ↓   CanonicalEmailContentLoader (5 source strategies: messageId file → storageURI →
    ↓     rawSourceHTML → recovered → plain-text fallback)
    ↓   EmailRenderQualityEvaluator (risk score → fall back to native plain text if HTML is junk)
@@ -89,6 +90,7 @@ These are genuine strengths; recommendations below preserve them.
 - **Native preview cards** instead of WebView for newsletters / transactional / calendar invites. Faster, accessible, dark-mode-correct.
 - **Custom `cid:` scheme handler** with on-demand attachment fetch and transparent-pixel fallback — much better than the typical "broken image" experience.
 - **Actor-based concurrency model.** `MessageBubbleLoader`, `ProcessedTextCache`, `MessagePersister` are actors; SwiftUI VMs are `@MainActor`. Background prefetch is cancellable.
+- **Persisted chat-bubble text source.** `Message.chatPreviewText` is now populated by synced ingest, optimistic sends, and batch creation, which keeps normal personal-message bubbles off the legacy runtime text-precedence path.
 - **WebKit prewarming** addresses the first-launch WKWebView cost.
 - **Strong test coverage** of the rendering pipeline (HTMLSanitization/, TextProcessing/, Preview/ test suites — ~40K LOC of tests).
 - **Memory-pressure cache eviction** wired through `MemoryWarningObserver`.
@@ -138,6 +140,8 @@ To produce the text shown in a personal-email chat bubble, content traverses:
 
 That's ~2,800 LOC of cascading heuristics — partially redundant (quote removal happens in HTML *and* in plain text; entity decoding is duplicated; "Sent from my iPhone" is a target in both layers) — to produce a short string. This is also where the highest concentration of email-specific edge cases live, and where the test suite is largest. With DOM-based quote removal up-front the plain-text layer collapses to "extract text from the DOM."
 
+Current status (2026-05-29): the SwiftSoup-backed HTML quote-removal and text-extraction paths are live, and normal personal-message bubbles now render the persisted `Message.chatPreviewText`. The remaining target for #3 is the legacy/fallback plain-text processing used when stored preview text is missing, for plain-text-only mail, and for rich-content classification support.
+
 ### D. `MiniEmailWebView` (scaled live WebView) in scrolling chat
 
 **Severity: medium-high (UX fragility).** **Remediation: #4.**
@@ -167,7 +171,7 @@ There are at least four caches with overlapping responsibilities:
 | `MessageBubbleHTMLAnalysisCache` (NSCache, 512) | `Services/Chat/MessageBubbleLoader.swift:12` | (per-call composite key) |
 | Per-builder internal caches inside `NewsletterPreviewBuilder` / `TransactionalPreviewBuilder` | preview builders | content signature |
 
-Invalidation involves recomputing `htmlSourceSignature(messageId:bodyStorageURI:)` at many call sites and threading it through composite cache keys. `MessageBubble.contentSignature` joins 10+ fingerprints with SHA256-per-call on every SwiftUI body re-evaluation (`Views/Chat/MessageBubble.swift:222-271`).
+Invalidation involves recomputing `htmlSourceSignature(messageId:bodyStorageURI:)` at many call sites and threading it through composite cache keys. #7 removed the per-body text-field SHA256 work from `MessageBubble`, but the broader cache story still has several independently-derived signatures that need to agree.
 
 ### F. Snippet representations are fragmented
 
@@ -180,13 +184,15 @@ For a single message the system maintains:
 - `Message.chatPreviewText` (persisted canonical chat-bubble text)
 - `fullTextContent` (loaded async at view time, now normally the stored chat preview or a legacy processed fallback)
 
-Current status (2026-05-29): recommendation #6 is complete. `Message.chatPreviewText` is the canonical personal-message chat bubble source, optimistic outgoing messages populate it from the composed body, and `MessageBubbleLoader` no longer runs the outgoing-body "richness" comparison. Older records with nil or blank `chatPreviewText` still fall back to processed loaded text for compatibility.
+Current status (2026-05-29): recommendation #6 is complete. `Message.chatPreviewText` is the canonical personal-message chat bubble source, optimistic outgoing messages populate it from the composed body, and batch-created messages map `ProcessedMessage.chatPreviewText`. `MessageBubbleLoader` skips the outgoing-body "richness" comparison whenever stored preview text exists. Older records with nil or blank `chatPreviewText` still fall back to processed loaded text, and outgoing legacy records can still use the body-vs-loaded-text comparison for compatibility.
 
-### G. `MessageBubble.loadSignature` is O(per-body-eval)
+### G. `MessageBubble.loadSignature` did SHA256 work per body eval
 
-**Severity: low (perf nit).** **Remediation: #7.**
+**Severity: low (perf nit).** **Remediation: #7, complete.**
 
-Every SwiftUI body re-evaluation computes `loadSignature`, which calls `contentFingerprint` (SHA256) on ~10 string fields and joins them. SwiftUI re-evaluates bodies aggressively. For a chat with 100 visible bubbles this is many SHA256 hashes per scroll tick.
+Original issue: every SwiftUI body re-evaluation computed `loadSignature`, which called `contentFingerprint` (SHA256) on ~10 string fields and joined them. SwiftUI re-evaluates bodies aggressively, so this was many SHA256 hashes per scroll tick.
+
+Current status (2026-05-29): complete. `ChatMessageRowModel` now precomputes the string fingerprints in `MessageBubbleLoadSignatureComponents`; `MessageBubble.loadSignature` only combines those fingerprints with the current HTML source signature and contact refresh token.
 
 ### H. `prepareOriginalHTML` and `preparePreviewHTML` share a lot
 
@@ -234,11 +240,11 @@ Files most affected (rewrite or thin):
 - `Services/EmailRenderQualityEvaluator.swift` (counts become DOM queries)
 - `Services/Preview/NewsletterPreviewBuilder.swift` and `TransactionalPreviewBuilder.swift` (use DOM accessors)
 
-Risk: SwiftSoup's parser is more permissive than ours in some edge cases; could introduce visible diffs. Mitigation: keep both pipelines behind a feature flag and golden-master test against the existing TextProcessing/HTMLSanitization test suites until parity is reached.
+Risk: SwiftSoup's parser is more permissive than ours in some edge cases; it can introduce visible diffs if future call sites switch from string processing to DOM processing without fixture coverage. Mitigation for new migrations: golden-master test against the existing TextProcessing/HTMLSanitization fixtures before removing any remaining fallback path.
 
 ### 2. **Single canonical "ParsedEmail" pass per message**
 
-**Effort: medium (depends on #1).** **Impact: high (perf).**
+**Effort: medium (now unblocked by #1).** **Impact: high (perf).**
 
 Once a DOM parser is in place, parse each message *once* into an `EmailDocument` and pass it (not the raw String) to all consumers: sanitizer, classifier, quality evaluator, preview builders, analysis builder.
 
@@ -246,7 +252,7 @@ Cache on `messageId + sourceSignature`. The single canonical pass replaces the ~
 
 ### 3. **Collapse the plain-text pipeline to a single DOM-based extraction**
 
-**Effort: medium (depends on #1).** **Impact: high (removes ~2000 LOC of edge-case heuristics).**
+**Effort: medium (now unblocked by #1 and #6).** **Impact: high (removes ~2000 LOC of edge-case heuristics).**
 
 With the DOM-level quote/signature stripping from #1, the chat-bubble text extraction becomes:
 
@@ -260,6 +266,8 @@ EmailDocument
 `PlainTextQuoteRemover` (491 LOC) and `PlainTextSignatureRemover` (845 LOC) become a fallback used only for emails that arrive as plain-text (no HTML available). Most of the regex churn is retired.
 
 Tests will need updating but the existing fixtures are excellent regression coverage.
+
+Current status (2026-05-29): this is the next simplification target. Because stored `Message.chatPreviewText` now wins for normal bubbles, #3 can focus on narrowing the fallback surface instead of changing the primary visible-text path.
 
 ### 4. **Replace `MiniEmailWebView` with rendered snapshots**
 
@@ -312,9 +320,9 @@ This makes invalidation a single concept: when `sourceSignature` changes, the wh
 
 **Effort: small.** **Impact: medium.**
 
-Compute the final "chat bubble preview text" at ingest time (in `MessageProcessor` or right after), store it in a single new field on `Message`, and use it everywhere. Drop the runtime `preferredOutgoingBodyFallback` "richness" comparison.
+Compute the final "chat bubble preview text" at ingest time (in `MessageProcessor` or right after), store it in a single new field on `Message`, and use it everywhere. The shipped version keeps the runtime `preferredOutgoingBodyFallback` "richness" comparison only for legacy outgoing records that do not have stored preview text.
 
-If #1/#3 land first, ingest-time text extraction is cheap and high-quality.
+#1 is now in place for migrated HTML paths, so follow-up #3 can simplify the remaining fallback text extraction without changing the primary chat-bubble source.
 
 Current status (2026-05-29): complete. Synced Gmail messages already populate `Message.chatPreviewText`; this phase filled the remaining creation paths and simplified the read path.
 
@@ -333,17 +341,17 @@ Validation completed on 2026-05-29:
 
 **Effort: tiny.** **Impact: small but real (frame-time during scroll).**
 
-Move the signature computation off the body path. Either:
-- compute it once in `ChatMessageRowModel` (when constructing the row model from Message) and store it as a `let`, or
-- compute it lazily in the VM with a single SHA256 over a stable concatenation.
+Move the signature computation off the body path.
 
-The current implementation does ~10 SHA256 hashes per body invocation per visible bubble.
+Current status (2026-05-29): complete. `ChatMessageRowModel` constructs `MessageBubbleLoadSignatureComponents` with precomputed fingerprints for body text, chat preview text, snippets, and sender fields. `MessageBubble.loadSignature` still incorporates the current HTML source signature and contact refresh token, but no longer performs the text-field SHA256 work on each body evaluation.
 
 ### 8. **Eagerly fetch inline attachments at ingest**
 
 **Effort: small.** **Impact: medium (first-open flicker).**
 
 `MessageProcessor` already knows the set of `cid:`-referenced attachment IDs. Schedule them for download in the background sync queue at ingest, the same way other attachments are queued. The on-demand path in `CIDSchemeHandler` becomes a true fallback for retroactive cache loss instead of the common path for older messages.
+
+Related shipped improvement (2026-05-29): original-email remote image fallback no longer blocks the initial full-message render on uncached attachment-style remote images. The original path now uses cached rewrites synchronously, warms missing image fallbacks out of band, and refreshes `HTMLMessageView` when the warmed result is available.
 
 ### 9. **Document the dark-mode policy on `HTMLDisplayWrapper.Theme`**
 
@@ -359,7 +367,7 @@ Document the same decision in `BaseEmailWebView.makeUIView` where `overrideUserI
 
 **Effort: very large.** **Impact: changes the shape of the problem.**
 
-Out of scope for this review, but worth flagging: a serverless function that does the canonical parse + classification + preview-card extraction *once*, then serves a compact JSON manifest to the client, would let the iOS app stop doing thousands of lines of CPU-heavy HTML work on every device. Defer until #1–#5 ship.
+Out of scope for this review, but worth flagging: a serverless function that does the canonical parse + classification + preview-card extraction *once*, then serves a compact JSON manifest to the client, would let the iOS app stop doing thousands of lines of CPU-heavy HTML work on every device. Defer until #2, #3, and #5 clarify the remaining local-client responsibilities.
 
 ---
 
@@ -367,15 +375,18 @@ Out of scope for this review, but worth flagging: a serverless function that doe
 
 Each step is independently shippable and reduces risk for the next.
 
-1. **#7 (memoize loadSignature)** — single-PR perf win, no risk, validates the review.
-2. **#9 (document dark-mode policy)** — doc-only.
-3. **#8 (eager inline attachment fetch)** — small, contained.
-4. **#4 (snapshot-based preview)** — biggest UX win, doesn't depend on the DOM rewrite.
-5. **#6 (canonical preview text at ingest)** — complete as of 2026-05-29.
-6. **#3 (collapse plain-text pipeline)** — next. The canonical chat preview source is now in place, so remaining plain-text simplification can target ingest/legacy fallback processing directly.
-7. **#1 (DOM parser adoption)** — feature-flagged, golden-master tested.
-8. **#2 (single canonical parse pass)** — completes the DOM migration.
-9. **#5 (unified rendering cache)** — capstone.
+Completed:
+- **#1 (DOM parser adoption)** — complete for migrated paths as of 2026-05-28.
+- **#4 (snapshot-based preview)** — default rich HTML preview path as of 2026-05-28.
+- **#6 (canonical preview text at ingest)** — complete as of 2026-05-29.
+- **#7 (memoize loadSignature)** — complete; text fingerprints are precomputed in `ChatMessageRowModel`.
+
+Remaining recommended order:
+1. **#3 (collapse plain-text pipeline)** — next. The canonical chat preview source is now in place, so remaining plain-text simplification can target ingest/legacy fallback processing directly.
+2. **#2 (single canonical parse pass)** — completes the DOM migration by passing one parsed representation through consumers.
+3. **#5 (unified rendering cache)** — capstone once the cache does not have to straddle both old and new parse paths.
+4. **#8 (eager inline attachment fetch)** — still useful for first-open fidelity; the original-reader warmup change reduced the blocking part but did not replace ingest-time attachment fetching.
+5. **#9 (document dark-mode policy)** — doc-only.
 
 ---
 
@@ -410,7 +421,7 @@ The repo already has the right harness. For each shipped change:
 
 ## Bottom line
 
-The current architecture is **functionally correct and impressively thorough**, but pays a heavy complexity tax for regex-based HTML manipulation. The single highest-leverage change is **adopting a DOM parser (recommendation #1)** — it directly collapses ~2,000 LOC of regex-based code and unlocks downstream simplifications (#2, #3, #7). The single highest-UX-stability change is **#4 (snapshot-based MiniEmailWebView replacement)** — independent and shippable on its own.
+The current architecture is **functionally correct and impressively thorough**, and the biggest completed wins are now in place: DOM-backed HTML processing for migrated paths (#1), snapshot-based rich previews (#4), persisted chat-preview text (#6), and precomputed bubble signature fingerprints (#7). The remaining complexity tax is concentrated in legacy/fallback plain-text processing, redundant parsed artifacts/caches, and first-open fidelity for inline assets.
 
 ---
 
@@ -465,4 +476,11 @@ Initial foundation landed on branch `claude/email-chat-architecture-EddMs`.
 ### What's still to do (in priority order):
 
 - **Next: #3, collapse the plain-text pipeline** now that chat bubble rendering consumes canonical stored preview text first.
+- **Then: #2, single canonical `ParsedEmail` pass** so sanitizer, classifier, analysis, and preview builders stop deriving overlapping artifacts independently.
 - **Defer unified rendering-cache work** until it no longer has to support both legacy and DOM branches.
+
+## Implementation status — original email recovery
+
+Current status (2026-05-29): full original email loading now distinguishes slow recovery from true missing content. `HTMLMessageView` calls `OriginalEmailSourceLoader.loadOriginalEmailSourceToCompletion`, shows a "Recovering original email..." state after the initial wait, and only shows unavailable content when the completion load actually returns nil. When recovered HTML is saved to the per-message file, the view updates `bodyStorageURI` so later loads use the stable canonical source.
+
+The same update made original-email remote-image fallback non-blocking for cached misses: `HTMLContentLoader.prepareOriginalHTML` uses cached attachment-style image rewrites immediately, starts a warmup task for pending rewrites, and `HTMLMessageView` reloads when `remoteImageAttachmentFallbackDidWarmNotification` fires for the message.
