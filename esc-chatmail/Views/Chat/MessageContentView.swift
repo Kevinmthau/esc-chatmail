@@ -234,16 +234,6 @@ struct MessageContentView: View {
         return displayText
     }
 
-    static func resolvedProcessedText(bodyText: String?, snippet: String?) -> String? {
-        if let processedBody = processedText(bodyText) {
-            return processedBody
-        }
-        if let processedSnippet = processedText(snippet) {
-            return processedSnippet
-        }
-        return nil
-    }
-
     static func resolvedVisibleText(
         fullTextContent: String?,
         fallbackPreviewText: String?,
@@ -261,22 +251,5 @@ struct MessageContentView: View {
             return nil
         }
         return text
-    }
-
-    /// Processes text while preserving paragraph structure and decoding HTML entities
-    /// Uses the same processing as ProcessedTextCache but preserves line breaks
-    /// (unlike cleanedSnippet which destroyed all newlines for conversation list previews)
-    private static func processedText(_ text: String?) -> String? {
-        let result = ChatBubbleTextProcessor.process(
-            content: text,
-            options: ChatBubbleTextProcessorOptions(
-                inputKind: .autoDetectHTML,
-                sanitizeRawEmailSource: true,
-                decodeHTMLEntities: true,
-                formatSignOffLineBreaks: true,
-                classifyRichContent: false
-            )
-        )
-        return result.mainText
     }
 }

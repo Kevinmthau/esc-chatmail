@@ -121,6 +121,7 @@ struct CoreDataBatchOperations: Sendable {
         managed.setValue(processed.gmThreadId, forKey: "gmThreadId")
         managed.setValue(processed.snippet, forKey: "snippet")
         managed.setValue(processed.cleanedSnippet, forKey: "cleanedSnippet")
+        managed.setValue(processed.chatPreviewText, forKey: "chatPreviewText")
         managed.setValue(processed.internalDate, forKey: "internalDate")
         managed.setValue(processed.isUnread, forKey: "isUnread")
         managed.setValue(processed.hasAttachments, forKey: "hasAttachments")

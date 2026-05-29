@@ -52,6 +52,28 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertEqual(fetched.attachmentsArray.compactMap(\.id), ["local_attachment_1"])
     }
 
+    func testCreateOptimisticMessage_populatesChatPreviewTextFromComposedBody() async throws {
+        let body = """
+        First paragraph.
+
+        Second paragraph.
+        Thanks,
+        Kevin
+        """
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: ["friend@example.com"],
+            body: body,
+            subject: "Subject",
+            optimisticConversation: .participantHash(
+                calculateParticipantHash(from: [normalizedEmail("friend@example.com")])
+            )
+        )
+
+        let message = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertEqual(message.chatPreviewText, body)
+    }
+
     func testCreateOptimisticMessage_persistsMutationRecordBeforeViewContextSave() async throws {
         let context = coreDataStack.viewContext
         let recipient = "durable-record@example.com"

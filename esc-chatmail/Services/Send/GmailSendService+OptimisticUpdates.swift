@@ -50,6 +50,7 @@ extension GmailSendService {
         message.internalDate = Date()
         message.snippet = snippet
         message.cleanedSnippet = cleanedSnippet
+        message.chatPreviewText = optimisticChatPreviewText(from: body)
         message.bodyText = body
         message.gmThreadId = gmThreadId
         message.subject = subject
@@ -98,6 +99,11 @@ extension GmailSendService {
             optimisticMessageID: message.id,
             conversationReference: ConversationReference(objectID: conversation.objectID)
         )
+    }
+
+    private nonisolated func optimisticChatPreviewText(from body: String) -> String? {
+        let trimmedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedBody.isEmpty ? nil : trimmedBody
     }
 
     @MainActor

@@ -334,18 +334,6 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
         XCTAssertNotEqual(firstSignature, secondSignature)
     }
 
-    func testResolvedProcessedText_fallsBackToProcessedSnippetWhenBodyCleansToNil() {
-        let result = MessageContentView.resolvedProcessedText(
-            bodyText: """
-            On Tue, Jan 2, 2026 at 9:41 AM Alice Example <alice@example.com> wrote:
-            > Earlier message
-            """,
-            snippet: "Tom &amp; Jerry"
-        )
-
-        XCTAssertEqual(result, "Tom & Jerry")
-    }
-
     func testResolvedVisibleText_prefersFullTextContentBeforeChatPreviewAndFallback() throws {
         let loadedText = """
         Can we please see alts for:

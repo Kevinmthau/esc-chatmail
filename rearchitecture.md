@@ -176,11 +176,11 @@ Invalidation involves recomputing `htmlSourceSignature(messageId:bodyStorageURI:
 For a single message the system maintains:
 - `gmailMessage.snippet` (from Gmail API)
 - `Message.snippet` (persisted)
-- `Message.cleanedSnippet` (persisted, post-processing)
-- `fallbackPreviewText`
-- `fullTextContent` (loaded async at view time)
+- `Message.cleanedSnippet` (persisted, post-processing, conversation-list oriented)
+- `Message.chatPreviewText` (persisted canonical chat-bubble text)
+- `fullTextContent` (loaded async at view time, now normally the stored chat preview or a legacy processed fallback)
 
-`MessageContentView.resolvedVisibleText` and `MessageBubbleTextPrecedence.preferredOutgoingBodyFallback` then run a "richness" comparison to pick the best of these at render time (`Views/Chat/MessageContentView.swift:209-266`, `Services/Chat/MessageBubbleLoader.swift:137-189`). The runtime selection between near-equivalent text representations is complex and order-dependent.
+Current status (2026-05-29): recommendation #6 is complete. `Message.chatPreviewText` is the canonical personal-message chat bubble source, optimistic outgoing messages populate it from the composed body, and `MessageBubbleLoader` no longer runs the outgoing-body "richness" comparison. Older records with nil or blank `chatPreviewText` still fall back to processed loaded text for compatibility.
 
 ### G. `MessageBubble.loadSignature` is O(per-body-eval)
 
@@ -316,6 +316,19 @@ Compute the final "chat bubble preview text" at ingest time (in `MessageProcesso
 
 If #1/#3 land first, ingest-time text extraction is cheap and high-quality.
 
+Current status (2026-05-29): complete. Synced Gmail messages already populate `Message.chatPreviewText`; this phase filled the remaining creation paths and simplified the read path.
+
+Files touched:
+- `Services/Send/GmailSendService+OptimisticUpdates.swift` — optimistic messages set `chatPreviewText` from the full composed body, preserving paragraph breaks.
+- `Services/CoreDataBatchOperations.swift` — batch-created messages map `ProcessedMessage.chatPreviewText`.
+- `Services/Chat/MessageBubbleLoader.swift` — forwarded lead-in behavior remains special; otherwise stored chat preview wins, with processed loaded text only as the legacy fallback.
+- `Views/Chat/MessageContentView.swift` — removed stale runtime text-processing helper surface.
+- Tests: `MessageBubbleLoaderTests`, `MessageBubbleViewModelTests`, `GmailSendServiceOptimisticCreationTests`.
+
+Validation completed on 2026-05-29:
+- `./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/MessageProcessorTests' -only-testing 'esc-chatmailTests/MessageBubbleLoaderTests' -only-testing 'esc-chatmailTests/MessageBubbleViewModelTests' -only-testing 'esc-chatmailTests/ChatMessageRowModelTests' -only-testing 'esc-chatmailTests/GmailSendServiceOptimisticCreationTests'`
+- `./Scripts/codex-build.sh`
+
 ### 7. **Memoize `MessageBubble.loadSignature`**
 
 **Effort: tiny.** **Impact: small but real (frame-time during scroll).**
@@ -358,9 +371,9 @@ Each step is independently shippable and reduces risk for the next.
 2. **#9 (document dark-mode policy)** — doc-only.
 3. **#8 (eager inline attachment fetch)** — small, contained.
 4. **#4 (snapshot-based preview)** — biggest UX win, doesn't depend on the DOM rewrite.
-5. **#6 (canonical preview text at ingest)** — small refactor, simplifies the read path.
-6. **#1 (DOM parser adoption)** — feature-flagged, golden-master tested.
-7. **#3 (collapse plain-text pipeline)** — falls out of #1 naturally.
+5. **#6 (canonical preview text at ingest)** — complete as of 2026-05-29.
+6. **#3 (collapse plain-text pipeline)** — next. The canonical chat preview source is now in place, so remaining plain-text simplification can target ingest/legacy fallback processing directly.
+7. **#1 (DOM parser adoption)** — feature-flagged, golden-master tested.
 8. **#2 (single canonical parse pass)** — completes the DOM migration.
 9. **#5 (unified rendering cache)** — capstone.
 
@@ -451,6 +464,5 @@ Initial foundation landed on branch `claude/email-chat-architecture-EddMs`.
 
 ### What's still to do (in priority order):
 
-- **Canonicalize preview text at ingest** so runtime chat bubble rendering can consume one persisted source instead of recomputing precedence.
-- **Simplify visible-text precedence** in `MessageContentView.resolvedVisibleText` and `MessageBubbleTextPrecedence` after the ingest source exists.
+- **Next: #3, collapse the plain-text pipeline** now that chat bubble rendering consumes canonical stored preview text first.
 - **Defer unified rendering-cache work** until it no longer has to support both legacy and DOM branches.
