@@ -157,6 +157,38 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertFalse(result.hasRichHTMLContent)
     }
 
+    func testLoadContent_blankChatPreviewTextFallsBackToProcessedLegacyText() async {
+        let messageId = "bubble-blank-chat-preview-fallback-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: "Legacy processed fallback",
+                chatPreviewText: " \n\t ",
+                bodyStorageURI: nil,
+                cleanedSnippet: "Snippet fallback",
+                snippet: "Snippet fallback",
+                subject: "Blank chat preview",
+                senderName: "Alice Example",
+                hasHTMLSource: false,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "Legacy processed fallback")
+        XCTAssertFalse(result.hasRichHTMLContent)
+    }
+
     func testLoadContent_incomingMessageFallsBackToRecoveredHTMLTextWhenChatPreviewMissing() async {
         let messageId = "bubble-recovered-preview-fallback-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
