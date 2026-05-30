@@ -58,7 +58,7 @@ MessageDisplayPolicy.shouldShowHTMLPreview           (Views/Chat/MessageDisplayP
                    ├── NetlifyDeployPreviewCard
                    ├── NewsletterPreviewCard          (NewsletterPreviewBuilder: 1093 LOC)
                    ├── TransactionalPreviewCard       (TransactionalPreviewBuilder: 1519 LOC)
-                   └── MiniEmailWebView (scaled WKWebView, last-resort fallback)
+                   └── EmailPreviewSnapshotView (cached image snapshot; MiniEmailWebView fallback)
 ```
 
 ### Full email viewer
@@ -292,6 +292,33 @@ cache/renderer suite. The local
 simulator smoke covered unauthenticated launch and an empty authenticated
 UI-test shell; it did not cover scroll stability across a mixed real/seeded
 rich-thread mailbox because no mailbox data was available on the simulator.
+
+#### Rendering stabilization checklist
+
+Stable means:
+- Rich HTML chat previews enter through `EmailPreviewSnapshotView`; live `MiniEmailWebView` is only the snapshot-failure fallback or an explicitly test/debug-only surface.
+- Snapshot cache keys vary by preview source signature, rendered HTML fingerprint, rounded container width, dark-mode state, and renderer version.
+- A successful snapshot render writes a disk-cache entry and updates the visible preview only while the current load task is still active.
+- Cancellation or a newer load identity must not update stale image, height, cache-key, or fallback state.
+- Full-message rendering remains on `HTMLMessageView` / `BaseEmailWebView(.fullInteractive)` and does not consume preview-only snapshot transforms.
+
+Metrics/logs to inspect with `ESC_LOG_DIAGNOSTICS=html-preview`:
+- `EmailPreviewSnapshot event=cache-hit` / `cache-miss` counts and `cacheKeyHash`.
+- `event=render-success` count, `duration`, `height`, and `cacheStored`.
+- `event=render-failure` count, `reason`, `duration`, and cumulative `timeouts`.
+- `event=fallback-mini-webview` count. This should be rare in normal scrolling; repeated counts on the same message indicate a snapshot-rendering bug or unsupported HTML case.
+- Existing `EmailPreviewPipeline` / `EmailPreviewSourceLoader` diagnostics for source kind, classification, and fallback preview source.
+
+Manual QA recipe:
+- Use a real mailbox thread on iPhone 17 Pro with mixed messages: newsletters, transactional emails, forwarded messages, calendar invites, inline `cid:` images, remote images, malformed HTML, and long replies.
+- Open the thread in light and dark mode, scroll rapidly through the rich previews, then pause on each preview and confirm there are no late height jumps after images or snapshots settle.
+- Tap each preview into the full original email and verify the full-message view preserves fidelity independently of the chat preview.
+- Repeat after clearing Caches/ or installing fresh so first-render misses, subsequent cache hits, remote-image warmup reloads, and failure fallback behavior are all visible in diagnostics.
+- Capture the diagnostic counts before and after the run; cache hits should rise on the second pass, render failures/timeouts/fallbacks should stay low, and no message should repeatedly fall back without a clear reason.
+
+Next large refactor: **#3, collapse the plain-text fallback pipeline**. Do not
+start #3 until this stabilization pass is green in build, targeted tests, and
+the real-mailbox QA recipe above.
 
 ### 5. **Unify rendering caches behind a single coordinator**
 

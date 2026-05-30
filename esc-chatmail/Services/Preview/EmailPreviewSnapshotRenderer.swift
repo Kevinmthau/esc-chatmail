@@ -32,7 +32,12 @@ enum EmailPreviewSnapshotAppearance {
 }
 
 @MainActor
-final class EmailPreviewSnapshotRenderer {
+protocol EmailPreviewSnapshotRendering: AnyObject {
+    func render(request: EmailPreviewSnapshotRequest) async throws -> EmailPreviewSnapshotResult
+}
+
+@MainActor
+final class EmailPreviewSnapshotRenderer: EmailPreviewSnapshotRendering {
     static let shared = EmailPreviewSnapshotRenderer()
 
     private init() {}

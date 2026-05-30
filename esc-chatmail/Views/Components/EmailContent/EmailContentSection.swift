@@ -4,7 +4,7 @@ import CryptoKit
 
 /// Container view that routes chat previews by content type.
 /// Newsletter and strongly-structured transactional emails render as derived native cards.
-/// Other rich HTML still falls back to the existing scaled WebView preview.
+/// Other rich HTML renders through a cached snapshot preview, with MiniEmailWebView as failure fallback.
 struct EmailContentSection: View {
     let message: ChatMessageRowModel
     let onOpenFullMessage: () -> Void
@@ -232,7 +232,8 @@ struct EmailContentSection: View {
             previewCacheKey: payload.previewCacheKey,
             isDarkMode: isDarkMode,
             senderEmail: message.senderEmail,
-            message: messageForInlineAttachments
+            message: messageForInlineAttachments,
+            messageId: message.id
         )
         .allowsHitTesting(false)
         .emailPreviewCardChrome()
