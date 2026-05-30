@@ -203,7 +203,7 @@ enum ChatBubbleTextProcessor {
         )
     }
 
-    private static func containsHTMLTags(_ text: String) -> Bool {
+    fileprivate static func containsHTMLTags(_ text: String) -> Bool {
         guard let regex = htmlTagPattern else {
             return text.contains("<") && text.contains(">")
         }
@@ -223,7 +223,7 @@ fileprivate struct HTMLProcessingCleanupResult {
 actor ProcessedTextCache: MemoryWarningHandler {
     static let shared = ProcessedTextCache()
     // Bump to invalidate cached entries when processing logic changes.
-    private static let processingVersion = "2026-05-30-chat-preview-primary-v1"
+    private static let processingVersion = "2026-05-30-chat-preview-primary-v2"
     static let chatBubblePreviewMode = "chat-bubble-preview"
     static let richContentAnalysisMode = "rich-content-analysis"
 
@@ -487,13 +487,42 @@ actor ProcessedTextCache: MemoryWarningHandler {
         bodyText: String? = nil,
         handler: HTMLContentHandler
     ) -> Bool {
-        let html = loadHTML(messageId: messageId, bodyStorageURI: bodyStorageURI, handler: handler)
-            ?? bodyText.flatMap { RawEmailSourceSanitizer.extractHTMLText(from: $0) }
-        guard let html else {
+        guard let html = richContentHTMLCandidate(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            handler: handler
+        ) else {
             return false
         }
 
-        return hasGenuineRichContent(html)
+        return hasGenuineRichContentAfterCleanup(html)
+    }
+
+    nonisolated private static func richContentHTMLCandidate(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        handler: HTMLContentHandler
+    ) -> String? {
+        if let html = loadHTML(messageId: messageId, bodyStorageURI: bodyStorageURI, handler: handler) {
+            return html
+        }
+
+        guard let bodyText else {
+            return nil
+        }
+
+        if let rawSourceHTML = RawEmailSourceSanitizer.extractHTMLText(from: bodyText) {
+            return rawSourceHTML
+        }
+
+        return ChatBubbleTextProcessor.containsHTMLTags(bodyText) ? bodyText : nil
+    }
+
+    nonisolated private static func hasGenuineRichContentAfterCleanup(_ html: String) -> Bool {
+        let cleanup = cleanedHTMLForProcessing(html)
+        return hasGenuineRichContent(cleanup.html)
     }
 
     nonisolated static func contentSourceSignature(

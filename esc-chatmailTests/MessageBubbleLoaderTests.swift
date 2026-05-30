@@ -482,6 +482,117 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertEqual(second.fullTextContent, "Stale stored preview")
     }
 
+    func testLoadContent_storedChatPreviewClassifiesDirectHTMLBodyFallback() async {
+        let messageId = "bubble-direct-html-rich-preview-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        HTMLContentHandler.shared.deleteHTML(for: messageId)
+        defer {
+            HTMLContentHandler.shared.deleteHTML(for: messageId)
+        }
+
+        let directHTML = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <section>
+            <table role="presentation" width="100%">
+              <tr><td><h1>Statement ready</h1></td></tr>
+              <tr><td><p>Your monthly account statement is now available.</p></td></tr>
+              <tr><td><a href="https://example.com/review">Review statement</a></td></tr>
+            </table>
+          </section>
+        </body>
+        </html>
+        """
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache()
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: directHTML,
+                chatPreviewText: "Statement ready",
+                bodyStorageURI: nil,
+                cleanedSnippet: "Statement ready",
+                snippet: "Statement ready",
+                subject: "Statement ready",
+                senderName: "Example Bank",
+                hasHTMLSource: false,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alerts@examplebank.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "Statement ready")
+        XCTAssertTrue(result.hasRichHTMLContent)
+        XCTAssertFalse(result.htmlAnalysis.hasHTMLSource)
+    }
+
+    func testLoadContent_storedChatPreviewCleansQuotesBeforeRichClassification() async {
+        let messageId = "bubble-rich-quote-cleanup-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        HTMLContentHandler.shared.deleteHTML(for: messageId)
+        defer {
+            HTMLContentHandler.shared.deleteHTML(for: messageId)
+        }
+
+        _ = HTMLContentHandler.shared.saveHTML(
+            """
+            <!DOCTYPE html>
+            <html>
+            <body>
+              <p>Sounds good to me.</p>
+              <div class="gmail_quote">
+                <section>
+                  <table role="presentation" width="100%">
+                    <tr><td><h1>Weekly newsletter</h1></td></tr>
+                    <tr><td><p>\(String(repeating: "Quoted newsletter copy. ", count: 30))</p></td></tr>
+                    <tr><td><a href="https://example.com/unsubscribe">Unsubscribe</a></td></tr>
+                  </table>
+                </section>
+              </div>
+            </body>
+            </html>
+            """,
+            for: messageId
+        )
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache()
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: nil,
+                chatPreviewText: "Sounds good to me.",
+                bodyStorageURI: nil,
+                cleanedSnippet: "Sounds good to me.",
+                snippet: "Sounds good to me.",
+                subject: "Re: Weekly newsletter",
+                senderName: "Alice Example",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "Sounds good to me.")
+        XCTAssertFalse(result.hasRichHTMLContent)
+    }
+
     func testLoadContent_rawEmailSourceWithEmbeddedHTML_marksRichContent() async {
         let messageId = "bubble-raw-html-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
