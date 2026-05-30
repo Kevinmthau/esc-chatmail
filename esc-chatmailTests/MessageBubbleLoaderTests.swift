@@ -923,6 +923,70 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)
     }
 
+    func testLoadContent_incomingUnparsedForwardedStoredPreviewClassifiesBodyFallbackHTML() async {
+        let messageId = "bubble-unparsed-forwarded-rich-html-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        HTMLContentHandler.shared.deleteHTML(for: messageId)
+        defer {
+            HTMLContentHandler.shared.deleteHTML(for: messageId)
+        }
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache()
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: """
+                <!DOCTYPE html>
+                <html>
+                <body>
+                  <section>
+                    <table role="presentation" width="100%">
+                      <tr><td><h1>Reserve your table</h1></td></tr>
+                      <tr><td><p>Your reservation details are ready to review.</p></td></tr>
+                      <tr><td><a href="https://example.com/review">Review details</a></td></tr>
+                    </table>
+                  </section>
+                </body>
+                </html>
+                """,
+                chatPreviewText: "Reservation details",
+                bodyStorageURI: nil,
+                cleanedSnippet: "Reservation details",
+                snippet: "Reservation details",
+                subject: "Fwd: Dinner reservation",
+                senderName: "Alice Example",
+                hasHTMLSource: false,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: true,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertNil(result.forwardedDisplayContent)
+        XCTAssertEqual(result.fullTextContent, "Reservation details")
+        XCTAssertTrue(result.hasRichHTMLContent)
+        XCTAssertFalse(result.htmlAnalysis.hasHTMLSource)
+        XCTAssertTrue(
+            MessageDisplayPolicy.shouldShowHTMLPreview(
+                hasHTMLSource: result.htmlAnalysis.hasHTMLSource,
+                isForwardedEmail: true,
+                isNewsletter: false,
+                hasRichHTMLContent: result.hasRichHTMLContent,
+                isFromMe: false,
+                isOneToOneConversation: true,
+                subject: "Fwd: Dinner reservation",
+                senderEmail: "alice@example.com"
+            )
+        )
+    }
+
     func testLoadContent_outgoingReplyPrefersFullBodyOverStoredHTMLWhenChatPreviewMissing() async throws {
         let messageId = "bubble-outgoing-reply-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)

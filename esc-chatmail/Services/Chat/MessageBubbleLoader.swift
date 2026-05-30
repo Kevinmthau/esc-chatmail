@@ -848,7 +848,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         from request: MessageBubbleContentRequest,
         resolvedHasHTMLSource: Bool
     ) async -> Bool {
-        guard !request.isFromMe, !request.isForwardedEmail else {
+        guard !request.isFromMe else {
             return false
         }
 
