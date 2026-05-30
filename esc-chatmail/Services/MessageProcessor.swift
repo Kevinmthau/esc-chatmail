@@ -705,16 +705,25 @@ class MessageProcessor: @unchecked Sendable {
         inputKind: ChatBubbleTextInputKind,
         sanitizeRawEmailSource: Bool
     ) -> String? {
-        let result = ChatBubbleTextProcessor.process(
-            content: content,
-            options: ChatBubbleTextProcessorOptions(
-                inputKind: inputKind,
-                sanitizeRawEmailSource: sanitizeRawEmailSource,
-                decodeHTMLEntities: true,
-                formatSignOffLineBreaks: true,
+        let result: ChatBubbleTextProcessingResult
+        switch inputKind {
+        case .html:
+            result = ChatBubbleTextProcessor.htmlCompatibilityFallback(
+                from: content,
                 classifyRichContent: false
             )
-        )
+        case .plainText:
+            result = ChatBubbleTextProcessor.plainTextOnlyFallback(
+                from: content,
+                sanitizeRawEmailSource: sanitizeRawEmailSource
+            )
+        case .autoDetectHTML:
+            result = ChatBubbleTextProcessor.legacyAutoDetectedFallback(
+                from: content,
+                sanitizeRawEmailSource: sanitizeRawEmailSource,
+                classifyRichContent: false
+            )
+        }
         return result.mainText
     }
 

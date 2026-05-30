@@ -241,7 +241,7 @@ struct MessageContentView: View {
         sharedDocumentLinks: [SharedDocumentLink] = []
     ) -> String? {
         let storedChatPreviewText = nonEmptyText(chatPreviewText)
-        let sourceText = fullTextContent ?? storedChatPreviewText ?? fallbackPreviewText
+        let sourceText = storedChatPreviewText ?? fullTextContent ?? fallbackPreviewText
         return SharedDocumentLinkExtractor.removingLinks(from: sourceText, matching: sharedDocumentLinks)
     }
 

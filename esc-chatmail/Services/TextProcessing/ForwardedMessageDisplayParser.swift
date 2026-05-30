@@ -131,15 +131,10 @@ enum ForwardedMessageDisplayParser {
     }
 
     private static func cleanedLeadInText(from text: String) -> String? {
-        let result = ChatBubbleTextProcessor.process(
-            content: text,
-            options: ChatBubbleTextProcessorOptions(
-                inputKind: .plainText,
-                sanitizeRawEmailSource: true,
-                decodeHTMLEntities: false,
-                formatSignOffLineBreaks: true,
-                classifyRichContent: false
-            )
+        let result = ChatBubbleTextProcessor.plainTextOnlyFallback(
+            from: text,
+            sanitizeRawEmailSource: true,
+            decodeHTMLEntities: false
         )
         if let mainText = trimmed(result.mainText) {
             return mainText

@@ -49,8 +49,8 @@ MessageBubble (SwiftUI)                              (Views/Chat/MessageBubble.s
 MessageDisplayPolicy.shouldShowHTMLPreview           (Views/Chat/MessageDisplayPolicy.swift:11)
    │
    ├── false → MessageContentView.textBubble          (Views/Chat/MessageContentView.swift:110)
-   │             uses persisted Message.chatPreviewText / loaded fullTextContent when available
-   │             legacy fallback: ChatBubbleTextProcessor (HTML → text, quote/sig strip)
+   │             primary: persisted Message.chatPreviewText
+   │             compatibility: DOM HTML fallback or legacy plain-text-only cleanup
    │
    └── true  → EmailContentSection                    (Views/Components/EmailContent/EmailContentSection.swift:84)
                  EmailPreviewPipeline.loadPreview     (Services/Preview/EmailPreviewPipeline.swift:61)
@@ -124,7 +124,8 @@ For a single chat-bubble render of one newsletter email, the HTML body is indepe
 4. By `EmailRenderQualityEvaluator` (tag counts, regex matches, text extraction).
 5. By `EmailPreviewClassifier` (signal scanning).
 6. By `MessageBubbleHTMLAnalysisBuilder` (cid: extraction).
-7. By `ChatBubbleTextProcessor` (full quote-removal → plain-text-extraction pipeline).
+7. By `ChatBubbleTextProcessor` only for missing `Message.chatPreviewText`
+   compatibility fallbacks.
 8. By the relevant preview builder (newsletter or transactional, which scrape DOM structure).
 9. By WKWebView (the actual final parse).
 
@@ -140,7 +141,7 @@ To produce the text shown in a personal-email chat bubble, content traverses:
 
 That's ~2,800 LOC of cascading heuristics — partially redundant (quote removal happens in HTML *and* in plain text; entity decoding is duplicated; "Sent from my iPhone" is a target in both layers) — to produce a short string. This is also where the highest concentration of email-specific edge cases live, and where the test suite is largest. With DOM-based quote removal up-front the plain-text layer collapses to "extract text from the DOM."
 
-Current status (2026-05-29): the SwiftSoup-backed HTML quote-removal and text-extraction paths are live, and normal personal-message bubbles now render the persisted `Message.chatPreviewText`. The remaining target for #3 is the legacy/fallback plain-text processing used when stored preview text is missing, for plain-text-only mail, and for rich-content classification support.
+Current status (2026-05-30): partially complete. Normal personal-message bubbles use persisted `Message.chatPreviewText` as the visible text source and no longer derive bubble text through the legacy runtime cascade. `MessageBubbleLoader` now enters fallback text processing only when `chatPreviewText` is nil/blank or when parsing a forwarded-message lead-in. HTML-backed missing-preview records derive compatibility text through the DOM-backed HTML path. The legacy plain-text quote/signature removers remain only behind named plain-text-only/old-record fallback helpers.
 
 ### D. `MiniEmailWebView` (scaled live WebView) in scrolling chat
 
@@ -267,7 +268,22 @@ EmailDocument
 
 Tests will need updating but the existing fixtures are excellent regression coverage.
 
-Current status (2026-05-29): this is the next simplification target. Because stored `Message.chatPreviewText` now wins for normal bubbles, #3 can focus on narrowing the fallback surface instead of changing the primary visible-text path.
+Current status (2026-05-30): partially complete. The normal render path is now:
+
+```
+Message.chatPreviewText
+  -> MessageBubbleLoader.fullTextContent
+  -> MessageContentView.textBubble
+```
+
+The remaining text-processing paths are intentionally narrow:
+- HTML-backed records with nil/blank `chatPreviewText` use `loadCompatibilityContent`, which derives text from stored/recovered HTML through `ChatBubbleTextProcessor.htmlCompatibilityFallback` and the DOM-backed `TextProcessing.extractPlainText`.
+- True plain-text-only records and old records with no stored preview use `ChatBubbleTextProcessor.plainTextOnlyFallback` / `legacyAutoDetectedFallback`, which is the only remaining production path into `PlainTextQuoteRemover` and `PlainTextSignatureRemover`.
+- Outgoing records created before optimistic sends populated `chatPreviewText` may still use `LegacyOutgoingBodyTextFallback` to prefer the composed body over a truncated stored HTML/snippet fallback.
+- Forwarded messages still parse lead-in text through `ForwardedMessageDisplayParser`; structured forwarded-card behavior is unchanged.
+- `ProcessedTextCache` still stores compatibility fallback text for old records, plus a separate rich-content analysis mode for stored-preview records so rich preview routing can work without deriving visible bubble text.
+
+Next recommended phase: **#2, single canonical parsed-email pass**. Do not start a unified `RenderedMessageCache` until one parsed representation can feed sanitizer, classification, analysis, preview builders, and fallback text extraction.
 
 ### 4. **Replace `MiniEmailWebView` with rendered snapshots**
 
@@ -316,9 +332,9 @@ Manual QA recipe:
 - Repeat after clearing Caches/ or installing fresh so first-render misses, subsequent cache hits, remote-image warmup reloads, and failure fallback behavior are all visible in diagnostics.
 - Capture the diagnostic counts before and after the run; cache hits should rise on the second pass, render failures/timeouts/fallbacks should stay low, and no message should repeatedly fall back without a clear reason.
 
-Next large refactor: **#3, collapse the plain-text fallback pipeline**. Do not
-start #3 until this stabilization pass is green in build, targeted tests, and
-the real-mailbox QA recipe above.
+Next large refactor: **#2, single canonical parsed-email pass**. Keep snapshot
+preview architecture stable while moving duplicated parsing/classification work
+behind one parsed representation.
 
 ### 5. **Unify rendering caches behind a single coordinator**
 
@@ -347,7 +363,7 @@ This makes invalidation a single concept: when `sourceSignature` changes, the wh
 
 **Effort: small.** **Impact: medium.**
 
-Compute the final "chat bubble preview text" at ingest time (in `MessageProcessor` or right after), store it in a single new field on `Message`, and use it everywhere. The shipped version keeps the runtime `preferredOutgoingBodyFallback` "richness" comparison only for legacy outgoing records that do not have stored preview text.
+Compute the final "chat bubble preview text" at ingest time (in `MessageProcessor` or right after), store it in a single new field on `Message`, and use it everywhere. The shipped version keeps the runtime `LegacyOutgoingBodyTextFallback` comparison only for legacy outgoing records that do not have stored preview text.
 
 #1 is now in place for migrated HTML paths, so follow-up #3 can simplify the remaining fallback text extraction without changing the primary chat-bubble source.
 
@@ -404,15 +420,15 @@ Each step is independently shippable and reduces risk for the next.
 
 Completed:
 - **#1 (DOM parser adoption)** — complete for migrated paths as of 2026-05-28.
+- **#3 (collapse plain-text pipeline)** — partially complete as of 2026-05-30; normal bubbles no longer derive visible text through the legacy runtime cascade, while explicit legacy/plain-text-only fallbacks remain.
 - **#4 (snapshot-based preview)** — default rich HTML preview path as of 2026-05-28.
 - **#6 (canonical preview text at ingest)** — complete as of 2026-05-29.
 - **#7 (memoize loadSignature)** — complete; text fingerprints are precomputed in `ChatMessageRowModel`.
 
 Remaining recommended order:
-1. **#3 (collapse plain-text pipeline)** — next. The canonical chat preview source is now in place, so remaining plain-text simplification can target ingest/legacy fallback processing directly.
-2. **#2 (single canonical parse pass)** — completes the DOM migration by passing one parsed representation through consumers.
-3. **#5 (unified rendering cache)** — capstone once the cache does not have to straddle both old and new parse paths.
-4. **#8 (eager inline attachment fetch)** — still useful for first-open fidelity; the original-reader warmup change reduced the blocking part but did not replace ingest-time attachment fetching.
+1. **#2 (single canonical parse pass)** — completes the DOM migration by passing one parsed representation through consumers.
+2. **#5 (unified rendering cache)** — capstone once the cache does not have to straddle both old and new parse paths.
+3. **#8 (eager inline attachment fetch)** — still useful for first-open fidelity; the original-reader warmup change reduced the blocking part but did not replace ingest-time attachment fetching.
 5. **#9 (document dark-mode policy)** — doc-only.
 
 ---
@@ -502,8 +518,7 @@ Initial foundation landed on branch `claude/email-chat-architecture-EddMs`.
 
 ### What's still to do (in priority order):
 
-- **Next: #3, collapse the plain-text pipeline** now that chat bubble rendering consumes canonical stored preview text first.
-- **Then: #2, single canonical `ParsedEmail` pass** so sanitizer, classifier, analysis, and preview builders stop deriving overlapping artifacts independently.
+- **Next: #2, single canonical `ParsedEmail` pass** so sanitizer, classifier, analysis, and preview builders stop deriving overlapping artifacts independently.
 - **Defer unified rendering-cache work** until it no longer has to support both legacy and DOM branches.
 
 ## Implementation status — original email recovery

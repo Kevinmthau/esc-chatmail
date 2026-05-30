@@ -366,7 +366,13 @@ final class ChatMessagesCoordinator: ObservableObject {
         let config = VirtualScrollConfiguration.default
         let prefetchLimit = config.visibleItemCount + config.bufferSize
         let recentMessages = visibleMessages.suffix(prefetchLimit)
-        let messageIds = recentMessages.map(\.id)
+        let messageIds = recentMessages
+            .filter { message in
+                message.chatPreviewText?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .isEmpty ?? true
+            }
+            .map(\.id)
         let senderEmails = recentMessages.compactMap(\.senderEmail)
 
         prefetchRecentContent(messageIds, senderEmails)

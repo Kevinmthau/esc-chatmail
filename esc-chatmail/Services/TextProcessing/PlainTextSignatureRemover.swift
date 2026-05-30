@@ -1,6 +1,6 @@
 import Foundation
 
-/// Detects and removes signature blocks from plain text email content.
+/// Legacy/plain-text-only fallback for detecting and removing signature blocks.
 /// Designed to be conservative for short messages while reliably stripping
 /// trailing contact blocks, mobile footers, and legal boilerplate.
 enum PlainTextSignatureRemover {
