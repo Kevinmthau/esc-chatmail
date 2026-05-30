@@ -96,26 +96,28 @@ enum ChatBubbleTextProcessor {
     ) -> ChatBubbleTextProcessingResult {
         // Strip quoted/signature content from HTML first. If that pass removes too much
         // (e.g., transactional templates), fall back to quote-only cleanup or original HTML.
-        let cleanedHTML = ProcessedTextCache.cleanedHTMLForProcessing(html)
+        let cleanup = ProcessedTextCache.cleanedHTMLForProcessing(html)
 
-        var plainTextAndQuotes = ProcessedTextCache.extractPlainTextAndQuotes(
-            from: cleanedHTML,
+        var plainText = ProcessedTextCache.extractPlainTextFromHTML(
+            from: cleanup.html,
             decodeHTMLEntities: decodeHTMLEntities,
-            formatSignOffLineBreaks: formatSignOffLineBreaks
+            formatSignOffLineBreaks: formatSignOffLineBreaks,
+            applyPlainTextQuoteRemoval: cleanup.applyPlainTextQuoteRemoval
         )
 
-        if plainTextAndQuotes.plainText == nil {
-            plainTextAndQuotes = ProcessedTextCache.extractPlainTextAndQuotes(
+        if plainText == nil {
+            plainText = ProcessedTextCache.extractPlainTextFromHTML(
                 from: html,
                 decodeHTMLEntities: decodeHTMLEntities,
-                formatSignOffLineBreaks: formatSignOffLineBreaks
+                formatSignOffLineBreaks: formatSignOffLineBreaks,
+                applyPlainTextQuoteRemoval: true
             )
         }
 
-        let hasRichContent = classifyRichContent ? ProcessedTextCache.hasGenuineRichContent(cleanedHTML) : false
+        let hasRichContent = classifyRichContent ? ProcessedTextCache.hasGenuineRichContent(cleanup.html) : false
         return ChatBubbleTextProcessingResult(
-            mainText: plainTextAndQuotes.plainText,
-            quotedParts: plainTextAndQuotes.quotedParts,
+            mainText: plainText,
+            quotedParts: [],
             hasRichContent: hasRichContent
         )
     }
@@ -158,13 +160,18 @@ enum ChatBubbleTextProcessor {
     }
 }
 
+fileprivate struct HTMLProcessingCleanupResult {
+    let html: String
+    let applyPlainTextQuoteRemoval: Bool
+}
+
 /// Thread-safe cache for processed message text content
 /// Eliminates redundant HTML parsing and regex operations during scroll
 /// Uses LRUCacheActor for automatic eviction management
 actor ProcessedTextCache: MemoryWarningHandler {
     static let shared = ProcessedTextCache()
     // Bump to invalidate cached entries when processing logic changes.
-    private static let processingVersion = "2026-03-02-chat-bubble-unified-v3"
+    private static let processingVersion = "2026-05-29-html-dom-text-v7"
     static let chatBubblePreviewMode = "chat-bubble-preview"
 
     /// Cached text content with rich content indicator and extracted quotes
@@ -816,36 +823,202 @@ actor ProcessedTextCache: MemoryWarningHandler {
         return nil
     }
 
-    nonisolated fileprivate static func extractPlainTextAndQuotes(
+    nonisolated fileprivate static func extractPlainTextFromHTML(
         from html: String,
         decodeHTMLEntities: Bool = false,
-        formatSignOffLineBreaks: Bool = true
-    ) -> (plainText: String?, quotedParts: [QuotedPart]) {
+        formatSignOffLineBreaks: Bool = true,
+        applyPlainTextQuoteRemoval: Bool = false
+    ) -> String? {
         let extracted = TextProcessing.extractPlainText(from: html)
-        guard !extracted.isEmpty else { return (nil, []) }
+        guard !extracted.isEmpty else { return nil }
 
         let decoded = decodeHTMLEntities ? HTMLEntityDecoder.decode(extracted) : extracted
-        let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: decoded)
-        let extractionResult = PlainTextQuoteRemover.extractQuotes(from: unwrapped)
+        let textBeforeUnwrap = applyPlainTextQuoteRemoval
+            ? decoded
+            : removeConsecutivePlainTextQuoteLines(from: decoded)
+        let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: textBeforeUnwrap)
+        let quoteRemoved: String
+        if applyPlainTextQuoteRemoval {
+            quoteRemoved = PlainTextQuoteRemover.extractQuotes(from: unwrapped).mainContent
+        } else {
+            let headerRemoved = removePlainTextHeaderQuoteBlocks(from: unwrapped)
+            quoteRemoved = removeResidualHTMLTextQuoteMarkers(from: headerRemoved)
+        }
         let formatted = formatSignOffLineBreaks
-            ? TextProcessing.formatSignOffLineBreaks(in: extractionResult.mainContent)
-            : extractionResult.mainContent
-        return (formatted.isEmpty ? nil : formatted, extractionResult.quotedParts)
+            ? TextProcessing.formatSignOffLineBreaks(in: quoteRemoved)
+            : quoteRemoved
+        let trimmed = formatted.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
-    nonisolated fileprivate static func cleanedHTMLForProcessing(_ html: String) -> String {
+    nonisolated private static func removeConsecutivePlainTextQuoteLines(from text: String) -> String {
+        let lines = text.components(separatedBy: .newlines)
+        guard lines.count > 1 else { return text }
+
+        var consecutiveQuoteLineCount = 0
+        for index in lines.indices {
+            let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix(">") {
+                consecutiveQuoteLineCount += 1
+                if consecutiveQuoteLineCount >= 2 {
+                    var firstQuoteLineIndex = index - consecutiveQuoteLineCount + 1
+                    if firstQuoteLineIndex > 0 {
+                        let precedingLine = lines[firstQuoteLineIndex - 1].trimmingCharacters(in: .whitespaces)
+                        if isHTMLTextQuoteAttributionLine(precedingLine) {
+                            firstQuoteLineIndex -= 1
+                        }
+                    }
+                    return lines[..<firstQuoteLineIndex].joined(separator: "\n")
+                }
+            } else {
+                consecutiveQuoteLineCount = 0
+            }
+        }
+
+        return text
+    }
+
+    nonisolated private static func isHTMLTextQuoteAttributionLine(_ text: String) -> Bool {
+        let lowercased = text.lowercased()
+        let attributionSuffixes = [
+            "wrote:", "schrieb:", "a écrit :", "a écrit:", "escribió:",
+            "ha scritto:", "escreveu:", "schreef:"
+        ]
+        return attributionSuffixes.contains(where: { lowercased.hasSuffix($0) })
+    }
+
+    private static let residualHTMLTextQuoteMarkerPatterns: [NSRegularExpression] = {
+        let rawPatterns = [
+            #"(?im)(?:^|\n)\s*begin forwarded message:\s*"#,
+            #"(?im)(?:^|\n)\s*-{2,}\s*forwarded message\b[^\n]*"#,
+            #"(?im)\s-{2,}\s*forwarded message\b[^\n]*"#,
+            #"(?im)(?:^|\n)\s*-{2,}\s*original message\s*-{2,}[^\n]*"#,
+            #"(?im)(?:^|\n)\s*Am .{1,200}? schrieb .{1,120}\s*:\s*"#,
+            #"(?im)(?:^|\n)\s*Le .{1,200}? a écrit\s*:\s*"#,
+            #"(?im)(?:^|\n)\s*El .{1,200}? escribió\s*:\s*"#,
+            #"(?im)(?:^|\n)\s*Il .{1,200}? ha scritto\s*:\s*"#,
+            #"(?im)(?:^|\n)\s*Em .{1,200}? escreveu\s*:\s*"#,
+            #"(?im)(?:^|\n)\s*Op .{1,200}? schreef .{1,120}\s*:\s*"#
+        ]
+        return rawPatterns.compactMap { try? NSRegularExpression(pattern: $0, options: []) }
+    }()
+
+    nonisolated private static func removeResidualHTMLTextQuoteMarkers(from text: String) -> String {
+        let range = NSRange(location: 0, length: text.utf16.count)
+        let earliestMatch = residualHTMLTextQuoteMarkerPatterns
+            .compactMap { pattern in
+                pattern.firstMatch(in: text, options: [], range: range)
+            }
+            .min { lhs, rhs in
+                if lhs.range.location == rhs.range.location {
+                    return lhs.range.length < rhs.range.length
+                }
+                return lhs.range.location < rhs.range.location
+            }
+
+        guard let earliestMatch,
+              let matchRange = Range(earliestMatch.range, in: text) else {
+            return text
+        }
+
+        return String(text[..<matchRange.lowerBound])
+    }
+
+    private static let htmlTextFromHeaderPrefixesLowercased: [String] = [
+        "from:", "von:", "de:", "de :", "da:", "van:"
+    ]
+
+    private static let htmlTextToHeaderPrefixesLowercased: [String] = [
+        "to:", "an:", "à:", "à :", "para:", "aan:"
+    ]
+
+    private static let htmlTextSentOrDateHeaderPrefixesLowercased: [String] = [
+        "sent:", "date:", "gesendet:", "datum:", "envoyé:", "envoyé :", "enviado:", "inviato:", "verzonden:"
+    ]
+
+    private static let htmlTextEmailPattern: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: "[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", options: [.caseInsensitive])
+    }()
+
+    nonisolated private static func removePlainTextHeaderQuoteBlocks(from text: String) -> String {
+        let lines = text.components(separatedBy: .newlines)
+        guard lines.count > 1 else { return text }
+
+        var lineStartOffsets: [Int] = []
+        lineStartOffsets.reserveCapacity(lines.count)
+        var runningOffset = 0
+        for (index, line) in lines.enumerated() {
+            lineStartOffsets.append(runningOffset)
+            runningOffset += line.count
+            if index < lines.count - 1 {
+                runningOffset += 1
+            }
+        }
+
+        for index in lines.indices {
+            let trimmed = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+
+            let lowercased = trimmed.lowercased()
+            guard htmlTextFromHeaderPrefixesLowercased.contains(where: { lowercased.hasPrefix($0) }) else {
+                continue
+            }
+
+            guard index > 0,
+                  lines[index - 1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                continue
+            }
+
+            var sawTo = false
+            var sawSentOrDate = false
+            var sawEmailAddress = containsHTMLTextEmailAddress(trimmed)
+            let upperBound = min(lines.count, index + 24)
+
+            if index + 1 < upperBound {
+                for candidateIndex in (index + 1)..<upperBound {
+                    let candidate = lines[candidateIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !candidate.isEmpty else { continue }
+
+                    let candidateLower = candidate.lowercased()
+                    if htmlTextToHeaderPrefixesLowercased.contains(where: { candidateLower.hasPrefix($0) }) {
+                        sawTo = true
+                    }
+                    if htmlTextSentOrDateHeaderPrefixesLowercased.contains(where: { candidateLower.hasPrefix($0) }) {
+                        sawSentOrDate = true
+                    }
+                    if containsHTMLTextEmailAddress(candidate) {
+                        sawEmailAddress = true
+                    }
+
+                    if sawTo && sawSentOrDate && sawEmailAddress,
+                       let removalIndex = text.index(text.startIndex, offsetBy: lineStartOffsets[index], limitedBy: text.endIndex) {
+                        return String(text[..<removalIndex])
+                    }
+                }
+            }
+        }
+
+        return text
+    }
+
+    nonisolated private static func containsHTMLTextEmailAddress(_ text: String) -> Bool {
+        let range = NSRange(location: 0, length: text.utf16.count)
+        return htmlTextEmailPattern?.firstMatch(in: text, options: [], range: range) != nil
+    }
+
+    nonisolated fileprivate static func cleanedHTMLForProcessing(_ html: String) -> HTMLProcessingCleanupResult {
         let quotedAndSignature = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
         if HTMLMeaningfulContentChecker.hasMeaningfulContent(quotedAndSignature) {
-            return quotedAndSignature
+            return HTMLProcessingCleanupResult(html: quotedAndSignature, applyPlainTextQuoteRemoval: false)
         }
 
         // Signature cleanup false-positive; try quote-only cleanup.
         let quotedOnly = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedOnly) ?? html
         if HTMLMeaningfulContentChecker.hasMeaningfulContent(quotedOnly) {
-            return quotedOnly
+            return HTMLProcessingCleanupResult(html: quotedOnly, applyPlainTextQuoteRemoval: false)
         }
 
-        return html
+        return HTMLProcessingCleanupResult(html: html, applyPlainTextQuoteRemoval: true)
     }
 
     nonisolated private static func approximateTextContent(from html: String) -> String {

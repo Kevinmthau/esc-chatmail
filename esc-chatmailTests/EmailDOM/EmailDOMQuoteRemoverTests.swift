@@ -117,6 +117,410 @@ final class EmailDOMQuoteRemoverTests: XCTestCase {
         XCTAssertFalse(text.contains("Older thread should be hidden."))
     }
 
+    func testRemoveQuotes_tableHeaderBlockAfterQuoteMarker_truncates() {
+        let html = """
+        <div>Current reply.</div>
+        <div>-----Original Message-----</div>
+        <table>
+            <tr><td>From:</td><td>Alice Example &lt;alice@example.com&gt;</td></tr>
+            <tr><td>Sent:</td><td>Monday, January 1, 2026 9:00 AM</td></tr>
+            <tr><td>To:</td><td>Bob Example</td></tr>
+            <tr><td>Subject:</td><td>Re: Planning</td></tr>
+        </table>
+        <div>Older thread should be hidden.</div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+
+        XCTAssertEqual(text, "Current reply.")
+        XCTAssertFalse(text.contains("Alice Example"))
+        XCTAssertFalse(text.contains("Older thread should be hidden."))
+    }
+
+    func testRemoveQuotes_tableHeaderBlockAfterBlankSeparatorWithoutQuoteSignal_preservesContent() {
+        let html = """
+        <div>Please review this request.</div>
+        <div><br></div>
+        <table>
+            <tr><td>From:</td><td>Alice Example &lt;alice@example.com&gt;</td></tr>
+            <tr><td>To:</td><td>Support</td></tr>
+            <tr><td>Date:</td><td>Monday, January 1, 2026 9:00 AM</td></tr>
+            <tr><td>Subject:</td><td>Contact request</td></tr>
+        </table>
+        <div>Please follow up this week.</div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+
+        XCTAssertTrue(text.contains("Please review this request."))
+        XCTAssertTrue(text.contains("From: Alice Example"))
+        XCTAssertTrue(text.contains("alice@example.com"))
+        XCTAssertTrue(text.contains("To: Support"))
+        XCTAssertTrue(text.contains("Date: Monday, January 1, 2026 9:00 AM"))
+        XCTAssertTrue(text.contains("Subject: Contact request"))
+        XCTAssertTrue(text.contains("Please follow up this week."))
+    }
+
+    func testRemoveQuotes_earlierTableHeaderWithQuoteMarkerBeforeLaterNestedTableHeader_truncatesAtEarlierTable() {
+        let html = """
+        <html>
+        <body>
+        <div>Current reply.</div>
+        <div>-----Original Message-----</div>
+        <div><br></div>
+        <table>
+            <tr><td>From:</td><td>Alice Example &lt;alice@example.com&gt;</td></tr>
+            <tr><td>Sent:</td><td>Monday, January 1, 2026 9:00 AM</td></tr>
+            <tr><td>To:</td><td>Bob Example &lt;bob@example.com&gt;</td></tr>
+            <tr><td>Subject:</td><td>Re: Planning</td></tr>
+        </table>
+        <div>First quoted block should be hidden.</div>
+        <div><br></div>
+        <table>
+            <tr>
+                <td>
+                    <table>
+                        <tr><td>From:</td><td>Carol Example &lt;carol@example.com&gt;</td></tr>
+                        <tr><td>Sent:</td><td>Sunday, December 31, 2025 4:00 PM</td></tr>
+                        <tr><td>To:</td><td>Alice Example &lt;alice@example.com&gt;</td></tr>
+                        <tr><td>Subject:</td><td>Fwd: Planning</td></tr>
+                    </table>
+                </td>
+            </tr>
+        </table>
+        <div>Nested quoted block should also be hidden.</div>
+        </body>
+        </html>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+
+        XCTAssertEqual(text, "Current reply.")
+        XCTAssertFalse(text.contains("Alice Example"))
+        XCTAssertFalse(text.contains("First quoted block should be hidden."))
+        XCTAssertFalse(text.contains("Carol Example"))
+        XCTAssertFalse(text.contains("Nested quoted block should also be hidden."))
+    }
+
+    func testRemoveQuotes_nestedTableHeaderBlockAfterSignaturePreservesOuterReplyContent() {
+        let html = """
+        <html>
+        <body>
+        <table>
+            <tr>
+                <td>
+                    <div>Current reply.</div>
+                    <div>Jane Example</div>
+                    <div>jane@example.com</div>
+                    <table>
+                        <tr><td>From:</td><td>Alice Example &lt;alice@example.com&gt;</td></tr>
+                        <tr><td>Sent:</td><td>Monday, January 1, 2026 9:00 AM</td></tr>
+                        <tr><td>To:</td><td>Bob Example &lt;bob@example.com&gt;</td></tr>
+                        <tr><td>Subject:</td><td>Re: Planning</td></tr>
+                    </table>
+                </td>
+            </tr>
+            <tr><td>Older thread should be hidden.</td></tr>
+        </table>
+        </body>
+        </html>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+
+        XCTAssertTrue(text.contains("Current reply."))
+        XCTAssertFalse(text.contains("Alice Example"))
+        XCTAssertFalse(text.contains("Older thread should be hidden."))
+    }
+
+    func testRemoveQuotes_tableFieldStyleContentWithoutQuoteMarker_preservesContent() {
+        let html = """
+        <div>Trip details</div>
+        <table>
+            <tr><td>From:</td><td>SFO</td></tr>
+            <tr><td>To:</td><td>JFK</td></tr>
+            <tr><td>Date:</td><td>Jun 1</td></tr>
+        </table>
+        <div>Window seat preferred.</div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+
+        XCTAssertTrue(text.contains("Trip details"))
+        XCTAssertTrue(text.contains("From: SFO"))
+        XCTAssertTrue(text.contains("To: JFK"))
+        XCTAssertTrue(text.contains("Date: Jun 1"))
+        XCTAssertTrue(text.contains("Window seat preferred."))
+    }
+
+    func testRemoveQuotes_midBodyFieldStyleLines_preservesContent() {
+        let html = """
+        <div>Trip details</div>
+        <div><br></div>
+        <div>From: SFO</div>
+        <div>To: JFK</div>
+        <div>Date: Jun 1</div>
+        <div>Window seat preferred.</div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+
+        XCTAssertTrue(text.contains("Trip details"))
+        XCTAssertTrue(text.contains("From: SFO"))
+        XCTAssertTrue(text.contains("To: JFK"))
+        XCTAssertTrue(text.contains("Date: Jun 1"))
+        XCTAssertTrue(text.contains("Window seat preferred."))
+    }
+
+    func testRemoveQuotes_startOfBodyFieldStyleLines_preservesContent() {
+        let html = """
+        <div>From: SFO</div>
+        <div>To: JFK</div>
+        <div>Date: Jun 1</div>
+        <div>Window seat preferred.</div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+
+        XCTAssertTrue(text.contains("From: SFO"))
+        XCTAssertTrue(text.contains("To: JFK"))
+        XCTAssertTrue(text.contains("Date: Jun 1"))
+        XCTAssertTrue(text.contains("Window seat preferred."))
+    }
+
+    func testRemoveQuotes_brSeparatedHeaderBlock_truncates() {
+        let html = """
+        <div>Current reply.</div>
+        <div>
+            From: Alice Example &lt;alice@example.com&gt;<br>
+            Sent: Monday, January 1, 2026 9:00 AM<br>
+            To: Bob Example &lt;bob@example.com&gt;<br>
+            Subject: Re: Planning<br><br>
+            Older thread should be hidden.
+        </div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+
+        XCTAssertEqual(text, "Current reply.")
+        XCTAssertFalse(text.contains("Alice Example"))
+        XCTAssertFalse(text.contains("Older thread should be hidden."))
+    }
+
+    func testRemoveQuotes_brSeparatedHeaderBlockAsFirstVisibleContent_preservesContent() {
+        let html = """
+        <div>
+            From: Alice Example &lt;alice@example.com&gt;<br>
+            Sent: Monday, January 1, 2026 9:00 AM<br>
+            To: Support &lt;support@example.com&gt;<br>
+            Subject: Contact request<br><br>
+            Please call me back.
+        </div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+
+        XCTAssertTrue(text.contains("From: Alice Example"))
+        XCTAssertTrue(text.contains("alice@example.com"))
+        XCTAssertTrue(text.contains("Subject: Contact request"))
+        XCTAssertTrue(text.contains("Please call me back."))
+    }
+
+    func testRemoveQuotes_brSeparatedHeaderBlockAfterHiddenPreheaderAsFirstVisibleContent_preservesContent() {
+        let html = """
+        <div style="display:none; max-height:0; overflow:hidden;">Preview text before the visible message.</div>
+        <div>
+            From: Alice Example &lt;alice@example.com&gt;<br>
+            Sent: Monday, January 1, 2026 9:00 AM<br>
+            To: Support &lt;support@example.com&gt;<br>
+            Subject: Contact request<br><br>
+            Please call me back.
+        </div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+
+        XCTAssertTrue(text.contains("From: Alice Example"))
+        XCTAssertTrue(text.contains("alice@example.com"))
+        XCTAssertTrue(text.contains("Subject: Contact request"))
+        XCTAssertTrue(text.contains("Please call me back."))
+    }
+
+    func testRemoveQuotes_brSeparatedFieldStyleContentWithoutEmailMetadata_preservesContent() {
+        let html = """
+        <div>Trip details</div>
+        <div>
+            From: SFO<br>
+            To: JFK<br>
+            Date: Jun 1<br>
+            Subject: Seat request<br><br>
+            Window seat preferred.
+        </div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html))
+
+        XCTAssertTrue(text.contains("Trip details"))
+        XCTAssertTrue(text.contains("From: SFO"))
+        XCTAssertTrue(text.contains("To: JFK"))
+        XCTAssertTrue(text.contains("Date: Jun 1"))
+        XCTAssertTrue(text.contains("Subject: Seat request"))
+        XCTAssertTrue(text.contains("Window seat preferred."))
+    }
+
+    func testRemoveQuotes_signatureMode_removesGenericContactSignatureBeforeHeader() {
+        let html = """
+        <div>Hi Kevin,</div>
+        <div>The estimate changed.</div>
+        <div>Buchalter</div>
+        <div>Monica</div>
+        <div>Mazzei</div>
+        <div>Partner | Certified Family Law Specialist</div>
+        <div>T</div>
+        <div><br></div>
+        <div>monica@examplelaw.com</div>
+        <div>425 Market Street, Suite 2900</div>
+        <div>San Francisco, CA 94105</div>
+        <div>www.examplelaw.com</div>
+        <div>From: Kevin Thau &lt;kmthau@gmail.com&gt;</div>
+        <div>Sent: Thursday, February 12, 2026 12:45 PM</div>
+        <div>To: Monica Example &lt;monica@examplelaw.com&gt;</div>
+        <div>Subject: Re: Draft Settlement Letter</div>
+        <div>Thanks for sending this over.</div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+
+        XCTAssertEqual(text, "Hi Kevin,\n\nThe estimate changed.")
+        XCTAssertFalse(text.contains("Buchalter"))
+        XCTAssertFalse(text.contains("From: Kevin Thau"))
+    }
+
+    func testRemoveQuotes_signatureMode_preservesBodyLineBeforeContactSignatureWithoutBlank() {
+        let html = """
+        <div>The estimate changed.</div>
+        <div>John Doe</div>
+        <div>Partner</div>
+        <div>john@example.com</div>
+        <div>415.555.1212</div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+
+        XCTAssertEqual(text, "The estimate changed.")
+        XCTAssertFalse(text.contains("John Doe"))
+        XCTAssertFalse(text.contains("john@example.com"))
+    }
+
+    func testRemoveQuotes_signatureMode_removesMinimalContactSignatureWithoutTitle() {
+        let html = """
+        <div>The estimate changed.</div>
+        <div>John Doe</div>
+        <div>john@example.com</div>
+        <div>415-555-1212</div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+
+        XCTAssertEqual(text, "The estimate changed.")
+        XCTAssertFalse(text.contains("John Doe"))
+        XCTAssertFalse(text.contains("john@example.com"))
+        XCTAssertFalse(text.contains("415-555-1212"))
+    }
+
+    func testRemoveQuotes_signatureMode_preservesTrailingContactListWithFinalBodyLine() {
+        let html = """
+        <div>Please pick one of these contacts.</div>
+        <div>Jane</div>
+        <div>jane@example.com</div>
+        <div>John</div>
+        <div>john@example.com</div>
+        <div>Please pick one</div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+
+        XCTAssertTrue(text.contains("Please pick one of these contacts."))
+        XCTAssertTrue(text.contains("Jane"))
+        XCTAssertTrue(text.contains("jane@example.com"))
+        XCTAssertTrue(text.contains("John"))
+        XCTAssertTrue(text.contains("john@example.com"))
+        XCTAssertTrue(text.contains("Please pick one"))
+    }
+
+    func testRemoveQuotes_signatureMode_preservesTrailingContactListEndingOnContactLine() {
+        let html = """
+        <div>Here are the contacts:</div>
+        <div>Jane</div>
+        <div>jane@example.com</div>
+        <div>John</div>
+        <div>john@example.com</div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+
+        XCTAssertTrue(text.contains("Here are the contacts:"))
+        XCTAssertTrue(text.contains("Jane"))
+        XCTAssertTrue(text.contains("jane@example.com"))
+        XCTAssertTrue(text.contains("John"))
+        XCTAssertTrue(text.contains("john@example.com"))
+    }
+
+    func testRemoveQuotes_signatureMode_preservesTrailingContactListAfterBlankSeparatorEndingOnContactLine() {
+        let html = """
+        <div>Here are the contacts:</div>
+        <div><br></div>
+        <div>Jane</div>
+        <div>jane@example.com</div>
+        <div>John</div>
+        <div>john@example.com</div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+
+        XCTAssertTrue(text.contains("Here are the contacts:"))
+        XCTAssertTrue(text.contains("Jane"))
+        XCTAssertTrue(text.contains("jane@example.com"))
+        XCTAssertTrue(text.contains("John"))
+        XCTAssertTrue(text.contains("john@example.com"))
+    }
+
+    func testRemoveQuotes_signatureMode_preservesReviewerEmailListEndingOnContactLine() {
+        let html = """
+        <div>Please email both reviewers:</div>
+        <div>Alice Smith</div>
+        <div>alice@example.com</div>
+        <div>Bob Jones</div>
+        <div>bob@example.com</div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+
+        XCTAssertTrue(text.contains("Please email both reviewers:"))
+        XCTAssertTrue(text.contains("Alice Smith"))
+        XCTAssertTrue(text.contains("alice@example.com"))
+        XCTAssertTrue(text.contains("Bob Jones"))
+        XCTAssertTrue(text.contains("bob@example.com"))
+    }
+
+    func testRemoveQuotes_signatureMode_preservesTrailingContactListWithNonKeywordIntro() {
+        let html = """
+        <div>Can you loop in these people?</div>
+        <div>Alice Smith</div>
+        <div>alice@example.com</div>
+        <div>Bob Jones</div>
+        <div>bob@example.com</div>
+        """
+
+        let text = plainText(EmailDOMQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures))
+
+        XCTAssertTrue(text.contains("Can you loop in these people?"))
+        XCTAssertTrue(text.contains("Alice Smith"))
+        XCTAssertTrue(text.contains("alice@example.com"))
+        XCTAssertTrue(text.contains("Bob Jones"))
+        XCTAssertTrue(text.contains("bob@example.com"))
+    }
+
     // MARK: - Text marker ("On ... wrote:")
 
     func testRemoveQuotes_onDateWrote_truncatesAtMarker() {

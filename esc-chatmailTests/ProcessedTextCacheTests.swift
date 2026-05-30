@@ -319,6 +319,356 @@ final class ProcessedTextCacheTests: XCTestCase {
         handler.deleteHTML(for: messageId)
     }
 
+    func testChatBubbleTextProcessor_htmlDOMQuoteContainers_removedBeforeTextExtraction() {
+        let cases = [
+            (
+                name: "gmail",
+                html: """
+                <div>Visible reply.</div>
+                <div class="gmail_quote"><p>Quoted Gmail history.</p></div>
+                """,
+                hiddenText: "Quoted Gmail history."
+            ),
+            (
+                name: "outlook",
+                html: """
+                <p>Visible reply.</p>
+                <div id="mail-editor-reference-message-container"><p>Quoted Outlook history.</p></div>
+                <p>Stale tail.</p>
+                """,
+                hiddenText: "Quoted Outlook history."
+            ),
+            (
+                name: "apple",
+                html: """
+                <p>Visible reply.</p>
+                <blockquote type="cite"><p>Quoted Apple history.</p></blockquote>
+                """,
+                hiddenText: "Quoted Apple history."
+            )
+        ]
+
+        for testCase in cases {
+            let result = ChatBubbleTextProcessor.process(
+                content: testCase.html,
+                options: ChatBubbleTextProcessorOptions(
+                    inputKind: .html,
+                    sanitizeRawEmailSource: false,
+                    decodeHTMLEntities: true,
+                    formatSignOffLineBreaks: true,
+                    classifyRichContent: false
+                )
+            )
+
+            XCTAssertEqual(result.mainText, "Visible reply.", testCase.name)
+            XCTAssertFalse(result.mainText?.contains(testCase.hiddenText) ?? true, testCase.name)
+            XCTAssertTrue(result.quotedParts.isEmpty, testCase.name)
+        }
+    }
+
+    func testChatBubbleTextProcessor_htmlLiteralQuoteLikeProse_isNotPlainTextQuoteRemoved() {
+        let html = """
+        <p>Please keep this literal example: On Jan 30, 2026 at 7:32 PM, Name should remain in the help text.</p>
+        <p>Done.</p>
+        """
+
+        let result = ChatBubbleTextProcessor.process(
+            content: html,
+            options: ChatBubbleTextProcessorOptions(
+                inputKind: .html,
+                sanitizeRawEmailSource: false,
+                decodeHTMLEntities: true,
+                formatSignOffLineBreaks: true,
+                classifyRichContent: false
+            )
+        )
+
+        XCTAssertEqual(
+            result.mainText,
+            "Please keep this literal example: On Jan 30, 2026 at 7:32 PM, Name should remain in the help text.\n\nDone."
+        )
+        XCTAssertTrue(result.quotedParts.isEmpty)
+    }
+
+    func testChatBubbleTextProcessor_htmlInternationalQuoteMarkers_removedAfterTextExtraction() {
+        let cases = [
+            (
+                name: "german",
+                visibleText: "Danke für die Nachricht.",
+                hiddenText: "Alter Verlauf.",
+                html: """
+                <div>Danke für die Nachricht.</div>
+                <div>Am 15. Januar 2024 schrieb Hans Müller:</div>
+                <div>Alter Verlauf.</div>
+                """
+            ),
+            (
+                name: "spanish",
+                visibleText: "Gracias por la información.",
+                hiddenText: "Mensaje anterior.",
+                html: """
+                <div>Gracias por la información.</div>
+                <div>El 15 de enero de 2024, Carlos García escribió:</div>
+                <div>Mensaje anterior.</div>
+                """
+            ),
+            (
+                name: "portuguese",
+                visibleText: "Obrigado.",
+                hiddenText: "Mensagem anterior.",
+                html: """
+                <div>Obrigado.</div>
+                <div>Em 15 de janeiro de 2024, João Silva escreveu:</div>
+                <div>Mensagem anterior.</div>
+                """
+            ),
+            (
+                name: "dutch",
+                visibleText: "Bedankt.",
+                hiddenText: "Oud bericht.",
+                html: """
+                <div>Bedankt.</div>
+                <div>Op 15 januari 2024 schreef Jan de Vries:</div>
+                <div>Oud bericht.</div>
+                """
+            )
+        ]
+
+        for testCase in cases {
+            let result = ChatBubbleTextProcessor.process(
+                content: testCase.html,
+                options: ChatBubbleTextProcessorOptions(
+                    inputKind: .html,
+                    sanitizeRawEmailSource: false,
+                    decodeHTMLEntities: true,
+                    formatSignOffLineBreaks: true,
+                    classifyRichContent: false
+                )
+            )
+
+            XCTAssertEqual(result.mainText, testCase.visibleText, testCase.name)
+            XCTAssertFalse(result.mainText?.contains(testCase.hiddenText) ?? true, testCase.name)
+            XCTAssertTrue(result.quotedParts.isEmpty, testCase.name)
+        }
+    }
+
+    func testChatBubbleTextProcessor_htmlWrappedPlainTextQuoteLines_removedAfterTextExtraction() {
+        let html = """
+        <div>Reply<br>&gt; old<br>&gt; thread</div>
+        """
+
+        let result = ChatBubbleTextProcessor.process(
+            content: html,
+            options: ChatBubbleTextProcessorOptions(
+                inputKind: .html,
+                sanitizeRawEmailSource: false,
+                decodeHTMLEntities: true,
+                formatSignOffLineBreaks: true,
+                classifyRichContent: false
+            )
+        )
+
+        XCTAssertEqual(result.mainText, "Reply")
+        XCTAssertTrue(result.quotedParts.isEmpty)
+    }
+
+    func testChatBubbleTextProcessor_htmlWrappedPlainTextQuoteLinesWithAttribution_removesAttribution() {
+        let html = """
+        <div>Reply<br>John wrote:<br>&gt; old<br>&gt; thread</div>
+        """
+
+        let result = ChatBubbleTextProcessor.process(
+            content: html,
+            options: ChatBubbleTextProcessorOptions(
+                inputKind: .html,
+                sanitizeRawEmailSource: false,
+                decodeHTMLEntities: true,
+                formatSignOffLineBreaks: true,
+                classifyRichContent: false
+            )
+        )
+
+        XCTAssertEqual(result.mainText, "Reply")
+        XCTAssertFalse(result.mainText?.contains("John wrote:") ?? true)
+        XCTAssertTrue(result.quotedParts.isEmpty)
+    }
+
+    func testProcessMessage_htmlOnlyOnWroteQuoteFallback_suppressesMainText() {
+        let messageId = "test-html-only-on-wrote-quote-\(UUID().uuidString)"
+        let handler = HTMLContentHandler.shared
+        let html = """
+        <div>On Jan 31, 2026 at 12:31 PM, Scott Wunderlich wrote:</div>
+        <div>Earlier message only.</div>
+        """
+
+        _ = handler.saveHTML(html, for: messageId)
+        let result = ProcessedTextCache.processMessage(messageId: messageId, handler: handler)
+
+        XCTAssertNil(result.plainText)
+        XCTAssertTrue(result.quotedParts.isEmpty)
+
+        handler.deleteHTML(for: messageId)
+    }
+
+    func testChatBubbleTextProcessor_htmlTextualForwardMarker_removedAfterDOMCleanup() {
+        let html = """
+        <div>FYI</div>
+        <div>---------- Forwarded message ---------</div>
+        <div>From: Jane Example &lt;jane@example.com&gt;</div>
+        <div>Date: Mon, Feb 16, 2026 at 5:56 PM</div>
+        <div>Subject: Spring plans</div>
+        <div>To: Kevin Example &lt;kevin@example.com&gt;</div>
+        <div>Looking forward to seeing you there.</div>
+        """
+
+        let result = ChatBubbleTextProcessor.process(
+            content: html,
+            options: ChatBubbleTextProcessorOptions(
+                inputKind: .html,
+                sanitizeRawEmailSource: false,
+                decodeHTMLEntities: true,
+                formatSignOffLineBreaks: true,
+                classifyRichContent: false
+            )
+        )
+
+        XCTAssertEqual(result.mainText, "FYI")
+        XCTAssertFalse(result.mainText?.contains("Forwarded message") ?? true)
+        XCTAssertFalse(result.mainText?.contains("Jane Example") ?? true)
+        XCTAssertTrue(result.quotedParts.isEmpty)
+    }
+
+    func testChatBubbleTextProcessor_htmlBRSeparatedHeaderBlock_removedBeforeTextExtraction() {
+        let html = """
+        <div>Visible reply.</div>
+        <div>
+            From: Jane Example &lt;jane@example.com&gt;<br>
+            Sent: Monday, February 16, 2026 5:56 PM<br>
+            To: Kevin Example &lt;kevin@example.com&gt;<br>
+            Subject: Spring plans<br><br>
+            Looking forward to seeing you there.
+        </div>
+        """
+
+        let result = ChatBubbleTextProcessor.process(
+            content: html,
+            options: ChatBubbleTextProcessorOptions(
+                inputKind: .html,
+                sanitizeRawEmailSource: false,
+                decodeHTMLEntities: true,
+                formatSignOffLineBreaks: true,
+                classifyRichContent: false
+            )
+        )
+
+        XCTAssertEqual(result.mainText, "Visible reply.")
+        XCTAssertFalse(result.mainText?.contains("Jane Example") ?? true)
+        XCTAssertFalse(result.mainText?.contains("Looking forward to seeing you there.") ?? true)
+        XCTAssertTrue(result.quotedParts.isEmpty)
+    }
+
+    func testChatBubbleTextProcessor_htmlTableHeaderBlockAfterBlankSeparator_removedBeforeTextExtraction() {
+        let html = """
+        <div>Visible reply.</div>
+        <div><br></div>
+        <table>
+            <tr><td>From:</td><td>Jane Example &lt;jane@example.com&gt;</td></tr>
+            <tr><td>Sent:</td><td>Monday, February 16, 2026 5:56 PM</td></tr>
+            <tr><td>To:</td><td>Kevin Example &lt;kevin@example.com&gt;</td></tr>
+            <tr><td>Subject:</td><td>Spring plans</td></tr>
+        </table>
+        <div>Looking forward to seeing you there.</div>
+        """
+
+        let result = ChatBubbleTextProcessor.process(
+            content: html,
+            options: ChatBubbleTextProcessorOptions(
+                inputKind: .html,
+                sanitizeRawEmailSource: false,
+                decodeHTMLEntities: true,
+                formatSignOffLineBreaks: true,
+                classifyRichContent: false
+            )
+        )
+
+        XCTAssertEqual(result.mainText, "Visible reply.")
+        XCTAssertFalse(result.mainText?.contains("Jane Example") ?? true)
+        XCTAssertFalse(result.mainText?.contains("Looking forward to seeing you there.") ?? true)
+        XCTAssertTrue(result.quotedParts.isEmpty)
+    }
+
+    func testChatBubbleTextProcessor_htmlSeparateDivHeaderBlockAfterBlankSeparator_removedByTextCleanup() {
+        let html = """
+        <div>Visible reply.</div>
+        <div><br></div>
+        <div>From: Jane Example &lt;jane@example.com&gt;</div>
+        <div>Sent: Monday, February 16, 2026 5:56 PM</div>
+        <div>To: Kevin Example &lt;kevin@example.com&gt;</div>
+        <div>Subject: Spring plans</div>
+        <div>Looking forward to seeing you there.</div>
+        """
+
+        let result = ChatBubbleTextProcessor.process(
+            content: html,
+            options: ChatBubbleTextProcessorOptions(
+                inputKind: .html,
+                sanitizeRawEmailSource: false,
+                decodeHTMLEntities: true,
+                formatSignOffLineBreaks: true,
+                classifyRichContent: false
+            )
+        )
+
+        XCTAssertEqual(result.mainText, "Visible reply.")
+        XCTAssertFalse(result.mainText?.contains("Jane Example") ?? true)
+        XCTAssertFalse(result.mainText?.contains("Looking forward to seeing you there.") ?? true)
+        XCTAssertTrue(result.quotedParts.isEmpty)
+    }
+
+    func testChatBubbleTextProcessor_htmlSeparateDivHeaderBlockWithoutSubject_removedByTextCleanup() {
+        let html = """
+        <div>Great. Will do! Have a nice weekend!</div>
+        <div><br></div>
+        <div>From: Kevin Thau &lt;kevin@example.com&gt;</div>
+        <div>Sent: Saturday, February 14, 2026 3:17:13 PM</div>
+        <div>To: Jasmine Example &lt;jasmine@example.com&gt;</div>
+        <div>Quoted body starts here.</div>
+        """
+
+        let result = ChatBubbleTextProcessor.process(
+            content: html,
+            options: ChatBubbleTextProcessorOptions(
+                inputKind: .html,
+                sanitizeRawEmailSource: false,
+                decodeHTMLEntities: true,
+                formatSignOffLineBreaks: true,
+                classifyRichContent: false
+            )
+        )
+
+        XCTAssertEqual(result.mainText, "Great. Will do! Have a nice weekend!")
+        XCTAssertFalse(result.mainText?.contains("Kevin Thau") ?? true)
+        XCTAssertFalse(result.mainText?.contains("Quoted body starts here.") ?? true)
+        XCTAssertTrue(result.quotedParts.isEmpty)
+    }
+
+    func testProcessMessage_htmlQuoteCleanup_returnsNoQuotedParts() {
+        let messageId = "test-html-quoted-parts-\(UUID().uuidString)"
+        let handler = HTMLContentHandler.shared
+        let html = """
+        <p>Visible reply.</p>
+        <blockquote type="cite"><p>Quoted history.</p></blockquote>
+        """
+
+        _ = handler.saveHTML(html, for: messageId)
+        let result = ProcessedTextCache.processMessage(messageId: messageId, handler: handler)
+
+        XCTAssertEqual(result.plainText, "Visible reply.")
+        XCTAssertTrue(result.quotedParts.isEmpty)
+
+        handler.deleteHTML(for: messageId)
+    }
+
     // MARK: - List Item Detection Tests
 
     func testIsListItem_numberedList_singleDigit() {

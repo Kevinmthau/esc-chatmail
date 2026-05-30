@@ -353,6 +353,54 @@ final class PlainTextQuoteRemoverTests: XCTestCase {
         XCTAssertEqual(result, "Here is the link you asked for:\nwww.example.com")
     }
 
+    func testRemoveSignature_trailingContactListEndingOnEmail_preserved() {
+        let text = """
+        Here are the contacts:
+        Jane
+        jane@example.com
+        John
+        john@example.com
+        """
+
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+
+        XCTAssertEqual(
+            result,
+            "Here are the contacts:\nJane\njane@example.com\nJohn\njohn@example.com"
+        )
+    }
+
+    func testRemoveSignature_reviewerEmailListEndingOnEmail_preserved() {
+        let text = """
+        Please email both reviewers:
+        Alice Smith
+        alice@example.com
+        Bob Jones
+        bob@example.com
+        """
+
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+
+        XCTAssertEqual(
+            result,
+            "Please email both reviewers:\nAlice Smith\nalice@example.com\nBob Jones\nbob@example.com"
+        )
+    }
+
+    func testRemoveSignature_minimalContactInfoSignature_removes() {
+        let text = """
+        Let me know.
+
+        John Doe
+        john@example.com
+        415-555-1212
+        """
+
+        let result = PlainTextQuoteRemover.removeSignature(from: text)
+
+        XCTAssertEqual(result, "Let me know.")
+    }
+
     func testRemoveSignature_phoneNumberInBodySentence_preserved() {
         let text = """
         Hi,

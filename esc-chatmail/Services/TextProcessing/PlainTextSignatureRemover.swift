@@ -226,6 +226,8 @@ enum PlainTextSignatureRemover {
         var signatureLineCount = 0
         var contactSignals = 0
         var signatureSupportSignals = 0
+        var affiliationSupportSignals = 0
+        var sawSignOffLine = false
         var sawSeparator = false
 
         for index in stride(from: lastNonEmpty, through: scanStart, by: -1) {
@@ -270,10 +272,19 @@ enum PlainTextSignatureRemover {
                 signatureLineCount += 1
                 // We scan backwards, so each matched line becomes the new earliest start.
                 signatureStartLine = index
+                if isSignOffLineForSignatureContext(line) {
+                    sawSignOffLine = true
+                }
+                if hasAffiliationSignatureSignal(line, evaluation: evaluation) {
+                    affiliationSupportSignals += 1
+                }
                 if hasStrongSignatureSignal(line, evaluation: evaluation) {
                     signatureSupportSignals += 1
                 }
             } else if signatureLineCount > 0 {
+                if isSignOffLineForSignatureContext(line) {
+                    sawSignOffLine = true
+                }
                 break
             }
         }
@@ -282,6 +293,12 @@ enum PlainTextSignatureRemover {
             if contactSignals == 0 &&
                 signatureSupportSignals == 0 &&
                 hasBodyLikeContentAfterPotentialSignOff(startingAt: startLine, lines: lines, lastNonEmpty: lastNonEmpty) {
+                return trimmed
+            }
+            if contactSignals >= 2 &&
+                affiliationSupportSignals == 0 &&
+                !sawSignOffLine &&
+                hasContactListIntroBeforeSignature(startingAt: startLine, lines: lines) {
                 return trimmed
             }
             let totalChars = trimmed.count
@@ -386,6 +403,14 @@ enum PlainTextSignatureRemover {
             }
         }
         return false
+    }
+
+    private static func isSignOffLineForSignatureContext(_ line: String) -> Bool {
+        let normalized = line
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: .punctuationCharacters)
+        return signOffWords.contains(normalized)
     }
 
     private static func looksLikeSentence(_ line: String) -> Bool {
@@ -641,6 +666,25 @@ enum PlainTextSignatureRemover {
         return false
     }
 
+    private static func hasContactListIntroBeforeSignature(startingAt startLine: Int, lines: [String]) -> Bool {
+        guard let previousIndex = previousNonEmptyLineIndex(before: startLine, in: lines) else {
+            return false
+        }
+        return isContactListIntroLine(lines[previousIndex])
+    }
+
+    private static let contactListIntroKeywords: [String] = [
+        "contact", "email", "reviewer", "recipient"
+    ]
+
+    private static func isContactListIntroLine(_ line: String) -> Bool {
+        let lowercased = line
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return lowercased.hasSuffix(":") &&
+            contactListIntroKeywords.contains(where: { lowercased.contains($0) })
+    }
+
     private static func preservesPostscriptAfterSignOff(lines: [String], lastNonEmpty: Int) -> Bool {
         guard isPostscriptLine(lines[lastNonEmpty].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) else {
             return false
@@ -814,6 +858,26 @@ enum PlainTextSignatureRemover {
         if containsKeyword(lowercased, in: titleKeywords) ||
             containsKeyword(lowercased, in: organizationKeywords) ||
             containsAddressKeyword(lowercased) {
+            return true
+        }
+
+        return false
+    }
+
+    private static func hasAffiliationSignatureSignal(_ line: String, evaluation: LineEvaluation) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        let lowercased = trimmed.lowercased()
+        if containsSignatureSeparator(trimmed) {
+            return true
+        }
+        if containsKeyword(lowercased, in: titleKeywords) ||
+            containsKeyword(lowercased, in: organizationKeywords) ||
+            containsAddressKeyword(lowercased) {
+            return true
+        }
+        if evaluation.isHardIndicator && !evaluation.hasContactInfo {
             return true
         }
 

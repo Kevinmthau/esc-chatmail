@@ -55,6 +55,7 @@ enum EmailDOMQuoteRemover {
                 try removeSignatureWrappers(in: document)
                 try removeFooterContainers(in: document)
                 try truncateAtSignatureMarkers(in: document)
+                try truncateTrailingContactSignature(in: document)
             }
             if inputIsFragment, let body = document.body() {
                 return try body.html()
@@ -174,6 +175,18 @@ enum EmailDOMQuoteRemover {
             return true
         }
 
+        if try truncateAtHeaderTableBoundary(in: document) {
+            return true
+        }
+
+        if try truncateAtHeaderBlockBoundary(in: document) {
+            return true
+        }
+
+        if try truncateAtInlineHeaderBlockBoundary(in: document) {
+            return true
+        }
+
         return false
     }
 
@@ -231,6 +244,323 @@ enum EmailDOMQuoteRemover {
             current = node.parent()
         }
         return element
+    }
+
+    private static let fromHeaderPrefixesLowercased: [String] = [
+        "from:", "von:", "de:", "de :", "da:", "van:"
+    ]
+
+    private static let toHeaderPrefixesLowercased: [String] = [
+        "to:", "an:", "à:", "à :", "para:", "aan:"
+    ]
+
+    private static let sentOrDateHeaderPrefixesLowercased: [String] = [
+        "sent:", "date:", "gesendet:", "datum:", "envoyé:", "envoyé :", "enviado:", "inviato:", "verzonden:"
+    ]
+
+    private static let subjectHeaderPrefixesLowercased: [String] = [
+        "subject:", "betreff:", "objet:", "objet :", "asunto:", "oggetto:", "assunto:", "onderwerp:"
+    ]
+
+    private struct HeaderTableBoundaryCandidate {
+        let removalElement: Element
+        let boundaryLineIndex: Int
+        let tableDepth: Int
+    }
+
+    private static func truncateAtHeaderTableBoundary(in document: Document) throws -> Bool {
+        guard let body = document.body() else { return false }
+        let tables = try document.select("table").array()
+        var candidates: [HeaderTableBoundaryCandidate] = []
+
+        for table in tables {
+            let precedingLines = visibleLineElements(in: body, includingEmpty: true, stoppingBefore: table)
+            let tableLines = visibleLineElements(in: table, includingEmpty: true)
+            let lines = precedingLines + tableLines
+            let lineTexts = lines.map(\.text)
+
+            guard let localStartIndex = tableLines.firstIndex(where: { isFromHeaderLine($0.text) }) else {
+                continue
+            }
+            let startIndex = precedingLines.count + localStartIndex
+
+            let boundary = quoteHeaderBoundaryMatch(before: startIndex, in: lines)
+
+            let removalElement: Element
+            let boundaryLineIndex: Int
+            if let boundary {
+                guard hasQuoteHeaderSequence(
+                    startingAt: startIndex,
+                    in: lineTexts,
+                    requireSubject: boundary.kind == .contactSignature
+                ) else {
+                    continue
+                }
+                removalElement = boundary.kind == .hard ? lines[boundary.index].element : table
+                boundaryLineIndex = boundary.kind == .hard ? boundary.index : startIndex
+            } else {
+                continue
+            }
+
+            candidates.append(HeaderTableBoundaryCandidate(
+                removalElement: removalElement,
+                boundaryLineIndex: boundaryLineIndex,
+                tableDepth: tableDepth(table)
+            ))
+        }
+
+        guard let candidate = candidates.min(by: { lhs, rhs in
+            if lhs.boundaryLineIndex == rhs.boundaryLineIndex {
+                return lhs.tableDepth > rhs.tableDepth
+            }
+            return lhs.boundaryLineIndex < rhs.boundaryLineIndex
+        }) else {
+            return false
+        }
+
+        try removeFromHereForward(candidate.removalElement)
+        return true
+    }
+
+    private static func truncateAtHeaderBlockBoundary(in document: Document) throws -> Bool {
+        guard let body = document.body() else { return false }
+        let lines = visibleLineElements(in: body, includingEmpty: true)
+
+        for index in lines.indices {
+            guard isFromHeaderLine(lines[index].text) else {
+                continue
+            }
+
+            guard let boundary = quoteHeaderBoundaryMatch(before: index, in: lines) else {
+                continue
+            }
+
+            guard hasQuoteHeaderSequence(
+                startingAt: index,
+                in: lines,
+                requireSubject: boundary.kind == .contactSignature
+            ) else {
+                continue
+            }
+
+            let removalElement = boundary.kind == .hard ? lines[boundary.index].element : lines[index].element
+            try removeFromHereForward(removalElement)
+            return true
+        }
+
+        return false
+    }
+
+    private static func truncateAtInlineHeaderBlockBoundary(in document: Document) throws -> Bool {
+        guard let body = document.body() else { return false }
+
+        for element in inlineHeaderBlockElements(in: body) {
+            let lines = inlineHeaderLines(in: element)
+            let lineTexts = lines.map(\.text)
+
+            for index in lineTexts.indices {
+                guard isFromHeaderLine(lineTexts[index]) else {
+                    continue
+                }
+
+                let boundary = quoteHeaderBoundaryMatch(before: index, in: lineTexts)
+                let requiresStrongInlineSignal = boundary == nil
+                let requireSubject = boundary?.kind == .contactSignature || requiresStrongInlineSignal
+
+                guard hasQuoteHeaderSequence(
+                    startingAt: index,
+                    in: lineTexts,
+                    requireSubject: requireSubject
+                ) else {
+                    continue
+                }
+
+                if requiresStrongInlineSignal {
+                    guard hasCurrentMessageContentBeforeInlineHeaderBlock(
+                            startingAt: index,
+                            in: lineTexts,
+                            element: element,
+                            body: body
+                        ),
+                        hasCompleteQuoteHeaderSequence(startingAt: index, in: lineTexts),
+                        headerSequenceContainsEmailAddress(startingAt: index, in: lineTexts) else {
+                        continue
+                    }
+                }
+
+                let removalLineIndex = (boundary?.kind == .hard) ? (boundary?.index ?? index) : index
+                guard let textNode = lines[removalLineIndex].startTextNode else {
+                    try removeFromHereForward(element)
+                    return true
+                }
+
+                try truncateAtTextNode(
+                    textNode,
+                    matchStartUTF16: lines[removalLineIndex].startUTF16Offset,
+                    in: textNode.getWholeText()
+                )
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private enum QuoteHeaderBoundary {
+        case hard
+        case contactSignature
+    }
+
+    private struct QuoteHeaderBoundaryMatch {
+        let kind: QuoteHeaderBoundary
+        let index: Int
+    }
+
+    private static func quoteHeaderBoundaryMatch(
+        before startIndex: Int,
+        in lines: [VisibleLineElement]
+    ) -> QuoteHeaderBoundaryMatch? {
+        quoteHeaderBoundaryMatch(before: startIndex, in: lines.map(\.text))
+    }
+
+    private static func quoteHeaderBoundaryMatch(before startIndex: Int, in lineTexts: [String]) -> QuoteHeaderBoundaryMatch? {
+        guard startIndex > 0 else { return nil }
+
+        for candidate in stride(from: startIndex - 1, through: 0, by: -1) {
+            let previousText = lineTexts[candidate]
+            guard !previousText.isEmpty else { continue }
+
+            if isTextualQuoteBoundaryLine(previousText) {
+                return QuoteHeaderBoundaryMatch(kind: .hard, index: candidate)
+            }
+
+            if isContactSignatureLine(previousText) {
+                return QuoteHeaderBoundaryMatch(kind: .contactSignature, index: candidate)
+            }
+
+            return nil
+        }
+
+        return nil
+    }
+
+    private static func isFromHeaderLine(_ text: String) -> Bool {
+        let lowercased = text.lowercased()
+        return fromHeaderPrefixesLowercased.contains(where: { lowercased.hasPrefix($0) })
+    }
+
+    private static func isTextualQuoteBoundaryLine(_ text: String) -> Bool {
+        let lowercased = text.lowercased()
+        if lowercased.contains("begin forwarded message:") {
+            return true
+        }
+        if lowercased.contains("forwarded message"), lowercased.contains("--") {
+            return true
+        }
+        if lowercased.contains("original message"), lowercased.contains("--") {
+            return true
+        }
+        return lowercased.trimmingCharacters(in: .whitespacesAndNewlines) == "________________________________"
+    }
+
+    private static func hasQuoteHeaderSequence(
+        startingAt startIndex: Int,
+        in lines: [VisibleLineElement],
+        requireSubject: Bool = false
+    ) -> Bool {
+        hasQuoteHeaderSequence(
+            startingAt: startIndex,
+            in: lines.map(\.text),
+            requireSubject: requireSubject
+        )
+    }
+
+    private static func hasQuoteHeaderSequence(
+        startingAt startIndex: Int,
+        in lineTexts: [String],
+        requireSubject: Bool = false
+    ) -> Bool {
+        var sawTo = false
+        var sawSentOrDate = false
+        var sawSubject = false
+        let upperBound = min(lineTexts.count, startIndex + 24)
+
+        guard startIndex + 1 < upperBound else { return false }
+
+        for index in (startIndex + 1)..<upperBound {
+            let lowercased = lineTexts[index].lowercased()
+            if toHeaderPrefixesLowercased.contains(where: { lowercased.hasPrefix($0) }) {
+                sawTo = true
+            }
+            if sentOrDateHeaderPrefixesLowercased.contains(where: { lowercased.hasPrefix($0) }) {
+                sawSentOrDate = true
+            }
+            if subjectHeaderPrefixesLowercased.contains(where: { lowercased.hasPrefix($0) }) {
+                sawSubject = true
+            }
+
+            if sawTo && (sawSentOrDate || sawSubject) {
+                if !requireSubject || sawSubject {
+                    return true
+                }
+            }
+        }
+
+        return false
+    }
+
+    private static func hasCompleteQuoteHeaderSequence(startingAt startIndex: Int, in lineTexts: [String]) -> Bool {
+        var sawTo = false
+        var sawSentOrDate = false
+        var sawSubject = false
+        let upperBound = min(lineTexts.count, startIndex + 24)
+
+        guard startIndex + 1 < upperBound else { return false }
+
+        for index in (startIndex + 1)..<upperBound {
+            let lowercased = lineTexts[index].lowercased()
+            if toHeaderPrefixesLowercased.contains(where: { lowercased.hasPrefix($0) }) {
+                sawTo = true
+            }
+            if sentOrDateHeaderPrefixesLowercased.contains(where: { lowercased.hasPrefix($0) }) {
+                sawSentOrDate = true
+            }
+            if subjectHeaderPrefixesLowercased.contains(where: { lowercased.hasPrefix($0) }) {
+                sawSubject = true
+            }
+
+            if sawTo && sawSentOrDate && sawSubject {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private static func headerSequenceContainsEmailAddress(startingAt startIndex: Int, in lineTexts: [String]) -> Bool {
+        let upperBound = min(lineTexts.count, startIndex + 24)
+        guard startIndex < upperBound else { return false }
+
+        for index in startIndex..<upperBound {
+            if containsEmailAddress(lineTexts[index]) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private static func hasCurrentMessageContentBeforeInlineHeaderBlock(
+        startingAt startIndex: Int,
+        in lineTexts: [String],
+        element: Element,
+        body: Element
+    ) -> Bool {
+        if lineTexts.prefix(startIndex).contains(where: { !$0.isEmpty }) {
+            return true
+        }
+
+        return hasVisibleTextBefore(element, in: body)
     }
 
     // MARK: - Text markers ("On … wrote:")
@@ -660,6 +990,238 @@ enum EmailDOMQuoteRemover {
         }
     }
 
+    private static let signatureEmailPattern: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: "[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", options: [.caseInsensitive])
+    }()
+
+    private static let signatureURLPattern: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: "\\bhttps?://\\S+|\\bwww\\.[^\\s]+", options: [.caseInsensitive])
+    }()
+
+    private static let signaturePhonePattern: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: "\\b\\+?\\d[\\d\\s().-]{6,}\\b", options: [])
+    }()
+
+    private static let signatureAddressPattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"(?i)\b(?:street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|suite|ste|floor|fl)\b\.?"#,
+            options: []
+        )
+    }()
+
+    private static let signatureCityStateZipPattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"^[A-Z][A-Z .'-]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?$"#,
+            options: [.caseInsensitive]
+        )
+    }()
+
+    private static let signatureStandaloneContactLabelPattern: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: "^(m|c|o|f|d|t|p)[:.]?$", options: [.caseInsensitive])
+    }()
+
+    private static let signatureTitleKeywords: [String] = [
+        "director", "manager", "vp", "vice president", "president", "founder",
+        "ceo", "cfo", "cto", "coo", "realtor", "broker", "associate",
+        "sales", "agent", "partner", "principal", "owner", "specialist"
+    ]
+
+    private static let signatureOrganizationKeywords: [String] = [
+        " inc", " inc.", " llc", " ltd", " corp", " corp.", " corporation",
+        " company", " co.", " partners", " group", " llp", " lp"
+    ]
+
+    private static let contactListIntroKeywords: [String] = [
+        "contact", "email", "reviewer", "recipient"
+    ]
+
+    private static func truncateTrailingContactSignature(in document: Document) throws {
+        guard let body = document.body() else { return }
+        let lines = visibleLineElements(in: body, includingEmpty: true)
+        guard let lastNonEmpty = lines.indices.last(where: { !lines[$0].text.isEmpty }) else { return }
+        guard isContactSignatureLine(lines[lastNonEmpty].text) else { return }
+
+        let scanStart = max(0, lastNonEmpty - 32)
+        var contactLineCount = 0
+        var signatureStart = lastNonEmpty
+        var strongSupportLineCount = 0
+        var signatureSupportLineCount = 0
+        var nonEmailContactLineCount = 0
+        var sawSignOffBeforeSignature = false
+        var precedingBodyLine: String?
+        var scanIndex = lastNonEmpty
+
+        while scanIndex >= scanStart {
+            let text = lines[scanIndex].text
+            if text.isEmpty {
+                guard let previousNonEmptyIndex = previousNonEmptyLineIndex(
+                    before: scanIndex,
+                    lowerBound: scanStart,
+                    in: lines
+                ) else {
+                    break
+                }
+
+                let previousText = lines[previousNonEmptyIndex].text
+                guard isContactSignatureLine(previousText) || isSignatureSupportLine(previousText) else {
+                    precedingBodyLine = previousText
+                    break
+                }
+
+                scanIndex = previousNonEmptyIndex
+                continue
+            }
+
+            if isLikelySignOffLine(text) {
+                sawSignOffBeforeSignature = true
+                break
+            }
+
+            if isContactSignatureLine(text) {
+                contactLineCount += 1
+                if hasNonEmailContactSignal(text) {
+                    nonEmailContactLineCount += 1
+                }
+                signatureStart = scanIndex
+                scanIndex -= 1
+                continue
+            }
+
+            guard isSignatureSupportLine(text) else {
+                precedingBodyLine = text
+                break
+            }
+
+            if isStrongSignatureSupportLine(text) {
+                strongSupportLineCount += 1
+            }
+            signatureSupportLineCount += 1
+            signatureStart = scanIndex
+            scanIndex -= 1
+        }
+
+        guard contactLineCount >= 2 else { return }
+
+        let nonEmptyRemovalCount = (signatureStart...lastNonEmpty).filter { !lines[$0].text.isEmpty }.count
+        guard nonEmptyRemovalCount >= 3 else { return }
+        if let precedingBodyLine, isContactListIntroLine(precedingBodyLine) {
+            return
+        }
+        let hasStrongSignatureSignal = sawSignOffBeforeSignature || strongSupportLineCount > 0
+        let hasWeakSinglePersonSignature = signatureSupportLineCount == 1 && nonEmailContactLineCount > 0
+        guard hasStrongSignatureSignal || hasWeakSinglePersonSignature else {
+            return
+        }
+
+        for index in signatureStart...lastNonEmpty {
+            try lines[index].element.remove()
+        }
+    }
+
+    private static func previousNonEmptyLineIndex(
+        before index: Int,
+        lowerBound: Int,
+        in lines: [VisibleLineElement]
+    ) -> Int? {
+        guard index > lowerBound else { return nil }
+
+        for candidate in stride(from: index - 1, through: lowerBound, by: -1) {
+            if !lines[candidate].text.isEmpty {
+                return candidate
+            }
+        }
+
+        return nil
+    }
+
+    private static func isContactSignatureLine(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        let range = NSRange(location: 0, length: text.utf16.count)
+        if signatureEmailPattern?.firstMatch(in: text, options: [], range: range) != nil {
+            return true
+        }
+        if signatureURLPattern?.firstMatch(in: text, options: [], range: range) != nil {
+            return true
+        }
+        if signaturePhonePattern?.firstMatch(in: text, options: [], range: range) != nil {
+            return true
+        }
+        if signatureAddressPattern?.firstMatch(in: text, options: [], range: range) != nil {
+            return true
+        }
+        if signatureCityStateZipPattern?.firstMatch(in: text, options: [], range: range) != nil {
+            return true
+        }
+        if signatureStandaloneContactLabelPattern?.firstMatch(in: text, options: [], range: range) != nil {
+            return true
+        }
+        return false
+    }
+
+    private static func hasNonEmailContactSignal(_ text: String) -> Bool {
+        let range = NSRange(location: 0, length: text.utf16.count)
+        if signatureURLPattern?.firstMatch(in: text, options: [], range: range) != nil {
+            return true
+        }
+        if signaturePhonePattern?.firstMatch(in: text, options: [], range: range) != nil {
+            return true
+        }
+        if signatureAddressPattern?.firstMatch(in: text, options: [], range: range) != nil {
+            return true
+        }
+        if signatureCityStateZipPattern?.firstMatch(in: text, options: [], range: range) != nil {
+            return true
+        }
+        if signatureStandaloneContactLabelPattern?.firstMatch(in: text, options: [], range: range) != nil {
+            return true
+        }
+        return false
+    }
+
+    private static func isSignatureSupportLine(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        if isStrongSignatureSupportLine(text) {
+            return true
+        }
+        if looksLikeSignatureNameSupportLine(text) {
+            return true
+        }
+        return false
+    }
+
+    private static func isStrongSignatureSupportLine(_ text: String) -> Bool {
+        let lowercased = text.lowercased()
+        if signatureTitleKeywords.contains(where: { lowercased.contains($0) }) {
+            return true
+        }
+        if signatureOrganizationKeywords.contains(where: { lowercased.contains($0) }) {
+            return true
+        }
+        return false
+    }
+
+    private static func isContactListIntroLine(_ text: String) -> Bool {
+        let lowercased = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return lowercased.hasSuffix(":") &&
+            contactListIntroKeywords.contains(where: { lowercased.contains($0) })
+    }
+
+    private static func looksLikeSignatureNameSupportLine(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard looksLikeNameLine(trimmed) else { return false }
+
+        let sentencePunctuation = CharacterSet(charactersIn: ".,:;!?")
+        guard trimmed.rangeOfCharacter(from: sentencePunctuation) == nil else { return false }
+
+        let words = trimmed.split(whereSeparator: \.isWhitespace)
+        return words.allSatisfy { word in
+            guard let firstLetter = word.first(where: { $0.isLetter }) else { return false }
+            return firstLetter.isUppercase
+        }
+    }
+
     // MARK: - Tree surgery
 
     private static func collectTextNodes(rootElement: Element) -> [TextNode] {
@@ -681,6 +1243,276 @@ enum EmailDOMQuoteRemover {
             }
         }
         return result
+    }
+
+    private struct VisibleLineElement {
+        let element: Element
+        let text: String
+    }
+
+    private struct InlineHeaderLine {
+        let text: String
+        let startTextNode: TextNode?
+        let startUTF16Offset: Int
+    }
+
+    private static let visibleLineElementTags: Set<String> = [
+        "div", "li", "p", "tr"
+    ]
+
+    private static let inlineHeaderBlockElementTags: Set<String> = [
+        "div", "p", "td", "th"
+    ]
+
+    private static func visibleLineElements(
+        in rootElement: Element,
+        includingEmpty: Bool,
+        stoppingBefore target: Element? = nil
+    ) -> [VisibleLineElement] {
+        var result: [VisibleLineElement] = []
+        var reachedTarget = false
+
+        func walk(_ node: Node) {
+            guard !reachedTarget else { return }
+            guard let element = node as? Element else { return }
+            if let target, element === target {
+                reachedTarget = true
+                return
+            }
+            guard !isHiddenFromVisibleText(element) else { return }
+            let tag = element.tagNameNormal()
+            if visibleLineElementTags.contains(tag),
+               !hasDescendantVisibleLineElement(element),
+               !elementContainsDescendantTable(element) {
+                let text = normalizedVisibleLineText(element)
+                if includingEmpty || !text.isEmpty {
+                    result.append(VisibleLineElement(element: element, text: text))
+                }
+                return
+            }
+
+            for child in element.getChildNodes() {
+                walk(child)
+            }
+        }
+
+        walk(rootElement)
+        return result
+    }
+
+    private static func inlineHeaderBlockElements(in rootElement: Element) -> [Element] {
+        var result: [Element] = []
+
+        func walk(_ node: Node) {
+            guard let element = node as? Element else { return }
+            guard !isHiddenFromVisibleText(element) else { return }
+            let tag = element.tagNameNormal()
+            if inlineHeaderBlockElementTags.contains(tag),
+               elementContainsBR(element),
+               !hasDescendantInlineHeaderBlockElement(element) {
+                result.append(element)
+                return
+            }
+
+            for child in element.getChildNodes() {
+                walk(child)
+            }
+        }
+
+        walk(rootElement)
+        return result
+    }
+
+    private static func inlineHeaderLines(in element: Element) -> [InlineHeaderLine] {
+        var result: [InlineHeaderLine] = []
+        var currentText = ""
+        var currentStartTextNode: TextNode?
+        var currentStartUTF16Offset = 0
+
+        func appendText(_ rawText: String, from textNode: TextNode) {
+            let normalized = rawText.replacingOccurrences(of: "\u{00a0}", with: " ")
+            guard let firstTextIndex = normalized.firstIndex(where: { !$0.isWhitespace }) else {
+                return
+            }
+
+            if currentStartTextNode == nil {
+                currentStartTextNode = textNode
+                currentStartUTF16Offset = normalized[..<firstTextIndex].utf16.count
+            }
+
+            let collapsed = normalizedVisibleLineText(normalized)
+            guard !collapsed.isEmpty else { return }
+
+            if !currentText.isEmpty, !currentText.hasSuffix(" ") {
+                currentText.append(" ")
+            }
+            currentText.append(collapsed)
+        }
+
+        func finishLine() {
+            result.append(InlineHeaderLine(
+                text: normalizedVisibleLineText(currentText),
+                startTextNode: currentStartTextNode,
+                startUTF16Offset: currentStartUTF16Offset
+            ))
+            currentText = ""
+            currentStartTextNode = nil
+            currentStartUTF16Offset = 0
+        }
+
+        func walk(_ node: Node) {
+            if let textNode = node as? TextNode {
+                appendText(textNode.getWholeText(), from: textNode)
+                return
+            }
+
+            guard let element = node as? Element else { return }
+            guard !isHiddenFromVisibleText(element) else { return }
+            if element.tagNameNormal() == "br" {
+                finishLine()
+                return
+            }
+
+            for child in element.getChildNodes() {
+                walk(child)
+            }
+        }
+
+        for child in element.getChildNodes() {
+            walk(child)
+        }
+
+        finishLine()
+        return result
+    }
+
+    private static func hasDescendantVisibleLineElement(_ element: Element) -> Bool {
+        for child in element.getChildNodes() {
+            guard let childElement = child as? Element else { continue }
+            guard !isHiddenFromVisibleText(childElement) else { continue }
+            if visibleLineElementTags.contains(childElement.tagNameNormal()) {
+                return true
+            }
+            if hasDescendantVisibleLineElement(childElement) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func hasDescendantInlineHeaderBlockElement(_ element: Element) -> Bool {
+        for child in element.getChildNodes() {
+            guard let childElement = child as? Element else { continue }
+            guard !isHiddenFromVisibleText(childElement) else { continue }
+            if inlineHeaderBlockElementTags.contains(childElement.tagNameNormal()),
+               elementContainsBR(childElement) {
+                return true
+            }
+            if hasDescendantInlineHeaderBlockElement(childElement) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func elementContainsBR(_ element: Element) -> Bool {
+        for child in element.getChildNodes() {
+            guard let childElement = child as? Element else { continue }
+            guard !isHiddenFromVisibleText(childElement) else { continue }
+            if childElement.tagNameNormal() == "br" {
+                return true
+            }
+            if elementContainsBR(childElement) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func elementContainsDescendantTable(_ element: Element) -> Bool {
+        for child in element.getChildNodes() {
+            guard let childElement = child as? Element else { continue }
+            guard !isHiddenFromVisibleText(childElement) else { continue }
+            if childElement.tagNameNormal() == "table" {
+                return true
+            }
+            if elementContainsDescendantTable(childElement) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func tableDepth(_ table: Element) -> Int {
+        var depth = 0
+        var current = table.parent()
+        while let node = current {
+            if node.tagNameNormal() == "body" {
+                break
+            }
+            depth += 1
+            current = node.parent()
+        }
+        return depth
+    }
+
+    private static func containsEmailAddress(_ text: String) -> Bool {
+        let range = NSRange(location: 0, length: text.utf16.count)
+        return signatureEmailPattern?.firstMatch(in: text, options: [], range: range) != nil
+    }
+
+    private static func hasVisibleTextBefore(_ target: Element, in rootElement: Element) -> Bool {
+        var reachedTarget = false
+        var sawText = false
+
+        func walk(_ node: Node) {
+            guard !reachedTarget, !sawText else { return }
+
+            if let element = node as? Element {
+                if element === target {
+                    reachedTarget = true
+                    return
+                }
+                guard !isHiddenFromVisibleText(element) else { return }
+            }
+
+            if let textNode = node as? TextNode,
+               !normalizedVisibleLineText(textNode.getWholeText()).isEmpty {
+                sawText = true
+                return
+            }
+
+            for child in node.getChildNodes() {
+                walk(child)
+            }
+        }
+
+        walk(rootElement)
+        return sawText
+    }
+
+    private static func isHiddenFromVisibleText(_ element: Element) -> Bool {
+        if element.hasAttr("hidden") {
+            return true
+        }
+
+        let style = ((try? element.attr("style")) ?? "")
+            .lowercased()
+            .filter { !$0.isWhitespace }
+        return style.contains("display:none") ||
+            style.contains("visibility:hidden")
+    }
+
+    private static func normalizedVisibleLineText(_ element: Element) -> String {
+        let text = (try? element.text()) ?? ""
+        return normalizedVisibleLineText(text)
+    }
+
+    private static func normalizedVisibleLineText(_ text: String) -> String {
+        return text
+            .replacingOccurrences(of: "\u{00a0}", with: " ")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Truncates the document at the given text node and offset:
