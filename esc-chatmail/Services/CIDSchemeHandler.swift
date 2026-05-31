@@ -11,11 +11,18 @@ import WebKit
 final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
 
     /// The message containing the attachments to resolve
-    weak var message: Message?
+    weak var message: Message? {
+        didSet {
+            messageReference.update(message)
+        }
+    }
 
     /// Background context factory for persisting on-demand fallback data
     private let makeBackgroundContext: @Sendable () -> NSManagedObjectContext
     private let apiClientOverride: (any GmailAPIClientProtocol)?
+    private let messageReference: MessageReference
+    private let activeTasks = ActiveSchemeTaskRegistry()
+    private let fetchCoalescer = CIDAttachmentFetchCoalescer()
 
     init(
         message: Message?,
@@ -23,6 +30,7 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         apiClient: (any GmailAPIClientProtocol)? = nil,
         makeBackgroundContext: (@Sendable () -> NSManagedObjectContext)? = nil
     ) {
+        self.messageReference = MessageReference(message: message)
         self.message = message
         self.makeBackgroundContext = makeBackgroundContext ?? {
             coreDataStack.newBackgroundContext()
@@ -34,8 +42,10 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
     // MARK: - WKURLSchemeHandler
 
     func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        let taskID = activeTasks.register(urlSchemeTask)
+
         guard let url = urlSchemeTask.request.url else {
-            urlSchemeTask.didFailWithError(URLError(.badURL))
+            fail(urlSchemeTask, taskID: taskID, with: URLError(.badURL))
             return
         }
 
@@ -43,58 +53,75 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         // cid:image001@domain.com -> image001@domain.com
         guard let contentId = Self.normalizedContentID(from: url) else {
             Log.debug("CIDSchemeHandler: Empty Content-ID from URL: \(url)", category: .ui)
-            urlSchemeTask.didFailWithError(URLError(.badURL))
+            fail(urlSchemeTask, taskID: taskID, with: URLError(.badURL))
             return
         }
 
-        // Find attachment with matching Content-ID
-        guard let message = message,
-              let attachment = findAttachment(withContentId: contentId, in: message) else {
+        let operation = Task { [weak self] in
+            guard let self else { return }
+            await self.handleRequest(
+                urlSchemeTask,
+                taskID: taskID,
+                contentId: contentId
+            )
+        }
+
+        activeTasks.setOperation(operation, for: taskID)
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
+        activeTasks.cancel(urlSchemeTask)
+    }
+
+    // MARK: - Private Helpers
+
+    private func handleRequest(
+        _ urlSchemeTask: WKURLSchemeTask,
+        taskID: ObjectIdentifier,
+        contentId: String
+    ) async {
+        defer {
+            activeTasks.finish(taskID)
+        }
+
+        guard activeTasks.isActive(taskID) else {
+            return
+        }
+
+        guard let attachment = await attachmentSnapshot(withContentId: contentId) else {
+            guard activeTasks.isActive(taskID) else { return }
             Log.debug("CIDSchemeHandler: No attachment found for Content-ID: \(contentId)", category: .ui)
             // Return a transparent pixel instead of failing, to avoid broken image icons
-            respondWithTransparentPixel(urlSchemeTask)
+            respondWithTransparentPixel(urlSchemeTask, taskID: taskID)
+            return
+        }
+
+        guard activeTasks.isActive(taskID) else {
             return
         }
 
         // Load attachment data from disk first.
         if let localPath = attachment.localURL,
            let data = AttachmentPaths.loadData(from: localPath) {
+            guard activeTasks.isActive(taskID) else { return }
             Log.debug("CIDSchemeHandler: eager/local hit for Content-ID: \(contentId)", category: .ui)
-            respond(urlSchemeTask, with: data, mimeType: attachment.mimeType)
+            respond(urlSchemeTask, taskID: taskID, with: data, mimeType: attachment.mimeType)
             return
         }
 
-        // On-demand fallback: fetch missing inline attachment bytes immediately so full email
-        // view can render all cid: images without waiting for a background download sweep.
-        let messageId = message.id
-        let attachmentId = attachment.id
-        let mimeType = attachment.mimeType
-        let filename = attachment.filename
-        let attachmentObjectID = attachment.objectID
-
         Log.debug("CIDSchemeHandler: on-demand fallback fetch for Content-ID: \(contentId)", category: .ui)
-        Task { [weak self] in
-            guard let self else { return }
-            if let data = await self.fetchAndPersistMissingAttachmentData(
-                messageId: messageId,
-                attachmentId: attachmentId,
-                mimeType: mimeType,
-                filename: filename,
-                attachmentObjectID: attachmentObjectID
-            ) {
-                self.respond(urlSchemeTask, with: data, mimeType: mimeType)
-            } else {
-                Log.debug("CIDSchemeHandler: Attachment not downloaded for Content-ID: \(contentId)", category: .ui)
-                self.respondWithTransparentPixel(urlSchemeTask)
-            }
+        if let data = await fetchAndPersistMissingAttachmentData(
+            attachment: attachment,
+            requestedContentId: contentId
+        ) {
+            guard activeTasks.isActive(taskID) else { return }
+            respond(urlSchemeTask, taskID: taskID, with: data, mimeType: attachment.mimeType)
+        } else {
+            guard activeTasks.isActive(taskID) else { return }
+            Log.debug("CIDSchemeHandler: Attachment not downloaded for Content-ID: \(contentId)", category: .ui)
+            respondWithTransparentPixel(urlSchemeTask, taskID: taskID)
         }
     }
-
-    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
-        // No per-task cleanup required.
-    }
-
-    // MARK: - Private Helpers
 
     /// Extracts the Content-ID from a cid: URL
     static func normalizedContentID(from url: URL) -> String? {
@@ -114,8 +141,24 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         return EmailDocument.normalizedContentID(contentId)
     }
 
-    /// Finds an attachment in the message with the given Content-ID
-    private func findAttachment(withContentId contentId: String, in message: Message) -> Attachment? {
+    private func attachmentSnapshot(withContentId contentId: String) async -> AttachmentSnapshot? {
+        guard let messageObjectID = messageReference.currentObjectID() else {
+            return nil
+        }
+
+        let context = makeBackgroundContext()
+        return await context.perform {
+            guard let message = try? context.existingObject(with: messageObjectID) as? Message else {
+                return nil
+            }
+
+            return Self.findAttachmentSnapshot(withContentId: contentId, in: message)
+        }
+    }
+
+    /// Finds an attachment in the message with the given Content-ID.
+    /// Must be called from the message's managed object context queue.
+    private static func findAttachmentSnapshot(withContentId contentId: String, in message: Message) -> AttachmentSnapshot? {
         guard let attachments = message.attachments else {
             return nil
         }
@@ -123,7 +166,7 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         if let attachment = attachments.first(where: {
             EmailDocument.normalizedContentID($0.contentId) == contentId
         }) {
-            return attachment
+            return AttachmentSnapshot(message: message, attachment: attachment)
         }
 
         let contentIdWithoutDomain = contentId.components(separatedBy: "@").first ?? contentId
@@ -132,25 +175,50 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
             let attachmentIdWithoutDomain = attachmentContentId.components(separatedBy: "@").first ?? attachmentContentId
             return attachmentIdWithoutDomain == contentIdWithoutDomain
         }) {
-            return attachment
+            return AttachmentSnapshot(message: message, attachment: attachment)
         }
 
         return nil
     }
 
     private func fetchAndPersistMissingAttachmentData(
-        messageId: String,
-        attachmentId: String?,
-        mimeType: String,
-        filename: String,
-        attachmentObjectID: NSManagedObjectID
+        attachment: AttachmentSnapshot,
+        requestedContentId: String
     ) async -> Data? {
-        guard let attachmentId,
+        guard let attachmentId = attachment.attachmentId,
               !attachmentId.isEmpty,
               !attachmentId.hasPrefix("local_") else {
             return nil
         }
 
+        let key = CIDAttachmentFetchKey(
+            messageId: attachment.messageId,
+            attachmentId: attachmentId,
+            normalizedContentID: attachment.normalizedContentID ?? requestedContentId
+        )
+
+        return await fetchCoalescer.data(for: key) { [apiClientOverride, makeBackgroundContext] in
+            await Self.fetchAndPersistMissingAttachmentData(
+                messageId: attachment.messageId,
+                attachmentId: attachmentId,
+                mimeType: attachment.mimeType,
+                filename: attachment.filename,
+                attachmentObjectID: attachment.objectID,
+                apiClientOverride: apiClientOverride,
+                makeBackgroundContext: makeBackgroundContext
+            )
+        }
+    }
+
+    private static func fetchAndPersistMissingAttachmentData(
+        messageId: String,
+        attachmentId: String,
+        mimeType: String,
+        filename: String,
+        attachmentObjectID: NSManagedObjectID,
+        apiClientOverride: (any GmailAPIClientProtocol)?,
+        makeBackgroundContext: @Sendable () -> NSManagedObjectContext
+    ) async -> Data? {
         do {
             let apiClient: any GmailAPIClientProtocol
             if let apiClientOverride {
@@ -189,9 +257,11 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         }
     }
 
-    private func respond(_ urlSchemeTask: WKURLSchemeTask, with data: Data, mimeType: String) {
+    private func respond(_ urlSchemeTask: WKURLSchemeTask, taskID: ObjectIdentifier, with data: Data, mimeType: String) {
+        guard activeTasks.isActive(taskID) else { return }
+
         guard let url = urlSchemeTask.request.url else {
-            urlSchemeTask.didFailWithError(URLError(.badURL))
+            fail(urlSchemeTask, taskID: taskID, with: URLError(.badURL))
             return
         }
 
@@ -203,22 +273,27 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
             textEncodingName: nil
         )
 
+        guard activeTasks.isActive(taskID) else { return }
         urlSchemeTask.didReceive(response)
+        guard activeTasks.isActive(taskID) else { return }
         urlSchemeTask.didReceive(data)
+        guard activeTasks.isActive(taskID) else { return }
         urlSchemeTask.didFinish()
     }
 
     /// Responds with a transparent 1x1 GIF pixel for missing attachments
-    private func respondWithTransparentPixel(_ urlSchemeTask: WKURLSchemeTask) {
+    private func respondWithTransparentPixel(_ urlSchemeTask: WKURLSchemeTask, taskID: ObjectIdentifier) {
+        guard activeTasks.isActive(taskID) else { return }
+
         guard let url = urlSchemeTask.request.url else {
-            urlSchemeTask.didFailWithError(URLError(.badURL))
+            fail(urlSchemeTask, taskID: taskID, with: URLError(.badURL))
             return
         }
 
         // Transparent 1x1 GIF
         let transparentPixelBase64 = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
         guard let data = Data(base64Encoded: transparentPixelBase64) else {
-            urlSchemeTask.didFailWithError(URLError(.cannotDecodeRawData))
+            fail(urlSchemeTask, taskID: taskID, with: URLError(.cannotDecodeRawData))
             return
         }
 
@@ -229,8 +304,160 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
             textEncodingName: nil
         )
 
+        guard activeTasks.isActive(taskID) else { return }
         urlSchemeTask.didReceive(response)
+        guard activeTasks.isActive(taskID) else { return }
         urlSchemeTask.didReceive(data)
+        guard activeTasks.isActive(taskID) else { return }
         urlSchemeTask.didFinish()
+    }
+
+    private func fail(_ urlSchemeTask: WKURLSchemeTask, taskID: ObjectIdentifier, with error: Error) {
+        defer {
+            activeTasks.finish(taskID)
+        }
+
+        guard activeTasks.isActive(taskID) else { return }
+        urlSchemeTask.didFailWithError(error)
+    }
+}
+
+private struct AttachmentSnapshot: @unchecked Sendable {
+    let messageId: String
+    let attachmentId: String?
+    let normalizedContentID: String?
+    let mimeType: String
+    let filename: String
+    let localURL: String?
+    let objectID: NSManagedObjectID
+
+    init(message: Message, attachment: Attachment) {
+        self.messageId = message.id
+        self.attachmentId = attachment.id
+        self.normalizedContentID = EmailDocument.normalizedContentID(attachment.contentId)
+        self.mimeType = attachment.mimeType
+        self.filename = attachment.filename
+        self.localURL = attachment.localURL
+        self.objectID = attachment.objectID
+    }
+}
+
+private struct CIDAttachmentFetchKey: Hashable, Sendable {
+    let messageId: String
+    let attachmentId: String
+    let normalizedContentID: String
+}
+
+private actor CIDAttachmentFetchCoalescer {
+    private var inFlight: [CIDAttachmentFetchKey: Task<Data?, Never>] = [:]
+
+    func data(
+        for key: CIDAttachmentFetchKey,
+        operation: @escaping @Sendable () async -> Data?
+    ) async -> Data? {
+        if let task = inFlight[key] {
+            return await task.value
+        }
+
+        let task = Task {
+            await operation()
+        }
+        inFlight[key] = task
+
+        let data = await task.value
+        inFlight[key] = nil
+        return data
+    }
+}
+
+private final class MessageReference {
+    private let lock = NSLock()
+    private var messageObjectID: NSManagedObjectID?
+
+    init(message: Message?) {
+        self.messageObjectID = message?.objectID
+    }
+
+    func update(_ message: Message?) {
+        lock.lock()
+        messageObjectID = message?.objectID
+        lock.unlock()
+    }
+
+    func currentObjectID() -> NSManagedObjectID? {
+        lock.lock()
+        defer { lock.unlock() }
+        return messageObjectID
+    }
+}
+
+private final class ActiveSchemeTaskRegistry {
+    private struct Entry {
+        var operation: Task<Void, Never>?
+        var isCancelled = false
+    }
+
+    private let lock = NSLock()
+    private var entries: [ObjectIdentifier: Entry] = [:]
+
+    func register(_ urlSchemeTask: WKURLSchemeTask) -> ObjectIdentifier {
+        let id = ObjectIdentifier(urlSchemeTask as AnyObject)
+        lock.lock()
+        entries[id] = Entry()
+        lock.unlock()
+        return id
+    }
+
+    func setOperation(_ operation: Task<Void, Never>, for id: ObjectIdentifier) {
+        lock.lock()
+        guard var entry = entries[id] else {
+            lock.unlock()
+            operation.cancel()
+            return
+        }
+
+        guard !entry.isCancelled else {
+            entries.removeValue(forKey: id)
+            lock.unlock()
+            operation.cancel()
+            return
+        }
+
+        entry.operation = operation
+        entries[id] = entry
+        lock.unlock()
+    }
+
+    func cancel(_ urlSchemeTask: WKURLSchemeTask) {
+        let id = ObjectIdentifier(urlSchemeTask as AnyObject)
+        lock.lock()
+        guard var entry = entries[id] else {
+            lock.unlock()
+            return
+        }
+
+        entry.isCancelled = true
+        let operation = entry.operation
+        entries[id] = entry
+        lock.unlock()
+
+        operation?.cancel()
+    }
+
+    func isActive(_ id: ObjectIdentifier) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let entry = entries[id] else {
+            return false
+        }
+
+        return !entry.isCancelled
+    }
+
+    func finish(_ id: ObjectIdentifier) {
+        lock.lock()
+        entries.removeValue(forKey: id)
+        lock.unlock()
     }
 }
