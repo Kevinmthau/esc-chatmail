@@ -28,6 +28,7 @@ final class ParsedEmailProviderTests: XCTestCase {
         XCTAssertEqual(parsed.htmlMetrics.tableCount, 1)
         XCTAssertEqual(parsed.htmlMetrics.linkCount, 1)
         XCTAssertEqual(parsed.htmlSummary.h1Text, "Weekly update")
+        XCTAssertNil(parsed.renderQuality)
 
         let second = await provider.parsedEmail(
             messageId: "message-1",
@@ -39,6 +40,35 @@ final class ParsedEmailProviderTests: XCTestCase {
         XCTAssertTrue(parsed === unwrappedSecond)
         let parseAttemptCount = await provider.debugParseAttemptCount()
         XCTAssertEqual(parseAttemptCount, 1)
+    }
+
+    func testProviderDefersRenderQualityUntilRequested() async throws {
+        let provider = ParsedEmailProvider()
+        let html = """
+        <html>
+        <body>
+          <p>Visible statement ready.</p>
+          <div style="opacity:0!important">Hidden preview copy.</div>
+        </body>
+        </html>
+        """
+
+        let previewCandidate = await provider.parsedEmail(
+            messageId: "message-1",
+            sourceSignature: "sha256:deferred",
+            canonicalHTML: html
+        )
+        let previewParsed = try XCTUnwrap(previewCandidate)
+        XCTAssertNil(previewParsed.renderQuality)
+
+        let qualityCandidate = await provider.parsedEmail(
+            messageId: "message-1",
+            sourceSignature: "sha256:deferred",
+            canonicalHTML: html,
+            includeRenderQuality: true
+        )
+        let qualityParsed = try XCTUnwrap(qualityCandidate)
+        XCTAssertNotNil(qualityParsed.renderQuality)
     }
 
     func testProviderInvalidatesMessageEntryWhenSourceSignatureChanges() async throws {
@@ -123,8 +153,10 @@ final class ParsedEmailProviderTests: XCTestCase {
         let parsed = try XCTUnwrap(try ParsedEmail.parse(
             messageId: "message-1",
             sourceSignature: "sha256:quality",
-            canonicalHTML: html
+            canonicalHTML: html,
+            includeRenderQuality: true
         ))
+        XCTAssertNotNil(parsed.renderQuality)
 
         let fallbackPath = evaluator.evaluate(
             html: html,

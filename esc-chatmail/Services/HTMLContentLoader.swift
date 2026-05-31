@@ -922,7 +922,8 @@ final class HTMLContentLoader {
                     "cleanup:\(cleanupMode.rawValue)",
                     "purpose:\(displayPurpose.rawValue)"
                 ].joined(separator: "|"),
-                canonicalHTML: sanitizedHTML
+                canonicalHTML: sanitizedHTML,
+                includeRenderQuality: true
             )
             let evaluation = qualityEvaluator.evaluate(
                 parsedEmail: parsedEmail,

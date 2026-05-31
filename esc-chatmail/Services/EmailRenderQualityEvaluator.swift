@@ -56,7 +56,12 @@ struct EmailRenderQualityEvaluator {
             includeTestFlightAvailabilitySignal: false
         )
 
-        let parsedRenderQuality = parsedEmail?.canonicalHTML == trimmedHTML ? parsedEmail?.renderQuality : nil
+        let parsedRenderQuality: ParsedEmailRenderQualityFacts?
+        if let parsedEmail, parsedEmail.canonicalHTML == trimmedHTML {
+            parsedRenderQuality = parsedEmail.renderQuality
+        } else {
+            parsedRenderQuality = nil
+        }
         let renderableHTML = parsedRenderQuality?.renderableHTML ?? HTMLMeaningfulContentChecker.renderableHTML(from: trimmedHTML)
         let document = parsedRenderQuality == nil ? EmailDocument.tryParse(trimmedHTML) : nil
         let renderableDocument = parsedRenderQuality == nil ? EmailDocument.tryParse(renderableHTML) : nil

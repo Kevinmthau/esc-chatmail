@@ -176,6 +176,22 @@ final class EmailDocumentTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(metrics.hiddenPrimaryContentCount, 3)
     }
 
+    func testRenderableText_excludesOpacityImportantHiddenContent() throws {
+        let html = """
+        <body>
+          <div style="opacity:0!important">Hidden preview copy.</div>
+          <p>Visible statement ready.</p>
+        </body>
+        """
+
+        let text = try XCTUnwrap(EmailDocument.tryParse(html)).renderablePlainText(
+            preserveParagraphs: true
+        )
+
+        XCTAssertFalse(text.contains("Hidden preview copy."))
+        XCTAssertTrue(text.contains("Visible statement ready."))
+    }
+
     // MARK: - Normalization helper
 
     func testNormalizedContentID_strips_angle_brackets_and_lowercases() {

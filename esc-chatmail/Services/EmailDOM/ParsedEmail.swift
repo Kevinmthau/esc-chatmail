@@ -47,7 +47,7 @@ final class ParsedEmail: @unchecked Sendable {
     let previewPlainText: String?
     let referencedInlineContentIDs: Set<String>
     let htmlMetrics: EmailDocumentHTMLMetrics
-    let renderQuality: ParsedEmailRenderQualityFacts
+    let renderQuality: ParsedEmailRenderQualityFacts?
     let htmlSummary: EmailPreviewHTMLSummary
 
     private let document: EmailDocument
@@ -55,7 +55,8 @@ final class ParsedEmail: @unchecked Sendable {
     init(
         key: ParsedEmailKey,
         canonicalHTML: String,
-        document: EmailDocument
+        document: EmailDocument,
+        includeRenderQuality: Bool = false
     ) {
         self.key = key
         self.canonicalHTML = canonicalHTML
@@ -65,13 +66,21 @@ final class ParsedEmail: @unchecked Sendable {
         self.referencedInlineContentIDs = document.referencedInlineContentIDs()
         self.htmlMetrics = EmailDocumentHTMLMetrics(classificationHTML: canonicalHTML)
         self.htmlSummary = document.previewHTMLSummary()
+        self.renderQuality = includeRenderQuality
+            ? Self.makeRenderQualityFacts(canonicalHTML: canonicalHTML, document: document)
+            : nil
+    }
 
+    private static func makeRenderQualityFacts(
+        canonicalHTML: String,
+        document: EmailDocument
+    ) -> ParsedEmailRenderQualityFacts {
         let renderableHTML = HTMLMeaningfulContentChecker.renderableHTML(from: canonicalHTML)
         let renderableMetrics = document.renderableQualityMetrics(
             footerLineHints: EmailRenderQualityHints.footerLineHints,
             primaryContentHints: EmailRenderQualityHints.primaryContentHints
         )
-        self.renderQuality = ParsedEmailRenderQualityFacts(
+        return ParsedEmailRenderQualityFacts(
             renderableHTML: renderableHTML,
             metrics: renderableMetrics,
             visibleText: document.renderablePlainText(preserveParagraphs: true),
@@ -85,6 +94,7 @@ final class ParsedEmail: @unchecked Sendable {
         messageId: String,
         sourceSignature: String,
         canonicalHTML: String,
+        includeRenderQuality: Bool = false,
         parser: (String) throws -> EmailDocument? = { try EmailDocument.parse($0) }
     ) throws -> ParsedEmail? {
         guard let document = try parser(canonicalHTML) else {
@@ -93,7 +103,8 @@ final class ParsedEmail: @unchecked Sendable {
         return ParsedEmail(
             key: ParsedEmailKey(messageId: messageId, sourceSignature: sourceSignature),
             canonicalHTML: canonicalHTML,
-            document: document
+            document: document,
+            includeRenderQuality: includeRenderQuality
         )
     }
 }
@@ -102,10 +113,26 @@ protocol ParsedEmailProviding: Sendable {
     func parsedEmail(
         messageId: String,
         sourceSignature: String,
-        canonicalHTML: String
+        canonicalHTML: String,
+        includeRenderQuality: Bool
     ) async -> ParsedEmail?
 
     func invalidate(messageId: String) async
+}
+
+extension ParsedEmailProviding {
+    func parsedEmail(
+        messageId: String,
+        sourceSignature: String,
+        canonicalHTML: String
+    ) async -> ParsedEmail? {
+        await parsedEmail(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            canonicalHTML: canonicalHTML,
+            includeRenderQuality: false
+        )
+    }
 }
 
 actor ParsedEmailProvider: ParsedEmailProviding {
@@ -129,15 +156,19 @@ actor ParsedEmailProvider: ParsedEmailProviding {
     func parsedEmail(
         messageId: String,
         sourceSignature: String,
-        canonicalHTML: String
+        canonicalHTML: String,
+        includeRenderQuality: Bool = false
     ) async -> ParsedEmail? {
         let key = ParsedEmailKey(messageId: messageId, sourceSignature: sourceSignature)
-        if let cached = cache[key] {
+        let cached = cache[key]
+        if let cached, !includeRenderQuality || cached.renderQuality != nil {
             logCacheEvent("cache-hit", key: key)
             return cached
         }
 
-        pruneStaleEntries(for: messageId, keeping: key)
+        if cached == nil {
+            pruneStaleEntries(for: messageId, keeping: key)
+        }
 
         let start = Date()
         parseAttemptCount += 1
@@ -146,6 +177,7 @@ actor ParsedEmailProvider: ParsedEmailProviding {
                 messageId: messageId,
                 sourceSignature: sourceSignature,
                 canonicalHTML: canonicalHTML,
+                includeRenderQuality: includeRenderQuality,
                 parser: parser
             ) else {
                 parseFailureCount += 1
@@ -154,9 +186,15 @@ actor ParsedEmailProvider: ParsedEmailProviding {
             }
 
             cache[key] = parsed
-            cacheOrder.append(key)
+            if cached == nil {
+                cacheOrder.append(key)
+            }
             enforceCountLimit()
-            logCacheEvent("cache-miss", key: key, duration: Date().timeIntervalSince(start))
+            logCacheEvent(
+                cached == nil ? "cache-miss" : "cache-upgrade",
+                key: key,
+                duration: Date().timeIntervalSince(start)
+            )
             return parsed
         } catch {
             parseFailureCount += 1

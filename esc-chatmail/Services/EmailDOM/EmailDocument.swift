@@ -535,7 +535,7 @@ final class EmailDocument {
         return compact.contains("display:none") ||
             compact.contains("visibility:hidden") ||
             compact.contains("mso-hide:all") ||
-            compact.range(of: #"opacity:0(?:\.0+)?(?:;|$)"#, options: .regularExpression) != nil
+            compact.range(of: #"opacity:0(?:\.0+)?(?:!important)?(?:;|$)"#, options: .regularExpression) != nil
     }
 
     private static func removingCSSComments(from css: String) -> String {
