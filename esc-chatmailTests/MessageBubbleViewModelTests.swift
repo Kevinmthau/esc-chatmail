@@ -334,7 +334,7 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
         XCTAssertNotEqual(firstSignature, secondSignature)
     }
 
-    func testResolvedVisibleText_prefersFullTextContentBeforeChatPreviewAndFallback() throws {
+    func testResolvedVisibleText_prefersChatPreviewBeforeLoadedCompatibilityText() throws {
         let loadedText = """
         Can we please see alts for:
 
@@ -352,7 +352,19 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(result, loadedText)
+        XCTAssertEqual(result, "Canonical chat preview")
+    }
+
+    func testResolvedVisibleText_usesLoadedCompatibilityTextWhenChatPreviewMissing() throws {
+        let result = try XCTUnwrap(
+            MessageContentView.resolvedVisibleText(
+                fullTextContent: "Loaded compatibility text",
+                fallbackPreviewText: "Legacy compact fallback",
+                chatPreviewText: nil
+            )
+        )
+
+        XCTAssertEqual(result, "Loaded compatibility text")
     }
 
     func testResolvedVisibleText_prefersChatPreviewBeforeLegacyFallback() throws {

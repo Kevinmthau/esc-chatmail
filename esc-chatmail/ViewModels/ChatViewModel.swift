@@ -248,10 +248,10 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Prefetch Operations
 
-    /// Prefetches text content and contacts for the given messages.
+    /// Prefetches legacy fallback text content and contacts for the given messages.
     /// Call from ChatView.onAppear with recent messages.
     func prefetchRecentContent(messageIds: [String], senderEmails: [String]) {
-        // Batch prefetch text content for recent messages (eliminates N+1 queries)
+        // Only old records without chatPreviewText should reach this text prefetch path.
         let processedTextCache = self.processedTextCache
         prefetchTaskManager.runDetached("prefetchText") {
             await processedTextCache.prefetch(messageIds: messageIds)

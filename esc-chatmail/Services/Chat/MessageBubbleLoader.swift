@@ -169,18 +169,24 @@ protocol MessageBubbleLoading: Sendable {
     func loadContent(from request: MessageBubbleContentRequest) async -> MessageBubbleContentResult
 }
 
-private enum MessageBubbleTextPrecedence {
-    static func preferredOutgoingBodyFallback(
+/// Legacy compatibility for outgoing records created before chatPreviewText was
+/// populated from the composed body. Normal outgoing bubbles use the persisted
+/// chatPreviewText and do not need this body-vs-loaded-text comparison.
+private enum LegacyOutgoingBodyTextFallback {
+    static func preferredBodyText(
         _ outgoingBodyText: String?,
-        comparedTo comparisonTexts: [String?]
+        over loadedText: String?
     ) -> String? {
         guard let outgoingBodyText,
               let candidate = comparableText(outgoingBodyText) else {
             return nil
         }
 
-        let comparisons = comparisonTexts.compactMap(comparableText)
-        guard comparisons.allSatisfy({ isRicher(candidate, than: $0) }) else {
+        guard let comparison = comparableText(loadedText) else {
+            return outgoingBodyText
+        }
+
+        guard isRicher(candidate, than: comparison) else {
             return nil
         }
 
@@ -647,20 +653,36 @@ actor MessageBubbleLoader: MessageBubbleLoading {
     func loadContent(from request: MessageBubbleContentRequest) async -> MessageBubbleContentResult {
         let htmlAnalysis = await cachedHTMLAnalysis(for: request)
         let forwardedDisplayContent = forwardedDisplayContent(from: request)
-        let loadedContent = await loadProcessedContent(
-            from: request,
-            resolvedHasHTMLSource: htmlAnalysis.hasHTMLSource
-        )
         let storedChatPreviewText = nonEmptyText(request.chatPreviewText)
-        let outgoingBodyFallback = storedChatPreviewText == nil
-            ? outgoingPlainTextContent(from: request, loadedPlainText: loadedContent.plainText)
-            : nil
+        let loadedContent: (plainText: String?, hasRichContent: Bool)
+        if forwardedDisplayContent != nil {
+            loadedContent = (plainText: nil, hasRichContent: false)
+        } else if storedChatPreviewText != nil {
+            loadedContent = (
+                plainText: nil,
+                hasRichContent: await loadRichContentClassification(
+                    from: request,
+                    resolvedHasHTMLSource: htmlAnalysis.hasHTMLSource
+                )
+            )
+        } else {
+            loadedContent = await loadCompatibilityContent(
+                from: request,
+                resolvedHasHTMLSource: htmlAnalysis.hasHTMLSource
+            )
+        }
 
         let fullTextContent: String?
         if let forwardedDisplayContent {
             fullTextContent = forwardedDisplayContent.leadInText
+        } else if let storedChatPreviewText {
+            fullTextContent = storedChatPreviewText
         } else {
-            fullTextContent = outgoingBodyFallback ?? storedChatPreviewText ?? loadedContent.plainText
+            let outgoingBodyFallback = outgoingPlainTextContent(
+                from: request,
+                loadedPlainText: loadedContent.plainText
+            )
+            fullTextContent = outgoingBodyFallback ?? loadedContent.plainText
         }
         let sharedDocumentLinkBodyText = forwardedDisplayContent == nil ? request.bodyText : nil
         let sharedDocumentLinkSnippet = forwardedDisplayContent == nil ? request.snippet : nil
@@ -702,21 +724,14 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             return nil
         }
 
-        let result = ChatBubbleTextProcessor.process(
-            content: request.bodyText,
-            options: ChatBubbleTextProcessorOptions(
-                inputKind: .autoDetectHTML,
-                sanitizeRawEmailSource: true,
-                decodeHTMLEntities: true,
-                formatSignOffLineBreaks: true,
-                classifyRichContent: false
-            )
+        let result = ChatBubbleTextProcessor.legacyAutoDetectedFallback(
+            from: request.bodyText,
+            sanitizeRawEmailSource: true,
+            classifyRichContent: false
         )
-        return MessageBubbleTextPrecedence.preferredOutgoingBodyFallback(
+        return LegacyOutgoingBodyTextFallback.preferredBodyText(
             result.mainText,
-            comparedTo: [
-                loadedPlainText
-            ]
+            over: loadedPlainText
         )
     }
 
@@ -829,10 +844,58 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             .joined(separator: ";")
     }
 
-    private func loadProcessedContent(
+    private func loadRichContentClassification(
+        from request: MessageBubbleContentRequest,
+        resolvedHasHTMLSource: Bool
+    ) async -> Bool {
+        guard !request.isFromMe else {
+            return false
+        }
+
+        let sourceSignature = ProcessedTextCache.contentSourceSignature(
+            messageId: request.messageID,
+            bodyStorageURI: request.bodyStorageURI,
+            bodyText: request.bodyText,
+            handler: htmlContentHandler
+        )
+
+        if let cached = await processedTextCache.get(
+            messageId: request.messageID,
+            sourceSignature: sourceSignature,
+            previewMode: ProcessedTextCache.richContentAnalysisMode
+        ) {
+            return cached.hasRichContent
+        }
+
+        let hasRichContent = ProcessedTextCache.classifyRichContent(
+            messageId: request.messageID,
+            bodyStorageURI: request.bodyStorageURI,
+            bodyText: request.bodyText,
+            handler: htmlContentHandler
+        )
+        let resolvedHasRichContent = hasRichContent || (
+            resolvedHasHTMLSource &&
+            looksLikeNewsletterFallbackText(request.bodyText ?? request.snippet)
+        )
+
+        await processedTextCache.set(
+            messageId: request.messageID,
+            sourceSignature: sourceSignature,
+            previewMode: ProcessedTextCache.richContentAnalysisMode,
+            plainText: nil,
+            hasRichContent: resolvedHasRichContent
+        )
+
+        return resolvedHasRichContent
+    }
+
+    private func loadCompatibilityContent(
         from request: MessageBubbleContentRequest,
         resolvedHasHTMLSource: Bool
     ) async -> (plainText: String?, hasRichContent: Bool) {
+        // Compatibility path for old records with missing chatPreviewText.
+        // HTML-backed messages derive text through the DOM-backed extractor;
+        // true plain-text-only messages use the legacy plain-text cleanup below.
         let sourceSignature = ProcessedTextCache.contentSourceSignature(
             messageId: request.messageID,
             bodyStorageURI: request.bodyStorageURI,
@@ -949,15 +1012,9 @@ actor MessageBubbleLoader: MessageBubbleLoading {
 
         if (shouldAttemptHTMLRecovery || shouldAttemptTrustedSenderRecovery || shouldAttemptNewsletterFallbackRecovery),
            let recoveredHTML = await htmlContentRecoveryService.recoverHTMLContent(messageId: request.messageID) {
-            let recoveredResult = ChatBubbleTextProcessor.process(
-                content: recoveredHTML,
-                options: ChatBubbleTextProcessorOptions(
-                    inputKind: .html,
-                    sanitizeRawEmailSource: false,
-                    decodeHTMLEntities: true,
-                    formatSignOffLineBreaks: true,
-                    classifyRichContent: true
-                )
+            let recoveredResult = ChatBubbleTextProcessor.htmlCompatibilityFallback(
+                from: recoveredHTML,
+                classifyRichContent: true
             )
             let recoveredHasRichContent =
                 recoveredResult.hasRichContent || shouldAttemptNewsletterFallbackRecovery
@@ -1027,23 +1084,19 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             let fallbackContent = RawEmailSourceSanitizer.extractHTMLText(from: text) ?? text
             let fallbackInputKind: ChatBubbleTextInputKind =
                 fallbackContent == text ? .autoDetectHTML : .html
-            let shouldSanitizeRawSource: Bool
-            switch fallbackInputKind {
-            case .html:
-                shouldSanitizeRawSource = false
-            case .plainText, .autoDetectHTML:
-                shouldSanitizeRawSource = true
-            }
-            let fallbackResult = ChatBubbleTextProcessor.process(
-                content: fallbackContent,
-                options: ChatBubbleTextProcessorOptions(
-                    inputKind: fallbackInputKind,
-                    sanitizeRawEmailSource: shouldSanitizeRawSource,
-                    decodeHTMLEntities: true,
-                    formatSignOffLineBreaks: true,
+            let fallbackResult: ChatBubbleTextProcessingResult
+            if fallbackInputKind == .html {
+                fallbackResult = ChatBubbleTextProcessor.htmlCompatibilityFallback(
+                    from: fallbackContent,
                     classifyRichContent: true
                 )
-            )
+            } else {
+                fallbackResult = ChatBubbleTextProcessor.legacyAutoDetectedFallback(
+                    from: fallbackContent,
+                    sanitizeRawEmailSource: true,
+                    classifyRichContent: true
+                )
+            }
             processedResult = (
                 fallbackResult.mainText,
                 fallbackResult.hasRichContent,

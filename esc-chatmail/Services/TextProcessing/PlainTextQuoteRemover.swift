@@ -1,7 +1,8 @@
 import Foundation
 
-/// Removes quoted text and signatures from plain text email content
-/// Handles reply quotes, forwarded messages, and common signature patterns
+/// Legacy/plain-text-only fallback for removing quoted text and signatures.
+/// Normal chat bubbles should use persisted Message.chatPreviewText; this remains
+/// for true plain-text-only emails and old records missing chatPreviewText.
 enum PlainTextQuoteRemover {
 
     // MARK: - Quote Indicator Patterns

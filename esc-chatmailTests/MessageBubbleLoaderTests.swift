@@ -157,6 +157,213 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertFalse(result.hasRichHTMLContent)
     }
 
+    func testLoadContent_populatedChatPreviewTextUsesStoredTextWithoutHTMLRecovery() async {
+        let messageId = "bubble-chat-preview-no-recovery-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        HTMLContentHandler.shared.deleteHTML(for: messageId)
+        defer {
+            HTMLContentHandler.shared.deleteHTML(for: messageId)
+        }
+
+        let recoverer = CountingHTMLContentRecoverer(
+            recoveredHTMLByMessageID: [
+                messageId: "<html><body><p>Recovered text that should not win</p></body></html>"
+            ]
+        )
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlContentRecoveryService: recoverer,
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache()
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: nil,
+                chatPreviewText: "Canonical stored preview",
+                bodyStorageURI: nil,
+                cleanedSnippet: "Snippet fallback",
+                snippet: "Snippet fallback",
+                subject: "Stored preview",
+                senderName: "Alice Example",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "Canonical stored preview")
+        let recoveryCallCount = await recoverer.recoveryCallCount()
+        XCTAssertEqual(recoveryCallCount, 0)
+    }
+
+    func testLoadContent_htmlMessageMissingChatPreviewTextUsesDOMFallback() async {
+        let messageId = "bubble-html-dom-fallback-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        HTMLContentHandler.shared.deleteHTML(for: messageId)
+        defer {
+            HTMLContentHandler.shared.deleteHTML(for: messageId)
+        }
+
+        _ = HTMLContentHandler.shared.saveHTML(
+            """
+            <html>
+            <body>
+              <p>Fresh DOM body.</p>
+              <div class="gmail_quote">
+                <p>Quoted content that should be removed.</p>
+              </div>
+            </body>
+            </html>
+            """,
+            for: messageId
+        )
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache()
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: nil,
+                chatPreviewText: nil,
+                bodyStorageURI: nil,
+                cleanedSnippet: "Snippet fallback",
+                snippet: "Snippet fallback",
+                subject: "HTML fallback",
+                senderName: "Alice Example",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "Fresh DOM body.")
+    }
+
+    func testLoadContent_plainTextOnlyMessageUsesNarrowLegacyCleanup() async {
+        let messageId = "bubble-plain-text-only-fallback-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: """
+                Fresh reply.
+
+                Sent from my iPhone
+
+                On Tue, Jan 2, 2026 at 9:41 AM Alice Example <alice@example.com> wrote:
+                > Old quoted content.
+                """,
+                chatPreviewText: nil,
+                bodyStorageURI: nil,
+                cleanedSnippet: "Fresh reply.",
+                snippet: "Fresh reply.",
+                subject: "Plain fallback",
+                senderName: "Alice Example",
+                hasHTMLSource: false,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "Fresh reply.")
+    }
+
+    func testLoadContent_outgoingOptimisticChatPreviewPreservesParagraphBreaks() async {
+        let messageId = "bubble-outgoing-optimistic-preview-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let composedPreview = """
+        First paragraph.
+
+        Second paragraph.
+
+        Third paragraph.
+        """
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: "First paragraph.",
+                chatPreviewText: composedPreview,
+                bodyStorageURI: nil,
+                cleanedSnippet: "First paragraph.",
+                snippet: "First paragraph.",
+                subject: "Optimistic send",
+                senderName: "Me",
+                hasHTMLSource: false,
+                hasAttachments: false,
+                isFromMe: true,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "me@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, composedPreview)
+    }
+
+    func testLoadContent_legacyRecordWithNilChatPreviewTextUsesBodyFallback() async {
+        let messageId = "bubble-legacy-nil-chat-preview-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: """
+                Legacy body fallback.
+
+                On Tue, Jan 2, 2026 at 9:41 AM Alice Example <alice@example.com> wrote:
+                > Older reply.
+                """,
+                chatPreviewText: nil,
+                bodyStorageURI: nil,
+                cleanedSnippet: "Truncated snippet",
+                snippet: "Truncated snippet",
+                subject: "Legacy fallback",
+                senderName: "Alice Example",
+                hasHTMLSource: false,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "Legacy body fallback.")
+    }
+
     func testLoadContent_blankChatPreviewTextFallsBackToProcessedLegacyText() async {
         let messageId = "bubble-blank-chat-preview-fallback-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
@@ -273,6 +480,117 @@ final class MessageBubbleLoaderTests: XCTestCase {
 
         XCTAssertEqual(first.fullTextContent, "Stale stored preview")
         XCTAssertEqual(second.fullTextContent, "Stale stored preview")
+    }
+
+    func testLoadContent_storedChatPreviewClassifiesDirectHTMLBodyFallback() async {
+        let messageId = "bubble-direct-html-rich-preview-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        HTMLContentHandler.shared.deleteHTML(for: messageId)
+        defer {
+            HTMLContentHandler.shared.deleteHTML(for: messageId)
+        }
+
+        let directHTML = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <section>
+            <table role="presentation" width="100%">
+              <tr><td><h1>Statement ready</h1></td></tr>
+              <tr><td><p>Your monthly account statement is now available.</p></td></tr>
+              <tr><td><a href="https://example.com/review">Review statement</a></td></tr>
+            </table>
+          </section>
+        </body>
+        </html>
+        """
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache()
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: directHTML,
+                chatPreviewText: "Statement ready",
+                bodyStorageURI: nil,
+                cleanedSnippet: "Statement ready",
+                snippet: "Statement ready",
+                subject: "Statement ready",
+                senderName: "Example Bank",
+                hasHTMLSource: false,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alerts@examplebank.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "Statement ready")
+        XCTAssertTrue(result.hasRichHTMLContent)
+        XCTAssertFalse(result.htmlAnalysis.hasHTMLSource)
+    }
+
+    func testLoadContent_storedChatPreviewCleansQuotesBeforeRichClassification() async {
+        let messageId = "bubble-rich-quote-cleanup-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        HTMLContentHandler.shared.deleteHTML(for: messageId)
+        defer {
+            HTMLContentHandler.shared.deleteHTML(for: messageId)
+        }
+
+        _ = HTMLContentHandler.shared.saveHTML(
+            """
+            <!DOCTYPE html>
+            <html>
+            <body>
+              <p>Sounds good to me.</p>
+              <div class="gmail_quote">
+                <section>
+                  <table role="presentation" width="100%">
+                    <tr><td><h1>Weekly newsletter</h1></td></tr>
+                    <tr><td><p>\(String(repeating: "Quoted newsletter copy. ", count: 30))</p></td></tr>
+                    <tr><td><a href="https://example.com/unsubscribe">Unsubscribe</a></td></tr>
+                  </table>
+                </section>
+              </div>
+            </body>
+            </html>
+            """,
+            for: messageId
+        )
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache()
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: nil,
+                chatPreviewText: "Sounds good to me.",
+                bodyStorageURI: nil,
+                cleanedSnippet: "Sounds good to me.",
+                snippet: "Sounds good to me.",
+                subject: "Re: Weekly newsletter",
+                senderName: "Alice Example",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "Sounds good to me.")
+        XCTAssertFalse(result.hasRichHTMLContent)
     }
 
     func testLoadContent_rawEmailSourceWithEmbeddedHTML_marksRichContent() async {
@@ -680,6 +998,70 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertNil(result.forwardedDisplayContent)
         XCTAssertEqual(result.fullTextContent, "Can you take a look at this?")
         XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)
+    }
+
+    func testLoadContent_incomingUnparsedForwardedStoredPreviewClassifiesBodyFallbackHTML() async {
+        let messageId = "bubble-unparsed-forwarded-rich-html-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        HTMLContentHandler.shared.deleteHTML(for: messageId)
+        defer {
+            HTMLContentHandler.shared.deleteHTML(for: messageId)
+        }
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache()
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: """
+                <!DOCTYPE html>
+                <html>
+                <body>
+                  <section>
+                    <table role="presentation" width="100%">
+                      <tr><td><h1>Reserve your table</h1></td></tr>
+                      <tr><td><p>Your reservation details are ready to review.</p></td></tr>
+                      <tr><td><a href="https://example.com/review">Review details</a></td></tr>
+                    </table>
+                  </section>
+                </body>
+                </html>
+                """,
+                chatPreviewText: "Reservation details",
+                bodyStorageURI: nil,
+                cleanedSnippet: "Reservation details",
+                snippet: "Reservation details",
+                subject: "Fwd: Dinner reservation",
+                senderName: "Alice Example",
+                hasHTMLSource: false,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: true,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertNil(result.forwardedDisplayContent)
+        XCTAssertEqual(result.fullTextContent, "Reservation details")
+        XCTAssertTrue(result.hasRichHTMLContent)
+        XCTAssertFalse(result.htmlAnalysis.hasHTMLSource)
+        XCTAssertTrue(
+            MessageDisplayPolicy.shouldShowHTMLPreview(
+                hasHTMLSource: result.htmlAnalysis.hasHTMLSource,
+                isForwardedEmail: true,
+                isNewsletter: false,
+                hasRichHTMLContent: result.hasRichHTMLContent,
+                isFromMe: false,
+                isOneToOneConversation: true,
+                subject: "Fwd: Dinner reservation",
+                senderEmail: "alice@example.com"
+            )
+        )
     }
 
     func testLoadContent_outgoingReplyPrefersFullBodyOverStoredHTMLWhenChatPreviewMissing() async throws {
@@ -1289,6 +1671,24 @@ private struct MockHTMLContentRecoverer: HTMLContentRecovering {
 
     func recoverHTMLContent(messageId: String) async -> String? {
         recoveredHTMLByMessageID[messageId]
+    }
+}
+
+private actor CountingHTMLContentRecoverer: HTMLContentRecovering {
+    let recoveredHTMLByMessageID: [String: String]
+    private var callCount = 0
+
+    init(recoveredHTMLByMessageID: [String: String]) {
+        self.recoveredHTMLByMessageID = recoveredHTMLByMessageID
+    }
+
+    func recoverHTMLContent(messageId: String) async -> String? {
+        callCount += 1
+        return recoveredHTMLByMessageID[messageId]
+    }
+
+    func recoveryCallCount() -> Int {
+        callCount
     }
 }
 

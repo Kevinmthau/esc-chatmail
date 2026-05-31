@@ -88,6 +88,56 @@ enum ChatBubbleTextProcessor {
         }
     }
 
+    static func htmlCompatibilityFallback(
+        from html: String?,
+        classifyRichContent: Bool
+    ) -> ChatBubbleTextProcessingResult {
+        process(
+            content: html,
+            options: ChatBubbleTextProcessorOptions(
+                inputKind: .html,
+                sanitizeRawEmailSource: false,
+                decodeHTMLEntities: true,
+                formatSignOffLineBreaks: true,
+                classifyRichContent: classifyRichContent
+            )
+        )
+    }
+
+    static func plainTextOnlyFallback(
+        from text: String?,
+        sanitizeRawEmailSource: Bool = true,
+        decodeHTMLEntities: Bool = true
+    ) -> ChatBubbleTextProcessingResult {
+        process(
+            content: text,
+            options: ChatBubbleTextProcessorOptions(
+                inputKind: .plainText,
+                sanitizeRawEmailSource: sanitizeRawEmailSource,
+                decodeHTMLEntities: decodeHTMLEntities,
+                formatSignOffLineBreaks: true,
+                classifyRichContent: false
+            )
+        )
+    }
+
+    static func legacyAutoDetectedFallback(
+        from text: String?,
+        sanitizeRawEmailSource: Bool = true,
+        classifyRichContent: Bool
+    ) -> ChatBubbleTextProcessingResult {
+        process(
+            content: text,
+            options: ChatBubbleTextProcessorOptions(
+                inputKind: .autoDetectHTML,
+                sanitizeRawEmailSource: sanitizeRawEmailSource,
+                decodeHTMLEntities: true,
+                formatSignOffLineBreaks: true,
+                classifyRichContent: classifyRichContent
+            )
+        )
+    }
+
     private static func processHTML(
         _ html: String,
         decodeHTMLEntities: Bool,
@@ -128,6 +178,8 @@ enum ChatBubbleTextProcessor {
         decodeHTMLEntities: Bool,
         formatSignOffLineBreaks: Bool
     ) -> ChatBubbleTextProcessingResult {
+        // Legacy/plain-text-only fallback. Normal chat bubbles should use the
+        // persisted Message.chatPreviewText and avoid this quote/signature path.
         var processed = text
         if sanitizeRawEmailSource {
             processed = RawEmailSourceSanitizer.extractDisplayText(from: processed)
@@ -151,7 +203,7 @@ enum ChatBubbleTextProcessor {
         )
     }
 
-    private static func containsHTMLTags(_ text: String) -> Bool {
+    fileprivate static func containsHTMLTags(_ text: String) -> Bool {
         guard let regex = htmlTagPattern else {
             return text.contains("<") && text.contains(">")
         }
@@ -171,26 +223,24 @@ fileprivate struct HTMLProcessingCleanupResult {
 actor ProcessedTextCache: MemoryWarningHandler {
     static let shared = ProcessedTextCache()
     // Bump to invalidate cached entries when processing logic changes.
-    private static let processingVersion = "2026-05-29-html-dom-text-v7"
+    private static let processingVersion = "2026-05-30-chat-preview-primary-v2"
     static let chatBubblePreviewMode = "chat-bubble-preview"
+    static let richContentAnalysisMode = "rich-content-analysis"
 
     /// Cached text content with rich content indicator and extracted quotes
     struct CachedText: Sendable {
         let plainText: String?
         let hasRichContent: Bool
         let quotedParts: [QuotedPart]
-        let prefersLoadedTextOverStoredPreview: Bool
 
         init(
             plainText: String?,
             hasRichContent: Bool,
-            quotedParts: [QuotedPart] = [],
-            prefersLoadedTextOverStoredPreview: Bool = false
+            quotedParts: [QuotedPart] = []
         ) {
             self.plainText = plainText
             self.hasRichContent = hasRichContent
             self.quotedParts = quotedParts
-            self.prefersLoadedTextOverStoredPreview = prefersLoadedTextOverStoredPreview
         }
     }
 
@@ -269,8 +319,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
     ) async -> (
         plainText: String?,
         hasRichContent: Bool,
-        quotedParts: [QuotedPart],
-        prefersLoadedTextOverStoredPreview: Bool
+        quotedParts: [QuotedPart]
     )? {
         let key = Self.cacheKey(
             for: messageId,
@@ -281,8 +330,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
         return (
             entry.plainText,
             entry.hasRichContent,
-            entry.quotedParts,
-            entry.prefersLoadedTextOverStoredPreview
+            entry.quotedParts
         )
     }
 
@@ -314,8 +362,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
         previewMode: String,
         plainText: String?,
         hasRichContent: Bool,
-        quotedParts: [QuotedPart] = [],
-        prefersLoadedTextOverStoredPreview: Bool = false
+        quotedParts: [QuotedPart] = []
     ) async {
         let size = Self.estimateSize(plainText, hasRichContent, quotedParts)
         let key = Self.cacheKey(
@@ -329,8 +376,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
             value: CachedText(
                 plainText: plainText,
                 hasRichContent: hasRichContent,
-                quotedParts: quotedParts,
-                prefersLoadedTextOverStoredPreview: prefersLoadedTextOverStoredPreview
+                quotedParts: quotedParts
             ),
             sizeBytes: size
         )
@@ -338,6 +384,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
         await pruneTrackedCacheKeys()
     }
 
+    /// Prefetches compatibility fallback text for old messages without chatPreviewText.
     func prefetch(messageIds: [String]) async {
         // Filter out already cached messages
         var uncachedMessages: [(messageId: String, sourceSignature: String)] = []
@@ -422,20 +469,60 @@ actor ProcessedTextCache: MemoryWarningHandler {
     ) -> (plainText: String?, hasRichContent: Bool, quotedParts: [QuotedPart]) {
         let html = loadHTML(messageId: messageId, bodyStorageURI: bodyStorageURI, handler: handler)
         if let html {
-            let result = ChatBubbleTextProcessor.process(
-                content: html,
-                options: ChatBubbleTextProcessorOptions(
-                    inputKind: .html,
-                    sanitizeRawEmailSource: false,
-                    decodeHTMLEntities: true,
-                    formatSignOffLineBreaks: true,
-                    classifyRichContent: true
-                )
+            let result = ChatBubbleTextProcessor.htmlCompatibilityFallback(
+                from: html,
+                classifyRichContent: true
             )
             return (result.mainText, result.hasRichContent, result.quotedParts)
         }
 
         return (nil, false, [])
+    }
+
+    /// Classifies rich HTML without deriving chat-bubble text. Used when
+    /// Message.chatPreviewText is already the visible bubble source.
+    nonisolated static func classifyRichContent(
+        messageId: String,
+        bodyStorageURI: String? = nil,
+        bodyText: String? = nil,
+        handler: HTMLContentHandler
+    ) -> Bool {
+        guard let html = richContentHTMLCandidate(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            handler: handler
+        ) else {
+            return false
+        }
+
+        return hasGenuineRichContentAfterCleanup(html)
+    }
+
+    nonisolated private static func richContentHTMLCandidate(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        handler: HTMLContentHandler
+    ) -> String? {
+        if let html = loadHTML(messageId: messageId, bodyStorageURI: bodyStorageURI, handler: handler) {
+            return html
+        }
+
+        guard let bodyText else {
+            return nil
+        }
+
+        if let rawSourceHTML = RawEmailSourceSanitizer.extractHTMLText(from: bodyText) {
+            return rawSourceHTML
+        }
+
+        return ChatBubbleTextProcessor.containsHTMLTags(bodyText) ? bodyText : nil
+    }
+
+    nonisolated private static func hasGenuineRichContentAfterCleanup(_ html: String) -> Bool {
+        let cleanup = cleanedHTMLForProcessing(html)
+        return hasGenuineRichContent(cleanup.html)
     }
 
     nonisolated static func contentSourceSignature(
@@ -829,6 +916,9 @@ actor ProcessedTextCache: MemoryWarningHandler {
         formatSignOffLineBreaks: Bool = true,
         applyPlainTextQuoteRemoval: Bool = false
     ) -> String? {
+        // HTML compatibility fallback for records missing chatPreviewText. The
+        // extraction itself is DOM-backed; the plain-text quote cleanup below is
+        // only used when HTML quote cleanup leaves no meaningful content.
         let extracted = TextProcessing.extractPlainText(from: html)
         guard !extracted.isEmpty else { return nil }
 
