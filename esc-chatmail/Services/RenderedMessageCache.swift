@@ -93,6 +93,18 @@ private struct AnyRenderedArtifactBox: @unchecked Sendable {
     let value: Any?
 }
 
+private struct RenderedMessageInvalidationSnapshot: Equatable, Sendable {
+    let globalGeneration: UInt64
+    let messageGeneration: UInt64
+    let sourceGeneration: UInt64
+}
+
+private struct RenderedMessageInFlightWork: Sendable {
+    let id: UUID
+    let task: Task<AnyRenderedArtifactBox, Never>
+    let invalidationSnapshot: RenderedMessageInvalidationSnapshot
+}
+
 actor RenderedMessageCache: MemoryWarningHandler {
     static let shared = RenderedMessageCache(startsMemoryWarningObserver: true)
 
@@ -101,7 +113,10 @@ actor RenderedMessageCache: MemoryWarningHandler {
     private let memoryObserver = MemoryWarningObserver()
     private var entries: [RenderedMessageKey: RenderedMessageCacheEntry] = [:]
     private var keysByMessageId: [String: Set<RenderedMessageKey>] = [:]
-    private var inFlight: [RenderedMessageInFlightKey: Task<AnyRenderedArtifactBox, Never>] = [:]
+    private var inFlight: [RenderedMessageInFlightKey: RenderedMessageInFlightWork] = [:]
+    private var globalInvalidationGeneration: UInt64 = 0
+    private var messageInvalidationGenerations: [String: UInt64] = [:]
+    private var sourceInvalidationGenerations: [RenderedMessageKey: UInt64] = [:]
     private var accessSequence: UInt64 = 0
     private var statistics = RenderedMessageCacheStatistics()
 
@@ -369,17 +384,22 @@ actor RenderedMessageCache: MemoryWarningHandler {
             sourceSignature.map { key.sourceSignature == $0 } ?? true
         }
         remove(keysToRemove, reason: reason)
+        cancelInFlight(messageId: messageId, sourceSignature: sourceSignature)
+        advanceInvalidationGeneration(messageId: messageId, sourceSignature: sourceSignature)
     }
 
     func clear() {
         let keys = Set(entries.keys)
         remove(keys, reason: .explicit)
-        inFlight.removeAll()
+        cancelAllInFlight()
+        advanceGlobalInvalidationGeneration()
     }
 
     func handleMemoryWarning() async {
         let keys = Set(entries.keys)
         remove(keys, reason: .memoryWarning)
+        cancelAllInFlight()
+        advanceGlobalInvalidationGeneration()
         Log.info("RenderedMessageCache cleared due to memory warning", category: .ui)
     }
 
@@ -399,7 +419,6 @@ actor RenderedMessageCache: MemoryWarningHandler {
         producer: @escaping @Sendable () async -> T?
     ) async -> T? {
         let key = RenderedMessageKey(messageId: messageId, sourceSignature: sourceSignature)
-        pruneStaleEntries(for: messageId, keeping: key)
 
         if let cached = cachedValue(
             key: key,
@@ -416,7 +435,7 @@ actor RenderedMessageCache: MemoryWarningHandler {
             variantKey: variantKey
         )
 
-        if let task = inFlight[inFlightKey] {
+        if let work = inFlight[inFlightKey] {
             statistics.duplicateWorkAvoided += 1
             log(
                 event: "duplicate-work-avoided",
@@ -424,17 +443,33 @@ actor RenderedMessageCache: MemoryWarningHandler {
                 artifactType: artifactType,
                 variantKey: variantKey
             )
-            let box = await task.value
+            let box = await work.task.value
+            guard isCurrent(work.invalidationSnapshot, for: key) else {
+                return nil
+            }
             return box.value as? T
         }
 
         let task = Task<AnyRenderedArtifactBox, Never> {
             AnyRenderedArtifactBox(value: await producer())
         }
-        inFlight[inFlightKey] = task
+        let work = RenderedMessageInFlightWork(
+            id: UUID(),
+            task: task,
+            invalidationSnapshot: invalidationSnapshot(for: key)
+        )
+        inFlight[inFlightKey] = work
 
-        let box = await task.value
-        inFlight.removeValue(forKey: inFlightKey)
+        let box = await work.task.value
+        let isCurrentWork = inFlight[inFlightKey]?.id == work.id
+        if isCurrentWork {
+            inFlight.removeValue(forKey: inFlightKey)
+        }
+
+        guard isCurrentWork,
+              isCurrent(work.invalidationSnapshot, for: key) else {
+            return nil
+        }
 
         guard let produced = box.value as? T else {
             return nil
@@ -459,7 +494,6 @@ actor RenderedMessageCache: MemoryWarningHandler {
         lookup: (RenderedMessageArtifacts) -> T?
     ) -> T? {
         let key = RenderedMessageKey(messageId: messageId, sourceSignature: sourceSignature)
-        pruneStaleEntries(for: messageId, keeping: key)
         return cachedValue(
             key: key,
             artifactType: artifactType,
@@ -496,7 +530,6 @@ actor RenderedMessageCache: MemoryWarningHandler {
         store: (inout RenderedMessageArtifacts, T) -> Void
     ) {
         let key = RenderedMessageKey(messageId: messageId, sourceSignature: sourceSignature)
-        pruneStaleEntries(for: messageId, keeping: key)
         storeValue(
             value,
             key: key,
@@ -534,20 +567,6 @@ actor RenderedMessageCache: MemoryWarningHandler {
         entries[key] = entry
     }
 
-    private func pruneStaleEntries(for messageId: String, keeping key: RenderedMessageKey) {
-        let keys = keysByMessageId[messageId] ?? []
-        let staleKeys = keys.filter { $0 != key }
-        remove(staleKeys, reason: .sourceSignatureChanged)
-
-        let staleInFlightKeys = inFlight.keys.filter {
-            $0.messageKey.messageId == messageId && $0.messageKey != key
-        }
-        for inFlightKey in staleInFlightKeys {
-            inFlight[inFlightKey]?.cancel()
-            inFlight.removeValue(forKey: inFlightKey)
-        }
-    }
-
     private func enforceLimits() {
         while entries.count > countLimit {
             evictLeastRecentlyUsed()
@@ -563,6 +582,58 @@ actor RenderedMessageCache: MemoryWarningHandler {
             return
         }
         remove([key], reason: .capacity)
+    }
+
+    private func cancelInFlight(messageId: String, sourceSignature: String?) {
+        let keysToCancel = inFlight.keys.filter { key in
+            key.messageKey.messageId == messageId &&
+                (sourceSignature.map { key.messageKey.sourceSignature == $0 } ?? true)
+        }
+
+        for key in keysToCancel {
+            inFlight[key]?.task.cancel()
+            inFlight.removeValue(forKey: key)
+        }
+    }
+
+    private func cancelAllInFlight() {
+        for work in inFlight.values {
+            work.task.cancel()
+        }
+        inFlight.removeAll()
+    }
+
+    private func invalidationSnapshot(for key: RenderedMessageKey) -> RenderedMessageInvalidationSnapshot {
+        RenderedMessageInvalidationSnapshot(
+            globalGeneration: globalInvalidationGeneration,
+            messageGeneration: messageInvalidationGenerations[key.messageId] ?? 0,
+            sourceGeneration: sourceInvalidationGenerations[key] ?? 0
+        )
+    }
+
+    private func isCurrent(
+        _ snapshot: RenderedMessageInvalidationSnapshot,
+        for key: RenderedMessageKey
+    ) -> Bool {
+        snapshot == invalidationSnapshot(for: key)
+    }
+
+    private func advanceInvalidationGeneration(messageId: String, sourceSignature: String?) {
+        if let sourceSignature {
+            let key = RenderedMessageKey(messageId: messageId, sourceSignature: sourceSignature)
+            sourceInvalidationGenerations[key, default: 0] &+= 1
+        } else {
+            messageInvalidationGenerations[messageId, default: 0] &+= 1
+            sourceInvalidationGenerations = sourceInvalidationGenerations.filter { entry in
+                entry.key.messageId != messageId
+            }
+        }
+    }
+
+    private func advanceGlobalInvalidationGeneration() {
+        globalInvalidationGeneration &+= 1
+        messageInvalidationGenerations.removeAll()
+        sourceInvalidationGenerations.removeAll()
     }
 
     private func remove<S: Sequence>(

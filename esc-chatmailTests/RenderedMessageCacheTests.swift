@@ -36,7 +36,7 @@ final class RenderedMessageCacheTests: XCTestCase {
         XCTAssertEqual(statistics.duplicateWorkAvoided, 1)
     }
 
-    func testSourceSignatureChangeInvalidatesArtifacts() async throws {
+    func testDifferentSourceSignaturesCanCoexist() async throws {
         let cache = RenderedMessageCache()
 
         _ = await cache.canonicalPlainText(
@@ -55,11 +55,85 @@ final class RenderedMessageCacheTests: XCTestCase {
 
         let staleArtifacts = await cache.artifacts(messageId: "message-1", sourceSignature: "source-1")
         let currentArtifacts = await cache.artifacts(messageId: "message-1", sourceSignature: "source-2")
-        let statistics = await cache.getStatistics()
 
-        XCTAssertNil(staleArtifacts)
+        XCTAssertEqual(staleArtifacts?.canonicalPlainText, "old text")
         XCTAssertEqual(currentArtifacts?.canonicalPlainText, "new text")
-        XCTAssertEqual(statistics.invalidations, 1)
+    }
+
+    func testBaseSourceLookupDoesNotPruneFallbackSourceArtifact() async throws {
+        let cache = RenderedMessageCache()
+        let variantKey = RenderedMessageVariantKey("chat-bubble-preview")
+        let baseSourceSignature = "html:123|456"
+        let fallbackSourceSignature = "html:123|456|fallback-body:sha256:body"
+
+        await cache.storeChatBubbleText(
+            RenderedMessageChatBubbleText(plainText: "fallback", hasRichContent: false),
+            messageId: "message-1",
+            sourceSignature: fallbackSourceSignature,
+            variantKey: variantKey
+        )
+
+        let baseResult = await cache.cachedChatBubbleText(
+            messageId: "message-1",
+            sourceSignature: baseSourceSignature,
+            variantKey: variantKey
+        )
+        let fallbackResult = await cache.cachedChatBubbleText(
+            messageId: "message-1",
+            sourceSignature: fallbackSourceSignature,
+            variantKey: variantKey
+        )
+
+        XCTAssertNil(baseResult)
+        XCTAssertEqual(fallbackResult?.plainText, "fallback")
+    }
+
+    func testInvalidationCancelsInFlightWorkAndDoesNotStoreResult() async throws {
+        let cache = RenderedMessageCache()
+        let gate = AsyncGate()
+
+        async let result = cache.canonicalPlainText(
+            messageId: "message-1",
+            sourceSignature: "source-1"
+        ) {
+            await gate.markStarted()
+            await gate.waitForRelease()
+            return "stale text"
+        }
+
+        await gate.waitForStart()
+        await cache.invalidate(messageId: "message-1")
+        await gate.release()
+
+        let produced = await result
+        let artifacts = await cache.artifacts(messageId: "message-1", sourceSignature: "source-1")
+
+        XCTAssertNil(produced)
+        XCTAssertNil(artifacts)
+    }
+
+    func testClearCancelsInFlightWorkAndDoesNotStoreResult() async throws {
+        let cache = RenderedMessageCache()
+        let gate = AsyncGate()
+
+        async let result = cache.canonicalPlainText(
+            messageId: "message-1",
+            sourceSignature: "source-1"
+        ) {
+            await gate.markStarted()
+            await gate.waitForRelease()
+            return "stale text"
+        }
+
+        await gate.waitForStart()
+        await cache.clear()
+        await gate.release()
+
+        let produced = await result
+        let artifacts = await cache.artifacts(messageId: "message-1", sourceSignature: "source-1")
+
+        XCTAssertNil(produced)
+        XCTAssertNil(artifacts)
     }
 
     func testPartialArtifactPopulationWorks() async throws {
@@ -198,5 +272,50 @@ private actor Counter {
 
     func value() -> Int {
         count
+    }
+}
+
+private actor AsyncGate {
+    private var started = false
+    private var released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func markStarted() {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    func waitForStart() async {
+        if started {
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    func waitForRelease() async {
+        if released {
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
     }
 }
