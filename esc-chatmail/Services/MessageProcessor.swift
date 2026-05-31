@@ -497,7 +497,8 @@ class MessageProcessor: @unchecked Sendable {
             }
         }
 
-        if let document = EmailDocument.tryParse(html) {
+        if html?.range(of: "cid:", options: .caseInsensitive) != nil,
+           let document = EmailDocument.tryParse(html) {
             normalizedContentIDs.formUnion(document.referencedInlineContentIDs())
         }
 

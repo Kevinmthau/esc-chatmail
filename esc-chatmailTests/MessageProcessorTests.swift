@@ -1458,6 +1458,50 @@ final class MessageProcessorTests: XCTestCase {
         )
     }
 
+    func testProcessGmailMessage_collectsInlineCIDPrefetchTargetsFromMIMEWhenHTMLHasNoCIDReferences() async throws {
+        let html = "<html><body><p>No inline image references here.</p></body></html>"
+        let message = makeMultipartMessage(
+            id: "inline-cid-prefetch-mime-only-message",
+            parts: [
+                MessagePart(
+                    partId: "0",
+                    mimeType: "text/html",
+                    filename: nil,
+                    headers: [
+                        MessageHeader(name: "Content-Type", value: "text/html; charset=utf-8")
+                    ],
+                    body: MessageBody(
+                        size: html.count,
+                        data: Data(html.utf8).base64EncodedString(),
+                        attachmentId: nil
+                    ),
+                    parts: nil
+                ),
+                MessagePart(
+                    partId: "1",
+                    mimeType: "image/png",
+                    filename: "mime-only.png",
+                    headers: [
+                        MessageHeader(name: "Content-Disposition", value: "inline; filename=\"mime-only.png\""),
+                        MessageHeader(name: "Content-ID", value: "<Mime-Only@Example.COM>")
+                    ],
+                    body: MessageBody(
+                        size: 90,
+                        data: nil,
+                        attachmentId: "att-mime-only"
+                    ),
+                    parts: nil
+                )
+            ]
+        )
+
+        let processedMessage = await processor.processGmailMessage(message, myAliases: [])
+        let processed = try XCTUnwrap(processedMessage)
+
+        XCTAssertEqual(processed.inlineCIDPrefetchContentIDs, ["mime-only@example.com"])
+        XCTAssertEqual(processed.inlineCIDPrefetchAttachmentIDs, ["att-mime-only"])
+    }
+
     private func makeMultipartMessage(id: String, parts: [MessagePart]) -> GmailMessage {
         GmailMessage(
             id: id,
