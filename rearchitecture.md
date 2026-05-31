@@ -251,6 +251,23 @@ Once a DOM parser is in place, parse each message *once* into an `EmailDocument`
 
 Cache on `messageId + sourceSignature`. The single canonical pass replaces the ~7 redundant scans listed in §B.
 
+Current status (2026-05-30): partially complete. A small `ParsedEmail` abstraction and `ParsedEmailProvider` actor now cache immutable facts by `messageId + sourceSignature`, prune stale entries when a message's source signature changes, and emit low-noise `html-preview` diagnostics for cache hit/miss duration and parse failures.
+
+Consumers now sharing `ParsedEmail`:
+- `EmailPreviewSourceLoader` uses it for preview HTML text, HTML summary, and `EmailPreviewClassifier` inputs.
+- `EmailPreviewClassifier` uses `ParsedEmail`'s centralized classification metrics/text fallback when available.
+- `MessageBubbleHTMLAnalysisBuilder` uses it for original inline `cid:` extraction while preserving raw fallback extraction on parse failure.
+- `EmailRenderQualityEvaluator` can evaluate from `ParsedEmail` render-quality facts; `HTMLContentLoader` uses that path for automatic original-view quality fallback on sanitized display HTML.
+
+Consumers still parsing or scanning independently, by design:
+- `HTMLSanitizerService` still performs DOM dangerous-markup removal plus specialized URL, tracking-pixel, and CSS sanitization because these are mutating safety passes, not reusable read-only facts.
+- `HTMLDisplayWrapper` still parses during full-document head injection and retains string injection as the parse-failure fallback.
+- `EmailPreviewImageExtractor` still sanitizes before image selection so unsafe/tracking image behavior remains unchanged.
+- Direct `NewsletterPreviewBuilder` / `TransactionalPreviewBuilder` raw-HTML entry points keep their local extraction path for tests and compatibility; the production `EmailPreviewSource` path receives shared extracted facts.
+- `HTMLQuoteRemover`, `TextProcessing`, and plain-text-only fallback paths remain independent where they intentionally transform or recover content.
+
+Next phase: do **not** build the unified `RenderedMessageCache` yet. Let parsed-email sharing stabilize first, then use it as the input layer for #5.
+
 ### 3. **Collapse the plain-text pipeline to a single DOM-based extraction**
 
 **Effort: medium (now unblocked by #1 and #6).** **Impact: high (removes ~2000 LOC of edge-case heuristics).**
@@ -420,16 +437,17 @@ Each step is independently shippable and reduces risk for the next.
 
 Completed:
 - **#1 (DOM parser adoption)** — complete for migrated paths as of 2026-05-28.
+- **#2 (single canonical parse pass)** — partially complete as of 2026-05-30; preview source extraction/classification, bubble inline-cid analysis, and render-quality facts now share `ParsedEmail`, while mutating sanitizer/wrapper/image-selection paths remain independent.
 - **#3 (collapse plain-text pipeline)** — partially complete as of 2026-05-30; normal bubbles no longer derive visible text through the legacy runtime cascade, while explicit legacy/plain-text-only fallbacks remain.
 - **#4 (snapshot-based preview)** — default rich HTML preview path as of 2026-05-28.
 - **#6 (canonical preview text at ingest)** — complete as of 2026-05-29.
 - **#7 (memoize loadSignature)** — complete; text fingerprints are precomputed in `ChatMessageRowModel`.
 
 Remaining recommended order:
-1. **#2 (single canonical parse pass)** — completes the DOM migration by passing one parsed representation through consumers.
-2. **#5 (unified rendering cache)** — capstone once the cache does not have to straddle both old and new parse paths.
+1. Continue hardening **#2 (single canonical parse pass)** only where low-risk consumers can use existing `ParsedEmail` facts without changing visible behavior.
+2. **#5 (unified rendering cache)** — capstone once parsed-email sharing is stable and no longer has to straddle both old and new parse paths.
 3. **#8 (eager inline attachment fetch)** — still useful for first-open fidelity; the original-reader warmup change reduced the blocking part but did not replace ingest-time attachment fetching.
-5. **#9 (document dark-mode policy)** — doc-only.
+4. **#9 (document dark-mode policy)** — doc-only.
 
 ---
 
@@ -464,7 +482,7 @@ The repo already has the right harness. For each shipped change:
 
 ## Bottom line
 
-The current architecture is **functionally correct and impressively thorough**, and the biggest completed wins are now in place: DOM-backed HTML processing for migrated paths (#1), snapshot-based rich previews (#4), persisted chat-preview text (#6), and precomputed bubble signature fingerprints (#7). The remaining complexity tax is concentrated in legacy/fallback plain-text processing, redundant parsed artifacts/caches, and first-open fidelity for inline assets.
+The current architecture is **functionally correct and impressively thorough**, and the biggest completed wins are now in place: DOM-backed HTML processing for migrated paths (#1), shared parsed-email facts for selected high-value consumers (#2 partial), snapshot-based rich previews (#4), persisted chat-preview text (#6), and precomputed bubble signature fingerprints (#7). The remaining complexity tax is concentrated in legacy/fallback plain-text processing, mutating rendering passes that still own their own parse/scans, and first-open fidelity for inline assets.
 
 ---
 
@@ -518,8 +536,8 @@ Initial foundation landed on branch `claude/email-chat-architecture-EddMs`.
 
 ### What's still to do (in priority order):
 
-- **Next: #2, single canonical `ParsedEmail` pass** so sanitizer, classifier, analysis, and preview builders stop deriving overlapping artifacts independently.
-- **Defer unified rendering-cache work** until it no longer has to support both legacy and DOM branches.
+- **Next: continue #2 only for low-risk consumers** that can share existing `ParsedEmail` facts without changing rendering behavior.
+- **Defer unified rendering-cache work** until parsed-email sharing is stable and it no longer has to support both legacy and DOM branches.
 
 ## Implementation status — original email recovery
 

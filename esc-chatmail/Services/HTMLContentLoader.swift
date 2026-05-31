@@ -88,6 +88,7 @@ final class HTMLContentLoader {
     private let sanitizer: HTMLSanitizerService
     private let remoteImageAttachmentFallback: HTMLRemoteImageAttachmentFallback
     private let qualityEvaluator: EmailRenderQualityEvaluator
+    private let parsedEmailProvider: any ParsedEmailProviding
     private static let linkDetector: NSDataDetector? = {
         try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
     }()
@@ -112,12 +113,14 @@ final class HTMLContentLoader {
         contentHandler: HTMLContentHandler = HTMLContentHandler(),
         sanitizer: HTMLSanitizerService = .shared,
         remoteImageAttachmentFallback: HTMLRemoteImageAttachmentFallback = .shared,
-        qualityEvaluator: EmailRenderQualityEvaluator = EmailRenderQualityEvaluator()
+        qualityEvaluator: EmailRenderQualityEvaluator = EmailRenderQualityEvaluator(),
+        parsedEmailProvider: any ParsedEmailProviding = ParsedEmailProvider.shared
     ) {
         self.contentHandler = contentHandler
         self.sanitizer = sanitizer
         self.remoteImageAttachmentFallback = remoteImageAttachmentFallback
         self.qualityEvaluator = qualityEvaluator
+        self.parsedEmailProvider = parsedEmailProvider
         self.htmlCacheDelegate = HTMLContentCacheDelegate()
         // Limit cache to ~50MB with both count and cost limits for proper memory pressure response
         htmlCache.countLimit = 1000
@@ -383,8 +386,10 @@ final class HTMLContentLoader {
         }
 
         let normalizedFallbackText = normalizedMeaningfulPlainText(from: bodyText)
+        let sourceSignature = sourceSignature(for: normalizedCanonicalHTML)
         guard let prepared = await wrappedHTMLIfMeaningful(
             normalizedCanonicalHTML,
+            sourceSignature: sourceSignature,
             messageId: messageId,
             plainText: normalizedFallbackText,
             senderEmail: senderEmail,
@@ -511,6 +516,9 @@ final class HTMLContentLoader {
     /// Invalidates cached HTML content for a message (both light/dark variants).
     func invalidate(messageId: String) {
         invalidateCachedResults(messageId: messageId) { _ in true }
+        Task {
+            await parsedEmailProvider.invalidate(messageId: messageId)
+        }
     }
 
     private func invalidateCachedResults(
@@ -679,6 +687,7 @@ final class HTMLContentLoader {
 
         guard let prepared = await wrappedHTMLIfMeaningful(
             html,
+            sourceSignature: sourceSignature,
             messageId: messageId,
             plainText: plainText,
             senderEmail: senderEmail,
@@ -883,6 +892,7 @@ final class HTMLContentLoader {
 
     private func wrappedHTMLIfMeaningful(
         _ html: String,
+        sourceSignature: String,
         messageId: String,
         plainText: String?,
         senderEmail: String?,
@@ -904,7 +914,18 @@ final class HTMLContentLoader {
         }
 
         if displayPurpose == .original, originalHTMLPreference == .automatic {
+            let parsedEmail = await parsedEmailProvider.parsedEmail(
+                messageId: messageId,
+                sourceSignature: [
+                    sourceSignature,
+                    "sanitized",
+                    "cleanup:\(cleanupMode.rawValue)",
+                    "purpose:\(displayPurpose.rawValue)"
+                ].joined(separator: "|"),
+                canonicalHTML: sanitizedHTML
+            )
             let evaluation = qualityEvaluator.evaluate(
+                parsedEmail: parsedEmail,
                 html: sanitizedHTML,
                 plainText: plainText,
                 senderEmail: senderEmail,

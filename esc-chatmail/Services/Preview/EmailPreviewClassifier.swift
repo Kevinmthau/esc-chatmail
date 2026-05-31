@@ -9,12 +9,35 @@ struct EmailPreviewClassifier {
         subject: String? = nil,
         includeTestFlightAvailabilitySignal: Bool = true
     ) -> EmailPreviewClassification {
+        classify(
+            parsedEmail: nil,
+            canonicalHTML: canonicalHTML,
+            bodyText: bodyText,
+            extractedText: extractedText,
+            senderEmail: senderEmail,
+            subject: subject,
+            includeTestFlightAvailabilitySignal: includeTestFlightAvailabilitySignal
+        )
+    }
+
+    func classify(
+        parsedEmail: ParsedEmail?,
+        canonicalHTML: String,
+        bodyText: String?,
+        extractedText: String? = nil,
+        senderEmail: String?,
+        subject: String? = nil,
+        includeTestFlightAvailabilitySignal: Bool = true
+    ) -> EmailPreviewClassification {
         let lowercasedHTML = canonicalHTML.lowercased()
         let previewText = normalizedBodyText(bodyText)
             ?? normalizedOptionalText(extractedText)
+            ?? normalizedOptionalText(parsedEmail?.previewPlainText)
             ?? normalizedText(TextProcessing.extractPlainText(from: canonicalHTML))
         let lowercasedText = previewText.lowercased()
-        let metrics = HTMLMetrics(html: lowercasedHTML)
+        let metrics = parsedEmail?.canonicalHTML == canonicalHTML
+            ? HTMLMetrics(metrics: parsedEmail?.htmlMetrics)
+            : HTMLMetrics(html: lowercasedHTML)
         let lowercasedSubject = subject?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() ?? ""
@@ -248,6 +271,12 @@ private struct HTMLMetrics {
     let imageCount: Int
     let tableCount: Int
     let linkCount: Int
+
+    init(metrics: EmailDocumentHTMLMetrics?) {
+        imageCount = metrics?.imageCount ?? 0
+        tableCount = metrics?.tableCount ?? 0
+        linkCount = metrics?.linkCount ?? 0
+    }
 
     init(html: String) {
         imageCount = HTMLMetrics.countOccurrences(of: "<img", in: html)

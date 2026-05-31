@@ -23,6 +23,30 @@ struct EmailDocumentRenderQualityMetrics: Equatable, Sendable {
     )
 }
 
+struct EmailDocumentHTMLMetrics: Equatable, Sendable {
+    let imageCount: Int
+    let tableCount: Int
+    let linkCount: Int
+
+    init(imageCount: Int, tableCount: Int, linkCount: Int) {
+        self.imageCount = imageCount
+        self.tableCount = tableCount
+        self.linkCount = linkCount
+    }
+
+    init(classificationHTML html: String) {
+        let lowercasedHTML = html.lowercased()
+        self.imageCount = Self.countOccurrences(of: "<img", in: lowercasedHTML)
+        self.tableCount = Self.countOccurrences(of: "<table", in: lowercasedHTML)
+        self.linkCount = Self.countOccurrences(of: "<a ", in: lowercasedHTML)
+    }
+
+    private static func countOccurrences(of token: String, in text: String) -> Int {
+        guard !token.isEmpty else { return 0 }
+        return text.components(separatedBy: token).count - 1
+    }
+}
+
 /// A parsed HTML email document with DOM-based operations.
 ///
 /// `EmailDocument` is the canonical DOM representation used by the HTML
@@ -193,6 +217,62 @@ final class EmailDocument {
         )
     }
 
+    func renderablePlainText(preserveParagraphs: Bool = true) -> String {
+        let text = EmailDOMTextExtractor.paragraphAwareText(
+            from: document,
+            skipping: isNonRenderableContentElement
+        )
+        guard !preserveParagraphs else {
+            return text
+        }
+        return text
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func renderableQualityMetrics(
+        footerLineHints: [String],
+        primaryContentHints: [String]
+    ) -> EmailDocumentRenderQualityMetrics {
+        let bodyRoot = document.body() ?? document
+
+        return EmailDocumentRenderQualityMetrics(
+            imageCount: renderableElements("img", root: bodyRoot).count,
+            tableCount: renderableElements("table", root: bodyRoot).count,
+            linkCount: renderableElements("a[href]", root: bodyRoot).count,
+            semanticElementCount: renderableElements(Self.semanticElementSelector, root: bodyRoot).count,
+            elementCount: renderableElements("*", root: bodyRoot).count,
+            largeSpacerSignalCount: renderableElements("td,tr,div,table,p", root: bodyRoot)
+                .filter(Self.isLargeSpacerElement)
+                .count,
+            hiddenPrimaryContentCount: hiddenPrimaryContentCount(
+                in: bodyRoot,
+                primaryContentHints: primaryContentHints
+            ),
+            footerLineRatio: Self.footerLineRatio(
+                in: renderablePlainText(preserveParagraphs: true),
+                hints: footerLineHints
+            )
+        )
+    }
+
+    func htmlMetrics() -> EmailDocumentHTMLMetrics {
+        let bodyRoot = document.body() ?? document
+        return EmailDocumentHTMLMetrics(
+            imageCount: selectedElements("img", root: bodyRoot).count,
+            tableCount: selectedElements("table", root: bodyRoot).count,
+            linkCount: selectedElements("a[href]", root: bodyRoot).count
+        )
+    }
+
+    func previewPlainText() -> String? {
+        EmailPreviewDOMQuery(document: document).plainText()
+    }
+
+    func previewHTMLSummary() -> EmailPreviewHTMLSummary {
+        EmailPreviewDOMQuery(document: document).htmlSummary()
+    }
+
     /// Normalizes a `cid:` URL or raw Content-ID to a lowercase identifier
     /// suitable for matching against `Attachment.contentId`. Mirrors the
     /// semantics of `MessageBubbleHTMLAnalysisBuilder.normalizedContentID`.
@@ -232,6 +312,10 @@ final class EmailDocument {
     private func selectedElements(_ selector: String, root: Element? = nil) -> [Element] {
         let root = root ?? document
         return ((try? root.select(selector)) ?? Elements()).array()
+    }
+
+    private func renderableElements(_ selector: String, root: Element) -> [Element] {
+        selectedElements(selector, root: root).filter { !hasNonRenderableAncestorOrSelf($0) }
     }
 
     private func largeSpacerSignalCount(in root: Element) -> Int {
@@ -420,6 +504,38 @@ final class EmailDocument {
         let compact = style.lowercased().filter { !$0.isWhitespace }
         return compact.contains("display:none") ||
             compact.contains("visibility:hidden")
+    }
+
+    private func hasNonRenderableAncestorOrSelf(_ element: Element) -> Bool {
+        var current: Element? = element
+        while let element = current {
+            if isNonRenderableContentElement(element) {
+                return true
+            }
+            current = element.parent()
+        }
+        return false
+    }
+
+    private func isNonRenderableContentElement(_ element: Element) -> Bool {
+        if (try? element.hasAttr("hidden")) == true {
+            return true
+        }
+
+        if Self.styleDeclarationRemovesRenderableContent((try? element.attr("style")) ?? "") {
+            return true
+        }
+
+        let className = ((try? element.attr("class")) ?? "").lowercased()
+        return className.range(of: #"\bm-hide\b|\bpreheader\b|\bpreview-text\b"#, options: .regularExpression) != nil
+    }
+
+    private static func styleDeclarationRemovesRenderableContent(_ style: String) -> Bool {
+        let compact = style.lowercased().filter { !$0.isWhitespace }
+        return compact.contains("display:none") ||
+            compact.contains("visibility:hidden") ||
+            compact.contains("mso-hide:all") ||
+            compact.range(of: #"opacity:0(?:\.0+)?(?:;|$)"#, options: .regularExpression) != nil
     }
 
     private static func removingCSSComments(from css: String) -> String {

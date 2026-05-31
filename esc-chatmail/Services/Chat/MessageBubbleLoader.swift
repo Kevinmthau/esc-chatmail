@@ -231,6 +231,7 @@ private enum LegacyOutgoingBodyTextFallback {
 enum MessageBubbleHTMLAnalysisBuilder {
     static func build(
         canonicalHTML: String?,
+        parsedEmail: ParsedEmail? = nil,
         hasHTMLSourceHint: Bool,
         isForwardedEmail: Bool,
         isLikelyCalendarInvite: Bool,
@@ -243,6 +244,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
     ) -> MessageBubbleHTMLAnalysis {
         build(
             canonicalHTML: canonicalHTML,
+            parsedEmail: parsedEmail,
             hasHTMLSource: hasHTMLSourceHint || canonicalHTML != nil,
             isForwardedEmail: isForwardedEmail,
             isLikelyCalendarInvite: isLikelyCalendarInvite,
@@ -278,6 +280,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
 
         return build(
             canonicalHTML: canonicalHTML,
+            parsedEmail: nil,
             hasHTMLSource: hasHTMLSource,
             isForwardedEmail: isForwardedEmail,
             isLikelyCalendarInvite: isLikelyCalendarInvite,
@@ -335,11 +338,12 @@ enum MessageBubbleHTMLAnalysisBuilder {
 
     private static func extractNonDisplayableInlineContentIDs(
         from html: String?,
+        parsedEmail: ParsedEmail?,
         attachments: [MessageBubbleAttachmentSnapshot]
     ) -> Set<String> {
         guard let html else { return [] }
 
-        let originalReferenced = extractReferencedContentIDs(from: html)
+        let originalReferenced = extractReferencedContentIDs(from: html, parsedEmail: parsedEmail)
         guard !originalReferenced.isEmpty else { return [] }
 
         let cleaned = cleanedHTMLForAttachmentFiltering(from: html)
@@ -367,8 +371,15 @@ enum MessageBubbleHTMLAnalysisBuilder {
         return html
     }
 
-    private static func extractReferencedContentIDs(from html: String?) -> Set<String> {
+    private static func extractReferencedContentIDs(
+        from html: String?,
+        parsedEmail: ParsedEmail? = nil
+    ) -> Set<String> {
         guard let html else { return [] }
+
+        if parsedEmail?.canonicalHTML == html {
+            return parsedEmail?.referencedInlineContentIDs ?? []
+        }
 
         if let document = EmailDocument.tryParse(html) {
             return document.referencedInlineContentIDs()
@@ -540,6 +551,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
 
     private static func build(
         canonicalHTML: String?,
+        parsedEmail: ParsedEmail?,
         hasHTMLSource: Bool,
         isForwardedEmail: Bool,
         isLikelyCalendarInvite: Bool,
@@ -556,9 +568,13 @@ enum MessageBubbleHTMLAnalysisBuilder {
 
         return MessageBubbleHTMLAnalysis(
             hasHTMLSource: hasHTMLSource,
-            referencedInlineContentIDs: extractReferencedContentIDs(from: canonicalHTML),
+            referencedInlineContentIDs: extractReferencedContentIDs(
+                from: canonicalHTML,
+                parsedEmail: parsedEmail
+            ),
             nonDisplayableInlineContentIDs: extractNonDisplayableInlineContentIDs(
                 from: canonicalHTML,
+                parsedEmail: parsedEmail,
                 attachments: attachmentSnapshots
             ),
             supportsCalendarInvitePreviewCard: supportsCalendarInvitePreviewCard(
@@ -615,6 +631,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
     private let htmlContentLoader: HTMLContentLoader
     private let htmlContentRecoveryService: any HTMLContentRecovering
     private let htmlAnalysisCache: MessageBubbleHTMLAnalysisCache
+    private let parsedEmailProvider: any ParsedEmailProviding
 
     init(
         contactsResolver: any ContactsResolving = ContactsResolver.shared,
@@ -622,7 +639,8 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         htmlContentHandler: HTMLContentHandler = .shared,
         htmlContentLoader: HTMLContentLoader = .shared,
         htmlContentRecoveryService: any HTMLContentRecovering = HTMLContentRecoveryService.shared,
-        htmlAnalysisCache: MessageBubbleHTMLAnalysisCache = .shared
+        htmlAnalysisCache: MessageBubbleHTMLAnalysisCache = .shared,
+        parsedEmailProvider: any ParsedEmailProviding = ParsedEmailProvider.shared
     ) {
         self.contactsResolver = contactsResolver
         self.processedTextCache = processedTextCache
@@ -630,6 +648,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         self.htmlContentLoader = htmlContentLoader
         self.htmlContentRecoveryService = htmlContentRecoveryService
         self.htmlAnalysisCache = htmlAnalysisCache
+        self.parsedEmailProvider = parsedEmailProvider
     }
 
     func loadSenderInfo(from request: MessageBubbleSenderRequest) async -> MessageBubbleSenderResult {
@@ -741,9 +760,22 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             return cached
         }
 
-        let canonicalHTML = await canonicalHTMLForAnalysisIfNeeded(for: request)
+        let canonicalContent = await canonicalContentForAnalysisIfNeeded(for: request)
+        let canonicalHTML = canonicalContent?.html
+        let parsedEmail: ParsedEmail?
+        if let canonicalHTML, let canonicalContent {
+            parsedEmail = await parsedEmailProvider.parsedEmail(
+                messageId: request.messageID,
+                sourceSignature: canonicalContent.sourceSignature,
+                canonicalHTML: canonicalHTML
+            )
+        } else {
+            parsedEmail = nil
+        }
+
         let analysis = MessageBubbleHTMLAnalysisBuilder.build(
             canonicalHTML: canonicalHTML,
+            parsedEmail: parsedEmail,
             hasHTMLSourceHint: request.hasHTMLSource,
             isForwardedEmail: request.isForwardedEmail,
             isLikelyCalendarInvite: request.isLikelyCalendarInvite,
@@ -766,7 +798,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         return text
     }
 
-    private func canonicalHTMLForAnalysisIfNeeded(for request: MessageBubbleContentRequest) async -> String? {
+    private func canonicalContentForAnalysisIfNeeded(for request: MessageBubbleContentRequest) async -> CanonicalEmailContent? {
         let needsCanonicalHTML =
             request.hasAttachments ||
             !request.attachmentSnapshots.isEmpty ||
@@ -788,7 +820,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             return nil
         }
 
-        return await htmlContentLoader.loadCanonicalHTML(
+        return await htmlContentLoader.loadCanonicalEmailContent(
             messageId: request.messageID,
             bodyStorageURI: request.bodyStorageURI,
             bodyText: request.bodyText,

@@ -4,6 +4,10 @@ import SwiftSoup
 struct EmailPreviewDOMQuery {
     private let document: Document
 
+    init(document: Document) {
+        self.document = document
+    }
+
     init?(html: String) {
         do {
             let document = try SwiftSoup.parse(html)

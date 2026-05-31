@@ -23,21 +23,33 @@ enum EmailDOMTextExtractor {
     /// Extracts paragraph-aware plain text from an entire parsed document.
     static func paragraphAwareText(
         from document: SwiftSoup.Document,
-        divsAsLineBreaks: Bool = false
+        divsAsLineBreaks: Bool = false,
+        skipping shouldSkipElement: ((Element) -> Bool)? = nil
     ) -> String {
         let root: Element = document.body() ?? document
         let buffer = TextBuffer()
-        walk(node: root, into: buffer, divsAsLineBreaks: divsAsLineBreaks)
+        walk(
+            node: root,
+            into: buffer,
+            divsAsLineBreaks: divsAsLineBreaks,
+            shouldSkipElement: shouldSkipElement
+        )
         return normalize(buffer.string)
     }
 
     /// Extracts paragraph-aware plain text from a subtree.
     static func paragraphAwareText(
         from element: Element,
-        divsAsLineBreaks: Bool = false
+        divsAsLineBreaks: Bool = false,
+        skipping shouldSkipElement: ((Element) -> Bool)? = nil
     ) -> String {
         let buffer = TextBuffer()
-        walk(node: element, into: buffer, divsAsLineBreaks: divsAsLineBreaks)
+        walk(
+            node: element,
+            into: buffer,
+            divsAsLineBreaks: divsAsLineBreaks,
+            shouldSkipElement: shouldSkipElement
+        )
         return normalize(buffer.string)
     }
 
@@ -59,7 +71,12 @@ enum EmailDOMTextExtractor {
         "script", "style", "head", "title", "meta", "link", "noscript", "template"
     ]
 
-    private static func walk(node: Node, into buffer: TextBuffer, divsAsLineBreaks: Bool) {
+    private static func walk(
+        node: Node,
+        into buffer: TextBuffer,
+        divsAsLineBreaks: Bool,
+        shouldSkipElement: ((Element) -> Bool)?
+    ) {
         if let textNode = node as? TextNode {
             // SwiftSoup's TextNode.text() returns decoded text.
             buffer.appendText(textNode.text())
@@ -72,6 +89,10 @@ enum EmailDOMTextExtractor {
         let tag = element.tagNameNormal()
 
         if invisibleTags.contains(tag) {
+            return
+        }
+
+        if shouldSkipElement?(element) == true {
             return
         }
 
@@ -105,7 +126,12 @@ enum EmailDOMTextExtractor {
         }
 
         for child in element.getChildNodes() {
-            walk(node: child, into: buffer, divsAsLineBreaks: divsAsLineBreaks)
+            walk(
+                node: child,
+                into: buffer,
+                divsAsLineBreaks: divsAsLineBreaks,
+                shouldSkipElement: shouldSkipElement
+            )
         }
 
         if isCell {

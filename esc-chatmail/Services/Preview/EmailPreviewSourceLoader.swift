@@ -26,16 +26,19 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
     private let htmlContentLoader: HTMLContentLoader
     private let classifier: EmailPreviewClassifier
     private let imageExtractor: EmailPreviewImageExtractor
+    private let parsedEmailProvider: any ParsedEmailProviding
     private let cache = NSCache<NSString, CachedSourceBox>()
 
     init(
         htmlContentLoader: HTMLContentLoader = .shared,
         classifier: EmailPreviewClassifier = EmailPreviewClassifier(),
-        imageExtractor: EmailPreviewImageExtractor = EmailPreviewImageExtractor()
+        imageExtractor: EmailPreviewImageExtractor = EmailPreviewImageExtractor(),
+        parsedEmailProvider: any ParsedEmailProviding = ParsedEmailProvider.shared
     ) {
         self.htmlContentLoader = htmlContentLoader
         self.classifier = classifier
         self.imageExtractor = imageExtractor
+        self.parsedEmailProvider = parsedEmailProvider
         cache.countLimit = 512
         cache.totalCostLimit = 30 * 1024 * 1024
     }
@@ -74,12 +77,19 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
             return cached.source
         }
 
+        let parsedEmail = await parsedEmailProvider.parsedEmail(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            canonicalHTML: canonicalHTML
+        )
         let extractedContent = EmailPreviewContentExtractor.extract(
             canonicalHTML: canonicalHTML,
             bodyText: canonicalContent.plainText,
+            parsedEmail: parsedEmail,
             imageExtractor: imageExtractor
         )
         let classification = classifier.classify(
+            parsedEmail: parsedEmail,
             canonicalHTML: canonicalHTML,
             bodyText: extractedContent.plainText,
             extractedText: extractedContent.htmlText,
@@ -157,14 +167,16 @@ enum EmailPreviewContentExtractor {
     static func extract(
         canonicalHTML: String,
         bodyText: String?,
+        parsedEmail: ParsedEmail? = nil,
         imageExtractor: EmailPreviewImageExtractor = EmailPreviewImageExtractor()
     ) -> EmailPreviewExtractedContent {
-        let domQuery = EmailPreviewDOMQuery(html: canonicalHTML)
+        let usesParsedEmail = parsedEmail?.canonicalHTML == canonicalHTML
+        let domQuery = usesParsedEmail ? nil : EmailPreviewDOMQuery(html: canonicalHTML)
         return EmailPreviewExtractedContent(
             plainText: normalizedPlainText(from: bodyText),
-            htmlText: normalizedHTMLText(from: canonicalHTML, domQuery: domQuery),
+            htmlText: normalizedHTMLText(from: canonicalHTML, parsedEmail: parsedEmail, domQuery: domQuery),
             images: imageExtractor.extractImages(from: canonicalHTML),
-            htmlSummary: htmlSummary(from: canonicalHTML, domQuery: domQuery)
+            htmlSummary: htmlSummary(from: canonicalHTML, parsedEmail: parsedEmail, domQuery: domQuery)
         )
     }
 
@@ -178,10 +190,18 @@ enum EmailPreviewContentExtractor {
     }
 
     static func normalizedHTMLText(from html: String) -> String? {
-        normalizedHTMLText(from: html, domQuery: EmailPreviewDOMQuery(html: html))
+        normalizedHTMLText(from: html, parsedEmail: nil, domQuery: EmailPreviewDOMQuery(html: html))
     }
 
-    private static func normalizedHTMLText(from html: String, domQuery: EmailPreviewDOMQuery?) -> String? {
+    private static func normalizedHTMLText(
+        from html: String,
+        parsedEmail: ParsedEmail?,
+        domQuery: EmailPreviewDOMQuery?
+    ) -> String? {
+        if parsedEmail?.canonicalHTML == html {
+            return parsedEmail?.previewPlainText
+        }
+
         if let domText = domQuery?.plainText() {
             return domText
         }
@@ -244,8 +264,22 @@ enum EmailPreviewContentExtractor {
         }
     }
 
-    private static func htmlSummary(from _: String, domQuery: EmailPreviewDOMQuery?) -> EmailPreviewHTMLSummary {
-        domQuery?.htmlSummary() ?? EmailPreviewHTMLSummary(
+    private static func htmlSummary(
+        from html: String,
+        parsedEmail: ParsedEmail?,
+        domQuery: EmailPreviewDOMQuery?
+    ) -> EmailPreviewHTMLSummary {
+        if parsedEmail?.canonicalHTML == html {
+            return parsedEmail?.htmlSummary ?? EmailPreviewHTMLSummary(
+                h1Text: nil,
+                h2Text: nil,
+                titleText: nil,
+                preheaderText: nil,
+                actionLinkTexts: []
+            )
+        }
+
+        return domQuery?.htmlSummary() ?? EmailPreviewHTMLSummary(
             h1Text: nil,
             h2Text: nil,
             titleText: nil,

@@ -26,12 +26,29 @@ struct EmailRenderQualityEvaluator {
         senderEmail: String?,
         subject: String?
     ) -> EmailRenderQualityEvaluation {
+        evaluate(
+            parsedEmail: nil,
+            html: html,
+            plainText: plainText,
+            senderEmail: senderEmail,
+            subject: subject
+        )
+    }
+
+    func evaluate(
+        parsedEmail: ParsedEmail?,
+        html: String,
+        plainText: String?,
+        senderEmail: String?,
+        subject: String?
+    ) -> EmailRenderQualityEvaluation {
         let trimmedHTML = html.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedHTML.isEmpty else {
             return .useHTML(summary: "html_empty")
         }
 
         let classification = previewClassifier.classify(
+            parsedEmail: parsedEmail,
             canonicalHTML: trimmedHTML,
             bodyText: plainText,
             senderEmail: senderEmail,
@@ -39,14 +56,16 @@ struct EmailRenderQualityEvaluator {
             includeTestFlightAvailabilitySignal: false
         )
 
-        let renderableHTML = HTMLMeaningfulContentChecker.renderableHTML(from: trimmedHTML)
-        let document = EmailDocument.tryParse(trimmedHTML)
-        let renderableDocument = EmailDocument.tryParse(renderableHTML)
-        let renderableMetrics = renderableDocument?.renderQualityMetrics(
-            footerLineHints: Self.footerLineHints,
-            primaryContentHints: Self.primaryContentHints
+        let parsedRenderQuality = parsedEmail?.canonicalHTML == trimmedHTML ? parsedEmail?.renderQuality : nil
+        let renderableHTML = parsedRenderQuality?.renderableHTML ?? HTMLMeaningfulContentChecker.renderableHTML(from: trimmedHTML)
+        let document = parsedRenderQuality == nil ? EmailDocument.tryParse(trimmedHTML) : nil
+        let renderableDocument = parsedRenderQuality == nil ? EmailDocument.tryParse(renderableHTML) : nil
+        let renderableMetrics = parsedRenderQuality?.metrics ?? renderableDocument?.renderQualityMetrics(
+            footerLineHints: EmailRenderQualityHints.footerLineHints,
+            primaryContentHints: EmailRenderQualityHints.primaryContentHints
         ) ?? .empty
-        let visibleTextSource = renderableDocument?.plainText(preserveParagraphs: true)
+        let visibleTextSource = parsedRenderQuality?.visibleText
+            ?? renderableDocument?.plainText(preserveParagraphs: true)
             ?? TextProcessing.extractPlainText(from: renderableHTML)
         let visibleHTMLText = normalizedText(visibleTextSource)
         let normalizedPlainText = normalizedText(plainText ?? "")
@@ -57,8 +76,8 @@ struct EmailRenderQualityEvaluator {
         let semanticTagCount = renderableMetrics.semanticElementCount
         let tagCount = renderableMetrics.elementCount
         let spacerSignalCount = renderableMetrics.largeSpacerSignalCount
-        let hiddenPrimaryContentCount = document?.hiddenPrimaryContentCount(
-            primaryContentHints: Self.primaryContentHints
+        let hiddenPrimaryContentCount = parsedRenderQuality?.hiddenPrimaryContentCount ?? document?.hiddenPrimaryContentCount(
+            primaryContentHints: EmailRenderQualityHints.primaryContentHints
         ) ?? renderableMetrics.hiddenPrimaryContentCount
         let footerLineRatio = renderableMetrics.footerLineRatio
         let markupToVisibleTextRatio = Double(renderableHTML.count) / Double(max(visibleHTMLText.count, 1))
@@ -272,32 +291,11 @@ struct EmailRenderQualityEvaluator {
         guard !lines.isEmpty else { return 0 }
 
         let footerLines = lines.filter { line in
-            Self.footerLineHints.contains { line.contains($0) }
+            EmailRenderQualityHints.footerLineHints.contains { line.contains($0) }
         }.count
 
         return Double(footerLines) / Double(lines.count)
     }
-
-    private static let footerLineHints = [
-        "unsubscribe",
-        "manage preferences",
-        "privacy policy",
-        "view in browser",
-        "view online",
-        "do not reply",
-        "do-not-reply",
-        "all rights reserved",
-        "mailing address",
-        "terms of use",
-        "security center"
-    ]
-
-    private static let primaryContentHints = [
-        "action",
-        "button",
-        "cta",
-        "primary"
-    ]
 
     private static let transactionFieldHints = [
         "amount",
