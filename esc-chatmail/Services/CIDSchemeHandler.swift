@@ -13,17 +13,20 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
     /// The message containing the attachments to resolve
     weak var message: Message?
 
-    /// Core Data stack for fetching attachment data
-    private let coreDataStack: CoreDataStack
+    /// Background context factory for persisting on-demand fallback data
+    private let makeBackgroundContext: @Sendable () -> NSManagedObjectContext
     private let apiClientOverride: (any GmailAPIClientProtocol)?
 
     init(
         message: Message?,
         coreDataStack: CoreDataStack = .shared,
-        apiClient: (any GmailAPIClientProtocol)? = nil
+        apiClient: (any GmailAPIClientProtocol)? = nil,
+        makeBackgroundContext: (@Sendable () -> NSManagedObjectContext)? = nil
     ) {
         self.message = message
-        self.coreDataStack = coreDataStack
+        self.makeBackgroundContext = makeBackgroundContext ?? {
+            coreDataStack.newBackgroundContext()
+        }
         self.apiClientOverride = apiClient
         super.init()
     }
@@ -38,9 +41,7 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
 
         // Extract Content-ID from URL
         // cid:image001@domain.com -> image001@domain.com
-        let contentId = extractContentId(from: url)
-
-        guard !contentId.isEmpty else {
+        guard let contentId = Self.normalizedContentID(from: url) else {
             Log.debug("CIDSchemeHandler: Empty Content-ID from URL: \(url)", category: .ui)
             urlSchemeTask.didFailWithError(URLError(.badURL))
             return
@@ -58,6 +59,7 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         // Load attachment data from disk first.
         if let localPath = attachment.localURL,
            let data = AttachmentPaths.loadData(from: localPath) {
+            Log.debug("CIDSchemeHandler: eager/local hit for Content-ID: \(contentId)", category: .ui)
             respond(urlSchemeTask, with: data, mimeType: attachment.mimeType)
             return
         }
@@ -70,6 +72,7 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         let filename = attachment.filename
         let attachmentObjectID = attachment.objectID
 
+        Log.debug("CIDSchemeHandler: on-demand fallback fetch for Content-ID: \(contentId)", category: .ui)
         Task { [weak self] in
             guard let self else { return }
             if let data = await self.fetchAndPersistMissingAttachmentData(
@@ -94,7 +97,7 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
     // MARK: - Private Helpers
 
     /// Extracts the Content-ID from a cid: URL
-    private func extractContentId(from url: URL) -> String {
+    static func normalizedContentID(from url: URL) -> String? {
         // cid: URLs can be formatted as:
         // - cid:image001@domain.com
         // - cid://image001@domain.com
@@ -104,22 +107,11 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         var contentId = url.absoluteString
 
         // Remove cid: prefix
-        if contentId.hasPrefix("cid:") {
+        if contentId.lowercased().hasPrefix("cid:") {
             contentId = String(contentId.dropFirst(4))
         }
 
-        // Remove leading slashes (for cid:// format)
-        while contentId.hasPrefix("/") {
-            contentId = String(contentId.dropFirst())
-        }
-
-        // URL decode in case of encoded characters
-        contentId = contentId.removingPercentEncoding ?? contentId
-
-        // Trim whitespace
-        contentId = contentId.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        return contentId
+        return EmailDocument.normalizedContentID(contentId)
     }
 
     /// Finds an attachment in the message with the given Content-ID
@@ -128,23 +120,17 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
             return nil
         }
 
-        // Try exact match first
-        if let attachment = attachments.first(where: { $0.contentId == contentId }) {
+        if let attachment = attachments.first(where: {
+            EmailDocument.normalizedContentID($0.contentId) == contentId
+        }) {
             return attachment
         }
 
-        // Try case-insensitive match
-        let lowercasedContentId = contentId.lowercased()
-        if let attachment = attachments.first(where: { $0.contentId?.lowercased() == lowercasedContentId }) {
-            return attachment
-        }
-
-        // Try matching without domain part (some email clients strip it)
         let contentIdWithoutDomain = contentId.components(separatedBy: "@").first ?? contentId
         if let attachment = attachments.first(where: {
-            guard let attachmentContentId = $0.contentId else { return false }
+            guard let attachmentContentId = EmailDocument.normalizedContentID($0.contentId) else { return false }
             let attachmentIdWithoutDomain = attachmentContentId.components(separatedBy: "@").first ?? attachmentContentId
-            return attachmentIdWithoutDomain.lowercased() == contentIdWithoutDomain.lowercased()
+            return attachmentIdWithoutDomain == contentIdWithoutDomain
         }) {
             return attachment
         }
@@ -184,7 +170,7 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
                 return data
             }
 
-            let backgroundContext = coreDataStack.newBackgroundContext()
+            let backgroundContext = makeBackgroundContext()
             await backgroundContext.perform {
                 guard let attachment = try? backgroundContext.existingObject(with: attachmentObjectID) as? Attachment else {
                     return

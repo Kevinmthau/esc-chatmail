@@ -529,20 +529,7 @@ extension Message {
     private static let calendarInviteDatePattern = #"\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b[\w\s,.:()\-–•]*\b\d{1,2}:\d{2}\s*(?:am|pm)\b"#
 
     private func normalizedContentID(from rawValue: String?) -> String? {
-        guard let rawValue else { return nil }
-
-        var normalized = rawValue
-            .trimmingCharacters(in: CharacterSet(charactersIn: "<> \t\r\n"))
-
-        while normalized.hasPrefix("/") {
-            normalized.removeFirst()
-        }
-
-        normalized = normalized.removingPercentEncoding ?? normalized
-        normalized = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !normalized.isEmpty else { return nil }
-        return normalized.lowercased()
+        EmailDocument.normalizedContentID(rawValue)
     }
 
     private func attachmentDeduplicationKey(for attachment: Attachment) -> AttachmentDeduplicationKey {

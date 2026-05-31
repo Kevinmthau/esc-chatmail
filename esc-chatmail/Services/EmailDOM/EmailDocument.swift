@@ -279,12 +279,21 @@ final class EmailDocument {
     static func normalizedContentID(_ rawValue: String?) -> String? {
         guard let rawValue else { return nil }
         var normalized = rawValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.lowercased().hasPrefix("cid:") {
+            normalized = String(normalized.dropFirst(4))
+        }
+        normalized = normalized
             .trimmingCharacters(in: CharacterSet(charactersIn: "<> \t\r\n"))
         while normalized.hasPrefix("/") {
             normalized.removeFirst()
         }
         normalized = normalized.removingPercentEncoding ?? normalized
-        normalized = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+        normalized = normalized.trimmingCharacters(in: CharacterSet(charactersIn: "<> \t\r\n"))
+        while normalized.hasPrefix("/") {
+            normalized.removeFirst()
+        }
+        normalized = normalized.trimmingCharacters(in: CharacterSet(charactersIn: "<> \t\r\n"))
         guard !normalized.isEmpty else { return nil }
         return normalized.lowercased()
     }

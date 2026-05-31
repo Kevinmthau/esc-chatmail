@@ -63,6 +63,23 @@ extension MessagePersister {
         }
     }
 
+    func scheduleInlineCIDPrefetchIfNeeded(
+        for processedMessage: ProcessedMessage,
+        in context: NSManagedObjectContext
+    ) async {
+        let request = InlineCIDAttachmentPrefetchRequest(
+            messageId: processedMessage.id,
+            contentIDs: processedMessage.inlineCIDPrefetchContentIDs,
+            attachmentIDs: processedMessage.inlineCIDPrefetchAttachmentIDs
+        )
+        guard !request.isEmpty else { return }
+
+        let scheduler = inlineCIDPrefetchScheduler
+        await context.perform {
+            scheduler(request, context)
+        }
+    }
+
     nonisolated func persistInlineAttachmentData(
         _ inlineData: Data,
         info: AttachmentInfo,

@@ -1388,6 +1388,76 @@ final class MessageProcessorTests: XCTestCase {
         XCTAssertFalse(processed?.plainTextBody?.contains("Content-Type: multipart/alternative") == true)
     }
 
+    func testProcessGmailMessage_collectsNormalizedInlineCIDPrefetchTargetsFromHTMLAndMIME() async throws {
+        let html = """
+        <html><body>
+        <img src="cid:///%3CLogo%40Example.COM%3E" alt="Logo">
+        </body></html>
+        """
+
+        let message = makeMultipartMessage(
+            id: "inline-cid-prefetch-target-message",
+            parts: [
+                MessagePart(
+                    partId: "0",
+                    mimeType: "text/html",
+                    filename: nil,
+                    headers: [
+                        MessageHeader(name: "Content-Type", value: "text/html; charset=utf-8")
+                    ],
+                    body: MessageBody(
+                        size: html.count,
+                        data: Data(html.utf8).base64EncodedString(),
+                        attachmentId: nil
+                    ),
+                    parts: nil
+                ),
+                MessagePart(
+                    partId: "1",
+                    mimeType: "image/png",
+                    filename: "logo.png",
+                    headers: [
+                        MessageHeader(name: "Content-Disposition", value: "inline; filename=\"logo.png\""),
+                        MessageHeader(name: "Content-ID", value: "<Logo@Example.COM>")
+                    ],
+                    body: MessageBody(
+                        size: 120,
+                        data: nil,
+                        attachmentId: "att-logo"
+                    ),
+                    parts: nil
+                ),
+                MessagePart(
+                    partId: "2",
+                    mimeType: "image/png",
+                    filename: "mime-only.png",
+                    headers: [
+                        MessageHeader(name: "Content-Disposition", value: "inline; filename=\"mime-only.png\""),
+                        MessageHeader(name: "Content-ID", value: "<Mime-Only@Example.COM>")
+                    ],
+                    body: MessageBody(
+                        size: 90,
+                        data: nil,
+                        attachmentId: "att-mime-only"
+                    ),
+                    parts: nil
+                )
+            ]
+        )
+
+        let processedMessage = await processor.processGmailMessage(message, myAliases: [])
+        let processed = try XCTUnwrap(processedMessage)
+
+        XCTAssertEqual(
+            processed.inlineCIDPrefetchContentIDs,
+            ["logo@example.com", "mime-only@example.com"]
+        )
+        XCTAssertEqual(
+            processed.inlineCIDPrefetchAttachmentIDs,
+            ["att-logo", "att-mime-only"]
+        )
+    }
+
     private func makeMultipartMessage(id: String, parts: [MessagePart]) -> GmailMessage {
         GmailMessage(
             id: id,

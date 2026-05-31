@@ -258,6 +258,10 @@ extension MessagePersister {
             )
         }
 
+        if result.didUpdate {
+            await scheduleInlineCIDPrefetchIfNeeded(for: processedMessage, in: context)
+        }
+
         if let modifiedConversationID = result.modifiedConversationID {
             await ModificationTracker.shared.trackModifiedConversation(
                 modifiedConversationID,
@@ -365,20 +369,7 @@ extension MessagePersister {
     }
 
     nonisolated func normalizedContentID(_ rawValue: String?) -> String? {
-        guard let rawValue else { return nil }
-
-        var normalized = rawValue
-            .trimmingCharacters(in: CharacterSet(charactersIn: "<> \t\r\n"))
-
-        while normalized.hasPrefix("/") {
-            normalized.removeFirst()
-        }
-
-        normalized = normalized.removingPercentEncoding ?? normalized
-        normalized = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !normalized.isEmpty else { return nil }
-        return normalized.lowercased()
+        EmailDocument.normalizedContentID(rawValue)
     }
 
     // MARK: - Inline attachment deduplication

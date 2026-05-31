@@ -430,6 +430,10 @@ Current status (2026-05-29): complete. `ChatMessageRowModel` constructs `Message
 
 Related shipped improvement (2026-05-29): original-email remote image fallback no longer blocks the initial full-message render on uncached attachment-style remote images. The original path now uses cached rewrites synchronously, warms missing image fallbacks out of band, and refreshes `HTMLMessageView` when the warmed result is available.
 
+Current status (2026-05-31): complete. `MessageProcessor` now records normalized inline CID prefetch targets from both MIME `Content-ID` attachment metadata and DOM-backed HTML `cid:` references. `MessagePersister` registers those targets with `InlineCIDAttachmentPrefetchScheduler` on the ingest context; after that context saves, `InlineCIDAttachmentPrefetcher` refetches the saved message/attachment rows and delegates missing inline attachment downloads to the existing `AttachmentDownloader` path. The eager path dedupes by message id + normalized CID / attachment id, skips already cached local files, and logs missing attachment metadata without blocking message persistence.
+
+`CIDSchemeHandler` remains the fallback for cases where eager fetch did not run, failed, found missing metadata, or local attachment files were later cleared. Its diagnostics now distinguish local/eager hits from on-demand fallback fetches.
+
 ### 9. **Document the dark-mode policy on `HTMLDisplayWrapper.Theme`**
 
 **Effort: trivial.** **Impact: prevents future regressions.**
@@ -459,12 +463,12 @@ Completed:
 - **#4 (snapshot-based preview)** — default rich HTML preview path as of 2026-05-28.
 - **#6 (canonical preview text at ingest)** — complete as of 2026-05-29.
 - **#7 (memoize loadSignature)** — complete; text fingerprints are precomputed in `ChatMessageRowModel`.
+- **#8 (eager inline attachment fetch)** — complete as of 2026-05-31; ingest records normalized MIME/HTML CID targets, schedules post-save eager downloads for missing inline attachments, and keeps `CIDSchemeHandler` as on-demand fallback.
 
 Remaining recommended order:
 1. Continue hardening **#2 (single canonical parse pass)** only where low-risk consumers can use existing `ParsedEmail` facts without changing visible behavior.
 2. **#5 cleanup** — remove compatibility cache shims once the new coordinator has soaked.
-3. **#8 (eager inline attachment fetch)** — still useful for first-open fidelity; the original-reader warmup change reduced the blocking part but did not replace ingest-time attachment fetching.
-4. **#9 (document dark-mode policy)** — doc-only.
+3. **#9 (document dark-mode policy)** — doc-only.
 
 ---
 
@@ -478,6 +482,7 @@ Remaining recommended order:
 - `esc-chatmail/Services/Chat/MessageBubbleLoader.swift` (1016 LOC)
 - `esc-chatmail/Services/EmailRenderQualityEvaluator.swift`
 - `esc-chatmail/Services/CIDSchemeHandler.swift`
+- `esc-chatmail/Services/InlineCIDAttachmentPrefetcher.swift`
 - `esc-chatmail/Views/Chat/MessageBubble.swift`, `MessageContentView.swift`, `MessageDisplayPolicy.swift`
 - `esc-chatmail/Views/Components/EmailContent/BaseEmailWebView.swift`, `EmailContentSection.swift`, `MiniEmailWebView.swift`
 
@@ -499,7 +504,7 @@ The repo already has the right harness. For each shipped change:
 
 ## Bottom line
 
-The current architecture is **functionally correct and impressively thorough**, and the biggest completed wins are now in place: DOM-backed HTML processing for migrated paths (#1), shared parsed-email facts for selected high-value consumers (#2 partial), snapshot-based rich previews (#4), persisted chat-preview text (#6), and precomputed bubble signature fingerprints (#7). The remaining complexity tax is concentrated in legacy/fallback plain-text processing, mutating rendering passes that still own their own parse/scans, and first-open fidelity for inline assets.
+The current architecture is **functionally correct and impressively thorough**, and the biggest completed wins are now in place: DOM-backed HTML processing for migrated paths (#1), shared parsed-email facts for selected high-value consumers (#2 partial), snapshot-based rich previews (#4), persisted chat-preview text (#6), precomputed bubble signature fingerprints (#7), and eager inline CID attachment fetching (#8). The remaining complexity tax is concentrated in legacy/fallback plain-text processing and mutating rendering passes that still own their own parse/scans.
 
 ---
 

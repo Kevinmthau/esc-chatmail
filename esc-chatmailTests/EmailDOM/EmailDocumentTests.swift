@@ -104,6 +104,13 @@ final class EmailDocumentTests: XCTestCase {
         XCTAssertTrue(ids.contains("abc-def"), "Expected normalized id; got \(ids)")
     }
 
+    func testReferencedInlineContentIDs_handlesLeadingSlashesAndPercentEncodedAngles() {
+        let html = #"<img src="cid:///%3CLogo%40Example.COM%3E">"#
+        let ids = EmailDocument.tryParse(html)?.referencedInlineContentIDs() ?? []
+
+        XCTAssertEqual(ids, ["logo@example.com"])
+    }
+
     func testReferencedInlineContentIDs_findsBackgroundAttribute() {
         let html = #"<table background="cid:bg.png"><tr><td>Cell</td></tr></table>"#
         let ids = EmailDocument.tryParse(html)?.referencedInlineContentIDs() ?? []
@@ -196,6 +203,13 @@ final class EmailDocumentTests: XCTestCase {
 
     func testNormalizedContentID_strips_angle_brackets_and_lowercases() {
         XCTAssertEqual(EmailDocument.normalizedContentID("<ABC.JPG>"), "abc.jpg")
+    }
+
+    func testNormalizedContentID_handlesCIDPrefixLeadingSlashesAndPercentEncodedAngles() {
+        XCTAssertEqual(
+            EmailDocument.normalizedContentID("cid:///%3CLogo%40Example.COM%3E"),
+            "logo@example.com"
+        )
     }
 
     func testNormalizedContentID_returnsNilForEmpty() {

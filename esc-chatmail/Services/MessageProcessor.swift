@@ -67,6 +67,12 @@ class MessageProcessor: @unchecked Sendable {
         if !processedMessage.attachmentInfo.isEmpty {
             processedMessage.hasAttachments = true
         }
+        let inlineCIDPrefetchTargets = self.inlineCIDPrefetchTargets(
+            html: content.html,
+            attachmentInfo: processedMessage.attachmentInfo
+        )
+        processedMessage.inlineCIDPrefetchContentIDs = inlineCIDPrefetchTargets.contentIDs
+        processedMessage.inlineCIDPrefetchAttachmentIDs = inlineCIDPrefetchTargets.attachmentIDs
         processedMessage.canonicalContent = canonicalContent(
             html: content.html,
             plainText: content.plainText,
@@ -471,6 +477,31 @@ class MessageProcessor: @unchecked Sendable {
         }
 
         return nil
+    }
+
+    private func inlineCIDPrefetchTargets(
+        html: String?,
+        attachmentInfo: [AttachmentInfo]
+    ) -> (contentIDs: Set<String>, attachmentIDs: Set<String>) {
+        var normalizedContentIDs = Set<String>()
+        var attachmentIDs = Set<String>()
+
+        for attachment in attachmentInfo {
+            guard let normalizedContentID = EmailDocument.normalizedContentID(attachment.contentId) else {
+                continue
+            }
+
+            normalizedContentIDs.insert(normalizedContentID)
+            if !attachment.id.isEmpty, !attachment.id.hasPrefix("local_") {
+                attachmentIDs.insert(attachment.id)
+            }
+        }
+
+        if let document = EmailDocument.tryParse(html) {
+            normalizedContentIDs.formUnion(document.referencedInlineContentIDs())
+        }
+
+        return (normalizedContentIDs, attachmentIDs)
     }
 
     private func extractEmbeddedHTMLFromTextualBodies(
@@ -929,6 +960,8 @@ struct ProcessedMessage: Sendable {
     var isNewsletter: Bool = false
     var hasAttachments: Bool = false
     var attachmentInfo: [AttachmentInfo] = []
+    var inlineCIDPrefetchContentIDs: Set<String> = []
+    var inlineCIDPrefetchAttachmentIDs: Set<String> = []
 }
 
 struct ProcessedHeaders: Sendable {

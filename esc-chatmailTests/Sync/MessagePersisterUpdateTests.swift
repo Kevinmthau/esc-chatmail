@@ -91,6 +91,61 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(saved.cleanedSnippet, "Line one. Line two.")
     }
 
+    func testCreateNewMessage_schedulesInlineCIDPrefetch() async throws {
+        let scheduleRecorder = InlineCIDPrefetchScheduleRecorder()
+        let htmlPersister = MessagePersister(
+            photoPrefetcher: { _ in },
+            inlineCIDPrefetchScheduler: { request, _ in
+                scheduleRecorder.record(request)
+            }
+        )
+
+        var headers = ProcessedHeaders()
+        headers.subject = "Inline CID"
+        headers.from = "Sender <sender@example.com>"
+        headers.to = [EmailAddress(email: "recipient@example.com", displayName: nil)]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: "message-inline-cid-prefetch-create",
+            gmThreadId: "thread-inline-cid-prefetch-create",
+            snippet: "Inline CID",
+            cleanedSnippet: "Inline CID",
+            chatPreviewText: "Inline CID",
+            internalDate: Date(),
+            headers: headers,
+            htmlBody: #"<html><body><img src="cid:Logo@Example.COM"></body></html>"#,
+            plainTextBody: "Inline CID",
+            labelIds: ["INBOX"],
+            isUnread: true,
+            isNewsletter: false,
+            hasAttachments: true,
+            attachmentInfo: [
+                AttachmentInfo(
+                    id: "att-logo",
+                    filename: "logo.png",
+                    mimeType: "image/png",
+                    size: 512,
+                    contentId: "Logo@Example.COM"
+                )
+            ],
+            inlineCIDPrefetchContentIDs: ["logo@example.com"],
+            inlineCIDPrefetchAttachmentIDs: ["att-logo"]
+        )
+
+        try await htmlPersister.createNewMessage(
+            processedMessage,
+            labelIds: nil,
+            myAliases: [normalizedEmail("recipient@example.com")],
+            in: context
+        )
+
+        XCTAssertEqual(scheduleRecorder.requests.count, 1)
+        XCTAssertEqual(scheduleRecorder.requests.first?.messageId, processedMessage.id)
+        XCTAssertEqual(scheduleRecorder.requests.first?.normalizedContentIDs, ["logo@example.com"])
+        XCTAssertEqual(scheduleRecorder.requests.first?.attachmentIDs, ["att-logo"])
+    }
+
     func testUpdateExistingMessage_updatesChatPreviewText() async throws {
         let conversation = ConversationBuilder.simple(in: context)
         let existingMessage = MessageBuilder()
@@ -1809,6 +1864,23 @@ final class MessagePersisterUpdateTests: XCTestCase {
             ),
             sizeEstimate: html.count + plainText.count
         )
+    }
+}
+
+private final class InlineCIDPrefetchScheduleRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedRequests: [InlineCIDAttachmentPrefetchRequest] = []
+
+    var requests: [InlineCIDAttachmentPrefetchRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedRequests
+    }
+
+    func record(_ request: InlineCIDAttachmentPrefetchRequest) {
+        lock.lock()
+        recordedRequests.append(request)
+        lock.unlock()
     }
 }
 
