@@ -1194,6 +1194,7 @@ actor ProcessedTextCache: MemoryWarningHandler {
         for key in trackedKeys.union([legacyKey]) {
             await cache.remove(key)
         }
+        await RenderedMessageCache.shared.invalidate(messageId: messageId, reason: .explicit)
     }
 
     /// Returns cache statistics for monitoring

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 struct OriginalEmailSource: Equatable, Sendable {
@@ -41,13 +42,16 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
 
     private let canonicalContentLoader: any CanonicalEmailContentLoading
     private let htmlContentLoader: HTMLContentLoader
+    private let renderedMessageCache: RenderedMessageCache
 
     init(
         canonicalContentLoader: any CanonicalEmailContentLoading = CanonicalEmailContentLoader.shared,
-        htmlContentLoader: HTMLContentLoader = .shared
+        htmlContentLoader: HTMLContentLoader = .shared,
+        renderedMessageCache: RenderedMessageCache = .shared
     ) {
         self.canonicalContentLoader = canonicalContentLoader
         self.htmlContentLoader = htmlContentLoader
+        self.renderedMessageCache = renderedMessageCache
     }
 
     func loadOriginalEmailSource(
@@ -107,14 +111,26 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         }
 
         if let canonicalHTML = canonicalContent.html,
-           let html = await htmlContentLoader.prepareOriginalHTML(
-            fromCanonicalHTML: canonicalHTML,
-            messageId: messageId,
-            sourceLocation: canonicalContent.sourceLocation,
-            plainText: canonicalContent.plainText,
-            senderEmail: senderEmail,
-            subject: subject,
-            isDarkMode: isDarkMode
+           let html = await renderedMessageCache.wrappedOriginalHTML(
+                messageId: messageId,
+                sourceSignature: canonicalContent.sourceSignature,
+                variantKey: originalHTMLVariantKey(
+                    content: canonicalContent,
+                    senderEmail: senderEmail,
+                    subject: subject,
+                    isDarkMode: isDarkMode
+                ),
+                producer: {
+                    await self.htmlContentLoader.prepareOriginalHTML(
+                        fromCanonicalHTML: canonicalHTML,
+                        messageId: messageId,
+                        sourceLocation: canonicalContent.sourceLocation,
+                        plainText: canonicalContent.plainText,
+                        senderEmail: senderEmail,
+                        subject: subject,
+                        isDarkMode: isDarkMode
+                    )
+                }
            ) {
             let source = OriginalEmailSource(
                 presentation: .html,
@@ -149,14 +165,26 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
            ),
            let recoveredHTML = recoveredContent.html,
            recoveredContent.sourceSignature != canonicalContent.sourceSignature,
-           let html = await htmlContentLoader.prepareOriginalHTML(
-            fromCanonicalHTML: recoveredHTML,
-            messageId: messageId,
-            sourceLocation: recoveredContent.sourceLocation,
-            plainText: recoveredContent.plainText,
-            senderEmail: senderEmail,
-            subject: subject,
-            isDarkMode: isDarkMode
+           let html = await renderedMessageCache.wrappedOriginalHTML(
+                messageId: messageId,
+                sourceSignature: recoveredContent.sourceSignature,
+                variantKey: originalHTMLVariantKey(
+                    content: recoveredContent,
+                    senderEmail: senderEmail,
+                    subject: subject,
+                    isDarkMode: isDarkMode
+                ),
+                producer: {
+                    await self.htmlContentLoader.prepareOriginalHTML(
+                        fromCanonicalHTML: recoveredHTML,
+                        messageId: messageId,
+                        sourceLocation: recoveredContent.sourceLocation,
+                        plainText: recoveredContent.plainText,
+                        senderEmail: senderEmail,
+                        subject: subject,
+                        isDarkMode: isDarkMode
+                    )
+                }
            ) {
             let source = OriginalEmailSource(
                 presentation: .html,
@@ -266,5 +294,34 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
             "OriginalEmailSourceLoader message \(messageId): sourceKind=\(source.sourceKind.rawValue) sourceLocation=\(source.sourceLocation.rawValue) presentation=\(source.presentation.rawValue)",
             category: .ui
         )
+    }
+
+    private func originalHTMLVariantKey(
+        content: CanonicalEmailContent,
+        senderEmail: String?,
+        subject: String?,
+        isDarkMode: Bool
+    ) -> RenderedMessageVariantKey {
+        RenderedMessageVariantKey([
+            "wrapped-original-html-v1",
+            "sourceLocation:\(content.sourceLocation.rawValue)",
+            "plainText:\(Self.fingerprint(for: content.plainText))",
+            "sender:\(Self.fingerprint(for: senderEmail))",
+            "subject:\(Self.fingerprint(for: subject))",
+            "dark:\(isDarkMode)"
+        ].joined(separator: "|"))
+    }
+
+    private static func fingerprint(for text: String?) -> String {
+        guard let text = text?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else {
+            return "nil"
+        }
+
+        return SHA256.hash(data: Data(text.utf8))
+            .prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 }

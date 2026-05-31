@@ -632,6 +632,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
     private let htmlContentRecoveryService: any HTMLContentRecovering
     private let htmlAnalysisCache: MessageBubbleHTMLAnalysisCache
     private let parsedEmailProvider: any ParsedEmailProviding
+    private let renderedMessageCache: RenderedMessageCache
 
     init(
         contactsResolver: any ContactsResolving = ContactsResolver.shared,
@@ -640,7 +641,8 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         htmlContentLoader: HTMLContentLoader = .shared,
         htmlContentRecoveryService: any HTMLContentRecovering = HTMLContentRecoveryService.shared,
         htmlAnalysisCache: MessageBubbleHTMLAnalysisCache = .shared,
-        parsedEmailProvider: any ParsedEmailProviding = ParsedEmailProvider.shared
+        parsedEmailProvider: any ParsedEmailProviding = ParsedEmailProvider.shared,
+        renderedMessageCache: RenderedMessageCache = .shared
     ) {
         self.contactsResolver = contactsResolver
         self.processedTextCache = processedTextCache
@@ -649,6 +651,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         self.htmlContentRecoveryService = htmlContentRecoveryService
         self.htmlAnalysisCache = htmlAnalysisCache
         self.parsedEmailProvider = parsedEmailProvider
+        self.renderedMessageCache = renderedMessageCache
     }
 
     func loadSenderInfo(from request: MessageBubbleSenderRequest) async -> MessageBubbleSenderResult {
@@ -755,11 +758,26 @@ actor MessageBubbleLoader: MessageBubbleLoading {
     }
 
     private func cachedHTMLAnalysis(for request: MessageBubbleContentRequest) async -> MessageBubbleHTMLAnalysis {
-        let cacheKey = htmlAnalysisCacheKey(for: request)
-        if let cached = htmlAnalysisCache.value(forKey: cacheKey) {
-            return cached
-        }
+        let variantKey = RenderedMessageVariantKey(htmlAnalysisCacheKey(for: request))
+        let sourceSignature = renderedSourceSignature(for: request)
 
+        let analysis = await renderedMessageCache.htmlAnalysis(
+            messageId: request.messageID,
+            sourceSignature: sourceSignature,
+            variantKey: variantKey
+        ) {
+            if let cached = self.htmlAnalysisCache.value(forKey: variantKey.rawValue) {
+                return cached
+            }
+
+            return await self.buildHTMLAnalysis(for: request)
+        } ?? .placeholder(hasHTMLSource: request.hasHTMLSource)
+
+        htmlAnalysisCache.setValue(analysis, forKey: variantKey.rawValue)
+        return analysis
+    }
+
+    private func buildHTMLAnalysis(for request: MessageBubbleContentRequest) async -> MessageBubbleHTMLAnalysis {
         let canonicalContent = await canonicalContentForAnalysisIfNeeded(for: request)
         let canonicalHTML = canonicalContent?.html
         let parsedEmail: ParsedEmail?
@@ -786,7 +804,6 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             subject: request.subject,
             attachmentSnapshots: request.attachmentSnapshots
         )
-        htmlAnalysisCache.setValue(analysis, forKey: cacheKey)
         return analysis
     }
 
@@ -848,6 +865,15 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         ].joined(separator: "|")
     }
 
+    private func renderedSourceSignature(for request: MessageBubbleContentRequest) -> String {
+        ProcessedTextCache.contentSourceSignature(
+            messageId: request.messageID,
+            bodyStorageURI: request.bodyStorageURI,
+            bodyText: request.bodyText,
+            handler: htmlContentHandler
+        )
+    }
+
     private func cacheFingerprint(for text: String?) -> String {
         guard let text = text?
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -884,41 +910,43 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             return false
         }
 
-        let sourceSignature = ProcessedTextCache.contentSourceSignature(
-            messageId: request.messageID,
-            bodyStorageURI: request.bodyStorageURI,
-            bodyText: request.bodyText,
-            handler: htmlContentHandler
-        )
+        let sourceSignature = renderedSourceSignature(for: request)
+        let variantKey = RenderedMessageVariantKey(ProcessedTextCache.richContentAnalysisMode)
 
-        if let cached = await processedTextCache.get(
+        return await renderedMessageCache.richContentClassification(
             messageId: request.messageID,
             sourceSignature: sourceSignature,
-            previewMode: ProcessedTextCache.richContentAnalysisMode
+            variantKey: variantKey
         ) {
-            return cached.hasRichContent
-        }
+            if let cached = await self.processedTextCache.get(
+                messageId: request.messageID,
+                sourceSignature: sourceSignature,
+                previewMode: ProcessedTextCache.richContentAnalysisMode
+            ) {
+                return cached.hasRichContent
+            }
 
-        let hasRichContent = ProcessedTextCache.classifyRichContent(
-            messageId: request.messageID,
-            bodyStorageURI: request.bodyStorageURI,
-            bodyText: request.bodyText,
-            handler: htmlContentHandler
-        )
-        let resolvedHasRichContent = hasRichContent || (
-            resolvedHasHTMLSource &&
-            looksLikeNewsletterFallbackText(request.bodyText ?? request.snippet)
-        )
+            let hasRichContent = ProcessedTextCache.classifyRichContent(
+                messageId: request.messageID,
+                bodyStorageURI: request.bodyStorageURI,
+                bodyText: request.bodyText,
+                handler: self.htmlContentHandler
+            )
+            let resolvedHasRichContent = hasRichContent || (
+                resolvedHasHTMLSource &&
+                self.looksLikeNewsletterFallbackText(request.bodyText ?? request.snippet)
+            )
 
-        await processedTextCache.set(
-            messageId: request.messageID,
-            sourceSignature: sourceSignature,
-            previewMode: ProcessedTextCache.richContentAnalysisMode,
-            plainText: nil,
-            hasRichContent: resolvedHasRichContent
-        )
+            await self.processedTextCache.set(
+                messageId: request.messageID,
+                sourceSignature: sourceSignature,
+                previewMode: ProcessedTextCache.richContentAnalysisMode,
+                plainText: nil,
+                hasRichContent: resolvedHasRichContent
+            )
 
-        return resolvedHasRichContent
+            return resolvedHasRichContent
+        } ?? false
     }
 
     private func loadCompatibilityContent(
@@ -928,12 +956,8 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         // Compatibility path for old records with missing chatPreviewText.
         // HTML-backed messages derive text through the DOM-backed extractor;
         // true plain-text-only messages use the legacy plain-text cleanup below.
-        let sourceSignature = ProcessedTextCache.contentSourceSignature(
-            messageId: request.messageID,
-            bodyStorageURI: request.bodyStorageURI,
-            bodyText: request.bodyText,
-            handler: htmlContentHandler
-        )
+        let sourceSignature = renderedSourceSignature(for: request)
+        let chatVariantKey = RenderedMessageVariantKey(ProcessedTextCache.chatBubblePreviewMode)
 
         var fallbackSourceSignature: String?
         func resolveFallbackSourceSignature() -> String {
@@ -962,10 +986,10 @@ actor MessageBubbleLoader: MessageBubbleLoading {
                 looksLikeNewsletterFallbackText(plainText)
         }
 
-        if let cached = await processedTextCache.get(
+        if let cached = await renderedMessageCache.cachedChatBubbleText(
             messageId: request.messageID,
             sourceSignature: sourceSignature,
-            previewMode: ProcessedTextCache.chatBubblePreviewMode
+            variantKey: chatVariantKey
         ) {
             let requiresURIRecompute =
                 resolvedHasHTMLSource &&
@@ -989,7 +1013,68 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             }
         }
 
+        if let cached = await processedTextCache.get(
+            messageId: request.messageID,
+            sourceSignature: sourceSignature,
+            previewMode: ProcessedTextCache.chatBubblePreviewMode
+        ) {
+            let requiresURIRecompute =
+                resolvedHasHTMLSource &&
+                cached.plainText == nil &&
+                request.bodyStorageURI != nil &&
+                !htmlContentHandler.htmlFileExists(for: request.messageID)
+            let requiresBodyFallbackRecompute =
+                cached.plainText == nil &&
+                !cached.hasRichContent &&
+                resolveFallbackSourceSignature() != sourceSignature
+            let shouldBypassCachedNewsletterFallback = isStaleNewsletterFallback(
+                plainText: cached.plainText,
+                hasRichContent: cached.hasRichContent
+            )
+
+            if !requiresURIRecompute && !requiresBodyFallbackRecompute && !shouldBypassCachedNewsletterFallback {
+                await renderedMessageCache.storeChatBubbleText(
+                    RenderedMessageChatBubbleText(
+                        plainText: cached.plainText,
+                        hasRichContent: cached.hasRichContent,
+                        quotedParts: cached.quotedParts
+                    ),
+                    messageId: request.messageID,
+                    sourceSignature: sourceSignature,
+                    variantKey: chatVariantKey
+                )
+                return (
+                    cached.plainText,
+                    cached.hasRichContent
+                )
+            }
+        }
+
         let resolvedFallbackSourceSignature = resolveFallbackSourceSignature()
+        if resolvedFallbackSourceSignature != sourceSignature,
+           let cached = await renderedMessageCache.cachedChatBubbleText(
+                messageId: request.messageID,
+                sourceSignature: resolvedFallbackSourceSignature,
+                variantKey: chatVariantKey
+           ) {
+            let requiresURIRecompute =
+                resolvedHasHTMLSource &&
+                cached.plainText == nil &&
+                request.bodyStorageURI != nil &&
+                !htmlContentHandler.htmlFileExists(for: request.messageID)
+            let shouldBypassCachedNewsletterFallback = isStaleNewsletterFallback(
+                plainText: cached.plainText,
+                hasRichContent: cached.hasRichContent
+            )
+
+            if !requiresURIRecompute && !shouldBypassCachedNewsletterFallback {
+                return (
+                    cached.plainText,
+                    cached.hasRichContent
+                )
+            }
+        }
+
         if resolvedFallbackSourceSignature != sourceSignature,
            let cached = await processedTextCache.get(
                 messageId: request.messageID,
@@ -1007,6 +1092,16 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             )
 
             if !requiresURIRecompute && !shouldBypassCachedNewsletterFallback {
+                await renderedMessageCache.storeChatBubbleText(
+                    RenderedMessageChatBubbleText(
+                        plainText: cached.plainText,
+                        hasRichContent: cached.hasRichContent,
+                        quotedParts: cached.quotedParts
+                    ),
+                    messageId: request.messageID,
+                    sourceSignature: resolvedFallbackSourceSignature,
+                    variantKey: chatVariantKey
+                )
                 return (
                     cached.plainText,
                     cached.hasRichContent
@@ -1059,6 +1154,16 @@ actor MessageBubbleLoader: MessageBubbleLoading {
                 hasRichContent: recoveredHasRichContent,
                 quotedParts: recoveredResult.quotedParts
             )
+            await renderedMessageCache.storeChatBubbleText(
+                RenderedMessageChatBubbleText(
+                    plainText: recoveredResult.mainText,
+                    hasRichContent: recoveredHasRichContent,
+                    quotedParts: recoveredResult.quotedParts
+                ),
+                messageId: request.messageID,
+                sourceSignature: sourceSignature,
+                variantKey: chatVariantKey
+            )
 
             if recoveredResult.mainText != nil || recoveredHasRichContent {
                 result = (
@@ -1071,7 +1176,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         return result
     }
 
-    private func looksLikeNewsletterFallbackText(_ text: String?) -> Bool {
+    nonisolated private func looksLikeNewsletterFallbackText(_ text: String?) -> Bool {
         guard let text = text?
             .trimmingCharacters(in: .whitespacesAndNewlines),
             !text.isEmpty else {
@@ -1144,6 +1249,16 @@ actor MessageBubbleLoader: MessageBubbleLoading {
             plainText: processedResult.plainText,
             hasRichContent: processedResult.hasRichContent,
             quotedParts: processedResult.quotedParts
+        )
+        await renderedMessageCache.storeChatBubbleText(
+            RenderedMessageChatBubbleText(
+                plainText: processedResult.plainText,
+                hasRichContent: processedResult.hasRichContent,
+                quotedParts: processedResult.quotedParts
+            ),
+            messageId: request.messageID,
+            sourceSignature: cacheSourceSignature,
+            variantKey: RenderedMessageVariantKey(ProcessedTextCache.chatBubblePreviewMode)
         )
 
         return (

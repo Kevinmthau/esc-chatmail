@@ -517,6 +517,7 @@ final class HTMLContentLoader {
     func invalidate(messageId: String) {
         invalidateCachedResults(messageId: messageId) { _ in true }
         Task {
+            await RenderedMessageCache.shared.invalidate(messageId: messageId, reason: .explicit)
             await parsedEmailProvider.invalidate(messageId: messageId)
         }
     }

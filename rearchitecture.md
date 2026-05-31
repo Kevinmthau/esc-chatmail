@@ -163,16 +163,19 @@ The native preview cards (newsletter, transactional, calendar, netlify) cover th
 
 **Severity: medium.** **Remediation: #5.**
 
-There are at least four caches with overlapping responsibilities:
+There were several caches with overlapping responsibilities:
 
 | Cache | File | Keyed on |
 |---|---|---|
 | `HTMLContentLoader.htmlCache` (NSCache, 50MB) | `Services/HTMLContentLoader.swift:105` | messageId + variantKey (darkMode, cleanupMode, displayPurpose, ...) |
 | `ProcessedTextCache` (LRU actor) | `Services/ProcessedTextCache.swift:164` | messageId + sourceSignature + previewMode + processingVersion |
 | `MessageBubbleHTMLAnalysisCache` (NSCache, 512) | `Services/Chat/MessageBubbleLoader.swift:12` | (per-call composite key) |
-| Per-builder internal caches inside `NewsletterPreviewBuilder` / `TransactionalPreviewBuilder` | preview builders | content signature |
+| `EmailPreviewSourceLoader` source cache (NSCache) | `Services/Preview/EmailPreviewSourceLoader.swift` | messageId + sourceSignature + preview-mode metadata |
+| `EmailPreviewSnapshotCache` (disk) | `Services/Preview/EmailPreviewSnapshotCache.swift` | preview cache key + rendered HTML fingerprint + width + dark mode |
 
 Invalidation involves recomputing `htmlSourceSignature(messageId:bodyStorageURI:)` at many call sites and threading it through composite cache keys. #7 removed the per-body text-field SHA256 work from `MessageBubble`, but the broader cache story still has several independently-derived signatures that need to agree.
+
+Current status (2026-05-30): partially complete. `RenderedMessageCache` now owns derived render artifacts keyed by `(messageId, sourceSignature)` with per-artifact variant keys. `EmailPreviewSourceLoader` no longer has its own in-memory source cache; preview source extraction/classification now coalesces through the render cache. `EmailPreviewPipeline` uses the render cache for preview render models and wrapped preview HTML. `MessageBubbleLoader` reads/writes render-cache analysis, rich-content classification, and legacy fallback text while retaining compatibility with `ProcessedTextCache`. `OriginalEmailSourceLoader` reuses lazy wrapped original HTML through the render cache. `EmailPreviewSnapshotCache` remains the disk owner for images; only lightweight snapshot metadata is recorded in the render cache.
 
 ### F. Snippet representations are fragmented
 
@@ -357,24 +360,38 @@ behind one parsed representation.
 
 **Effort: medium.** **Impact: medium (clarity > raw perf).**
 
-Replace the 4-ish caches with one `RenderedMessageCache` actor keyed on `(messageId, sourceSignature)` and producing a `RenderedMessage` value containing all downstream artifacts:
+Current status (2026-05-30): partially complete. `RenderedMessageCache` is now an actor keyed on `(messageId, sourceSignature)` with per-artifact variant keys for inputs that legitimately change by dark mode, cleanup mode, sender/subject metadata, attachment fingerprints, or preview route. It supports lazy/partial population, source-signature pruning, memory-warning clearing, LRU-ish capacity limits, and in-flight coalescing.
+
+The shipped value is `RenderedMessageArtifacts`:
 
 ```swift
-struct RenderedMessage {
-    let canonicalPlainText: String
-    let chatBubbleText: String           // post-quote-strip
-    let htmlAnalysis: MessageBubbleHTMLAnalysis
-    let classification: EmailPreviewClassification
-    let previewCard: EmailPreviewRenderModel?
-    let snapshotImage: UIImage?          // for MiniEmailWebView replacement (#4)
-    let wrappedPreviewHTML: String?      // only when card path fails
-    let wrappedOriginalHTML: String?     // lazy
+struct RenderedMessageArtifacts {
+    let sourceSignature: String
+    var canonicalPlainText: String?
+    var chatBubbleTextByVariant: [RenderedMessageVariantKey: RenderedMessageChatBubbleText]
+    var htmlAnalysisByVariant: [RenderedMessageVariantKey: MessageBubbleHTMLAnalysis]
+    var richContentClassificationByVariant: [RenderedMessageVariantKey: Bool]
+    var previewSourceByVariant: [RenderedMessageVariantKey: EmailPreviewSource]
+    var previewRenderModelByVariant: [RenderedMessageVariantKey: EmailPreviewRenderModel]
+    var wrappedPreviewHTMLByVariant: [RenderedMessageVariantKey: HTMLPreviewPayload]
+    var wrappedOriginalHTMLByVariant: [RenderedMessageVariantKey: String]
+    var snapshotMetadataByVariant: [RenderedMessageVariantKey: RenderedMessageSnapshotMetadata]
 }
 ```
 
-Producers populate on demand and write through. Consumers (MessageBubble, EmailContentSection, HTMLMessageView) read.
+Ownership after this change:
+- `RenderedMessageCache`: in-memory derived render facts, preview source/classification, preview render models, wrapped preview/original HTML, bubble analysis, rich-content flags, legacy fallback text, snapshot metadata.
+- `ParsedEmailProvider`: shared DOM-derived immutable parse facts; it remains the input layer, not the render artifact owner.
+- `EmailPreviewSnapshotCache`: disk-backed snapshot image bytes and metadata files. It is intentionally not replaced.
+- `HTMLContentLoader.htmlCache`: still caches low-level wrapped `HTMLLoadResult` variants used by legacy/fallback load paths; it remains until `HTMLContentLoader` itself can become a producer behind `RenderedMessageCache`.
+- `ProcessedTextCache`: still stores compatibility text results for old records and chat prefetch callers; `MessageBubbleLoader` now mirrors useful results into `RenderedMessageCache`.
+- `MessageBubbleHTMLAnalysisCache`: retained as a small compatibility shim for tests and low-churn call sites; `MessageBubbleLoader` writes through to the render cache.
 
-This makes invalidation a single concept: when `sourceSignature` changes, the whole `RenderedMessage` is dropped.
+Remaining cleanup:
+- Move any remaining direct `HTMLContentLoader.htmlCache` wrapped-result ownership behind `RenderedMessageCache` when the low-level loader API can be narrowed without behavior changes.
+- Retire `MessageBubbleHTMLAnalysisCache` after downstream tests and call sites no longer need a dedicated shim.
+- Narrow `ProcessedTextCache` to legacy/prefetch-only use, or fold its remaining fallback text path fully into `RenderedMessageCache`.
+- Keep snapshot image bytes disk-backed; do not store rendered images in memory artifacts.
 
 ### 6. **Pick one canonical preview text per message at ingest**
 
@@ -445,7 +462,7 @@ Completed:
 
 Remaining recommended order:
 1. Continue hardening **#2 (single canonical parse pass)** only where low-risk consumers can use existing `ParsedEmail` facts without changing visible behavior.
-2. **#5 (unified rendering cache)** — capstone once parsed-email sharing is stable and no longer has to straddle both old and new parse paths.
+2. **#5 cleanup** — remove compatibility cache shims once the new coordinator has soaked.
 3. **#8 (eager inline attachment fetch)** — still useful for first-open fidelity; the original-reader warmup change reduced the blocking part but did not replace ingest-time attachment fetching.
 4. **#9 (document dark-mode policy)** — doc-only.
 
@@ -537,7 +554,7 @@ Initial foundation landed on branch `claude/email-chat-architecture-EddMs`.
 ### What's still to do (in priority order):
 
 - **Next: continue #2 only for low-risk consumers** that can share existing `ParsedEmail` facts without changing rendering behavior.
-- **Defer unified rendering-cache work** until parsed-email sharing is stable and it no longer has to support both legacy and DOM branches.
+- For render-cache cleanup, keep changes consumer-by-consumer and validate with `RenderedMessageCacheTests`, bubble loader/view-model tests, preview pipeline/builder tests, original source loader tests, and snapshot cache tests before broadening.
 
 ## Implementation status — original email recovery
 

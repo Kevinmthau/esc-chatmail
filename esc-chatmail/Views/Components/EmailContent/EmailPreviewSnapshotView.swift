@@ -173,6 +173,12 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                     cacheKey: cacheKey,
                     messageId: diagnosticMessageId
                 )
+                await recordSnapshotMetadata(
+                    cached,
+                    previewCacheKey: previewCacheKey,
+                    snapshotCacheKey: cacheKey,
+                    messageId: diagnosticMessageId
+                )
                 snapshotImage = image
                 displayHeight = HTMLPreviewSizing.clampedHeight(cached.displayHeight)
                 completedCacheKey = cacheKey
@@ -232,6 +238,14 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                 displayHeight: result.displayHeight,
                 cacheStored: cached != nil
             )
+            if let cached {
+                await recordSnapshotMetadata(
+                    cached,
+                    previewCacheKey: previewCacheKey,
+                    snapshotCacheKey: result.cacheKey,
+                    messageId: diagnosticMessageId
+                )
+            }
             snapshotImage = result.image
             displayHeight = HTMLPreviewSizing.clampedHeight(result.displayHeight)
             completedCacheKey = cacheKey
@@ -255,5 +269,50 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
             didFail = true
             completedCacheKey = cacheKey
         }
+    }
+
+    private func recordSnapshotMetadata(
+        _ entry: EmailPreviewSnapshotCacheEntry,
+        previewCacheKey: String,
+        snapshotCacheKey: String,
+        messageId: String?
+    ) async {
+        guard let messageId,
+              let sourceSignature = Self.sourceSignature(
+                fromPreviewCacheKey: previewCacheKey,
+                messageId: messageId
+              ) else {
+            return
+        }
+
+        await RenderedMessageCache.shared.recordSnapshotMetadata(
+            RenderedMessageSnapshotMetadata(
+                snapshotCacheKey: snapshotCacheKey,
+                displayHeight: Double(entry.displayHeight),
+                pixelScale: Double(entry.pixelScale),
+                createdAt: entry.createdAt
+            ),
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            variantKey: RenderedMessageVariantKey("snapshot:\(snapshotCacheKey)")
+        )
+    }
+
+    private static func sourceSignature(
+        fromPreviewCacheKey previewCacheKey: String,
+        messageId: String
+    ) -> String? {
+        let prefix = "\(messageId)|"
+        guard previewCacheKey.hasPrefix(prefix) else {
+            return nil
+        }
+
+        let remainder = previewCacheKey.dropFirst(prefix.count)
+        guard let modeRange = remainder.range(of: "|mode:") else {
+            return nil
+        }
+
+        let sourceSignature = remainder[..<modeRange.lowerBound]
+        return sourceSignature.isEmpty ? nil : String(sourceSignature)
     }
 }

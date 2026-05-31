@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 struct EmailPreviewPipelineRequest: Sendable {
@@ -14,17 +15,17 @@ struct EmailPreviewPipelineRequest: Sendable {
     let isDarkMode: Bool
 }
 
-enum NativePreviewCardRoute: Equatable {
+enum NativePreviewCardRoute: Equatable, Sendable {
     case newsletter
     case transactional
 }
 
-struct HTMLPreviewPayload: Equatable {
+struct HTMLPreviewPayload: Equatable, Sendable {
     let html: String
     let previewCacheKey: String
 }
 
-enum EmailPreviewRenderModel: Equatable {
+enum EmailPreviewRenderModel: Equatable, Sendable {
     case calendarInvite(CalendarInvitePreviewModel)
     case newsletter(NewsletterPreviewModel)
     case transactional(TransactionalPreviewModel)
@@ -41,6 +42,7 @@ final class EmailPreviewPipeline: @unchecked Sendable {
     private let newsletterPreviewBuilder: NewsletterPreviewBuilder
     private let transactionalPreviewBuilder: TransactionalPreviewBuilder
     private let netlifyDeployPreviewBuilder: NetlifyDeployPreviewBuilder
+    private let renderedMessageCache: RenderedMessageCache
 
     init(
         previewSourceLoader: any EmailPreviewSourceLoading = EmailPreviewSourceLoader.shared,
@@ -48,7 +50,8 @@ final class EmailPreviewPipeline: @unchecked Sendable {
         calendarInvitePreviewBuilder: CalendarInvitePreviewBuilder = CalendarInvitePreviewBuilder(),
         newsletterPreviewBuilder: NewsletterPreviewBuilder = NewsletterPreviewBuilder(),
         transactionalPreviewBuilder: TransactionalPreviewBuilder = TransactionalPreviewBuilder(),
-        netlifyDeployPreviewBuilder: NetlifyDeployPreviewBuilder = NetlifyDeployPreviewBuilder()
+        netlifyDeployPreviewBuilder: NetlifyDeployPreviewBuilder = NetlifyDeployPreviewBuilder(),
+        renderedMessageCache: RenderedMessageCache = .shared
     ) {
         self.previewSourceLoader = previewSourceLoader
         self.htmlContentLoader = htmlContentLoader
@@ -56,6 +59,7 @@ final class EmailPreviewPipeline: @unchecked Sendable {
         self.newsletterPreviewBuilder = newsletterPreviewBuilder
         self.transactionalPreviewBuilder = transactionalPreviewBuilder
         self.netlifyDeployPreviewBuilder = netlifyDeployPreviewBuilder
+        self.renderedMessageCache = renderedMessageCache
     }
 
     func loadPreview(request: EmailPreviewPipelineRequest) async -> EmailPreviewRenderModel? {
@@ -67,7 +71,7 @@ final class EmailPreviewPipeline: @unchecked Sendable {
             subject: request.subject,
             allowRecovery: true
         ),
-              let canonicalHTML = previewSource.canonicalHTML else {
+              previewSource.canonicalHTML != nil else {
             if let fallbackPreview = await loadFallbackHTMLPreview(request: request) {
                 return fallbackPreview
             }
@@ -79,6 +83,23 @@ final class EmailPreviewPipeline: @unchecked Sendable {
                 category: .ui
             )
             return nil
+        }
+
+        return await renderedMessageCache.previewRenderModel(
+            messageId: request.messageId,
+            sourceSignature: previewSource.sourceSignature,
+            variantKey: previewRenderVariantKey(for: request)
+        ) {
+            await self.buildPreview(previewSource: previewSource, request: request)
+        }
+    }
+
+    private func buildPreview(
+        previewSource: EmailPreviewSource,
+        request: EmailPreviewPipelineRequest
+    ) async -> EmailPreviewRenderModel? {
+        guard let canonicalHTML = previewSource.canonicalHTML else {
+            return await loadFallbackHTMLPreview(request: request)
         }
 
         let classification = previewSource.classification
@@ -153,20 +174,27 @@ final class EmailPreviewPipeline: @unchecked Sendable {
             }
         }
 
-        guard let previewHTML = await htmlContentLoader.preparePreviewHTML(
-            fromCanonicalHTML: canonicalHTML,
+        guard let payload = await renderedMessageCache.wrappedPreviewHTML(
             messageId: request.messageId,
-            bodyText: previewSource.plainText,
-            senderEmail: request.senderEmail,
-            subject: request.subject,
-            isDarkMode: request.isDarkMode,
-            cleanupMode: request.cleanupMode
-        ) else {
-            return await loadFallbackHTMLPreview(request: request)
-        }
+            sourceSignature: previewSource.sourceSignature,
+            variantKey: wrappedPreviewHTMLVariantKey(
+                request: request,
+                previewSource: previewSource
+            ),
+            producer: {
+            guard let previewHTML = await self.htmlContentLoader.preparePreviewHTML(
+                fromCanonicalHTML: canonicalHTML,
+                messageId: request.messageId,
+                bodyText: previewSource.plainText,
+                senderEmail: request.senderEmail,
+                subject: request.subject,
+                isDarkMode: request.isDarkMode,
+                cleanupMode: request.cleanupMode
+            ) else {
+                return nil
+            }
 
-        return .html(
-            HTMLPreviewPayload(
+            return HTMLPreviewPayload(
                 html: previewHTML,
                 previewCacheKey: Self.makePreviewHTMLCacheKey(
                     messageId: request.messageId,
@@ -175,7 +203,11 @@ final class EmailPreviewPipeline: @unchecked Sendable {
                     cleanupMode: request.cleanupMode
                 )
             )
-        )
+        }) else {
+            return await loadFallbackHTMLPreview(request: request)
+        }
+
+        return .html(payload)
     }
 
     static func makePreviewHTMLCacheKey(
@@ -249,5 +281,47 @@ final class EmailPreviewPipeline: @unchecked Sendable {
                 )
             )
         )
+    }
+
+    private func previewRenderVariantKey(for request: EmailPreviewPipelineRequest) -> RenderedMessageVariantKey {
+        RenderedMessageVariantKey([
+            "preview-render-v1",
+            "body:\(Self.fingerprint(for: request.bodyText))",
+            "snippet:\(Self.fingerprint(for: request.cleanedSnippet))",
+            "senderName:\(Self.fingerprint(for: request.senderName))",
+            "senderEmail:\(Self.fingerprint(for: request.senderEmail))",
+            "subject:\(Self.fingerprint(for: request.subject))",
+            "newsletter:\(request.isNewsletter)",
+            "forwarded:\(request.isForwardedEmail)",
+            "cleanup:\(request.cleanupMode.rawValue)",
+            "dark:\(request.isDarkMode)"
+        ].joined(separator: "|"))
+    }
+
+    private func wrappedPreviewHTMLVariantKey(
+        request: EmailPreviewPipelineRequest,
+        previewSource: EmailPreviewSource
+    ) -> RenderedMessageVariantKey {
+        RenderedMessageVariantKey([
+            "wrapped-preview-html-v1",
+            "body:\(Self.fingerprint(for: previewSource.plainText))",
+            "senderEmail:\(Self.fingerprint(for: request.senderEmail))",
+            "subject:\(Self.fingerprint(for: request.subject))",
+            "cleanup:\(request.cleanupMode.rawValue)",
+            "dark:\(request.isDarkMode)"
+        ].joined(separator: "|"))
+    }
+
+    private static func fingerprint(for text: String?) -> String {
+        guard let text = text?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else {
+            return "nil"
+        }
+
+        return SHA256.hash(data: Data(text.utf8))
+            .prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 }

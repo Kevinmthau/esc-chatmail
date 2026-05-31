@@ -15,32 +15,24 @@ protocol EmailPreviewSourceLoading: Sendable {
 final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Sendable {
     static let shared = EmailPreviewSourceLoader()
 
-    private final class CachedSourceBox {
-        let source: EmailPreviewSource
-
-        init(_ source: EmailPreviewSource) {
-            self.source = source
-        }
-    }
-
     private let htmlContentLoader: HTMLContentLoader
     private let classifier: EmailPreviewClassifier
     private let imageExtractor: EmailPreviewImageExtractor
     private let parsedEmailProvider: any ParsedEmailProviding
-    private let cache = NSCache<NSString, CachedSourceBox>()
+    private let renderedMessageCache: RenderedMessageCache
 
     init(
         htmlContentLoader: HTMLContentLoader = .shared,
         classifier: EmailPreviewClassifier = EmailPreviewClassifier(),
         imageExtractor: EmailPreviewImageExtractor = EmailPreviewImageExtractor(),
-        parsedEmailProvider: any ParsedEmailProviding = ParsedEmailProvider.shared
+        parsedEmailProvider: any ParsedEmailProviding = ParsedEmailProvider.shared,
+        renderedMessageCache: RenderedMessageCache = .shared
     ) {
         self.htmlContentLoader = htmlContentLoader
         self.classifier = classifier
         self.imageExtractor = imageExtractor
         self.parsedEmailProvider = parsedEmailProvider
-        cache.countLimit = 512
-        cache.totalCostLimit = 30 * 1024 * 1024
+        self.renderedMessageCache = renderedMessageCache
     }
 
     func loadPreviewSource(
@@ -62,10 +54,8 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
         }
 
         let sourceSignature = canonicalContent.sourceSignature
-        let cacheKey = self.cacheKey(
-            messageId: messageId,
-            sourceSignature: sourceSignature,
-            previewMode: Self.previewMode(
+        let variantKey = RenderedMessageVariantKey(
+            Self.previewMode(
                 bodyText: canonicalContent.plainText,
                 senderEmail: senderEmail,
                 subject: subject,
@@ -73,13 +63,31 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
             )
         )
 
-        if let cached = cache.object(forKey: cacheKey as NSString) {
-            return cached.source
-        }
-
-        let parsedEmail = await parsedEmailProvider.parsedEmail(
+        return await renderedMessageCache.previewSource(
             messageId: messageId,
             sourceSignature: sourceSignature,
+            variantKey: variantKey
+        ) {
+            await self.buildPreviewSource(
+                messageId: messageId,
+                canonicalContent: canonicalContent,
+                canonicalHTML: canonicalHTML,
+                senderEmail: senderEmail,
+                subject: subject
+            )
+        }
+    }
+
+    private func buildPreviewSource(
+        messageId: String,
+        canonicalContent: CanonicalEmailContent,
+        canonicalHTML: String,
+        senderEmail: String?,
+        subject: String?
+    ) async -> EmailPreviewSource {
+        let parsedEmail = await parsedEmailProvider.parsedEmail(
+            messageId: messageId,
+            sourceSignature: canonicalContent.sourceSignature,
             canonicalHTML: canonicalHTML
         )
         let extractedContent = EmailPreviewContentExtractor.extract(
@@ -99,7 +107,7 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
 
         let source = EmailPreviewSource(
             messageId: messageId,
-            sourceSignature: sourceSignature,
+            sourceSignature: canonicalContent.sourceSignature,
             canonicalHTML: canonicalHTML,
             plainText: extractedContent.plainText,
             extractedText: extractedContent.htmlText,
@@ -117,20 +125,7 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
             category: .ui
         )
 
-        cache.setObject(CachedSourceBox(source), forKey: cacheKey as NSString, cost: canonicalHTML.utf8.count)
         return source
-    }
-
-    private func cacheKey(
-        messageId: String,
-        sourceSignature: String,
-        previewMode: String
-    ) -> String {
-        [
-            messageId,
-            sourceSignature,
-            previewMode
-        ].joined(separator: "|")
     }
 
     private static func previewMode(
