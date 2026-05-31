@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import WebKit
 
 private final class LayoutAwareWKWebView: WKWebView {
@@ -17,12 +18,41 @@ private final class LayoutAwareWKWebView: WKWebView {
 
 /// Configuration mode for email WebView rendering
 enum EmailWebViewMode {
-    /// Full interactive view with JavaScript, scrolling, and link handling
+    /// Full interactive original-email view with JavaScript, scrolling, and link handling.
+    ///
+    /// This mode follows the original-email policy: preserve author intent by
+    /// rendering in a light trait environment even when the app is in dark mode.
     case fullInteractive
-    /// Scaled preview (e.g., 50%) with no interaction
+    /// Scaled preview (e.g., 50%) with no interaction.
+    ///
+    /// Preview modes follow the preview policy: the wrapped HTML and native
+    /// background adapt to the app appearance while keeping authored colors where possible.
     case scaledPreview(scale: CGFloat)
-    /// Simple non-interactive preview at full size
+    /// Simple non-interactive preview at full size.
+    ///
+    /// Preview modes leave the WebView trait style unspecified so CSS can resolve
+    /// against the surrounding app appearance.
     case simplePreview
+}
+
+extension EmailWebViewMode {
+    var displayPurpose: HTMLDisplayPurpose {
+        switch self {
+        case .fullInteractive:
+            return .original
+        case .scaledPreview, .simplePreview:
+            return .preview
+        }
+    }
+
+    var webViewUserInterfaceStyle: UIUserInterfaceStyle {
+        switch self {
+        case .fullInteractive:
+            return .light
+        case .scaledPreview, .simplePreview:
+            return .unspecified
+        }
+    }
 }
 
 /// Unified WebView for rendering email HTML content
@@ -69,9 +99,10 @@ struct BaseEmailWebView: UIViewRepresentable {
             // Match Apple Mail's WebView behavior
             webView.scrollView.contentInsetAdjustmentBehavior = .never
             webView.scrollView.automaticallyAdjustsScrollIndicatorInsets = true
-            // Keep full-message documents on a light trait environment so authored
-            // dark-mode CSS doesn't render low-contrast text against our light surface.
-            webView.overrideUserInterfaceStyle = .light
+            // Full original emails force a light trait environment to preserve the
+            // author's intended presentation instead of opting the document into
+            // app dark mode.
+            webView.overrideUserInterfaceStyle = mode.webViewUserInterfaceStyle
             // Use mobile user agent to trigger responsive media queries
             webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
             // Prevent automatic font size adjustment that can break layouts
@@ -207,12 +238,10 @@ struct BaseEmailWebView: UIViewRepresentable {
 
         func applyBackgroundAppearance(to webView: WKWebView) {
             webView.isOpaque = false
-            switch parent.mode {
-            case .fullInteractive:
-                webView.overrideUserInterfaceStyle = .light
-            case .scaledPreview, .simplePreview:
-                webView.overrideUserInterfaceStyle = .unspecified
-            }
+            // Keep this in sync with the display-purpose policy: full original
+            // emails use light traits, while previews stay unspecified and rely
+            // on their wrapped preview theme.
+            webView.overrideUserInterfaceStyle = parent.mode.webViewUserInterfaceStyle
             let backgroundColor = nativeBackgroundColor(for: parent.mode) ?? .clear
             webView.backgroundColor = backgroundColor
             webView.scrollView.backgroundColor = backgroundColor
@@ -252,15 +281,6 @@ struct BaseEmailWebView: UIViewRepresentable {
             }
         }
 
-        private func displayPurpose(for mode: EmailWebViewMode) -> HTMLDisplayPurpose {
-            switch mode {
-            case .fullInteractive:
-                return .original
-            case .scaledPreview, .simplePreview:
-                return .preview
-            }
-        }
-
         private func nativeBackgroundColor(for mode: EmailWebViewMode) -> UIColor? {
             if case .simplePreview = mode, parent.isDarkMode == nil {
                 // Preserve the old transparent simple-preview surface unless the caller opts into theming.
@@ -269,7 +289,7 @@ struct BaseEmailWebView: UIViewRepresentable {
 
             let theme = HTMLDisplayWrapper.theme(
                 isDarkMode: parent.isDarkMode ?? false,
-                displayPurpose: displayPurpose(for: mode)
+                displayPurpose: mode.displayPurpose
             )
             return UIColor(hex: theme.backgroundColorHex) ?? .systemBackground
         }

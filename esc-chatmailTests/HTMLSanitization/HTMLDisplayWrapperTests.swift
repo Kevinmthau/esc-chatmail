@@ -15,6 +15,25 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         super.tearDown()
     }
 
+    func testTheme_previewDisplayPurposeHonorsDarkMode() {
+        let light = HTMLDisplayWrapper.theme(isDarkMode: false, displayPurpose: .preview)
+        let dark = HTMLDisplayWrapper.theme(isDarkMode: true, displayPurpose: .preview)
+
+        XCTAssertEqual(light.backgroundColorHex, "#f2f2f7")
+        XCTAssertEqual(light.textColorHex, "#000000")
+        XCTAssertEqual(dark.backgroundColorHex, "#1c1c1e")
+        XCTAssertEqual(dark.textColorHex, "#ffffff")
+    }
+
+    func testTheme_originalDisplayPurposePreservesLightPresentationInDarkMode() {
+        let light = HTMLDisplayWrapper.theme(isDarkMode: false, displayPurpose: .original)
+        let dark = HTMLDisplayWrapper.theme(isDarkMode: true, displayPurpose: .original)
+
+        XCTAssertEqual(light, dark)
+        XCTAssertEqual(dark.backgroundColorHex, "#ffffff")
+        XCTAssertEqual(dark.textColorHex, "#000000")
+    }
+
     func testWrapHTMLForDisplay_partialHTML_originalUsesAppleMailFallbackTypography() {
         let html = """
         <div>Hello from Apple Mail</div>
@@ -37,6 +56,25 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertTrue(darkResult.contains("background-color: #1c1c1e"))
         XCTAssertTrue(darkResult.contains("color: #ffffff"))
         XCTAssertFalse(lightResult.contains(appleMailFallbackFontStack))
+    }
+
+    func testWrapHTMLForDisplay_darkPreviewAppliesFallbackTextCSSOnlyForPreview() {
+        let html = """
+        <p style="color: #123456;">Authored color survives</p>
+        <p>Fallback color can adapt</p>
+        """
+
+        let lightPreview = sut.wrapHTMLForDisplay(html, isDarkMode: false, displayPurpose: .preview)
+        let darkPreview = sut.wrapHTMLForDisplay(html, isDarkMode: true, displayPurpose: .preview)
+        let darkOriginal = sut.wrapHTMLForDisplay(html, isDarkMode: true, displayPurpose: .original)
+
+        XCTAssertTrue(darkPreview.contains(#"p:not([style*="color"])"#))
+        XCTAssertTrue(darkPreview.contains("color: #ffffff"))
+        XCTAssertTrue(darkPreview.contains("color: #123456;"))
+        XCTAssertFalse(lightPreview.contains(#"p:not([style*="color"])"#))
+        XCTAssertFalse(darkOriginal.contains(#"p:not([style*="color"])"#))
+        XCTAssertTrue(darkOriginal.contains("background-color: #ffffff"))
+        XCTAssertFalse(darkOriginal.contains("background-color: #1c1c1e"))
     }
 
     func testWrapHTMLForDisplay_existingDocumentWithoutFontStyling_usesAppleMailFallbackTypography() {

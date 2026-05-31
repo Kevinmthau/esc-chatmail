@@ -216,6 +216,14 @@ If an inline-image attachment isn't on disk at render time, the scheme handler s
 
 `HTMLDisplayWrapper.theme` returns light-on-light for `.original` regardless of `isDarkMode` — a deliberate choice to preserve authored colors — but it's not documented in the type and surprises on first read. The preview path *does* honor dark mode, plus a "fallback dark text" CSS override that intentionally avoids overriding emails that already specify colors. The intent is correct; the policy deserves to be named.
 
+### Email dark-mode policy
+
+Preview: adapt to the app appearance while preserving authored colors where possible. Dark-mode preview fallback CSS only recolors common unstyled text elements.
+
+Original Email: preserve author intent and render as original/light regardless of system dark mode unless no HTML exists and the app must fall back to native/plain text.
+
+Snapshot previews follow the preview policy and are cached per dark-mode state. Full interactive original email follows the original-email policy.
+
 ---
 
 ## Recommendations (prioritized)
@@ -438,11 +446,7 @@ Current status (2026-05-31): complete. `MessageProcessor` now records normalized
 
 **Effort: trivial.** **Impact: prevents future regressions.**
 
-Add a doc comment to `HTMLDisplayWrapper.theme(...)` explaining:
-- previews honor dark mode, with a fallback CSS that only re-colors text when the email didn't specify colors
-- original-email view deliberately renders in light theme regardless of system dark mode, to preserve author intent
-
-Document the same decision in `BaseEmailWebView.makeUIView` where `overrideUserInterfaceStyle = .light` is set for full-message mode.
+Current status (2026-05-31): complete. `HTMLDisplayWrapper.theme(...)` documents the policy, `BaseEmailWebView` names the original-vs-preview display-purpose and trait-style split, and `EmailPreviewSnapshotRenderer` documents that snapshot previews follow preview dark-mode behavior.
 
 ### 10. **(Optional) Server-side preprocessing**
 
@@ -464,11 +468,11 @@ Completed:
 - **#6 (canonical preview text at ingest)** — complete as of 2026-05-29.
 - **#7 (memoize loadSignature)** — complete; text fingerprints are precomputed in `ChatMessageRowModel`.
 - **#8 (eager inline attachment fetch)** — complete as of 2026-05-31; ingest records normalized MIME/HTML CID targets, schedules post-save eager downloads for missing inline attachments, and keeps `CIDSchemeHandler` as on-demand fallback.
+- **#9 (document dark-mode policy)** — complete as of 2026-05-31; preview/original/snapshot policies are documented in code and this roadmap.
 
 Remaining recommended order:
 1. Continue hardening **#2 (single canonical parse pass)** only where low-risk consumers can use existing `ParsedEmail` facts without changing visible behavior.
 2. **#5 cleanup** — remove compatibility cache shims once the new coordinator has soaked.
-3. **#9 (document dark-mode policy)** — doc-only.
 
 ---
 

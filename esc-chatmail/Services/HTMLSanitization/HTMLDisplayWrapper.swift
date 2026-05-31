@@ -14,11 +14,21 @@ struct HTMLDisplayWrapper {
     static let maximumResponsiveLayoutViewportWidth = 480
     static let maximumFixedLayoutViewportWidth = 900
 
+    /// Fallback colors for the wrapper-owned surface.
+    ///
+    /// These colors should not be treated as an instruction to rewrite authored
+    /// email colors. They are the background/text defaults used when the email
+    /// leaves parts of the document unstyled.
     struct Theme: Equatable, Sendable {
         let backgroundColorHex: String
         let textColorHex: String
     }
 
+    /// Returns the wrapper fallback theme for a display purpose.
+    ///
+    /// Preview rendering follows the app appearance so chat cards remain readable
+    /// in dark mode. Original-email rendering deliberately returns the light theme
+    /// for both system appearances to preserve authored colors and layout intent.
     static func theme(
         isDarkMode: Bool,
         displayPurpose: HTMLDisplayPurpose
@@ -88,6 +98,8 @@ struct HTMLDisplayWrapper {
         // Inject our viewport meta, CSP, and minimal styles into the existing document
         // This preserves the email's original <style> tags and media queries
 
+        // Preview is the only display purpose that gets dark-mode fallback text.
+        // Full original emails stay light-authored, including when the app is dark.
         let shouldApplyDarkModeFallbackText = isDarkMode && displayPurpose == .preview
         let originalColorSchemeHead = colorSchemeHead(for: displayPurpose)
         let originalColorSchemeCSS = colorSchemeCSS(for: displayPurpose)
@@ -219,6 +231,8 @@ struct HTMLDisplayWrapper {
         displayPurpose: HTMLDisplayPurpose,
         fallbackTypographyCSS: String
     ) -> String {
+        // Preview is the only display purpose that gets dark-mode fallback text.
+        // Full original emails stay light-authored, including when the app is dark.
         let shouldApplyDarkModeFallbackText = isDarkMode && displayPurpose == .preview
         let originalColorSchemeHead = colorSchemeHead(for: displayPurpose)
         let originalColorSchemeCSS = colorSchemeCSS(for: displayPurpose)
@@ -357,7 +371,10 @@ struct HTMLDisplayWrapper {
         """
     }
 
-    /// Dark mode CSS overrides - only applied when email doesn't specify colors
+    /// Preview-only dark-mode fallback text.
+    ///
+    /// This intentionally targets common unstyled elements and avoids elements
+    /// with inline colors so authored color choices survive where possible.
     private func darkModeCSS(textColor: String) -> String {
         return """
         /* Dark mode: only override text color if not already specified */

@@ -20,9 +20,21 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         super.tearDown()
     }
 
-    func testSnapshotAppearanceUsesExplicitRequestColorScheme() {
+    func testSnapshotAppearanceUsesExplicitRequestColorSchemeAndPreviewTheme() {
         XCTAssertEqual(EmailPreviewSnapshotAppearance.userInterfaceStyle(isDarkMode: false), .light)
         XCTAssertEqual(EmailPreviewSnapshotAppearance.userInterfaceStyle(isDarkMode: true), .dark)
+        XCTAssertEqual(
+            EmailPreviewSnapshotAppearance.theme(isDarkMode: false),
+            HTMLDisplayWrapper.theme(isDarkMode: false, displayPurpose: .preview)
+        )
+        XCTAssertEqual(
+            EmailPreviewSnapshotAppearance.theme(isDarkMode: true),
+            HTMLDisplayWrapper.theme(isDarkMode: true, displayPurpose: .preview)
+        )
+        XCTAssertNotEqual(
+            EmailPreviewSnapshotAppearance.theme(isDarkMode: true),
+            HTMLDisplayWrapper.theme(isDarkMode: true, displayPurpose: .original)
+        )
     }
 
     func testCacheKeyChangesWithPreviewSignatureWidthDarkModeContentAndRendererVersion() {
@@ -205,6 +217,7 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         XCTAssertEqual(viewModel.completedCacheKey, expectedCacheKey)
         XCTAssertFalse(viewModel.didFail)
         XCTAssertEqual(renderer.requests.map(\.cacheKey), [expectedCacheKey])
+        XCTAssertEqual(renderer.requests.map(\.isDarkMode), [true])
         let counts = EmailPreviewSnapshotDiagnostics.countsForTesting()
         XCTAssertEqual(counts.cacheMisses, 1)
         XCTAssertEqual(counts.renderSuccesses, 1)

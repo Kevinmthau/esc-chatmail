@@ -26,8 +26,15 @@ enum EmailPreviewSnapshotRenderError: Error {
 }
 
 enum EmailPreviewSnapshotAppearance {
+    /// Snapshot previews follow the preview policy, not the original-email policy:
+    /// render against the requested app appearance so cached images match chat UI.
     static func userInterfaceStyle(isDarkMode: Bool) -> UIUserInterfaceStyle {
         isDarkMode ? .dark : .light
+    }
+
+    /// Snapshot previews use the same wrapper theme as live preview WebViews.
+    static func theme(isDarkMode: Bool) -> HTMLDisplayWrapper.Theme {
+        HTMLDisplayWrapper.theme(isDarkMode: isDarkMode, displayPurpose: .preview)
     }
 }
 
@@ -156,10 +163,12 @@ private final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDel
 
     private func applyBackgroundAppearance() {
         webView.isOpaque = false
+        // Snapshot previews explicitly set dark/light traits from the request so
+        // offscreen rendering matches the app appearance encoded into the cache key.
         webView.overrideUserInterfaceStyle = EmailPreviewSnapshotAppearance.userInterfaceStyle(
             isDarkMode: request.isDarkMode
         )
-        let theme = HTMLDisplayWrapper.theme(isDarkMode: request.isDarkMode, displayPurpose: .preview)
+        let theme = EmailPreviewSnapshotAppearance.theme(isDarkMode: request.isDarkMode)
         let color = UIColor(hex: theme.backgroundColorHex) ?? .systemBackground
         webView.backgroundColor = color
         webView.scrollView.backgroundColor = color

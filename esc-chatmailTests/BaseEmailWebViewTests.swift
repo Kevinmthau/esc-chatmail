@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 @testable import esc_chatmail
 
 @MainActor
@@ -81,6 +82,18 @@ final class BaseEmailWebViewTests: XCTestCase {
         coordinator.resetLoadedSignatureAfterFailure(for: error)
 
         XCTAssertFalse(coordinator.needsReload)
+    }
+
+    func testModeDisplayPurposeUsesOriginalPolicyOnlyForFullInteractiveEmail() {
+        XCTAssertEqual(EmailWebViewMode.fullInteractive.displayPurpose, .original)
+        XCTAssertEqual(EmailWebViewMode.scaledPreview(scale: 0.5).displayPurpose, .preview)
+        XCTAssertEqual(EmailWebViewMode.simplePreview.displayPurpose, .preview)
+    }
+
+    func testModeUserInterfaceStyleForcesLightOnlyForFullOriginalEmail() {
+        XCTAssertEqual(EmailWebViewMode.fullInteractive.webViewUserInterfaceStyle, .light)
+        XCTAssertEqual(EmailWebViewMode.scaledPreview(scale: 0.5).webViewUserInterfaceStyle, .unspecified)
+        XCTAssertEqual(EmailWebViewMode.simplePreview.webViewUserInterfaceStyle, .unspecified)
     }
 
     private func makeWebView(message: Message?) -> BaseEmailWebView {
