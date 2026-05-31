@@ -4,20 +4,38 @@ import XCTest
 final class EmailPreviewPipelineTests: XCTestCase {
     private var contentHandler: HTMLContentHandler!
     private var pipeline: EmailPreviewPipeline!
+    private var testMessagesDirectory: URL!
+    private var renderedMessageCache: RenderedMessageCache!
 
     override func setUp() {
         super.setUp()
-        contentHandler = HTMLContentHandler()
-        let htmlLoader = HTMLContentLoader(contentHandler: contentHandler, sanitizer: .shared)
+        testMessagesDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("EmailPreviewPipelineTests-\(UUID().uuidString)", isDirectory: true)
+        contentHandler = HTMLContentHandler(messagesDirectory: testMessagesDirectory)
+        let htmlLoader = HTMLContentLoader(
+            contentHandler: contentHandler,
+            sanitizer: .shared,
+            recoveryService: NoopHTMLContentRecoverer()
+        )
+        renderedMessageCache = RenderedMessageCache()
         pipeline = EmailPreviewPipeline(
-            previewSourceLoader: EmailPreviewSourceLoader(htmlContentLoader: htmlLoader),
-            htmlContentLoader: htmlLoader
+            previewSourceLoader: EmailPreviewSourceLoader(
+                htmlContentLoader: htmlLoader,
+                renderedMessageCache: renderedMessageCache
+            ),
+            htmlContentLoader: htmlLoader,
+            renderedMessageCache: renderedMessageCache
         )
     }
 
     override func tearDown() {
         pipeline = nil
+        renderedMessageCache = nil
         contentHandler = nil
+        if let testMessagesDirectory {
+            try? FileManager.default.removeItem(at: testMessagesDirectory)
+        }
+        testMessagesDirectory = nil
         super.tearDown()
     }
 
@@ -206,6 +224,52 @@ final class EmailPreviewPipelineTests: XCTestCase {
         XCTAssertEqual(model.sourceDomain, "email.apple.com")
     }
 
+    func testLoadPreview_longTailRichHTMLReturnsSnapshotHTMLPayload() async throws {
+        let messageId = "preview-pipeline-rich-html-fallback-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        _ = contentHandler.saveHTML(
+            """
+            <!DOCTYPE html>
+            <html>
+            <body>
+              <table role="presentation" width="100%">
+                <tr><td><img src="https://cdn.example.com/hero.jpg" width="640" height="240" alt=""></td></tr>
+                <tr><td><h1>Forwarded design proof</h1></td></tr>
+                <tr><td><p>This rich HTML does not qualify for a native card.</p></td></tr>
+              </table>
+            </body>
+            </html>
+            """,
+            for: messageId
+        )
+
+        let loadedPreview = await pipeline.loadPreview(
+            request: EmailPreviewPipelineRequest(
+                messageId: messageId,
+                bodyStorageURI: nil,
+                bodyText: "Forwarded design proof",
+                cleanedSnippet: nil,
+                senderName: "Designer",
+                senderEmail: "designer@example.com",
+                subject: "Fwd: Design proof",
+                isNewsletter: false,
+                isForwardedEmail: true,
+                cleanupMode: .none,
+                isDarkMode: false
+            )
+        )
+        let preview = try XCTUnwrap(loadedPreview)
+
+        guard case .html(let payload) = preview else {
+            XCTFail("Expected snapshot-backed HTML payload, got \(preview)")
+            return
+        }
+
+        XCTAssertTrue(payload.html.contains("Forwarded design proof"))
+        XCTAssertTrue(payload.previewCacheKey.contains("mode:html-preview"))
+    }
+
     func testLoadPreview_unusableStoredHTMLFallsBackToPlainTextPreview() async throws {
         let messageId = "preview-pipeline-plain-fallback-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }
@@ -293,5 +357,73 @@ final class EmailPreviewPipelineTests: XCTestCase {
 
         XCTAssertTrue(payload.html.contains("Storage preview content"))
         XCTAssertFalse(payload.previewCacheKey.contains("plainText:"))
+    }
+
+    func testLoadPreview_rejectedMessageFileRefreshesWhenStorageFallbackAppears() async throws {
+        let messageId = "preview-pipeline-storage-refresh-\(UUID().uuidString)"
+        let storageURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(messageId)-storage.html")
+        defer {
+            contentHandler.deleteHTML(for: messageId)
+            try? FileManager.default.removeItem(at: storageURL)
+        }
+
+        _ = contentHandler.saveHTML(
+            """
+            <html><body><div style="display: none;">Tracking shell</div></body></html>
+            """,
+            for: messageId
+        )
+
+        let request = EmailPreviewPipelineRequest(
+            messageId: messageId,
+            bodyStorageURI: storageURL.path,
+            bodyText: "Plain fallback token",
+            cleanedSnippet: nil,
+            senderName: "Sender",
+            senderEmail: "sender@example.com",
+            subject: "Storage",
+            isNewsletter: false,
+            isForwardedEmail: true,
+            cleanupMode: .none,
+            isDarkMode: false
+        )
+
+        let loadedFirstPreview = await pipeline.loadPreview(request: request)
+        let firstPreview = try XCTUnwrap(loadedFirstPreview)
+        guard case .html(let firstPayload) = firstPreview else {
+            XCTFail("Expected plain fallback HTML preview, got \(firstPreview)")
+            return
+        }
+
+        XCTAssertTrue(firstPayload.html.contains("Plain fallback token"))
+        XCTAssertFalse(firstPayload.html.contains("Storage fallback token"))
+
+        try """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <h1>Storage fallback token</h1>
+          <p>Renderable fallback HTML.</p>
+        </body>
+        </html>
+        """.write(to: storageURL, atomically: true, encoding: .utf8)
+
+        let loadedSecondPreview = await pipeline.loadPreview(request: request)
+        let secondPreview = try XCTUnwrap(loadedSecondPreview)
+        guard case .html(let secondPayload) = secondPreview else {
+            XCTFail("Expected storage HTML fallback preview, got \(secondPreview)")
+            return
+        }
+
+        XCTAssertTrue(secondPayload.html.contains("Storage fallback token"))
+        XCTAssertFalse(secondPayload.html.contains("Plain fallback token"))
+        XCTAssertFalse(secondPayload.previewCacheKey.contains("plainText:"))
+    }
+}
+
+private struct NoopHTMLContentRecoverer: HTMLContentRecovering {
+    func recoverHTMLContent(messageId: String) async -> String? {
+        nil
     }
 }

@@ -285,8 +285,9 @@ final class EmailPreviewPipeline: @unchecked Sendable {
 
     private func previewRenderVariantKey(for request: EmailPreviewPipelineRequest) -> RenderedMessageVariantKey {
         RenderedMessageVariantKey([
-            "preview-render-v1",
+            "preview-render-v2",
             "body:\(Self.fingerprint(for: request.bodyText))",
+            "storage:\(Self.storageFallbackIdentity(for: request.bodyStorageURI))",
             "snippet:\(Self.fingerprint(for: request.cleanedSnippet))",
             "senderName:\(Self.fingerprint(for: request.senderName))",
             "senderEmail:\(Self.fingerprint(for: request.senderEmail))",
@@ -323,5 +324,30 @@ final class EmailPreviewPipeline: @unchecked Sendable {
             .prefix(8)
             .map { String(format: "%02x", $0) }
             .joined()
+    }
+
+    private static func storageFallbackIdentity(for bodyStorageURI: String?) -> String {
+        guard let bodyStorageURI = bodyStorageURI?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !bodyStorageURI.isEmpty else {
+            return "nil"
+        }
+
+        let uriFingerprint = fingerprint(for: bodyStorageURI)
+        guard let url = StorageURIResolver.resolve(bodyStorageURI) else {
+            return "uri:\(uriFingerprint)|unresolved"
+        }
+
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return "uri:\(uriFingerprint)|missing"
+        }
+
+        guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
+              let timestamp = values.contentModificationDate?.timeIntervalSince1970,
+              let fileSize = values.fileSize else {
+            return "uri:\(uriFingerprint)|file:unknown"
+        }
+
+        return "uri:\(uriFingerprint)|file:\(timestamp)|\(fileSize)"
     }
 }

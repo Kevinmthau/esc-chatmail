@@ -1,9 +1,7 @@
 import Foundation
-import WebKit
-import UIKit
 
 /// Main HTML sanitization service - facade delegating to specialized components
-final class HTMLSanitizerService: HTMLSanitizerProtocol {
+final class HTMLSanitizerService {
     static let shared = HTMLSanitizerService()
 
     // MARK: - Internal Components
@@ -11,8 +9,6 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
     private let urlSanitizer = HTMLURLSanitizer()
     private let cssSanitizer = HTMLCSSSanitizer()
     private let trackingRemover = HTMLTrackingRemover()
-    private let attributedConverter = HTMLAttributedStringConverter()
-    private let complexityAnalyzer = HTMLComplexityAnalyzer()
     private let displayWrapper = HTMLDisplayWrapper()
     private let dangerousMarkupSanitizer: (String) throws -> String
 
@@ -96,19 +92,6 @@ final class HTMLSanitizerService: HTMLSanitizerProtocol {
 
     private func removeEventHandlers(_ html: String) -> String {
         RegexSanitizer.replace(in: html, regex: Self.eventHandlerRegex)
-    }
-
-    // MARK: - HTML to AttributedString Conversion
-
-    func htmlToAttributedString(_ html: String, isFromMe: Bool) -> NSAttributedString? {
-        let sanitized = sanitize(html)
-        return attributedConverter.convert(sanitized, isFromMe: isFromMe)
-    }
-
-    // MARK: - HTML Complexity Analysis
-
-    func analyzeComplexity(_ html: String) -> HTMLComplexity {
-        complexityAnalyzer.analyze(html)
     }
 
     // MARK: - HTML Wrapping for Display

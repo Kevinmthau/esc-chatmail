@@ -55,8 +55,9 @@ extension EmailWebViewMode {
     }
 }
 
-/// Unified WebView for rendering email HTML content
-/// Consolidates HTMLWebView, MiniEmailWebView, and HTMLPreviewWebView
+/// Unified WebView for rendering email HTML content.
+/// Used by the full original-email view, compose previews, and the
+/// MiniEmailWebView snapshot-failure fallback.
 struct BaseEmailWebView: UIViewRepresentable {
     let htmlContent: String
     let mode: EmailWebViewMode

@@ -2,8 +2,9 @@ import CryptoKit
 import Foundation
 import SwiftUI
 
-/// A scaled-down WKWebView that shows a preview of HTML email content.
-/// Keep newsletter chat previews out of this path; they should use the derived native preview card.
+/// Snapshot-failure fallback for rich HTML chat previews.
+/// Normal rich previews should render through EmailPreviewSnapshotView so list
+/// scrolling does not depend on live WKWebView layout.
 struct MiniEmailWebView: View {
     let htmlContent: String
     let previewCacheKey: String?

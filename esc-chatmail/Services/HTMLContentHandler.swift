@@ -26,10 +26,14 @@ final class HTMLContentHandler {
     /// Serial queue for exclusive directory operations like deleteAllHTML
     private let exclusiveQueue = DispatchQueue(label: "com.esc.htmlcontent.exclusive")
 
-    init() {
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        self.messagesDirectory = documentsPath.appendingPathComponent("Messages")
+    init(messagesDirectory: URL? = nil) {
+        if let messagesDirectory {
+            self.messagesDirectory = messagesDirectory
+        } else {
+            let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+                ?? FileManager.default.temporaryDirectory
+            self.messagesDirectory = documentsPath.appendingPathComponent("Messages")
+        }
         createMessagesDirectoryIfNeeded()
     }
 

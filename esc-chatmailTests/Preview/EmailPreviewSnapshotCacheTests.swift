@@ -175,7 +175,9 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         XCTAssertEqual(viewModel.completedCacheKey, cacheKey)
         XCTAssertFalse(viewModel.didFail)
         XCTAssertTrue(renderer.requests.isEmpty)
-        XCTAssertEqual(EmailPreviewSnapshotDiagnostics.countsForTesting().cacheHits, 1)
+        let counts = EmailPreviewSnapshotDiagnostics.countsForTesting()
+        XCTAssertEqual(counts.cacheHits, 1)
+        XCTAssertEqual(counts.miniEmailWebViewFallbacks, 0)
     }
 
     @MainActor
@@ -221,6 +223,7 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         let counts = EmailPreviewSnapshotDiagnostics.countsForTesting()
         XCTAssertEqual(counts.cacheMisses, 1)
         XCTAssertEqual(counts.renderSuccesses, 1)
+        XCTAssertEqual(counts.miniEmailWebViewFallbacks, 0)
     }
 
     @MainActor

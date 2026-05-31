@@ -89,6 +89,7 @@ final class HTMLContentLoader {
     private let remoteImageAttachmentFallback: HTMLRemoteImageAttachmentFallback
     private let qualityEvaluator: EmailRenderQualityEvaluator
     private let parsedEmailProvider: any ParsedEmailProviding
+    private let recoveryService: any HTMLContentRecovering
     private static let linkDetector: NSDataDetector? = {
         try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
     }()
@@ -114,13 +115,15 @@ final class HTMLContentLoader {
         sanitizer: HTMLSanitizerService = .shared,
         remoteImageAttachmentFallback: HTMLRemoteImageAttachmentFallback = .shared,
         qualityEvaluator: EmailRenderQualityEvaluator = EmailRenderQualityEvaluator(),
-        parsedEmailProvider: any ParsedEmailProviding = ParsedEmailProvider.shared
+        parsedEmailProvider: any ParsedEmailProviding = ParsedEmailProvider.shared,
+        recoveryService: any HTMLContentRecovering = HTMLContentRecoveryService.shared
     ) {
         self.contentHandler = contentHandler
         self.sanitizer = sanitizer
         self.remoteImageAttachmentFallback = remoteImageAttachmentFallback
         self.qualityEvaluator = qualityEvaluator
         self.parsedEmailProvider = parsedEmailProvider
+        self.recoveryService = recoveryService
         self.htmlCacheDelegate = HTMLContentCacheDelegate()
         // Limit cache to ~50MB with both count and cost limits for proper memory pressure response
         htmlCache.countLimit = 1000
@@ -246,13 +249,13 @@ final class HTMLContentLoader {
         }
 
         if !rejectedHTMLSources.isEmpty {
-            invalidate(messageId: messageId)
+            invalidateCachedResults(messageId: messageId) { _ in true }
         } else if let cachedResult = cachedHTMLResultForUnavailableSource(variantKey: variantKey) {
             return cachedResult
         }
 
         // Method 4: Recovery - fetch from Gmail API if local content missing
-        if let recoveredHTML = await HTMLContentRecoveryService.shared.recoverHTMLContent(messageId: messageId),
+        if let recoveredHTML = await recoveryService.recoverHTMLContent(messageId: messageId),
            let html = canonicalHTMLSource(from: recoveredHTML),
            let result = await cachedOrPreparedHTMLResult(
                html,
@@ -362,7 +365,10 @@ final class HTMLContentLoader {
         bodyText: String? = nil,
         allowRecovery: Bool = true
     ) async -> CanonicalEmailContent? {
-        await CanonicalEmailContentLoader(contentHandler: contentHandler).loadCanonicalEmailContent(
+        await CanonicalEmailContentLoader(
+            contentHandler: contentHandler,
+            recoveryService: recoveryService
+        ).loadCanonicalEmailContent(
             messageId: messageId,
             bodyStorageURI: bodyStorageURI,
             bodyText: bodyText,
