@@ -437,6 +437,83 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)
     }
 
+    func testLoadContent_cachedEmptySourceFalseUsesCurrentNewsletterSnippetFallback() async throws {
+        let messageId = "bubble-empty-source-newsletter-fallback-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        HTMLContentHandler.shared.deleteHTML(for: messageId)
+
+        let sourceSignature = ProcessedTextCache.contentSourceSignature(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: nil,
+            handler: HTMLContentHandler.shared
+        )
+        XCTAssertEqual(sourceSignature, "empty")
+
+        await ProcessedTextCache.shared.set(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            previewMode: ProcessedTextCache.chatBubblePreviewMode,
+            plainText: "Ordinary cached preview",
+            hasRichContent: false
+        )
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:]),
+            htmlContentRecoveryService: MockHTMLContentRecoverer(
+                recoveredHTMLByMessageID: [
+                    messageId: """
+                    <!DOCTYPE html>
+                    <html>
+                    <body>
+                      <table role="presentation" width="100%">
+                        <tr><td><h1>Recovered newsletter preview</h1></td></tr>
+                        <tr><td><p>View in Browser</p></td></tr>
+                        <tr><td><p><a href="https://example.com/unsubscribe">Unsubscribe</a></p></td></tr>
+                      </table>
+                    </body>
+                    </html>
+                    """
+                ]
+            ),
+            htmlAnalysisCache: MessageBubbleHTMLAnalysisCache()
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: nil,
+                bodyStorageURI: nil,
+                cleanedSnippet: "Tickets Now On Sale",
+                snippet: """
+                American Museum of Natural History
+                https://e.wordfly.com/click?sid=abc123
+
+                View in Browser
+                https://e.wordfly.com/view?sid=abc123
+
+                Manage Subscriptions
+                https://e.wordfly.com/preferences?sid=abc123
+                """,
+                subject: "Tickets Now On Sale",
+                senderName: "American Museum of Natural History",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: false,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "publicprograms@email.amnh.org",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertTrue(result.hasRichHTMLContent)
+        XCTAssertTrue(result.fullTextContent?.contains("Recovered newsletter preview") == true)
+        XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)
+
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+    }
+
     func testLoadContent_outgoingForwardedMessage_returnsStructuredForwardPreview() async {
         let messageId = "bubble-forwarded-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)

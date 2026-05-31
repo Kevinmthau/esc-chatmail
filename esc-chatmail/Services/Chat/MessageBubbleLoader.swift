@@ -857,10 +857,14 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         }
 
         func isStaleNewsletterFallback(plainText: String?, hasRichContent: Bool) -> Bool {
-            !request.isFromMe &&
-            resolvedHasHTMLSource &&
-            !hasRichContent &&
-            looksLikeNewsletterFallbackText(plainText ?? request.bodyText ?? request.snippet)
+            guard !request.isFromMe,
+                  resolvedHasHTMLSource,
+                  !hasRichContent else {
+                return false
+            }
+
+            return looksLikeNewsletterFallbackText(request.bodyText ?? request.snippet) ||
+                looksLikeNewsletterFallbackText(plainText)
         }
 
         if let cached = await processedTextCache.get(
