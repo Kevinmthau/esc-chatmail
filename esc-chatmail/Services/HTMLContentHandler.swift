@@ -150,6 +150,25 @@ final class HTMLContentHandler {
         return cachedFileSignature(for: resolvedURL, cacheMissing: false)
     }
 
+    func canonicalHTMLSourceSignature(messageId: String, bodyStorageURI: String?) -> String? {
+        let primaryFileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
+        if let signature = canonicalHTMLSourceSignature(from: loadHTML(from: primaryFileURL)) {
+            return signature
+        }
+
+        guard let bodyStorageURI,
+              let resolvedURL = StorageURIResolver.resolve(bodyStorageURI),
+              resolvedURL.path != primaryFileURL.path else {
+            return nil
+        }
+
+        return canonicalHTMLSourceSignature(from: loadHTML(from: resolvedURL))
+    }
+
+    func canonicalHTMLSourceSignature(for html: String) -> String? {
+        canonicalHTMLSourceSignature(from: html)
+    }
+
     func calculateStorageSize() -> Int64 {
         var totalSize: Int64 = 0
 
@@ -233,6 +252,36 @@ final class HTMLContentHandler {
         }
 
         return nsError.domain == NSPOSIXErrorDomain && nsError.code == ENOENT
+    }
+
+    private func canonicalHTMLSourceSignature(from html: String?) -> String? {
+        guard let html = canonicalHTMLSource(from: html) else {
+            return nil
+        }
+
+        let content = CanonicalEmailContent(
+            html: html,
+            plainText: nil,
+            sourceKind: .html,
+            sourceLocation: .messageFile
+        )
+        return content.hasHTMLSource ? content.sourceSignature : nil
+    }
+
+    private func canonicalHTMLSource(from html: String?) -> String? {
+        guard let html else { return nil }
+
+        let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lowercased = trimmed.lowercased()
+
+        if lowercased.contains("esc-plain-text-styles") ||
+            lowercased.contains("esc-plain-main") ||
+            lowercased.contains("esc-plain-details") {
+            return nil
+        }
+
+        return trimmed
     }
 
     private func cacheKey(for fileURL: URL) -> NSString {

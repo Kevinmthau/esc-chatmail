@@ -21,6 +21,30 @@ private enum OriginalEmailLoadState {
     }
 }
 
+struct OriginalEmailLoadIdentity: Equatable {
+    let baseLoadKey: String
+
+    static func make(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        subject: String?,
+        senderEmail: String?,
+        isDarkMode: Bool
+    ) -> OriginalEmailLoadIdentity {
+        let baseLoadKey = [
+            messageId,
+            bodyStorageURI ?? "",
+            "\(bodyText?.hashValue ?? 0)",
+            "\(subject?.hashValue ?? 0)",
+            "\(senderEmail?.hashValue ?? 0)",
+            "\(isDarkMode)"
+        ].joined(separator: "|")
+
+        return OriginalEmailLoadIdentity(baseLoadKey: baseLoadKey)
+    }
+}
+
 struct HTMLMessageView: View {
     let message: Message
     @Environment(\.dismiss) private var dismiss
@@ -28,11 +52,22 @@ struct HTMLMessageView: View {
     @State private var loadState: OriginalEmailLoadState = .loading
     @State private var activeBaseLoadKey: String?
     @State private var activeLoadTaskKey: String?
+    @State private var activeHTMLSourceSignature: String?
     @State private var reloadGeneration = 0
 
     private let originalEmailSourceLoader = OriginalEmailSourceLoader.shared
+    private var loadIdentity: OriginalEmailLoadIdentity {
+        OriginalEmailLoadIdentity.make(
+            messageId: message.id,
+            bodyStorageURI: message.bodyStorageURI,
+            bodyText: message.bodyText,
+            subject: message.subject,
+            senderEmail: message.senderEmail,
+            isDarkMode: colorScheme == .dark
+        )
+    }
     private var baseLoadKey: String {
-        "\(message.id)|\(message.bodyStorageURI ?? "")|\(message.bodyText?.hashValue ?? 0)|\(message.subject?.hashValue ?? 0)|\(message.senderEmail?.hashValue ?? 0)|\(colorScheme == .dark)"
+        loadIdentity.baseLoadKey
     }
     private var loadKey: String {
         "\(baseLoadKey)|reload:\(reloadGeneration)"
@@ -53,6 +88,9 @@ struct HTMLMessageView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: HTMLContentLoader.remoteImageAttachmentFallbackDidWarmNotification)) { notification in
             reloadIfRemoteImageFallbackWarmed(notification)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: HTMLContentLoader.contentSourceDidChangeNotification)) { notification in
+            reloadIfContentSourceChanged(notification)
         }
         .task(id: loadKey) {
             await loadHTMLContent()
@@ -90,13 +128,17 @@ struct HTMLMessageView: View {
     }
 
     private func loadHTMLContent() async {
-        let taskBaseLoadKey = baseLoadKey
-        let taskLoadKey = loadKey
+        let taskLoadIdentity = loadIdentity
+        let taskBaseLoadKey = taskLoadIdentity.baseLoadKey
+        let taskLoadKey = "\(taskBaseLoadKey)|reload:\(reloadGeneration)"
 
         await MainActor.run {
             let shouldReset = activeBaseLoadKey != taskBaseLoadKey
             activeBaseLoadKey = taskBaseLoadKey
             activeLoadTaskKey = taskLoadKey
+            if shouldReset {
+                activeHTMLSourceSignature = nil
+            }
 
             if shouldReset || !loadState.hasLoadedContent {
                 loadState = .loading
@@ -157,6 +199,8 @@ struct HTMLMessageView: View {
                 return
             }
 
+            activeHTMLSourceSignature = source?.sourceSignature
+
             switch source?.presentation {
             case .html:
                 if let html = source?.html {
@@ -188,6 +232,21 @@ struct HTMLMessageView: View {
     private func reloadIfRemoteImageFallbackWarmed(_ notification: Notification) {
         guard let warmedMessageId = notification.userInfo?[HTMLContentLoader.remoteImageAttachmentFallbackMessageIdUserInfoKey] as? String,
               warmedMessageId == message.id else {
+            return
+        }
+
+        reloadGeneration &+= 1
+    }
+
+    private func reloadIfContentSourceChanged(_ notification: Notification) {
+        guard let changedMessageId = notification.userInfo?[HTMLContentLoader.contentSourceDidChangeMessageIdUserInfoKey] as? String,
+              changedMessageId == message.id else {
+            return
+        }
+
+        let changedSourceSignature = notification.userInfo?[HTMLContentLoader.contentSourceDidChangeSourceSignatureUserInfoKey] as? String
+        if let changedSourceSignature,
+           changedSourceSignature == activeHTMLSourceSignature {
             return
         }
 

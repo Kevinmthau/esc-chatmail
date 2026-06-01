@@ -220,6 +220,10 @@ actor ParsedEmailProvider: ParsedEmailProviding {
     func debugCachedCount() -> Int {
         cache.count
     }
+
+    func debugCachedSourceSignatures(messageId: String) -> Set<String> {
+        Set(cache.keys.filter { $0.messageId == messageId }.map(\.sourceSignature))
+    }
 #endif
 
     private func pruneStaleEntries(for messageId: String, keeping key: ParsedEmailKey) {

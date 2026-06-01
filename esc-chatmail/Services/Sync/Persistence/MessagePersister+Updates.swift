@@ -7,6 +7,7 @@ private struct MessageUpdateResult {
     let didUpdate: Bool
     let modifiedConversationID: NSManagedObjectID?
     let shouldInvalidateRenderedContent: Bool
+    let changedHTMLSourceSignature: String?
     let participantDisplayNameUpdateEmails: [String]
     let participantDisplayNameUpdateConversationIDs: Set<NSManagedObjectID>
 }
@@ -22,6 +23,7 @@ extension MessagePersister {
         in context: NSManagedObjectContext
     ) async -> Bool {
         let saveHTML = self.saveHTML
+        let htmlContentHandler = self.htmlContentHandler
 
         let result: MessageUpdateResult = await context.perform {
             let request = Message.fetchRequest()
@@ -36,6 +38,7 @@ extension MessagePersister {
                     didUpdate: false,
                     modifiedConversationID: nil,
                     shouldInvalidateRenderedContent: false,
+                    changedHTMLSourceSignature: nil,
                     participantDisplayNameUpdateEmails: [],
                     participantDisplayNameUpdateConversationIDs: []
                 )
@@ -46,6 +49,7 @@ extension MessagePersister {
                     didUpdate: false,
                     modifiedConversationID: nil,
                     shouldInvalidateRenderedContent: false,
+                    changedHTMLSourceSignature: nil,
                     participantDisplayNameUpdateEmails: [],
                     participantDisplayNameUpdateConversationIDs: []
                 )
@@ -64,6 +68,13 @@ extension MessagePersister {
             var senderHeaderDisplayNameUpdateConversationIDs = Set<NSManagedObjectID>()
             let shouldPreserveLocalMailboxState = HistoryProcessor.hasPendingLocalModification(message: existingMessage)
             let canonicalHTML = processedMessage.canonicalContent?.html ?? processedMessage.htmlBody
+            let previousHTMLSourceSignature = canonicalHTML == nil ? nil : htmlContentHandler.canonicalHTMLSourceSignature(
+                messageId: processedMessage.id,
+                bodyStorageURI: previousBodyStorageURI
+            )
+            let incomingHTMLSourceSignature = canonicalHTML.flatMap {
+                htmlContentHandler.canonicalHTMLSourceSignature(for: $0)
+            }
             let savedBodyStorageURI = canonicalHTML.flatMap {
                 saveHTML($0, processedMessage.id)?.absoluteString
             }
@@ -246,13 +257,17 @@ extension MessagePersister {
             let bodyTextChanged = existingMessage.bodyText != previousBodyText
             let chatPreviewTextChanged = existingMessage.chatPreviewText != previousChatPreviewText
             let snippetChanged = existingMessage.snippet != previousSnippet
+            let htmlSourceSignatureChanged = savedBodyStorageURI != nil &&
+                incomingHTMLSourceSignature != nil &&
+                previousHTMLSourceSignature != incomingHTMLSourceSignature
 
             Log.debug("Updated existing message: \(processedMessage.id)", category: .sync)
 
             return MessageUpdateResult(
                 didUpdate: true,
                 modifiedConversationID: modifiedConversationID,
-                shouldInvalidateRenderedContent: bodyStorageURIChanged || bodyTextChanged || chatPreviewTextChanged || snippetChanged,
+                shouldInvalidateRenderedContent: bodyStorageURIChanged || bodyTextChanged || chatPreviewTextChanged || snippetChanged || htmlSourceSignatureChanged,
+                changedHTMLSourceSignature: htmlSourceSignatureChanged ? incomingHTMLSourceSignature : nil,
                 participantDisplayNameUpdateEmails: displayNameUpdateEmails,
                 participantDisplayNameUpdateConversationIDs: displayNameUpdateConversationIDs
             )
@@ -280,7 +295,14 @@ extension MessagePersister {
 
         if result.shouldInvalidateRenderedContent {
             await ProcessedTextCache.shared.invalidate(messageId: processedMessage.id)
-            HTMLContentLoader.shared.invalidate(messageId: processedMessage.id)
+            await HTMLContentLoader.shared.invalidateContent(messageId: processedMessage.id)
+        }
+
+        if let changedHTMLSourceSignature = result.changedHTMLSourceSignature {
+            await HTMLContentLoader.postContentSourceDidChange(
+                messageId: processedMessage.id,
+                sourceSignature: changedHTMLSourceSignature
+            )
         }
 
         return result.didUpdate

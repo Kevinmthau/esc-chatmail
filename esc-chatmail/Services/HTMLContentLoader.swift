@@ -83,6 +83,9 @@ final class HTMLContentLoader {
     static let shared = HTMLContentLoader()
     static let remoteImageAttachmentFallbackDidWarmNotification = Notification.Name("HTMLContentLoader.remoteImageAttachmentFallbackDidWarm")
     static let remoteImageAttachmentFallbackMessageIdUserInfoKey = "messageId"
+    static let contentSourceDidChangeNotification = Notification.Name("HTMLContentLoader.contentSourceDidChange")
+    static let contentSourceDidChangeMessageIdUserInfoKey = "messageId"
+    static let contentSourceDidChangeSourceSignatureUserInfoKey = "sourceSignature"
 
     private let contentHandler: HTMLContentHandler
     private let sanitizer: HTMLSanitizerService
@@ -526,6 +529,25 @@ final class HTMLContentLoader {
             await RenderedMessageCache.shared.invalidate(messageId: messageId, reason: .explicit)
             await parsedEmailProvider.invalidate(messageId: messageId)
         }
+    }
+
+    /// Invalidates cached HTML content and awaits shared rendered/parsed cache invalidation.
+    func invalidateContent(messageId: String) async {
+        invalidateCachedResults(messageId: messageId) { _ in true }
+        await RenderedMessageCache.shared.invalidate(messageId: messageId, reason: .explicit)
+        await parsedEmailProvider.invalidate(messageId: messageId)
+    }
+
+    @MainActor
+    static func postContentSourceDidChange(messageId: String, sourceSignature: String) {
+        NotificationCenter.default.post(
+            name: contentSourceDidChangeNotification,
+            object: nil,
+            userInfo: [
+                contentSourceDidChangeMessageIdUserInfoKey: messageId,
+                contentSourceDidChangeSourceSignatureUserInfoKey: sourceSignature
+            ]
+        )
     }
 
     private func invalidateCachedResults(

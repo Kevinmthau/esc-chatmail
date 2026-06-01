@@ -188,6 +188,232 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(existingMessage.cleanedSnippet, "Updated preview.")
     }
 
+    func testUpdateExistingMessage_invalidatesCachesWhenStoredHTMLChangesWithSameURIAndText() async throws {
+        let contentHandler = HTMLContentHandler.shared
+        let messageId = "message-html-source-update-\(UUID().uuidString)"
+        let oldHTML = "<!DOCTYPE html><html><body><p>OLD_HTML_TOKEN</p></body></html>"
+        let newHTML = "<!DOCTYPE html><html><body><p>NEW_HTML_TOKEN</p></body></html>"
+        let plainText = "Stable plain text"
+        let chatPreviewText = "Preferred chat preview"
+        let snippet = "Stable snippet"
+        let subject = "Stable subject"
+        let senderEmail = "sender@example.com"
+
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
+        await ParsedEmailProvider.shared.invalidate(messageId: messageId)
+        defer {
+            contentHandler.deleteHTML(for: messageId)
+        }
+
+        let oldURL = try XCTUnwrap(contentHandler.saveHTML(oldHTML, for: messageId))
+        let oldSignature = try XCTUnwrap(
+            contentHandler.canonicalHTMLSourceSignature(messageId: messageId, bodyStorageURI: oldURL.absoluteString)
+        )
+        let newSignature = try XCTUnwrap(contentHandler.canonicalHTMLSourceSignature(for: newHTML))
+
+        let conversation = ConversationBuilder.simple(in: context)
+        let existingMessage = MessageBuilder()
+            .withId(messageId)
+            .withSubject(subject)
+            .withSender(email: senderEmail, name: "Sender")
+            .withSnippet(snippet)
+            .withBody(plainText)
+            .inConversation(conversation)
+            .build(in: context)
+        existingMessage.bodyStorageURI = oldURL.absoluteString
+        existingMessage.chatPreviewText = chatPreviewText
+
+        _ = await RenderedMessageCache.shared.wrappedOriginalHTML(
+            messageId: messageId,
+            sourceSignature: oldSignature,
+            variantKey: "original-test"
+        ) {
+            "wrapped old html"
+        }
+        _ = await ParsedEmailProvider.shared.parsedEmail(
+            messageId: messageId,
+            sourceSignature: oldSignature,
+            canonicalHTML: oldHTML
+        )
+        let oldArtifactsBeforeUpdate = await RenderedMessageCache.shared.artifacts(
+            messageId: messageId,
+            sourceSignature: oldSignature
+        )
+        let parsedSignaturesBeforeUpdate = await ParsedEmailProvider.shared.debugCachedSourceSignatures(messageId: messageId)
+        XCTAssertNotNil(oldArtifactsBeforeUpdate)
+        XCTAssertTrue(parsedSignaturesBeforeUpdate.contains(oldSignature))
+
+        let sourceChangeExpectation = expectation(description: "HTML source change notification posted")
+        let observer = NotificationCenter.default.addObserver(
+            forName: HTMLContentLoader.contentSourceDidChangeNotification,
+            object: nil,
+            queue: nil
+        ) { notification in
+            guard notification.userInfo?[HTMLContentLoader.contentSourceDidChangeMessageIdUserInfoKey] as? String == messageId else {
+                return
+            }
+            XCTAssertEqual(
+                notification.userInfo?[HTMLContentLoader.contentSourceDidChangeSourceSignatureUserInfoKey] as? String,
+                newSignature
+            )
+            XCTAssertTrue(Thread.isMainThread)
+            sourceChangeExpectation.fulfill()
+        }
+        defer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+
+        var headers = ProcessedHeaders()
+        headers.subject = subject
+        headers.from = "Sender <\(senderEmail)>"
+        headers.isFromMe = false
+        let processedMessage = ProcessedMessage(
+            id: messageId,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: snippet,
+            cleanedSnippet: snippet,
+            chatPreviewText: chatPreviewText,
+            internalDate: existingMessage.internalDate,
+            headers: headers,
+            htmlBody: newHTML,
+            plainTextBody: plainText,
+            labelIds: [],
+            isUnread: existingMessage.isUnread,
+            isNewsletter: existingMessage.isNewsletter,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        let htmlPersister = MessagePersister(
+            htmlContentHandler: contentHandler,
+            photoPrefetcher: { _ in }
+        )
+        let didUpdate = await htmlPersister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertEqual(existingMessage.bodyStorageURI, oldURL.absoluteString)
+        XCTAssertEqual(existingMessage.bodyText, plainText)
+        XCTAssertEqual(existingMessage.chatPreviewText, chatPreviewText)
+        let oldArtifactsAfterUpdate = await RenderedMessageCache.shared.artifacts(
+            messageId: messageId,
+            sourceSignature: oldSignature
+        )
+        let parsedSignaturesAfterUpdate = await ParsedEmailProvider.shared.debugCachedSourceSignatures(messageId: messageId)
+        XCTAssertNil(oldArtifactsAfterUpdate)
+        XCTAssertFalse(parsedSignaturesAfterUpdate.contains(oldSignature))
+        await fulfillment(of: [sourceChangeExpectation], timeout: 1.0)
+    }
+
+    func testUpdateExistingMessage_doesNotInvalidateCachesWhenStoredHTMLSourceSignatureIsUnchanged() async throws {
+        let contentHandler = HTMLContentHandler.shared
+        let messageId = "message-html-source-stable-\(UUID().uuidString)"
+        let html = "<!DOCTYPE html><html><body><p>SAME_HTML_TOKEN</p></body></html>"
+        let plainText = "Stable plain text"
+        let chatPreviewText = "Preferred chat preview"
+        let snippet = "Stable snippet"
+        let subject = "Stable subject"
+        let senderEmail = "sender@example.com"
+
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+        await RenderedMessageCache.shared.invalidate(messageId: messageId)
+        await ParsedEmailProvider.shared.invalidate(messageId: messageId)
+        defer {
+            contentHandler.deleteHTML(for: messageId)
+        }
+
+        let oldURL = try XCTUnwrap(contentHandler.saveHTML(html, for: messageId))
+        let sourceSignature = try XCTUnwrap(
+            contentHandler.canonicalHTMLSourceSignature(messageId: messageId, bodyStorageURI: oldURL.absoluteString)
+        )
+
+        let conversation = ConversationBuilder.simple(in: context)
+        let existingMessage = MessageBuilder()
+            .withId(messageId)
+            .withSubject(subject)
+            .withSender(email: senderEmail, name: "Sender")
+            .withSnippet(snippet)
+            .withBody(plainText)
+            .inConversation(conversation)
+            .build(in: context)
+        existingMessage.bodyStorageURI = oldURL.absoluteString
+        existingMessage.chatPreviewText = chatPreviewText
+
+        _ = await RenderedMessageCache.shared.wrappedOriginalHTML(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            variantKey: "original-test"
+        ) {
+            "wrapped stable html"
+        }
+        _ = await ParsedEmailProvider.shared.parsedEmail(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            canonicalHTML: html
+        )
+
+        let noSourceChangeExpectation = expectation(description: "HTML source change notification not posted")
+        noSourceChangeExpectation.isInverted = true
+        let observer = NotificationCenter.default.addObserver(
+            forName: HTMLContentLoader.contentSourceDidChangeNotification,
+            object: nil,
+            queue: nil
+        ) { notification in
+            guard notification.userInfo?[HTMLContentLoader.contentSourceDidChangeMessageIdUserInfoKey] as? String == messageId else {
+                return
+            }
+            noSourceChangeExpectation.fulfill()
+        }
+        defer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+
+        var headers = ProcessedHeaders()
+        headers.subject = subject
+        headers.from = "Sender <\(senderEmail)>"
+        headers.isFromMe = false
+        let processedMessage = ProcessedMessage(
+            id: messageId,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: snippet,
+            cleanedSnippet: snippet,
+            chatPreviewText: chatPreviewText,
+            internalDate: existingMessage.internalDate,
+            headers: headers,
+            htmlBody: html,
+            plainTextBody: plainText,
+            labelIds: [],
+            isUnread: existingMessage.isUnread,
+            isNewsletter: existingMessage.isNewsletter,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        let htmlPersister = MessagePersister(
+            htmlContentHandler: contentHandler,
+            photoPrefetcher: { _ in }
+        )
+        let didUpdate = await htmlPersister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        let stableArtifactsAfterUpdate = await RenderedMessageCache.shared.artifacts(
+            messageId: messageId,
+            sourceSignature: sourceSignature
+        )
+        let stableParsedSignaturesAfterUpdate = await ParsedEmailProvider.shared.debugCachedSourceSignatures(messageId: messageId)
+        XCTAssertNotNil(stableArtifactsAfterUpdate)
+        XCTAssertTrue(stableParsedSignaturesAfterUpdate.contains(sourceSignature))
+        await fulfillment(of: [noSourceChangeExpectation], timeout: 0.2)
+    }
+
     func testSaveMessage_newHTMLMessage_savesHTMLOnce() async throws {
         var headers = ProcessedHeaders()
         headers.subject = "HTML message"

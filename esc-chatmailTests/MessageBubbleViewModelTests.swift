@@ -431,3 +431,80 @@ final class OriginalEmailMetadataFormatterTests: XCTestCase {
         XCTAssertEqual(senderLine, "John Smith <john.smith@example.com>")
     }
 }
+
+final class OriginalEmailLoadIdentityTests: XCTestCase {
+    func testBaseLoadKeyDoesNotChangeWhenStoredHTMLChangesWithSameURI() throws {
+        let messagesDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OriginalEmailLoadIdentity-\(UUID().uuidString)", isDirectory: true)
+        let handler = HTMLContentHandler(messagesDirectory: messagesDirectory)
+        let messageId = "original-load-key-change"
+        defer {
+            handler.deleteHTML(for: messageId)
+            try? FileManager.default.removeItem(at: messagesDirectory)
+        }
+
+        let oldURL = try XCTUnwrap(handler.saveHTML("<html><body><p>OLD_TOKEN</p></body></html>", for: messageId))
+        let firstIdentity = OriginalEmailLoadIdentity.make(
+            messageId: messageId,
+            bodyStorageURI: oldURL.absoluteString,
+            bodyText: "Stable text",
+            subject: "Stable subject",
+            senderEmail: "sender@example.com",
+            isDarkMode: false
+        )
+
+        _ = handler.saveHTML("<html><body><p>NEW_TOKEN</p></body></html>", for: messageId)
+        let secondIdentity = OriginalEmailLoadIdentity.make(
+            messageId: messageId,
+            bodyStorageURI: oldURL.absoluteString,
+            bodyText: "Stable text",
+            subject: "Stable subject",
+            senderEmail: "sender@example.com",
+            isDarkMode: false
+        )
+
+        XCTAssertEqual(firstIdentity.baseLoadKey, secondIdentity.baseLoadKey)
+    }
+
+    func testBaseLoadKeyChangesWhenModelInputsChange() throws {
+        let messagesDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OriginalEmailLoadIdentity-\(UUID().uuidString)", isDirectory: true)
+        let handler = HTMLContentHandler(messagesDirectory: messagesDirectory)
+        let messageId = "original-load-key-input-change"
+        defer {
+            handler.deleteHTML(for: messageId)
+            try? FileManager.default.removeItem(at: messagesDirectory)
+        }
+
+        let oldURL = try XCTUnwrap(handler.saveHTML("<html><body><p>SAME_TOKEN</p></body></html>", for: messageId))
+        let firstIdentity = OriginalEmailLoadIdentity.make(
+            messageId: messageId,
+            bodyStorageURI: oldURL.absoluteString,
+            bodyText: "Stable text",
+            subject: "Stable subject",
+            senderEmail: "sender@example.com",
+            isDarkMode: false
+        )
+
+        let bodyTextIdentity = OriginalEmailLoadIdentity.make(
+            messageId: messageId,
+            bodyStorageURI: oldURL.absoluteString,
+            bodyText: "Updated text",
+            subject: "Stable subject",
+            senderEmail: "sender@example.com",
+            isDarkMode: false
+        )
+
+        let darkModeIdentity = OriginalEmailLoadIdentity.make(
+            messageId: messageId,
+            bodyStorageURI: oldURL.absoluteString,
+            bodyText: "Stable text",
+            subject: "Stable subject",
+            senderEmail: "sender@example.com",
+            isDarkMode: true
+        )
+
+        XCTAssertNotEqual(firstIdentity.baseLoadKey, bodyTextIdentity.baseLoadKey)
+        XCTAssertNotEqual(firstIdentity.baseLoadKey, darkModeIdentity.baseLoadKey)
+    }
+}
