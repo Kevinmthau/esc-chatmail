@@ -311,6 +311,236 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
     }
 
     @MainActor
+    func testViewModelKeepsNewerSnapshotWhenOlderRenderCompletesLast() async throws {
+        EmailPreviewSnapshotDiagnostics.resetForTesting()
+
+        let cache = EmailPreviewSnapshotCache(cacheDirectory: tempDirectory)
+        let firstHTML = "<html><body>First delayed preview</body></html>"
+        let secondHTML = "<html><body>Second current preview</body></html>"
+        let renderer = KeyedDelayedSnapshotRenderer()
+        let viewModel = EmailPreviewSnapshotViewModel(cache: cache, renderer: renderer)
+        let firstStarted = expectation(description: "first render started")
+        let secondStarted = expectation(description: "second render started")
+        var firstCacheKey: String?
+        var secondCacheKey: String?
+        renderer.onStart = { request in
+            if request.html == firstHTML {
+                firstCacheKey = request.cacheKey
+                firstStarted.fulfill()
+            } else if request.html == secondHTML {
+                secondCacheKey = request.cacheKey
+                secondStarted.fulfill()
+            }
+        }
+
+        let firstTask = Task { @MainActor in
+            await viewModel.loadSnapshot(
+                htmlContent: firstHTML,
+                previewCacheKey: "stale-message|first-source",
+                isDarkMode: false,
+                senderEmail: nil,
+                message: nil,
+                messageId: "stale-message",
+                containerWidth: 280
+            )
+        }
+        await fulfillment(of: [firstStarted], timeout: 1.0)
+
+        let secondTask = Task { @MainActor in
+            await viewModel.loadSnapshot(
+                htmlContent: secondHTML,
+                previewCacheKey: "stale-message|second-source",
+                isDarkMode: false,
+                senderEmail: nil,
+                message: nil,
+                messageId: "stale-message",
+                containerWidth: 280
+            )
+        }
+        await fulfillment(of: [secondStarted], timeout: 1.0)
+
+        let resolvedSecondCacheKey = try XCTUnwrap(secondCacheKey)
+        renderer.succeed(
+            cacheKey: resolvedSecondCacheKey,
+            image: makeImage(color: .systemGreen),
+            displayHeight: 224
+        )
+        await secondTask.value
+
+        XCTAssertEqual(viewModel.completedCacheKey, resolvedSecondCacheKey)
+        XCTAssertEqual(viewModel.displayHeight, 224)
+        let currentPixel = try XCTUnwrap(
+            rgbaPixel(in: try XCTUnwrap(viewModel.snapshotImage), at: CGPoint(x: 10, y: 10))
+        )
+        XCTAssertGreaterThan(currentPixel.green, currentPixel.red)
+
+        let resolvedFirstCacheKey = try XCTUnwrap(firstCacheKey)
+        renderer.succeed(
+            cacheKey: resolvedFirstCacheKey,
+            image: makeImage(color: .systemOrange),
+            displayHeight: 180
+        )
+        await firstTask.value
+
+        XCTAssertEqual(viewModel.completedCacheKey, resolvedSecondCacheKey)
+        XCTAssertEqual(viewModel.displayHeight, 224)
+        let finalPixel = try XCTUnwrap(
+            rgbaPixel(in: try XCTUnwrap(viewModel.snapshotImage), at: CGPoint(x: 10, y: 10))
+        )
+        XCTAssertGreaterThan(finalPixel.green, finalPixel.red)
+        let staleCachedSnapshot = await cache.load(for: resolvedFirstCacheKey)
+        let currentCachedSnapshot = await cache.load(for: resolvedSecondCacheKey)
+        XCTAssertNil(staleCachedSnapshot)
+        XCTAssertNotNil(currentCachedSnapshot)
+    }
+
+    @MainActor
+    func testSnapshotRenderSchedulerRespectsMaxConcurrency() async throws {
+        let scheduler = EmailPreviewSnapshotRenderScheduler(maxConcurrentRenders: 2)
+        let firstStarted = expectation(description: "first render started")
+        let secondStarted = expectation(description: "second render started")
+        let thirdStarted = expectation(description: "third render started")
+        var continuations: [String: CheckedContinuation<EmailPreviewSnapshotResult, Error>] = [:]
+        var activeCount = 0
+        var maxActiveCount = 0
+        var startedKeys: [String] = []
+
+        func scheduledTask(cacheKey: String) -> Task<EmailPreviewSnapshotResult, Error> {
+            Task { @MainActor in
+                try await scheduler.render(request: makeSnapshotRequest(cacheKey: cacheKey)) {
+                    activeCount += 1
+                    maxActiveCount = max(maxActiveCount, activeCount)
+                    startedKeys.append(cacheKey)
+                    defer { activeCount -= 1 }
+
+                    return try await withCheckedThrowingContinuation { continuation in
+                        continuations[cacheKey] = continuation
+                        switch cacheKey {
+                        case "scheduler-first":
+                            firstStarted.fulfill()
+                        case "scheduler-second":
+                            secondStarted.fulfill()
+                        case "scheduler-third":
+                            thirdStarted.fulfill()
+                        default:
+                            break
+                        }
+                    }
+                }
+            }
+        }
+
+        let firstTask = scheduledTask(cacheKey: "scheduler-first")
+        let secondTask = scheduledTask(cacheKey: "scheduler-second")
+        let thirdTask = scheduledTask(cacheKey: "scheduler-third")
+
+        await fulfillment(of: [firstStarted, secondStarted], timeout: 1.0)
+        XCTAssertEqual(startedKeys, ["scheduler-first", "scheduler-second"])
+        XCTAssertEqual(maxActiveCount, 2)
+
+        continuations["scheduler-first"]?.resume(
+            returning: makeSnapshotResult(cacheKey: "scheduler-first", color: .systemRed)
+        )
+        await fulfillment(of: [thirdStarted], timeout: 1.0)
+        XCTAssertEqual(startedKeys, ["scheduler-first", "scheduler-second", "scheduler-third"])
+        XCTAssertEqual(maxActiveCount, 2)
+
+        continuations["scheduler-second"]?.resume(
+            returning: makeSnapshotResult(cacheKey: "scheduler-second", color: .systemBlue)
+        )
+        continuations["scheduler-third"]?.resume(
+            returning: makeSnapshotResult(cacheKey: "scheduler-third", color: .systemGreen)
+        )
+
+        _ = try await firstTask.value
+        _ = try await secondTask.value
+        _ = try await thirdTask.value
+        XCTAssertEqual(maxActiveCount, 2)
+    }
+
+    @MainActor
+    func testSnapshotRenderSchedulerCoalescesSameCacheKeyRequests() async throws {
+        let scheduler = EmailPreviewSnapshotRenderScheduler(maxConcurrentRenders: 1)
+        let renderStarted = expectation(description: "coalesced render started")
+        var continuation: CheckedContinuation<EmailPreviewSnapshotResult, Error>?
+        var startCount = 0
+        let request = makeSnapshotRequest(cacheKey: "coalesced-snapshot")
+
+        func scheduledTask() -> Task<EmailPreviewSnapshotResult, Error> {
+            Task { @MainActor in
+                try await scheduler.render(request: request) {
+                    startCount += 1
+                    return try await withCheckedThrowingContinuation { renderContinuation in
+                        continuation = renderContinuation
+                        renderStarted.fulfill()
+                    }
+                }
+            }
+        }
+
+        let firstTask = scheduledTask()
+        let secondTask = scheduledTask()
+
+        await fulfillment(of: [renderStarted], timeout: 1.0)
+        await Task.yield()
+        XCTAssertEqual(startCount, 1)
+
+        continuation?.resume(
+            returning: makeSnapshotResult(cacheKey: request.cacheKey, color: .systemPurple)
+        )
+
+        let firstResult = try await firstTask.value
+        let secondResult = try await secondTask.value
+        XCTAssertEqual(firstResult.cacheKey, request.cacheKey)
+        XCTAssertEqual(secondResult.cacheKey, request.cacheKey)
+        XCTAssertEqual(startCount, 1)
+    }
+
+    @MainActor
+    func testSnapshotRenderSchedulerCancelsQueuedRenderBeforeOperationStarts() async throws {
+        let scheduler = EmailPreviewSnapshotRenderScheduler(maxConcurrentRenders: 1)
+        let firstStarted = expectation(description: "first render started")
+        var firstContinuation: CheckedContinuation<EmailPreviewSnapshotResult, Error>?
+        var startedKeys: [String] = []
+
+        let firstTask = Task { @MainActor in
+            try await scheduler.render(request: makeSnapshotRequest(cacheKey: "queued-first")) {
+                startedKeys.append("queued-first")
+                return try await withCheckedThrowingContinuation { continuation in
+                    firstContinuation = continuation
+                    firstStarted.fulfill()
+                }
+            }
+        }
+        await fulfillment(of: [firstStarted], timeout: 1.0)
+
+        let queuedTask = Task { @MainActor in
+            try await scheduler.render(request: makeSnapshotRequest(cacheKey: "queued-cancelled")) {
+                startedKeys.append("queued-cancelled")
+                return self.makeSnapshotResult(cacheKey: "queued-cancelled", color: .systemOrange)
+            }
+        }
+        await Task.yield()
+        queuedTask.cancel()
+
+        do {
+            _ = try await queuedTask.value
+            XCTFail("Expected queued snapshot render to throw CancellationError")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+
+        XCTAssertEqual(startedKeys, ["queued-first"])
+        firstContinuation?.resume(
+            returning: makeSnapshotResult(cacheKey: "queued-first", color: .systemBlue)
+        )
+        _ = try await firstTask.value
+        XCTAssertEqual(startedKeys, ["queued-first"])
+    }
+
+    @MainActor
     func testRendererCancellationStopsSnapshotRender() async {
         let request = EmailPreviewSnapshotRequest(
             html: "<html><body><div style=\"height: 200px\">Preview</div></body></html>",
@@ -404,6 +634,30 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         }
     }
 
+    private func makeSnapshotRequest(cacheKey: String) -> EmailPreviewSnapshotRequest {
+        EmailPreviewSnapshotRequest(
+            html: "<html><body>\(cacheKey)</body></html>",
+            cacheKey: cacheKey,
+            containerWidth: 280,
+            isDarkMode: false,
+            senderEmail: nil,
+            message: nil
+        )
+    }
+
+    private func makeSnapshotResult(
+        cacheKey: String,
+        color: UIColor,
+        displayHeight: CGFloat = HTMLPreviewSizing.defaultPreviewHeight
+    ) -> EmailPreviewSnapshotResult {
+        EmailPreviewSnapshotResult(
+            image: makeImage(color: color),
+            displayHeight: displayHeight,
+            pixelScale: 2,
+            cacheKey: cacheKey
+        )
+    }
+
     private func rgbaPixel(
         in image: UIImage,
         at point: CGPoint
@@ -478,5 +732,36 @@ private final class DelayedSnapshotRenderer: EmailPreviewSnapshotRendering {
     func succeed(with result: EmailPreviewSnapshotResult) {
         continuation?.resume(returning: result)
         continuation = nil
+    }
+}
+
+@MainActor
+private final class KeyedDelayedSnapshotRenderer: EmailPreviewSnapshotRendering {
+    var onStart: ((EmailPreviewSnapshotRequest) -> Void)?
+    private(set) var requests: [EmailPreviewSnapshotRequest] = []
+    private var continuations: [String: CheckedContinuation<EmailPreviewSnapshotResult, Error>] = [:]
+
+    func render(request: EmailPreviewSnapshotRequest) async throws -> EmailPreviewSnapshotResult {
+        requests.append(request)
+        return try await withCheckedThrowingContinuation { continuation in
+            continuations[request.cacheKey] = continuation
+            onStart?(request)
+        }
+    }
+
+    func succeed(
+        cacheKey: String,
+        image: UIImage,
+        displayHeight: CGFloat
+    ) {
+        continuations[cacheKey]?.resume(
+            returning: EmailPreviewSnapshotResult(
+                image: image,
+                displayHeight: displayHeight,
+                pixelScale: image.scale,
+                cacheKey: cacheKey
+            )
+        )
+        continuations[cacheKey] = nil
     }
 }

@@ -44,19 +44,200 @@ protocol EmailPreviewSnapshotRendering: AnyObject {
 }
 
 @MainActor
+protocol EmailPreviewSnapshotRenderScheduling: AnyObject {
+    func render(
+        request: EmailPreviewSnapshotRequest,
+        operation: @escaping @MainActor () async throws -> EmailPreviewSnapshotResult
+    ) async throws -> EmailPreviewSnapshotResult
+}
+
+@MainActor
+final class EmailPreviewSnapshotRenderScheduler: EmailPreviewSnapshotRenderScheduling {
+    static let shared = EmailPreviewSnapshotRenderScheduler(maxConcurrentRenders: 2)
+
+    private final class ScheduledRender {
+        let id = UUID()
+        let request: EmailPreviewSnapshotRequest
+        let operation: @MainActor () async throws -> EmailPreviewSnapshotResult
+        var continuations: [UUID: CheckedContinuation<EmailPreviewSnapshotResult, Error>] = [:]
+        var isRunning = false
+        var task: Task<Void, Never>?
+
+        init(
+            request: EmailPreviewSnapshotRequest,
+            operation: @escaping @MainActor () async throws -> EmailPreviewSnapshotResult
+        ) {
+            self.request = request
+            self.operation = operation
+        }
+    }
+
+    private let maxConcurrentRenders: Int
+    private var runningCount = 0
+    private var queue: [ScheduledRender] = []
+    private var inFlightByCacheKey: [String: ScheduledRender] = [:]
+    private var pendingWaiterIDs: Set<UUID> = []
+    private var cancelledPendingWaiterIDs: Set<UUID> = []
+
+    init(maxConcurrentRenders: Int) {
+        self.maxConcurrentRenders = max(1, maxConcurrentRenders)
+    }
+
+    func render(
+        request: EmailPreviewSnapshotRequest,
+        operation: @escaping @MainActor () async throws -> EmailPreviewSnapshotResult
+    ) async throws -> EmailPreviewSnapshotResult {
+        try Task.checkCancellation()
+
+        let waiterID = UUID()
+        let cacheKey = request.cacheKey
+        pendingWaiterIDs.insert(waiterID)
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                enqueue(
+                    request: request,
+                    operation: operation,
+                    waiterID: waiterID,
+                    continuation: continuation
+                )
+            }
+        } onCancel: {
+            Task { @MainActor [weak self, cacheKey] in
+                self?.cancelWaiter(id: waiterID, cacheKey: cacheKey)
+            }
+        }
+    }
+
+    private func enqueue(
+        request: EmailPreviewSnapshotRequest,
+        operation: @escaping @MainActor () async throws -> EmailPreviewSnapshotResult,
+        waiterID: UUID,
+        continuation: CheckedContinuation<EmailPreviewSnapshotResult, Error>
+    ) {
+        pendingWaiterIDs.remove(waiterID)
+
+        let wasCancelledBeforeEnqueue = cancelledPendingWaiterIDs.remove(waiterID) != nil
+        guard !Task.isCancelled,
+              !wasCancelledBeforeEnqueue else {
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+
+        if let existing = inFlightByCacheKey[request.cacheKey] {
+            existing.continuations[waiterID] = continuation
+            return
+        }
+
+        let work = ScheduledRender(request: request, operation: operation)
+        work.continuations[waiterID] = continuation
+        inFlightByCacheKey[request.cacheKey] = work
+        queue.append(work)
+        startAvailableWork()
+    }
+
+    private func startAvailableWork() {
+        while runningCount < maxConcurrentRenders, !queue.isEmpty {
+            let work = queue.removeFirst()
+            guard !work.continuations.isEmpty else {
+                removeInFlightReference(for: work)
+                continue
+            }
+
+            work.isRunning = true
+            runningCount += 1
+            work.task = Task { @MainActor [weak self, work] in
+                let result: Result<EmailPreviewSnapshotResult, Error>
+                do {
+                    try Task.checkCancellation()
+                    let value = try await work.operation()
+                    try Task.checkCancellation()
+                    result = .success(value)
+                } catch {
+                    result = .failure(error)
+                }
+
+                self?.finish(work, result: result)
+            }
+        }
+    }
+
+    private func cancelWaiter(id waiterID: UUID, cacheKey: String) {
+        if pendingWaiterIDs.remove(waiterID) != nil {
+            cancelledPendingWaiterIDs.insert(waiterID)
+            return
+        }
+
+        guard let work = inFlightByCacheKey[cacheKey],
+              let continuation = work.continuations.removeValue(forKey: waiterID) else {
+            return
+        }
+
+        continuation.resume(throwing: CancellationError())
+
+        guard work.continuations.isEmpty else {
+            return
+        }
+
+        if work.isRunning {
+            removeInFlightReference(for: work)
+            work.task?.cancel()
+        } else {
+            queue.removeAll { $0.id == work.id }
+            removeInFlightReference(for: work)
+        }
+    }
+
+    private func finish(
+        _ work: ScheduledRender,
+        result: Result<EmailPreviewSnapshotResult, Error>
+    ) {
+        guard work.isRunning else {
+            return
+        }
+
+        work.isRunning = false
+        runningCount = max(0, runningCount - 1)
+        removeInFlightReference(for: work)
+
+        let continuations = Array(work.continuations.values)
+        work.continuations.removeAll()
+        for continuation in continuations {
+            continuation.resume(with: result)
+        }
+
+        startAvailableWork()
+    }
+
+    private func removeInFlightReference(for work: ScheduledRender) {
+        let cacheKey = work.request.cacheKey
+        if inFlightByCacheKey[cacheKey]?.id == work.id {
+            inFlightByCacheKey.removeValue(forKey: cacheKey)
+        }
+    }
+}
+
+@MainActor
 final class EmailPreviewSnapshotRenderer: EmailPreviewSnapshotRendering {
     static let shared = EmailPreviewSnapshotRenderer()
 
-    private init() {}
+    private let scheduler: any EmailPreviewSnapshotRenderScheduling
+
+    init(scheduler: any EmailPreviewSnapshotRenderScheduling = EmailPreviewSnapshotRenderScheduler.shared) {
+        self.scheduler = scheduler
+    }
 
     func render(request: EmailPreviewSnapshotRequest) async throws -> EmailPreviewSnapshotResult {
         try Task.checkCancellation()
-        let session = try EmailPreviewSnapshotRenderSession(request: request)
-        return try await withTaskCancellationHandler {
-            try await session.render()
-        } onCancel: {
-            Task { @MainActor in
-                session.cancel()
+        return try await scheduler.render(request: request) {
+            try Task.checkCancellation()
+            let session = try EmailPreviewSnapshotRenderSession(request: request)
+            return try await withTaskCancellationHandler {
+                try await session.render()
+            } onCancel: {
+                Task { @MainActor in
+                    session.cancel()
+                }
             }
         }
     }

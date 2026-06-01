@@ -123,6 +123,13 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
 
     private let cache: EmailPreviewSnapshotCache
     private let renderer: (any EmailPreviewSnapshotRendering)?
+    private var loadGeneration = 0
+    private var activeRequest: ActiveRequest?
+
+    private struct ActiveRequest {
+        let generation: Int
+        let cacheKey: String
+    }
 
     init(
         cache: EmailPreviewSnapshotCache = .shared,
@@ -145,7 +152,6 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
         guard containerWidth > 1 else {
             return
         }
-        lastContainerWidth = containerWidth
         let diagnosticMessageId = messageId ?? message?.id
 
         let cacheKey = EmailPreviewSnapshotCacheKey.make(
@@ -155,7 +161,13 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
             isDarkMode: isDarkMode
         )
 
+        let generation = beginRequest(cacheKey: cacheKey, containerWidth: containerWidth)
+
         guard completedCacheKey != cacheKey else {
+            return
+        }
+
+        guard isActive(generation: generation, cacheKey: cacheKey) else {
             return
         }
 
@@ -164,7 +176,7 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
         displayHeight = HTMLPreviewSizing.defaultPreviewHeight
 
         if let cached = await cache.load(for: cacheKey) {
-            guard !Task.isCancelled else {
+            guard isActive(generation: generation, cacheKey: cacheKey) else {
                 return
             }
 
@@ -173,12 +185,18 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                     cacheKey: cacheKey,
                     messageId: diagnosticMessageId
                 )
+                guard isActive(generation: generation, cacheKey: cacheKey) else {
+                    return
+                }
                 await recordSnapshotMetadata(
                     cached,
                     previewCacheKey: previewCacheKey,
                     snapshotCacheKey: cacheKey,
                     messageId: diagnosticMessageId
                 )
+                guard isActive(generation: generation, cacheKey: cacheKey) else {
+                    return
+                }
                 snapshotImage = image
                 displayHeight = HTMLPreviewSizing.clampedHeight(cached.displayHeight)
                 completedCacheKey = cacheKey
@@ -191,7 +209,7 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                 reason: "invalid-image-data"
             )
         } else {
-            guard !Task.isCancelled else {
+            guard isActive(generation: generation, cacheKey: cacheKey) else {
                 return
             }
 
@@ -216,7 +234,8 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                 )
             )
 
-            guard !Task.isCancelled else {
+            guard result.cacheKey == cacheKey,
+                  isActive(generation: generation, cacheKey: cacheKey) else {
                 return
             }
 
@@ -227,7 +246,7 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                 for: result.cacheKey
             )
 
-            guard !Task.isCancelled else {
+            guard isActive(generation: generation, cacheKey: cacheKey) else {
                 return
             }
 
@@ -239,12 +258,18 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                 cacheStored: cached != nil
             )
             if let cached {
+                guard isActive(generation: generation, cacheKey: cacheKey) else {
+                    return
+                }
                 await recordSnapshotMetadata(
                     cached,
                     previewCacheKey: previewCacheKey,
                     snapshotCacheKey: result.cacheKey,
                     messageId: diagnosticMessageId
                 )
+                guard isActive(generation: generation, cacheKey: cacheKey) else {
+                    return
+                }
             }
             snapshotImage = result.image
             displayHeight = HTMLPreviewSizing.clampedHeight(result.displayHeight)
@@ -252,7 +277,7 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
         } catch is CancellationError {
             return
         } catch {
-            guard !Task.isCancelled else {
+            guard isActive(generation: generation, cacheKey: cacheKey) else {
                 return
             }
 
@@ -269,6 +294,23 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
             didFail = true
             completedCacheKey = cacheKey
         }
+    }
+
+    private func beginRequest(cacheKey: String, containerWidth: CGFloat) -> Int {
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        activeRequest = ActiveRequest(generation: generation, cacheKey: cacheKey)
+        lastContainerWidth = containerWidth
+        return generation
+    }
+
+    private func isActive(generation: Int, cacheKey: String) -> Bool {
+        guard !Task.isCancelled,
+              activeRequest?.generation == generation,
+              activeRequest?.cacheKey == cacheKey else {
+            return false
+        }
+        return true
     }
 
     private func recordSnapshotMetadata(
