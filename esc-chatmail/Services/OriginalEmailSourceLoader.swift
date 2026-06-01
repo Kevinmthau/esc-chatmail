@@ -32,7 +32,6 @@ protocol OriginalEmailSourceLoading: Sendable {
         bodyText: String?,
         senderEmail: String?,
         subject: String?,
-        isDarkMode: Bool,
         timeout: TimeInterval
     ) async -> OriginalEmailSource?
 }
@@ -60,7 +59,6 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         bodyText: String?,
         senderEmail: String?,
         subject: String?,
-        isDarkMode _: Bool,
         timeout: TimeInterval = 5.0
     ) async -> OriginalEmailSource? {
         // Soft timeout: if the load can't finish in `timeout` seconds, return nil
@@ -80,8 +78,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
                 bodyStorageURI: bodyStorageURI,
                 bodyText: bodyText,
                 senderEmail: senderEmail,
-                subject: subject,
-                isDarkMode: false
+                subject: subject
             )
         }
         return result ?? nil
@@ -92,8 +89,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         bodyStorageURI: String?,
         bodyText: String?,
         senderEmail: String?,
-        subject: String?,
-        isDarkMode _: Bool
+        subject: String?
     ) async -> OriginalEmailSource? {
         guard let canonicalContent = await canonicalContentLoader.loadCanonicalEmailContent(
             messageId: messageId,

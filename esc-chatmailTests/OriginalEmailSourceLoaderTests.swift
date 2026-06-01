@@ -38,7 +38,6 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
             bodyText: plainURLDump,
             senderEmail: "reservations@example.com",
             subject: "Reserve your table",
-            isDarkMode: false,
             timeout: 5.0
         )
         let source = try XCTUnwrap(loadedSource)
@@ -68,7 +67,6 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
             bodyText: plainURLDump,
             senderEmail: "reservations@example.com",
             subject: "View offer",
-            isDarkMode: false,
             timeout: 5.0
         )
         let source = try XCTUnwrap(loadedSource)
@@ -92,7 +90,6 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
             bodyText: "https://tracking.example.com/a\nBook a suite",
             senderEmail: "reservations@example.com",
             subject: "Book a suite",
-            isDarkMode: false,
             timeout: 5.0
         )
         let source = try XCTUnwrap(loadedSource)
@@ -105,41 +102,39 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
         XCTAssertTrue(html.contains("href=\"https://example.com/cta\""))
     }
 
-    func testLoadOriginalEmailSource_darkModeToggleReusesRenderedOriginalVariant() async throws {
-        let messageId = "original-dark-toggle-\(UUID().uuidString)"
+    func testLoadOriginalEmailSource_repeatedLoadReusesRenderedOriginalVariant() async throws {
+        let messageId = "original-repeated-load-\(UUID().uuidString)"
         let renderedCache = RenderedMessageCache()
         let loader = makeLoader(renderedMessageCache: renderedCache)
         defer { contentHandler.deleteHTML(for: messageId) }
 
         _ = contentHandler.saveHTML(newsletterHTML(title: "Stable original"), for: messageId)
 
-        let lightSource = await loader.loadOriginalEmailSourceToCompletion(
+        let firstSource = await loader.loadOriginalEmailSourceToCompletion(
             messageId: messageId,
             bodyStorageURI: nil,
             bodyText: "Stable original",
             senderEmail: "newsletter@example.com",
-            subject: "Stable original",
-            isDarkMode: false
+            subject: "Stable original"
         )
-        let darkSource = await loader.loadOriginalEmailSourceToCompletion(
+        let secondSource = await loader.loadOriginalEmailSourceToCompletion(
             messageId: messageId,
             bodyStorageURI: nil,
             bodyText: "Stable original",
             senderEmail: "newsletter@example.com",
-            subject: "Stable original",
-            isDarkMode: true
+            subject: "Stable original"
         )
 
-        let light = try XCTUnwrap(lightSource)
-        let dark = try XCTUnwrap(darkSource)
+        let first = try XCTUnwrap(firstSource)
+        let second = try XCTUnwrap(secondSource)
         let cachedArtifacts = await renderedCache.artifacts(
             messageId: messageId,
-            sourceSignature: light.sourceSignature
+            sourceSignature: first.sourceSignature
         )
         let artifacts = try XCTUnwrap(cachedArtifacts)
 
-        XCTAssertEqual(light.sourceSignature, dark.sourceSignature)
-        XCTAssertEqual(light.html, dark.html)
+        XCTAssertEqual(first.sourceSignature, second.sourceSignature)
+        XCTAssertEqual(first.html, second.html)
         XCTAssertEqual(artifacts.wrappedOriginalHTMLByVariant.count, 1)
     }
 
@@ -155,8 +150,7 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
             bodyStorageURI: nil,
             bodyText: "First original",
             senderEmail: "newsletter@example.com",
-            subject: "Original",
-            isDarkMode: false
+            subject: "Original"
         )
         let first = try XCTUnwrap(firstSource)
 
@@ -166,8 +160,7 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
             bodyStorageURI: nil,
             bodyText: "First original",
             senderEmail: "newsletter@example.com",
-            subject: "Original",
-            isDarkMode: false
+            subject: "Original"
         )
         let second = try XCTUnwrap(secondSource)
 
@@ -188,8 +181,8 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
         XCTAssertNotNil(secondArtifacts)
     }
 
-    func testLoadOriginalEmailSource_darkModeStillUsesAuthorIntentFullFidelityMode() async throws {
-        let messageId = "original-dark-author-intent-\(UUID().uuidString)"
+    func testLoadOriginalEmailSource_usesLightColorSchemeForFullFidelity() async throws {
+        let messageId = "original-light-fidelity-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }
 
         _ = contentHandler.saveHTML(newsletterHTML(title: "Author colors"), for: messageId)
@@ -200,7 +193,6 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
             bodyText: "Author colors",
             senderEmail: "newsletter@example.com",
             subject: "Author colors",
-            isDarkMode: true,
             timeout: 5.0
         )
         let source = try XCTUnwrap(loadedSource)
@@ -224,7 +216,6 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
             bodyText: "Plain text only\nhttps://example.com",
             senderEmail: "person@example.com",
             subject: "Plain",
-            isDarkMode: false,
             timeout: 5.0
         )
         let source = try XCTUnwrap(loadedSource)
@@ -252,7 +243,6 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
             bodyText: "Visible plain text fallback",
             senderEmail: "person@example.com",
             subject: "Fallback",
-            isDarkMode: false,
             timeout: 5.0
         )
         let source = try XCTUnwrap(loadedSource)
@@ -282,7 +272,6 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
             bodyText: "https://tracking.example.com/open\nRecovered original",
             senderEmail: "newsletter@example.com",
             subject: "Recovered",
-            isDarkMode: false,
             timeout: 5.0
         )
         let source = try XCTUnwrap(loadedSource)
@@ -317,7 +306,6 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
             bodyText: "https://tracking.example.com/open\nStorage original",
             senderEmail: "newsletter@example.com",
             subject: "Storage",
-            isDarkMode: false,
             timeout: 5.0
         )
         let source = try XCTUnwrap(loadedSource)
@@ -349,7 +337,6 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
             ),
             senderEmail: "newsletter@example.com",
             subject: "Raw",
-            isDarkMode: false,
             timeout: 5.0
         )
         let source = try XCTUnwrap(loadedSource)
@@ -370,7 +357,6 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
             bodyText: "Plain fallback before recovery",
             senderEmail: "newsletter@example.com",
             subject: "Recovered",
-            isDarkMode: false,
             timeout: 5.0
         )
         let first = try XCTUnwrap(firstSource)
@@ -384,7 +370,6 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
             bodyText: "Plain fallback before recovery",
             senderEmail: "newsletter@example.com",
             subject: "Recovered",
-            isDarkMode: false,
             timeout: 5.0
         )
         let recovered = try XCTUnwrap(recoveredSource)
@@ -418,7 +403,6 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
             bodyText: nil,
             senderEmail: "newsletter@example.com",
             subject: "Delayed",
-            isDarkMode: false,
             timeout: 0.01
         )
         XCTAssertNil(timedOut)
@@ -428,8 +412,7 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
             bodyStorageURI: nil,
             bodyText: nil,
             senderEmail: "newsletter@example.com",
-            subject: "Delayed",
-            isDarkMode: false
+            subject: "Delayed"
         )
         let recovered = try XCTUnwrap(recoveredSource)
 
@@ -461,7 +444,6 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
             bodyText: nil,
             senderEmail: "newsletter@example.com",
             subject: "Delayed",
-            isDarkMode: false,
             timeout: 0.01
         )
         XCTAssertNil(timedOut)
@@ -474,7 +456,6 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
             bodyText: nil,
             senderEmail: "newsletter@example.com",
             subject: "Delayed",
-            isDarkMode: false,
             timeout: 0.5
         )
         let retry = try XCTUnwrap(retrySource)
@@ -493,8 +474,7 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
             bodyStorageURI: nil,
             bodyText: nil,
             senderEmail: "person@example.com",
-            subject: "Missing",
-            isDarkMode: false
+            subject: "Missing"
         )
 
         XCTAssertNil(loadedSource)

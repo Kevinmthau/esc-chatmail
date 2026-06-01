@@ -148,6 +148,8 @@ struct BaseEmailWebView: UIViewRepresentable {
         private var attachmentAvailabilityObserver: NSObjectProtocol?
         private weak var observedContext: NSManagedObjectContext?
         private var observedMessageObjectID: NSManagedObjectID?
+        private var cachedReferencedInlineCIDs: Set<String>?
+        private var cachedReferencedInlineCIDsHTML: String?
         /// Holds strong reference to the cid: scheme handler
         var cidHandler: CIDSchemeHandler?
 
@@ -368,8 +370,25 @@ struct BaseEmailWebView: UIViewRepresentable {
                 return "cid:unchanged"
             }
 
-            return InlineCIDAttachmentAvailabilityFingerprint.make(
-                html: parent.htmlContent,
+            // `InlineCIDAttachmentAvailabilityFingerprint` scans the whole HTML for `cid:`
+            // references and stats attachment files on disk, and `needsReload` evaluates
+            // this on every SwiftUI update. Cache only the HTML-derived reference scan
+            // (it changes solely with the HTML); attachment availability is re-evaluated
+            // every call because it can change on disk without the HTML changing, and
+            // `needsReload` must observe that.
+            let referencedContentIDs: Set<String>
+            if let cachedReferencedInlineCIDs, cachedReferencedInlineCIDsHTML == parent.htmlContent {
+                referencedContentIDs = cachedReferencedInlineCIDs
+            } else {
+                referencedContentIDs = InlineCIDAttachmentAvailabilityFingerprint.referencedInlineContentIDs(
+                    in: parent.htmlContent
+                )
+                cachedReferencedInlineCIDs = referencedContentIDs
+                cachedReferencedInlineCIDsHTML = parent.htmlContent
+            }
+
+            return InlineCIDAttachmentAvailabilityFingerprint.fingerprint(
+                referencedContentIDs: referencedContentIDs,
                 message: parent.message
             )
         }
@@ -595,7 +614,14 @@ struct BaseEmailWebView: UIViewRepresentable {
 
 enum InlineCIDAttachmentAvailabilityFingerprint {
     static func make(html: String, message: Message?) -> String {
-        let referencedContentIDs = referencedInlineContentIDs(in: html)
+        fingerprint(referencedContentIDs: referencedInlineContentIDs(in: html), message: message)
+    }
+
+    /// Builds the availability fingerprint for an already-extracted set of referenced
+    /// `cid:` content IDs. Split out from `make` so callers can cache the (HTML-only)
+    /// reference extraction while still re-evaluating live attachment availability, which
+    /// can change on disk (a CID image finishing download) without the HTML changing.
+    static func fingerprint(referencedContentIDs: Set<String>, message: Message?) -> String {
         guard !referencedContentIDs.isEmpty else {
             return "cid:none"
         }
@@ -623,7 +649,7 @@ enum InlineCIDAttachmentAvailabilityFingerprint {
         return "cid:\(entries.joined(separator: "|"))"
     }
 
-    private static func referencedInlineContentIDs(in html: String) -> Set<String> {
+    static func referencedInlineContentIDs(in html: String) -> Set<String> {
         guard html.range(of: "cid:", options: .caseInsensitive) != nil else {
             return []
         }

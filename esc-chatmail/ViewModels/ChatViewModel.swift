@@ -261,9 +261,11 @@ final class ChatViewModel: ObservableObject {
 
         // Batch prefetch contacts to avoid thundering herd on first load
         let uniqueEmails = Array(Set(senderEmails))
-        let contactsResolver = self.contactsResolver
-        prefetchTaskManager.runDetached("prefetchContacts") {
-            await contactsResolver.prewarm(emails: uniqueEmails)
+        if !uniqueEmails.isEmpty {
+            let contactsResolver = self.contactsResolver
+            prefetchTaskManager.runDetached("prefetchContacts") {
+                await contactsResolver.prewarm(emails: uniqueEmails)
+            }
         }
     }
 

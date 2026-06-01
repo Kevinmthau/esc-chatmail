@@ -126,7 +126,6 @@ final class OriginalEmailLoadViewModel: ObservableObject {
             bodyText: request.bodyText,
             senderEmail: request.senderEmail,
             subject: request.subject,
-            isDarkMode: false,
             timeout: loadTimeout
         )
 

@@ -211,7 +211,6 @@ private final class StubOriginalEmailSourceLoader: OriginalEmailSourceLoading, @
         bodyText _: String?,
         senderEmail _: String?,
         subject _: String?,
-        isDarkMode _: Bool,
         timeout: TimeInterval
     ) async -> OriginalEmailSource? {
         lock.lock()
