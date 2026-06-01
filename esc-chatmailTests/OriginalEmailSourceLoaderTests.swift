@@ -438,6 +438,53 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
         XCTAssertTrue(recovered.html?.contains("Delayed recovered original") == true)
     }
 
+    func testLoadOriginalEmailSourceRetryReadsRecoveredHTMLAfterSoftTimeoutWarmsCache() async throws {
+        let messageId = "original-timeout-warmed-retry-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let delayedRecovery = DelayedRecoveryService(
+            contentHandler: contentHandler,
+            html: newsletterHTML(title: "Warm recovered original"),
+            delayNanoseconds: 80_000_000
+        )
+        let delayedLoader = OriginalEmailSourceLoader(
+            canonicalContentLoader: CanonicalEmailContentLoader(
+                contentHandler: contentHandler,
+                recoveryService: delayedRecovery
+            ),
+            htmlContentLoader: HTMLContentLoader(contentHandler: contentHandler, sanitizer: .shared)
+        )
+
+        let timedOut = await delayedLoader.loadOriginalEmailSource(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: nil,
+            senderEmail: "newsletter@example.com",
+            subject: "Delayed",
+            isDarkMode: false,
+            timeout: 0.01
+        )
+        XCTAssertNil(timedOut)
+
+        try await Task.sleep(nanoseconds: 120_000_000)
+
+        let retrySource = await delayedLoader.loadOriginalEmailSource(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: nil,
+            senderEmail: "newsletter@example.com",
+            subject: "Delayed",
+            isDarkMode: false,
+            timeout: 0.5
+        )
+        let retry = try XCTUnwrap(retrySource)
+
+        XCTAssertEqual(retry.presentation, .html)
+        XCTAssertEqual(retry.sourceKind, .html)
+        XCTAssertEqual(retry.sourceLocation, .messageFile)
+        XCTAssertTrue(retry.html?.contains("Warm recovered original") == true)
+    }
+
     func testLoadOriginalEmailSourceToCompletionReturnsNilForTrueUnavailableContent() async {
         let messageId = "original-unavailable-\(UUID().uuidString)"
 

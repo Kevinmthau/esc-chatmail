@@ -236,12 +236,6 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
             throw EmailPreviewSnapshotRenderError.timeout
         }
         let viewModel = EmailPreviewSnapshotViewModel(cache: cache, renderer: renderer)
-        let expectedCacheKey = EmailPreviewSnapshotCacheKey.make(
-            previewCacheKey: "failed-message|source",
-            renderedHTML: html,
-            containerWidth: 280,
-            isDarkMode: false
-        )
 
         await viewModel.loadSnapshot(
             htmlContent: html,
@@ -255,11 +249,305 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
 
         XCTAssertNil(viewModel.snapshotImage)
         XCTAssertTrue(viewModel.didFail)
-        XCTAssertEqual(viewModel.completedCacheKey, expectedCacheKey)
+        XCTAssertNil(viewModel.completedCacheKey)
         let counts = EmailPreviewSnapshotDiagnostics.countsForTesting()
         XCTAssertEqual(counts.renderFailures, 1)
         XCTAssertEqual(counts.timeouts, 1)
         XCTAssertEqual(counts.miniEmailWebViewFallbacks, 1)
+    }
+
+    @MainActor
+    func testViewModelCanLoadSameCacheKeyFromCacheAfterRenderFailure() async {
+        EmailPreviewSnapshotDiagnostics.resetForTesting()
+
+        let cache = EmailPreviewSnapshotCache(cacheDirectory: tempDirectory)
+        let html = "<html><body>Eventually cached preview</body></html>"
+        let renderer = StubSnapshotRenderer { _ in
+            throw EmailPreviewSnapshotRenderError.timeout
+        }
+        let viewModel = EmailPreviewSnapshotViewModel(
+            cache: cache,
+            renderer: renderer,
+            retryBackoff: 10,
+            maximumAutomaticRetryAttempts: 0
+        )
+        let expectedCacheKey = EmailPreviewSnapshotCacheKey.make(
+            previewCacheKey: "cached-after-failure|source",
+            renderedHTML: html,
+            containerWidth: 280,
+            isDarkMode: false
+        )
+
+        await viewModel.loadSnapshot(
+            htmlContent: html,
+            previewCacheKey: "cached-after-failure|source",
+            isDarkMode: false,
+            senderEmail: nil,
+            message: nil,
+            messageId: "cached-after-failure",
+            containerWidth: 280
+        )
+        XCTAssertTrue(viewModel.didFail)
+
+        _ = await cache.store(
+            image: makeImage(color: .systemGreen),
+            displayHeight: 206,
+            pixelScale: 2,
+            for: expectedCacheKey
+        )
+
+        await viewModel.loadSnapshot(
+            htmlContent: html,
+            previewCacheKey: "cached-after-failure|source",
+            isDarkMode: false,
+            senderEmail: nil,
+            message: nil,
+            messageId: "cached-after-failure",
+            containerWidth: 280
+        )
+
+        XCTAssertNotNil(viewModel.snapshotImage)
+        XCTAssertFalse(viewModel.didFail)
+        XCTAssertEqual(viewModel.displayHeight, 206)
+        XCTAssertEqual(viewModel.completedCacheKey, expectedCacheKey)
+        XCTAssertEqual(renderer.requests.count, 1)
+    }
+
+    @MainActor
+    func testViewModelSuccessfulRetryClearsFailureState() async throws {
+        EmailPreviewSnapshotDiagnostics.resetForTesting()
+
+        let cache = EmailPreviewSnapshotCache(cacheDirectory: tempDirectory)
+        let html = "<html><body>Transient failure preview</body></html>"
+        var renderAttempts = 0
+        let renderer = StubSnapshotRenderer { request in
+            renderAttempts += 1
+            if renderAttempts == 1 {
+                throw EmailPreviewSnapshotRenderError.timeout
+            }
+            return EmailPreviewSnapshotResult(
+                image: self.makeImage(color: .systemBlue),
+                displayHeight: 218,
+                pixelScale: 2,
+                cacheKey: request.cacheKey
+            )
+        }
+        let viewModel = EmailPreviewSnapshotViewModel(
+            cache: cache,
+            renderer: renderer,
+            retryBackoff: 0.05,
+            maximumAutomaticRetryAttempts: 0
+        )
+        let expectedCacheKey = EmailPreviewSnapshotCacheKey.make(
+            previewCacheKey: "transient-message|source",
+            renderedHTML: html,
+            containerWidth: 280,
+            isDarkMode: false
+        )
+
+        await viewModel.loadSnapshot(
+            htmlContent: html,
+            previewCacheKey: "transient-message|source",
+            isDarkMode: false,
+            senderEmail: nil,
+            message: nil,
+            messageId: "transient-message",
+            containerWidth: 280
+        )
+        XCTAssertTrue(viewModel.didFail)
+
+        await viewModel.loadSnapshot(
+            htmlContent: html,
+            previewCacheKey: "transient-message|source",
+            isDarkMode: false,
+            senderEmail: nil,
+            message: nil,
+            messageId: "transient-message",
+            containerWidth: 280
+        )
+        XCTAssertEqual(renderer.requests.count, 1)
+
+        try await Task.sleep(nanoseconds: 80_000_000)
+        await viewModel.loadSnapshot(
+            htmlContent: html,
+            previewCacheKey: "transient-message|source",
+            isDarkMode: false,
+            senderEmail: nil,
+            message: nil,
+            messageId: "transient-message",
+            containerWidth: 280
+        )
+
+        XCTAssertNotNil(viewModel.snapshotImage)
+        XCTAssertFalse(viewModel.didFail)
+        XCTAssertEqual(viewModel.displayHeight, 218)
+        XCTAssertEqual(viewModel.completedCacheKey, expectedCacheKey)
+        XCTAssertEqual(renderer.requests.count, 2)
+    }
+
+    @MainActor
+    func testViewModelPermanentFailuresDoNotImmediatelyRetrySameCacheKey() async throws {
+        EmailPreviewSnapshotDiagnostics.resetForTesting()
+
+        let cache = EmailPreviewSnapshotCache(cacheDirectory: tempDirectory)
+        let html = "<html><body>Permanent failure preview</body></html>"
+        let renderer = StubSnapshotRenderer { _ in
+            throw EmailPreviewSnapshotRenderError.timeout
+        }
+        let viewModel = EmailPreviewSnapshotViewModel(
+            cache: cache,
+            renderer: renderer,
+            retryBackoff: 0.05,
+            maximumAutomaticRetryAttempts: 0
+        )
+
+        await viewModel.loadSnapshot(
+            htmlContent: html,
+            previewCacheKey: "permanent-message|source",
+            isDarkMode: false,
+            senderEmail: nil,
+            message: nil,
+            messageId: "permanent-message",
+            containerWidth: 280
+        )
+        XCTAssertTrue(viewModel.didFail)
+        XCTAssertEqual(renderer.requests.count, 1)
+
+        await viewModel.loadSnapshot(
+            htmlContent: html,
+            previewCacheKey: "permanent-message|source",
+            isDarkMode: false,
+            senderEmail: nil,
+            message: nil,
+            messageId: "permanent-message",
+            containerWidth: 280
+        )
+        XCTAssertEqual(renderer.requests.count, 1)
+
+        try await Task.sleep(nanoseconds: 80_000_000)
+        await viewModel.loadSnapshot(
+            htmlContent: html,
+            previewCacheKey: "permanent-message|source",
+            isDarkMode: false,
+            senderEmail: nil,
+            message: nil,
+            messageId: "permanent-message",
+            containerWidth: 280
+        )
+        XCTAssertEqual(renderer.requests.count, 2)
+
+        await viewModel.loadSnapshot(
+            htmlContent: html,
+            previewCacheKey: "permanent-message|source",
+            isDarkMode: false,
+            senderEmail: nil,
+            message: nil,
+            messageId: "permanent-message",
+            containerWidth: 280
+        )
+        XCTAssertEqual(renderer.requests.count, 2)
+        XCTAssertTrue(viewModel.didFail)
+        XCTAssertNil(viewModel.completedCacheKey)
+    }
+
+    @MainActor
+    func testViewModelRetryForFailedCacheKeySurvivesDifferentCacheKeySuccess() async throws {
+        EmailPreviewSnapshotDiagnostics.resetForTesting()
+
+        let cache = EmailPreviewSnapshotCache(cacheDirectory: tempDirectory)
+        let failedHTML = "<html><body>Failed preview</body></html>"
+        let successfulHTML = "<html><body>Successful preview</body></html>"
+        var failedRenderAttempts = 0
+        let renderer = StubSnapshotRenderer { request in
+            if request.html == failedHTML {
+                failedRenderAttempts += 1
+                if failedRenderAttempts == 1 {
+                    throw EmailPreviewSnapshotRenderError.timeout
+                }
+            }
+
+            return EmailPreviewSnapshotResult(
+                image: self.makeImage(color: request.html == failedHTML ? .systemBlue : .systemGreen),
+                displayHeight: request.html == failedHTML ? 218 : 206,
+                pixelScale: 2,
+                cacheKey: request.cacheKey
+            )
+        }
+        let viewModel = EmailPreviewSnapshotViewModel(
+            cache: cache,
+            renderer: renderer,
+            retryBackoff: 0.05,
+            maximumAutomaticRetryAttempts: 1
+        )
+        let failedCacheKey = EmailPreviewSnapshotCacheKey.make(
+            previewCacheKey: "retry-message|failed-source",
+            renderedHTML: failedHTML,
+            containerWidth: 280,
+            isDarkMode: false
+        )
+        let successfulCacheKey = EmailPreviewSnapshotCacheKey.make(
+            previewCacheKey: "retry-message|successful-source",
+            renderedHTML: successfulHTML,
+            containerWidth: 280,
+            isDarkMode: false
+        )
+
+        await viewModel.loadSnapshot(
+            htmlContent: failedHTML,
+            previewCacheKey: "retry-message|failed-source",
+            isDarkMode: false,
+            senderEmail: nil,
+            message: nil,
+            messageId: "retry-message",
+            containerWidth: 280
+        )
+        XCTAssertTrue(viewModel.didFail)
+        XCTAssertEqual(failedRenderAttempts, 1)
+        XCTAssertEqual(viewModel.retryGeneration, 0)
+
+        await viewModel.loadSnapshot(
+            htmlContent: successfulHTML,
+            previewCacheKey: "retry-message|successful-source",
+            isDarkMode: false,
+            senderEmail: nil,
+            message: nil,
+            messageId: "retry-message",
+            containerWidth: 280
+        )
+        XCTAssertFalse(viewModel.didFail)
+        XCTAssertEqual(viewModel.completedCacheKey, successfulCacheKey)
+
+        await viewModel.loadSnapshot(
+            htmlContent: failedHTML,
+            previewCacheKey: "retry-message|failed-source",
+            isDarkMode: false,
+            senderEmail: nil,
+            message: nil,
+            messageId: "retry-message",
+            containerWidth: 280
+        )
+        XCTAssertTrue(viewModel.didFail)
+        XCTAssertEqual(failedRenderAttempts, 1)
+        XCTAssertEqual(viewModel.retryGeneration, 0)
+
+        try await Task.sleep(nanoseconds: 80_000_000)
+        XCTAssertEqual(viewModel.retryGeneration, 1)
+
+        await viewModel.loadSnapshot(
+            htmlContent: failedHTML,
+            previewCacheKey: "retry-message|failed-source",
+            isDarkMode: false,
+            senderEmail: nil,
+            message: nil,
+            messageId: "retry-message",
+            containerWidth: 280
+        )
+
+        XCTAssertNotNil(viewModel.snapshotImage)
+        XCTAssertFalse(viewModel.didFail)
+        XCTAssertEqual(viewModel.displayHeight, 218)
+        XCTAssertEqual(viewModel.completedCacheKey, failedCacheKey)
+        XCTAssertEqual(failedRenderAttempts, 2)
     }
 
     @MainActor

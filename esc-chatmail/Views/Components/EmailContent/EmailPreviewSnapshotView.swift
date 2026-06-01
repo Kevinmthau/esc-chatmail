@@ -63,7 +63,7 @@ struct EmailPreviewSnapshotView: View {
     private func snapshotLoadTask(width: CGFloat) -> some View {
         let effectiveWidth = width > 1 ? width : viewModel.lastContainerWidth
         return Color.clear
-            .task(id: loadIdentity(for: effectiveWidth)) {
+            .task(id: loadTaskIdentity(for: effectiveWidth)) {
                 await viewModel.loadSnapshot(
                     htmlContent: htmlContent,
                     previewCacheKey: previewCacheKey,
@@ -111,6 +111,14 @@ struct EmailPreviewSnapshotView: View {
             isDarkMode: isDarkMode
         )
     }
+
+    private func loadTaskIdentity(for width: CGFloat) -> String {
+        let identity = loadIdentity(for: width)
+        guard viewModel.didFail else {
+            return identity
+        }
+        return "\(identity)|retry:\(viewModel.retryGeneration)"
+    }
 }
 
 @MainActor
@@ -120,23 +128,37 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
     @Published private(set) var completedCacheKey: String?
     @Published private(set) var lastContainerWidth: CGFloat = 0
     @Published private(set) var didFail = false
+    @Published private(set) var retryGeneration = 0
 
     private let cache: EmailPreviewSnapshotCache
     private let renderer: (any EmailPreviewSnapshotRendering)?
+    private let retryBackoff: TimeInterval
+    private let maximumAutomaticRetryAttempts: Int
     private var loadGeneration = 0
     private var activeRequest: ActiveRequest?
+    private var failedAttemptsByCacheKey: [String: FailedAttempt] = [:]
+    private var retryTasksByCacheKey: [String: Task<Void, Never>] = [:]
 
     private struct ActiveRequest {
         let generation: Int
         let cacheKey: String
     }
 
+    private struct FailedAttempt {
+        let count: Int
+        let nextRetryAt: Date
+    }
+
     init(
         cache: EmailPreviewSnapshotCache = .shared,
-        renderer: (any EmailPreviewSnapshotRendering)? = nil
+        renderer: (any EmailPreviewSnapshotRendering)? = nil,
+        retryBackoff: TimeInterval = 1.0,
+        maximumAutomaticRetryAttempts: Int = 1
     ) {
         self.cache = cache
         self.renderer = renderer
+        self.retryBackoff = retryBackoff
+        self.maximumAutomaticRetryAttempts = maximumAutomaticRetryAttempts
     }
 
     @MainActor
@@ -163,7 +185,7 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
 
         let generation = beginRequest(cacheKey: cacheKey, containerWidth: containerWidth)
 
-        guard completedCacheKey != cacheKey else {
+        guard completedCacheKey != cacheKey || didFail else {
             return
         }
 
@@ -171,9 +193,14 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
             return
         }
 
-        snapshotImage = nil
-        didFail = false
-        displayHeight = HTMLPreviewSizing.defaultPreviewHeight
+        let isRetryingFailedKey = failedAttemptsByCacheKey[cacheKey] != nil
+        if isRetryingFailedKey {
+            didFail = true
+        } else {
+            snapshotImage = nil
+            didFail = false
+            displayHeight = HTMLPreviewSizing.defaultPreviewHeight
+        }
 
         if let cached = await cache.load(for: cacheKey) {
             guard isActive(generation: generation, cacheKey: cacheKey) else {
@@ -200,6 +227,7 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                 snapshotImage = image
                 displayHeight = HTMLPreviewSizing.clampedHeight(cached.displayHeight)
                 completedCacheKey = cacheKey
+                clearFailedAttempt(for: cacheKey)
                 return
             }
 
@@ -218,6 +246,10 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                 messageId: diagnosticMessageId,
                 reason: "not-found"
             )
+        }
+
+        guard shouldAttemptRender(cacheKey: cacheKey) else {
+            return
         }
 
         let renderStart = CFAbsoluteTimeGetCurrent()
@@ -274,6 +306,7 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
             snapshotImage = result.image
             displayHeight = HTMLPreviewSizing.clampedHeight(result.displayHeight)
             completedCacheKey = cacheKey
+            clearFailedAttempt(for: cacheKey)
         } catch is CancellationError {
             return
         } catch {
@@ -292,7 +325,7 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                 messageId: diagnosticMessageId
             )
             didFail = true
-            completedCacheKey = cacheKey
+            recordFailedAttempt(for: cacheKey)
         }
     }
 
@@ -311,6 +344,69 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
             return false
         }
         return true
+    }
+
+    private func shouldAttemptRender(cacheKey: String) -> Bool {
+        guard let failedAttempt = failedAttemptsByCacheKey[cacheKey] else {
+            return true
+        }
+        return Date() >= failedAttempt.nextRetryAt
+    }
+
+    private func recordFailedAttempt(for cacheKey: String) {
+        let previousCount = failedAttemptsByCacheKey[cacheKey]?.count ?? 0
+        let count = previousCount + 1
+        let delay = retryDelay(failureCount: count)
+        failedAttemptsByCacheKey[cacheKey] = FailedAttempt(
+            count: count,
+            nextRetryAt: Date().addingTimeInterval(delay)
+        )
+
+        guard count <= maximumAutomaticRetryAttempts else {
+            cancelRetry(for: cacheKey)
+            return
+        }
+
+        scheduleRetry(cacheKey: cacheKey, failureCount: count, delay: delay)
+    }
+
+    private func clearFailedAttempt(for cacheKey: String) {
+        failedAttemptsByCacheKey[cacheKey] = nil
+        didFail = false
+        cancelRetry(for: cacheKey)
+    }
+
+    private func retryDelay(failureCount: Int) -> TimeInterval {
+        let multiplier = pow(2.0, Double(max(0, failureCount - 1)))
+        return min(30.0, max(0.05, retryBackoff * multiplier))
+    }
+
+    private func scheduleRetry(cacheKey: String, failureCount: Int, delay: TimeInterval) {
+        cancelRetry(for: cacheKey)
+        retryTasksByCacheKey[cacheKey] = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch {
+                return
+            }
+
+            await self?.triggerRetry(cacheKey: cacheKey, failureCount: failureCount)
+        }
+    }
+
+    private func triggerRetry(cacheKey: String, failureCount: Int) {
+        retryTasksByCacheKey[cacheKey] = nil
+        guard didFail,
+              activeRequest?.cacheKey == cacheKey,
+              failedAttemptsByCacheKey[cacheKey]?.count == failureCount else {
+            return
+        }
+        retryGeneration &+= 1
+    }
+
+    private func cancelRetry(for cacheKey: String) {
+        retryTasksByCacheKey[cacheKey]?.cancel()
+        retryTasksByCacheKey[cacheKey] = nil
     }
 
     private func recordSnapshotMetadata(

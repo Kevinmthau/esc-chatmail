@@ -2,12 +2,12 @@ import SwiftUI
 import UIKit
 
 // MARK: - Full HTML Message View
-private enum OriginalEmailLoadedContent {
+enum OriginalEmailLoadedContent: Equatable {
     case html(String)
     case plainText(String)
 }
 
-private enum OriginalEmailLoadState {
+enum OriginalEmailLoadState: Equatable {
     case loading
     case recovering
     case loaded(OriginalEmailLoadedContent)
@@ -21,7 +21,7 @@ private enum OriginalEmailLoadState {
     }
 }
 
-struct OriginalEmailLoadIdentity: Equatable {
+struct OriginalEmailLoadIdentity: Equatable, Sendable {
     let baseLoadKey: String
 
     static func make(
@@ -43,18 +43,167 @@ struct OriginalEmailLoadIdentity: Equatable {
     }
 }
 
+struct OriginalEmailLoadRequest: Equatable, Sendable {
+    let messageId: String
+    let bodyStorageURI: String?
+    let bodyText: String?
+    let subject: String?
+    let senderEmail: String?
+    let identity: OriginalEmailLoadIdentity
+
+    init(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        subject: String?,
+        senderEmail: String?
+    ) {
+        self.messageId = messageId
+        self.bodyStorageURI = bodyStorageURI
+        self.bodyText = bodyText
+        self.subject = subject
+        self.senderEmail = senderEmail
+        self.identity = OriginalEmailLoadIdentity.make(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            subject: subject,
+            senderEmail: senderEmail
+        )
+    }
+}
+
+@MainActor
+final class OriginalEmailLoadViewModel: ObservableObject {
+    @Published private(set) var loadState: OriginalEmailLoadState = .loading
+    @Published private(set) var reloadGeneration = 0
+    private(set) var activeHTMLSourceSignature: String?
+
+    private let originalEmailSourceLoader: any OriginalEmailSourceLoading
+    private let loadTimeout: TimeInterval
+    private let recoveringDelay: TimeInterval
+    private var activeBaseLoadKey: String?
+    private var activeLoadTaskKey: String?
+
+    init(
+        originalEmailSourceLoader: any OriginalEmailSourceLoading = OriginalEmailSourceLoader.shared,
+        loadTimeout: TimeInterval = 5.0,
+        recoveringDelay: TimeInterval = 5.0
+    ) {
+        self.originalEmailSourceLoader = originalEmailSourceLoader
+        self.loadTimeout = loadTimeout
+        self.recoveringDelay = recoveringDelay
+    }
+
+    func loadOriginalEmail(for request: OriginalEmailLoadRequest) async -> OriginalEmailSource? {
+        let taskBaseLoadKey = request.identity.baseLoadKey
+        let taskLoadKey = "\(taskBaseLoadKey)|reload:\(reloadGeneration)"
+        let shouldReset = activeBaseLoadKey != taskBaseLoadKey
+        let shouldPreserveLoadedContent = !shouldReset && loadState.hasLoadedContent
+        activeBaseLoadKey = taskBaseLoadKey
+        activeLoadTaskKey = taskLoadKey
+        if shouldReset {
+            activeHTMLSourceSignature = nil
+        }
+
+        if shouldReset || !loadState.hasLoadedContent {
+            loadState = .loading
+        }
+
+        let recoveringTask = Task { [weak self] in
+            let nanoseconds = UInt64(max(0, self?.recoveringDelay ?? 0) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard !Task.isCancelled else {
+                return
+            }
+            self?.markRecoveringIfCurrent(taskLoadKey: taskLoadKey)
+        }
+        defer { recoveringTask.cancel() }
+
+        let source = await originalEmailSourceLoader.loadOriginalEmailSource(
+            messageId: request.messageId,
+            bodyStorageURI: request.bodyStorageURI,
+            bodyText: request.bodyText,
+            senderEmail: request.senderEmail,
+            subject: request.subject,
+            isDarkMode: false,
+            timeout: loadTimeout
+        )
+
+        guard !Task.isCancelled,
+              activeLoadTaskKey == taskLoadKey else {
+            return nil
+        }
+
+        if let source {
+            activeHTMLSourceSignature = source.sourceSignature
+            applyLoadedSource(source)
+        } else if !shouldPreserveLoadedContent {
+            activeHTMLSourceSignature = nil
+            loadState = .unavailable
+        }
+        return source
+    }
+
+    func retry() {
+        loadState = .loading
+        reloadGeneration &+= 1
+    }
+
+    func reloadPreservingContent() {
+        reloadGeneration &+= 1
+    }
+
+    private func markRecoveringIfCurrent(taskLoadKey: String) {
+        guard activeLoadTaskKey == taskLoadKey else {
+            return
+        }
+        if case .loading = loadState {
+            loadState = .recovering
+        }
+    }
+
+    private func applyLoadedSource(_ source: OriginalEmailSource) {
+        switch source.presentation {
+        case .html:
+            if let html = source.html {
+                loadState = .loaded(.html(html))
+            } else {
+                loadState = .unavailable
+            }
+        case .nativePlainText:
+            if let plainText = source.plainText {
+                loadState = .loaded(.plainText(plainText))
+            } else {
+                loadState = .unavailable
+            }
+        }
+    }
+}
+
 struct HTMLMessageView: View {
     let message: Message
     @Environment(\.dismiss) private var dismiss
-    @State private var loadState: OriginalEmailLoadState = .loading
-    @State private var activeBaseLoadKey: String?
-    @State private var activeLoadTaskKey: String?
-    @State private var activeHTMLSourceSignature: String?
-    @State private var reloadGeneration = 0
+    @StateObject private var loadViewModel: OriginalEmailLoadViewModel
 
-    private let originalEmailSourceLoader = OriginalEmailSourceLoader.shared
-    private var loadIdentity: OriginalEmailLoadIdentity {
-        OriginalEmailLoadIdentity.make(
+    init(
+        message: Message,
+        originalEmailSourceLoader: any OriginalEmailSourceLoading = OriginalEmailSourceLoader.shared,
+        originalEmailLoadTimeout: TimeInterval = 5.0,
+        recoveringDelay: TimeInterval = 5.0
+    ) {
+        self.message = message
+        self._loadViewModel = StateObject(
+            wrappedValue: OriginalEmailLoadViewModel(
+                originalEmailSourceLoader: originalEmailSourceLoader,
+                loadTimeout: originalEmailLoadTimeout,
+                recoveringDelay: recoveringDelay
+            )
+        )
+    }
+
+    private var loadRequest: OriginalEmailLoadRequest {
+        OriginalEmailLoadRequest(
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
             bodyText: message.bodyText,
@@ -62,11 +211,14 @@ struct HTMLMessageView: View {
             senderEmail: message.senderEmail
         )
     }
+    private var loadIdentity: OriginalEmailLoadIdentity {
+        loadRequest.identity
+    }
     private var baseLoadKey: String {
         loadIdentity.baseLoadKey
     }
     private var loadKey: String {
-        "\(baseLoadKey)|reload:\(reloadGeneration)"
+        "\(baseLoadKey)|reload:\(loadViewModel.reloadGeneration)"
     }
 
     var body: some View {
@@ -95,7 +247,7 @@ struct HTMLMessageView: View {
 
     @ViewBuilder
     private var content: some View {
-        switch loadState {
+        switch loadViewModel.loadState {
         case .loading:
             ProgressView("Loading...")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -115,57 +267,21 @@ struct HTMLMessageView: View {
                 OriginalEmailReadableView(message: message, text: text)
             }
         case .unavailable:
-            ContentUnavailableView(
-                "No Content",
-                systemImage: "doc.text",
-                description: Text("The original email content is not available")
-            )
+            ContentUnavailableView {
+                SwiftUI.Label("Original Email Unavailable", systemImage: "doc.text")
+            } description: {
+                Text("The original email content could not be loaded. Recovery may still finish in the background.")
+            } actions: {
+                Button("Retry") {
+                    loadViewModel.retry()
+                }
+            }
         }
     }
 
     private func loadHTMLContent() async {
-        let taskLoadIdentity = loadIdentity
-        let taskBaseLoadKey = taskLoadIdentity.baseLoadKey
-        let taskLoadKey = "\(taskBaseLoadKey)|reload:\(reloadGeneration)"
-
-        await MainActor.run {
-            let shouldReset = activeBaseLoadKey != taskBaseLoadKey
-            activeBaseLoadKey = taskBaseLoadKey
-            activeLoadTaskKey = taskLoadKey
-            if shouldReset {
-                activeHTMLSourceSignature = nil
-            }
-
-            if shouldReset || !loadState.hasLoadedContent {
-                loadState = .loading
-            }
-        }
-
-        let recoveringTask = Task {
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
-            guard !Task.isCancelled else {
-                return
-            }
-            await MainActor.run {
-                guard activeLoadTaskKey == taskLoadKey else {
-                    return
-                }
-                if case .loading = loadState {
-                    loadState = .recovering
-                }
-            }
-        }
-        defer { recoveringTask.cancel() }
-
         Log.diagnostic(.htmlPreview, level: .info, "HTMLMessageView loading message \(message.id)", category: .ui)
-        let source = await originalEmailSourceLoader.loadOriginalEmailSourceToCompletion(
-            messageId: message.id,
-            bodyStorageURI: message.bodyStorageURI,
-            bodyText: message.bodyText,
-            senderEmail: message.senderEmail,
-            subject: message.subject,
-            isDarkMode: false
-        )
+        let source = await loadViewModel.loadOriginalEmail(for: loadRequest)
 
         guard !Task.isCancelled else {
             return
@@ -190,31 +306,6 @@ struct HTMLMessageView: View {
             }
         }
 
-        await MainActor.run {
-            guard activeLoadTaskKey == taskLoadKey else {
-                return
-            }
-
-            activeHTMLSourceSignature = source?.sourceSignature
-
-            switch source?.presentation {
-            case .html:
-                if let html = source?.html {
-                    loadState = .loaded(.html(html))
-                } else {
-                    loadState = .unavailable
-                }
-            case .nativePlainText:
-                if let plainText = source?.plainText {
-                    loadState = .loaded(.plainText(plainText))
-                } else {
-                    loadState = .unavailable
-                }
-            case nil:
-                loadState = .unavailable
-            }
-        }
-
         if let source {
             Log.diagnostic(
                 .htmlPreview,
@@ -231,7 +322,7 @@ struct HTMLMessageView: View {
             return
         }
 
-        reloadGeneration &+= 1
+        loadViewModel.reloadPreservingContent()
     }
 
     private func reloadIfContentSourceChanged(_ notification: Notification) {
@@ -242,11 +333,11 @@ struct HTMLMessageView: View {
 
         let changedSourceSignature = notification.userInfo?[HTMLContentLoader.contentSourceDidChangeSourceSignatureUserInfoKey] as? String
         if let changedSourceSignature,
-           changedSourceSignature == activeHTMLSourceSignature {
+           changedSourceSignature == loadViewModel.activeHTMLSourceSignature {
             return
         }
 
-        reloadGeneration &+= 1
+        loadViewModel.reloadPreservingContent()
     }
 }
 
