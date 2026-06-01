@@ -35,12 +35,11 @@ enum EmailRenderQualityHints {
     ]
 }
 
-/// Immutable facts derived from one canonical parsed HTML email.
+/// Immutable value facts derived from one canonical parsed HTML email.
 ///
-/// The underlying `EmailDocument` is intentionally kept private: SwiftSoup's
-/// document type is mutable, so consumers share precomputed value facts instead
-/// of passing a live DOM across concurrency boundaries.
-final class ParsedEmail: @unchecked Sendable {
+/// `EmailDocument` is parsed only while constructing this value. The mutable
+/// DOM is not retained, so parsed facts can safely cross concurrency boundaries.
+struct ParsedEmail: Equatable, Sendable {
     let key: ParsedEmailKey
     let canonicalHTML: String
     let plainText: String
@@ -49,26 +48,28 @@ final class ParsedEmail: @unchecked Sendable {
     let htmlMetrics: EmailDocumentHTMLMetrics
     let renderQuality: ParsedEmailRenderQualityFacts?
     let htmlSummary: EmailPreviewHTMLSummary
+    let previewImages: [EmailPreviewImage]?
 
-    private let document: EmailDocument
-
-    init(
+    private init(
         key: ParsedEmailKey,
         canonicalHTML: String,
-        document: EmailDocument,
-        includeRenderQuality: Bool = false
+        plainText: String,
+        previewPlainText: String?,
+        referencedInlineContentIDs: Set<String>,
+        htmlMetrics: EmailDocumentHTMLMetrics,
+        renderQuality: ParsedEmailRenderQualityFacts?,
+        htmlSummary: EmailPreviewHTMLSummary,
+        previewImages: [EmailPreviewImage]?
     ) {
         self.key = key
         self.canonicalHTML = canonicalHTML
-        self.document = document
-        self.plainText = document.plainText(preserveParagraphs: true)
-        self.previewPlainText = document.previewPlainText()
-        self.referencedInlineContentIDs = document.referencedInlineContentIDs()
-        self.htmlMetrics = EmailDocumentHTMLMetrics(classificationHTML: canonicalHTML)
-        self.htmlSummary = document.previewHTMLSummary()
-        self.renderQuality = includeRenderQuality
-            ? Self.makeRenderQualityFacts(canonicalHTML: canonicalHTML, document: document)
-            : nil
+        self.plainText = plainText
+        self.previewPlainText = previewPlainText
+        self.referencedInlineContentIDs = referencedInlineContentIDs
+        self.htmlMetrics = htmlMetrics
+        self.renderQuality = renderQuality
+        self.htmlSummary = htmlSummary
+        self.previewImages = previewImages
     }
 
     private static func makeRenderQualityFacts(
@@ -95,6 +96,7 @@ final class ParsedEmail: @unchecked Sendable {
         sourceSignature: String,
         canonicalHTML: String,
         includeRenderQuality: Bool = false,
+        includePreviewImages: Bool = false,
         parser: (String) throws -> EmailDocument? = { try EmailDocument.parse($0) }
     ) throws -> ParsedEmail? {
         guard let document = try parser(canonicalHTML) else {
@@ -103,8 +105,17 @@ final class ParsedEmail: @unchecked Sendable {
         return ParsedEmail(
             key: ParsedEmailKey(messageId: messageId, sourceSignature: sourceSignature),
             canonicalHTML: canonicalHTML,
-            document: document,
-            includeRenderQuality: includeRenderQuality
+            plainText: document.plainText(preserveParagraphs: true),
+            previewPlainText: document.previewPlainText(),
+            referencedInlineContentIDs: document.referencedInlineContentIDs(),
+            htmlMetrics: EmailDocumentHTMLMetrics(classificationHTML: canonicalHTML),
+            renderQuality: includeRenderQuality
+                ? Self.makeRenderQualityFacts(canonicalHTML: canonicalHTML, document: document)
+                : nil,
+            htmlSummary: document.previewHTMLSummary(),
+            previewImages: includePreviewImages
+                ? EmailPreviewImageExtractor().extractImages(from: canonicalHTML)
+                : nil
         )
     }
 }
@@ -114,7 +125,8 @@ protocol ParsedEmailProviding: Sendable {
         messageId: String,
         sourceSignature: String,
         canonicalHTML: String,
-        includeRenderQuality: Bool
+        includeRenderQuality: Bool,
+        includePreviewImages: Bool
     ) async -> ParsedEmail?
 
     func invalidate(messageId: String) async
@@ -130,7 +142,23 @@ extension ParsedEmailProviding {
             messageId: messageId,
             sourceSignature: sourceSignature,
             canonicalHTML: canonicalHTML,
-            includeRenderQuality: false
+            includeRenderQuality: false,
+            includePreviewImages: false
+        )
+    }
+
+    func parsedEmail(
+        messageId: String,
+        sourceSignature: String,
+        canonicalHTML: String,
+        includeRenderQuality: Bool
+    ) async -> ParsedEmail? {
+        await parsedEmail(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            canonicalHTML: canonicalHTML,
+            includeRenderQuality: includeRenderQuality,
+            includePreviewImages: false
         )
     }
 }
@@ -157,11 +185,14 @@ actor ParsedEmailProvider: ParsedEmailProviding {
         messageId: String,
         sourceSignature: String,
         canonicalHTML: String,
-        includeRenderQuality: Bool = false
+        includeRenderQuality: Bool = false,
+        includePreviewImages: Bool = false
     ) async -> ParsedEmail? {
         let key = ParsedEmailKey(messageId: messageId, sourceSignature: sourceSignature)
         let cached = cache[key]
-        if let cached, !includeRenderQuality || cached.renderQuality != nil {
+        let cachedHasRequestedFacts = (!includeRenderQuality || cached?.renderQuality != nil)
+            && (!includePreviewImages || cached?.previewImages != nil)
+        if let cached, cachedHasRequestedFacts {
             logCacheEvent("cache-hit", key: key)
             return cached
         }
@@ -177,7 +208,8 @@ actor ParsedEmailProvider: ParsedEmailProviding {
                 messageId: messageId,
                 sourceSignature: sourceSignature,
                 canonicalHTML: canonicalHTML,
-                includeRenderQuality: includeRenderQuality,
+                includeRenderQuality: includeRenderQuality || cached?.renderQuality != nil,
+                includePreviewImages: includePreviewImages || cached?.previewImages != nil,
                 parser: parser
             ) else {
                 parseFailureCount += 1

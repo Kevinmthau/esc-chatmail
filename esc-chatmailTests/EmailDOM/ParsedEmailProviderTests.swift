@@ -23,12 +23,14 @@ final class ParsedEmailProviderTests: XCTestCase {
         let parsed = try XCTUnwrap(first)
 
         XCTAssertEqual(parsed.plainText, "Weekly update\n\nHello world.\n\nOpen")
+        XCTAssertEqual(parsed.previewPlainText, "Weekly update\n\nHello world.\n\nOpen")
         XCTAssertEqual(parsed.referencedInlineContentIDs, ["hero-image"])
         XCTAssertEqual(parsed.htmlMetrics.imageCount, 1)
         XCTAssertEqual(parsed.htmlMetrics.tableCount, 1)
         XCTAssertEqual(parsed.htmlMetrics.linkCount, 1)
         XCTAssertEqual(parsed.htmlSummary.h1Text, "Weekly update")
         XCTAssertNil(parsed.renderQuality)
+        XCTAssertNil(parsed.previewImages)
 
         let second = await provider.parsedEmail(
             messageId: "message-1",
@@ -37,9 +39,59 @@ final class ParsedEmailProviderTests: XCTestCase {
         )
 
         let unwrappedSecond = try XCTUnwrap(second)
-        XCTAssertTrue(parsed === unwrappedSecond)
+        XCTAssertEqual(parsed, unwrappedSecond)
         let parseAttemptCount = await provider.debugParseAttemptCount()
         XCTAssertEqual(parseAttemptCount, 1)
+    }
+
+    func testProviderDefersPreviewImagesUntilRequested() async throws {
+        let provider = ParsedEmailProvider()
+        let html = """
+        <html>
+        <body>
+          <h1>Preview source</h1>
+          <img src="https://cdn.example.com/hero.jpg" width="640" height="320" alt="Hero artwork">
+          <p>Story after the hero image.</p>
+        </body>
+        </html>
+        """
+
+        let previewCandidate = await provider.parsedEmail(
+            messageId: "message-1",
+            sourceSignature: "sha256:images",
+            canonicalHTML: html
+        )
+        let previewParsed = try XCTUnwrap(previewCandidate)
+        XCTAssertNil(previewParsed.previewImages)
+
+        let imageCandidate = await provider.parsedEmail(
+            messageId: "message-1",
+            sourceSignature: "sha256:images",
+            canonicalHTML: html,
+            includeRenderQuality: false,
+            includePreviewImages: true
+        )
+        let imageParsed = try XCTUnwrap(imageCandidate)
+
+        XCTAssertEqual(imageParsed.previewImages?.count, 1)
+        XCTAssertEqual(imageParsed.previewImages?.first?.sourceURL, "https://cdn.example.com/hero.jpg")
+        XCTAssertEqual(imageParsed.previewImages?.first?.width, 640)
+        XCTAssertEqual(imageParsed.previewImages?.first?.height, 320)
+        XCTAssertEqual(imageParsed.previewImages?.first?.descriptor, "hero artwork")
+        XCTAssertEqual(imageParsed.previewImages, EmailPreviewImageExtractor().extractImages(from: html))
+        XCTAssertNil(imageParsed.renderQuality)
+        let parseAttemptCountAfterUpgrade = await provider.debugParseAttemptCount()
+        XCTAssertEqual(parseAttemptCountAfterUpgrade, 2)
+
+        _ = await provider.parsedEmail(
+            messageId: "message-1",
+            sourceSignature: "sha256:images",
+            canonicalHTML: html,
+            includeRenderQuality: false,
+            includePreviewImages: true
+        )
+        let parseAttemptCountAfterImageCacheHit = await provider.debugParseAttemptCount()
+        XCTAssertEqual(parseAttemptCountAfterImageCacheHit, 2)
     }
 
     func testProviderDefersRenderQualityUntilRequested() async throws {
@@ -90,7 +142,7 @@ final class ParsedEmailProviderTests: XCTestCase {
         XCTAssertNotNil(second)
         let unwrappedFirst = try XCTUnwrap(first)
         let unwrappedSecond = try XCTUnwrap(second)
-        XCTAssertFalse(unwrappedFirst === unwrappedSecond)
+        XCTAssertNotEqual(unwrappedFirst, unwrappedSecond)
         let cachedCount = await provider.debugCachedCount()
         let parseAttemptCountAfterSecondSignature = await provider.debugParseAttemptCount()
         XCTAssertEqual(cachedCount, 1)

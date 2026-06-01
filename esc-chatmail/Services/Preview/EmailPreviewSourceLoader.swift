@@ -88,7 +88,9 @@ final class EmailPreviewSourceLoader: EmailPreviewSourceLoading, @unchecked Send
         let parsedEmail = await parsedEmailProvider.parsedEmail(
             messageId: messageId,
             sourceSignature: canonicalContent.sourceSignature,
-            canonicalHTML: canonicalHTML
+            canonicalHTML: canonicalHTML,
+            includeRenderQuality: false,
+            includePreviewImages: true
         )
         let extractedContent = EmailPreviewContentExtractor.extract(
             canonicalHTML: canonicalHTML,
@@ -170,7 +172,7 @@ enum EmailPreviewContentExtractor {
         return EmailPreviewExtractedContent(
             plainText: normalizedPlainText(from: bodyText),
             htmlText: normalizedHTMLText(from: canonicalHTML, parsedEmail: parsedEmail, domQuery: domQuery),
-            images: imageExtractor.extractImages(from: canonicalHTML),
+            images: previewImages(from: canonicalHTML, parsedEmail: parsedEmail, imageExtractor: imageExtractor),
             htmlSummary: htmlSummary(from: canonicalHTML, parsedEmail: parsedEmail, domQuery: domQuery)
         )
     }
@@ -281,6 +283,19 @@ enum EmailPreviewContentExtractor {
             preheaderText: nil,
             actionLinkTexts: []
         )
+    }
+
+    private static func previewImages(
+        from html: String,
+        parsedEmail: ParsedEmail?,
+        imageExtractor: EmailPreviewImageExtractor
+    ) -> [EmailPreviewImage] {
+        if parsedEmail?.canonicalHTML == html,
+           let previewImages = parsedEmail?.previewImages {
+            return previewImages
+        }
+
+        return imageExtractor.extractImages(from: html)
     }
 }
 
