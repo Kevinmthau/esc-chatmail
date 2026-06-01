@@ -931,6 +931,154 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)
     }
 
+    func testLoadContent_forwardedMessagePrefersStructuredChatPreviewOverStaleBodyText() async {
+        let messageId = "bubble-forwarded-chat-preview-primary-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: """
+                Stale body lead-in.
+
+                Begin forwarded message:
+
+                From: Stale Sender <stale@example.com>
+                Date: Wed, Apr 22, 2026 at 8:12 AM
+                Subject: Stale reservation
+
+                Stale forwarded preview.
+                """,
+                chatPreviewText: """
+                Canonical chat lead-in.
+
+                Begin forwarded message:
+
+                From: Jane Example <jane@example.com>
+                Date: Wed, Apr 22, 2026 at 8:12 AM
+                To: Kevin Thau <kevin@example.com>
+                Subject: Dinner reservation
+
+                Your table is confirmed for 7:30 PM.
+                """,
+                bodyStorageURI: nil,
+                cleanedSnippet: "Stale body lead-in. Begin forwarded message:",
+                snippet: "Stale body lead-in. Begin forwarded message: From: Stale Sender",
+                subject: "Fwd: Dinner reservation",
+                senderName: "Alice Example",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: true,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "Canonical chat lead-in.")
+        XCTAssertEqual(result.forwardedDisplayContent?.leadInText, "Canonical chat lead-in.")
+        XCTAssertEqual(result.forwardedDisplayContent?.senderDisplayName, "Jane Example")
+        XCTAssertEqual(result.forwardedDisplayContent?.senderEmail, "jane@example.com")
+        XCTAssertEqual(result.forwardedDisplayContent?.subject, "Dinner reservation")
+        XCTAssertEqual(
+            result.forwardedDisplayContent?.previewSnippet,
+            "Your table is confirmed for 7:30 PM."
+        )
+    }
+
+    func testLoadContent_forwardedMessageUsesChatPreviewLeadInWithBodyHeaderFallback() async {
+        let messageId = "bubble-forwarded-chat-preview-lead-in-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: """
+                Stale raw lead-in.
+
+                ---------- Forwarded message ---------
+                From: Jane Example <jane@example.com>
+                Date: Wed, Apr 22, 2026 at 8:12 AM
+                Subject: Dinner reservation
+                To: Kevin Thau <kevin@example.com>
+
+                Your table is confirmed for 7:30 PM.
+                """,
+                chatPreviewText: "Canonical chat lead-in.",
+                bodyStorageURI: nil,
+                cleanedSnippet: "Stale raw lead-in. ---------- Forwarded message ---------",
+                snippet: "Stale raw lead-in. ---------- Forwarded message --------- From: Jane Example",
+                subject: "Fwd: Dinner reservation",
+                senderName: "Alice Example",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: true,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "Canonical chat lead-in.")
+        XCTAssertEqual(result.forwardedDisplayContent?.leadInText, "Canonical chat lead-in.")
+        XCTAssertEqual(result.forwardedDisplayContent?.senderDisplayName, "Jane Example")
+        XCTAssertEqual(result.forwardedDisplayContent?.subject, "Dinner reservation")
+        XCTAssertEqual(result.forwardedDisplayContent?.recipientSummary, "Kevin Thau")
+    }
+
+    func testLoadContent_forwardedMessageWithBlankChatPreviewUsesBodyTextFallback() async {
+        let messageId = "bubble-forwarded-blank-chat-preview-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: """
+                Body fallback lead-in.
+
+                ---------- Forwarded message ---------
+                From: Jane Example <jane@example.com>
+                Date: Wed, Apr 22, 2026 at 8:12 AM
+                Subject: Dinner reservation
+
+                Your table is confirmed for 7:30 PM.
+                """,
+                chatPreviewText: " \n\t ",
+                bodyStorageURI: nil,
+                cleanedSnippet: "Body fallback lead-in.",
+                snippet: "Body fallback lead-in. ---------- Forwarded message --------- From: Jane Example",
+                subject: "Fwd: Dinner reservation",
+                senderName: "Alice Example",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: true,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "alice@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "Body fallback lead-in.")
+        XCTAssertEqual(result.forwardedDisplayContent?.leadInText, "Body fallback lead-in.")
+        XCTAssertEqual(result.forwardedDisplayContent?.senderDisplayName, "Jane Example")
+        XCTAssertEqual(result.forwardedDisplayContent?.subject, "Dinner reservation")
+    }
+
     func testLoadContent_forwardedMessageUsesCleanedSnippetBeforeSnippet() async {
         let messageId = "bubble-forwarded-cleaned-snippet-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)
