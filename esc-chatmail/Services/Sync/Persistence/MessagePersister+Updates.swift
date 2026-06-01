@@ -7,6 +7,7 @@ private struct MessageUpdateResult {
     let didUpdate: Bool
     let modifiedConversationID: NSManagedObjectID?
     let shouldInvalidateRenderedContent: Bool
+    let htmlSourceDidChange: Bool
     let changedHTMLSourceSignature: String?
     let participantDisplayNameUpdateEmails: [String]
     let participantDisplayNameUpdateConversationIDs: Set<NSManagedObjectID>
@@ -38,6 +39,7 @@ extension MessagePersister {
                     didUpdate: false,
                     modifiedConversationID: nil,
                     shouldInvalidateRenderedContent: false,
+                    htmlSourceDidChange: false,
                     changedHTMLSourceSignature: nil,
                     participantDisplayNameUpdateEmails: [],
                     participantDisplayNameUpdateConversationIDs: []
@@ -49,6 +51,7 @@ extension MessagePersister {
                     didUpdate: false,
                     modifiedConversationID: nil,
                     shouldInvalidateRenderedContent: false,
+                    htmlSourceDidChange: false,
                     changedHTMLSourceSignature: nil,
                     participantDisplayNameUpdateEmails: [],
                     participantDisplayNameUpdateConversationIDs: []
@@ -258,7 +261,6 @@ extension MessagePersister {
             let chatPreviewTextChanged = existingMessage.chatPreviewText != previousChatPreviewText
             let snippetChanged = existingMessage.snippet != previousSnippet
             let htmlSourceSignatureChanged = savedBodyStorageURI != nil &&
-                incomingHTMLSourceSignature != nil &&
                 previousHTMLSourceSignature != incomingHTMLSourceSignature
 
             Log.debug("Updated existing message: \(processedMessage.id)", category: .sync)
@@ -267,6 +269,7 @@ extension MessagePersister {
                 didUpdate: true,
                 modifiedConversationID: modifiedConversationID,
                 shouldInvalidateRenderedContent: bodyStorageURIChanged || bodyTextChanged || chatPreviewTextChanged || snippetChanged || htmlSourceSignatureChanged,
+                htmlSourceDidChange: htmlSourceSignatureChanged,
                 changedHTMLSourceSignature: htmlSourceSignatureChanged ? incomingHTMLSourceSignature : nil,
                 participantDisplayNameUpdateEmails: displayNameUpdateEmails,
                 participantDisplayNameUpdateConversationIDs: displayNameUpdateConversationIDs
@@ -298,10 +301,10 @@ extension MessagePersister {
             await HTMLContentLoader.shared.invalidateContent(messageId: processedMessage.id)
         }
 
-        if let changedHTMLSourceSignature = result.changedHTMLSourceSignature {
+        if result.htmlSourceDidChange {
             await HTMLContentLoader.postContentSourceDidChange(
                 messageId: processedMessage.id,
-                sourceSignature: changedHTMLSourceSignature
+                sourceSignature: result.changedHTMLSourceSignature
             )
         }
 

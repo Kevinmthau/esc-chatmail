@@ -539,14 +539,18 @@ final class HTMLContentLoader {
     }
 
     @MainActor
-    static func postContentSourceDidChange(messageId: String, sourceSignature: String) {
+    static func postContentSourceDidChange(messageId: String, sourceSignature: String?) {
+        var userInfo: [String: Any] = [
+            contentSourceDidChangeMessageIdUserInfoKey: messageId
+        ]
+        if let sourceSignature {
+            userInfo[contentSourceDidChangeSourceSignatureUserInfoKey] = sourceSignature
+        }
+
         NotificationCenter.default.post(
             name: contentSourceDidChangeNotification,
             object: nil,
-            userInfo: [
-                contentSourceDidChangeMessageIdUserInfoKey: messageId,
-                contentSourceDidChangeSourceSignatureUserInfoKey: sourceSignature
-            ]
+            userInfo: userInfo
         )
     }
 
