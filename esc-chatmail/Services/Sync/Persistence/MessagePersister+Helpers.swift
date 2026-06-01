@@ -121,6 +121,7 @@ extension MessagePersister {
         }
 
         attachment.state = .downloaded
+        attachment.lastDownloadFailedAt = nil
         return true
     }
 

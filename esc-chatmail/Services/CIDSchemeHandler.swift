@@ -247,13 +247,34 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
                 attachment.localURL = originalPath
                 attachment.byteSize = Int64(max(Int(attachment.byteSize), data.count))
                 attachment.state = .downloaded
+                attachment.lastDownloadFailedAt = nil
                 backgroundContext.saveOrLog(operation: "persist inline cid attachment")
             }
 
             return data
         } catch {
+            await markAttachmentDownloadFailed(
+                attachmentObjectID: attachmentObjectID,
+                makeBackgroundContext: makeBackgroundContext
+            )
             Log.debug("CIDSchemeHandler: On-demand fetch failed for attachment \(attachmentId): \(error.localizedDescription)", category: .ui)
             return nil
+        }
+    }
+
+    private static func markAttachmentDownloadFailed(
+        attachmentObjectID: NSManagedObjectID,
+        makeBackgroundContext: @Sendable () -> NSManagedObjectContext
+    ) async {
+        let backgroundContext = makeBackgroundContext()
+        await backgroundContext.perform {
+            guard let attachment = try? backgroundContext.existingObject(with: attachmentObjectID) as? Attachment else {
+                return
+            }
+
+            attachment.state = .failed
+            attachment.lastDownloadFailedAt = Date()
+            backgroundContext.saveOrLog(operation: "mark inline cid attachment failed", category: .attachment)
         }
     }
 

@@ -13,6 +13,7 @@ extension Attachment {
     @NSManaged public var stateRaw: String
     @NSManaged public var localURL: String?
     @NSManaged public var previewURL: String?
+    @NSManaged public var lastDownloadFailedAt: Date?
     @NSManaged public var byteSize: Int64
     @NSManaged public var pageCount: Int16
     @NSManaged public var width: Int16

@@ -17,6 +17,7 @@
         <attribute name="pageCount" optional="YES" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
         <attribute name="previewURL" optional="YES" attributeType="String"/>
         <attribute name="stateRaw" attributeType="String" defaultValueString="queued"/>
+        <attribute name="lastDownloadFailedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="width" optional="YES" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
         <relationship name="message" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="Message" inverseName="attachments" inverseEntity="Message"/>
     </entity>

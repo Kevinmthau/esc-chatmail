@@ -21,6 +21,7 @@ final class AttachmentBuilder {
     private var state: Attachment.State = .queued
     private var localURL: String?
     private var previewURL: String?
+    private var lastDownloadFailedAt: Date?
     private var byteSize: Int64 = 1024
     private var pageCount: Int16 = 0
     private var width: Int16 = 0
@@ -90,6 +91,11 @@ final class AttachmentBuilder {
         return self
     }
 
+    func withLastDownloadFailedAt(_ date: Date?) -> Self {
+        self.lastDownloadFailedAt = date
+        return self
+    }
+
     func withLocalURL(_ url: String) -> Self {
         self.localURL = url
         return self
@@ -124,6 +130,7 @@ final class AttachmentBuilder {
         attachment.state = state
         attachment.localURL = localURL
         attachment.previewURL = previewURL
+        attachment.lastDownloadFailedAt = lastDownloadFailedAt
         attachment.byteSize = byteSize
         attachment.pageCount = pageCount
         attachment.width = width

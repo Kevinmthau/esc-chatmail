@@ -134,6 +134,7 @@ actor InlineCIDAttachmentPrefetcher {
     typealias AttachmentDownload = @Sendable (NSManagedObjectID, String, NSManagedObjectContext) async -> Void
 
     static let shared = InlineCIDAttachmentPrefetcher()
+    private static let defaultFailedAttachmentRetryInterval: TimeInterval = 30 * 60
 
     private struct PrefetchKey: Hashable {
         let messageId: String
@@ -151,6 +152,8 @@ actor InlineCIDAttachmentPrefetcher {
 
     private let makeBackgroundContext: @Sendable () -> NSManagedObjectContext
     private let downloadAttachment: AttachmentDownload
+    private let failedAttachmentRetryInterval: TimeInterval
+    private let now: @Sendable () -> Date
     private var inFlightKeys: Set<PrefetchKey> = []
 
     init(
@@ -163,7 +166,9 @@ actor InlineCIDAttachmentPrefetcher {
 
     init(
         makeBackgroundContext: @escaping @Sendable () -> NSManagedObjectContext,
-        downloadAttachment: AttachmentDownload? = nil
+        downloadAttachment: AttachmentDownload? = nil,
+        failedAttachmentRetryInterval: TimeInterval = InlineCIDAttachmentPrefetcher.defaultFailedAttachmentRetryInterval,
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.makeBackgroundContext = makeBackgroundContext
         self.downloadAttachment = downloadAttachment ?? { objectID, messageId, context in
@@ -174,6 +179,8 @@ actor InlineCIDAttachmentPrefetcher {
                 in: context
             )
         }
+        self.failedAttachmentRetryInterval = failedAttachmentRetryInterval
+        self.now = now
     }
 
     func prefetch(_ requests: [InlineCIDAttachmentPrefetchRequest]) async {
@@ -223,7 +230,10 @@ actor InlineCIDAttachmentPrefetcher {
         for request: InlineCIDAttachmentPrefetchRequest,
         in context: NSManagedObjectContext
     ) async -> [PrefetchCandidate] {
-        await context.perform {
+        let referenceDate = now()
+        let retryInterval = failedAttachmentRetryInterval
+
+        return await context.perform {
             let fetchRequest = Message.fetchRequest()
             fetchRequest.predicate = MessagePredicates.id(request.messageId)
             fetchRequest.fetchLimit = 1
@@ -287,11 +297,22 @@ actor InlineCIDAttachmentPrefetcher {
                 }
 
                 if attachment.state == .failed {
+                    guard Self.canRetryFailedAttachment(
+                        attachment,
+                        now: referenceDate,
+                        retryInterval: retryInterval
+                    ) else {
+                        Log.debug(
+                            "InlineCIDAttachmentPrefetcher: skipping recent failed eager fetch for message \(message.id) cid=\(normalizedContentID ?? "nil") attachment=\(attachmentID); CIDSchemeHandler fallback remains available",
+                            category: .attachment
+                        )
+                        continue
+                    }
+
                     Log.debug(
-                        "InlineCIDAttachmentPrefetcher: skipping previously failed eager fetch for message \(message.id) cid=\(normalizedContentID ?? "nil") attachment=\(attachmentID); CIDSchemeHandler fallback remains available",
+                        "InlineCIDAttachmentPrefetcher: retrying stale failed eager fetch for message \(message.id) cid=\(normalizedContentID ?? "nil") attachment=\(attachmentID)",
                         category: .attachment
                     )
-                    continue
                 }
 
                 let key = PrefetchKey(
@@ -333,5 +354,17 @@ actor InlineCIDAttachmentPrefetcher {
             return false
         }
         return FileManager.default.fileExists(atPath: fileURL.path)
+    }
+
+    private static func canRetryFailedAttachment(
+        _ attachment: Attachment,
+        now: Date,
+        retryInterval: TimeInterval
+    ) -> Bool {
+        guard retryInterval > 0 else { return false }
+        guard let lastDownloadFailedAt = attachment.lastDownloadFailedAt else {
+            return true
+        }
+        return now.timeIntervalSince(lastDownloadFailedAt) >= retryInterval
     }
 }

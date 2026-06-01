@@ -131,6 +131,45 @@ final class AttachmentDownloaderTests: XCTestCase {
         XCTAssertEqual(attachment.state, .queued)
     }
 
+    @MainActor
+    func testDownloadFailureAfterRetryBudgetMarksFailedAndCleansInFlight() async throws {
+        let message = MessageBuilder()
+            .withId("message-download-retry-failure")
+            .withAttachments()
+            .build(in: context)
+        let attachment = AttachmentBuilder()
+            .withId("att-download-retry-failure")
+            .withFilename("missing.png")
+            .withMimeType("image/png")
+            .queued()
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let apiClient = MockGmailAPIClient()
+        let downloader = AttachmentDownloader(
+            apiClient: apiClient,
+            maxRetryAttempts: 2,
+            baseRetryDelay: 0
+        )
+        let backgroundContext = testStack.newBackgroundContext()
+        let beforeDownload = Date()
+
+        await downloader.downloadAttachment(
+            attachmentObjectID: attachment.objectID,
+            messageId: message.id,
+            in: backgroundContext
+        )
+
+        let persistedState = try await fetchAttachmentState(objectID: attachment.objectID)
+        XCTAssertEqual(apiClient.getAttachmentCallCount, 2)
+        XCTAssertEqual(persistedState.state, .failed)
+        let failedAt = try XCTUnwrap(persistedState.lastDownloadFailedAt)
+        XCTAssertGreaterThanOrEqual(failedAt, beforeDownload)
+        XCTAssertFalse(downloader.activeDownloads.contains("att-download-retry-failure"))
+        XCTAssertNil(downloader.downloadProgress["att-download-retry-failure"])
+    }
+
     // MARK: - Query Tests
 
     func testFetchAttachments_filtersByState() throws {
@@ -876,5 +915,16 @@ final class AttachmentDownloaderTests: XCTestCase {
         XCTAssertTrue(validFiles.contains("Attachments/file1.jpg"))
         XCTAssertTrue(validFiles.contains("Previews/file1.jpg"))
         XCTAssertTrue(validFiles.contains("Attachments/file2.pdf"))
+    }
+
+    private func fetchAttachmentState(
+        objectID: NSManagedObjectID
+    ) async throws -> (state: Attachment.State, lastDownloadFailedAt: Date?) {
+        try await testStack.performBackgroundTask { context in
+            guard let attachment = try context.existingObject(with: objectID) as? Attachment else {
+                throw NSError(domain: "AttachmentDownloaderTests", code: 1)
+            }
+            return (attachment.state, attachment.lastDownloadFailedAt)
+        }
     }
 }

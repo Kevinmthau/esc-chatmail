@@ -9,14 +9,21 @@ final class AttachmentDownloader: ObservableObject {
     @Published var downloadProgress: [String: Double] = [:]
     @Published var activeDownloads: Set<String> = []
 
-    private let apiClient = GmailAPIClient.shared
+    private let apiClient: any GmailAPIClientProtocol
     private let coreDataStack = CoreDataStack.shared
     private var cancellables = Set<AnyCancellable>()
     private var retryAttempts: [String: Int] = [:]
-    private let maxRetryAttempts = 3
-    private let baseRetryDelay: TimeInterval = 2.0
+    private let maxRetryAttempts: Int
+    private let baseRetryDelay: TimeInterval
 
-    private init() {
+    init(
+        apiClient: any GmailAPIClientProtocol = GmailAPIClient.shared,
+        maxRetryAttempts: Int = 3,
+        baseRetryDelay: TimeInterval = 2.0
+    ) {
+        self.apiClient = apiClient
+        self.maxRetryAttempts = maxRetryAttempts
+        self.baseRetryDelay = baseRetryDelay
         AttachmentPaths.setupDirectories()
     }
 
@@ -79,6 +86,7 @@ final class AttachmentDownloader: ObservableObject {
             if attachmentInContext.isLocalAttachment {
                 Log.debug("Skipping download for local attachment: \(attachmentId)", category: .attachment)
                 attachmentInContext.state = .downloaded
+                attachmentInContext.lastDownloadFailedAt = nil
                 do {
                     try context.save()
                 } catch {
@@ -102,15 +110,24 @@ final class AttachmentDownloader: ObservableObject {
         attachmentId: String,
         attachmentObjectID: NSManagedObjectID,
         messageId: String,
-        in context: NSManagedObjectContext
+        in context: NSManagedObjectContext,
+        isRetryContinuation: Bool = false
     ) async {
-        if activeDownloads.contains(attachmentId) {
+        if !isRetryContinuation && activeDownloads.contains(attachmentId) {
             Log.debug("Download already in progress for attachment: \(attachmentId)", category: .attachment)
             return
         }
 
-        activeDownloads.insert(attachmentId)
+        if !isRetryContinuation {
+            activeDownloads.insert(attachmentId)
+        }
         downloadProgress[attachmentId] = 0.0
+        defer {
+            if !isRetryContinuation {
+                activeDownloads.remove(attachmentId)
+                downloadProgress.removeValue(forKey: attachmentId)
+            }
+        }
 
         do {
             let attachmentInfo = await context.perform {
@@ -177,6 +194,7 @@ final class AttachmentDownloader: ObservableObject {
                 } else {
                     Log.warning("Failed to save original attachment file for ID: \(attachmentId)", category: .attachment)
                     attachmentInContext.state = .failed
+                    attachmentInContext.lastDownloadFailedAt = Date()
                 }
 
                 if let width = processedResult.width {
@@ -194,6 +212,7 @@ final class AttachmentDownloader: ObservableObject {
 
                 if processedResult.savedOriginal {
                     attachmentInContext.state = .downloaded
+                    attachmentInContext.lastDownloadFailedAt = nil
                 }
 
                 do {
@@ -206,8 +225,6 @@ final class AttachmentDownloader: ObservableObject {
             }
 
             if !saveSucceeded || !processedResult.savedOriginal {
-                activeDownloads.remove(attachmentId)
-                downloadProgress.removeValue(forKey: attachmentId)
                 return
             }
 
@@ -239,15 +256,17 @@ final class AttachmentDownloader: ObservableObject {
                     attachmentId: attachmentId,
                     attachmentObjectID: attachmentObjectID,
                     messageId: messageId,
-                    in: context
+                    in: context,
+                    isRetryContinuation: true
                 )
                 return
             } else {
-                // Max retries reached, mark as permanently failed
-                Log.warning("Attachment \(attachmentId) permanently failed after \(maxRetryAttempts) attempts", category: .attachment)
+                // Immediate retry budget is exhausted; later callers may retry based on this timestamp.
+                Log.warning("Attachment \(attachmentId) failed after \(maxRetryAttempts) attempts", category: .attachment)
                 await context.perform {
                     if let attachmentInContext = try? context.existingObject(with: attachmentObjectID) as? Attachment {
                         attachmentInContext.state = .failed
+                        attachmentInContext.lastDownloadFailedAt = Date()
                         do {
                             try context.save()
                         } catch {
@@ -258,9 +277,6 @@ final class AttachmentDownloader: ObservableObject {
                 retryAttempts.removeValue(forKey: attachmentId)
             }
         }
-
-        activeDownloads.remove(attachmentId)
-        downloadProgress.removeValue(forKey: attachmentId)
     }
     
     func retryFailedDownload(for attachment: Attachment) async {

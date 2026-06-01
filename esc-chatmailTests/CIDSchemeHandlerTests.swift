@@ -84,6 +84,52 @@ final class CIDSchemeHandlerTests: XCTestCase {
         XCTAssertEqual(AttachmentPaths.loadData(from: persistedLocalURL), imageData)
     }
 
+    func testOnDemandFallbackFailureRefreshesFailedTimestamp() async throws {
+        let staleFailureDate = Date().addingTimeInterval(-3_600)
+        let message = MessageBuilder()
+            .withId("message-cid-fallback-failure")
+            .withAttachments()
+            .build(in: context)
+        let attachment = AttachmentBuilder()
+            .withId("att-cid-fallback-failure")
+            .withFilename("missing.png")
+            .withMimeType("image/png")
+            .withContentId("missing@example.com")
+            .failed()
+            .withLastDownloadFailedAt(staleFailureDate)
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let apiClient = MockGmailAPIClient()
+        let didFinish = expectation(description: "cid scheme task finished with fallback pixel")
+        let task = MockURLSchemeTask(
+            url: try XCTUnwrap(URL(string: "cid:missing@example.com")),
+            didComplete: {
+                didFinish.fulfill()
+            }
+        )
+        let stack = testStack!
+        let handler = CIDSchemeHandler(
+            message: message,
+            apiClient: apiClient,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        let beforeFetch = Date()
+
+        handler.webView(WKWebView(), start: task)
+
+        await fulfillment(of: [didFinish], timeout: 2.0)
+        XCTAssertNil(task.error)
+        XCTAssertEqual(apiClient.getAttachmentCallCount, 1)
+
+        let persistedState = try await fetchAttachmentState(objectID: attachment.objectID)
+        XCTAssertEqual(persistedState.state, .failed)
+        let failedAt = try XCTUnwrap(persistedState.lastDownloadFailedAt)
+        XCTAssertGreaterThanOrEqual(failedAt, beforeFetch)
+        XCTAssertGreaterThan(failedAt, staleFailureDate)
+    }
+
     func testStoppedTaskReceivesNoCallbacksAfterDelayedFallbackCompletes() async throws {
         let message = MessageBuilder()
             .withId("message-cid-cancel")
@@ -286,6 +332,17 @@ final class CIDSchemeHandlerTests: XCTestCase {
                 return
             }
             try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    private func fetchAttachmentState(
+        objectID: NSManagedObjectID
+    ) async throws -> (state: Attachment.State, lastDownloadFailedAt: Date?) {
+        try await testStack.performBackgroundTask { context in
+            guard let attachment = try context.existingObject(with: objectID) as? Attachment else {
+                throw NSError(domain: "CIDSchemeHandlerTests", code: 1)
+            }
+            return (attachment.state, attachment.lastDownloadFailedAt)
         }
     }
 }
