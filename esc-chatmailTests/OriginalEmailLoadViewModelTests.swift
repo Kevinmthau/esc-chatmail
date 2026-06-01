@@ -18,7 +18,8 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         let viewModel = OriginalEmailLoadViewModel(
             originalEmailSourceLoader: loader,
             loadTimeout: 0.5,
-            recoveringDelay: 0.05
+            recoveringDelay: 0.05,
+            maxAutoRetryAttempts: 0
         )
 
         await viewModel.loadOriginalEmail(for: makeRequest(messageId: "local-html"))
@@ -35,7 +36,8 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         let viewModel = OriginalEmailLoadViewModel(
             originalEmailSourceLoader: loader,
             loadTimeout: 0.01,
-            recoveringDelay: 0.005
+            recoveringDelay: 0.005,
+            maxAutoRetryAttempts: 0
         )
 
         let task = Task { @MainActor in
@@ -56,7 +58,8 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         let viewModel = OriginalEmailLoadViewModel(
             originalEmailSourceLoader: loader,
             loadTimeout: 0.01,
-            recoveringDelay: 0.005
+            recoveringDelay: 0.005,
+            maxAutoRetryAttempts: 0
         )
 
         await viewModel.loadOriginalEmail(for: makeRequest(messageId: "retry-missing"))
@@ -84,7 +87,8 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         let viewModel = OriginalEmailLoadViewModel(
             originalEmailSourceLoader: loader,
             loadTimeout: 0.01,
-            recoveringDelay: 0.005
+            recoveringDelay: 0.005,
+            maxAutoRetryAttempts: 0
         )
         let request = makeRequest(messageId: "warmed-retry")
 
@@ -114,7 +118,8 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         let viewModel = OriginalEmailLoadViewModel(
             originalEmailSourceLoader: loader,
             loadTimeout: 0.01,
-            recoveringDelay: 0.005
+            recoveringDelay: 0.005,
+            maxAutoRetryAttempts: 0
         )
         let request = makeRequest(messageId: "preserving-refresh")
 
@@ -145,12 +150,58 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         let viewModel = OriginalEmailLoadViewModel(
             originalEmailSourceLoader: loader,
             loadTimeout: 0.5,
-            recoveringDelay: 0.005
+            recoveringDelay: 0.005,
+            maxAutoRetryAttempts: 0
         )
 
         await viewModel.loadOriginalEmail(for: makeRequest(messageId: "recovered-html"))
 
         XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
+    }
+
+    func testSlowRecoveryAutoRetryLoadsWarmedHTML() async {
+        let html = "<html><body>Auto-retried recovered original</body></html>"
+        let loader = StubOriginalEmailSourceLoader(
+            responses: [
+                nil,
+                originalEmailSource(
+                    presentation: .html,
+                    html: html,
+                    sourceKind: .recoveredHTML,
+                    sourceLocation: .recoveredHTML
+                )
+            ]
+        )
+        let viewModel = OriginalEmailLoadViewModel(
+            originalEmailSourceLoader: loader,
+            loadTimeout: 0.01,
+            recoveringDelay: 0.005,
+            maxAutoRetryAttempts: 2,
+            autoRetryDelay: 0.001,
+            autoRetryTimeout: 0.02
+        )
+
+        await viewModel.loadOriginalEmail(for: makeRequest(messageId: "auto-retry-warmed"))
+
+        XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
+        XCTAssertEqual(loader.observedTimeouts, [0.01, 0.02])
+    }
+
+    func testSlowRecoveryAutoRetryStopsAtUnavailableForTrueMiss() async {
+        let loader = StubOriginalEmailSourceLoader(responses: [nil, nil, nil])
+        let viewModel = OriginalEmailLoadViewModel(
+            originalEmailSourceLoader: loader,
+            loadTimeout: 0.01,
+            recoveringDelay: 0.005,
+            maxAutoRetryAttempts: 2,
+            autoRetryDelay: 0.001,
+            autoRetryTimeout: 0.02
+        )
+
+        await viewModel.loadOriginalEmail(for: makeRequest(messageId: "auto-retry-missing"))
+
+        XCTAssertEqual(viewModel.loadState, .unavailable)
+        XCTAssertEqual(loader.observedTimeouts, [0.01, 0.02, 0.02])
     }
 
     private func makeRequest(messageId: String) -> OriginalEmailLoadRequest {

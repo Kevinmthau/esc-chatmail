@@ -166,15 +166,17 @@ enum RawEmailSourceSanitizer {
         var index = 0
         while index < lines.count {
             let line = lines[index]
-            let lower = line.lowercased()
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
 
-            guard matchingContentType(lower) else {
+            if line.isEmpty ||
+                isAnyBoundaryLine(trimmed, preferredBoundary: boundary, knownBoundaries: knownBoundaries) ||
+                !isHeaderLine(line) {
                 index += 1
                 continue
             }
 
-            var partHeaders: [String] = [line]
-            var bodyStart = index + 1
+            var partHeaders: [String] = []
+            var bodyStart = index
 
             while bodyStart < lines.count {
                 let headerLine = lines[bodyStart]
@@ -189,7 +191,16 @@ enum RawEmailSourceSanitizer {
                     continue
                 }
 
+                partHeaders.removeAll()
                 break
+            }
+
+            guard !partHeaders.isEmpty,
+                  unfoldedHeaderLines(partHeaders)
+                .map({ $0.lowercased() })
+                .contains(where: matchingContentType) else {
+                index = max(bodyStart, index + 1)
+                continue
             }
 
             var bodyLines: [String] = []
@@ -219,6 +230,25 @@ enum RawEmailSourceSanitizer {
         }
 
         return nil
+    }
+
+    private static func unfoldedHeaderLines(_ headers: [String]) -> [String] {
+        var unfolded: [String] = []
+
+        for header in headers {
+            if header.hasPrefix(" ") || header.hasPrefix("\t") {
+                if let last = unfolded.indices.last {
+                    unfolded[last] += " " + header.trimmingCharacters(in: .whitespacesAndNewlines)
+                } else {
+                    unfolded.append(header.trimmingCharacters(in: .whitespacesAndNewlines))
+                }
+                continue
+            }
+
+            unfolded.append(header)
+        }
+
+        return unfolded
     }
 
     private static func containsEmbeddedMimeScaffolding(_ text: String) -> Bool {

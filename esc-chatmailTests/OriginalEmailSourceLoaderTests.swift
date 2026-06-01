@@ -347,6 +347,45 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
         XCTAssertTrue(source.html?.contains("Raw original") == true)
     }
 
+    func testLoadOriginalEmailSource_rawEmbeddedHTMLSavesMessageFileAndSkipsRecovery() async throws {
+        let messageId = "original-klaviyo-raw-source-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let firstSource = await loader.loadOriginalEmailSource(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: klaviyoStyleRawMultipartAlternativeSource(),
+            senderEmail: "newsletter@flamingoestate.example",
+            subject: "A bright note from Flamingo Estate",
+            timeout: 5.0
+        )
+        let first = try XCTUnwrap(firstSource)
+
+        XCTAssertEqual(first.presentation, .html)
+        XCTAssertEqual(first.sourceKind, .html)
+        XCTAssertEqual(first.sourceLocation, .rawSourceHTML)
+        XCTAssertTrue(first.html?.contains("Roma Heirloom Tomato Candle") == true)
+        XCTAssertFalse(first.html?.contains("Content-Type: text/plain") == true)
+        XCTAssertTrue(contentHandler.loadHTML(for: messageId)?.contains("Roma Heirloom Tomato Candle") == true)
+        XCTAssertEqual(recoveryService.recoveryRequestCount, 0)
+
+        let secondSource = await loader.loadOriginalEmailSource(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: nil,
+            senderEmail: "newsletter@flamingoestate.example",
+            subject: "A bright note from Flamingo Estate",
+            timeout: 5.0
+        )
+        let second = try XCTUnwrap(secondSource)
+
+        XCTAssertEqual(second.presentation, .html)
+        XCTAssertEqual(second.sourceKind, .html)
+        XCTAssertEqual(second.sourceLocation, .messageFile)
+        XCTAssertTrue(second.html?.contains("Roma Heirloom Tomato Candle") == true)
+        XCTAssertEqual(recoveryService.recoveryRequestCount, 0)
+    }
+
     func testLoadOriginalEmailSource_recoveryUpgradesPlainTextWithoutStaleCache() async throws {
         let messageId = "original-recovery-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }
@@ -521,6 +560,50 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
         """
     }
 
+    private func klaviyoStyleRawMultipartAlternativeSource() -> String {
+        """
+        From: Flamingo Estate <newsletter@flamingoestate.example>
+        To: person@example.com
+        Subject: A bright note from Flamingo Estate
+        MIME-Version: 1.0
+        Content-Type: multipart/alternative; boundary="===============728914537882421=="
+
+        --===============728914537882421==
+        Content-Type: text/plain; charset="UTF-8"
+        Content-Transfer-Encoding: quoted-printable
+
+        Plain fallback should not appear in the original HTML.
+        Roma Heirloom Tomato Candle
+
+        --===============728914537882421==
+        Content-Transfer-Encoding: quoted-printable
+        Content-Type: text/html; charset="UTF-8"
+
+        <!doctype html>
+        <html>
+        <body>
+          <div style=3D"display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">
+            A bright note from Flamingo Estate &zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;
+          </div>
+          <table role=3D"presentation" width=3D"100%">
+            <tr>
+              <td><img src=3D"https://d3k81ch9hvuctc.cloudfront.net/company/flamingo/header.gif" alt=3D"Flamingo Estate"></td>
+            </tr>
+            <tr>
+              <td>
+                <img src=3D"https://cdn.shopify.com/s/files/1/0000/products/tomato-candle.png?v=3D1712345678" alt=3D"Roma Heirloom Tomato Candle">
+                <h1>Roma Heirloom Tomato Candle</h1>
+                <p>Sun-warmed leaves, garden vines, and a green finish.</p>
+              </td>
+            </tr>
+          </table>
+        </body>
+        </html>
+
+        --===============728914537882421==--
+        """
+    }
+
     private func makeLoader(
         renderedMessageCache: RenderedMessageCache = RenderedMessageCache()
     ) -> OriginalEmailSourceLoader {
@@ -539,9 +622,16 @@ private final class MutableRecoveryService: HTMLContentRecovering, @unchecked Se
     private let lock = NSLock()
     private let contentHandler: HTMLContentHandler
     private var htmlByMessageID: [String: String] = [:]
+    private var recoveryRequests = 0
 
     init(contentHandler: HTMLContentHandler) {
         self.contentHandler = contentHandler
+    }
+
+    var recoveryRequestCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return recoveryRequests
     }
 
     func setHTML(_ html: String, for messageId: String) {
@@ -552,6 +642,7 @@ private final class MutableRecoveryService: HTMLContentRecovering, @unchecked Se
 
     func recoverHTMLContent(messageId: String) async -> String? {
         lock.lock()
+        recoveryRequests += 1
         let html = htmlByMessageID[messageId]
         lock.unlock()
 

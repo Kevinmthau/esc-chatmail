@@ -100,6 +100,20 @@ final class RawEmailSourceSanitizerTests: XCTestCase {
         XCTAssertFalse(extracted?.contains("Content-Type: text/plain") == true)
     }
 
+    func testExtractHTMLText_klaviyoStyleRawSource_extractsDecodedHTMLBody() {
+        let extracted = RawEmailSourceSanitizer.extractHTMLText(from: klaviyoStyleRawNewsletterEmail)
+
+        XCTAssertNotNil(extracted)
+        XCTAssertTrue(extracted?.contains("Roma Heirloom Tomato Candle") == true)
+        XCTAssertTrue(extracted?.contains("Flamingo Estate") == true)
+        XCTAssertTrue(extracted?.contains("https://cdn.shopify.com/s/files/1/0000/products/tomato-candle.png?v=1712345678") == true)
+        XCTAssertTrue(extracted?.contains("https://d3k81ch9hvuctc.cloudfront.net/company/flamingo/header.gif") == true)
+        XCTAssertFalse(extracted?.contains("Content-Type: text/plain") == true)
+        XCTAssertFalse(extracted?.contains("Content-Transfer-Encoding: quoted-printable") == true)
+        XCTAssertFalse(extracted?.contains("===============728914537882421==") == true)
+        XCTAssertFalse(extracted?.contains("Plain fallback should not appear") == true)
+    }
+
     func testExtractDisplayText_rawMultipartSource_withQuestionMarkBoundary_extractsPlainTextBody() {
         let extracted = RawEmailSourceSanitizer.extractDisplayText(from: rawMultipartEmailWithQuestionMarkBoundary)
 
@@ -351,6 +365,63 @@ final class RawEmailSourceSanitizerTests: XCTestCase {
         </html>
 
         --newsletter-boundary-123--
+        """
+    }
+
+    private var klaviyoStyleRawNewsletterEmail: String {
+        """
+        Delivered-To: person@example.com
+        Received: by 2002:a05:6e04:71a:b0:3ac:63b9:5e27 with SMTP id o26csp2106356imz;
+                Mon, 18 May 2026 09:12:31 -0700 (PDT)
+        X-Received: by 2002:a05:6214:4f02:b0:8ae:652b:e3c4 with SMTP id 6a1803df08f44;
+                Mon, 18 May 2026 09:12:31 -0700 (PDT)
+        Return-Path: <bounce-12345@email.flamingoestate.example>
+        MIME-Version: 1.0
+        Subject: A bright note from Flamingo Estate
+        Content-Type: multipart/alternative; boundary="===============728914537882421=="
+
+        --===============728914537882421==
+        Content-Type: text/plain; charset="UTF-8"
+        Content-Transfer-Encoding: quoted-printable
+
+        Plain fallback should not appear in extracted HTML.
+        Roma Heirloom Tomato Candle
+        https://example.com/products/tomato-candle
+
+        --===============728914537882421==
+        Content-Transfer-Encoding: quoted-printable
+        Content-Type: text/html; charset="UTF-8"
+
+        <!doctype html>
+        <html>
+        <body>
+          <div style=3D"display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">
+            A bright note from Flamingo Estate &zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;
+          </div>
+          <table role=3D"presentation" width=3D"100%">
+            <tr>
+              <td>
+                <img src=3D"https://d3k81ch9hvuctc.cloudfront.net/company/flamingo/header.gif" alt=3D"Flamingo Estate">
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <img src=3D"https://cdn.shopify.com/s/files/1/0000/products/tomato-candle.png?v=3D1712345678" alt=3D"Roma Heirloom Tomato Candle">
+                <h1>Roma Heirloom Tomato Candle</h1>
+                <p>Sun-warmed leaves, garden vines, and a green finish.</p>
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <img src=3D"https://cdn.shopify.com/s/files/1/0000/products/tomato-candle-detail.png?v=3D1712345678" alt=3D"Tomato candle detail">
+                <a href=3D"https://example.com/products/tomato-candle">Shop now</a>
+              </td>
+            </tr>
+          </table>
+        </body>
+        </html>
+
+        --===============728914537882421==--
         """
     }
 

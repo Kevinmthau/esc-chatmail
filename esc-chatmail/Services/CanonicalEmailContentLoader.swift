@@ -73,9 +73,10 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
         if let bodyText,
            let rawSourceHTML = RawEmailSourceSanitizer.extractHTMLText(from: bodyText),
            let html = canonicalHTMLSource(from: rawSourceHTML) {
-            _ = contentHandler.saveHTML(html, for: messageId)
-            HTMLContentLoader.shared.invalidate(messageId: messageId)
-            await ProcessedTextCache.shared.invalidate(messageId: messageId)
+            if contentHandler.saveHTML(html, for: messageId) != nil {
+                await HTMLContentLoader.shared.invalidateContent(messageId: messageId)
+                await ProcessedTextCache.shared.invalidate(messageId: messageId)
+            }
             return logAndReturn(
                 CanonicalEmailContent(
                     html: html,

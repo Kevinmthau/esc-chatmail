@@ -44,6 +44,66 @@ final class HTMLContentRecoveryServiceTests: XCTestCase {
         XCTAssertTrue(contentHandler.loadHTML(for: messageId)?.contains("AMNH_HTML_TOKEN") == true)
     }
 
+    func testRecoverHTMLContent_postsContentSourceDidChangeNotification() async {
+        let messageId = "html-recovery-source-change-\(UUID().uuidString)"
+        let attachmentId = "html-body-\(UUID().uuidString)"
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <h1>AMNH_SOURCE_CHANGE_TOKEN</h1>
+          <p>Recovered newsletter body.</p>
+        </body>
+        </html>
+        """
+        let expectedSourceSignature = CanonicalEmailContent(
+            html: html,
+            plainText: nil,
+            sourceKind: .recoveredHTML,
+            sourceLocation: .recoveredHTML
+        ).sourceSignature
+
+        let mockAPIClient = MockGmailAPIClient()
+        mockAPIClient.getMessageResponses[messageId] = makeHTMLAttachmentMessage(
+            id: messageId,
+            attachmentId: attachmentId
+        )
+        mockAPIClient.attachmentResponses["\(messageId):\(attachmentId)"] = Data(html.utf8)
+
+        let contentHandler = HTMLContentHandler()
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let service = HTMLContentRecoveryService(
+            gmailAPIClientProvider: { mockAPIClient },
+            contentHandler: contentHandler
+        )
+
+        let sourceChangeExpectation = expectation(description: "Recovered HTML source change notification posted")
+        let observer = NotificationCenter.default.addObserver(
+            forName: HTMLContentLoader.contentSourceDidChangeNotification,
+            object: nil,
+            queue: nil
+        ) { notification in
+            guard notification.userInfo?[HTMLContentLoader.contentSourceDidChangeMessageIdUserInfoKey] as? String == messageId else {
+                return
+            }
+            XCTAssertEqual(
+                notification.userInfo?[HTMLContentLoader.contentSourceDidChangeSourceSignatureUserInfoKey] as? String,
+                expectedSourceSignature
+            )
+            XCTAssertTrue(Thread.isMainThread)
+            sourceChangeExpectation.fulfill()
+        }
+        defer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+
+        let recoveredHTML = await service.recoverHTMLContent(messageId: messageId)
+
+        XCTAssertEqual(recoveredHTML, html)
+        await fulfillment(of: [sourceChangeExpectation], timeout: 1.0)
+    }
+
     func testRecoverHTMLContent_textBodyContainingMimeOnlyRawSource_extractsEmbeddedHTML() async {
         let messageId = "html-recovery-mime-only-\(UUID().uuidString)"
         let rawSource = """

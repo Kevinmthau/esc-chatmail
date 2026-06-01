@@ -87,9 +87,22 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
             }
 
             // 3. Save to disk for future use
-            _ = contentHandler.saveHTML(html, for: messageId)
-            HTMLContentLoader.shared.invalidate(messageId: messageId)
-            await ProcessedTextCache.shared.invalidate(messageId: messageId)
+            if contentHandler.saveHTML(html, for: messageId) != nil {
+                await HTMLContentLoader.shared.invalidateContent(messageId: messageId)
+                await ProcessedTextCache.shared.invalidate(messageId: messageId)
+                let sourceSignature = CanonicalEmailContent(
+                    html: html,
+                    plainText: nil,
+                    sourceKind: .recoveredHTML,
+                    sourceLocation: .recoveredHTML
+                ).sourceSignature
+                await MainActor.run {
+                    HTMLContentLoader.postContentSourceDidChange(
+                        messageId: messageId,
+                        sourceSignature: sourceSignature
+                    )
+                }
+            }
             Log.info("Recovered HTML content for message \(messageId)", category: .ui)
             return .html(html)
         } catch {

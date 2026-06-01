@@ -82,17 +82,26 @@ final class OriginalEmailLoadViewModel: ObservableObject {
     private let originalEmailSourceLoader: any OriginalEmailSourceLoading
     private let loadTimeout: TimeInterval
     private let recoveringDelay: TimeInterval
+    private let maxAutoRetryAttempts: Int
+    private let autoRetryDelay: TimeInterval
+    private let autoRetryTimeout: TimeInterval
     private var activeBaseLoadKey: String?
     private var activeLoadTaskKey: String?
 
     init(
         originalEmailSourceLoader: any OriginalEmailSourceLoading = OriginalEmailSourceLoader.shared,
         loadTimeout: TimeInterval = 5.0,
-        recoveringDelay: TimeInterval = 5.0
+        recoveringDelay: TimeInterval = 5.0,
+        maxAutoRetryAttempts: Int = 1,
+        autoRetryDelay: TimeInterval = 0.5,
+        autoRetryTimeout: TimeInterval = 1.0
     ) {
         self.originalEmailSourceLoader = originalEmailSourceLoader
         self.loadTimeout = loadTimeout
         self.recoveringDelay = recoveringDelay
+        self.maxAutoRetryAttempts = max(0, maxAutoRetryAttempts)
+        self.autoRetryDelay = max(0, autoRetryDelay)
+        self.autoRetryTimeout = max(0, autoRetryTimeout)
     }
 
     func loadOriginalEmail(for request: OriginalEmailLoadRequest) async -> OriginalEmailSource? {
@@ -120,14 +129,22 @@ final class OriginalEmailLoadViewModel: ObservableObject {
         }
         defer { recoveringTask.cancel() }
 
-        let source = await originalEmailSourceLoader.loadOriginalEmailSource(
-            messageId: request.messageId,
-            bodyStorageURI: request.bodyStorageURI,
-            bodyText: request.bodyText,
-            senderEmail: request.senderEmail,
-            subject: request.subject,
+        var source = await loadSource(
+            for: request,
             timeout: loadTimeout
         )
+
+        guard !Task.isCancelled,
+              activeLoadTaskKey == taskLoadKey else {
+            return nil
+        }
+
+        if source == nil, !shouldPreserveLoadedContent {
+            source = await autoRetryMissingSourceIfNeeded(
+                for: request,
+                taskLoadKey: taskLoadKey
+            )
+        }
 
         guard !Task.isCancelled,
               activeLoadTaskKey == taskLoadKey else {
@@ -151,6 +168,59 @@ final class OriginalEmailLoadViewModel: ObservableObject {
 
     func reloadPreservingContent() {
         reloadGeneration &+= 1
+    }
+
+    private func loadSource(
+        for request: OriginalEmailLoadRequest,
+        timeout: TimeInterval
+    ) async -> OriginalEmailSource? {
+        await originalEmailSourceLoader.loadOriginalEmailSource(
+            messageId: request.messageId,
+            bodyStorageURI: request.bodyStorageURI,
+            bodyText: request.bodyText,
+            senderEmail: request.senderEmail,
+            subject: request.subject,
+            timeout: timeout
+        )
+    }
+
+    private func autoRetryMissingSourceIfNeeded(
+        for request: OriginalEmailLoadRequest,
+        taskLoadKey: String
+    ) async -> OriginalEmailSource? {
+        guard maxAutoRetryAttempts > 0 else {
+            return nil
+        }
+
+        if case .loading = loadState {
+            loadState = .recovering
+        }
+
+        for _ in 0..<maxAutoRetryAttempts {
+            guard !Task.isCancelled,
+                  activeLoadTaskKey == taskLoadKey else {
+                return nil
+            }
+
+            let retryDelayNanoseconds = UInt64(autoRetryDelay * 1_000_000_000)
+            if retryDelayNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: retryDelayNanoseconds)
+            }
+
+            guard !Task.isCancelled,
+                  activeLoadTaskKey == taskLoadKey else {
+                return nil
+            }
+
+            if let source = await loadSource(
+                for: request,
+                timeout: autoRetryTimeout
+            ) {
+                return source
+            }
+        }
+
+        return nil
     }
 
     private func markRecoveringIfCurrent(taskLoadKey: String) {
