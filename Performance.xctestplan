@@ -1,0 +1,31 @@
+{
+  "configurations" : [
+    {
+      "id" : "7E5701A0-0000-0000-0000-0000000000A2",
+      "name" : "Configuration 1",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:esc-chatmail.xcodeproj",
+      "identifier" : "F9399FE02E66521800A7578D",
+      "name" : "esc-chatmail"
+    }
+  },
+  "testTargets" : [
+    {
+      "selectedTests" : [
+        "PerformanceRegressionTests"
+      ],
+      "target" : {
+        "containerPath" : "container:esc-chatmail.xcodeproj",
+        "identifier" : "F9399FF12E66521800A7578D",
+        "name" : "esc-chatmailTests"
+      }
+    }
+  ],
+  "version" : 1
+}

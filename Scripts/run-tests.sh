@@ -30,9 +30,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "${RUN_PERFORMANCE_TESTS}" == "true" ]]; then
-  ARGS+=("-only-testing:esc-chatmailTests/PerformanceRegressionTests")
+  # Performance test plan: runs only PerformanceRegressionTests.
+  ARGS+=("-testPlan" "Performance")
 else
-  ARGS+=("-skip-testing:esc-chatmailTests/PerformanceRegressionTests")
+  # Default test plan: runs the suite with PerformanceRegressionTests excluded
+  # (timing-sensitive). This is the same plan the Xcode Cloud Test action uses.
+  ARGS+=("-testPlan" "esc-chatmail")
 fi
 
 xcodebuild test \

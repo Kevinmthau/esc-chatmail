@@ -1,0 +1,57 @@
+# SwiftLint configuration — advisory (warnings only) for esc-chatmail.
+#
+# Rules default to `warning` severity, and we intentionally never set
+# `severity: error` here, so SwiftLint never breaks a build or a CI run. The limits
+# below are deliberately loose: the goal of this first adoption pass on a large, mature
+# codebase is actionable signal, not a wall of noise. Tighten over time.
+
+included:
+  - esc-chatmail
+
+excluded:
+  - esc-chatmailTests
+  - esc-chatmailUITests
+  - .build
+  - build
+  - DerivedData
+  - "**/*.generated.swift"
+  - esc-chatmail.xcodeproj
+
+# Quiet the rules that would otherwise flood a large existing codebase. Several of
+# these (file_length, type_body_length, function_body_length, cyclomatic_complexity)
+# would fire loudly on the known monolithic files — useful future signal for the
+# deferred decomposition work, but kept advisory and quiet for now.
+disabled_rules:
+  - line_length
+  - file_length
+  - type_body_length
+  - function_body_length
+  - cyclomatic_complexity
+  - function_parameter_count
+  - identifier_name
+  - todo
+  # Dominant cosmetic finding (200+ hits) — drowns out more meaningful signal. It's
+  # trivially auto-fixable later via `swiftlint --fix`; re-enable once cleaned up.
+  - trailing_whitespace
+
+# Keep this pass strictly advisory: a few rules otherwise default to `error` severity,
+# which would fail the optional Xcode build phase and show as red errors. Force every
+# finding to a non-blocking warning so `swiftlint lint` exits 0.
+force_try:
+  severity: warning
+force_cast:
+  severity: warning
+large_tuple:
+  warning: 2
+  error: 99
+type_name:
+  max_length:
+    warning: 50
+    error: 1000
+  excluded:
+    # The @main App type intentionally mirrors the `esc-chatmail` module name.
+    - esc_chatmailApp
+
+# `xcode` formatting renders as `file:line: warning:` — parsed into inline warnings by
+# Xcode and readable in Xcode Cloud build logs.
+reporter: "xcode"

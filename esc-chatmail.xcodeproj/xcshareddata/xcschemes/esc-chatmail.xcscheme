@@ -41,28 +41,15 @@
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
       shouldUseLaunchSchemeArgsEnv = "YES">
-      <Testables>
-         <TestableReference
-            skipped = "NO"
-            parallelizable = "YES">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "F9399FF12E66521800A7578D"
-               BuildableName = "esc-chatmailTests.xctest"
-               BlueprintName = "esc-chatmailTests"
-               ReferencedContainer = "container:esc-chatmail.xcodeproj">
-            </BuildableReference>
-         </TestableReference>
-      </Testables>
-      <MacroExpansion>
-         <BuildableReference
-            BuildableIdentifier = "primary"
-            BlueprintIdentifier = "F9399FE02E66521800A7578D"
-            BuildableName = "esc-chatmail.app"
-            BlueprintName = "esc-chatmail"
-            ReferencedContainer = "container:esc-chatmail.xcodeproj">
-         </BuildableReference>
-      </MacroExpansion>
+      <TestPlans>
+         <TestPlanReference
+            reference = "container:esc-chatmail.xctestplan"
+            default = "YES">
+         </TestPlanReference>
+         <TestPlanReference
+            reference = "container:Performance.xctestplan">
+         </TestPlanReference>
+      </TestPlans>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"
