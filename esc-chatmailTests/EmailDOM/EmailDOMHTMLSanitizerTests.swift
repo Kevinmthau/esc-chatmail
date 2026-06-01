@@ -79,6 +79,136 @@ final class EmailDOMHTMLSanitizerTests: XCTestCase {
         XCTAssertTrue(result.contains("<p>Content</p>"))
     }
 
+    func testSVGPolicy_removesForeignObjectSubtree() throws {
+        let html = #"""
+        <p>Safe before</p>
+        <svg width="100" height="100">
+          <foreignObject width="100" height="100">
+            <body xmlns="http://www.w3.org/1999/xhtml" onload="steal()">Injected HTML</body>
+          </foreignObject>
+        </svg>
+        <p>Safe after</p>
+        """#
+
+        let result = try EmailDOMHTMLSanitizer.removeDangerousElementsAndEventHandlers(from: html)
+        let lowercasedResult = result.lowercased()
+
+        XCTAssertFalse(lowercasedResult.contains("<svg"))
+        XCTAssertFalse(lowercasedResult.contains("<foreignobject"))
+        XCTAssertFalse(result.contains("Injected HTML"))
+        XCTAssertFalse(lowercasedResult.contains("onload"))
+        XCTAssertTrue(result.contains("<p>Safe before</p>"))
+        XCTAssertTrue(result.contains("<p>Safe after</p>"))
+    }
+
+    func testSVGPolicy_removesAnimateElements() throws {
+        let html = #"""
+        <p>Safe before</p>
+        <svg>
+          <circle r="10">
+            <animate attributeName="r" from="10" to="50" begin="0s" dur="1s"></animate>
+            <animateTransform attributeName="transform" type="rotate" from="0" to="360"></animateTransform>
+          </circle>
+        </svg>
+        <p>Safe after</p>
+        """#
+
+        let result = try EmailDOMHTMLSanitizer.removeDangerousElementsAndEventHandlers(from: html)
+        let lowercasedResult = result.lowercased()
+
+        XCTAssertFalse(lowercasedResult.contains("<svg"))
+        XCTAssertFalse(lowercasedResult.contains("<animate"))
+        XCTAssertFalse(lowercasedResult.contains("attributename"))
+        XCTAssertTrue(result.contains("<p>Safe before</p>"))
+        XCTAssertTrue(result.contains("<p>Safe after</p>"))
+    }
+
+    func testSVGPolicy_removesSetElements() throws {
+        let html = #"""
+        <p>Safe before</p>
+        <svg>
+          <set attributeName="href" to="javascript:alert(1)" begin="0s"></set>
+        </svg>
+        <p>Safe after</p>
+        """#
+
+        let result = try EmailDOMHTMLSanitizer.removeDangerousElementsAndEventHandlers(from: html)
+        let lowercasedResult = result.lowercased()
+
+        XCTAssertFalse(lowercasedResult.contains("<svg"))
+        XCTAssertFalse(lowercasedResult.contains("<set"))
+        XCTAssertFalse(lowercasedResult.contains("javascript:"))
+        XCTAssertTrue(result.contains("<p>Safe before</p>"))
+        XCTAssertTrue(result.contains("<p>Safe after</p>"))
+    }
+
+    func testSVGPolicy_removesHrefAndXlinkReferences() throws {
+        let html = #"""
+        <p>Safe before</p>
+        <svg>
+          <defs><path id="icon" d="M0 0h10v10z"></path></defs>
+          <use href="javascript:alert(1)"></use>
+          <use xlink:href="https://evil.example/sprite.svg#icon"></use>
+          <a href="https://evil.example/phish"><text>Click</text></a>
+        </svg>
+        <p>Safe after</p>
+        """#
+
+        let result = try EmailDOMHTMLSanitizer.removeDangerousElementsAndEventHandlers(from: html)
+        let lowercasedResult = result.lowercased()
+
+        XCTAssertFalse(lowercasedResult.contains("<svg"))
+        XCTAssertFalse(lowercasedResult.contains("<use"))
+        XCTAssertFalse(lowercasedResult.contains("href="))
+        XCTAssertFalse(lowercasedResult.contains("xlink:href"))
+        XCTAssertFalse(lowercasedResult.contains("javascript:"))
+        XCTAssertFalse(lowercasedResult.contains("evil.example"))
+        XCTAssertTrue(result.contains("<p>Safe before</p>"))
+        XCTAssertTrue(result.contains("<p>Safe after</p>"))
+    }
+
+    func testSVGPolicy_removesExternalImageReferences() throws {
+        let html = #"""
+        <p>Safe before</p>
+        <svg>
+          <image href="https://evil.example/pixel.png" width="1" height="1"></image>
+          <feImage xlink:href="https://evil.example/filter.png"></feImage>
+        </svg>
+        <p>Safe after</p>
+        """#
+
+        let result = try EmailDOMHTMLSanitizer.removeDangerousElementsAndEventHandlers(from: html)
+        let lowercasedResult = result.lowercased()
+
+        XCTAssertFalse(lowercasedResult.contains("<svg"))
+        XCTAssertFalse(lowercasedResult.contains("<image"))
+        XCTAssertFalse(lowercasedResult.contains("<feimage"))
+        XCTAssertFalse(lowercasedResult.contains("href="))
+        XCTAssertFalse(lowercasedResult.contains("evil.example"))
+        XCTAssertTrue(result.contains("<p>Safe before</p>"))
+        XCTAssertTrue(result.contains("<p>Safe after</p>"))
+    }
+
+    func testSVGPolicy_removesOrphanReferenceElementsWithAttributes() throws {
+        let html = #"""
+        <p>Safe before</p>
+        <use href="javascript:alert(1)"></use>
+        <image href="https://evil.example/pixel.png" width="1" height="1"></image>
+        <p>Safe after</p>
+        """#
+
+        let result = try EmailDOMHTMLSanitizer.removeDangerousElementsAndEventHandlers(from: html)
+        let lowercasedResult = result.lowercased()
+
+        XCTAssertFalse(lowercasedResult.contains("<use"))
+        XCTAssertFalse(lowercasedResult.contains("<image"))
+        XCTAssertFalse(lowercasedResult.contains("href="))
+        XCTAssertFalse(lowercasedResult.contains("evil.example"))
+        XCTAssertFalse(lowercasedResult.contains("javascript:"))
+        XCTAssertTrue(result.contains("<p>Safe before</p>"))
+        XCTAssertTrue(result.contains("<p>Safe after</p>"))
+    }
+
     func testSafeLayoutAndEmailAttributes_preserved() throws {
         let html = """
         <table id="container" class="layout" role="presentation" data-template="receipt" aria-label="Receipt" width="600" cellpadding="0" cellspacing="0" border="0" style="width: 100%">
@@ -229,6 +359,14 @@ final class EmailDOMHTMLSanitizerTests: XCTestCase {
 
     func testPlainTextAngleBracketEmailAddress_returnsUnchanged() throws {
         let text = "Contact <alice@example.com> for details"
+
+        let result = try EmailDOMHTMLSanitizer.removeDangerousElementsAndEventHandlers(from: text)
+
+        XCTAssertEqual(result, text)
+    }
+
+    func testPlainTextAngleBracketSVGChildNames_returnsUnchanged() throws {
+        let text = "Literal placeholders: <set>, <use>, <image>, and <animate>"
 
         let result = try EmailDOMHTMLSanitizer.removeDangerousElementsAndEventHandlers(from: text)
 
@@ -409,6 +547,30 @@ final class EmailDOMHTMLSanitizerPipelineTests: XCTestCase {
         """#
 
         assertFullSanitizationInvariants(HTMLSanitizerService.shared.sanitize(html))
+    }
+
+    func testFullPipelineRemovesInlineSVGReferences() {
+        let html = #"""
+        <p>Body</p>
+        <svg>
+          <use href="#local-symbol"></use>
+          <use xlink:href="https://evil.example/sprite.svg#icon"></use>
+          <image href="https://evil.example/pixel.png"></image>
+        </svg>
+        """#
+
+        let result = HTMLSanitizerService.shared.sanitize(
+            html,
+            rewriteModernImageFormatHints: false
+        )
+        let lowercasedResult = result.lowercased()
+
+        XCTAssertTrue(result.contains("<p>Body</p>"))
+        XCTAssertFalse(lowercasedResult.contains("<svg"))
+        XCTAssertFalse(lowercasedResult.contains("<use"))
+        XCTAssertFalse(lowercasedResult.contains("<image"))
+        XCTAssertFalse(lowercasedResult.contains("href="))
+        XCTAssertFalse(lowercasedResult.contains("evil.example"))
     }
 
     private func assertFullSanitizationInvariants(

@@ -13,24 +13,36 @@ enum EmailDOMHTMLSanitizer {
         "frame", "frameset", "iframe", "base", "basefont",
         "form", "input", "button", "select", "textarea",
         "option", "optgroup", "fieldset", "legend", "label",
-        "meta", "link"
+        "meta", "link",
+        // Inline SVG is removed as a whole in email HTML. SVG has active
+        // subcontent (`foreignObject`, animations, `set`) and URL-bearing
+        // reference elements (`use`, `image`, `feImage`) whose safe subset is
+        // not needed by the app today, so we do not attempt a partial allowlist.
+        "svg", "foreignobject", "animate", "animatemotion", "animatetransform",
+        "set", "use", "image", "feimage"
     ]
 
     private static let dangerousTagSet = Set(dangerousTags)
-    private static let knownHTMLTagSet = dangerousTagSet.union([
-        "a", "abbr", "address", "area", "article", "aside", "audio",
-        "b", "bdi", "bdo", "blockquote", "body", "br",
-        "caption", "center", "cite", "code", "col", "colgroup",
-        "data", "datalist", "dd", "del", "details", "dfn", "dialog", "dir", "div", "dl", "dt",
-        "em", "figcaption", "figure", "font", "footer",
-        "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hgroup", "hr", "html",
-        "i", "img", "ins", "kbd", "li", "main", "map", "mark", "menu", "meter",
-        "nav", "ol", "p", "picture", "pre", "progress",
-        "q", "rp", "rt", "ruby", "s", "samp", "section", "small", "source",
-        "span", "strike", "strong", "style", "sub", "summary", "sup", "svg",
-        "table", "tbody", "td", "template", "tfoot", "th", "thead", "time", "title", "tr", "track",
-        "u", "ul", "var", "video", "wbr"
-    ])
+    private static let dangerousTagsRequiringMarkupEvidence: Set<String> = [
+        "foreignobject", "animate", "animatemotion", "animatetransform",
+        "set", "use", "image", "feimage"
+    ]
+    private static let knownHTMLTagSet = dangerousTagSet
+        .subtracting(dangerousTagsRequiringMarkupEvidence)
+        .union([
+            "a", "abbr", "address", "area", "article", "aside", "audio",
+            "b", "bdi", "bdo", "blockquote", "body", "br",
+            "caption", "center", "cite", "code", "col", "colgroup",
+            "data", "datalist", "dd", "del", "details", "dfn", "dialog", "dir", "div", "dl", "dt",
+            "em", "figcaption", "figure", "font", "footer",
+            "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hgroup", "hr", "html",
+            "i", "img", "ins", "kbd", "li", "main", "map", "mark", "menu", "meter",
+            "nav", "ol", "p", "picture", "pre", "progress",
+            "q", "rp", "rt", "ruby", "s", "samp", "section", "small", "source",
+            "span", "strike", "strong", "style", "sub", "summary", "sup",
+            "table", "tbody", "td", "template", "tfoot", "th", "thead", "time", "title", "tr", "track",
+            "u", "ul", "var", "video", "wbr"
+        ])
     private static let dangerousSelector = dangerousTags.joined(separator: ",")
 
     static func removeDangerousElementsAndEventHandlers(from html: String) throws -> String {
