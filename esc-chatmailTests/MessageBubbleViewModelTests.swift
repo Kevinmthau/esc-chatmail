@@ -367,6 +367,18 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
         XCTAssertEqual(result, "Loaded compatibility text")
     }
 
+    func testResolvedVisibleText_usesLegacyFallbackWhenChatPreviewAndLoadedTextMissing() throws {
+        let result = try XCTUnwrap(
+            MessageContentView.resolvedVisibleText(
+                fullTextContent: nil,
+                fallbackPreviewText: "Legacy compact fallback",
+                chatPreviewText: nil
+            )
+        )
+
+        XCTAssertEqual(result, "Legacy compact fallback")
+    }
+
     func testResolvedVisibleText_prefersChatPreviewBeforeLegacyFallback() throws {
         let result = try XCTUnwrap(
             MessageContentView.resolvedVisibleText(

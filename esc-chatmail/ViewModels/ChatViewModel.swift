@@ -252,9 +252,11 @@ final class ChatViewModel: ObservableObject {
     /// Call from ChatView.onAppear with recent messages.
     func prefetchRecentContent(messageIds: [String], senderEmails: [String]) {
         // Only old records without chatPreviewText should reach this text prefetch path.
-        let processedTextCache = self.processedTextCache
-        prefetchTaskManager.runDetached("prefetchText") {
-            await processedTextCache.prefetch(messageIds: messageIds)
+        if !messageIds.isEmpty {
+            let processedTextCache = self.processedTextCache
+            prefetchTaskManager.runDetached("prefetchText") {
+                await processedTextCache.prefetch(messageIds: messageIds)
+            }
         }
 
         // Batch prefetch contacts to avoid thundering herd on first load

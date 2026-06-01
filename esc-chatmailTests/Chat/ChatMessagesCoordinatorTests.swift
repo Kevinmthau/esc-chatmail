@@ -288,6 +288,59 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         XCTAssertEqual(prefetchedSenderEmailBatches, [expectedPrefetchMessages.compactMap(\.senderEmail)])
     }
 
+    func testHandleDisplayedMessagesChange_prefetchesOnlyMessagesMissingChatPreviewText() async throws {
+        let senderEmails = [
+            "has-preview@example.com",
+            "blank-preview@example.com",
+            "missing-preview@example.com",
+            "also-has-preview@example.com"
+        ]
+        let (_, messages) = try makeConversationWithMessages(senderEmails: senderEmails)
+        messages[0].chatPreviewText = "Stored chat preview"
+        messages[1].chatPreviewText = " \n\t "
+        messages[2].chatPreviewText = nil
+        messages[3].chatPreviewText = "Another stored preview"
+        try viewContext.save()
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+
+        var prefetchedMessageBatches: [[String]] = []
+        var prefetchedSenderEmailBatches: [[String]] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { _ in },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { messageIds, senderEmails in
+                prefetchedMessageBatches.append(messageIds)
+                prefetchedSenderEmailBatches.append(senderEmails)
+            },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        coordinator.handleDisplayedMessagesChange(
+            oldIDs: [],
+            newIDs: rows.map(\.objectID),
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            messageCount: messages.count,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+
+        await waitUntil {
+            prefetchedMessageBatches.count == 1
+        }
+
+        XCTAssertEqual(prefetchedMessageBatches, [[messages[1].id, messages[2].id]])
+        XCTAssertEqual(prefetchedSenderEmailBatches, [senderEmails])
+    }
+
     func testScrollHandlers_doNotScheduleBottomAnchorsBeforeInitialWindowLoaded() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",
