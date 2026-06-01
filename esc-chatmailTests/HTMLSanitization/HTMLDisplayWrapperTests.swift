@@ -77,6 +77,23 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertFalse(darkOriginal.contains("background-color: #1c1c1e"))
     }
 
+    func testWrapHTMLForDisplay_existingDocument_darkPreviewUsesReadableFallbackStyling() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <p>Unstyled forwarded text</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(html, isDarkMode: true, displayPurpose: .preview)
+
+        XCTAssertTrue(result.contains("background-color: #1c1c1e;"))
+        XCTAssertTrue(result.contains(#"p:not([style*="color"])"#))
+        XCTAssertTrue(result.contains("color: #ffffff;"))
+    }
+
     func testWrapHTMLForDisplay_existingDocumentWithoutFontStyling_usesAppleMailFallbackTypography() {
         let html = """
         <!DOCTYPE html>

@@ -39,8 +39,10 @@ final class ComposeViewModel: ObservableObject {
     @Published var error: Error?
     @Published var showError = false
     @Published var skippedForwardAttachmentCount = 0
+    @Published private(set) var forwardedPreviewHTML: String?
     private(set) var lastSentConversationReference: ConversationReference?
     private var hasSetupMode = false
+    private var forwardedPreviewIsDarkMode: Bool?
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -83,7 +85,6 @@ final class ComposeViewModel: ObservableObject {
         if case .forward = mode { return true }
         return false
     }
-    var forwardedPreviewHTML: String? { forwardedHTMLBody }
     var forwardedPreviewText: String { forwardedPlainTextBody }
 
     var canSend: Bool {
@@ -164,6 +165,28 @@ final class ComposeViewModel: ObservableObject {
         case .newMessage, .newEmail:
             break
         }
+    }
+
+    func updateForwardedPreviewHTML(isDarkMode: Bool) {
+        guard let forwardedHTMLBody else {
+            forwardedPreviewIsDarkMode = nil
+            if forwardedPreviewHTML != nil {
+                forwardedPreviewHTML = nil
+            }
+            return
+        }
+
+        guard forwardedPreviewHTML == nil || forwardedPreviewIsDarkMode != isDarkMode else {
+            return
+        }
+
+        let wrappedHTML = HTMLSanitizerService.shared.wrapHTMLForDisplay(
+            forwardedHTMLBody,
+            isDarkMode: isDarkMode,
+            displayPurpose: .preview
+        )
+        forwardedPreviewIsDarkMode = isDarkMode
+        forwardedPreviewHTML = wrappedHTML
     }
 
     // MARK: - Delegate Methods (passthrough to services)

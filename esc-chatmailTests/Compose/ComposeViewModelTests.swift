@@ -140,6 +140,48 @@ final class ComposeViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.skippedForwardAttachmentCount, 1)
     }
 
+    func testUpdateForwardedPreviewHTML_cachesWrappedPreviewAndRefreshesForColorScheme() throws {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let forwardModeContext = ComposeForwardModeContext(
+            id: "forward-source-message",
+            initialSubject: "Fwd: Original Subject",
+            forwardedPlainTextBody: "Forwarded body",
+            forwardedHTMLBody: """
+            <!DOCTYPE html>
+            <html>
+            <body><p>Forwarded HTML body</p></body>
+            </html>
+            """,
+            forwardedInlineAttachmentInfos: [],
+            forwardedRegularAttachments: []
+        )
+        let viewModel = ComposeViewModel(
+            mode: .forward(forwardModeContext),
+            dependencies: deps.makeComposeDependencies()
+        )
+
+        viewModel.setupForMode()
+        XCTAssertNil(viewModel.forwardedPreviewHTML)
+
+        viewModel.updateForwardedPreviewHTML(isDarkMode: false)
+        let lightPreview = try XCTUnwrap(viewModel.forwardedPreviewHTML)
+
+        XCTAssertTrue(lightPreview.contains("Forwarded HTML body"))
+        XCTAssertTrue(lightPreview.contains("background-color: #f2f2f7;"))
+
+        viewModel.body = "Typing should not change the cached forwarded preview"
+        viewModel.updateForwardedPreviewHTML(isDarkMode: false)
+
+        XCTAssertEqual(viewModel.forwardedPreviewHTML, lightPreview)
+
+        viewModel.updateForwardedPreviewHTML(isDarkMode: true)
+        let darkPreview = try XCTUnwrap(viewModel.forwardedPreviewHTML)
+
+        XCTAssertTrue(darkPreview.contains("Forwarded HTML body"))
+        XCTAssertTrue(darkPreview.contains("background-color: #1c1c1e;"))
+        XCTAssertNotEqual(darkPreview, lightPreview)
+    }
+
     func testSend_newMessageBuildsParticipantHashOptimisticConversationContext() async {
         let authSession = makeTestAuthSession(userEmail: "me@example.com")
         let coordinator = MockOutboundMessageCoordinator()

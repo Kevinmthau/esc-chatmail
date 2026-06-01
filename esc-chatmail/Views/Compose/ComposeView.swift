@@ -6,6 +6,7 @@ import Contacts
 /// Consolidates NewMessageComposerView and NewMessageView
 struct ComposeView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
 
     @StateObject private var viewModel: ComposeViewModel
     @FocusState private var focusedField: FocusField?
@@ -20,6 +21,10 @@ struct ComposeView: View {
 
     private var iMessageCanvasColor: Color {
         Color(.systemGroupedBackground)
+    }
+
+    private var isDarkMode: Bool {
+        colorScheme == .dark
     }
 
     enum FocusField {
@@ -170,6 +175,7 @@ struct ComposeView: View {
         .onAppear {
             // Setup mode-specific data (forward text, reply recipients, etc.)
             viewModel.setupForMode()
+            viewModel.updateForwardedPreviewHTML(isDarkMode: isDarkMode)
 
             // Auto-focus recipient field after a brief delay
             Task { @MainActor in
@@ -177,6 +183,9 @@ struct ComposeView: View {
                 guard !Task.isCancelled else { return }
                 focusedField = .recipient
             }
+        }
+        .onChange(of: isDarkMode) { _, newValue in
+            viewModel.updateForwardedPreviewHTML(isDarkMode: newValue)
         }
     }
 
@@ -328,8 +337,12 @@ struct ComposeView: View {
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 12)
 
-            if let html = viewModel.forwardedPreviewHTML {
-                BaseEmailWebView(htmlContent: html, mode: .simplePreview)
+            if let previewHTML = viewModel.forwardedPreviewHTML {
+                BaseEmailWebView(
+                    htmlContent: previewHTML,
+                    mode: .simplePreview,
+                    isDarkMode: isDarkMode
+                )
                     .frame(height: 240)
                     .cornerRadius(10)
                     .overlay(
