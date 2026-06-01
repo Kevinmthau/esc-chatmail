@@ -131,6 +131,7 @@ protocol OutboundMessageSendServicing: ComposeSendServicing {
         subject: String?,
         threadId: String?,
         attachments: [OutboundMessageRequest.AttachmentContext],
+        chatPreviewText: String?,
         optimisticConversation: OptimisticConversationReference?
     ) async throws -> OptimisticSendHandle
 
@@ -151,6 +152,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         let htmlBody: String?
         let threadId: String?
         let attachments: [OutboundMessageRequest.AttachmentContext]
+        let chatPreviewText: String?
         let inlineAttachmentInfos: [GmailSendService.AttachmentInfo]
         let optimisticConversation: OptimisticConversationReference?
         let replyMetadata: OutboundMessageRequest.ReplyMetadata?
@@ -193,6 +195,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
             subject: preparedSend.subject,
             threadId: preparedSend.threadId,
             attachments: preparedSend.attachments,
+            chatPreviewText: preparedSend.chatPreviewText,
             optimisticConversation: preparedSend.optimisticConversation
         )
         let optimisticMessageID = optimisticSendHandle.optimisticMessageID
@@ -246,13 +249,15 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
     private func prepare(_ request: OutboundMessageRequest) throws -> PreparedSend {
         switch request {
         case .compose(let compose):
+            let body = normalizedBody(compose.body)
             return PreparedSend(
                 recipientEmails: compose.recipientEmails,
-                body: normalizedBody(compose.body),
+                body: body,
                 subject: normalizedSubject(compose.subject),
                 htmlBody: nil,
                 threadId: nil,
                 attachments: compose.attachments,
+                chatPreviewText: optimisticChatPreviewText(from: body),
                 inlineAttachmentInfos: [],
                 optimisticConversation: compose.optimisticConversation,
                 replyMetadata: nil
@@ -286,6 +291,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 htmlBody: htmlBody,
                 threadId: nil,
                 attachments: forward.attachments,
+                chatPreviewText: optimisticChatPreviewText(from: userBody),
                 inlineAttachmentInfos: forward.forwardedInlineAttachmentInfos,
                 optimisticConversation: forward.optimisticConversation,
                 replyMetadata: nil
@@ -304,6 +310,7 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
                 htmlBody: nil,
                 threadId: metadata.threadId,
                 attachments: reply.attachments,
+                chatPreviewText: optimisticChatPreviewText(from: body),
                 inlineAttachmentInfos: [],
                 optimisticConversation: reply.context.optimisticConversation,
                 replyMetadata: metadata
@@ -321,6 +328,11 @@ final class OutboundMessageCoordinator: OutboundMessageCoordinating {
         }
 
         return subject
+    }
+
+    private func optimisticChatPreviewText(from text: String) -> String? {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedText.isEmpty ? nil : trimmedText
     }
 
     private func makeReconciliationHooks(

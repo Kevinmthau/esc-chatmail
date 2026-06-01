@@ -16,6 +16,29 @@ extension GmailSendService {
         attachments: [OutboundMessageRequest.AttachmentContext] = [],
         optimisticConversation: OptimisticConversationReference? = nil
     ) async throws -> OptimisticSendHandle {
+        try await createOptimisticMessage(
+            to: recipients,
+            body: body,
+            subject: subject,
+            threadId: threadId,
+            attachments: attachments,
+            chatPreviewText: optimisticChatPreviewText(from: body),
+            optimisticConversation: optimisticConversation
+        )
+    }
+
+    /// Creates an optimistic local message with an explicit chat preview.
+    /// The stored body stays as the full send body for full-message viewing.
+    @MainActor
+    func createOptimisticMessage(
+        to recipients: [String],
+        body: String,
+        subject: String? = nil,
+        threadId: String? = nil,
+        attachments: [OutboundMessageRequest.AttachmentContext] = [],
+        chatPreviewText: String?,
+        optimisticConversation: OptimisticConversationReference? = nil
+    ) async throws -> OptimisticSendHandle {
         // Pre-compute values that don't need Core Data
         let messageId = UUID().uuidString
         let snippet = String(body.prefix(120))
@@ -50,7 +73,7 @@ extension GmailSendService {
         message.internalDate = Date()
         message.snippet = snippet
         message.cleanedSnippet = cleanedSnippet
-        message.chatPreviewText = optimisticChatPreviewText(from: body)
+        message.chatPreviewText = optimisticChatPreviewText(from: chatPreviewText)
         message.bodyText = body
         message.gmThreadId = gmThreadId
         message.subject = subject
@@ -101,9 +124,13 @@ extension GmailSendService {
         )
     }
 
-    private nonisolated func optimisticChatPreviewText(from body: String) -> String? {
-        let trimmedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmedBody.isEmpty ? nil : trimmedBody
+    private nonisolated func optimisticChatPreviewText(from text: String?) -> String? {
+        guard let trimmedText = text?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmedText.isEmpty else {
+            return nil
+        }
+
+        return trimmedText
     }
 
     @MainActor

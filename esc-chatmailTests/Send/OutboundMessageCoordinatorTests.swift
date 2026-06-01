@@ -272,6 +272,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         let snapshot = sendService.snapshot
         XCTAssertEqual(snapshot.createOptimisticCalls.count, 1)
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.body, "Intro line\n\nForwarded plain text")
+        XCTAssertEqual(snapshot.createOptimisticCalls.first?.chatPreviewText, "Intro line")
         XCTAssertEqual(snapshot.createOptimisticCalls.first?.optimisticConversation?.participantHashValue, "participant-hash-2")
         XCTAssertEqual(snapshot.sendNewCalls.count, 1)
         XCTAssertEqual(snapshot.sendNewCalls.first?.body, "Intro line\n\nForwarded plain text")
@@ -280,6 +281,43 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertTrue(snapshot.sendNewCalls.first?.htmlBody?.contains("Forwarded HTML") == true)
         XCTAssertEqual(snapshot.markAttachmentsAsUploadingCalls, [])
         XCTAssertEqual(snapshot.sendNewCalls.first?.inlineAttachmentContentIDs, ["cid-inline"])
+        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
+    }
+
+    func testSend_forwardWithoutUserBodyKeepsOptimisticPreviewEmptyAndSendsForwardedBody() async throws {
+        let sendService = MockOutboundMessageSendService(context: coreDataStack.viewContext)
+        let syncPerformer = MockCoordinatorSyncPerformer()
+        let coordinator = makeCoordinator(sendService: sendService, syncPerformer: syncPerformer)
+        let completionExpectation = expectation(description: "forward send completes")
+
+        _ = try await coordinator.send(
+            .forward(
+                .init(
+                    recipientEmails: ["to@example.com"],
+                    subject: "Fwd: Hello",
+                    body: "  \n  ",
+                    attachments: [],
+                    forwardedPlainTextBody: "Forwarded plain text",
+                    forwardedHTMLBody: nil,
+                    forwardedInlineAttachmentInfos: [],
+                    optimisticConversation: .participantHash("participant-hash-3")
+                )
+            ),
+            reconciliationHooks: .init(
+                onSuccess: { _ in completionExpectation.fulfill() },
+                onFailure: nil
+            )
+        )
+
+        await fulfillment(of: [completionExpectation], timeout: 1.0)
+
+        let snapshot = sendService.snapshot
+        XCTAssertEqual(snapshot.createOptimisticCalls.count, 1)
+        XCTAssertEqual(snapshot.createOptimisticCalls.first?.body, "Forwarded plain text")
+        XCTAssertNil(snapshot.createOptimisticCalls.first?.chatPreviewText)
+        XCTAssertEqual(snapshot.sendNewCalls.count, 1)
+        XCTAssertEqual(snapshot.sendNewCalls.first?.body, "Forwarded plain text")
+        XCTAssertTrue(snapshot.sendNewCalls.first?.htmlBody?.contains("Forwarded plain text") == true)
         XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
     }
 
@@ -443,6 +481,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         let body: String
         let subject: String?
         let threadId: String?
+        let chatPreviewText: String?
         let optimisticConversation: OptimisticConversationReference?
         let attachmentReferences: [LocalAttachmentReference]
     }
@@ -506,6 +545,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         subject: String?,
         threadId: String?,
         attachments: [OutboundMessageRequest.AttachmentContext],
+        chatPreviewText: String?,
         optimisticConversation: OptimisticConversationReference?
     ) async throws -> OptimisticSendHandle {
         queue.sync {
@@ -515,6 +555,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
                     body: body,
                     subject: subject,
                     threadId: threadId,
+                    chatPreviewText: chatPreviewText,
                     optimisticConversation: optimisticConversation,
                     attachmentReferences: attachments.map(\.localAttachmentReference)
                 )
@@ -537,6 +578,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
         message.gmThreadId = threadId ?? ""
         message.subject = subject
         message.bodyText = body
+        message.chatPreviewText = chatPreviewText
         message.internalDate = Date()
         message.isFromMe = true
         message.conversation = conversation
