@@ -627,7 +627,8 @@ final class HTMLContentLoader {
             evaluatorInputsKey = "static"
         }
 
-        return "\(messageId)_\(isDarkMode)_\(cleanupMode.rawValue)_\(displayPurpose.rawValue)_\(originalHTMLPreference.rawValue)_\(evaluatorInputsKey)" as NSString
+        let appearanceKey = displayPurpose == .original ? "forcedLight" : "\(isDarkMode)"
+        return "\(messageId)_\(appearanceKey)_\(cleanupMode.rawValue)_\(displayPurpose.rawValue)_\(originalHTMLPreference.rawValue)_\(evaluatorInputsKey)" as NSString
     }
 
     private func cacheKey(

@@ -10,13 +10,7 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
         super.setUp()
         contentHandler = HTMLContentHandler()
         recoveryService = MutableRecoveryService(contentHandler: contentHandler)
-        loader = OriginalEmailSourceLoader(
-            canonicalContentLoader: CanonicalEmailContentLoader(
-                contentHandler: contentHandler,
-                recoveryService: recoveryService
-            ),
-            htmlContentLoader: HTMLContentLoader(contentHandler: contentHandler, sanitizer: .shared)
-        )
+        loader = makeLoader()
     }
 
     override func tearDown() {
@@ -109,6 +103,116 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
         XCTAssertTrue(html.lowercased().contains("<table"))
         XCTAssertTrue(html.lowercased().contains("<img"))
         XCTAssertTrue(html.contains("href=\"https://example.com/cta\""))
+    }
+
+    func testLoadOriginalEmailSource_darkModeToggleReusesRenderedOriginalVariant() async throws {
+        let messageId = "original-dark-toggle-\(UUID().uuidString)"
+        let renderedCache = RenderedMessageCache()
+        let loader = makeLoader(renderedMessageCache: renderedCache)
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        _ = contentHandler.saveHTML(newsletterHTML(title: "Stable original"), for: messageId)
+
+        let lightSource = await loader.loadOriginalEmailSourceToCompletion(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "Stable original",
+            senderEmail: "newsletter@example.com",
+            subject: "Stable original",
+            isDarkMode: false
+        )
+        let darkSource = await loader.loadOriginalEmailSourceToCompletion(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "Stable original",
+            senderEmail: "newsletter@example.com",
+            subject: "Stable original",
+            isDarkMode: true
+        )
+
+        let light = try XCTUnwrap(lightSource)
+        let dark = try XCTUnwrap(darkSource)
+        let cachedArtifacts = await renderedCache.artifacts(
+            messageId: messageId,
+            sourceSignature: light.sourceSignature
+        )
+        let artifacts = try XCTUnwrap(cachedArtifacts)
+
+        XCTAssertEqual(light.sourceSignature, dark.sourceSignature)
+        XCTAssertEqual(light.html, dark.html)
+        XCTAssertEqual(artifacts.wrappedOriginalHTMLByVariant.count, 1)
+    }
+
+    func testLoadOriginalEmailSource_sourceSignatureChangeReloadsRenderedHTML() async throws {
+        let messageId = "original-source-change-\(UUID().uuidString)"
+        let renderedCache = RenderedMessageCache()
+        let loader = makeLoader(renderedMessageCache: renderedCache)
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        _ = contentHandler.saveHTML(newsletterHTML(title: "First original"), for: messageId)
+        let firstSource = await loader.loadOriginalEmailSourceToCompletion(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "First original",
+            senderEmail: "newsletter@example.com",
+            subject: "Original",
+            isDarkMode: false
+        )
+        let first = try XCTUnwrap(firstSource)
+
+        _ = contentHandler.saveHTML(newsletterHTML(title: "Second original with changed source"), for: messageId)
+        let secondSource = await loader.loadOriginalEmailSourceToCompletion(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "First original",
+            senderEmail: "newsletter@example.com",
+            subject: "Original",
+            isDarkMode: false
+        )
+        let second = try XCTUnwrap(secondSource)
+
+        XCTAssertNotEqual(first.sourceSignature, second.sourceSignature)
+        XCTAssertTrue(first.html?.contains("First original") == true)
+        XCTAssertFalse(first.html?.contains("Second original with changed source") == true)
+        XCTAssertTrue(second.html?.contains("Second original with changed source") == true)
+        XCTAssertFalse(second.html?.contains("First original") == true)
+        let firstArtifacts = await renderedCache.artifacts(
+            messageId: messageId,
+            sourceSignature: first.sourceSignature
+        )
+        let secondArtifacts = await renderedCache.artifacts(
+            messageId: messageId,
+            sourceSignature: second.sourceSignature
+        )
+        XCTAssertNotNil(firstArtifacts)
+        XCTAssertNotNil(secondArtifacts)
+    }
+
+    func testLoadOriginalEmailSource_darkModeStillUsesAuthorIntentFullFidelityMode() async throws {
+        let messageId = "original-dark-author-intent-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        _ = contentHandler.saveHTML(newsletterHTML(title: "Author colors"), for: messageId)
+
+        let loadedSource = await loader.loadOriginalEmailSource(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "Author colors",
+            senderEmail: "newsletter@example.com",
+            subject: "Author colors",
+            isDarkMode: true,
+            timeout: 5.0
+        )
+        let source = try XCTUnwrap(loadedSource)
+        let html = try XCTUnwrap(source.html)
+
+        XCTAssertEqual(source.presentation, .html)
+        XCTAssertTrue(html.contains(#"<meta name="color-scheme" content="light">"#))
+        XCTAssertTrue(html.contains("color-scheme: light;"))
+        XCTAssertTrue(html.lowercased().contains("<table"))
+        XCTAssertTrue(html.lowercased().contains("<img"))
+        XCTAssertTrue(html.contains("href=\"https://example.com/cta\""))
+        XCTAssertFalse(html.contains("#1c1c1e"))
     }
 
     func testLoadOriginalEmailSource_plainTextOnlyRendersNativePlainText() async throws {
@@ -388,6 +492,19 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
 
         --raw-boundary--
         """
+    }
+
+    private func makeLoader(
+        renderedMessageCache: RenderedMessageCache = RenderedMessageCache()
+    ) -> OriginalEmailSourceLoader {
+        OriginalEmailSourceLoader(
+            canonicalContentLoader: CanonicalEmailContentLoader(
+                contentHandler: contentHandler,
+                recoveryService: recoveryService
+            ),
+            htmlContentLoader: HTMLContentLoader(contentHandler: contentHandler, sanitizer: .shared),
+            renderedMessageCache: renderedMessageCache
+        )
     }
 }
 

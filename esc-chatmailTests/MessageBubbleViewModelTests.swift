@@ -444,25 +444,78 @@ final class OriginalEmailLoadIdentityTests: XCTestCase {
         }
 
         let oldURL = try XCTUnwrap(handler.saveHTML("<html><body><p>OLD_TOKEN</p></body></html>", for: messageId))
+        let firstSourceSignature = handler.htmlSourceSignature(
+            messageId: messageId,
+            bodyStorageURI: oldURL.absoluteString
+        )
         let firstIdentity = OriginalEmailLoadIdentity.make(
             messageId: messageId,
             bodyStorageURI: oldURL.absoluteString,
             bodyText: "Stable text",
             subject: "Stable subject",
-            senderEmail: "sender@example.com",
-            isDarkMode: false
+            senderEmail: "sender@example.com"
         )
 
-        _ = handler.saveHTML("<html><body><p>NEW_TOKEN</p></body></html>", for: messageId)
+        _ = handler.saveHTML("<html><body><p>NEW_TOKEN_WITH_LONGER_SOURCE</p></body></html>", for: messageId)
+        let secondSourceSignature = handler.htmlSourceSignature(
+            messageId: messageId,
+            bodyStorageURI: oldURL.absoluteString
+        )
         let secondIdentity = OriginalEmailLoadIdentity.make(
             messageId: messageId,
             bodyStorageURI: oldURL.absoluteString,
             bodyText: "Stable text",
             subject: "Stable subject",
-            senderEmail: "sender@example.com",
-            isDarkMode: false
+            senderEmail: "sender@example.com"
         )
 
+        XCTAssertNotEqual(firstSourceSignature, secondSourceSignature)
+        XCTAssertEqual(firstIdentity.baseLoadKey, secondIdentity.baseLoadKey)
+    }
+
+    func testBaseLoadKeyDoesNotChangeWhenRawSourceExtractionCreatesMessageFile() throws {
+        let messagesDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OriginalEmailLoadIdentity-\(UUID().uuidString)", isDirectory: true)
+        let handler = HTMLContentHandler(messagesDirectory: messagesDirectory)
+        let messageId = "original-load-key-raw-source"
+        defer {
+            handler.deleteHTML(for: messageId)
+            try? FileManager.default.removeItem(at: messagesDirectory)
+        }
+
+        let rawBodyText = """
+        MIME-Version: 1.0
+        Content-Type: text/html; charset=UTF-8
+
+        <html><body><p>RAW_SOURCE_TOKEN</p></body></html>
+        """
+        let missingSourceSignature = handler.htmlSourceSignature(
+            messageId: messageId,
+            bodyStorageURI: nil
+        )
+        let firstIdentity = OriginalEmailLoadIdentity.make(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: rawBodyText,
+            subject: "Stable subject",
+            senderEmail: "sender@example.com"
+        )
+
+        _ = handler.saveHTML("<html><body><p>RAW_SOURCE_TOKEN</p></body></html>", for: messageId)
+        let savedSourceSignature = handler.htmlSourceSignature(
+            messageId: messageId,
+            bodyStorageURI: nil
+        )
+        let secondIdentity = OriginalEmailLoadIdentity.make(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: rawBodyText,
+            subject: "Stable subject",
+            senderEmail: "sender@example.com"
+        )
+
+        XCTAssertEqual(missingSourceSignature, "missing")
+        XCTAssertNotEqual(missingSourceSignature, savedSourceSignature)
         XCTAssertEqual(firstIdentity.baseLoadKey, secondIdentity.baseLoadKey)
     }
 
@@ -482,8 +535,7 @@ final class OriginalEmailLoadIdentityTests: XCTestCase {
             bodyStorageURI: oldURL.absoluteString,
             bodyText: "Stable text",
             subject: "Stable subject",
-            senderEmail: "sender@example.com",
-            isDarkMode: false
+            senderEmail: "sender@example.com"
         )
 
         let bodyTextIdentity = OriginalEmailLoadIdentity.make(
@@ -491,20 +543,9 @@ final class OriginalEmailLoadIdentityTests: XCTestCase {
             bodyStorageURI: oldURL.absoluteString,
             bodyText: "Updated text",
             subject: "Stable subject",
-            senderEmail: "sender@example.com",
-            isDarkMode: false
-        )
-
-        let darkModeIdentity = OriginalEmailLoadIdentity.make(
-            messageId: messageId,
-            bodyStorageURI: oldURL.absoluteString,
-            bodyText: "Stable text",
-            subject: "Stable subject",
-            senderEmail: "sender@example.com",
-            isDarkMode: true
+            senderEmail: "sender@example.com"
         )
 
         XCTAssertNotEqual(firstIdentity.baseLoadKey, bodyTextIdentity.baseLoadKey)
-        XCTAssertNotEqual(firstIdentity.baseLoadKey, darkModeIdentity.baseLoadKey)
     }
 }

@@ -29,16 +29,14 @@ struct OriginalEmailLoadIdentity: Equatable {
         bodyStorageURI: String?,
         bodyText: String?,
         subject: String?,
-        senderEmail: String?,
-        isDarkMode: Bool
+        senderEmail: String?
     ) -> OriginalEmailLoadIdentity {
         let baseLoadKey = [
             messageId,
             bodyStorageURI ?? "",
             "\(bodyText?.hashValue ?? 0)",
             "\(subject?.hashValue ?? 0)",
-            "\(senderEmail?.hashValue ?? 0)",
-            "\(isDarkMode)"
+            "\(senderEmail?.hashValue ?? 0)"
         ].joined(separator: "|")
 
         return OriginalEmailLoadIdentity(baseLoadKey: baseLoadKey)
@@ -48,7 +46,6 @@ struct OriginalEmailLoadIdentity: Equatable {
 struct HTMLMessageView: View {
     let message: Message
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.colorScheme) private var colorScheme
     @State private var loadState: OriginalEmailLoadState = .loading
     @State private var activeBaseLoadKey: String?
     @State private var activeLoadTaskKey: String?
@@ -62,8 +59,7 @@ struct HTMLMessageView: View {
             bodyStorageURI: message.bodyStorageURI,
             bodyText: message.bodyText,
             subject: message.subject,
-            senderEmail: message.senderEmail,
-            isDarkMode: colorScheme == .dark
+            senderEmail: message.senderEmail
         )
     }
     private var baseLoadKey: String {
@@ -111,7 +107,7 @@ struct HTMLMessageView: View {
             case .html(let html):
                 HTMLWebView(
                     htmlContent: html,
-                    isDarkMode: colorScheme == .dark,
+                    isDarkMode: false,
                     message: message
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -168,7 +164,7 @@ struct HTMLMessageView: View {
             bodyText: message.bodyText,
             senderEmail: message.senderEmail,
             subject: message.subject,
-            isDarkMode: colorScheme == .dark
+            isDarkMode: false
         )
 
         guard !Task.isCancelled else {

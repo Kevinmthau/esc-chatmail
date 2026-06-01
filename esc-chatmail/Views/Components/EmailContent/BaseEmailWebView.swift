@@ -386,7 +386,7 @@ struct BaseEmailWebView: UIViewRepresentable {
             }
             switch mode {
             case .fullInteractive:
-                return "fullInteractive:\(colorSchemeSignature)"
+                return "fullInteractive"
             case .simplePreview:
                 return "simplePreview:\(colorSchemeSignature)"
             case .scaledPreview(let scale):

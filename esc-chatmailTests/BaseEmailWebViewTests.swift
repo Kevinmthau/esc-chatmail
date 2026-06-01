@@ -46,6 +46,20 @@ final class BaseEmailWebViewTests: XCTestCase {
         XCTAssertTrue(coordinator.needsReload)
     }
 
+    func testCoordinatorDoesNotReloadFullOriginalEmailWhenAppDarkModeToggles() {
+        let message = makeMessage(id: "message-dark-toggle")
+        let lightView = makeWebView(message: message, isDarkMode: false)
+        let darkView = makeWebView(message: message, isDarkMode: true)
+        let coordinator = BaseEmailWebView.Coordinator(lightView)
+
+        coordinator.recordLoadedSignature()
+        XCTAssertFalse(coordinator.needsReload)
+
+        coordinator.updateParent(darkView)
+
+        XCTAssertFalse(coordinator.needsReload)
+    }
+
     func testCoordinatorNeedsReloadWhenReferencedCIDAttachmentBecomesLocallyAvailable() throws {
         AttachmentPaths.setupDirectories()
         let message = makeMessage(id: "message-cid-reload")
@@ -181,10 +195,11 @@ final class BaseEmailWebViewTests: XCTestCase {
         XCTAssertEqual(EmailWebViewMode.simplePreview.webViewUserInterfaceStyle, .unspecified)
     }
 
-    private func makeWebView(message: Message?) -> BaseEmailWebView {
+    private func makeWebView(message: Message?, isDarkMode: Bool? = nil) -> BaseEmailWebView {
         BaseEmailWebView(
             htmlContent: "<html><body><img src=\"cid:image001@example.com\"></body></html>",
             mode: .fullInteractive,
+            isDarkMode: isDarkMode,
             message: message
         )
     }

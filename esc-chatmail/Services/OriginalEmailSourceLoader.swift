@@ -60,7 +60,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         bodyText: String?,
         senderEmail: String?,
         subject: String?,
-        isDarkMode: Bool,
+        isDarkMode _: Bool,
         timeout: TimeInterval = 5.0
     ) async -> OriginalEmailSource? {
         // Soft timeout: if the load can't finish in `timeout` seconds, return nil
@@ -81,7 +81,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
                 bodyText: bodyText,
                 senderEmail: senderEmail,
                 subject: subject,
-                isDarkMode: isDarkMode
+                isDarkMode: false
             )
         }
         return result ?? nil
@@ -93,7 +93,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         bodyText: String?,
         senderEmail: String?,
         subject: String?,
-        isDarkMode: Bool
+        isDarkMode _: Bool
     ) async -> OriginalEmailSource? {
         guard let canonicalContent = await canonicalContentLoader.loadCanonicalEmailContent(
             messageId: messageId,
@@ -117,8 +117,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
                 variantKey: originalHTMLVariantKey(
                     content: canonicalContent,
                     senderEmail: senderEmail,
-                    subject: subject,
-                    isDarkMode: isDarkMode
+                    subject: subject
                 ),
                 producer: {
                     await self.htmlContentLoader.prepareOriginalHTML(
@@ -128,7 +127,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
                         plainText: canonicalContent.plainText,
                         senderEmail: senderEmail,
                         subject: subject,
-                        isDarkMode: isDarkMode
+                        isDarkMode: false
                     )
                 }
            ) {
@@ -151,8 +150,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
             bodyStorageURI: bodyStorageURI,
             bodyText: bodyText,
             senderEmail: senderEmail,
-            subject: subject,
-            isDarkMode: isDarkMode
+            subject: subject
            ) {
             log(fallbackSource, messageId: messageId)
             return fallbackSource
@@ -171,8 +169,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
                 variantKey: originalHTMLVariantKey(
                     content: recoveredContent,
                     senderEmail: senderEmail,
-                    subject: subject,
-                    isDarkMode: isDarkMode
+                    subject: subject
                 ),
                 producer: {
                     await self.htmlContentLoader.prepareOriginalHTML(
@@ -182,7 +179,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
                         plainText: recoveredContent.plainText,
                         senderEmail: senderEmail,
                         subject: subject,
-                        isDarkMode: isDarkMode
+                        isDarkMode: false
                     )
                 }
            ) {
@@ -236,8 +233,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         bodyStorageURI: String?,
         bodyText: String?,
         senderEmail: String?,
-        subject: String?,
-        isDarkMode: Bool
+        subject: String?
     ) async -> OriginalEmailSource? {
         let fallback = await htmlContentLoader.loadContentWithTimeout(
             messageId: messageId,
@@ -245,7 +241,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
             bodyText: bodyText,
             senderEmail: senderEmail,
             subject: subject,
-            isDarkMode: isDarkMode,
+            isDarkMode: false,
             cleanupMode: .none,
             displayPurpose: .original,
             originalHTMLPreference: .preferHTML,
@@ -299,16 +295,14 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
     private func originalHTMLVariantKey(
         content: CanonicalEmailContent,
         senderEmail: String?,
-        subject: String?,
-        isDarkMode: Bool
+        subject: String?
     ) -> RenderedMessageVariantKey {
         RenderedMessageVariantKey([
             "wrapped-original-html-v1",
             "sourceLocation:\(content.sourceLocation.rawValue)",
             "plainText:\(Self.fingerprint(for: content.plainText))",
             "sender:\(Self.fingerprint(for: senderEmail))",
-            "subject:\(Self.fingerprint(for: subject))",
-            "dark:\(isDarkMode)"
+            "subject:\(Self.fingerprint(for: subject))"
         ].joined(separator: "|"))
     }
 

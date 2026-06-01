@@ -554,6 +554,43 @@ final class HTMLContentLoaderTests: XCTestCase {
 #endif
     }
 
+    func testPrepareOriginalHTMLCacheDoesNotVaryByDarkMode() async {
+        let messageId = "html-loader-original-dark-cache-\(UUID().uuidString)"
+        let originalHTML = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <table><tr><td>Dark mode independent original body</td></tr></table>
+        </body>
+        </html>
+        """
+
+        let light = await loader.prepareOriginalHTML(
+            fromCanonicalHTML: originalHTML,
+            messageId: messageId,
+            sourceLocation: .messageFile,
+            plainText: nil,
+            senderEmail: "sender@example.com",
+            subject: "Subject",
+            isDarkMode: false
+        )
+        let dark = await loader.prepareOriginalHTML(
+            fromCanonicalHTML: originalHTML,
+            messageId: messageId,
+            sourceLocation: .messageFile,
+            plainText: nil,
+            senderEmail: "sender@example.com",
+            subject: "Subject",
+            isDarkMode: true
+        )
+
+        XCTAssertNotNil(light)
+        XCTAssertEqual(light, dark)
+#if DEBUG
+        XCTAssertEqual(loader.debugCachedVariantCount(for: messageId), 1)
+#endif
+    }
+
     func testLoadContent_cleanupModeQuotedOnlyPreservesSignatureBlock() async {
         let messageId = "html-loader-signature-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }
