@@ -30,6 +30,69 @@ final class CIDSchemeHandlerTests: XCTestCase {
         )
     }
 
+    func testMissingCIDAttachmentRendersFallbackUntilAttachmentPersistsLocally() async throws {
+        AttachmentPaths.setupDirectories()
+        let message = MessageBuilder()
+            .withId("message-cid-later-local")
+            .withAttachments()
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let stack = testStack!
+        let apiClient = MockGmailAPIClient()
+        let handler = CIDSchemeHandler(
+            message: message,
+            apiClient: apiClient,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        let cidURL = try XCTUnwrap(URL(string: "cid:later@example.com"))
+        let transparentPixel = try XCTUnwrap(
+            Data(base64Encoded: "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+        )
+
+        let fallbackFinished = expectation(description: "missing cid scheme task finished with fallback")
+        let fallbackTask = MockURLSchemeTask(url: cidURL) {
+            fallbackFinished.fulfill()
+        }
+
+        handler.webView(WKWebView(), start: fallbackTask)
+
+        await fulfillment(of: [fallbackFinished], timeout: 2.0)
+        XCTAssertNil(fallbackTask.error)
+        XCTAssertEqual(fallbackTask.response?.mimeType, "image/gif")
+        XCTAssertEqual(fallbackTask.receivedData, transparentPixel)
+        XCTAssertEqual(apiClient.getAttachmentCallCount, 0)
+
+        let localPath = AttachmentPaths.originalPath(idOrUUID: "att-cid-later-local-\(UUID().uuidString)", ext: "png")
+        let localData = Data([0x89, 0x50, 0x4E, 0x47, 0x44])
+        XCTAssertTrue(AttachmentPaths.saveData(localData, to: localPath))
+        defer { AttachmentPaths.deleteFile(at: localPath) }
+
+        _ = AttachmentBuilder()
+            .withId("att-cid-later-local")
+            .withFilename("later.png")
+            .withMimeType("image/png")
+            .withContentId("later@example.com")
+            .downloaded()
+            .withLocalURL(localPath)
+            .forMessage(message)
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let localFinished = expectation(description: "persisted local cid scheme task finished")
+        let localTask = MockURLSchemeTask(url: cidURL) {
+            localFinished.fulfill()
+        }
+
+        handler.webView(WKWebView(), start: localTask)
+
+        await fulfillment(of: [localFinished], timeout: 2.0)
+        XCTAssertNil(localTask.error)
+        XCTAssertEqual(localTask.response?.mimeType, "image/png")
+        XCTAssertEqual(localTask.receivedData, localData)
+        XCTAssertEqual(apiClient.getAttachmentCallCount, 0)
+    }
+
     func testOnDemandFallbackFetchesAndPersistsMissingInlineAttachment() async throws {
         let message = MessageBuilder()
             .withId("message-cid-fallback")

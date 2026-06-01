@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import WebKit
+import CoreData
 
 private final class LayoutAwareWKWebView: WKWebView {
     var onLayoutChange: ((WKWebView) -> Void)?
@@ -124,6 +125,7 @@ struct BaseEmailWebView: UIViewRepresentable {
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.updateParent(self)
+        context.coordinator.observeAttachmentAvailabilityChanges(reloading: webView)
         context.coordinator.applyBackgroundAppearance(to: webView)
         context.coordinator.loadContentIfReady(in: webView)
     }
@@ -140,13 +142,21 @@ struct BaseEmailWebView: UIViewRepresentable {
         var lastLoadedReloadSignature: String = ""
         private var isLoading = false
         private var hasFinishedLoad = false
+        private var shouldReloadAfterCurrentLoad = false
         private var lastDeliveredPreviewHeight: CGFloat = 0
         private var previewMeasurementGeneration = 0
+        private var attachmentAvailabilityObserver: NSObjectProtocol?
+        private weak var observedContext: NSManagedObjectContext?
+        private var observedMessageObjectID: NSManagedObjectID?
         /// Holds strong reference to the cid: scheme handler
         var cidHandler: CIDSchemeHandler?
 
         init(_ parent: BaseEmailWebView) {
             self.parent = parent
+        }
+
+        deinit {
+            stopObservingAttachmentAvailabilityChanges()
         }
 
         var needsReload: Bool {
@@ -158,9 +168,102 @@ struct BaseEmailWebView: UIViewRepresentable {
             cidHandler?.message = parent.message
         }
 
+        func observeAttachmentAvailabilityChanges(reloading webView: WKWebView) {
+            guard case .fullInteractive = parent.mode,
+                  let message = parent.message,
+                  let context = message.managedObjectContext else {
+                stopObservingAttachmentAvailabilityChanges()
+                return
+            }
+
+            let messageObjectID = message.objectID
+            if let observedContext,
+               observedContext === context,
+               observedMessageObjectID == messageObjectID {
+                return
+            }
+
+            stopObservingAttachmentAvailabilityChanges()
+            observedContext = context
+            observedMessageObjectID = messageObjectID
+            attachmentAvailabilityObserver = NotificationCenter.default.addObserver(
+                forName: .NSManagedObjectContextObjectsDidChange,
+                object: context,
+                queue: .main
+            ) { [weak self, weak webView] notification in
+                guard let self, let webView else { return }
+                self.reloadIfAttachmentAvailabilityChanged(notification, in: webView)
+            }
+        }
+
+        private func stopObservingAttachmentAvailabilityChanges() {
+            if let attachmentAvailabilityObserver {
+                NotificationCenter.default.removeObserver(attachmentAvailabilityObserver)
+            }
+            attachmentAvailabilityObserver = nil
+            observedContext = nil
+            observedMessageObjectID = nil
+        }
+
+        private func reloadIfAttachmentAvailabilityChanged(_ notification: Notification, in webView: WKWebView) {
+            guard notificationMayAffectCurrentMessageAttachments(notification) else {
+                return
+            }
+
+            guard needsReload else {
+                return
+            }
+
+            if isLoading {
+                shouldReloadAfterCurrentLoad = true
+                return
+            }
+
+            loadContentIfReady(in: webView)
+        }
+
+        private func notificationMayAffectCurrentMessageAttachments(_ notification: Notification) -> Bool {
+            guard let messageObjectID = parent.message?.objectID else {
+                return false
+            }
+
+            for object in changedObjects(in: notification) {
+                if object.objectID == messageObjectID {
+                    return true
+                }
+
+                guard let attachment = object as? Attachment else {
+                    continue
+                }
+
+                if attachment.message?.objectID == messageObjectID {
+                    return true
+                }
+
+                if parent.message?.attachments?.contains(where: { $0.objectID == attachment.objectID }) == true {
+                    return true
+                }
+            }
+
+            return false
+        }
+
+        private func changedObjects(in notification: Notification) -> [NSManagedObject] {
+            [
+                NSInsertedObjectsKey,
+                NSUpdatedObjectsKey,
+                NSDeletedObjectsKey,
+                NSRefreshedObjectsKey,
+                NSInvalidatedObjectsKey
+            ].flatMap { key in
+                (notification.userInfo?[key] as? Set<NSManagedObject>) ?? []
+            }
+        }
+
         func loadContent(in webView: WKWebView) {
             guard !isLoading else { return }
             isLoading = true
+            shouldReloadAfterCurrentLoad = false
             lastDeliveredPreviewHeight = 0
             previewMeasurementGeneration &+= 1
             recordLoadedSignature()
@@ -250,7 +353,7 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
 
         private func reloadSignature() -> String {
-            "\(modeSignature(for: parent.mode)):\(messageIdentitySignature())"
+            "\(modeSignature(for: parent.mode)):\(messageIdentitySignature()):\(inlineCIDAvailabilitySignature())"
         }
 
         private func messageIdentitySignature() -> String {
@@ -258,6 +361,17 @@ struct BaseEmailWebView: UIViewRepresentable {
                 return "message:none"
             }
             return "message:\(message.id)"
+        }
+
+        private func inlineCIDAvailabilitySignature() -> String {
+            guard case .fullInteractive = parent.mode else {
+                return "cid:unchanged"
+            }
+
+            return InlineCIDAttachmentAvailabilityFingerprint.make(
+                html: parent.htmlContent,
+                message: parent.message
+            )
         }
 
         private func modeSignature(for mode: EmailWebViewMode) -> String {
@@ -385,18 +499,30 @@ struct BaseEmailWebView: UIViewRepresentable {
                 in: webView,
                 generation: previewMeasurementGeneration
             )
+            reloadAfterCurrentLoadIfNeeded(in: webView)
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             isLoading = false
             resetLoadedSignatureAfterFailure(for: error)
             Log.debug("WebView navigation failed: \(error)", category: .ui)
+            reloadAfterCurrentLoadIfNeeded(in: webView)
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             isLoading = false
             resetLoadedSignatureAfterFailure(for: error)
             Log.debug("WebView provisional navigation failed: \(error)", category: .ui)
+            reloadAfterCurrentLoadIfNeeded(in: webView)
+        }
+
+        private func reloadAfterCurrentLoadIfNeeded(in webView: WKWebView) {
+            guard shouldReloadAfterCurrentLoad else {
+                return
+            }
+
+            shouldReloadAfterCurrentLoad = false
+            loadContentIfReady(in: webView)
         }
 
         private func schedulePreviewHeightMeasurement(
@@ -464,6 +590,118 @@ struct BaseEmailWebView: UIViewRepresentable {
                 callback?(roundedHeight)
             }
         }
+    }
+}
+
+enum InlineCIDAttachmentAvailabilityFingerprint {
+    static func make(html: String, message: Message?) -> String {
+        let referencedContentIDs = referencedInlineContentIDs(in: html)
+        guard !referencedContentIDs.isEmpty else {
+            return "cid:none"
+        }
+
+        guard let message else {
+            return "cid:message:none"
+        }
+
+        let attachments = message.attachmentsArray.sorted {
+            sortKey(for: $0) < sortKey(for: $1)
+        }
+
+        let entries = referencedContentIDs.sorted().map { contentID in
+            let matches = matchingAttachments(for: contentID, in: attachments)
+            guard !matches.isEmpty else {
+                return "\(contentID)=missing"
+            }
+
+            let matchSignatures = matches
+                .map(availabilitySignature(for:))
+                .joined(separator: ",")
+            return "\(contentID)=\(matchSignatures)"
+        }
+
+        return "cid:\(entries.joined(separator: "|"))"
+    }
+
+    private static func referencedInlineContentIDs(in html: String) -> Set<String> {
+        guard html.range(of: "cid:", options: .caseInsensitive) != nil else {
+            return []
+        }
+
+        var referencedContentIDs = Set<String>()
+        let cidPrefix = "cid:"
+        var searchRange = html.startIndex..<html.endIndex
+
+        while let cidRange = html.range(of: cidPrefix, options: .caseInsensitive, range: searchRange) {
+            let startOfCID = cidRange.upperBound
+            var endOfCID = startOfCID
+
+            while endOfCID < html.endIndex {
+                let char = html[endOfCID]
+                if char == "\"" || char == "'" || char == " " || char == "," ||
+                    char == ")" || char == ">" || char == "<" ||
+                    char == "\n" || char == "\r" || char == "\t" {
+                    break
+                }
+                endOfCID = html.index(after: endOfCID)
+            }
+
+            if startOfCID < endOfCID,
+               let normalizedContentID = EmailDocument.normalizedContentID(String(html[startOfCID..<endOfCID])) {
+                referencedContentIDs.insert(normalizedContentID)
+            }
+
+            searchRange = endOfCID..<html.endIndex
+        }
+
+        return referencedContentIDs
+    }
+
+    private static func matchingAttachments(for contentID: String, in attachments: [Attachment]) -> [Attachment] {
+        let exactMatches = attachments.filter {
+            EmailDocument.normalizedContentID($0.contentId) == contentID
+        }
+
+        if !exactMatches.isEmpty {
+            return exactMatches
+        }
+
+        let contentIDWithoutDomain = contentID.components(separatedBy: "@").first ?? contentID
+        return attachments.filter {
+            guard let attachmentContentID = EmailDocument.normalizedContentID($0.contentId) else {
+                return false
+            }
+            let attachmentIDWithoutDomain = attachmentContentID.components(separatedBy: "@").first ?? attachmentContentID
+            return attachmentIDWithoutDomain == contentIDWithoutDomain
+        }
+    }
+
+    private static func availabilitySignature(for attachment: Attachment) -> String {
+        let attachmentIdentity = attachment.id ?? attachment.objectID.uriRepresentation().absoluteString
+        let availability: String
+
+        if hasUsableLocalFile(attachment) {
+            availability = "available:\(attachment.localURL ?? "")"
+        } else if attachment.isReady {
+            availability = "readyMissingLocalFile"
+        } else {
+            availability = "unavailable"
+        }
+
+        return "\(attachmentIdentity):\(availability)"
+    }
+
+    private static func hasUsableLocalFile(_ attachment: Attachment) -> Bool {
+        guard let localURL = attachment.localURL,
+              let fileURL = AttachmentPaths.fullURL(for: localURL) else {
+            return false
+        }
+
+        return FileManager.default.fileExists(atPath: fileURL.path)
+    }
+
+    private static func sortKey(for attachment: Attachment) -> String {
+        attachment.id ?? attachment.objectID.uriRepresentation().absoluteString
     }
 }
 

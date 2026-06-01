@@ -46,6 +46,91 @@ final class BaseEmailWebViewTests: XCTestCase {
         XCTAssertTrue(coordinator.needsReload)
     }
 
+    func testCoordinatorNeedsReloadWhenReferencedCIDAttachmentBecomesLocallyAvailable() throws {
+        AttachmentPaths.setupDirectories()
+        let message = makeMessage(id: "message-cid-reload")
+        let attachment = AttachmentBuilder()
+            .withId("att-cid-reload")
+            .withFilename("image001.png")
+            .withMimeType("image/png")
+            .withContentId("image001@example.com")
+            .queued()
+            .forMessage(message)
+            .build(in: coreDataStack.viewContext)
+        try coreDataStack.saveViewContext()
+
+        let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: message))
+        coordinator.recordLoadedSignature()
+        XCTAssertFalse(coordinator.needsReload)
+
+        let localPath = AttachmentPaths.originalPath(idOrUUID: "att-cid-reload-\(UUID().uuidString)", ext: "png")
+        XCTAssertTrue(AttachmentPaths.saveData(Data([0x89, 0x50, 0x4E, 0x47]), to: localPath))
+        defer { AttachmentPaths.deleteFile(at: localPath) }
+
+        attachment.localURL = localPath
+        attachment.state = .downloaded
+        try coreDataStack.saveViewContext()
+
+        XCTAssertTrue(coordinator.needsReload)
+    }
+
+    func testCoordinatorDoesNotReloadWhenUnreferencedAttachmentBecomesLocallyAvailable() throws {
+        AttachmentPaths.setupDirectories()
+        let message = makeMessage(id: "message-unreferenced-cid")
+        let attachment = AttachmentBuilder()
+            .withId("att-unreferenced-cid")
+            .withFilename("other.png")
+            .withMimeType("image/png")
+            .withContentId("other@example.com")
+            .queued()
+            .forMessage(message)
+            .build(in: coreDataStack.viewContext)
+        try coreDataStack.saveViewContext()
+
+        let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: message))
+        coordinator.recordLoadedSignature()
+        XCTAssertFalse(coordinator.needsReload)
+
+        let localPath = AttachmentPaths.originalPath(idOrUUID: "att-unreferenced-cid-\(UUID().uuidString)", ext: "png")
+        XCTAssertTrue(AttachmentPaths.saveData(Data([0x89, 0x50, 0x4E, 0x47]), to: localPath))
+        defer { AttachmentPaths.deleteFile(at: localPath) }
+
+        attachment.localURL = localPath
+        attachment.state = .downloaded
+        try coreDataStack.saveViewContext()
+
+        XCTAssertFalse(coordinator.needsReload)
+    }
+
+    func testCoordinatorDoesNotReloadForUnrelatedMessageAttachmentAvailabilityChange() throws {
+        AttachmentPaths.setupDirectories()
+        let currentMessage = makeMessage(id: "message-current-cid")
+        let unrelatedMessage = makeMessage(id: "message-unrelated-cid")
+        let unrelatedAttachment = AttachmentBuilder()
+            .withId("att-unrelated-cid")
+            .withFilename("image001.png")
+            .withMimeType("image/png")
+            .withContentId("image001@example.com")
+            .queued()
+            .forMessage(unrelatedMessage)
+            .build(in: coreDataStack.viewContext)
+        try coreDataStack.saveViewContext()
+
+        let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: currentMessage))
+        coordinator.recordLoadedSignature()
+        XCTAssertFalse(coordinator.needsReload)
+
+        let localPath = AttachmentPaths.originalPath(idOrUUID: "att-unrelated-cid-\(UUID().uuidString)", ext: "png")
+        XCTAssertTrue(AttachmentPaths.saveData(Data([0x89, 0x50, 0x4E, 0x47]), to: localPath))
+        defer { AttachmentPaths.deleteFile(at: localPath) }
+
+        unrelatedAttachment.localURL = localPath
+        unrelatedAttachment.state = .downloaded
+        try coreDataStack.saveViewContext()
+
+        XCTAssertFalse(coordinator.needsReload)
+    }
+
     func testResetLoadedSignatureAfterFailureMakesCurrentContentEligibleForRetry() {
         let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: nil))
 
