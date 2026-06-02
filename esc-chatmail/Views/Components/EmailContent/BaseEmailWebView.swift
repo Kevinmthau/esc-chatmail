@@ -68,6 +68,9 @@ struct BaseEmailWebView: UIViewRepresentable {
     var message: Message?
     /// Optional callback for non-interactive previews that need their rendered height.
     var onPreviewHeightChange: ((CGFloat) -> Void)? = nil
+    /// Optional callback invoked when a navigation finishes (first paint). The full-view reader uses
+    /// this to cross-fade away its instant snapshot placeholder once the live WebView has rendered.
+    var onLoadFinished: (() -> Void)? = nil
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -514,6 +517,7 @@ struct BaseEmailWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             isLoading = false
             recordFinishedLoad()
+            parent.onLoadFinished?()
             schedulePreviewHeightMeasurement(
                 in: webView,
                 generation: previewMeasurementGeneration

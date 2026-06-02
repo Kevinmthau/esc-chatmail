@@ -322,15 +322,94 @@ actor RenderedMessageCache: MemoryWarningHandler {
         variantKey: RenderedMessageVariantKey,
         producer: @escaping @Sendable () async -> String?
     ) async -> String? {
-        await cachedOrProduce(
+        await cacheAwareWrappedOriginalHTML(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            variantKey: variantKey,
+            producer: {
+                guard let html = await producer() else {
+                    return nil
+                }
+                return PreparedOriginalHTML(html: html, shouldCache: true)
+            }
+        )
+    }
+
+    func cacheAwareWrappedOriginalHTML(
+        messageId: String,
+        sourceSignature: String,
+        variantKey: RenderedMessageVariantKey,
+        producer: @escaping @Sendable () async -> PreparedOriginalHTML?
+    ) async -> String? {
+        let key = RenderedMessageKey(messageId: messageId, sourceSignature: sourceSignature)
+
+        if let cached = cachedValue(
             messageId: messageId,
             sourceSignature: sourceSignature,
             artifactType: .wrappedOriginalHTML,
             variantKey: variantKey,
-            lookup: { $0.wrappedOriginalHTMLByVariant[variantKey] },
-            store: { $0.wrappedOriginalHTMLByVariant[variantKey] = $1 },
-            producer: producer
+            lookup: { $0.wrappedOriginalHTMLByVariant[variantKey] }
+        ) {
+            return cached
+        }
+
+        let inFlightKey = RenderedMessageInFlightKey(
+            messageKey: key,
+            artifactType: .wrappedOriginalHTML,
+            variantKey: variantKey
         )
+
+        if let work = inFlight[inFlightKey] {
+            statistics.duplicateWorkAvoided += 1
+            log(
+                event: "duplicate-work-avoided",
+                key: key,
+                artifactType: .wrappedOriginalHTML,
+                variantKey: variantKey
+            )
+            let box = await work.task.value
+            guard isCurrent(work.invalidationSnapshot, for: key) else {
+                return nil
+            }
+            return (box.value as? PreparedOriginalHTML)?.html
+        }
+
+        let task = Task<AnyRenderedArtifactBox, Never> {
+            AnyRenderedArtifactBox(value: await producer())
+        }
+        let work = RenderedMessageInFlightWork(
+            id: UUID(),
+            task: task,
+            invalidationSnapshot: invalidationSnapshot(for: key)
+        )
+        inFlight[inFlightKey] = work
+
+        let box = await work.task.value
+        let isCurrentWork = inFlight[inFlightKey]?.id == work.id
+        if isCurrentWork {
+            inFlight.removeValue(forKey: inFlightKey)
+        }
+
+        guard isCurrentWork,
+              isCurrent(work.invalidationSnapshot, for: key),
+              let produced = box.value as? PreparedOriginalHTML else {
+            return nil
+        }
+
+        guard produced.shouldCache else {
+            return produced.html
+        }
+
+        storeValue(
+            produced.html,
+            key: key,
+            artifactType: .wrappedOriginalHTML,
+            variantKey: variantKey
+        ) { artifacts, value in
+            artifacts.wrappedOriginalHTMLByVariant[variantKey] = value
+        }
+        statistics.producedArtifacts += 1
+        return produced.html
     }
 
     func recordSnapshotMetadata(
@@ -362,6 +441,33 @@ actor RenderedMessageCache: MemoryWarningHandler {
             variantKey: variantKey,
             lookup: { $0.snapshotMetadataByVariant[variantKey] }
         )
+    }
+
+    /// Returns the most recently rendered preview snapshot metadata for a message across all cached
+    /// source signatures and variants. Used by the full-view "Original Email" reader to show the
+    /// already-rendered preview bitmap instantly while the live WebView paints, without having to
+    /// reconstruct the exact (width/dark-mode/source-signature) snapshot cache key.
+    func latestSnapshotMetadata(messageId: String) -> RenderedMessageSnapshotMetadata? {
+        guard let keys = keysByMessageId[messageId] else {
+            return nil
+        }
+
+        var latest: RenderedMessageSnapshotMetadata?
+        for key in keys {
+            guard let entry = entries[key] else {
+                continue
+            }
+            for metadata in entry.artifacts.snapshotMetadataByVariant.values {
+                if let current = latest {
+                    if metadata.createdAt > current.createdAt {
+                        latest = metadata
+                    }
+                } else {
+                    latest = metadata
+                }
+            }
+        }
+        return latest
     }
 
     func artifacts(messageId: String, sourceSignature: String) -> RenderedMessageArtifacts? {

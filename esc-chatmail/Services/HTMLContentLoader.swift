@@ -73,6 +73,11 @@ private struct WrappedHTMLResult {
     let shouldCache: Bool
 }
 
+struct PreparedOriginalHTML: Sendable {
+    let html: String
+    let shouldCache: Bool
+}
+
 private enum PreparedLoadResult {
     case html(WrappedHTMLResult)
     case nativePlainText(String)
@@ -430,6 +435,26 @@ final class HTMLContentLoader {
         subject: String? = nil,
         isDarkMode: Bool
     ) async -> String? {
+        await prepareOriginalHTMLForCaching(
+            fromCanonicalHTML: canonicalHTML,
+            messageId: messageId,
+            sourceLocation: sourceLocation,
+            plainText: plainText,
+            senderEmail: senderEmail,
+            subject: subject,
+            isDarkMode: isDarkMode
+        )?.html
+    }
+
+    func prepareOriginalHTMLForCaching(
+        fromCanonicalHTML canonicalHTML: String,
+        messageId: String,
+        sourceLocation: CanonicalEmailSourceLocation = .messageFile,
+        plainText: String? = nil,
+        senderEmail: String? = nil,
+        subject: String? = nil,
+        isDarkMode: Bool
+    ) async -> PreparedOriginalHTML? {
         guard let normalizedCanonicalHTML = canonicalHTMLSource(from: canonicalHTML) else {
             return nil
         }
@@ -446,7 +471,7 @@ final class HTMLContentLoader {
             originalHTMLPreference: .preferHTML
         )
 
-        guard let result = await cachedOrPreparedHTMLResult(
+        guard let prepared = await cacheableOrPreparedHTMLResult(
             normalizedCanonicalHTML,
             source: htmlLoadSource(for: sourceLocation),
             messageId: messageId,
@@ -462,7 +487,12 @@ final class HTMLContentLoader {
             return nil
         }
 
-        return result.presentation == .html ? result.html : nil
+        guard prepared.result.presentation == .html,
+              let html = prepared.result.html else {
+            return nil
+        }
+
+        return PreparedOriginalHTML(html: html, shouldCache: prepared.shouldCache)
     }
 
     /// Returns canonical stored HTML only when the original-reader heuristics would keep HTML.
@@ -695,6 +725,11 @@ final class HTMLContentLoader {
         }
     }
 
+    private struct CacheableHTMLLoadResult {
+        let result: HTMLLoadResult
+        let shouldCache: Bool
+    }
+
     private func cachedOrPreparedHTMLResult(
         _ html: String,
         source: HTMLLoadResult.HTMLLoadSource,
@@ -708,6 +743,34 @@ final class HTMLContentLoader {
         originalHTMLPreference: OriginalEmailHTMLPreference,
         variantKey: NSString
     ) async -> HTMLLoadResult? {
+        await cacheableOrPreparedHTMLResult(
+            html,
+            source: source,
+            messageId: messageId,
+            plainText: plainText,
+            senderEmail: senderEmail,
+            subject: subject,
+            isDarkMode: isDarkMode,
+            cleanupMode: cleanupMode,
+            displayPurpose: displayPurpose,
+            originalHTMLPreference: originalHTMLPreference,
+            variantKey: variantKey
+        )?.result
+    }
+
+    private func cacheableOrPreparedHTMLResult(
+        _ html: String,
+        source: HTMLLoadResult.HTMLLoadSource,
+        messageId: String,
+        plainText: String?,
+        senderEmail: String?,
+        subject: String?,
+        isDarkMode: Bool,
+        cleanupMode: HTMLContentCleanupMode,
+        displayPurpose: HTMLDisplayPurpose,
+        originalHTMLPreference: OriginalEmailHTMLPreference,
+        variantKey: NSString
+    ) async -> CacheableHTMLLoadResult? {
         let sourceSignature = sourceSignature(for: html)
         let cacheKey = cacheKey(
             variantKey: variantKey,
@@ -716,7 +779,7 @@ final class HTMLContentLoader {
         )
 
         if let cachedResult = htmlCache.object(forKey: cacheKey) {
-            return cachedResult.result
+            return CacheableHTMLLoadResult(result: cachedResult.result, shouldCache: true)
         }
 
         guard let prepared = await wrappedHTMLIfMeaningful(
@@ -736,17 +799,20 @@ final class HTMLContentLoader {
 
         switch prepared {
         case .html(let wrapped):
-            return cachedHTMLResult(
-                html: wrapped.html,
-                source: source,
-                shouldCache: wrapped.shouldCache,
-                cacheKey: cacheKey,
-                variantKey: variantKey,
-                messageId: messageId,
-                sourceSignature: sourceSignature
+            return CacheableHTMLLoadResult(
+                result: cachedHTMLResult(
+                    html: wrapped.html,
+                    source: source,
+                    shouldCache: wrapped.shouldCache,
+                    cacheKey: cacheKey,
+                    variantKey: variantKey,
+                    messageId: messageId,
+                    sourceSignature: sourceSignature
+                ),
+                shouldCache: wrapped.shouldCache
             )
         case .nativePlainText(let text):
-            return qualityFallbackResult(text)
+            return CacheableHTMLLoadResult(result: qualityFallbackResult(text), shouldCache: true)
         }
     }
 
@@ -993,10 +1059,18 @@ final class HTMLContentLoader {
                     senderEmail: senderEmail
                 )
             }
-            rewrittenHTML = sanitizer.sanitize(
-                cachedRewrite.html,
-                rewriteModernImageFormatHints: rewriteImageHints
-            )
+            // Skip a second full sanitize pass when the attachment-image rewrite changed nothing
+            // (the common case for the full-view open). Re-sanitizing identical, already-sanitized
+            // HTML is wasted CPU on the hot path and a known corruption risk for complex
+            // nested-table newsletters; only re-sanitize when the rewrite actually mutated the HTML.
+            if cachedRewrite.html == sanitizedHTML {
+                rewrittenHTML = sanitizedHTML
+            } else {
+                rewrittenHTML = sanitizer.sanitize(
+                    cachedRewrite.html,
+                    rewriteModernImageFormatHints: rewriteImageHints
+                )
+            }
             shouldCache = !cachedRewrite.hasPendingUpdates
         case .preview:
             let cachedRewrite = await remoteImageAttachmentFallback.previewInlineAttachmentStyleImages(

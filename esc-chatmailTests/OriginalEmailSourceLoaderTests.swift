@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 @testable import esc_chatmail
 
 final class OriginalEmailSourceLoaderTests: XCTestCase {
@@ -519,6 +520,142 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
         XCTAssertNil(loadedSource)
     }
 
+    func testWarmOriginalEmailSourceMakesLaterOpenAnInstantCacheHit() async throws {
+        let messageId = "warm-original-\(UUID().uuidString)"
+        let renderedCache = RenderedMessageCache()
+        let loader = makeLoader(renderedMessageCache: renderedCache)
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        _ = contentHandler.saveHTML(newsletterHTML(title: "Warm me"), for: messageId)
+
+        await loader.warmOriginalEmailSource(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "Warm me",
+            senderEmail: "newsletter@example.com",
+            subject: "Warm me"
+        )
+
+        let statsAfterWarm = await renderedCache.getStatistics()
+        XCTAssertEqual(statsAfterWarm.producedArtifacts, 1, "Warm should prepare and cache the original HTML")
+        XCTAssertEqual(recoveryService.recoveryRequestCount, 0, "Warm must never trigger network recovery")
+
+        let openedSource = await loader.loadOriginalEmailSourceToCompletion(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "Warm me",
+            senderEmail: "newsletter@example.com",
+            subject: "Warm me"
+        )
+        let source = try XCTUnwrap(openedSource)
+
+        XCTAssertEqual(source.presentation, .html)
+        XCTAssertTrue(source.html?.contains("Warm me") == true)
+
+        let statsAfterOpen = await renderedCache.getStatistics()
+        XCTAssertEqual(
+            statsAfterOpen.producedArtifacts,
+            1,
+            "Opening the full view should reuse the warmed cache entry instead of re-preparing"
+        )
+
+        let cachedArtifacts = await renderedCache.artifacts(
+            messageId: messageId,
+            sourceSignature: source.sourceSignature
+        )
+        let artifacts = try XCTUnwrap(cachedArtifacts)
+        XCTAssertEqual(artifacts.wrappedOriginalHTMLByVariant.count, 1)
+    }
+
+    func testWarmOriginalEmailSourceDoesNotCachePendingRemoteImageRewrite() async throws {
+        let messageId = "warm-pending-rewrite-\(UUID().uuidString)"
+        let renderedCache = RenderedMessageCache()
+        let imageURL = "https://cdn.example.com/hero.webp?format=auto"
+        let html = remoteImageHTML(title: "Needs image rewrite", imageURL: imageURL)
+        let imageData = onePixelPNGData()
+        let remoteImageAttachmentFallback = HTMLRemoteImageAttachmentFallback { request in
+            let headers: [String: String] = [
+                "Content-Type": "image/webp",
+                "Content-Length": "\(imageData.count)"
+            ]
+            let response = try XCTUnwrap(
+                HTTPURLResponse(
+                    url: try XCTUnwrap(request.url),
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: headers
+                )
+            )
+
+            if request.httpMethod == "HEAD" {
+                return (Data(), response)
+            }
+
+            return (imageData, response)
+        }
+        let loader = makeLoader(
+            renderedMessageCache: renderedCache,
+            remoteImageAttachmentFallback: remoteImageAttachmentFallback
+        )
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        _ = contentHandler.saveHTML(html, for: messageId)
+
+        await loader.warmOriginalEmailSource(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "Needs image rewrite",
+            senderEmail: "newsletter@example.com",
+            subject: "Needs image rewrite"
+        )
+
+        let statsAfterWarm = await renderedCache.getStatistics()
+        XCTAssertEqual(statsAfterWarm.producedArtifacts, 0, "Warm must not cache first-pass HTML while image rewrites are pending")
+        XCTAssertEqual(statsAfterWarm.currentEntryCount, 0)
+
+        _ = await remoteImageAttachmentFallback.inlineAttachmentStyleImages(
+            in: html,
+            senderEmail: "newsletter@example.com"
+        )
+
+        let openedSource = await loader.loadOriginalEmailSourceToCompletion(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "Needs image rewrite",
+            senderEmail: "newsletter@example.com",
+            subject: "Needs image rewrite"
+        )
+        let source = try XCTUnwrap(openedSource)
+        let openedHTML = try XCTUnwrap(source.html)
+
+        XCTAssertTrue(openedHTML.contains("data:image/"))
+        XCTAssertFalse(openedHTML.contains(imageURL))
+
+        let statsAfterOpen = await renderedCache.getStatistics()
+        XCTAssertEqual(statsAfterOpen.producedArtifacts, 1)
+        XCTAssertEqual(statsAfterOpen.currentEntryCount, 1)
+    }
+
+    func testWarmOriginalEmailSourceWithoutLocalHTMLDoesNotRecoverOrCache() async {
+        let messageId = "warm-no-recovery-\(UUID().uuidString)"
+        let renderedCache = RenderedMessageCache()
+        let loader = makeLoader(renderedMessageCache: renderedCache)
+        // Recovery HTML is available, but warming must never reach for it.
+        recoveryService.setHTML(newsletterHTML(title: "Should not recover"), for: messageId)
+
+        await loader.warmOriginalEmailSource(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "Plain text only, no HTML markup here",
+            senderEmail: "person@example.com",
+            subject: "No HTML"
+        )
+
+        XCTAssertEqual(recoveryService.recoveryRequestCount, 0)
+        let stats = await renderedCache.getStatistics()
+        XCTAssertEqual(stats.producedArtifacts, 0)
+    }
+
     private func newsletterHTML(title: String) -> String {
         """
         <!DOCTYPE html>
@@ -536,6 +673,25 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
         </body>
         </html>
         """
+    }
+
+    private func remoteImageHTML(title: String, imageURL: String) -> String {
+        """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <img src="\(imageURL)" alt="Hero">
+          <h1>\(title)</h1>
+        </body>
+        </html>
+        """
+    }
+
+    private func onePixelPNGData() -> Data {
+        UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1)).pngData { context in
+            UIColor.systemBlue.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
     }
 
     private func rawMultipartAlternativeSource(plainText: String, html: String) -> String {
@@ -605,14 +761,19 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
     }
 
     private func makeLoader(
-        renderedMessageCache: RenderedMessageCache = RenderedMessageCache()
+        renderedMessageCache: RenderedMessageCache = RenderedMessageCache(),
+        remoteImageAttachmentFallback: HTMLRemoteImageAttachmentFallback = .shared
     ) -> OriginalEmailSourceLoader {
         OriginalEmailSourceLoader(
             canonicalContentLoader: CanonicalEmailContentLoader(
                 contentHandler: contentHandler,
                 recoveryService: recoveryService
             ),
-            htmlContentLoader: HTMLContentLoader(contentHandler: contentHandler, sanitizer: .shared),
+            htmlContentLoader: HTMLContentLoader(
+                contentHandler: contentHandler,
+                sanitizer: .shared,
+                remoteImageAttachmentFallback: remoteImageAttachmentFallback
+            ),
             renderedMessageCache: renderedMessageCache
         )
     }

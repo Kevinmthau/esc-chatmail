@@ -28,6 +28,17 @@ struct EmailContentSection: View {
         )
     }
 
+    /// Identity for the background full-view warm task. The original-email render is appearance
+    /// independent (forced light), so this deliberately omits dark mode: a single warm serves both.
+    /// Keyed on the source signature so a recovered/changed source re-warms the new content.
+    private var warmFullEmailKey: String {
+        let sourceSignature = HTMLContentHandler.shared.htmlSourceSignature(
+            messageId: message.id,
+            bodyStorageURI: message.bodyStorageURI
+        )
+        return "\(message.id)|\(message.bodyStorageURI ?? "")|warm-original|source:\(sourceSignature)"
+    }
+
     static func makeLoadKey(for message: ChatMessageRowModel, isDarkMode: Bool) -> String {
         makeLoadKey(
             for: message,
@@ -101,6 +112,19 @@ struct EmailContentSection: View {
         .task(id: loadKey) {
             let generation = await beginLoad()
             await loadHTML(generation: generation)
+        }
+        // Prepare the full-view "Original Email" HTML in the background while the card is visible so
+        // tapping it is an instant RenderedMessageCache hit instead of a cold multi-second prepare.
+        // Runs at .utility so it never competes with snapshot rendering or scrolling, and auto-cancels
+        // when the row scrolls away (warmOriginalEmailSource bails before the expensive prepare).
+        .task(id: warmFullEmailKey, priority: .utility) {
+            await OriginalEmailSourceLoader.shared.warmOriginalEmailSource(
+                messageId: message.id,
+                bodyStorageURI: message.bodyStorageURI,
+                bodyText: message.bodyText,
+                senderEmail: message.senderEmail,
+                subject: message.subject
+            )
         }
         .onReceive(NotificationCenter.default.publisher(for: HTMLContentLoader.remoteImageAttachmentFallbackDidWarmNotification)) { notification in
             reloadIfRemoteImageFallbackWarmed(notification)

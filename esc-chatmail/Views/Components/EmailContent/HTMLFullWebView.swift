@@ -8,6 +8,8 @@ struct HTMLWebView: View {
     var senderEmail: String? = nil
     /// Optional message for resolving cid: URLs to inline attachments
     var message: Message?
+    /// Invoked when the WebView finishes its first paint, so the reader can cross-fade its placeholder.
+    var onLoadFinished: (() -> Void)? = nil
 
     var body: some View {
         BaseEmailWebView(
@@ -15,7 +17,8 @@ struct HTMLWebView: View {
             mode: .fullInteractive,
             isDarkMode: isDarkMode,
             senderEmail: senderEmail,
-            message: message
+            message: message,
+            onLoadFinished: onLoadFinished
         )
     }
 }

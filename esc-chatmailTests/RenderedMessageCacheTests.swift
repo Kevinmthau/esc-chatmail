@@ -255,6 +255,39 @@ final class RenderedMessageCacheTests: XCTestCase {
         XCTAssertNil(metadata)
     }
 
+    func testLatestSnapshotMetadataReturnsMostRecentAcrossSourceSignatures() async throws {
+        let renderedCache = RenderedMessageCache()
+
+        await renderedCache.recordSnapshotMetadata(
+            RenderedMessageSnapshotMetadata(
+                snapshotCacheKey: "snapshot-old",
+                displayHeight: 100,
+                pixelScale: 2,
+                createdAt: Date(timeIntervalSince1970: 1_000)
+            ),
+            messageId: "message-1",
+            sourceSignature: "source-old",
+            variantKey: "snapshot:old"
+        )
+        await renderedCache.recordSnapshotMetadata(
+            RenderedMessageSnapshotMetadata(
+                snapshotCacheKey: "snapshot-new",
+                displayHeight: 120,
+                pixelScale: 2,
+                createdAt: Date(timeIntervalSince1970: 2_000)
+            ),
+            messageId: "message-1",
+            sourceSignature: "source-new",
+            variantKey: "snapshot:new"
+        )
+
+        let latest = await renderedCache.latestSnapshotMetadata(messageId: "message-1")
+        XCTAssertEqual(latest?.snapshotCacheKey, "snapshot-new")
+
+        let missing = await renderedCache.latestSnapshotMetadata(messageId: "unknown-message")
+        XCTAssertNil(missing)
+    }
+
     private static func image() -> UIImage? {
         UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { context in
             UIColor.systemBlue.setFill()

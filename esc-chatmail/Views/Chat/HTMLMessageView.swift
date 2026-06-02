@@ -254,6 +254,10 @@ struct HTMLMessageView: View {
     let message: Message
     @Environment(\.dismiss) private var dismiss
     @StateObject private var loadViewModel: OriginalEmailLoadViewModel
+    /// The already-rendered chat preview snapshot, shown instantly while the live WebView paints.
+    @State private var snapshotPlaceholder: UIImage?
+    /// Set once the live WebView reports its first paint, cross-fading the snapshot away.
+    @State private var webViewPainted = false
 
     init(
         message: Message,
@@ -312,30 +316,84 @@ struct HTMLMessageView: View {
         .task(id: loadKey) {
             await loadHTMLContent()
         }
+        .task(id: message.id) {
+            await loadSnapshotPlaceholder()
+        }
     }
 
     @ViewBuilder
     private var content: some View {
         switch loadViewModel.loadState {
         case .loading:
-            ProgressView("Loading...")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            loadingContent(isRecovering: false)
         case .recovering:
-            ProgressView("Recovering original email...")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            loadingContent(isRecovering: true)
         case .loaded(let loadedContent):
             switch loadedContent {
             case .html(let html):
-                HTMLWebView(
-                    htmlContent: html,
-                    isDarkMode: false,
-                    message: message
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                loadedHTMLContent(html: html)
             case .plainText(let text):
                 OriginalEmailReadableView(message: message, text: text)
             }
         case .unavailable:
+            unavailableContent
+        }
+    }
+
+    /// Loading/recovering: if the rendered chat preview snapshot is already available, show it
+    /// immediately so the email appears instantly instead of a bare spinner. With cache warming the
+    /// load usually resolves within a frame or two; this mainly covers cold/slow opens.
+    @ViewBuilder
+    private func loadingContent(isRecovering: Bool) -> some View {
+        if let snapshotPlaceholder {
+            snapshotPlaceholderView(snapshotPlaceholder)
+                .overlay(alignment: .bottom) {
+                    if isRecovering {
+                        loadingBanner(text: "Loading full email…")
+                    }
+                }
+        } else {
+            ProgressView(isRecovering ? "Recovering original email..." : "Loading...")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    /// Loaded HTML: render the interactive WebView, covering its first-paint flash with the snapshot
+    /// placeholder and cross-fading the placeholder out once the WebView reports it has painted.
+    @ViewBuilder
+    private func loadedHTMLContent(html: String) -> some View {
+        ZStack {
+            HTMLWebView(
+                htmlContent: html,
+                isDarkMode: false,
+                message: message,
+                onLoadFinished: handleWebViewPainted
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if let snapshotPlaceholder, !webViewPainted {
+                snapshotPlaceholderView(snapshotPlaceholder)
+                    .transition(.opacity)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var unavailableContent: some View {
+        if let snapshotPlaceholder {
+            // Never dead-end on a blank "Unavailable" card when the rendered preview is still on hand.
+            snapshotPlaceholderView(snapshotPlaceholder)
+                .overlay(alignment: .bottom) {
+                    Button {
+                        loadViewModel.retry()
+                    } label: {
+                        SwiftUI.Label("Reload full email", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.bottom, 20)
+                }
+        } else {
             ContentUnavailableView {
                 SwiftUI.Label("Original Email Unavailable", systemImage: "doc.text")
             } description: {
@@ -346,6 +404,51 @@ struct HTMLMessageView: View {
                 }
             }
         }
+    }
+
+    private func snapshotPlaceholderView(_ image: UIImage) -> some View {
+        GeometryReader { geometry in
+            Image(uiImage: image)
+                .resizable()
+                .interpolation(.medium)
+                .scaledToFit()
+                .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(uiColor: .systemBackground))
+    }
+
+    private func loadingBanner(text: String) -> some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule())
+        .padding(.bottom, 20)
+    }
+
+    private func handleWebViewPainted() {
+        guard !webViewPainted else {
+            return
+        }
+        withAnimation(.easeOut(duration: 0.25)) {
+            webViewPainted = true
+        }
+    }
+
+    private func loadSnapshotPlaceholder() async {
+        guard snapshotPlaceholder == nil,
+              let metadata = await RenderedMessageCache.shared.latestSnapshotMetadata(messageId: message.id),
+              let entry = await EmailPreviewSnapshotCache.shared.load(for: metadata.snapshotCacheKey),
+              let image = UIImage(data: entry.imageData),
+              !Task.isCancelled else {
+            return
+        }
+        snapshotPlaceholder = image
     }
 
     private func loadHTMLContent() async {

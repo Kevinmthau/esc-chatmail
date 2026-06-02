@@ -107,7 +107,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         }
 
         if let canonicalHTML = canonicalContent.html,
-           let html = await renderedMessageCache.wrappedOriginalHTML(
+           let html = await renderedMessageCache.cacheAwareWrappedOriginalHTML(
                 messageId: messageId,
                 sourceSignature: canonicalContent.sourceSignature,
                 variantKey: originalHTMLVariantKey(
@@ -116,7 +116,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
                     subject: subject
                 ),
                 producer: {
-                    await self.htmlContentLoader.prepareOriginalHTML(
+                    await self.htmlContentLoader.prepareOriginalHTMLForCaching(
                         fromCanonicalHTML: canonicalHTML,
                         messageId: messageId,
                         sourceLocation: canonicalContent.sourceLocation,
@@ -159,7 +159,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
            ),
            let recoveredHTML = recoveredContent.html,
            recoveredContent.sourceSignature != canonicalContent.sourceSignature,
-           let html = await renderedMessageCache.wrappedOriginalHTML(
+           let html = await renderedMessageCache.cacheAwareWrappedOriginalHTML(
                 messageId: messageId,
                 sourceSignature: recoveredContent.sourceSignature,
                 variantKey: originalHTMLVariantKey(
@@ -168,7 +168,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
                     subject: subject
                 ),
                 producer: {
-                    await self.htmlContentLoader.prepareOriginalHTML(
+                    await self.htmlContentLoader.prepareOriginalHTMLForCaching(
                         fromCanonicalHTML: recoveredHTML,
                         messageId: messageId,
                         sourceLocation: recoveredContent.sourceLocation,
@@ -222,6 +222,60 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         )
         log(source, messageId: messageId)
         return source
+    }
+
+    /// Prepares and caches the original-email HTML ahead of a full-view open so the tap becomes an
+    /// instant `RenderedMessageCache` hit instead of a cold, multi-second prepare.
+    ///
+    /// Uses only locally available canonical content (`allowRecovery: false`) so warming never issues
+    /// Gmail network recovery while a chat thread scrolls. It writes the exact same
+    /// `wrappedOriginalHTML` cache entry (same variant key and producer) that
+    /// `loadOriginalEmailSourceToCompletion` reads when the prepared HTML is cacheable, so a
+    /// subsequent open returns immediately without pinning first-pass remote-image rewrites.
+    /// Safe to call repeatedly and from background priority; the rendered cache dedups concurrent
+    /// producers for the same key.
+    func warmOriginalEmailSource(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        senderEmail: String?,
+        subject: String?
+    ) async {
+        guard let canonicalContent = await canonicalContentLoader.loadCanonicalEmailContent(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            allowRecovery: false
+        ),
+              let canonicalHTML = canonicalContent.html else {
+            return
+        }
+
+        // Skip the expensive prepare if the caller (e.g. a chat row) has already scrolled away.
+        guard !Task.isCancelled else {
+            return
+        }
+
+        _ = await renderedMessageCache.cacheAwareWrappedOriginalHTML(
+            messageId: messageId,
+            sourceSignature: canonicalContent.sourceSignature,
+            variantKey: originalHTMLVariantKey(
+                content: canonicalContent,
+                senderEmail: senderEmail,
+                subject: subject
+            ),
+            producer: {
+                await self.htmlContentLoader.prepareOriginalHTMLForCaching(
+                    fromCanonicalHTML: canonicalHTML,
+                    messageId: messageId,
+                    sourceLocation: canonicalContent.sourceLocation,
+                    plainText: canonicalContent.plainText,
+                    senderEmail: senderEmail,
+                    subject: subject,
+                    isDarkMode: false
+                )
+            }
+        )
     }
 
     private func loadFallbackHTMLSource(
