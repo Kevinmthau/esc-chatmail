@@ -14,6 +14,16 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
         case failed
     }
 
+    private enum HTMLRecoveryCandidateSource: Equatable {
+        case htmlMimePart
+        case embeddedRawSource
+    }
+
+    private struct HTMLRecoveryCandidate {
+        let html: String
+        let source: HTMLRecoveryCandidateSource
+    }
+
     private let gmailAPIClientProvider: @Sendable () async -> any GmailAPIClientProtocol
     private let contentHandler: HTMLContentHandler
     private var recoveryTasks: [String: Task<RecoveryAttemptResult, Never>] = [:]
@@ -70,18 +80,29 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
                 return .failed
             }
 
-            let extractedHTML: String?
-            if let recoveredHTML = await extractHTMLBody(from: payload, messageId: messageId, apiClient: apiClient) {
-                extractedHTML = recoveredHTML
-            } else {
-                extractedHTML = await extractEmbeddedHTMLFromTextualBodies(
+            let htmlMimeCandidates = await collectHTMLCandidates(
+                from: payload,
+                messageId: messageId,
+                apiClient: apiClient,
+                includeHTMLMimeParts: true,
+                includeEmbeddedRawSource: false
+            )
+
+            let embeddedRawSourceCandidates: [HTMLRecoveryCandidate]
+            let resolvedHTML = bestMeaningfulHTMLCandidate(from: htmlMimeCandidates)
+            if resolvedHTML == nil {
+                embeddedRawSourceCandidates = await collectHTMLCandidates(
                     from: payload,
                     messageId: messageId,
-                    apiClient: apiClient
+                    apiClient: apiClient,
+                    includeHTMLMimeParts: false,
+                    includeEmbeddedRawSource: true
                 )
+            } else {
+                embeddedRawSourceCandidates = []
             }
 
-            guard let html = extractedHTML else {
+            guard let html = resolvedHTML ?? bestMeaningfulHTMLCandidate(from: embeddedRawSourceCandidates) else {
                 Log.debug("No HTML body found for message \(messageId)", category: .ui)
                 return .noHTML
             }
@@ -137,32 +158,66 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
         return false
     }
 
-    private func extractEmbeddedHTMLFromTextualBodies(
+    private func collectHTMLCandidates(
         from part: MessagePart,
         messageId: String,
-        apiClient: any GmailAPIClientProtocol
-    ) async -> String? {
-        if let decodedText = await decodedTextualBody(from: part, messageId: messageId, apiClient: apiClient),
-           let extractedHTML = RawEmailSourceSanitizer.extractHTMLText(from: decodedText) {
-            let trimmed = extractedHTML.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                return trimmed
+        apiClient: any GmailAPIClientProtocol,
+        includeHTMLMimeParts: Bool,
+        includeEmbeddedRawSource: Bool
+    ) async -> [HTMLRecoveryCandidate] {
+        guard !isAttachmentContentPart(part) else {
+            return []
+        }
+
+        var candidates: [HTMLRecoveryCandidate] = []
+        let resolvedMimeType = resolvedMimeType(for: part)
+        let isHTMLPart = isHTMLMimeType(resolvedMimeType)
+        let shouldExtractHTMLPart = includeHTMLMimeParts && isHTMLPart
+        let shouldExtractEmbeddedRawSource = includeEmbeddedRawSource && !isHTMLPart && canContainEmbeddedRawSourceHTML(resolvedMimeType)
+
+        if (shouldExtractHTMLPart || shouldExtractEmbeddedRawSource),
+           let decodedBody = await decodedTextualBody(from: part, messageId: messageId, apiClient: apiClient) {
+            if isHTMLPart {
+                appendCandidate(
+                    decodedBody,
+                    source: .htmlMimePart,
+                    to: &candidates
+                )
+            } else if let extractedHTML = RawEmailSourceSanitizer.extractHTMLText(from: decodedBody) {
+                appendCandidate(
+                    extractedHTML,
+                    source: .embeddedRawSource,
+                    to: &candidates
+                )
             }
         }
 
         if let parts = part.parts {
             for subpart in parts {
-                if let html = await extractEmbeddedHTMLFromTextualBodies(
+                candidates.append(contentsOf: await collectHTMLCandidates(
                     from: subpart,
                     messageId: messageId,
-                    apiClient: apiClient
-                ) {
-                    return html
-                }
+                    apiClient: apiClient,
+                    includeHTMLMimeParts: includeHTMLMimeParts,
+                    includeEmbeddedRawSource: includeEmbeddedRawSource
+                ))
             }
         }
 
-        return nil
+        return candidates
+    }
+
+    private func appendCandidate(
+        _ html: String,
+        source: HTMLRecoveryCandidateSource,
+        to candidates: inout [HTMLRecoveryCandidate]
+    ) {
+        let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+
+        candidates.append(HTMLRecoveryCandidate(html: trimmed, source: source))
     }
 
     private func decodedTextualBody(
@@ -181,41 +236,6 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
                 headers: part.headers,
                 apiClient: apiClient
             )
-        }
-
-        return nil
-    }
-
-    /// Extracts HTML body from MIME structure
-    private func extractHTMLBody(
-        from part: MessagePart,
-        messageId: String,
-        apiClient: any GmailAPIClientProtocol
-    ) async -> String? {
-        let resolvedMimeType = resolvedMimeType(for: part)
-
-        // Check this part for text/html
-        if isHTMLMimeType(resolvedMimeType) {
-            if let data = part.body?.data {
-                return decodeBody(data, headers: part.headers)
-            } else if let attachmentId = part.body?.attachmentId {
-                // Large HTML body - fetch via attachment API
-                return await fetchLargeBodyContent(
-                    attachmentId: attachmentId,
-                    messageId: messageId,
-                    headers: part.headers,
-                    apiClient: apiClient
-                )
-            }
-        }
-
-        // Recursively check child parts
-        if let parts = part.parts {
-            for subpart in parts {
-                if let html = await extractHTMLBody(from: subpart, messageId: messageId, apiClient: apiClient) {
-                    return html
-                }
-            }
         }
 
         return nil
@@ -299,6 +319,114 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
         }
 
         return mimeType.hasPrefix("text/html")
+    }
+
+    private func canContainEmbeddedRawSourceHTML(_ mimeType: String?) -> Bool {
+        guard let mimeType = mimeType?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              !mimeType.isEmpty else {
+            return true
+        }
+
+        return mimeType.hasPrefix("text/") || mimeType.hasPrefix("message/")
+    }
+
+    private func isAttachmentContentPart(_ part: MessagePart) -> Bool {
+        let trimmedFilename = part.filename?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedFilename.isEmpty {
+            return true
+        }
+
+        let contentDisposition = part.headers?
+            .first(where: { $0.name.lowercased() == "content-disposition" })?
+            .value
+            .lowercased() ?? ""
+
+        return contentDisposition.contains("attachment")
+    }
+
+    private func bestMeaningfulHTMLCandidate(from candidates: [HTMLRecoveryCandidate]) -> String? {
+        let scoredCandidates = candidates.enumerated().compactMap { index, candidate -> (html: String, source: HTMLRecoveryCandidateSource, score: Int, order: Int)? in
+            let html = candidate.html.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !html.isEmpty,
+                  HTMLMeaningfulContentChecker.hasMeaningfulContent(html) else {
+                return nil
+            }
+
+            return (
+                html: html,
+                source: candidate.source,
+                score: scoreHTMLCandidate(html, source: candidate.source),
+                order: index
+            )
+        }
+
+        let sortedCandidates = scoredCandidates
+            .sorted { lhs, rhs in
+                if lhs.score != rhs.score {
+                    return lhs.score > rhs.score
+                }
+                return lhs.order < rhs.order
+            }
+
+        return sortedCandidates.first { $0.source == .htmlMimePart }?.html
+            ?? sortedCandidates.first?.html
+    }
+
+    private func scoreHTMLCandidate(_ html: String, source: HTMLRecoveryCandidateSource) -> Int {
+        var score = 100_000
+        let lowercased = html.lowercased()
+        let renderableHTML = HTMLMeaningfulContentChecker.renderableHTML(from: html)
+        let visibleTextLength = normalizedVisibleTextLength(in: renderableHTML)
+
+        score += min(visibleTextLength, 20_000)
+        if visibleTextLength > 0 {
+            score += 500
+        }
+
+        if lowercased.contains("<img") {
+            score += 1_000
+        }
+        if lowercased.contains("<svg") {
+            score += 1_000
+        }
+        if lowercased.contains("background-image") {
+            score += 750
+        }
+        if lowercased.contains("<table") {
+            score += 250
+        }
+
+        if lowercased.contains("<!doctype") {
+            score += 200
+        }
+        if lowercased.contains("<html") {
+            score += 200
+        }
+        if lowercased.contains("</html>") {
+            score += 100
+        }
+        if lowercased.contains("<body") {
+            score += 200
+        }
+        if lowercased.contains("</body>") {
+            score += 100
+        }
+
+        if source == .htmlMimePart {
+            score += 25
+        }
+
+        return score
+    }
+
+    private func normalizedVisibleTextLength(in html: String) -> Int {
+        let text = TextProcessing.extractPlainText(from: html)
+        let normalized = text
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.count
     }
 
     private func decodeTransferEncoding(_ text: String, headers: [MessageHeader]?) -> String {

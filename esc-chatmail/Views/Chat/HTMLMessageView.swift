@@ -21,6 +21,11 @@ enum OriginalEmailLoadState: Equatable {
     }
 }
 
+enum OriginalEmailMissingSourceRecoveryPolicy: Sendable {
+    case markUnavailableAfterRetries
+    case keepRecoveringWhileActive
+}
+
 struct OriginalEmailLoadIdentity: Equatable, Sendable {
     let baseLoadKey: String
 
@@ -104,7 +109,10 @@ final class OriginalEmailLoadViewModel: ObservableObject {
         self.autoRetryTimeout = max(0, autoRetryTimeout)
     }
 
-    func loadOriginalEmail(for request: OriginalEmailLoadRequest) async -> OriginalEmailSource? {
+    func loadOriginalEmail(
+        for request: OriginalEmailLoadRequest,
+        missingSourceRecoveryPolicy: OriginalEmailMissingSourceRecoveryPolicy = .markUnavailableAfterRetries
+    ) async -> OriginalEmailSource? {
         let taskBaseLoadKey = request.identity.baseLoadKey
         let taskLoadKey = "\(taskBaseLoadKey)|reload:\(reloadGeneration)"
         let shouldReset = activeBaseLoadKey != taskBaseLoadKey
@@ -140,9 +148,10 @@ final class OriginalEmailLoadViewModel: ObservableObject {
         }
 
         if source == nil, !shouldPreserveLoadedContent {
-            source = await autoRetryMissingSourceIfNeeded(
+            source = await retryMissingSourceIfNeeded(
                 for: request,
-                taskLoadKey: taskLoadKey
+                taskLoadKey: taskLoadKey,
+                recoveryPolicy: missingSourceRecoveryPolicy
             )
         }
 
@@ -155,8 +164,13 @@ final class OriginalEmailLoadViewModel: ObservableObject {
             activeHTMLSourceSignature = source.sourceSignature
             applyLoadedSource(source)
         } else if !shouldPreserveLoadedContent {
-            activeHTMLSourceSignature = nil
-            loadState = .unavailable
+            switch missingSourceRecoveryPolicy {
+            case .markUnavailableAfterRetries:
+                activeHTMLSourceSignature = nil
+                loadState = .unavailable
+            case .keepRecoveringWhileActive:
+                markRecoveringIfCurrent(taskLoadKey: taskLoadKey)
+            }
         }
         return source
     }
@@ -182,6 +196,25 @@ final class OriginalEmailLoadViewModel: ObservableObject {
             subject: request.subject,
             timeout: timeout
         )
+    }
+
+    private func retryMissingSourceIfNeeded(
+        for request: OriginalEmailLoadRequest,
+        taskLoadKey: String,
+        recoveryPolicy: OriginalEmailMissingSourceRecoveryPolicy
+    ) async -> OriginalEmailSource? {
+        switch recoveryPolicy {
+        case .markUnavailableAfterRetries:
+            return await autoRetryMissingSourceIfNeeded(
+                for: request,
+                taskLoadKey: taskLoadKey
+            )
+        case .keepRecoveringWhileActive:
+            return await keepRecoveringWhileActive(
+                for: request,
+                taskLoadKey: taskLoadKey
+            )
+        }
     }
 
     private func autoRetryMissingSourceIfNeeded(
@@ -223,6 +256,35 @@ final class OriginalEmailLoadViewModel: ObservableObject {
         return nil
     }
 
+    private func keepRecoveringWhileActive(
+        for request: OriginalEmailLoadRequest,
+        taskLoadKey: String
+    ) async -> OriginalEmailSource? {
+        markRecoveringIfCurrent(taskLoadKey: taskLoadKey)
+
+        while !Task.isCancelled,
+              activeLoadTaskKey == taskLoadKey {
+            let idleDelay = autoRetryDelay > 0 ? autoRetryDelay : 1.0
+            try? await Task.sleep(nanoseconds: UInt64(idleDelay * 1_000_000_000))
+
+            guard !Task.isCancelled,
+                  activeLoadTaskKey == taskLoadKey else {
+                return nil
+            }
+
+            if let source = await loadSource(
+                for: request,
+                timeout: autoRetryTimeout
+            ) {
+                return source
+            }
+
+            markRecoveringIfCurrent(taskLoadKey: taskLoadKey)
+        }
+
+        return nil
+    }
+
     private func markRecoveringIfCurrent(taskLoadKey: String) {
         guard activeLoadTaskKey == taskLoadKey else {
             return
@@ -258,6 +320,7 @@ struct HTMLMessageView: View {
     @State private var snapshotPlaceholder: UIImage?
     /// Set once the live WebView reports its first paint, cross-fading the snapshot away.
     @State private var webViewPainted = false
+    @State private var loadedContentSignature: String?
 
     init(
         message: Message,
@@ -362,6 +425,7 @@ struct HTMLMessageView: View {
     /// placeholder and cross-fading the placeholder out once the WebView reports it has painted.
     @ViewBuilder
     private func loadedHTMLContent(html: String) -> some View {
+        let contentSignature = loadedHTMLContentSignature(for: html)
         ZStack {
             HTMLWebView(
                 htmlContent: html,
@@ -376,6 +440,12 @@ struct HTMLMessageView: View {
                     .transition(.opacity)
                     .allowsHitTesting(false)
             }
+        }
+        .onAppear {
+            handleLoadedContentSignature(contentSignature)
+        }
+        .onChange(of: contentSignature) { _, newSignature in
+            handleLoadedContentSignature(newSignature)
         }
     }
 
@@ -449,11 +519,19 @@ struct HTMLMessageView: View {
             return
         }
         snapshotPlaceholder = image
+        if !loadViewModel.loadState.hasLoadedContent {
+            loadViewModel.reloadPreservingContent()
+        }
     }
 
     private func loadHTMLContent() async {
         Log.diagnostic(.htmlPreview, level: .info, "HTMLMessageView loading message \(message.id)", category: .ui)
-        let source = await loadViewModel.loadOriginalEmail(for: loadRequest)
+        let source = await loadViewModel.loadOriginalEmail(
+            for: loadRequest,
+            missingSourceRecoveryPolicy: snapshotPlaceholder == nil
+                ? .markUnavailableAfterRetries
+                : .keepRecoveringWhileActive
+        )
 
         guard !Task.isCancelled else {
             return
@@ -510,6 +588,28 @@ struct HTMLMessageView: View {
         }
 
         loadViewModel.reloadPreservingContent()
+    }
+
+    private func loadedHTMLContentSignature(for html: String) -> String {
+        let htmlSignature = CanonicalEmailContent(
+            html: html,
+            plainText: nil,
+            sourceKind: .html,
+            sourceLocation: .messageFile
+        ).sourceSignature
+        return [
+            loadViewModel.activeHTMLSourceSignature ?? "source:nil",
+            htmlSignature
+        ].joined(separator: "|")
+    }
+
+    private func handleLoadedContentSignature(_ signature: String) {
+        guard loadedContentSignature != signature else {
+            return
+        }
+
+        loadedContentSignature = signature
+        webViewPainted = false
     }
 }
 

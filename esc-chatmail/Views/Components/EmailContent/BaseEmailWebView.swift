@@ -140,6 +140,11 @@ struct BaseEmailWebView: UIViewRepresentable {
     // MARK: - Coordinator
 
     class Coordinator: NSObject, WKNavigationDelegate {
+        enum LoadReadiness: Equatable {
+            case ready
+            case deferred(reason: String)
+        }
+
         var parent: BaseEmailWebView
         var lastLoadedContent: String = ""
         var lastLoadedReloadSignature: String = ""
@@ -296,17 +301,68 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
 
         func loadContentIfReady(in webView: WKWebView) {
-            guard needsReload, !isLoading else {
+            let windowPresent = webView.window != nil
+            let width = webView.bounds.width
+            let height = webView.bounds.height
+
+            switch loadReadiness(windowPresent: windowPresent, width: width, height: height) {
+            case .ready:
+                loadContent(in: webView)
+            case .deferred(let reason):
+                logDeferredLoad(
+                    reason: reason,
+                    windowPresent: windowPresent,
+                    width: width,
+                    height: height
+                )
+                return
+            }
+        }
+
+        func loadReadiness(windowPresent: Bool, width: CGFloat, height: CGFloat) -> LoadReadiness {
+            guard needsReload else {
+                return .deferred(reason: "no-pending-reload")
+            }
+
+            guard !isLoading else {
+                return .deferred(reason: "already-loading")
+            }
+
+            guard windowPresent else {
+                return .deferred(reason: "missing-window")
+            }
+
+            guard width > 1 else {
+                return .deferred(reason: "missing-width")
+            }
+
+            switch parent.mode {
+            case .fullInteractive:
+                return .ready
+            case .scaledPreview, .simplePreview:
+                guard height > 1 else {
+                    return .deferred(reason: "missing-height")
+                }
+                return .ready
+            }
+        }
+
+        private func logDeferredLoad(
+            reason: String,
+            windowPresent: Bool,
+            width: CGFloat,
+            height: CGFloat
+        ) {
+            guard needsReload || isLoading else {
                 return
             }
 
-            guard webView.window != nil,
-                  webView.bounds.width > 1,
-                  webView.bounds.height > 1 else {
-                return
-            }
-
-            loadContent(in: webView)
+            Log.diagnostic(
+                .htmlPreview,
+                level: .debug,
+                "BaseEmailWebView deferredLoad reason=\(reason) mode=\(readinessModeDescription()) messageId=\(parent.message?.id ?? "nil") windowPresent=\(windowPresent) width=\(String(format: "%.1f", width)) height=\(String(format: "%.1f", height)) needsReload=\(needsReload) isLoading=\(isLoading)",
+                category: .ui
+            )
         }
 
         func recordLoadedSignature() {
@@ -415,6 +471,17 @@ struct BaseEmailWebView: UIViewRepresentable {
                 // Quantize to prevent unnecessary reloads from insignificant layout jitter.
                 let quantized = Int((scale * 1000.0).rounded())
                 return "scaledPreview:\(quantized):\(colorSchemeSignature)"
+            }
+        }
+
+        private func readinessModeDescription() -> String {
+            switch parent.mode {
+            case .fullInteractive:
+                return "fullInteractive"
+            case .simplePreview:
+                return "simplePreview"
+            case .scaledPreview(let scale):
+                return "scaledPreview:\(String(format: "%.3f", scale))"
             }
         }
 

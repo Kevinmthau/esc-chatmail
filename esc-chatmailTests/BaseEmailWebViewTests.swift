@@ -183,6 +183,30 @@ final class BaseEmailWebViewTests: XCTestCase {
         XCTAssertFalse(coordinator.needsReload)
     }
 
+    func testFullInteractiveLoadReadinessDoesNotRequireMeasuredHeight() {
+        let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: nil, mode: .fullInteractive))
+
+        let readiness = coordinator.loadReadiness(windowPresent: true, width: 320, height: 0.5)
+
+        XCTAssertEqual(readiness, .ready)
+    }
+
+    func testScaledPreviewLoadReadinessStillRequiresMeasuredHeight() {
+        let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: nil, mode: .scaledPreview(scale: 0.5)))
+
+        let readiness = coordinator.loadReadiness(windowPresent: true, width: 320, height: 0.5)
+
+        XCTAssertEqual(readiness, .deferred(reason: "missing-height"))
+    }
+
+    func testSimplePreviewLoadReadinessStillRequiresMeasuredHeight() {
+        let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: nil, mode: .simplePreview))
+
+        let readiness = coordinator.loadReadiness(windowPresent: true, width: 320, height: 0.5)
+
+        XCTAssertEqual(readiness, .deferred(reason: "missing-height"))
+    }
+
     func testModeDisplayPurposeUsesOriginalPolicyOnlyForFullInteractiveEmail() {
         XCTAssertEqual(EmailWebViewMode.fullInteractive.displayPurpose, .original)
         XCTAssertEqual(EmailWebViewMode.scaledPreview(scale: 0.5).displayPurpose, .preview)
@@ -195,10 +219,14 @@ final class BaseEmailWebViewTests: XCTestCase {
         XCTAssertEqual(EmailWebViewMode.simplePreview.webViewUserInterfaceStyle, .unspecified)
     }
 
-    private func makeWebView(message: Message?, isDarkMode: Bool? = nil) -> BaseEmailWebView {
+    private func makeWebView(
+        message: Message?,
+        mode: EmailWebViewMode = .fullInteractive,
+        isDarkMode: Bool? = nil
+    ) -> BaseEmailWebView {
         BaseEmailWebView(
             htmlContent: "<html><body><img src=\"cid:image001@example.com\"></body></html>",
-            mode: .fullInteractive,
+            mode: mode,
             isDarkMode: isDarkMode,
             message: message
         )

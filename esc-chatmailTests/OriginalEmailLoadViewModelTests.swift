@@ -204,6 +204,116 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         XCTAssertEqual(loader.observedTimeouts, [0.01, 0.02, 0.02])
     }
 
+    func testPlaceholderBackedRecoveryRetriesUntilBackgroundWarmIsVisible() async throws {
+        let html = "<html><body>Background warmed original</body></html>"
+        let loader = CacheWarmingOriginalEmailSourceLoader(
+            warmedSource: originalEmailSource(
+                presentation: .html,
+                html: html,
+                sourceKind: .html,
+                sourceLocation: .messageFile
+            ),
+            warmDelayNanoseconds: 30_000_000
+        )
+        let viewModel = OriginalEmailLoadViewModel(
+            originalEmailSourceLoader: loader,
+            loadTimeout: 0.01,
+            recoveringDelay: 0.005,
+            maxAutoRetryAttempts: 0,
+            autoRetryDelay: 0.005,
+            autoRetryTimeout: 0.01
+        )
+
+        _ = await viewModel.loadOriginalEmail(
+            for: makeRequest(messageId: "placeholder-recovering-warmed"),
+            missingSourceRecoveryPolicy: .keepRecoveringWhileActive
+        )
+
+        let requestCount = await loader.requestCount
+        let observedTimeouts = await loader.observedTimeouts
+        XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
+        XCTAssertGreaterThanOrEqual(requestCount, 2)
+        XCTAssertEqual(observedTimeouts.first, 0.01)
+    }
+
+    func testPlaceholderBackedRecoveryLoadsLaterHTMLWithoutRecoveryReload() async throws {
+        let html = "<html><body>Placeholder-backed recovered original</body></html>"
+        let loader = StubOriginalEmailSourceLoader(
+            responses: [
+                nil,
+                originalEmailSource(
+                    presentation: .html,
+                    html: html,
+                    sourceKind: .recoveredHTML,
+                    sourceLocation: .recoveredHTML
+                )
+            ]
+        )
+        let viewModel = OriginalEmailLoadViewModel(
+            originalEmailSourceLoader: loader,
+            loadTimeout: 0.01,
+            recoveringDelay: 0.005,
+            maxAutoRetryAttempts: 0,
+            autoRetryDelay: 0.001,
+            autoRetryTimeout: 0.02
+        )
+
+        _ = await viewModel.loadOriginalEmail(
+            for: makeRequest(messageId: "placeholder-recovered-later"),
+            missingSourceRecoveryPolicy: .keepRecoveringWhileActive
+        )
+
+        XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
+        XCTAssertEqual(loader.observedTimeouts, [0.01, 0.02])
+    }
+
+    func testPlaceholderBackedRecoveryCanRestartFromRecoveringAndLoadLaterHTML() async throws {
+        let html = "<html><body>Notification restarted recovery</body></html>"
+        let loader = StubOriginalEmailSourceLoader(
+            responses: [
+                nil,
+                originalEmailSource(
+                    presentation: .html,
+                    html: html,
+                    sourceKind: .recoveredHTML,
+                    sourceLocation: .recoveredHTML
+                )
+            ]
+        )
+        let viewModel = OriginalEmailLoadViewModel(
+            originalEmailSourceLoader: loader,
+            loadTimeout: 0.01,
+            recoveringDelay: 0.005,
+            maxAutoRetryAttempts: 0,
+            autoRetryDelay: 1.0,
+            autoRetryTimeout: 0.02
+        )
+        let request = makeRequest(messageId: "placeholder-reload-from-recovering")
+
+        let firstTask = Task { @MainActor in
+            await viewModel.loadOriginalEmail(
+                for: request,
+                missingSourceRecoveryPolicy: .keepRecoveringWhileActive
+            )
+        }
+
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(viewModel.loadState, .recovering)
+
+        viewModel.reloadPreservingContent()
+        firstTask.cancel()
+        _ = await firstTask.value
+
+        await viewModel.loadOriginalEmail(
+            for: request,
+            missingSourceRecoveryPolicy: .keepRecoveringWhileActive
+        )
+
+        XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
+        XCTAssertEqual(viewModel.reloadGeneration, 1)
+        XCTAssertEqual(loader.requestCount, 2)
+    }
+
     private func makeRequest(messageId: String) -> OriginalEmailLoadRequest {
         OriginalEmailLoadRequest(
             messageId: messageId,
@@ -274,5 +384,65 @@ private final class StubOriginalEmailSourceLoader: OriginalEmailSourceLoading, @
         }
 
         return response
+    }
+}
+
+private actor CacheWarmingOriginalEmailSourceLoader: OriginalEmailSourceLoading {
+    private let warmedSource: OriginalEmailSource
+    private let warmDelayNanoseconds: UInt64
+    private var timeouts: [TimeInterval] = []
+    private var cachedSource: OriginalEmailSource?
+    private var hasStartedWarm = false
+
+    init(warmedSource: OriginalEmailSource, warmDelayNanoseconds: UInt64) {
+        self.warmedSource = warmedSource
+        self.warmDelayNanoseconds = warmDelayNanoseconds
+    }
+
+    var requestCount: Int {
+        timeouts.count
+    }
+
+    var observedTimeouts: [TimeInterval] {
+        timeouts
+    }
+
+    func loadOriginalEmailSource(
+        messageId _: String,
+        bodyStorageURI _: String?,
+        bodyText _: String?,
+        senderEmail _: String?,
+        subject _: String?,
+        timeout: TimeInterval
+    ) async -> OriginalEmailSource? {
+        timeouts.append(timeout)
+        let source = cachedSource
+        let shouldStartWarm = cachedSource == nil && !hasStartedWarm
+        if shouldStartWarm {
+            hasStartedWarm = true
+        }
+
+        if let source {
+            return source
+        }
+
+        if shouldStartWarm {
+            Task { [self] in
+                if warmDelayNanoseconds > 0 {
+                    try? await Task.sleep(nanoseconds: warmDelayNanoseconds)
+                }
+                await storeWarmedSource()
+            }
+        }
+
+        if timeout > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+        }
+
+        return cachedSource
+    }
+
+    private func storeWarmedSource() {
+        cachedSource = warmedSource
     }
 }
