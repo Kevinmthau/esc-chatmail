@@ -12,6 +12,16 @@ final class AsyncTimeoutTests: XCTestCase {
         XCTAssertEqual(result, 42)
     }
 
+    func testWithSoftTimeout_releasesWorkResultBeforeTimeoutTaskWakes() async {
+        let box = await droppedSoftTimeoutPayload()
+
+        for _ in 0..<20 where box.value != nil {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertNil(box.value, "the timeout gate should not retain the returned work value after resuming")
+    }
+
     func testWithSoftTimeout_returnsNilWhenTimeoutFiresFirst() async {
         let start = Date()
         let result = await withSoftTimeout(seconds: 0.1) {
@@ -50,4 +60,21 @@ final class AsyncTimeoutTests: XCTestCase {
         let completed = await flag.didCompleteWork
         XCTAssertTrue(completed, "soft timeout must NOT cancel the underlying work")
     }
+
+    private func droppedSoftTimeoutPayload() async -> WeakBox<TimeoutPayload> {
+        let box = WeakBox<TimeoutPayload>()
+        var payload: TimeoutPayload? = await withSoftTimeout(seconds: 2.0) {
+            TimeoutPayload()
+        }
+        XCTAssertNotNil(payload)
+        box.value = payload
+        payload = nil
+        return box
+    }
+}
+
+private final class TimeoutPayload: @unchecked Sendable {}
+
+private final class WeakBox<Object: AnyObject>: @unchecked Sendable {
+    weak var value: Object?
 }

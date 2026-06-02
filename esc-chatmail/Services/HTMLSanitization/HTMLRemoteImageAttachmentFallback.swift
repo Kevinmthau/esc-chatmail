@@ -38,24 +38,6 @@ actor HTMLRemoteImageAttachmentFallback {
         case pending
     }
 
-    private final class ResolutionGate<T: Sendable>: @unchecked Sendable {
-        private let lock = NSLock()
-        private var continuation: CheckedContinuation<T, Never>?
-
-        init(_ continuation: CheckedContinuation<T, Never>) {
-            self.continuation = continuation
-        }
-
-        func resume(returning result: T) {
-            lock.lock()
-            let continuation = self.continuation
-            self.continuation = nil
-            lock.unlock()
-
-            continuation?.resume(returning: result)
-        }
-    }
-
     private struct CostBoundedStringCache: Sendable {
         private var values: [String: String] = [:]
         private var costs: [String: Int] = [:]
@@ -375,7 +357,7 @@ actor HTMLRemoteImageAttachmentFallback {
         }
 
         return await withCheckedContinuation { continuation in
-            let gate = ResolutionGate<PreviewDataURLResolutionResult>(continuation)
+            let gate = SingleFireContinuationGate<PreviewDataURLResolutionResult>(continuation)
 
             Task { [self] in
                 let result = await task.value
@@ -456,7 +438,7 @@ actor HTMLRemoteImageAttachmentFallback {
         timeoutNanoseconds: UInt64
     ) async -> String? {
         await withCheckedContinuation { continuation in
-            let gate = ResolutionGate<String?>(continuation)
+            let gate = SingleFireContinuationGate<String?>(continuation)
 
             Task { [self] in
                 let result = await task.value

@@ -1,6 +1,37 @@
 import CryptoKit
 import Foundation
 
+enum OriginalEmailTelemetry {
+    static func log(
+        event: String,
+        messageId: String,
+        source: String? = nil,
+        duration: TimeInterval? = nil,
+        detail: String? = nil
+    ) {
+        var components = [
+            "OriginalEmail event=\(event)",
+            "message=\(messageId)"
+        ]
+        if let source {
+            components.append("source=\(source)")
+        }
+        if let duration {
+            components.append("duration_ms=\(Int((duration * 1000).rounded()))")
+        }
+        if let detail {
+            components.append(detail)
+        }
+
+        Log.diagnostic(
+            .htmlPreview,
+            level: .info,
+            components.joined(separator: " "),
+            category: .ui
+        )
+    }
+}
+
 struct OriginalEmailSource: Equatable, Sendable {
     enum Presentation: String, Sendable {
         case html
@@ -34,6 +65,74 @@ protocol OriginalEmailSourceLoading: Sendable {
         subject: String?,
         timeout: TimeInterval
     ) async -> OriginalEmailSource?
+
+    func ensureOriginalEmailAvailable(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        senderEmail: String?,
+        subject: String?
+    ) async -> OriginalEmailSource?
+}
+
+extension OriginalEmailSourceLoading {
+    /// Default "run to completion" implementation for conformers that don't supply
+    /// their own. `.greatestFiniteMagnitude` means "no deadline" — `withSoftTimeout`
+    /// treats a non-representable deadline as no timeout and simply awaits the work.
+    func ensureOriginalEmailAvailable(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        senderEmail: String?,
+        subject: String?
+    ) async -> OriginalEmailSource? {
+        await loadOriginalEmailSource(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            senderEmail: senderEmail,
+            subject: subject,
+            timeout: .greatestFiniteMagnitude
+        )
+    }
+}
+
+private struct OriginalEmailEnsureRequestKey: Hashable, Sendable {
+    let messageId: String
+    let currentHTMLSourceSignatureFingerprint: String
+    let bodyStorageURIFingerprint: String
+    let bodyTextFingerprint: String
+    let senderEmailFingerprint: String
+    let subjectFingerprint: String
+
+    init(
+        messageId: String,
+        currentHTMLSourceSignature: String?,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        senderEmail: String?,
+        subject: String?
+    ) {
+        self.messageId = messageId
+        self.currentHTMLSourceSignatureFingerprint = Self.fingerprint(for: currentHTMLSourceSignature)
+        self.bodyStorageURIFingerprint = Self.fingerprint(for: bodyStorageURI)
+        self.bodyTextFingerprint = Self.fingerprint(for: bodyText)
+        self.senderEmailFingerprint = Self.fingerprint(for: senderEmail)
+        self.subjectFingerprint = Self.fingerprint(for: subject)
+    }
+
+    private static func fingerprint(for text: String?) -> String {
+        guard let text else {
+            return "nil"
+        }
+
+        let data = Data(text.utf8)
+        let digest = SHA256.hash(data: data)
+            .prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "\(data.count):\(digest)"
+    }
 }
 
 final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Sendable {
@@ -42,6 +141,7 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
     private let canonicalContentLoader: any CanonicalEmailContentLoading
     private let htmlContentLoader: HTMLContentLoader
     private let renderedMessageCache: RenderedMessageCache
+    private let ensureCoordinator = InFlightRequestManager<OriginalEmailEnsureRequestKey, OriginalEmailSource>()
 
     init(
         canonicalContentLoader: any CanonicalEmailContentLoading = CanonicalEmailContentLoader.shared,
@@ -84,6 +184,77 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         return result ?? nil
     }
 
+    func ensureOriginalEmailAvailable(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        senderEmail: String?,
+        subject: String?
+    ) async -> OriginalEmailSource? {
+        let currentHTMLSourceSignature = canonicalContentLoader.currentHTMLSourceSignature(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI
+        )
+        let requestKey = OriginalEmailEnsureRequestKey(
+            messageId: messageId,
+            currentHTMLSourceSignature: currentHTMLSourceSignature,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            senderEmail: senderEmail,
+            subject: subject
+        )
+
+        // Coalesce only identical loader inputs and local source snapshots. The
+        // same file/URI can be overwritten while recovery is in flight, and the
+        // newer source must load immediately.
+        return await ensureCoordinator.deduplicated(key: requestKey) { [self] in
+            let start = CFAbsoluteTimeGetCurrent()
+            OriginalEmailTelemetry.log(
+                event: "original_email_opened",
+                messageId: messageId,
+                detail: "priority=userInitiated"
+            )
+
+            let source = await loadOriginalEmailSourceToCompletion(
+                messageId: messageId,
+                bodyStorageURI: bodyStorageURI,
+                bodyText: bodyText,
+                senderEmail: senderEmail,
+                subject: subject
+            )
+
+            let duration = CFAbsoluteTimeGetCurrent() - start
+            if let source {
+                let sourceName = telemetrySourceName(for: source)
+                OriginalEmailTelemetry.log(
+                    event: source.sourceLocation == .messageFile || source.sourceLocation == .storageURI
+                        ? "original_email_cache_hit"
+                        : "original_email_cache_miss",
+                    messageId: messageId,
+                    source: sourceName,
+                    duration: nil,
+                    detail: "sourceLocation=\(source.sourceLocation.rawValue)"
+                )
+                OriginalEmailTelemetry.log(
+                    event: "original_email_time_to_first_render_ms",
+                    messageId: messageId,
+                    source: sourceName,
+                    duration: duration,
+                    detail: "presentation=\(source.presentation.rawValue)"
+                )
+            } else {
+                OriginalEmailTelemetry.log(
+                    event: "original_email_decode_failed",
+                    messageId: messageId,
+                    duration: duration,
+                    detail: "failure_reason=no_recoverable_source"
+                )
+            }
+
+            return source
+        }
+    }
+
     func loadOriginalEmailSourceToCompletion(
         messageId: String,
         bodyStorageURI: String?,
@@ -116,14 +287,12 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
                     subject: subject
                 ),
                 producer: {
-                    await self.htmlContentLoader.prepareOriginalHTMLForCaching(
-                        fromCanonicalHTML: canonicalHTML,
+                    await self.prepareOriginalHTMLWithTelemetry(
+                        canonicalHTML,
+                        content: canonicalContent,
                         messageId: messageId,
-                        sourceLocation: canonicalContent.sourceLocation,
-                        plainText: canonicalContent.plainText,
                         senderEmail: senderEmail,
-                        subject: subject,
-                        isDarkMode: false
+                        subject: subject
                     )
                 }
            ) {
@@ -168,14 +337,12 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
                     subject: subject
                 ),
                 producer: {
-                    await self.htmlContentLoader.prepareOriginalHTMLForCaching(
-                        fromCanonicalHTML: recoveredHTML,
+                    await self.prepareOriginalHTMLWithTelemetry(
+                        recoveredHTML,
+                        content: recoveredContent,
                         messageId: messageId,
-                        sourceLocation: recoveredContent.sourceLocation,
-                        plainText: recoveredContent.plainText,
                         senderEmail: senderEmail,
-                        subject: subject,
-                        isDarkMode: false
+                        subject: subject
                     )
                 }
            ) {
@@ -265,17 +432,51 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
                 subject: subject
             ),
             producer: {
-                await self.htmlContentLoader.prepareOriginalHTMLForCaching(
-                    fromCanonicalHTML: canonicalHTML,
+                await self.prepareOriginalHTMLWithTelemetry(
+                    canonicalHTML,
+                    content: canonicalContent,
                     messageId: messageId,
-                    sourceLocation: canonicalContent.sourceLocation,
-                    plainText: canonicalContent.plainText,
                     senderEmail: senderEmail,
-                    subject: subject,
-                    isDarkMode: false
+                    subject: subject
                 )
             }
         )
+    }
+
+    private func prepareOriginalHTMLWithTelemetry(
+        _ canonicalHTML: String,
+        content: CanonicalEmailContent,
+        messageId: String,
+        senderEmail: String?,
+        subject: String?
+    ) async -> PreparedOriginalHTML? {
+        let source = telemetrySourceName(sourceLocation: content.sourceLocation)
+        let start = CFAbsoluteTimeGetCurrent()
+        OriginalEmailTelemetry.log(
+            event: "original_email_sanitize_started",
+            messageId: messageId,
+            source: source,
+            detail: "sourceLocation=\(content.sourceLocation.rawValue)"
+        )
+
+        let prepared = await htmlContentLoader.prepareOriginalHTMLForCaching(
+            fromCanonicalHTML: canonicalHTML,
+            messageId: messageId,
+            sourceLocation: content.sourceLocation,
+            plainText: content.plainText,
+            senderEmail: senderEmail,
+            subject: subject,
+            isDarkMode: false
+        )
+
+        OriginalEmailTelemetry.log(
+            event: prepared == nil ? "original_email_sanitize_failed" : "original_email_sanitize_completed",
+            messageId: messageId,
+            source: source,
+            duration: CFAbsoluteTimeGetCurrent() - start,
+            detail: prepared == nil ? "failure_reason=prepare_original_html_failed" : nil
+        )
+        return prepared
     }
 
     private func loadFallbackHTMLSource(
@@ -367,5 +568,22 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
             .prefix(8)
             .map { String(format: "%02x", $0) }
             .joined()
+    }
+
+    private func telemetrySourceName(for source: OriginalEmailSource) -> String {
+        telemetrySourceName(sourceLocation: source.sourceLocation)
+    }
+
+    private func telemetrySourceName(sourceLocation: CanonicalEmailSourceLocation) -> String {
+        switch sourceLocation {
+        case .messageFile, .storageURI:
+            return "decoded_cache"
+        case .rawSourceHTML:
+            return "raw_cache"
+        case .recoveredHTML:
+            return "provider_fetch"
+        case .plainText:
+            return "plain_text_fallback"
+        }
     }
 }

@@ -18,39 +18,81 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         let viewModel = OriginalEmailLoadViewModel(
             originalEmailSourceLoader: loader,
             loadTimeout: 0.5,
-            recoveringDelay: 0.05,
-            maxAutoRetryAttempts: 0
+            recoveringDelay: 0.05
         )
 
         await viewModel.loadOriginalEmail(for: makeRequest(messageId: "local-html"))
 
         XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
-        XCTAssertEqual(loader.observedTimeouts, [0.5])
+        XCTAssertEqual(loader.ensureRequestCount, 1)
     }
 
-    func testSlowUnavailableLoadExitsRecoveringState() async throws {
+    func testSlowEnsureTimesOutBeforeForegroundRecoveryCompletes() async throws {
         let loader = StubOriginalEmailSourceLoader(
             responses: [nil],
-            delayNanoseconds: 50_000_000
+            delayNanoseconds: 80_000_000
         )
         let viewModel = OriginalEmailLoadViewModel(
             originalEmailSourceLoader: loader,
-            loadTimeout: 0.01,
-            recoveringDelay: 0.005,
-            maxAutoRetryAttempts: 0
+            loadTimeout: 0.03,
+            recoveringDelay: 0.005
         )
 
         let task = Task { @MainActor in
             await viewModel.loadOriginalEmail(for: makeRequest(messageId: "slow-missing"))
         }
 
-        try await Task.sleep(nanoseconds: 20_000_000)
+        try await Task.sleep(nanoseconds: 15_000_000)
         XCTAssertEqual(viewModel.loadState, .recovering)
 
         await task.value
 
-        XCTAssertEqual(viewModel.loadState, .unavailable)
-        XCTAssertEqual(loader.observedTimeouts, [0.01])
+        XCTAssertEqual(viewModel.loadState, .retryableFailure("original_email_unavailable"))
+        XCTAssertEqual(loader.ensureRequestCount, 1)
+        XCTAssertEqual(loader.completedEnsureRequestCount, 0)
+
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(loader.completedEnsureRequestCount, 1)
+    }
+
+    func testRetryableTimeoutAppliesLateSuccessfulSource() async throws {
+        let html = "<html><body>Late local original</body></html>"
+        let lateSource = originalEmailSource(
+            presentation: .html,
+            html: html,
+            sourceKind: .html,
+            sourceLocation: .messageFile
+        )
+        var acceptedSources: [OriginalEmailSource] = []
+        let loader = ManuallyCompletingOriginalEmailSourceLoader(
+            source: lateSource
+        )
+        let viewModel = OriginalEmailLoadViewModel(
+            originalEmailSourceLoader: loader,
+            loadTimeout: 0.01,
+            recoveringDelay: 0.005,
+            onSourceLoaded: { source in
+                acceptedSources.append(source)
+            }
+        )
+
+        let source = await viewModel.loadOriginalEmail(
+            for: makeRequest(messageId: "late-success"),
+            missingSourceRecoveryPolicy: .markUnavailableAfterRetries
+        )
+
+        XCTAssertNil(source)
+        XCTAssertEqual(viewModel.loadState, .retryableFailure("original_email_unavailable"))
+        XCTAssertEqual(loader.ensureRequestCount, 1)
+        XCTAssertEqual(loader.completedEnsureRequestCount, 0)
+        XCTAssertTrue(acceptedSources.isEmpty)
+
+        loader.complete()
+        try await waitForLoadState(.loaded(.html(html)), in: viewModel)
+
+        XCTAssertEqual(viewModel.activeHTMLSourceSignature, "html-signature")
+        XCTAssertEqual(loader.completedEnsureRequestCount, 1)
+        XCTAssertEqual(acceptedSources, [lateSource])
     }
 
     func testUnavailableStateIsRetryCapable() async {
@@ -58,12 +100,11 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         let viewModel = OriginalEmailLoadViewModel(
             originalEmailSourceLoader: loader,
             loadTimeout: 0.01,
-            recoveringDelay: 0.005,
-            maxAutoRetryAttempts: 0
+            recoveringDelay: 0.005
         )
 
         await viewModel.loadOriginalEmail(for: makeRequest(messageId: "retry-missing"))
-        XCTAssertEqual(viewModel.loadState, .unavailable)
+        XCTAssertEqual(viewModel.loadState, .retryableFailure("original_email_unavailable"))
 
         viewModel.retry()
 
@@ -87,19 +128,18 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         let viewModel = OriginalEmailLoadViewModel(
             originalEmailSourceLoader: loader,
             loadTimeout: 0.01,
-            recoveringDelay: 0.005,
-            maxAutoRetryAttempts: 0
+            recoveringDelay: 0.005
         )
         let request = makeRequest(messageId: "warmed-retry")
 
         await viewModel.loadOriginalEmail(for: request)
-        XCTAssertEqual(viewModel.loadState, .unavailable)
+        XCTAssertEqual(viewModel.loadState, .retryableFailure("original_email_unavailable"))
 
         viewModel.retry()
         await viewModel.loadOriginalEmail(for: request)
 
         XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
-        XCTAssertEqual(loader.requestCount, 2)
+        XCTAssertEqual(loader.ensureRequestCount, 2)
     }
 
     func testPreservingReloadKeepsLoadedHTMLWhenRefreshReturnsNil() async {
@@ -118,8 +158,7 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         let viewModel = OriginalEmailLoadViewModel(
             originalEmailSourceLoader: loader,
             loadTimeout: 0.01,
-            recoveringDelay: 0.005,
-            maxAutoRetryAttempts: 0
+            recoveringDelay: 0.005
         )
         let request = makeRequest(messageId: "preserving-refresh")
 
@@ -132,7 +171,7 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
         XCTAssertEqual(viewModel.activeHTMLSourceSignature, "html-signature")
-        XCTAssertEqual(loader.requestCount, 2)
+        XCTAssertEqual(loader.ensureRequestCount, 2)
     }
 
     func testSuccessfulRecoveryRendersHTML() async throws {
@@ -150,8 +189,7 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         let viewModel = OriginalEmailLoadViewModel(
             originalEmailSourceLoader: loader,
             loadTimeout: 0.5,
-            recoveringDelay: 0.005,
-            maxAutoRetryAttempts: 0
+            recoveringDelay: 0.005
         )
 
         await viewModel.loadOriginalEmail(for: makeRequest(messageId: "recovered-html"))
@@ -159,52 +197,53 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
     }
 
-    func testSlowRecoveryAutoRetryLoadsWarmedHTML() async {
+    func testDelayedForegroundRecoveryLoadsWarmedHTMLWithoutUnavailableState() async throws {
         let html = "<html><body>Auto-retried recovered original</body></html>"
         let loader = StubOriginalEmailSourceLoader(
             responses: [
-                nil,
                 originalEmailSource(
                     presentation: .html,
                     html: html,
                     sourceKind: .recoveredHTML,
                     sourceLocation: .recoveredHTML
                 )
-            ]
+            ],
+            delayNanoseconds: 40_000_000
         )
         let viewModel = OriginalEmailLoadViewModel(
             originalEmailSourceLoader: loader,
-            loadTimeout: 0.01,
-            recoveringDelay: 0.005,
-            maxAutoRetryAttempts: 2,
-            autoRetryDelay: 0.001,
-            autoRetryTimeout: 0.02
+            loadTimeout: 0.1,
+            recoveringDelay: 0.005
         )
 
-        await viewModel.loadOriginalEmail(for: makeRequest(messageId: "auto-retry-warmed"))
+        let task = Task { @MainActor in
+            await viewModel.loadOriginalEmail(for: makeRequest(messageId: "auto-retry-warmed"))
+        }
+
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(viewModel.loadState, .recovering)
+
+        await task.value
 
         XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
-        XCTAssertEqual(loader.observedTimeouts, [0.01, 0.02])
+        XCTAssertEqual(loader.ensureRequestCount, 1)
     }
 
-    func testSlowRecoveryAutoRetryStopsAtUnavailableForTrueMiss() async {
+    func testForegroundRecoveryStopsAtRetryableFailureForTrueMiss() async {
         let loader = StubOriginalEmailSourceLoader(responses: [nil, nil, nil])
         let viewModel = OriginalEmailLoadViewModel(
             originalEmailSourceLoader: loader,
             loadTimeout: 0.01,
-            recoveringDelay: 0.005,
-            maxAutoRetryAttempts: 2,
-            autoRetryDelay: 0.001,
-            autoRetryTimeout: 0.02
+            recoveringDelay: 0.005
         )
 
         await viewModel.loadOriginalEmail(for: makeRequest(messageId: "auto-retry-missing"))
 
-        XCTAssertEqual(viewModel.loadState, .unavailable)
-        XCTAssertEqual(loader.observedTimeouts, [0.01, 0.02, 0.02])
+        XCTAssertEqual(viewModel.loadState, .retryableFailure("original_email_unavailable"))
+        XCTAssertEqual(loader.ensureRequestCount, 1)
     }
 
-    func testPlaceholderBackedRecoveryRetriesUntilBackgroundWarmIsVisible() async throws {
+    func testPlaceholderBackedRecoveryWaitsUntilForegroundWarmIsVisible() async throws {
         let html = "<html><body>Background warmed original</body></html>"
         let loader = CacheWarmingOriginalEmailSourceLoader(
             warmedSource: originalEmailSource(
@@ -217,11 +256,8 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         )
         let viewModel = OriginalEmailLoadViewModel(
             originalEmailSourceLoader: loader,
-            loadTimeout: 0.01,
-            recoveringDelay: 0.005,
-            maxAutoRetryAttempts: 0,
-            autoRetryDelay: 0.005,
-            autoRetryTimeout: 0.01
+            loadTimeout: 0.1,
+            recoveringDelay: 0.005
         )
 
         _ = await viewModel.loadOriginalEmail(
@@ -230,41 +266,88 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         )
 
         let requestCount = await loader.requestCount
-        let observedTimeouts = await loader.observedTimeouts
         XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
-        XCTAssertGreaterThanOrEqual(requestCount, 2)
-        XCTAssertEqual(observedTimeouts.first, 0.01)
+        XCTAssertEqual(requestCount, 1)
     }
 
-    func testPlaceholderBackedRecoveryLoadsLaterHTMLWithoutRecoveryReload() async throws {
+    func testPlaceholderBackedRecoveryContinuesAfterSoftTimeoutUntilWarmIsVisible() async throws {
         let html = "<html><body>Placeholder-backed recovered original</body></html>"
         let loader = StubOriginalEmailSourceLoader(
             responses: [
-                nil,
                 originalEmailSource(
                     presentation: .html,
                     html: html,
                     sourceKind: .recoveredHTML,
                     sourceLocation: .recoveredHTML
                 )
-            ]
+            ],
+            delayNanoseconds: 40_000_000
         )
         let viewModel = OriginalEmailLoadViewModel(
             originalEmailSourceLoader: loader,
             loadTimeout: 0.01,
-            recoveringDelay: 0.005,
-            maxAutoRetryAttempts: 0,
-            autoRetryDelay: 0.001,
-            autoRetryTimeout: 0.02
+            recoveringDelay: 0.005
         )
 
-        _ = await viewModel.loadOriginalEmail(
-            for: makeRequest(messageId: "placeholder-recovered-later"),
-            missingSourceRecoveryPolicy: .keepRecoveringWhileActive
-        )
+        let task = Task { @MainActor in
+            await viewModel.loadOriginalEmail(
+                for: makeRequest(messageId: "placeholder-recovered-later"),
+                missingSourceRecoveryPolicy: .keepRecoveringWhileActive
+            )
+        }
+
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(viewModel.loadState, .recovering)
+        XCTAssertEqual(loader.ensureRequestCount, 1)
+        XCTAssertEqual(loader.completedEnsureRequestCount, 0)
+
+        _ = await task.value
 
         XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
-        XCTAssertEqual(loader.observedTimeouts, [0.01, 0.02])
+        XCTAssertEqual(loader.ensureRequestCount, 1)
+    }
+
+    func testPlaceholderBackedRecoveryStopsWaitingWhenCancelledAfterSoftTimeout() async throws {
+        let loader = ManuallyCompletingOriginalEmailSourceLoader(
+            source: originalEmailSource(
+                presentation: .html,
+                html: "<html><body>Slow placeholder recovery</body></html>",
+                sourceKind: .recoveredHTML,
+                sourceLocation: .recoveredHTML
+            )
+        )
+        let viewModel = OriginalEmailLoadViewModel(
+            originalEmailSourceLoader: loader,
+            loadTimeout: 0.01,
+            recoveringDelay: 0.005
+        )
+
+        let task = Task { @MainActor in
+            await viewModel.loadOriginalEmail(
+                for: makeRequest(messageId: "placeholder-cancelled-recovery"),
+                missingSourceRecoveryPolicy: .keepRecoveringWhileActive
+            )
+        }
+
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(viewModel.loadState, .recovering)
+        XCTAssertEqual(loader.ensureRequestCount, 1)
+        XCTAssertEqual(loader.completedEnsureRequestCount, 0)
+
+        task.cancel()
+        let cancelledResult = await withSoftTimeout(seconds: 0.25) {
+            await task.value
+        }
+
+        guard case .some(.none) = cancelledResult else {
+            XCTFail("Expected placeholder-backed recovery to return nil promptly after cancellation")
+            loader.complete()
+            _ = await task.value
+            return
+        }
+
+        XCTAssertEqual(loader.completedEnsureRequestCount, 0)
+        loader.complete()
     }
 
     func testPlaceholderBackedRecoveryCanRestartFromRecoveringAndLoadLaterHTML() async throws {
@@ -278,15 +361,13 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
                     sourceKind: .recoveredHTML,
                     sourceLocation: .recoveredHTML
                 )
-            ]
+            ],
+            delayNanoseconds: 100_000_000
         )
         let viewModel = OriginalEmailLoadViewModel(
             originalEmailSourceLoader: loader,
-            loadTimeout: 0.01,
-            recoveringDelay: 0.005,
-            maxAutoRetryAttempts: 0,
-            autoRetryDelay: 1.0,
-            autoRetryTimeout: 0.02
+            loadTimeout: 0.2,
+            recoveringDelay: 0.005
         )
         let request = makeRequest(messageId: "placeholder-reload-from-recovering")
 
@@ -311,14 +392,110 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
         XCTAssertEqual(viewModel.reloadGeneration, 1)
-        XCTAssertEqual(loader.requestCount, 2)
+        XCTAssertEqual(loader.ensureRequestCount, 2)
     }
 
-    private func makeRequest(messageId: String) -> OriginalEmailLoadRequest {
+    func testContentSourceReloadPolicyReloadsWhileSourceIsResolving() {
+        let resolvingStates: [OriginalEmailLoadState] = [.loading, .recovering]
+
+        for loadState in resolvingStates {
+            XCTAssertTrue(
+                OriginalEmailContentSourceReloadPolicy.shouldReload(
+                    changedMessageId: "message-1",
+                    currentMessageId: "message-1",
+                    changedSourceSignature: "new-source",
+                    activeSourceSignature: nil,
+                    loadState: loadState
+                )
+            )
+        }
+    }
+
+    func testContentSourceReloadPolicySkipsAlreadyLoadedSourceSignature() {
+        XCTAssertFalse(
+            OriginalEmailContentSourceReloadPolicy.shouldReload(
+                changedMessageId: "message-1",
+                currentMessageId: "message-1",
+                changedSourceSignature: "loaded-source",
+                activeSourceSignature: "loaded-source",
+                loadState: .loaded(.html("<html></html>"))
+            )
+        )
+    }
+
+    func testContentSourceReloadDuringRecoverySupersedesStaleInFlightLoad() async throws {
+        let staleHTML = "<html><body>Stale original</body></html>"
+        let freshHTML = "<html><body>Fresh synced original</body></html>"
+        let staleSource = originalEmailSource(
+            presentation: .html,
+            html: staleHTML,
+            sourceKind: .html,
+            sourceLocation: .messageFile,
+            sourceSignature: "old-source"
+        )
+        let freshSource = originalEmailSource(
+            presentation: .html,
+            html: freshHTML,
+            sourceKind: .html,
+            sourceLocation: .messageFile,
+            sourceSignature: "new-source"
+        )
+        let loader = BodyTextCompletingOriginalEmailSourceLoader()
+        let viewModel = OriginalEmailLoadViewModel(
+            originalEmailSourceLoader: loader,
+            loadTimeout: 0.01,
+            recoveringDelay: 0.005
+        )
+        let staleRequest = makeRequest(
+            messageId: "content-source-reload",
+            bodyText: "Old raw source"
+        )
+        let freshRequest = makeRequest(
+            messageId: "content-source-reload",
+            bodyText: "Fresh synced raw source"
+        )
+
+        let staleTask = Task { @MainActor in
+            await viewModel.loadOriginalEmail(
+                for: staleRequest,
+                missingSourceRecoveryPolicy: .keepRecoveringWhileActive
+            )
+        }
+
+        try await waitForEnsureRequestCount(1, in: loader)
+        try await waitForLoadState(.recovering, in: viewModel)
+
+        viewModel.reloadPreservingContent()
+        let freshTask = Task { @MainActor in
+            await viewModel.loadOriginalEmail(
+                for: freshRequest,
+                missingSourceRecoveryPolicy: .keepRecoveringWhileActive
+            )
+        }
+
+        try await waitForEnsureRequestCount(2, in: loader)
+        XCTAssertTrue(loader.completeRequest(bodyText: "Fresh synced raw source", with: freshSource))
+
+        let freshResult = await freshTask.value
+        XCTAssertEqual(freshResult, freshSource)
+        XCTAssertEqual(viewModel.loadState, .loaded(.html(freshHTML)))
+        XCTAssertEqual(viewModel.activeHTMLSourceSignature, "new-source")
+
+        XCTAssertTrue(loader.completeRequest(bodyText: "Old raw source", with: staleSource))
+        let staleResult = await staleTask.value
+        XCTAssertNil(staleResult)
+        XCTAssertEqual(viewModel.loadState, .loaded(.html(freshHTML)))
+        XCTAssertEqual(viewModel.activeHTMLSourceSignature, "new-source")
+    }
+
+    private func makeRequest(
+        messageId: String,
+        bodyText: String = "Plain fallback"
+    ) -> OriginalEmailLoadRequest {
         OriginalEmailLoadRequest(
             messageId: messageId,
             bodyStorageURI: nil,
-            bodyText: "Plain fallback",
+            bodyText: bodyText,
             subject: "Original",
             senderEmail: "sender@example.com"
         )
@@ -329,7 +506,8 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         html: String?,
         plainText: String? = nil,
         sourceKind: CanonicalEmailSourceKind,
-        sourceLocation: CanonicalEmailSourceLocation
+        sourceLocation: CanonicalEmailSourceLocation,
+        sourceSignature: String? = nil
     ) -> OriginalEmailSource {
         OriginalEmailSource(
             presentation: presentation,
@@ -337,17 +515,113 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
             plainText: plainText,
             sourceKind: sourceKind,
             sourceLocation: sourceLocation,
-            sourceSignature: "\(sourceKind.rawValue)-signature",
+            sourceSignature: sourceSignature ?? "\(sourceKind.rawValue)-signature",
             hasHTMLSource: html != nil
         )
+    }
+
+    private func waitForEnsureRequestCount(
+        _ expectedCount: Int,
+        in loader: BodyTextCompletingOriginalEmailSourceLoader,
+        timeout: TimeInterval = 1.0,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while loader.ensureRequestCount < expectedCount, Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(loader.ensureRequestCount, expectedCount, file: file, line: line)
+    }
+
+    private func waitForLoadState(
+        _ expectedState: OriginalEmailLoadState,
+        in viewModel: OriginalEmailLoadViewModel,
+        timeout: TimeInterval = 1.0,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while viewModel.loadState != expectedState, Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(viewModel.loadState, expectedState, file: file, line: line)
+    }
+}
+
+private final class BodyTextCompletingOriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Sendable {
+    private struct PendingRequest {
+        let bodyText: String?
+        let continuation: CheckedContinuation<OriginalEmailSource?, Never>
+    }
+
+    private let stateQueue = DispatchQueue(label: "BodyTextCompletingOriginalEmailSourceLoader.state")
+    private var pendingRequests: [PendingRequest] = []
+    private var ensureCalls = 0
+
+    var ensureRequestCount: Int {
+        stateQueue.sync { ensureCalls }
+    }
+
+    func loadOriginalEmailSource(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        senderEmail: String?,
+        subject: String?,
+        timeout: TimeInterval
+    ) async -> OriginalEmailSource? {
+        await ensureOriginalEmailAvailable(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            senderEmail: senderEmail,
+            subject: subject
+        )
+    }
+
+    func ensureOriginalEmailAvailable(
+        messageId _: String,
+        bodyStorageURI _: String?,
+        bodyText: String?,
+        senderEmail _: String?,
+        subject _: String?
+    ) async -> OriginalEmailSource? {
+        await withCheckedContinuation { continuation in
+            stateQueue.sync {
+                ensureCalls += 1
+                pendingRequests.append(
+                    PendingRequest(
+                        bodyText: bodyText,
+                        continuation: continuation
+                    )
+                )
+            }
+        }
+    }
+
+    func completeRequest(bodyText: String?, with source: OriginalEmailSource?) -> Bool {
+        let continuation = stateQueue.sync { () -> CheckedContinuation<OriginalEmailSource?, Never>? in
+            guard let index = pendingRequests.firstIndex(where: { $0.bodyText == bodyText }) else {
+                return nil
+            }
+            return pendingRequests.remove(at: index).continuation
+        }
+
+        continuation?.resume(returning: source)
+        return continuation != nil
     }
 }
 
 private final class StubOriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Sendable {
-    private let lock = NSLock()
+    private let stateQueue = DispatchQueue(label: "StubOriginalEmailSourceLoader.state")
     private var responses: [OriginalEmailSource?]
     private let delayNanoseconds: UInt64
     private var timeouts: [TimeInterval] = []
+    private var ensureCalls = 0
+    private var completedEnsureCalls = 0
 
     init(responses: [OriginalEmailSource?], delayNanoseconds: UInt64 = 0) {
         self.responses = responses
@@ -355,15 +629,19 @@ private final class StubOriginalEmailSourceLoader: OriginalEmailSourceLoading, @
     }
 
     var observedTimeouts: [TimeInterval] {
-        lock.lock()
-        defer { lock.unlock() }
-        return timeouts
+        stateQueue.sync { timeouts }
     }
 
     var requestCount: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return timeouts.count
+        stateQueue.sync { timeouts.count + ensureCalls }
+    }
+
+    var ensureRequestCount: Int {
+        stateQueue.sync { ensureCalls }
+    }
+
+    var completedEnsureRequestCount: Int {
+        stateQueue.sync { completedEnsureCalls }
     }
 
     func loadOriginalEmailSource(
@@ -374,16 +652,129 @@ private final class StubOriginalEmailSourceLoader: OriginalEmailSourceLoading, @
         subject _: String?,
         timeout: TimeInterval
     ) async -> OriginalEmailSource? {
-        lock.lock()
-        timeouts.append(timeout)
-        let response = responses.isEmpty ? nil : responses.removeFirst()
-        lock.unlock()
+        await nextResponse(recordedTimeout: timeout)
+    }
+
+    func ensureOriginalEmailAvailable(
+        messageId _: String,
+        bodyStorageURI _: String?,
+        bodyText _: String?,
+        senderEmail _: String?,
+        subject _: String?
+    ) async -> OriginalEmailSource? {
+        await nextResponse(recordedTimeout: nil)
+    }
+
+    private func nextResponse(recordedTimeout timeout: TimeInterval?) async -> OriginalEmailSource? {
+        let isEnsureRequest = timeout == nil
+        let response = stateQueue.sync {
+            if let timeout {
+                timeouts.append(timeout)
+            } else {
+                ensureCalls += 1
+            }
+            return responses.isEmpty ? nil : responses.removeFirst()
+        }
 
         if delayNanoseconds > 0 {
             try? await Task.sleep(nanoseconds: delayNanoseconds)
         }
 
+        if isEnsureRequest {
+            stateQueue.sync {
+                completedEnsureCalls += 1
+            }
+        }
+
         return response
+    }
+}
+
+private final class ManuallyCompletingOriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Sendable {
+    private let stateQueue = DispatchQueue(label: "ManuallyCompletingOriginalEmailSourceLoader.state")
+    private let source: OriginalEmailSource?
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+    private var isComplete = false
+    private var ensureCalls = 0
+    private var completedEnsureCalls = 0
+
+    init(source: OriginalEmailSource?) {
+        self.source = source
+    }
+
+    var ensureRequestCount: Int {
+        stateQueue.sync { ensureCalls }
+    }
+
+    var completedEnsureRequestCount: Int {
+        stateQueue.sync { completedEnsureCalls }
+    }
+
+    func loadOriginalEmailSource(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        senderEmail: String?,
+        subject: String?,
+        timeout: TimeInterval
+    ) async -> OriginalEmailSource? {
+        await ensureOriginalEmailAvailable(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            senderEmail: senderEmail,
+            subject: subject
+        )
+    }
+
+    func ensureOriginalEmailAvailable(
+        messageId _: String,
+        bodyStorageURI _: String?,
+        bodyText _: String?,
+        senderEmail _: String?,
+        subject _: String?
+    ) async -> OriginalEmailSource? {
+        stateQueue.sync {
+            ensureCalls += 1
+        }
+
+        await waitForCompletion()
+
+        stateQueue.sync {
+            completedEnsureCalls += 1
+        }
+        return source
+    }
+
+    func complete() {
+        let continuation = stateQueue.sync { () -> CheckedContinuation<Void, Never>? in
+            isComplete = true
+            let continuation = releaseContinuation
+            releaseContinuation = nil
+            return continuation
+        }
+        continuation?.resume()
+    }
+
+    private func waitForCompletion() async {
+        let alreadyComplete = stateQueue.sync { isComplete }
+        if alreadyComplete {
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            let shouldResume = stateQueue.sync { () -> Bool in
+                if isComplete {
+                    return true
+                }
+                releaseContinuation = continuation
+                return false
+            }
+
+            if shouldResume {
+                continuation.resume()
+            }
+        }
     }
 }
 
@@ -391,6 +782,7 @@ private actor CacheWarmingOriginalEmailSourceLoader: OriginalEmailSourceLoading 
     private let warmedSource: OriginalEmailSource
     private let warmDelayNanoseconds: UInt64
     private var timeouts: [TimeInterval] = []
+    private var ensureCalls = 0
     private var cachedSource: OriginalEmailSource?
     private var hasStartedWarm = false
 
@@ -400,7 +792,7 @@ private actor CacheWarmingOriginalEmailSourceLoader: OriginalEmailSourceLoading 
     }
 
     var requestCount: Int {
-        timeouts.count
+        timeouts.count + ensureCalls
     }
 
     var observedTimeouts: [TimeInterval] {
@@ -439,6 +831,25 @@ private actor CacheWarmingOriginalEmailSourceLoader: OriginalEmailSourceLoading 
             try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
         }
 
+        return cachedSource
+    }
+
+    func ensureOriginalEmailAvailable(
+        messageId _: String,
+        bodyStorageURI _: String?,
+        bodyText _: String?,
+        senderEmail _: String?,
+        subject _: String?
+    ) async -> OriginalEmailSource? {
+        ensureCalls += 1
+        if let cachedSource {
+            return cachedSource
+        }
+
+        if warmDelayNanoseconds > 0 {
+            try? await Task.sleep(nanoseconds: warmDelayNanoseconds)
+        }
+        cachedSource = warmedSource
         return cachedSource
     }
 

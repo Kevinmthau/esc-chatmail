@@ -387,6 +387,242 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
         XCTAssertEqual(recoveryService.recoveryRequestCount, 0)
     }
 
+    func testEnsureOriginalEmailAvailable_returnsStoredDecodedHTMLImmediately() async throws {
+        let messageId = "original-ensure-cache-hit-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        _ = contentHandler.saveHTML(newsletterHTML(title: "Cached original"), for: messageId)
+
+        let source = await loader.ensureOriginalEmailAvailable(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "Cached original",
+            senderEmail: "newsletter@example.com",
+            subject: "Cached original"
+        )
+        let loaded = try XCTUnwrap(source)
+
+        XCTAssertEqual(loaded.presentation, .html)
+        XCTAssertEqual(loaded.sourceLocation, .messageFile)
+        XCTAssertTrue(loaded.html?.contains("Cached original") == true)
+        XCTAssertEqual(recoveryService.recoveryRequestCount, 0)
+    }
+
+    func testEnsureOriginalEmailAvailable_decodesRedactedTopoKlaviyoRawFixtureWithoutNetwork() async throws {
+        let messageId = "original-topo-klaviyo-raw-source-\(UUID().uuidString)"
+        let requestRecorder = RequestRecorder()
+        let loader = makeLoader(
+            remoteImageAttachmentFallback: HTMLRemoteImageAttachmentFallback { request in
+                await requestRecorder.record(request)
+                throw URLError(.unsupportedURL)
+            }
+        )
+        let sourceDidChange = expectation(
+            forNotification: HTMLContentLoader.contentSourceDidChangeNotification,
+            object: nil
+        ) { notification in
+            notification.userInfo?[HTMLContentLoader.contentSourceDidChangeMessageIdUserInfoKey] as? String == messageId
+        }
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let source = await loader.ensureOriginalEmailAvailable(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: topoKlaviyoStyleRawMultipartAlternativeSource(),
+            senderEmail: "updates@topodesigns.example",
+            subject: "A redacted Topo Designs dispatch"
+        )
+
+        let loaded = try XCTUnwrap(source)
+        let html = try XCTUnwrap(loaded.html)
+
+        XCTAssertEqual(loaded.presentation, .html)
+        XCTAssertEqual(loaded.sourceLocation, .rawSourceHTML)
+        XCTAssertTrue(html.lowercased().contains("<html"))
+        XCTAssertTrue(html.lowercased().contains("<img"))
+        XCTAssertTrue(html.contains("Mountain Utility Pack"))
+        XCTAssertTrue(html.contains("https://assets.example.test/topo/hero.jpg"))
+        XCTAssertFalse(html.contains("=3D"))
+        XCTAssertFalse(html.contains("https://tracking.example.test/open"))
+        let requestCount = await requestRecorder.count
+        XCTAssertEqual(requestCount, 0)
+        XCTAssertEqual(recoveryService.recoveryRequestCount, 0)
+        await fulfillment(of: [sourceDidChange], timeout: 1.0)
+    }
+
+    func testEnsureOriginalEmailAvailable_coalescesConcurrentRecoveryRequests() async throws {
+        let messageId = "original-ensure-coalesced-\(UUID().uuidString)"
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let delayedRecovery = DelayedRecoveryService(
+            contentHandler: contentHandler,
+            html: newsletterHTML(title: "Coalesced recovered original"),
+            delayNanoseconds: 50_000_000
+        )
+        let loader = OriginalEmailSourceLoader(
+            canonicalContentLoader: CanonicalEmailContentLoader(
+                contentHandler: contentHandler,
+                recoveryService: delayedRecovery
+            ),
+            htmlContentLoader: HTMLContentLoader(
+                contentHandler: contentHandler,
+                sanitizer: .shared,
+                remoteImageAttachmentFallback: HTMLRemoteImageAttachmentFallback { _ in
+                    throw URLError(.unsupportedURL)
+                }
+            ),
+            renderedMessageCache: RenderedMessageCache()
+        )
+
+        async let first = loader.ensureOriginalEmailAvailable(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: nil,
+            senderEmail: "newsletter@example.com",
+            subject: "Coalesced"
+        )
+        async let second = loader.ensureOriginalEmailAvailable(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: nil,
+            senderEmail: "newsletter@example.com",
+            subject: "Coalesced"
+        )
+
+        let sources = await (first, second)
+        let firstSource = try XCTUnwrap(sources.0)
+        let secondSource = try XCTUnwrap(sources.1)
+
+        XCTAssertEqual(firstSource.html, secondSource.html)
+        XCTAssertTrue(firstSource.html?.contains("Coalesced recovered original") == true)
+        XCTAssertEqual(delayedRecovery.recoveryRequestCount, 1)
+    }
+
+    func testEnsureOriginalEmailAvailable_doesNotCoalesceChangedSourceWithInFlightRecovery() async throws {
+        let messageId = "original-ensure-source-changed-\(UUID().uuidString)"
+        let recoveryStarted = expectation(description: "Recovery started")
+        let storageURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(messageId)-storage.html")
+        defer {
+            contentHandler.deleteHTML(for: messageId)
+            try? FileManager.default.removeItem(at: storageURL)
+        }
+
+        let delayedRecovery = DelayedRecoveryService(
+            contentHandler: contentHandler,
+            html: newsletterHTML(title: "Stale recovered original"),
+            delayNanoseconds: 150_000_000,
+            onRecoveryStarted: {
+                recoveryStarted.fulfill()
+            }
+        )
+        let loader = OriginalEmailSourceLoader(
+            canonicalContentLoader: CanonicalEmailContentLoader(
+                contentHandler: contentHandler,
+                recoveryService: delayedRecovery
+            ),
+            htmlContentLoader: HTMLContentLoader(
+                contentHandler: contentHandler,
+                sanitizer: .shared,
+                remoteImageAttachmentFallback: HTMLRemoteImageAttachmentFallback { _ in
+                    throw URLError(.unsupportedURL)
+                }
+            ),
+            renderedMessageCache: RenderedMessageCache()
+        )
+
+        let firstTask = Task {
+            await loader.ensureOriginalEmailAvailable(
+                messageId: messageId,
+                bodyStorageURI: nil,
+                bodyText: nil,
+                senderEmail: "newsletter@example.com",
+                subject: "Stale"
+            )
+        }
+        await fulfillment(of: [recoveryStarted], timeout: 1.0)
+
+        try newsletterHTML(title: "Newly synced original").write(to: storageURL, atomically: true, encoding: .utf8)
+        let updatedSource = await loader.ensureOriginalEmailAvailable(
+            messageId: messageId,
+            bodyStorageURI: storageURL.path,
+            bodyText: nil,
+            senderEmail: "newsletter@example.com",
+            subject: "Newly synced"
+        )
+        let updated = try XCTUnwrap(updatedSource)
+        let updatedHTML = try XCTUnwrap(updated.html)
+
+        XCTAssertEqual(updated.presentation, .html)
+        XCTAssertEqual(updated.sourceLocation, .storageURI)
+        XCTAssertTrue(updatedHTML.contains("Newly synced original"))
+        XCTAssertFalse(updatedHTML.contains("Stale recovered original"))
+
+        let first = await firstTask.value
+        XCTAssertTrue(first?.html?.contains("Stale recovered original") == true)
+        XCTAssertEqual(delayedRecovery.recoveryRequestCount, 1)
+    }
+
+    func testEnsureOriginalEmailAvailable_doesNotCoalesceSameURIFileChangeWithInFlightRecovery() async throws {
+        let messageId = "original-ensure-same-uri-source-changed-\(UUID().uuidString)"
+        let recoveryStarted = expectation(description: "Recovery started")
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let delayedRecovery = DelayedRecoveryService(
+            contentHandler: contentHandler,
+            html: newsletterHTML(title: "Stale recovered original"),
+            delayNanoseconds: 150_000_000,
+            onRecoveryStarted: {
+                recoveryStarted.fulfill()
+            }
+        )
+        let loader = OriginalEmailSourceLoader(
+            canonicalContentLoader: CanonicalEmailContentLoader(
+                contentHandler: contentHandler,
+                recoveryService: delayedRecovery
+            ),
+            htmlContentLoader: HTMLContentLoader(
+                contentHandler: contentHandler,
+                sanitizer: .shared,
+                remoteImageAttachmentFallback: HTMLRemoteImageAttachmentFallback { _ in
+                    throw URLError(.unsupportedURL)
+                }
+            ),
+            renderedMessageCache: RenderedMessageCache()
+        )
+
+        let firstTask = Task {
+            await loader.ensureOriginalEmailAvailable(
+                messageId: messageId,
+                bodyStorageURI: nil,
+                bodyText: nil,
+                senderEmail: "newsletter@example.com",
+                subject: "Original"
+            )
+        }
+        await fulfillment(of: [recoveryStarted], timeout: 1.0)
+
+        _ = contentHandler.saveHTML(newsletterHTML(title: "Newly synced original"), for: messageId)
+        let updatedSource = await loader.ensureOriginalEmailAvailable(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: nil,
+            senderEmail: "newsletter@example.com",
+            subject: "Original"
+        )
+        let updated = try XCTUnwrap(updatedSource)
+        let updatedHTML = try XCTUnwrap(updated.html)
+
+        XCTAssertEqual(updated.presentation, .html)
+        XCTAssertEqual(updated.sourceLocation, .messageFile)
+        XCTAssertTrue(updatedHTML.contains("Newly synced original"))
+        XCTAssertFalse(updatedHTML.contains("Stale recovered original"))
+
+        let first = await firstTask.value
+        XCTAssertTrue(first?.html?.contains("Stale recovered original") == true)
+        XCTAssertEqual(delayedRecovery.recoveryRequestCount, 1)
+    }
+
     func testLoadOriginalEmailSource_recoveryUpgradesPlainTextWithoutStaleCache() async throws {
         let messageId = "original-recovery-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }
@@ -760,6 +996,52 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
         """
     }
 
+    private func topoKlaviyoStyleRawMultipartAlternativeSource() -> String {
+        """
+        From: Topo Designs <updates@topodesigns.example>
+        To: person@example.com
+        Subject: A redacted Topo Designs dispatch
+        MIME-Version: 1.0
+        Content-Type: multipart/alternative; boundary="===============TOPODESIGNSREDACTED=="
+
+        --===============TOPODESIGNSREDACTED==
+        Content-Type: text/plain; charset=US-ASCII
+        Content-Transfer-Encoding: 7bit
+
+        Mountain Utility Pack
+        Built for quick trips and daily carry.
+
+        --===============TOPODESIGNSREDACTED==
+        Content-Transfer-Encoding: quoted-printable
+        Content-Type: text/html; charset=UTF-8
+
+        <!doctype html>
+        <html>
+        <body>
+          <div style=3D"display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;width:0;">
+            Hidden preheader content &zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;
+          </div>
+          <div style=3D"display:none;font-size:0;line-height:0;max-height:0;max-width:0;overflow:hidden;">
+            HIDDEN_BLOCK_START \(String(repeating: "trail ", count: 80)) HIDDEN_BLOCK_END
+          </div>
+          <table role=3D"presentation" width=3D"100%">
+            <tr>
+              <td>
+                <img src=3D"https://assets.example.test/topo/hero.jpg" alt=3D"Topo Designs Mountain Utility Pack">
+                <h1>Mountain Utility Pack</h1>
+                <p>Built for quick trips and daily carry.</p>
+                <a href=3D"https://shop.example.test/products/mountain-utility-pack">Explore the pack</a>
+              </td>
+            </tr>
+          </table>
+          <img src=3D"https://tracking.example.test/open" width=3D"1" height=3D"1" alt=3D"">
+        </body>
+        </html>
+
+        --===============TOPODESIGNSREDACTED==--
+        """
+    }
+
     private func makeLoader(
         renderedMessageCache: RenderedMessageCache = RenderedMessageCache(),
         remoteImageAttachmentFallback: HTMLRemoteImageAttachmentFallback = .shared
@@ -816,17 +1098,35 @@ private final class MutableRecoveryService: HTMLContentRecovering, @unchecked Se
 }
 
 private final class DelayedRecoveryService: HTMLContentRecovering, @unchecked Sendable {
+    private let stateQueue = DispatchQueue(label: "DelayedRecoveryService.state")
     private let contentHandler: HTMLContentHandler
     private let html: String?
     private let delayNanoseconds: UInt64
+    private let onRecoveryStarted: (() -> Void)?
+    private var recoveryRequests = 0
 
-    init(contentHandler: HTMLContentHandler, html: String?, delayNanoseconds: UInt64) {
+    init(
+        contentHandler: HTMLContentHandler,
+        html: String?,
+        delayNanoseconds: UInt64,
+        onRecoveryStarted: (() -> Void)? = nil
+    ) {
         self.contentHandler = contentHandler
         self.html = html
         self.delayNanoseconds = delayNanoseconds
+        self.onRecoveryStarted = onRecoveryStarted
+    }
+
+    var recoveryRequestCount: Int {
+        stateQueue.sync { recoveryRequests }
     }
 
     func recoverHTMLContent(messageId: String) async -> String? {
+        stateQueue.sync {
+            recoveryRequests += 1
+        }
+        onRecoveryStarted?()
+
         try? await Task.sleep(nanoseconds: delayNanoseconds)
 
         if let html {
@@ -834,5 +1134,13 @@ private final class DelayedRecoveryService: HTMLContentRecovering, @unchecked Se
         }
 
         return html
+    }
+}
+
+private actor RequestRecorder {
+    private(set) var count = 0
+
+    func record(_: URLRequest) {
+        count += 1
     }
 }

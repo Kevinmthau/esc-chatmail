@@ -12,6 +12,20 @@ protocol CanonicalEmailContentLoading: Sendable {
         messageId: String,
         bodyText: String?
     ) async -> CanonicalEmailContent?
+
+    func currentHTMLSourceSignature(
+        messageId: String,
+        bodyStorageURI: String?
+    ) -> String?
+}
+
+extension CanonicalEmailContentLoading {
+    func currentHTMLSourceSignature(
+        messageId: String,
+        bodyStorageURI: String?
+    ) -> String? {
+        nil
+    }
 }
 
 final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecked Sendable {
@@ -70,21 +84,69 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
             )
         }
 
-        if let bodyText,
-           let rawSourceHTML = RawEmailSourceSanitizer.extractHTMLText(from: bodyText),
-           let html = canonicalHTMLSource(from: rawSourceHTML) {
-            if contentHandler.saveHTML(html, for: messageId) != nil {
-                await HTMLContentLoader.shared.invalidateContent(messageId: messageId)
-                await ProcessedTextCache.shared.invalidate(messageId: messageId)
-            }
-            return logAndReturn(
-                CanonicalEmailContent(
+        let rawExtraction = bodyText.map(RawEmailSourceSanitizer.extractHTMLResult(from:)) ?? .notRawSource
+        if rawExtraction != .notRawSource {
+            let decodeStart = CFAbsoluteTimeGetCurrent()
+            OriginalEmailTelemetry.log(
+                event: "original_email_decode_started",
+                messageId: messageId,
+                source: "raw_cache",
+                detail: "stage=raw_mime_extract"
+            )
+
+            if case .html(let rawSourceHTML) = rawExtraction,
+               let html = canonicalHTMLSource(from: rawSourceHTML) {
+                OriginalEmailTelemetry.log(
+                    event: "original_email_decode_completed",
+                    messageId: messageId,
+                    source: "raw_cache",
+                    duration: CFAbsoluteTimeGetCurrent() - decodeStart,
+                    detail: "stage=raw_mime_extract"
+                )
+
+                let content = CanonicalEmailContent(
                     html: html,
                     plainText: normalizedPlainText,
                     sourceKind: .html,
                     sourceLocation: .rawSourceHTML
-                ),
-                messageId: messageId
+                )
+
+                let writeStart = CFAbsoluteTimeGetCurrent()
+                if contentHandler.saveHTML(html, for: messageId) != nil {
+                    OriginalEmailTelemetry.log(
+                        event: "original_email_db_write_completed",
+                        messageId: messageId,
+                        source: "raw_cache",
+                        duration: CFAbsoluteTimeGetCurrent() - writeStart,
+                        detail: "storage=html_file"
+                    )
+                    await HTMLContentLoader.shared.invalidateContent(messageId: messageId)
+                    await ProcessedTextCache.shared.invalidate(messageId: messageId)
+                    await MainActor.run {
+                        HTMLContentLoader.postContentSourceDidChange(
+                            messageId: messageId,
+                            sourceSignature: content.sourceSignature
+                        )
+                    }
+                } else {
+                    OriginalEmailTelemetry.log(
+                        event: "original_email_db_write_failed",
+                        messageId: messageId,
+                        source: "raw_cache",
+                        duration: CFAbsoluteTimeGetCurrent() - writeStart,
+                        detail: "storage=html_file failure_reason=save_html_failed"
+                    )
+                }
+
+                return logAndReturn(content, messageId: messageId)
+            }
+
+            OriginalEmailTelemetry.log(
+                event: "original_email_decode_failed",
+                messageId: messageId,
+                source: "raw_cache",
+                duration: CFAbsoluteTimeGetCurrent() - decodeStart,
+                detail: "stage=raw_mime_extract failure_reason=no_html_part"
             )
         }
 
@@ -121,10 +183,36 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
         messageId: String,
         bodyText: String?
     ) async -> CanonicalEmailContent? {
-        guard let recoveredHTML = await recoveryService.recoverHTMLContent(messageId: messageId),
-              let html = canonicalHTMLSource(from: recoveredHTML) else {
+        guard let recoveredHTML = await recoveryService.recoverHTMLContent(messageId: messageId) else {
             return nil
         }
+
+        let decodeStart = CFAbsoluteTimeGetCurrent()
+        OriginalEmailTelemetry.log(
+            event: "original_email_decode_started",
+            messageId: messageId,
+            source: "provider_fetch",
+            detail: "stage=recovered_html_canonicalize"
+        )
+
+        guard let html = canonicalHTMLSource(from: recoveredHTML) else {
+            OriginalEmailTelemetry.log(
+                event: "original_email_decode_failed",
+                messageId: messageId,
+                source: "provider_fetch",
+                duration: CFAbsoluteTimeGetCurrent() - decodeStart,
+                detail: "stage=recovered_html_canonicalize failure_reason=invalid_html"
+            )
+            return nil
+        }
+
+        OriginalEmailTelemetry.log(
+            event: "original_email_decode_completed",
+            messageId: messageId,
+            source: "provider_fetch",
+            duration: CFAbsoluteTimeGetCurrent() - decodeStart,
+            detail: "stage=recovered_html_canonicalize"
+        )
 
         return logAndReturn(
             CanonicalEmailContent(
@@ -134,6 +222,16 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
                 sourceLocation: .recoveredHTML
             ),
             messageId: messageId
+        )
+    }
+
+    func currentHTMLSourceSignature(
+        messageId: String,
+        bodyStorageURI: String?
+    ) -> String? {
+        contentHandler.canonicalHTMLSourceSignature(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI
         )
     }
 

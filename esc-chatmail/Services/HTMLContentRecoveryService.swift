@@ -69,13 +69,43 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
     }
 
     private func performRecovery(messageId: String) async -> RecoveryAttemptResult {
+        let fetchStart = CFAbsoluteTimeGetCurrent()
+        OriginalEmailTelemetry.log(
+            event: "original_email_raw_fetch_started",
+            messageId: messageId,
+            source: "provider_fetch",
+            detail: "provider=gmail format=full"
+        )
+
         do {
             // 1. Fetch full message from Gmail API
             let apiClient = await gmailAPIClientProvider()
             let gmailMessage = try await apiClient.getMessage(id: messageId, format: "full")
+            OriginalEmailTelemetry.log(
+                event: "original_email_raw_fetch_completed",
+                messageId: messageId,
+                source: "provider_fetch",
+                duration: CFAbsoluteTimeGetCurrent() - fetchStart,
+                detail: "provider=gmail format=full"
+            )
 
             // 2. Extract HTML body from MIME structure (may fetch large body parts via API)
+            let decodeStart = CFAbsoluteTimeGetCurrent()
+            OriginalEmailTelemetry.log(
+                event: "original_email_decode_started",
+                messageId: messageId,
+                source: "provider_fetch",
+                detail: "stage=gmail_mime_extract"
+            )
+
             guard let payload = gmailMessage.payload else {
+                OriginalEmailTelemetry.log(
+                    event: "original_email_decode_failed",
+                    messageId: messageId,
+                    source: "provider_fetch",
+                    duration: CFAbsoluteTimeGetCurrent() - decodeStart,
+                    detail: "stage=gmail_mime_extract failure_reason=missing_payload"
+                )
                 Log.debug("No HTML body found for message \(messageId)", category: .ui)
                 return .failed
             }
@@ -103,12 +133,35 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
             }
 
             guard let html = resolvedHTML ?? bestMeaningfulHTMLCandidate(from: embeddedRawSourceCandidates) else {
+                OriginalEmailTelemetry.log(
+                    event: "original_email_decode_failed",
+                    messageId: messageId,
+                    source: "provider_fetch",
+                    duration: CFAbsoluteTimeGetCurrent() - decodeStart,
+                    detail: "stage=gmail_mime_extract failure_reason=no_html_candidate"
+                )
                 Log.debug("No HTML body found for message \(messageId)", category: .ui)
                 return .noHTML
             }
 
+            OriginalEmailTelemetry.log(
+                event: "original_email_decode_completed",
+                messageId: messageId,
+                source: "provider_fetch",
+                duration: CFAbsoluteTimeGetCurrent() - decodeStart,
+                detail: "stage=gmail_mime_extract"
+            )
+
             // 3. Save to disk for future use
+            let writeStart = CFAbsoluteTimeGetCurrent()
             if contentHandler.saveHTML(html, for: messageId) != nil {
+                OriginalEmailTelemetry.log(
+                    event: "original_email_db_write_completed",
+                    messageId: messageId,
+                    source: "provider_fetch",
+                    duration: CFAbsoluteTimeGetCurrent() - writeStart,
+                    detail: "storage=html_file"
+                )
                 await HTMLContentLoader.shared.invalidateContent(messageId: messageId)
                 await ProcessedTextCache.shared.invalidate(messageId: messageId)
                 let sourceSignature = CanonicalEmailContent(
@@ -123,13 +176,36 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
                         sourceSignature: sourceSignature
                     )
                 }
+            } else {
+                OriginalEmailTelemetry.log(
+                    event: "original_email_db_write_failed",
+                    messageId: messageId,
+                    source: "provider_fetch",
+                    duration: CFAbsoluteTimeGetCurrent() - writeStart,
+                    detail: "storage=html_file failure_reason=save_html_failed"
+                )
             }
             Log.info("Recovered HTML content for message \(messageId)", category: .ui)
             return .html(html)
         } catch {
-            Log.warning("Failed to recover HTML for \(messageId): \(error)", category: .ui)
+            let errorCode = redactedErrorCode(error)
+            OriginalEmailTelemetry.log(
+                event: "original_email_raw_fetch_failed",
+                messageId: messageId,
+                source: "provider_fetch",
+                duration: CFAbsoluteTimeGetCurrent() - fetchStart,
+                detail: "provider=gmail format=full failure_reason=\(errorCode)"
+            )
+            Log.warning("Failed to recover HTML for \(messageId): \(errorCode)", category: .ui)
             return .failed
         }
+    }
+
+    private func redactedErrorCode(_ error: Error) -> String {
+        if let urlError = error as? URLError {
+            return "url_error_\(urlError.code.rawValue)"
+        }
+        return String(describing: type(of: error))
     }
 
     private func resolvedHTML(from result: RecoveryAttemptResult, messageId: String) -> String? {

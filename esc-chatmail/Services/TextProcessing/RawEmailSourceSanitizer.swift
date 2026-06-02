@@ -48,9 +48,19 @@ enum RawEmailSourceSanitizer {
         return stripMimeScaffolding(from: withoutTransportHeaders)
     }
 
-    static func extractHTMLText(from text: String) -> String? {
+    /// Outcome of attempting to pull an HTML part out of a raw email blob.
+    /// Distinguishes "not raw source at all" from "raw source but no HTML part" so
+    /// callers can gate telemetry/recovery on a single parse instead of first
+    /// calling a detection predicate and then re-normalizing for extraction.
+    enum RawHTMLExtraction: Equatable {
+        case notRawSource
+        case rawSourceWithoutHTML
+        case html(String)
+    }
+
+    static func extractHTMLResult(from text: String) -> RawHTMLExtraction {
         let normalized = normalizeLineEndings(text)
-        guard looksLikeRawEmailSource(normalized) else { return nil }
+        guard looksLikeRawEmailSource(normalized) else { return .notRawSource }
 
         let withoutTransportHeaders = stripLeadingTransportHeaders(from: normalized)
         guard let htmlPart = extractPartBody(
@@ -60,11 +70,18 @@ enum RawEmailSourceSanitizer {
             },
             stripScaffoldingAfterDecode: false
         ) else {
-            return nil
+            return .rawSourceWithoutHTML
         }
 
         let trimmed = htmlPart.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        return trimmed.isEmpty ? .rawSourceWithoutHTML : .html(trimmed)
+    }
+
+    static func extractHTMLText(from text: String) -> String? {
+        if case .html(let html) = extractHTMLResult(from: text) {
+            return html
+        }
+        return nil
     }
 
     private static func normalizeLineEndings(_ text: String) -> String {
