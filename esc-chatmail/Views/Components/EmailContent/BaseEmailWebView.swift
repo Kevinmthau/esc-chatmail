@@ -654,37 +654,7 @@ enum InlineCIDAttachmentAvailabilityFingerprint {
     }
 
     static func referencedInlineContentIDs(in html: String) -> Set<String> {
-        guard html.range(of: "cid:", options: .caseInsensitive) != nil else {
-            return []
-        }
-
-        var referencedContentIDs = Set<String>()
-        let cidPrefix = "cid:"
-        var searchRange = html.startIndex..<html.endIndex
-
-        while let cidRange = html.range(of: cidPrefix, options: .caseInsensitive, range: searchRange) {
-            let startOfCID = cidRange.upperBound
-            var endOfCID = startOfCID
-
-            while endOfCID < html.endIndex {
-                let char = html[endOfCID]
-                if char == "\"" || char == "'" || char == " " || char == "," ||
-                    char == ")" || char == ">" || char == "<" ||
-                    char == "\n" || char == "\r" || char == "\t" {
-                    break
-                }
-                endOfCID = html.index(after: endOfCID)
-            }
-
-            if startOfCID < endOfCID,
-               let normalizedContentID = EmailDocument.normalizedContentID(String(html[startOfCID..<endOfCID])) {
-                referencedContentIDs.insert(normalizedContentID)
-            }
-
-            searchRange = endOfCID..<html.endIndex
-        }
-
-        return referencedContentIDs
+        EmailDocument.referencedContentIDs(in: html, terminators: EmailDocument.CIDScanTerminators.cssAndWhitespace)
     }
 
     private static func matchingAttachments(for contentID: String, in attachments: [Attachment]) -> [Attachment] {

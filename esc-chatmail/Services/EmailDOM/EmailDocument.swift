@@ -158,29 +158,7 @@ final class EmailDocument {
         // Also search inline style="...url(cid:...)" patterns. Doing this once
         // against the rendered HTML is OK; the call is bounded by document
         // size and avoids walking every node's style attribute.
-        let html = outerHTML()
-        let lowerHTML = html.lowercased()
-        var searchIndex = lowerHTML.startIndex
-        let cidScheme = "cid:"
-        while let range = lowerHTML.range(of: cidScheme, range: searchIndex..<lowerHTML.endIndex) {
-            let valueStart = range.upperBound
-            var end = valueStart
-            while end < lowerHTML.endIndex {
-                let char = lowerHTML[end]
-                if char == "\"" || char == "'" || char == " " || char == "," ||
-                    char == ")" || char == ">" || char == "<" {
-                    break
-                }
-                end = lowerHTML.index(after: end)
-            }
-            if valueStart < end {
-                let id = String(lowerHTML[valueStart..<end])
-                if let normalized = Self.normalizedContentID(id) {
-                    result.insert(normalized)
-                }
-            }
-            searchIndex = end
-        }
+        result.formUnion(Self.referencedContentIDs(in: outerHTML(), terminators: CIDScanTerminators.css))
         return result
     }
 

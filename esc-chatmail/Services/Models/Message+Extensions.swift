@@ -336,39 +336,7 @@ extension Message {
     /// Extracts Content-IDs referenced via cid: URLs in HTML.
     private func extractReferencedContentIDs(from html: String?) -> Set<String> {
         guard let html else { return [] }
-
-        // Match cid: references in src attributes (e.g., src="cid:ii_ml1i6p6v0")
-        // Pattern matches: cid: followed by the Content-ID (which may contain letters, numbers, underscores, dots, @)
-        var referencedCIDs = Set<String>()
-
-        // Simple regex-free approach: find all occurrences of "cid:" and extract the ID
-        let cidPrefix = "cid:"
-        var searchRange = html.startIndex..<html.endIndex
-
-        while let cidRange = html.range(of: cidPrefix, options: .caseInsensitive, range: searchRange) {
-            let startOfCID = cidRange.upperBound
-            // Find the end of the CID (typically ends at quote, space, or angle bracket)
-            var endOfCID = startOfCID
-            while endOfCID < html.endIndex {
-                let char = html[endOfCID]
-                if char == "\"" || char == "'" || char == " " || char == "," ||
-                    char == ">" || char == "<" {
-                    break
-                }
-                endOfCID = html.index(after: endOfCID)
-            }
-
-            if startOfCID < endOfCID {
-                let contentId = String(html[startOfCID..<endOfCID])
-                if let normalizedContentId = normalizedContentID(from: contentId) {
-                    referencedCIDs.insert(normalizedContentId)
-                }
-            }
-
-            searchRange = endOfCID..<html.endIndex
-        }
-
-        return referencedCIDs
+        return EmailDocument.referencedContentIDs(in: html)
     }
 
     /// Extra fallback for Outlook/Word signatures where HTML signature wrappers are inconsistent.
@@ -394,41 +362,17 @@ extension Message {
             return []
         }
 
-        let cidPrefix = "cid:"
         var nonDisplayable = Set<String>()
-        var searchRange = html.startIndex..<html.endIndex
-
-        while let cidRange = html.range(of: cidPrefix, options: .caseInsensitive, range: searchRange) {
-            let startOfCID = cidRange.upperBound
-            var endOfCID = startOfCID
-
-            while endOfCID < html.endIndex {
-                let char = html[endOfCID]
-                if char == "\"" || char == "'" || char == " " || char == "," ||
-                    char == ">" || char == "<" {
-                    break
-                }
-                endOfCID = html.index(after: endOfCID)
-            }
-
-            defer {
-                searchRange = endOfCID..<html.endIndex
-            }
-
-            guard startOfCID < endOfCID else { continue }
-            guard let normalizedCID = normalizedContentID(from: String(html[startOfCID..<endOfCID])) else {
-                continue
-            }
-
+        EmailDocument.scanReferencedContentIDs(in: html) { normalizedCID, valueStart in
             // Heuristic-only fallback: only treat trailing CIDs as likely signature assets.
-            let cidOffset = html.distance(from: html.startIndex, to: startOfCID)
+            let cidOffset = html.distance(from: html.startIndex, to: valueStart)
             let trailingThreshold = Int(Double(html.count) * 0.45)
             guard cidOffset >= trailingThreshold else {
-                continue
+                return
             }
 
             guard isLikelySignatureInlineAttachment(contentID: normalizedCID) else {
-                continue
+                return
             }
             nonDisplayable.insert(normalizedCID)
         }

@@ -407,35 +407,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
         if let document = EmailDocument.tryParse(html) {
             return document.referencedInlineContentIDs()
         }
-        return extractRawReferencedContentIDs(from: html)
-    }
-
-    private static func extractRawReferencedContentIDs(from html: String) -> Set<String> {
-        var referencedCIDs = Set<String>()
-        let cidPrefix = "cid:"
-        var searchRange = html.startIndex..<html.endIndex
-
-        while let cidRange = html.range(of: cidPrefix, options: .caseInsensitive, range: searchRange) {
-            let startOfCID = cidRange.upperBound
-            var endOfCID = startOfCID
-            while endOfCID < html.endIndex {
-                let char = html[endOfCID]
-                if char == "\"" || char == "'" || char == " " || char == "," ||
-                    char == ">" || char == "<" {
-                    break
-                }
-                endOfCID = html.index(after: endOfCID)
-            }
-
-            if startOfCID < endOfCID,
-               let normalizedContentId = normalizedContentID(from: String(html[startOfCID..<endOfCID])) {
-                referencedCIDs.insert(normalizedContentId)
-            }
-
-            searchRange = endOfCID..<html.endIndex
-        }
-
-        return referencedCIDs
+        return EmailDocument.referencedContentIDs(in: html)
     }
 
     private static func extractLikelySignatureInlineContentIDs(
@@ -459,43 +431,19 @@ enum MessageBubbleHTMLAnalysisBuilder {
             return []
         }
 
-        let cidPrefix = "cid:"
         var nonDisplayable = Set<String>()
-        var searchRange = html.startIndex..<html.endIndex
-
-        while let cidRange = html.range(of: cidPrefix, options: .caseInsensitive, range: searchRange) {
-            let startOfCID = cidRange.upperBound
-            var endOfCID = startOfCID
-
-            while endOfCID < html.endIndex {
-                let char = html[endOfCID]
-                if char == "\"" || char == "'" || char == " " || char == "," ||
-                    char == ">" || char == "<" {
-                    break
-                }
-                endOfCID = html.index(after: endOfCID)
-            }
-
-            defer {
-                searchRange = endOfCID..<html.endIndex
-            }
-
-            guard startOfCID < endOfCID else { continue }
-            guard let normalizedCID = normalizedContentID(from: String(html[startOfCID..<endOfCID])) else {
-                continue
-            }
-
-            let cidOffset = html.distance(from: html.startIndex, to: startOfCID)
+        EmailDocument.scanReferencedContentIDs(in: html) { normalizedCID, valueStart in
+            let cidOffset = html.distance(from: html.startIndex, to: valueStart)
             let trailingThreshold = Int(Double(html.count) * 0.45)
             guard cidOffset >= trailingThreshold else {
-                continue
+                return
             }
 
             guard isLikelySignatureInlineAttachment(
                 contentID: normalizedCID,
                 attachments: attachments
             ) else {
-                continue
+                return
             }
 
             nonDisplayable.insert(normalizedCID)
