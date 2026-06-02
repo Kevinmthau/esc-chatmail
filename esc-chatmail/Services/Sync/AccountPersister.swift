@@ -43,7 +43,7 @@ extension MessagePersister {
                     if saveHistoryId {
                         existing.historyId = profile.historyId
                     }
-                    Log.debug("Updated existing account: \(profile.emailAddress)", category: .sync)
+                    Log.debug("Updated existing account: \(Log.redact(email: profile.emailAddress))", category: .sync)
                     return
                 }
             } catch {
@@ -63,7 +63,7 @@ extension MessagePersister {
             account.historyId = saveHistoryId ? profile.historyId : nil
             account.aliasesArray = aliases
             let savedHistoryId = saveHistoryId ? profile.historyId : "nil"
-            Log.info("Created new account: \(profile.emailAddress) with historyId: \(savedHistoryId)", category: .sync)
+            Log.info("Created new account: \(Log.redact(email: profile.emailAddress)) with historyId: \(savedHistoryId)", category: .sync)
         }
     }
 

@@ -133,7 +133,7 @@ actor MessagePersister {
         // Debug: Log incoming message details
         let fromHeader = gmailMessage.payload?.headers?.first(where: { $0.name.lowercased() == "from" })?.value ?? "unknown"
         let subjectHeader = gmailMessage.payload?.headers?.first(where: { $0.name.lowercased() == "subject" })?.value ?? "no subject"
-        Log.debug("Processing: from=\(fromHeader.prefix(40)) subj=\(subjectHeader.prefix(40))", category: .sync)
+        Log.debug("Processing: from=\(Log.redact(address: fromHeader)) subjLen=\(subjectHeader.count)", category: .sync)
 
         // Process the Gmail message (may fetch large body parts via API)
         guard let processedMessage = await messageProcessor.processGmailMessage(

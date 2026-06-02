@@ -42,7 +42,7 @@ actor AvatarStorage {
             try dataToSave.write(to: fileURL, options: .atomic)
             return fileURL.absoluteString
         } catch {
-            Log.error("Failed to save avatar for \(email)", category: .general, error: error)
+            Log.error("Failed to save avatar for \(Log.redact(email: email))", category: .general, error: error)
             return nil
         }
     }

@@ -490,7 +490,7 @@ struct BaseEmailWebView: UIViewRepresentable {
 
                 if (scheme == "http" || scheme == "https") &&
                     PrivateNetworkAddressDetector.isPrivateOrReserved(url) {
-                    Log.warning("Blocked private/reserved email link: \(url.absoluteString)", category: .ui)
+                    Log.warning("Blocked private/reserved email link: \(Log.redact(url: url))", category: .ui)
                     decisionHandler(.cancel)
                     return
                 }

@@ -109,7 +109,7 @@ extension MessagePersister {
                     }
                 }
             } catch {
-                Log.error("Failed to update participant display name for \(email)", category: .coreData, error: error)
+                Log.error("Failed to update participant display name for \(Log.redact(email: email))", category: .coreData, error: error)
             }
         }
 
