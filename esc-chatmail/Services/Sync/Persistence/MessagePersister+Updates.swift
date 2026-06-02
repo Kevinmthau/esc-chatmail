@@ -177,7 +177,7 @@ extension MessagePersister {
 
             var existingAttachmentIds = Set(existingMessage.attachmentsArray.compactMap(\.id))
             var existingContentIds = Set(
-                existingMessage.attachmentsArray.compactMap { self.normalizedContentID($0.contentId) }
+                existingMessage.attachmentsArray.compactMap { EmailDocument.normalizedContentID($0.contentId) }
             )
             var consumedOptimisticAttachmentObjectIDs = Set<NSManagedObjectID>()
 
@@ -211,7 +211,7 @@ extension MessagePersister {
                         existingAttachmentIds.remove(previousAttachmentID)
                     }
                     existingAttachmentIds.insert(attachmentInfo.id)
-                    if let normalizedIncomingCID = self.normalizedContentID(attachmentInfo.contentId) {
+                    if let normalizedIncomingCID = EmailDocument.normalizedContentID(attachmentInfo.contentId) {
                         existingContentIds.insert(normalizedIncomingCID)
                     }
                     continue
@@ -221,7 +221,7 @@ extension MessagePersister {
                     continue
                 }
 
-                if let normalizedIncomingCID = self.normalizedContentID(attachmentInfo.contentId),
+                if let normalizedIncomingCID = EmailDocument.normalizedContentID(attachmentInfo.contentId),
                    existingContentIds.contains(normalizedIncomingCID) {
                     continue
                 }
@@ -236,7 +236,7 @@ extension MessagePersister {
                 self.createAttachment(attachmentInfo, for: existingMessage, in: context)
 
                 existingAttachmentIds.insert(attachmentInfo.id)
-                if let normalizedIncomingCID = self.normalizedContentID(attachmentInfo.contentId) {
+                if let normalizedIncomingCID = EmailDocument.normalizedContentID(attachmentInfo.contentId) {
                     existingContentIds.insert(normalizedIncomingCID)
                 }
                 if let incomingFP { existingInlineFingerprints.insert(incomingFP) }
@@ -360,9 +360,9 @@ extension MessagePersister {
 
         guard !localCandidates.isEmpty else { return nil }
 
-        if let normalizedIncomingCID = normalizedContentID(attachmentInfo.contentId),
+        if let normalizedIncomingCID = EmailDocument.normalizedContentID(attachmentInfo.contentId),
            let cidMatch = localCandidates.first(where: {
-               normalizedContentID($0.contentId) == normalizedIncomingCID
+               EmailDocument.normalizedContentID($0.contentId) == normalizedIncomingCID
            }) {
             return cidMatch
         }
@@ -371,7 +371,7 @@ extension MessagePersister {
         let incomingSize = Int64(attachmentInfo.size)
 
         return localCandidates.first(where: {
-            normalizedContentID($0.contentId) == nil &&
+            EmailDocument.normalizedContentID($0.contentId) == nil &&
             normalizedAttachmentFilename($0.filename) == normalizedIncomingFilename &&
             $0.mimeType == attachmentInfo.mimeType &&
             $0.byteSize == incomingSize
@@ -391,10 +391,6 @@ extension MessagePersister {
 
     nonisolated func normalizedAttachmentFilename(_ filename: String) -> String {
         filename.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    }
-
-    nonisolated func normalizedContentID(_ rawValue: String?) -> String? {
-        EmailDocument.normalizedContentID(rawValue)
     }
 
     // MARK: - Inline attachment deduplication
@@ -420,7 +416,7 @@ extension MessagePersister {
             var bestAttachmentByContentID: [String: Attachment] = [:]
 
             for attachment in message.attachmentsArray {
-                guard let contentID = normalizedContentID(attachment.contentId) else { continue }
+                guard let contentID = EmailDocument.normalizedContentID(attachment.contentId) else { continue }
 
                 if let existing = bestAttachmentByContentID[contentID] {
                     if shouldPreferInlineAttachment(attachment, over: existing) {

@@ -130,7 +130,7 @@ extension Message {
         let allAttachments = deduplicatedAttachments(in: attachmentsArray.filter { attachment in
             guard !attachment.isLikelySignatureImage else { return false }
 
-            guard let contentId = normalizedContentID(from: attachment.contentId) else {
+            guard let contentId = EmailDocument.normalizedContentID(attachment.contentId) else {
                 return true
             }
 
@@ -156,7 +156,7 @@ extension Message {
             cidFilteredAttachments = allAttachments
         } else {
             cidFilteredAttachments = allAttachments.filter { attachment in
-                guard let contentId = normalizedContentID(from: attachment.contentId) else {
+                guard let contentId = EmailDocument.normalizedContentID(attachment.contentId) else {
                     return true // No Content-ID, always show
                 }
                 // Hide if this Content-ID is referenced in the HTML body.
@@ -182,7 +182,7 @@ extension Message {
         let allAttachments = deduplicatedAttachments(in: attachmentsArray.filter { attachment in
             guard !attachment.isLikelySignatureImage else { return false }
 
-            guard let contentId = normalizedContentID(from: attachment.contentId) else {
+            guard let contentId = EmailDocument.normalizedContentID(attachment.contentId) else {
                 return true
             }
 
@@ -202,7 +202,7 @@ extension Message {
             cidFilteredAttachments = allAttachments
         } else {
             cidFilteredAttachments = allAttachments.filter { attachment in
-                guard let contentId = normalizedContentID(from: attachment.contentId) else {
+                guard let contentId = EmailDocument.normalizedContentID(attachment.contentId) else {
                     return true
                 }
                 return !htmlAnalysis.referencedInlineContentIDs.contains(contentId)
@@ -381,7 +381,7 @@ extension Message {
     }
 
     private func isLikelySignatureInlineAttachment(contentID: String) -> Bool {
-        guard let attachment = attachmentsArray.first(where: { normalizedContentID(from: $0.contentId) == contentID }) else {
+        guard let attachment = attachmentsArray.first(where: { EmailDocument.normalizedContentID($0.contentId) == contentID }) else {
             return false
         }
 
@@ -472,12 +472,8 @@ extension Message {
 
     private static let calendarInviteDatePattern = #"\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b[\w\s,.:()\-–•]*\b\d{1,2}:\d{2}\s*(?:am|pm)\b"#
 
-    private func normalizedContentID(from rawValue: String?) -> String? {
-        EmailDocument.normalizedContentID(rawValue)
-    }
-
     private func attachmentDeduplicationKey(for attachment: Attachment) -> AttachmentDeduplicationKey {
-        if let contentId = normalizedContentID(from: attachment.contentId) {
+        if let contentId = EmailDocument.normalizedContentID(attachment.contentId) {
             return .contentId(contentId)
         }
 

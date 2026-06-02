@@ -277,7 +277,7 @@ struct ChatMessageRowModel: Equatable {
         let allAttachments = deduplicatedAttachments(in: attachments.filter { attachment in
             guard !attachment.isLikelySignatureImage else { return false }
 
-            guard let contentId = MessageBubbleHTMLAnalysisBuilder.normalizedContentID(from: attachment.contentId) else {
+            guard let contentId = EmailDocument.normalizedContentID(attachment.contentId) else {
                 return true
             }
 
@@ -297,7 +297,7 @@ struct ChatMessageRowModel: Equatable {
             cidFilteredAttachments = allAttachments
         } else {
             cidFilteredAttachments = allAttachments.filter { attachment in
-                guard let contentId = MessageBubbleHTMLAnalysisBuilder.normalizedContentID(from: attachment.contentId) else {
+                guard let contentId = EmailDocument.normalizedContentID(attachment.contentId) else {
                     return true
                 }
                 return !htmlAnalysis.referencedInlineContentIDs.contains(contentId)
@@ -341,7 +341,7 @@ struct ChatMessageRowModel: Equatable {
     private func attachmentDeduplicationKey(
         for attachment: ChatMessageAttachmentModel
     ) -> ChatMessageAttachmentDeduplicationKey {
-        if let normalizedContentId = MessageBubbleHTMLAnalysisBuilder.normalizedContentID(from: attachment.contentId) {
+        if let normalizedContentId = EmailDocument.normalizedContentID(attachment.contentId) {
             return .contentId(normalizedContentId)
         }
 

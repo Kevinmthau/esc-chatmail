@@ -329,10 +329,6 @@ enum MessageBubbleHTMLAnalysisBuilder {
         )
     }
 
-    static func normalizedContentID(from rawValue: String?) -> String? {
-        EmailDocument.normalizedContentID(rawValue)
-    }
-
     private static func loadHTML(
         messageID: String,
         bodyStorageURI: String?,
@@ -456,7 +452,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
         contentID: String,
         attachments: [MessageBubbleAttachmentSnapshot]
     ) -> Bool {
-        guard let attachment = attachments.first(where: { normalizedContentID(from: $0.contentId) == contentID }) else {
+        guard let attachment = attachments.first(where: { EmailDocument.normalizedContentID($0.contentId) == contentID }) else {
             return false
         }
 
@@ -889,7 +885,7 @@ actor MessageBubbleLoader: MessageBubbleLoading {
         return attachments
             .map { attachment in
                 [
-                    MessageBubbleHTMLAnalysisBuilder.normalizedContentID(from: attachment.contentId) ?? "cid:nil",
+                    EmailDocument.normalizedContentID(attachment.contentId) ?? "cid:nil",
                     attachment.filename.lowercased(),
                     attachment.mimeType.lowercased(),
                     "\(attachment.width)x\(attachment.height)"

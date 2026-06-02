@@ -252,8 +252,9 @@ final class EmailDocument {
     }
 
     /// Normalizes a `cid:` URL or raw Content-ID to a lowercase identifier
-    /// suitable for matching against `Attachment.contentId`. Mirrors the
-    /// semantics of `MessageBubbleHTMLAnalysisBuilder.normalizedContentID`.
+    /// suitable for matching against `Attachment.contentId`. This is the single
+    /// shared normalizer for raw Content-ID strings across the message, bubble,
+    /// persistence, and web-view layers.
     static func normalizedContentID(_ rawValue: String?) -> String? {
         guard let rawValue else { return nil }
         var normalized = rawValue
