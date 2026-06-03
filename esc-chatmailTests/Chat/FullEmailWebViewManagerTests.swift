@@ -145,10 +145,14 @@ final class FullInteractiveEmailWebViewNavigationDecisionTests: XCTestCase {
         XCTAssertEqual(decide(.linkActivated, "x-apple-data-detectors://1"), .allow)
     }
 
-    func testPrivateOrReservedLinksAreCancelled() {
-        // Loopback / private hosts must never open from email content.
-        XCTAssertEqual(decide(.linkActivated, "http://127.0.0.1/admin"), .cancel)
-        XCTAssertEqual(decide(.linkActivated, "http://192.168.0.1/"), .cancel)
+    func testPrivateOrReservedLinksAreBlocked() {
+        // Loopback / private hosts must never open from email content. They resolve to a distinct
+        // `blockedPrivateNetwork` decision (carrying the URL) so the live coordinator can log the
+        // block; the warm delegate treats it as a plain cancel.
+        let loopback = URL(string: "http://127.0.0.1/admin")!
+        let privateHost = URL(string: "http://192.168.0.1/")!
+        XCTAssertEqual(decide(.linkActivated, "http://127.0.0.1/admin"), .blockedPrivateNetwork(loopback))
+        XCTAssertEqual(decide(.linkActivated, "http://192.168.0.1/"), .blockedPrivateNetwork(privateHost))
     }
 
     func testNonLinkNavigationsFallThroughToAllow() {

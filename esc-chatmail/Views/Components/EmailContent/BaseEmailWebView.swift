@@ -569,57 +569,27 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
 
         private func handleFullInteractiveNavigation(_ navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            // Allow initial load and resource loads first (before other checks)
-            // This is critical for loadHTMLString with about:blank baseURL
-            if navigationAction.navigationType == .other || navigationAction.navigationType == .reload {
+            // The decision logic lives in the shared, unit-tested `FullInteractiveEmailWebView`
+            // `navigationDecision` so this live reader and the off-screen warm delegate stay in
+            // lockstep. This wrapper only performs the WebKit-side side effects: opening external
+            // links and logging blocked private/reserved ones.
+            switch FullInteractiveEmailWebView.navigationDecision(
+                navigationType: navigationAction.navigationType,
+                url: navigationAction.request.url
+            ) {
+            case .allow:
                 decisionHandler(.allow)
-                return
-            }
-
-            if let url = navigationAction.request.url {
-                let urlString = url.absoluteString
-
-                // Block obviously malformed URLs
-                if urlString.isEmpty || urlString == "about:blank" {
-                    decisionHandler(.cancel)
-                    return
-                }
-
-                // Block unsupported schemes that cause errors
-                // Note: "cid" is NOT blocked - it's handled by CIDSchemeHandler
-                let scheme = url.scheme?.lowercased() ?? ""
-                let unsupportedSchemes = ["javascript", "vbscript", "file"]
-                if unsupportedSchemes.contains(scheme) {
-                    decisionHandler(.cancel)
-                    return
-                }
-            }
-
-            // Handle link clicks
-            if navigationAction.navigationType == .linkActivated,
-               let url = navigationAction.request.url {
-                let scheme = url.scheme?.lowercased() ?? ""
-
-                if scheme == "x-apple-data-detectors" {
-                    decisionHandler(.allow)
-                    return
-                }
-
-                if (scheme == "http" || scheme == "https") &&
-                    PrivateNetworkAddressDetector.isPrivateOrReserved(url) {
-                    Log.warning("Blocked private/reserved email link: \(Log.redact(url: url))", category: .ui)
-                    decisionHandler(.cancel)
-                    return
-                }
-
+            case .cancel:
+                decisionHandler(.cancel)
+            case .blockedPrivateNetwork(let url):
+                Log.warning("Blocked private/reserved email link: \(Log.redact(url: url))", category: .ui)
+                decisionHandler(.cancel)
+            case .openExternally(let url):
                 if UIApplication.shared.canOpenURL(url) {
                     UIApplication.shared.open(url)
                 }
                 decisionHandler(.cancel)
-                return
             }
-
-            decisionHandler(.allow)
         }
 
         private func handlePreviewNavigation(_ navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {

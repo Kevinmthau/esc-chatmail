@@ -82,13 +82,22 @@ enum FullInteractiveEmailWebView {
     // MARK: Navigation policy (pure, shared, unit-testable)
 
     enum NavigationDecision: Equatable {
+        /// Permit the navigation (initial/resource loads, reloads, data-detector taps, form posts).
         case allow
+        /// Cancel without side effects (malformed/about:blank URLs, unsupported schemes).
         case cancel
+        /// Cancel a link to a private/reserved host. Carries the URL so the caller can log the block;
+        /// the decision stays pure (no logging here) and the side effect lives with the caller.
+        case blockedPrivateNetwork(URL)
+        /// Cancel in-WebView and hand the link to the system browser instead.
         case openExternally(URL)
     }
 
-    /// Pure navigation decision for the full-interactive WebView, shared by the live coordinator and
-    /// the warm pre-render delegate. Keeping it pure lets it be unit-tested without WebKit.
+    /// Pure navigation decision for the full-interactive WebView, shared by the live `Coordinator`
+    /// (which performs the side effects — opening external URLs, logging blocked links) and the
+    /// off-screen `WarmNavigationDelegate` (which has no side effects — it permits the `.allow` cases
+    /// and cancels the link-opening and blocked-link cases). Keeping the decision pure lets it be
+    /// unit-tested without WebKit.
     static func navigationDecision(
         navigationType: WKNavigationType,
         url: URL?
@@ -122,7 +131,7 @@ enum FullInteractiveEmailWebView {
             }
             if scheme == "http" || scheme == "https",
                PrivateNetworkAddressDetector.isPrivateOrReserved(url) {
-                return .cancel
+                return .blockedPrivateNetwork(url)
             }
             return .openExternally(url)
         }
@@ -555,7 +564,7 @@ private final class WarmNavigationDelegate: NSObject, WKNavigationDelegate {
         ) {
         case .allow:
             decisionHandler(.allow)
-        case .cancel, .openExternally:
+        case .cancel, .blockedPrivateNetwork, .openExternally:
             decisionHandler(.cancel)
         }
     }
