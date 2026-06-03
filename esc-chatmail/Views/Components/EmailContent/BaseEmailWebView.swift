@@ -452,10 +452,15 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
 
         func applyBackgroundAppearance(to webView: WKWebView) {
+            // Full original emails force the light surface. Delegate to the shared helper so the live
+            // reader and the pre-render pool apply byte-identical appearance; otherwise an adopted
+            // warm instance could repaint its background on display. Previews stay unspecified and
+            // rely on their wrapped preview theme.
+            if case .fullInteractive = parent.mode {
+                FullInteractiveEmailWebView.applyBackgroundAppearance(to: webView)
+                return
+            }
             webView.isOpaque = false
-            // Keep this in sync with the display-purpose policy: full original
-            // emails use light traits, while previews stay unspecified and rely
-            // on their wrapped preview theme.
             webView.overrideUserInterfaceStyle = parent.mode.webViewUserInterfaceStyle
             let backgroundColor = nativeBackgroundColor(for: parent.mode) ?? .clear
             webView.backgroundColor = backgroundColor
@@ -789,20 +794,5 @@ enum InlineCIDAttachmentAvailabilityFingerprint {
 
     private static func sortKey(for attachment: Attachment) -> String {
         attachment.id ?? attachment.objectID.uriRepresentation().absoluteString
-    }
-}
-
-private extension UIColor {
-    convenience init?(hex: String) {
-        let trimmed = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
-        guard trimmed.count == 6, let value = Int(trimmed, radix: 16) else {
-            return nil
-        }
-
-        let red = CGFloat((value >> 16) & 0xFF) / 255
-        let green = CGFloat((value >> 8) & 0xFF) / 255
-        let blue = CGFloat(value & 0xFF) / 255
-
-        self.init(red: red, green: green, blue: blue, alpha: 1)
     }
 }
