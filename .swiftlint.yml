@@ -52,6 +52,6 @@ type_name:
     # The @main App type intentionally mirrors the `esc-chatmail` module name.
     - esc_chatmailApp
 
-# `xcode` formatting renders as `file:line: warning:` — parsed into inline warnings by
-# Xcode and readable in Xcode Cloud build logs.
+# `xcode` formatting renders as `file:line: warning:`, which Xcode parses into
+# inline warnings.
 reporter: "xcode"

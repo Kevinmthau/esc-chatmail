@@ -110,5 +110,4 @@ See `esc-chatmail/Configuration/SECURITY_SETUP.md` for the current local configu
 ## Additional Documentation
 
 - `AGENTS.md` - contributor and agent workflow guidance.
-- `XCODE_CLOUD_SETUP.md` - Xcode Cloud setup and CI notes.
 - `esc-chatmail/Configuration/SECURITY_SETUP.md` - security configuration setup.
