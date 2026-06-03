@@ -2081,8 +2081,8 @@ final class HTMLContentLoaderTests: XCTestCase {
 
     private func loadFixture(named name: String) throws -> String {
         // Load from the test bundle, not `#filePath`: the compile-time source path is unreachable
-        // from the simulator test process in CI sandboxes (e.g. Xcode Cloud), where it resolves to a
-        // host checkout path the simulator can't read. Fixtures are bundled as test resources.
+        // from sandboxed simulator test processes, where it resolves to a host checkout path the
+        // simulator can't read. Fixtures are bundled as test resources.
         let bundle = Bundle(for: type(of: self))
         guard let fixtureURL = bundle.url(forResource: name, withExtension: nil) else {
             throw CocoaError(.fileNoSuchFile)

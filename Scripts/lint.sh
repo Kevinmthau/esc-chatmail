@@ -2,8 +2,7 @@
 set -euo pipefail
 
 # Advisory SwiftLint runner. Surfaces violations as warnings and never fails the
-# caller — used by both local developers and the Xcode Cloud pre-build hook
-# (ci_scripts/ci_pre_xcodebuild.sh).
+# caller.
 #
 # Usage: ./Scripts/lint.sh [extra swiftlint args...]
 
