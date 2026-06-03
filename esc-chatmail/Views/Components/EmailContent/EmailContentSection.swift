@@ -2,6 +2,30 @@ import SwiftUI
 import CoreData
 import CryptoKit
 
+struct OriginalEmailWarmRequest: Equatable, Sendable {
+    let messageId: String
+    let bodyStorageURI: String?
+    let bodyText: String?
+    let senderEmail: String?
+    let subject: String?
+}
+
+protocol OriginalEmailSourceWarming: Sendable {
+    func warmOriginalEmailSource(request: OriginalEmailWarmRequest) async
+}
+
+extension OriginalEmailSourceLoader: OriginalEmailSourceWarming {
+    func warmOriginalEmailSource(request: OriginalEmailWarmRequest) async {
+        await warmOriginalEmailSource(
+            messageId: request.messageId,
+            bodyStorageURI: request.bodyStorageURI,
+            bodyText: request.bodyText,
+            senderEmail: request.senderEmail,
+            subject: request.subject
+        )
+    }
+}
+
 /// Container view that routes chat previews by content type.
 /// Newsletter and strongly-structured transactional emails render as derived native cards.
 /// Other rich HTML renders through a cached snapshot preview, with MiniEmailWebView as failure fallback.
@@ -15,7 +39,19 @@ struct EmailContentSection: View {
     @State private var isLoading = true
     @State private var loadGeneration = 0
     @State private var remoteImageFallbackReloadTask: Task<Void, Never>?
+    @State private var remoteImageFallbackOriginalWarmTask: Task<Void, Never>?
+    private let originalEmailSourceWarmer: any OriginalEmailSourceWarming
     private let previewPipeline = EmailPreviewPipeline.shared
+
+    init(
+        message: ChatMessageRowModel,
+        onOpenFullMessage: @escaping () -> Void,
+        originalEmailSourceWarmer: any OriginalEmailSourceWarming = OriginalEmailSourceLoader.shared
+    ) {
+        self.message = message
+        self.onOpenFullMessage = onOpenFullMessage
+        self.originalEmailSourceWarmer = originalEmailSourceWarmer
+    }
 
     private var loadKey: String {
         Self.makeLoadKey(
@@ -118,12 +154,8 @@ struct EmailContentSection: View {
         // Runs at .utility so it never competes with snapshot rendering or scrolling, and auto-cancels
         // when the row scrolls away (warmOriginalEmailSource bails before the expensive prepare).
         .task(id: warmFullEmailKey, priority: .utility) {
-            await OriginalEmailSourceLoader.shared.warmOriginalEmailSource(
-                messageId: message.id,
-                bodyStorageURI: message.bodyStorageURI,
-                bodyText: message.bodyText,
-                senderEmail: message.senderEmail,
-                subject: message.subject
+            await originalEmailSourceWarmer.warmOriginalEmailSource(
+                request: Self.originalEmailWarmRequest(for: message)
             )
         }
         .onReceive(NotificationCenter.default.publisher(for: HTMLContentLoader.remoteImageAttachmentFallbackDidWarmNotification)) { notification in
@@ -132,6 +164,8 @@ struct EmailContentSection: View {
         .onDisappear {
             remoteImageFallbackReloadTask?.cancel()
             remoteImageFallbackReloadTask = nil
+            remoteImageFallbackOriginalWarmTask?.cancel()
+            remoteImageFallbackOriginalWarmTask = nil
         }
     }
 
@@ -193,8 +227,10 @@ struct EmailContentSection: View {
     }
 
     private func reloadIfRemoteImageFallbackWarmed(_ notification: Notification) {
-        guard let warmedMessageId = notification.userInfo?[HTMLContentLoader.remoteImageAttachmentFallbackMessageIdUserInfoKey] as? String,
-              warmedMessageId == message.id else {
+        guard let warmRequest = Self.remoteImageFallbackOriginalWarmRequest(
+            for: message,
+            notification: notification
+        ) else {
             return
         }
 
@@ -203,6 +239,12 @@ struct EmailContentSection: View {
             let generation = await beginBackgroundReload()
             await loadHTML(generation: generation)
         }
+
+        remoteImageFallbackOriginalWarmTask = Self.replacingRemoteImageFallbackOriginalWarmTask(
+            remoteImageFallbackOriginalWarmTask,
+            request: warmRequest,
+            warmer: originalEmailSourceWarmer
+        )
     }
 
     @ViewBuilder
@@ -294,5 +336,38 @@ struct EmailContentSection: View {
             .prefix(8)
             .map { String(format: "%02x", $0) }
             .joined()
+    }
+
+    static func originalEmailWarmRequest(for message: ChatMessageRowModel) -> OriginalEmailWarmRequest {
+        OriginalEmailWarmRequest(
+            messageId: message.id,
+            bodyStorageURI: message.bodyStorageURI,
+            bodyText: message.bodyText,
+            senderEmail: message.senderEmail,
+            subject: message.subject
+        )
+    }
+
+    static func remoteImageFallbackOriginalWarmRequest(
+        for message: ChatMessageRowModel,
+        notification: Notification
+    ) -> OriginalEmailWarmRequest? {
+        guard let warmedMessageId = notification.userInfo?[HTMLContentLoader.remoteImageAttachmentFallbackMessageIdUserInfoKey] as? String,
+              warmedMessageId == message.id else {
+            return nil
+        }
+
+        return originalEmailWarmRequest(for: message)
+    }
+
+    static func replacingRemoteImageFallbackOriginalWarmTask(
+        _ existingTask: Task<Void, Never>?,
+        request: OriginalEmailWarmRequest,
+        warmer: any OriginalEmailSourceWarming
+    ) -> Task<Void, Never> {
+        existingTask?.cancel()
+        return Task(priority: .utility) {
+            await warmer.warmOriginalEmailSource(request: request)
+        }
     }
 }

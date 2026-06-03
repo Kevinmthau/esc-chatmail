@@ -1004,4 +1004,190 @@ final class EmailContentSectionTests: XCTestCase {
 
         XCTAssertEqual(routes, [])
     }
+
+    func testRemoteImageFallbackNotificationBuildsOriginalWarmRequestForMatchingMessage() async throws {
+        let row = makeRemoteImageWarmRow(id: "warm-message")
+        let notification = remoteImageFallbackWarmNotification(messageId: "warm-message")
+        let expectedRequest = OriginalEmailWarmRequest(
+            messageId: "warm-message",
+            bodyStorageURI: "file:///tmp/warm-message.html",
+            bodyText: "Warm body",
+            senderEmail: "warm@example.com",
+            subject: "Warm subject"
+        )
+
+        guard let request = EmailContentSection.remoteImageFallbackOriginalWarmRequest(
+            for: row,
+            notification: notification
+        ) else {
+            return XCTFail("Expected matching notification to produce an original-email warm request")
+        }
+
+        let warmer = RecordingOriginalEmailSourceWarmer()
+        let warmTask = EmailContentSection.replacingRemoteImageFallbackOriginalWarmTask(
+            nil,
+            request: request,
+            warmer: warmer
+        )
+        try await waitForRequestCount(1, in: warmer)
+
+        XCTAssertEqual(request, expectedRequest)
+        let recordedRequests = await warmer.recordedRequests()
+        XCTAssertEqual(recordedRequests, [expectedRequest])
+
+        warmTask.cancel()
+        await warmer.releaseAll()
+        await warmTask.value
+    }
+
+    func testRemoteImageFallbackNotificationIgnoresNonMatchingMessage() {
+        let row = makeRemoteImageWarmRow(id: "warm-message")
+        let notification = remoteImageFallbackWarmNotification(messageId: "other-message")
+
+        let request = EmailContentSection.remoteImageFallbackOriginalWarmRequest(
+            for: row,
+            notification: notification
+        )
+
+        XCTAssertNil(request)
+    }
+
+    func testRemoteImageFallbackOriginalWarmTaskReplacesStaleWork() async throws {
+        let request = OriginalEmailWarmRequest(
+            messageId: "warm-message",
+            bodyStorageURI: "file:///tmp/warm-message.html",
+            bodyText: "Warm body",
+            senderEmail: "warm@example.com",
+            subject: "Warm subject"
+        )
+        let warmer = RecordingOriginalEmailSourceWarmer()
+
+        var warmTask: Task<Void, Never>? = EmailContentSection.replacingRemoteImageFallbackOriginalWarmTask(
+            nil,
+            request: request,
+            warmer: warmer
+        )
+        try await waitForRequestCount(1, in: warmer)
+
+        warmTask = EmailContentSection.replacingRemoteImageFallbackOriginalWarmTask(
+            warmTask,
+            request: request,
+            warmer: warmer
+        )
+        try await waitForRequestCount(2, in: warmer)
+        try await waitForCancellationCount(1, in: warmer)
+
+        warmTask?.cancel()
+        await warmer.releaseAll()
+        if let warmTask {
+            await warmTask.value
+        }
+    }
+
+    private func makeRemoteImageWarmRow(id: String) -> ChatMessageRowModel {
+        let message = MessageBuilder()
+            .withId(id)
+            .withSubject("Warm subject")
+            .withSender(email: "warm@example.com", name: "Warm Sender")
+            .withBody("Warm body")
+            .build(in: testStack.viewContext)
+
+        message.bodyStorageURI = "file:///tmp/\(id).html"
+        message.cleanedSnippet = "Warm cleaned snippet"
+
+        return ChatMessageRowModelMapper.map(message)
+    }
+
+    private func remoteImageFallbackWarmNotification(messageId: String) -> Notification {
+        Notification(
+            name: HTMLContentLoader.remoteImageAttachmentFallbackDidWarmNotification,
+            userInfo: [
+                HTMLContentLoader.remoteImageAttachmentFallbackMessageIdUserInfoKey: messageId
+            ]
+        )
+    }
+
+    private func waitForRequestCount(
+        _ expectedCount: Int,
+        in warmer: RecordingOriginalEmailSourceWarmer,
+        timeout: TimeInterval = 1.0,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while await warmer.requestCount() < expectedCount, Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        let requestCount = await warmer.requestCount()
+        XCTAssertEqual(requestCount, expectedCount, file: file, line: line)
+    }
+
+    private func waitForCancellationCount(
+        _ expectedCount: Int,
+        in warmer: RecordingOriginalEmailSourceWarmer,
+        timeout: TimeInterval = 1.0,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while await warmer.cancellationCount() < expectedCount, Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        let cancellationCount = await warmer.cancellationCount()
+        XCTAssertEqual(cancellationCount, expectedCount, file: file, line: line)
+    }
+}
+
+private actor RecordingOriginalEmailSourceWarmer: OriginalEmailSourceWarming {
+    private var requests: [OriginalEmailWarmRequest] = []
+    private var cancellations = 0
+    private var releaseContinuations: [CheckedContinuation<Void, Never>] = []
+    private var isReleased = false
+
+    func warmOriginalEmailSource(request: OriginalEmailWarmRequest) async {
+        requests.append(request)
+
+        await withTaskCancellationHandler {
+            await waitUntilReleased()
+        } onCancel: {
+            Task {
+                await self.recordCancellation()
+            }
+        }
+    }
+
+    func recordedRequests() -> [OriginalEmailWarmRequest] {
+        requests
+    }
+
+    func requestCount() -> Int {
+        requests.count
+    }
+
+    func cancellationCount() -> Int {
+        cancellations
+    }
+
+    func releaseAll() {
+        isReleased = true
+        let continuations = releaseContinuations
+        releaseContinuations.removeAll()
+        continuations.forEach { $0.resume() }
+    }
+
+    private func recordCancellation() {
+        cancellations += 1
+    }
+
+    private func waitUntilReleased() async {
+        guard !isReleased else {
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            releaseContinuations.append(continuation)
+        }
+    }
 }

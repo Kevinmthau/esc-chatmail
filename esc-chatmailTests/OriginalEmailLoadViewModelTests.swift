@@ -307,6 +307,43 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         XCTAssertEqual(loader.ensureRequestCount, 1)
     }
 
+    func testFullReaderRecoveryContinuesAfterSoftTimeoutWithoutSnapshotPlaceholder() async throws {
+        let html = "<html><body>No-snapshot recovered original</body></html>"
+        let loader = StubOriginalEmailSourceLoader(
+            responses: [
+                originalEmailSource(
+                    presentation: .html,
+                    html: html,
+                    sourceKind: .recoveredHTML,
+                    sourceLocation: .recoveredHTML
+                )
+            ],
+            delayNanoseconds: 40_000_000
+        )
+        let viewModel = OriginalEmailLoadViewModel(
+            originalEmailSourceLoader: loader,
+            loadTimeout: 0.01,
+            recoveringDelay: 0.005
+        )
+
+        let task = Task { @MainActor in
+            await viewModel.loadOriginalEmail(
+                for: makeRequest(messageId: "full-reader-no-snapshot-recovered-later"),
+                missingSourceRecoveryPolicy: .keepRecoveringWhileActive
+            )
+        }
+
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(viewModel.loadState, .recovering)
+        XCTAssertEqual(loader.ensureRequestCount, 1)
+        XCTAssertEqual(loader.completedEnsureRequestCount, 0)
+
+        _ = await task.value
+
+        XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
+        XCTAssertEqual(loader.ensureRequestCount, 1)
+    }
+
     func testPlaceholderBackedRecoveryStopsWaitingWhenCancelledAfterSoftTimeout() async throws {
         let loader = ManuallyCompletingOriginalEmailSourceLoader(
             source: originalEmailSource(

@@ -530,9 +530,7 @@ struct HTMLMessageView: View {
         Log.diagnostic(.htmlPreview, level: .info, "HTMLMessageView loading message \(message.id)", category: .ui)
         let source = await loadViewModel.loadOriginalEmail(
             for: loadRequest,
-            missingSourceRecoveryPolicy: snapshotPlaceholder == nil
-                ? .markUnavailableAfterRetries
-                : .keepRecoveringWhileActive
+            missingSourceRecoveryPolicy: .keepRecoveringWhileActive
         )
 
         guard !Task.isCancelled else {
