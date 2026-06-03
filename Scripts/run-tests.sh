@@ -34,7 +34,7 @@ if [[ "${RUN_PERFORMANCE_TESTS}" == "true" ]]; then
   ARGS+=("-testPlan" "Performance")
 else
   # Default test plan: runs the suite with PerformanceRegressionTests excluded
-  # (timing-sensitive). This is the same plan the Xcode Cloud Test action uses.
+  # because they are timing-sensitive.
   ARGS+=("-testPlan" "esc-chatmail")
 fi
 
