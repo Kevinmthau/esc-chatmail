@@ -140,9 +140,9 @@ final class CoreDataBackupManagerTests: XCTestCase {
         let oldest = "Store.backup-2026-05-12T18-40-00Z.sqlite"
         let legacy = "legacy.sqlite"
 
-        try writeBackup(named: newest)
-        try writeBackup(named: legacy)
-        try writeBackup(named: oldest)
+        _ = try writeBackup(named: newest)
+        _ = try writeBackup(named: legacy)
+        _ = try writeBackup(named: oldest)
 
         let backupNames = CoreDataBackupManager.listBackups(for: storeURL)
             .map(\.lastPathComponent)
@@ -164,8 +164,8 @@ final class CoreDataBackupManagerTests: XCTestCase {
         let newer = "Store.backup-not-a-date.sqlite"
         let older = "legacy.sqlite"
 
-        try writeBackup(named: newer, createdAt: Date(timeIntervalSinceNow: 60))
-        try writeBackup(named: older, createdAt: Date(timeIntervalSinceNow: -60))
+        _ = try writeBackup(named: newer, createdAt: Date(timeIntervalSinceNow: 60))
+        _ = try writeBackup(named: older, createdAt: Date(timeIntervalSinceNow: -60))
 
         let backupNames = CoreDataBackupManager.listBackups(for: storeURL)
             .map(\.lastPathComponent)
@@ -178,8 +178,8 @@ final class CoreDataBackupManagerTests: XCTestCase {
         let first = "AStore.backup-2026-05-12T18-42-00Z.sqlite"
         let second = "BStore.backup-2026-05-12T18-42-00Z.sqlite"
 
-        try writeBackup(named: first, createdAt: creationDate)
-        try writeBackup(named: second, createdAt: creationDate)
+        _ = try writeBackup(named: first, createdAt: creationDate)
+        _ = try writeBackup(named: second, createdAt: creationDate)
 
         let backupNames = CoreDataBackupManager.listBackups(for: storeURL)
             .map(\.lastPathComponent)

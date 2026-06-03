@@ -55,8 +55,9 @@ final class AccountBuilder {
     /// Builds the Account entity in the given context.
     /// - Parameter context: The managed object context to create the account in
     /// - Returns: The created Account entity
+    @discardableResult
     func build(in context: NSManagedObjectContext) -> Account {
-        let account = Account(context: context)
+        let account = context.insertTestObject(Account.self)
         account.id = id
         account.email = email
         account.historyId = historyId

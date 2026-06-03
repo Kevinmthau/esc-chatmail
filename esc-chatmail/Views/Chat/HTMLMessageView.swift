@@ -564,9 +564,15 @@ struct HTMLMessageView: View {
         }
 
         let messageId = message.id
+        let messageObjectID = message.objectID
         Task {
             await context.perform {
                 guard let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+                    return
+                }
+                guard let resolvedObject = try? context.existingObject(with: messageObjectID),
+                      let message = resolvedObject as? Message,
+                      !message.isDeleted else {
                     return
                 }
                 let messagesDirectory = documentsPath.appendingPathComponent("Messages")

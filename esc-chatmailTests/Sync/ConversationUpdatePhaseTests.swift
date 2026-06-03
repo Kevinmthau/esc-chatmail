@@ -23,20 +23,19 @@ final class ConversationUpdatePhaseTests: XCTestCase {
         )
 
         let didUpdate = expectation(description: "rollups updated")
-        var capturedIDs: Set<NSManagedObjectID> = []
-        var capturedContextID: ObjectIdentifier?
+        let recorder = RollupUpdateRecorder()
 
         let phase = ConversationUpdatePhase { conversationIDs, rollupContext in
-            capturedIDs = conversationIDs
-            capturedContextID = ObjectIdentifier(rollupContext)
+            await recorder.record(conversationIDs: conversationIDs, context: rollupContext)
             didUpdate.fulfill()
         }
 
         try await phase.execute(input: expectedIDs, context: context)
         await fulfillment(of: [didUpdate], timeout: 1.0)
 
-        XCTAssertEqual(capturedIDs, expectedIDs)
-        XCTAssertEqual(capturedContextID, ObjectIdentifier(context.coreDataContext))
+        let captured = await recorder.snapshot()
+        XCTAssertEqual(captured.conversationIDs, expectedIDs)
+        XCTAssertEqual(captured.contextID, ObjectIdentifier(context.coreDataContext))
     }
 
     private func makeConversationIDs(
@@ -48,5 +47,19 @@ final class ConversationUpdatePhaseTests: XCTestCase {
         }
         try stack.saveViewContext()
         return Set(conversations.map(\.objectID))
+    }
+}
+
+private actor RollupUpdateRecorder {
+    private var conversationIDs: Set<NSManagedObjectID> = []
+    private var contextID: ObjectIdentifier?
+
+    func record(conversationIDs: Set<NSManagedObjectID>, context: NSManagedObjectContext) {
+        self.conversationIDs = conversationIDs
+        self.contextID = ObjectIdentifier(context)
+    }
+
+    func snapshot() -> (conversationIDs: Set<NSManagedObjectID>, contextID: ObjectIdentifier?) {
+        (conversationIDs, contextID)
     }
 }

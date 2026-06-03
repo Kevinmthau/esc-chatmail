@@ -390,7 +390,7 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                 return
             }
 
-            await self?.triggerRetry(cacheKey: cacheKey, failureCount: failureCount)
+            self?.triggerRetry(cacheKey: cacheKey, failureCount: failureCount)
         }
     }
 

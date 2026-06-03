@@ -19,7 +19,7 @@ final class OutboundAttachmentContextBuilderTests: XCTestCase {
         let context = coreDataStack.viewContext
         let builder = OutboundAttachmentContextBuilder(viewContext: context)
 
-        let attachment = Attachment(context: context)
+        let attachment = context.insertTestObject(Attachment.self)
         attachment.id = "local_attachment_1"
         attachment.filename = "photo.jpg"
         attachment.mimeType = "image/jpeg"

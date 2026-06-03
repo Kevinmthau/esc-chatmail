@@ -1240,7 +1240,7 @@ final class ParticipantLoaderTests: XCTestCase {
     // MARK: - Helpers
 
     private func addConversationParticipant(person: Person, to conversation: Conversation) {
-        let participant = ConversationParticipant(context: context)
+        let participant = context.insertTestObject(ConversationParticipant.self)
         participant.id = UUID()
         participant.participantRole = .normal
         participant.person = person
@@ -1286,13 +1286,14 @@ private final class CountingContactsResolving: ContactsResolving, @unchecked Sen
 
     func lookup(email: String) async -> ContactMatch? {
         let normalized = EmailNormalizer.normalize(email)
+        return recordLookup(normalized: normalized, email: email)
+    }
 
+    private func recordLookup(normalized: String, email: String) -> ContactMatch? {
         lock.lock()
+        defer { lock.unlock() }
         _lookupCount += 1
-        let match = contactMap[normalized] ?? contactMap[email]
-        lock.unlock()
-
-        return match
+        return contactMap[normalized] ?? contactMap[email]
     }
 
     func prewarm(emails: [String]) async {}

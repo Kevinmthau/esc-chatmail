@@ -506,7 +506,7 @@ final class EmailDocument {
     }
 
     private func isNonRenderableContentElement(_ element: Element) -> Bool {
-        if (try? element.hasAttr("hidden")) == true {
+        if element.hasAttr("hidden") {
             return true
         }
 

@@ -603,10 +603,14 @@ private final class MockBackgroundSyncCoordinator: @unchecked Sendable, Backgrou
     }
 
     func prefetchLabelIdsForBackground(in context: NSManagedObjectContext) async -> Set<String> {
-        lock.lock()
-        prefetchContextIDs.append(ObjectIdentifier(context))
-        lock.unlock()
+        recordPrefetch(context: context)
         return ["INBOX"]
+    }
+
+    private func recordPrefetch(context: NSManagedObjectContext) {
+        lock.lock()
+        defer { lock.unlock() }
+        prefetchContextIDs.append(ObjectIdentifier(context))
     }
 
     func saveMessage(
@@ -615,9 +619,7 @@ private final class MockBackgroundSyncCoordinator: @unchecked Sendable, Backgrou
         modificationTransaction: ModificationTracker.Transaction,
         in context: NSManagedObjectContext
     ) async {
-        lock.lock()
-        savedMessageContextIDs.append(ObjectIdentifier(context))
-        lock.unlock()
+        recordSavedMessage(context: context)
 
         await context.perform {
             guard let conversation = try? context.existingObject(with: self.seedConversationObjectID) as? Conversation else {
@@ -633,23 +635,40 @@ private final class MockBackgroundSyncCoordinator: @unchecked Sendable, Backgrou
         }
     }
 
+    private func recordSavedMessage(context: NSManagedObjectContext) {
+        lock.lock()
+        defer { lock.unlock() }
+        savedMessageContextIDs.append(ObjectIdentifier(context))
+    }
+
     func updateConversationRollups(
         conversationIDs: Set<NSManagedObjectID>,
         in context: NSManagedObjectContext
     ) async {
+        recordConversationRollups(conversationIDs: conversationIDs, context: context)
+    }
+
+    private func recordConversationRollups(
+        conversationIDs: Set<NSManagedObjectID>,
+        context: NSManagedObjectContext
+    ) {
         lock.lock()
+        defer { lock.unlock() }
         rollupContextIDs.append(ObjectIdentifier(context))
         rollupConversationIDs.append(conversationIDs)
-        lock.unlock()
     }
 
     func updateConversationDisplayNames(
         conversationIDs: Set<NSManagedObjectID>,
         in context: NSManagedObjectContext
     ) async {
+        recordConversationDisplayNames(conversationIDs: conversationIDs)
+    }
+
+    private func recordConversationDisplayNames(conversationIDs: Set<NSManagedObjectID>) {
         lock.lock()
+        defer { lock.unlock() }
         displayNameConversationIDs.append(conversationIDs)
-        lock.unlock()
     }
 }
 

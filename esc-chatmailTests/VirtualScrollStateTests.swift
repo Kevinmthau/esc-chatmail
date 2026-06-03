@@ -729,7 +729,7 @@ final class VirtualScrollStateTests: XCTestCase {
     }
 
     private func addMessageParticipant(person: Person, kind: ParticipantKind, to message: Message) {
-        let participant = MessageParticipant(context: viewContext)
+        let participant = viewContext.insertTestObject(MessageParticipant.self)
         participant.id = UUID()
         participant.participantKind = kind
         participant.person = person

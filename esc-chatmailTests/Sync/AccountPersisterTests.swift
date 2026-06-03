@@ -46,7 +46,7 @@ final class AccountPersisterTests: XCTestCase {
 
     func testSaveAccount_withoutHistoryIdOnUpdate_preservesExistingCursor() async throws {
         let seedContext = stack.viewContext
-        AccountBuilder()
+        _ = AccountBuilder()
             .withEmail("test@example.com")
             .withHistoryId("history-old")
             .build(in: seedContext)

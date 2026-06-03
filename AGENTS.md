@@ -29,7 +29,7 @@ Use the Xcode app toolchain explicitly. Plain `xcodebuild` will otherwise point 
 
 Default simulator:
 - `platform=iOS Simulator,name=iPhone 17 Pro`
-- Xcode 26.4.1 currently registers the iOS simulator runtime as `26.4`; do not pin `OS=26.4.1`.
+- Xcode simulator runtimes are registered by major/minor OS version; do not pin patch-level OS versions.
 
 Codex wrapper commands:
 

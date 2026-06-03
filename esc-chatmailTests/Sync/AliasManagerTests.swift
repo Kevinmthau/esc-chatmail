@@ -19,7 +19,7 @@ final class AliasManagerTests: XCTestCase {
     }
 
     func testGetAliasesMergesAccountAliasesWithSelfContactAliases() async throws {
-        AccountBuilder()
+        _ = AccountBuilder()
             .withEmail("KM.Thau@googlemail.com")
             .withAliases(["alias+tag@gmail.com"])
             .build(in: context)
@@ -39,7 +39,7 @@ final class AliasManagerTests: XCTestCase {
     }
 
     func testGetAliasesPreservesAccountAliasesWhenSelfContactAliasesUnavailable() async throws {
-        AccountBuilder()
+        _ = AccountBuilder()
             .withEmail("me@example.com")
             .withAliases(["send-as@example.com"])
             .build(in: context)
@@ -133,11 +133,16 @@ private final class StubSelfAliasProvider: SelfAliasProviding, @unchecked Sendab
     }
 
     func aliases(knownEmails: [String]) async -> Set<String> {
+        recordAliasesRequest(knownEmails: knownEmails)
+    }
+
+    private func recordAliasesRequest(knownEmails: [String]) -> Set<String> {
         lock.lock()
+        defer { lock.unlock() }
+
         _searchedEmails = knownEmails
         _searchCount += 1
         let aliases = aliases
-        lock.unlock()
         return aliases
     }
 }

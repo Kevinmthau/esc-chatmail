@@ -2,7 +2,7 @@ import Foundation
 
 /// Thread-safe HTML file storage operations.
 /// Uses atomic writes and safe directory operations to prevent race conditions.
-final class HTMLContentHandler {
+final class HTMLContentHandler: @unchecked Sendable {
     /// Shared singleton instance for efficient reuse across views
     static let shared = HTMLContentHandler()
 

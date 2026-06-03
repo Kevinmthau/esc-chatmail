@@ -1,3 +1,4 @@
+import CoreData
 import XCTest
 @testable import esc_chatmail
 
@@ -24,6 +25,20 @@ final class ChatViewModelTests: XCTestCase {
             tokenManager: tokenManager,
             gmailAPIClient: GmailAPIClient(tokenManager: tokenManager)
         )
+    }
+
+    @discardableResult
+    private func addConversationParticipant(
+        person: Person,
+        to conversation: Conversation,
+        in context: NSManagedObjectContext
+    ) -> ConversationParticipant {
+        let participant = context.insertTestObject(ConversationParticipant.self)
+        participant.id = UUID()
+        participant.participantRole = .normal
+        participant.person = person
+        participant.conversation = conversation
+        return participant
     }
 
     func testOpenFullMessage_setsPresentedMessage() {
@@ -87,27 +102,18 @@ final class ChatViewModelTests: XCTestCase {
             .recentlyActive()
             .build(in: context)
 
-        let me = Person(context: context)
-        me.id = UUID()
-        me.email = "me@example.com"
-        me.displayName = "Me"
+        let me = PersonBuilder()
+            .withEmail("me@example.com")
+            .withDisplayName("Me")
+            .build(in: context)
 
-        let other = Person(context: context)
-        other.id = UUID()
-        other.email = "friend@example.com"
-        other.displayName = "Friend"
+        let other = PersonBuilder()
+            .withEmail("friend@example.com")
+            .withDisplayName("Friend")
+            .build(in: context)
 
-        let meParticipant = ConversationParticipant(context: context)
-        meParticipant.id = UUID()
-        meParticipant.participantRole = .normal
-        meParticipant.person = me
-        meParticipant.conversation = conversation
-
-        let otherParticipant = ConversationParticipant(context: context)
-        otherParticipant.id = UUID()
-        otherParticipant.participantRole = .normal
-        otherParticipant.person = other
-        otherParticipant.conversation = conversation
+        addConversationParticipant(person: me, to: conversation, in: context)
+        addConversationParticipant(person: other, to: conversation, in: context)
 
         let message = MessageBuilder()
             .withId("message-forward")
@@ -191,26 +197,18 @@ final class ChatViewModelTests: XCTestCase {
             .recentlyActive()
             .build(in: context)
 
-        let me = Person(context: context)
-        me.id = UUID()
-        me.email = "me@example.com"
+        let me = PersonBuilder()
+            .withEmail("me@example.com")
+            .noDisplayName()
+            .build(in: context)
 
-        let friend = Person(context: context)
-        friend.id = UUID()
-        friend.email = "friend@example.com"
-        friend.displayName = "Friend"
+        let friend = PersonBuilder()
+            .withEmail("friend@example.com")
+            .withDisplayName("Friend")
+            .build(in: context)
 
-        let meParticipant = ConversationParticipant(context: context)
-        meParticipant.id = UUID()
-        meParticipant.person = me
-        meParticipant.participantRole = .normal
-        meParticipant.conversation = conversation
-
-        let friendParticipant = ConversationParticipant(context: context)
-        friendParticipant.id = UUID()
-        friendParticipant.person = friend
-        friendParticipant.participantRole = .normal
-        friendParticipant.conversation = conversation
+        addConversationParticipant(person: me, to: conversation, in: context)
+        addConversationParticipant(person: friend, to: conversation, in: context)
 
         let replyTarget = MessageBuilder()
             .withId("message-1")
@@ -268,26 +266,18 @@ final class ChatViewModelTests: XCTestCase {
             .recentlyActive()
             .build(in: context)
 
-        let me = Person(context: context)
-        me.id = UUID()
-        me.email = "me@example.com"
+        let me = PersonBuilder()
+            .withEmail("me@example.com")
+            .noDisplayName()
+            .build(in: context)
 
-        let friend = Person(context: context)
-        friend.id = UUID()
-        friend.email = "friend@example.com"
-        friend.displayName = "Friend"
+        let friend = PersonBuilder()
+            .withEmail("friend@example.com")
+            .withDisplayName("Friend")
+            .build(in: context)
 
-        let meParticipant = ConversationParticipant(context: context)
-        meParticipant.id = UUID()
-        meParticipant.person = me
-        meParticipant.participantRole = .normal
-        meParticipant.conversation = conversation
-
-        let friendParticipant = ConversationParticipant(context: context)
-        friendParticipant.id = UUID()
-        friendParticipant.person = friend
-        friendParticipant.participantRole = .normal
-        friendParticipant.conversation = conversation
+        addConversationParticipant(person: me, to: conversation, in: context)
+        addConversationParticipant(person: friend, to: conversation, in: context)
 
         let replyTarget = MessageBuilder()
             .withId("message-1")

@@ -268,7 +268,7 @@ final class ConversationRollupUpdaterTests: XCTestCase {
             .withEmail(email)
             .withDisplayName(displayName)
             .build(in: context)
-        let participant = ConversationParticipant(context: context)
+        let participant = context.insertTestObject(ConversationParticipant.self)
         participant.id = UUID()
         participant.participantRole = .normal
         participant.person = person

@@ -119,7 +119,7 @@ extension MessagePersister {
             }
 
             if let plainText = processedMessage.plainTextBody, !plainText.isEmpty {
-                let shouldPreserveOutgoingLocalBody = self.shouldPreserveOutgoingLocalBodyText(
+                let shouldPreserveOutgoingLocalBody = Self.shouldPreserveOutgoingLocalBodyText(
                     previousBodyText: previousBodyText,
                     incomingBodyText: plainText,
                     incomingSnippet: processedMessage.snippet,
@@ -311,7 +311,7 @@ extension MessagePersister {
         return result.didUpdate
     }
 
-    private func shouldPreserveOutgoingLocalBodyText(
+    private nonisolated static func shouldPreserveOutgoingLocalBodyText(
         previousBodyText: String?,
         incomingBodyText: String,
         incomingSnippet: String?,
@@ -336,7 +336,7 @@ extension MessagePersister {
         return snippetCandidates.contains(incoming)
     }
 
-    private func normalizedBodyComparisonText(_ text: String?) -> String? {
+    private nonisolated static func normalizedBodyComparisonText(_ text: String?) -> String? {
         guard let text else { return nil }
 
         let normalized = HTMLEntityDecoder.decode(

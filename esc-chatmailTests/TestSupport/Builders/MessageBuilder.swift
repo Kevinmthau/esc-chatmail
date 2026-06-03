@@ -131,8 +131,9 @@ final class MessageBuilder {
     /// Builds the Message entity in the given context.
     /// - Parameter context: The managed object context to create the message in
     /// - Returns: The created Message entity
+    @discardableResult
     func build(in context: NSManagedObjectContext) -> Message {
-        let message = Message(context: context)
+        let message = context.insertTestObject(Message.self)
         message.id = id
         message.gmThreadId = gmThreadId
         message.subject = subject

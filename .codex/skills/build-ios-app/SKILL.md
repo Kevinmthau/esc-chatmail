@@ -3,7 +3,7 @@ name: build-ios-app
 description: Build and test the esc-chatmail iOS app with the repo's real project, scheme, simulator defaults, and validation rules.
 ---
 
-# Build IOS App
+# Build iOS App
 
 ## When To Use
 
@@ -25,10 +25,20 @@ Run the real `esc-chatmail` project with the correct toolchain, scheme, and simu
 
 3. Prefer an explicit simulator destination.
    - Default simulator: `platform=iOS Simulator,name=iPhone 17 Pro`
-   - Xcode 26.4.1 currently registers the iOS simulator runtime as `26.4`; do not pin `OS=26.4.1`.
+   - Xcode simulator runtimes are registered by major/minor OS version; do not pin patch-level OS versions.
    - Reason: `Scripts/run-tests.sh` otherwise picks the first available iPhone simulator, which can land on an older runtime.
 
-4. Use these commands.
+4. Use the repo wrappers for routine Codex runs.
+
+```bash
+./Scripts/codex-build.sh
+```
+
+```bash
+./Scripts/codex-test.sh
+```
+
+5. If the wrapper is unsuitable, use the same explicit environment and project settings manually.
 
 ```bash
 DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro' \
@@ -46,13 +56,11 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 bash Scripts/run-tests.sh
 ```
 
-5. Start narrow, then widen only if the touched area justifies it.
+6. Start narrow, then widen only if the touched area justifies it.
    - Narrow test command pattern:
 
 ```bash
-DESTINATION='platform=iOS Simulator,name=iPhone 17 Pro' \
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-bash Scripts/run-tests.sh -only-testing 'esc-chatmailTests/<SuiteName>'
+./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/<SuiteName>'
 ```
 
    - HTML/rendering changes: `esc-chatmailTests/HTMLSanitization/HTMLContentLoaderTests`, `esc-chatmailTests/HTMLSanitization/HTMLDisplayWrapperTests`, `esc-chatmailTests/HTMLSanitization/HTMLSanitizerServiceTests`, `esc-chatmailTests/HTMLSanitization/HTMLRemoteImageAttachmentFallbackTests`, `esc-chatmailTests/HTMLPreviewScaleCalculatorTests`
@@ -60,12 +68,12 @@ bash Scripts/run-tests.sh -only-testing 'esc-chatmailTests/<SuiteName>'
    - Compose changes: `esc-chatmailTests/Compose/ComposeViewModelTests`, `esc-chatmailTests/Compose/ComposeSendOrchestratorTests`
    - Chat bubble/thread changes: `esc-chatmailTests/MessageBubbleLoaderTests`, `esc-chatmailTests/MessageBubbleViewModelTests`
 
-6. Use the repo test wrapper for tests.
+7. Use the repo test wrapper for tests.
    - `Scripts/run-tests.sh` sets the scheme/configuration and skips `PerformanceRegressionTests` by default.
    - Pass `--performance` only when performance coverage is part of the task.
    - Prefer setting `DESTINATION` explicitly for reproducible runs and to avoid failures when a previously documented runtime is no longer installed.
 
-7. Known failure patterns in this repo.
+8. Known failure patterns in this repo.
    - `xcodebuild` or `simctl` fails before build starts: toolchain is pointed at Command Line Tools instead of Xcode.
    - Tests run on an unexpected simulator/runtime: `DESTINATION` was left implicit.
    - HTML test failures after preview work: check for preview logic leaking into the full-message path.

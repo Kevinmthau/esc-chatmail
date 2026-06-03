@@ -40,13 +40,13 @@ final class ChatMessageRowModelTests: XCTestCase {
         message.cleanedSnippet = "Cleaned Snippet"
         message.chatPreviewText = "Chat preview\n\nText"
 
-        let participant = MessageParticipant(context: viewContext)
+        let participant = viewContext.insertTestObject(MessageParticipant.self)
         participant.id = UUID()
         participant.participantKind = .from
         participant.message = message
         participant.person = sender
 
-        let attachment = Attachment(context: viewContext)
+        let attachment = viewContext.insertTestObject(Attachment.self)
         attachment.id = "attachment-1"
         attachment.contentId = "cid-attachment-1"
         attachment.filename = "photo.png"
@@ -111,7 +111,7 @@ final class ChatMessageRowModelTests: XCTestCase {
             .inConversation(conversation)
             .build(in: viewContext)
 
-        let failedAttachment = Attachment(context: viewContext)
+        let failedAttachment = viewContext.insertTestObject(Attachment.self)
         failedAttachment.id = "local_failed_attachment"
         failedAttachment.filename = "agenda.pdf"
         failedAttachment.mimeType = "application/pdf"

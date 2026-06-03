@@ -70,12 +70,12 @@ final class AuthSessionTests: XCTestCase {
 
     func testPersistSessionForBackgroundAccess_migratesLegacyTokensToBackgroundReadableAccess() throws {
         let keychain = MockKeychainService()
-        var tokenManager: TokenManager!
+        let tokenManagerProvider = TokenManagerProvider()
         let session = makeAuthSession(
-            tokenManagerProvider: { tokenManager },
+            tokenManagerProvider: { tokenManagerProvider.tokenManager },
             keychainService: keychain
         )
-        tokenManager = TokenManager(
+        tokenManagerProvider.tokenManager = TokenManager(
             keychainService: keychain,
             authSession: session,
             tokenRefresher: MockTokenRefresher()
@@ -165,4 +165,9 @@ private final class AuthSessionTokenManagerFactory: @unchecked Sendable {
         createdManagers.append(manager)
         return manager
     }
+}
+
+@MainActor
+private final class TokenManagerProvider: @unchecked Sendable {
+    var tokenManager: TokenManager!
 }

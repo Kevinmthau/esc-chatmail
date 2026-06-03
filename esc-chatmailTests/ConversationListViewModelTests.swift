@@ -279,7 +279,7 @@ final class ConversationListViewModelTests: XCTestCase {
     }
 
     private func addConversationParticipant(person: Person, to conversation: Conversation) {
-        let participant = ConversationParticipant(context: context)
+        let participant = context.insertTestObject(ConversationParticipant.self)
         participant.id = UUID()
         participant.participantRole = .normal
         participant.person = person

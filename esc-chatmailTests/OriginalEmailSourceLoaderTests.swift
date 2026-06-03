@@ -1084,16 +1084,20 @@ private final class MutableRecoveryService: HTMLContentRecovering, @unchecked Se
     }
 
     func recoverHTMLContent(messageId: String) async -> String? {
-        lock.lock()
-        recoveryRequests += 1
-        let html = htmlByMessageID[messageId]
-        lock.unlock()
+        let html = recordRecoveryRequest(messageId: messageId)
 
         if let html {
             _ = contentHandler.saveHTML(html, for: messageId)
         }
 
         return html
+    }
+
+    private func recordRecoveryRequest(messageId: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        recoveryRequests += 1
+        return htmlByMessageID[messageId]
     }
 }
 

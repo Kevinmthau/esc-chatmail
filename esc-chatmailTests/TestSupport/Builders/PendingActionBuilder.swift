@@ -166,8 +166,9 @@ final class PendingActionBuilder {
     /// Builds the PendingAction entity in the given context.
     /// - Parameter context: The managed object context to create the action in
     /// - Returns: The created PendingAction entity
+    @discardableResult
     func build(in context: NSManagedObjectContext) -> PendingAction {
-        let action = PendingAction(context: context)
+        let action = context.insertTestObject(PendingAction.self)
         action.id = id
         action.actionType = actionType
         action.messageId = messageId

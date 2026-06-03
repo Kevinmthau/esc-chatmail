@@ -138,7 +138,7 @@ final class HistoryProcessorTests: XCTestCase {
 
     func testHasPendingLocalModification_nilLocalModifiedAt_returnsFalse() {
         let context = testStack.viewContext
-        let message = Message(context: context)
+        let message = context.insertTestObject(Message.self)
         message.id = "m1"
         message.localModifiedAt = nil
 
@@ -147,7 +147,7 @@ final class HistoryProcessorTests: XCTestCase {
 
     func testHasPendingLocalModification_freshLocalModification_returnsTrue() {
         let context = testStack.viewContext
-        let message = Message(context: context)
+        let message = context.insertTestObject(Message.self)
         message.id = "m1"
         message.localModifiedAt = Date().addingTimeInterval(-30) // 30 seconds ago
 
@@ -156,7 +156,7 @@ final class HistoryProcessorTests: XCTestCase {
 
     func testHasPendingLocalModification_staleLocalModification_returnsFalse() {
         let context = testStack.viewContext
-        let message = Message(context: context)
+        let message = context.insertTestObject(Message.self)
         message.id = "m1"
         // Beyond maxLocalModificationAge (30 minutes)
         message.localModifiedAt = Date().addingTimeInterval(-SyncConfig.maxLocalModificationAge - 60)
@@ -168,7 +168,7 @@ final class HistoryProcessorTests: XCTestCase {
 
     func testHasConflict_mirrorsHasPendingLocalModification() {
         let context = testStack.viewContext
-        let message = Message(context: context)
+        let message = context.insertTestObject(Message.self)
         message.id = "m1"
         message.localModifiedAt = Date()
 

@@ -223,8 +223,8 @@ final class EmailPreviewSnapshotRenderer: EmailPreviewSnapshotRendering {
 
     private let scheduler: any EmailPreviewSnapshotRenderScheduling
 
-    init(scheduler: any EmailPreviewSnapshotRenderScheduling = EmailPreviewSnapshotRenderScheduler.shared) {
-        self.scheduler = scheduler
+    init(scheduler: (any EmailPreviewSnapshotRenderScheduling)? = nil) {
+        self.scheduler = scheduler ?? EmailPreviewSnapshotRenderScheduler.shared
     }
 
     func render(request: EmailPreviewSnapshotRequest) async throws -> EmailPreviewSnapshotResult {

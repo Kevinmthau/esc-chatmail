@@ -297,7 +297,7 @@ enum PerformanceFixtureFactory {
                 .withDisplayName(participant.name)
                 .build(in: context)
 
-            let conversationParticipant = ConversationParticipant(context: context)
+            let conversationParticipant = context.insertTestObject(ConversationParticipant.self)
             conversationParticipant.id = UUID()
             conversationParticipant.participantRole = .normal
             conversationParticipant.person = person

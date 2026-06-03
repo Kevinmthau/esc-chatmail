@@ -266,7 +266,7 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
             )
         )
 
-        let queuedSubmission = try XCTUnwrap(submission)
+        _ = try XCTUnwrap(submission)
         await fulfillment(of: [completionExpectation], timeout: 1.0)
 
         let snapshot = sendService.snapshot
@@ -427,22 +427,23 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
             .recentlyActive()
             .build(in: context)
 
-        let me = Person(context: context)
-        me.id = UUID()
-        me.email = "me@example.com"
+        let me = PersonBuilder()
+            .withEmail("me@example.com")
+            .noDisplayName()
+            .build(in: context)
 
-        let friend = Person(context: context)
-        friend.id = UUID()
-        friend.email = friendEmail
-        friend.displayName = "Friend"
+        let friend = PersonBuilder()
+            .withEmail(friendEmail)
+            .withDisplayName("Friend")
+            .build(in: context)
 
-        let meParticipant = ConversationParticipant(context: context)
+        let meParticipant = context.insertTestObject(ConversationParticipant.self)
         meParticipant.id = UUID()
         meParticipant.person = me
         meParticipant.participantRole = .normal
         meParticipant.conversation = conversation
 
-        let friendParticipant = ConversationParticipant(context: context)
+        let friendParticipant = context.insertTestObject(ConversationParticipant.self)
         friendParticipant.id = UUID()
         friendParticipant.person = friend
         friendParticipant.participantRole = .normal
@@ -573,7 +574,7 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
                 .build(in: context)
         }
 
-        let message = Message(context: context)
+        let message = context.insertTestObject(Message.self)
         message.id = "optimistic-\(UUID().uuidString)"
         message.gmThreadId = threadId ?? ""
         message.subject = subject

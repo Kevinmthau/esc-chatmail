@@ -361,7 +361,7 @@ actor HTMLRemoteImageAttachmentFallback {
 
             Task { [self] in
                 let result = await task.value
-                let finalized = await finalizeResolution(result, cacheKey: cacheKey)
+                let finalized = finalizeResolution(result, cacheKey: cacheKey)
                 switch finalized {
                 case .rewritten(let dataURL):
                     gate.resume(returning: .rewritten(dataURL))
@@ -442,7 +442,7 @@ actor HTMLRemoteImageAttachmentFallback {
 
             Task { [self] in
                 let result = await task.value
-                let finalized = await finalizeResolution(result, cacheKey: cacheKey)
+                let finalized = finalizeResolution(result, cacheKey: cacheKey)
                 switch finalized {
                 case .rewritten(let dataURL):
                     gate.resume(returning: dataURL)

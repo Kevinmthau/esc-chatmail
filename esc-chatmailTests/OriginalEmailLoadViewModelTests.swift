@@ -21,7 +21,7 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
             recoveringDelay: 0.05
         )
 
-        await viewModel.loadOriginalEmail(for: makeRequest(messageId: "local-html"))
+        _ = await viewModel.loadOriginalEmail(for: makeRequest(messageId: "local-html"))
 
         XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
         XCTAssertEqual(loader.ensureRequestCount, 1)
@@ -45,7 +45,7 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         try await Task.sleep(nanoseconds: 15_000_000)
         XCTAssertEqual(viewModel.loadState, .recovering)
 
-        await task.value
+        _ = await task.value
 
         XCTAssertEqual(viewModel.loadState, .retryableFailure("original_email_unavailable"))
         XCTAssertEqual(loader.ensureRequestCount, 1)
@@ -103,7 +103,7 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
             recoveringDelay: 0.005
         )
 
-        await viewModel.loadOriginalEmail(for: makeRequest(messageId: "retry-missing"))
+        _ = await viewModel.loadOriginalEmail(for: makeRequest(messageId: "retry-missing"))
         XCTAssertEqual(viewModel.loadState, .retryableFailure("original_email_unavailable"))
 
         viewModel.retry()
@@ -132,11 +132,11 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         )
         let request = makeRequest(messageId: "warmed-retry")
 
-        await viewModel.loadOriginalEmail(for: request)
+        _ = await viewModel.loadOriginalEmail(for: request)
         XCTAssertEqual(viewModel.loadState, .retryableFailure("original_email_unavailable"))
 
         viewModel.retry()
-        await viewModel.loadOriginalEmail(for: request)
+        _ = await viewModel.loadOriginalEmail(for: request)
 
         XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
         XCTAssertEqual(loader.ensureRequestCount, 2)
@@ -162,12 +162,12 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         )
         let request = makeRequest(messageId: "preserving-refresh")
 
-        await viewModel.loadOriginalEmail(for: request)
+        _ = await viewModel.loadOriginalEmail(for: request)
         XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
         XCTAssertEqual(viewModel.activeHTMLSourceSignature, "html-signature")
 
         viewModel.reloadPreservingContent()
-        await viewModel.loadOriginalEmail(for: request)
+        _ = await viewModel.loadOriginalEmail(for: request)
 
         XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
         XCTAssertEqual(viewModel.activeHTMLSourceSignature, "html-signature")
@@ -192,7 +192,7 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
             recoveringDelay: 0.005
         )
 
-        await viewModel.loadOriginalEmail(for: makeRequest(messageId: "recovered-html"))
+        _ = await viewModel.loadOriginalEmail(for: makeRequest(messageId: "recovered-html"))
 
         XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
     }
@@ -223,7 +223,7 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         try await Task.sleep(nanoseconds: 20_000_000)
         XCTAssertEqual(viewModel.loadState, .recovering)
 
-        await task.value
+        _ = await task.value
 
         XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
         XCTAssertEqual(loader.ensureRequestCount, 1)
@@ -237,7 +237,7 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
             recoveringDelay: 0.005
         )
 
-        await viewModel.loadOriginalEmail(for: makeRequest(messageId: "auto-retry-missing"))
+        _ = await viewModel.loadOriginalEmail(for: makeRequest(messageId: "auto-retry-missing"))
 
         XCTAssertEqual(viewModel.loadState, .retryableFailure("original_email_unavailable"))
         XCTAssertEqual(loader.ensureRequestCount, 1)
@@ -422,7 +422,7 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         firstTask.cancel()
         _ = await firstTask.value
 
-        await viewModel.loadOriginalEmail(
+        _ = await viewModel.loadOriginalEmail(
             for: request,
             missingSourceRecoveryPolicy: .keepRecoveringWhileActive
         )
@@ -860,7 +860,7 @@ private actor CacheWarmingOriginalEmailSourceLoader: OriginalEmailSourceLoading 
                 if warmDelayNanoseconds > 0 {
                     try? await Task.sleep(nanoseconds: warmDelayNanoseconds)
                 }
-                await storeWarmedSource()
+                storeWarmedSource()
             }
         }
 

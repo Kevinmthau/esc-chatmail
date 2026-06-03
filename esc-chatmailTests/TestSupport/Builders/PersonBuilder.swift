@@ -2,6 +2,16 @@ import Foundation
 import CoreData
 @testable import esc_chatmail
 
+extension NSManagedObjectContext {
+    func insertTestObject<T: NSManagedObject>(_ type: T.Type) -> T {
+        let entityName = String(describing: type)
+        guard let object = NSEntityDescription.insertNewObject(forEntityName: entityName, into: self) as? T else {
+            fatalError("Failed to insert test object for entity \(entityName)")
+        }
+        return object
+    }
+}
+
 /// Fluent builder for creating Person entities in tests.
 ///
 /// Usage:
@@ -49,8 +59,9 @@ final class PersonBuilder {
     /// Builds the Person entity in the given context.
     /// - Parameter context: The managed object context to create the person in
     /// - Returns: The created Person entity
+    @discardableResult
     func build(in context: NSManagedObjectContext) -> Person {
-        let person = Person(context: context)
+        let person = context.insertTestObject(Person.self)
         person.id = id
         person.email = email
         person.displayName = displayName

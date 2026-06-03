@@ -17,11 +17,11 @@ final class AttachmentDownloader: ObservableObject {
     private let baseRetryDelay: TimeInterval
 
     init(
-        apiClient: any GmailAPIClientProtocol = GmailAPIClient.shared,
+        apiClient: (any GmailAPIClientProtocol)? = nil,
         maxRetryAttempts: Int = 3,
         baseRetryDelay: TimeInterval = 2.0
     ) {
-        self.apiClient = apiClient
+        self.apiClient = apiClient ?? GmailAPIClient.shared
         self.maxRetryAttempts = maxRetryAttempts
         self.baseRetryDelay = baseRetryDelay
         AttachmentPaths.setupDirectories()

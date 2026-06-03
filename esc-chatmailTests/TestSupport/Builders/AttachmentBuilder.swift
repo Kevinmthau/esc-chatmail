@@ -121,8 +121,9 @@ final class AttachmentBuilder {
     /// Builds the Attachment entity in the given context.
     /// - Parameter context: The managed object context to create the attachment in
     /// - Returns: The created Attachment entity
+    @discardableResult
     func build(in context: NSManagedObjectContext) -> Attachment {
-        let attachment = Attachment(context: context)
+        let attachment = context.insertTestObject(Attachment.self)
         attachment.id = id
         attachment.contentId = contentId
         attachment.filename = filename

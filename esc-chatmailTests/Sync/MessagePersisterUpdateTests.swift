@@ -1058,21 +1058,20 @@ final class MessagePersisterUpdateTests: XCTestCase {
         let preSaveNotificationExpectation = expectation(description: "person display info notification not posted before save")
         preSaveNotificationExpectation.isInverted = true
         let notificationExpectation = expectation(description: "person display info notification posted after save")
-        var didSave = false
-        var notifiedEmails = Set<String>()
+        let notificationRecorder = PersonDisplayInfoNotificationRecorder()
         let observer = NotificationCenter.default.addObserver(
             forName: .personDisplayInfoDidChange,
             object: nil,
             queue: nil
         ) { notification in
-            let emails = PersonDisplayInfoChangeNotification.emails(from: notification)
-            guard emails.contains(senderEmail) else { return }
-            guard didSave else {
-                preSaveNotificationExpectation.fulfill()
+            switch notificationRecorder.record(notification: notification, senderEmail: senderEmail) {
+            case .unrelated:
                 return
+            case .beforeSave:
+                preSaveNotificationExpectation.fulfill()
+            case .afterSave:
+                notificationExpectation.fulfill()
             }
-            notifiedEmails = emails
-            notificationExpectation.fulfill()
         }
         defer {
             NotificationCenter.default.removeObserver(observer)
@@ -1087,10 +1086,10 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertTrue(didUpdate)
         await fulfillment(of: [preSaveNotificationExpectation], timeout: 0.2)
 
-        didSave = true
+        notificationRecorder.markSaved()
         try context.save()
         await fulfillment(of: [notificationExpectation], timeout: 1.0)
-        XCTAssertEqual(notifiedEmails, [senderEmail])
+        XCTAssertEqual(notificationRecorder.notifiedEmails, [senderEmail])
     }
 
     func testUpdateExistingMessage_postsPersonDisplayInfoChangeAfterSaveWhenSenderHeaderNameBecomesUnusable() async throws {
@@ -1138,21 +1137,20 @@ final class MessagePersisterUpdateTests: XCTestCase {
         let preSaveNotificationExpectation = expectation(description: "person display info notification not posted before save")
         preSaveNotificationExpectation.isInverted = true
         let notificationExpectation = expectation(description: "person display info notification posted after save")
-        var didSave = false
-        var notifiedEmails = Set<String>()
+        let notificationRecorder = PersonDisplayInfoNotificationRecorder()
         let observer = NotificationCenter.default.addObserver(
             forName: .personDisplayInfoDidChange,
             object: nil,
             queue: nil
         ) { notification in
-            let emails = PersonDisplayInfoChangeNotification.emails(from: notification)
-            guard emails.contains(senderEmail) else { return }
-            guard didSave else {
-                preSaveNotificationExpectation.fulfill()
+            switch notificationRecorder.record(notification: notification, senderEmail: senderEmail) {
+            case .unrelated:
                 return
+            case .beforeSave:
+                preSaveNotificationExpectation.fulfill()
+            case .afterSave:
+                notificationExpectation.fulfill()
             }
-            notifiedEmails = emails
-            notificationExpectation.fulfill()
         }
         defer {
             NotificationCenter.default.removeObserver(observer)
@@ -1168,10 +1166,10 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(existingMessage.senderName, "john.smith")
         await fulfillment(of: [preSaveNotificationExpectation], timeout: 0.2)
 
-        didSave = true
+        notificationRecorder.markSaved()
         try context.save()
         await fulfillment(of: [notificationExpectation], timeout: 1.0)
-        XCTAssertEqual(notifiedEmails, [senderEmail])
+        XCTAssertEqual(notificationRecorder.notifiedEmails, [senderEmail])
     }
 
     func testCreateNewMessage_sameGmThreadIdWithParticipantDrift_reusesExistingConversation() async throws {
@@ -2131,7 +2129,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
     }
 
     private func addConversationParticipant(person: Person, to conversation: Conversation) {
-        let participant = ConversationParticipant(context: context)
+        let participant = context.insertTestObject(ConversationParticipant.self)
         participant.id = UUID()
         participant.participantRole = .normal
         participant.person = person
@@ -2139,7 +2137,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
     }
 
     private func addMessageParticipant(person: Person, kind: ParticipantKind, to message: Message) {
-        let participant = MessageParticipant(context: context)
+        let participant = context.insertTestObject(MessageParticipant.self)
         participant.id = UUID()
         participant.participantKind = kind
         participant.person = person
@@ -2229,7 +2227,48 @@ private final class InlineCIDPrefetchScheduleRecorder: @unchecked Sendable {
     }
 }
 
-private final class StubMessageProcessor: MessageProcessor {
+private enum PersonDisplayInfoNotificationRecord {
+    case unrelated
+    case beforeSave
+    case afterSave
+}
+
+private final class PersonDisplayInfoNotificationRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didSave = false
+    private var recordedNotifiedEmails = Set<String>()
+
+    var notifiedEmails: Set<String> {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedNotifiedEmails
+    }
+
+    func markSaved() {
+        lock.lock()
+        didSave = true
+        lock.unlock()
+    }
+
+    func record(notification: Notification, senderEmail: String) -> PersonDisplayInfoNotificationRecord {
+        let emails = PersonDisplayInfoChangeNotification.emails(from: notification)
+        guard emails.contains(senderEmail) else {
+            return .unrelated
+        }
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard didSave else {
+            return .beforeSave
+        }
+
+        recordedNotifiedEmails = emails
+        return .afterSave
+    }
+}
+
+private final class StubMessageProcessor: MessageProcessor, @unchecked Sendable {
     private let processedMessage: ProcessedMessage?
 
     init(processedMessage: ProcessedMessage?) {

@@ -82,7 +82,7 @@ final class GmailSendServiceTests: XCTestCase {
     }
 
     func testAttachmentSnapshot_doesNotMutateAttachmentState() {
-        let attachment = Attachment(context: coreDataStack.viewContext)
+        let attachment = coreDataStack.viewContext.insertTestObject(Attachment.self)
         attachment.id = "inline-1"
         attachment.filename = "inline.png"
         attachment.mimeType = "image/png"

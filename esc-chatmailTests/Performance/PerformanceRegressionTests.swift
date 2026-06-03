@@ -25,6 +25,7 @@ final class PerformanceRegressionTests: XCTestCase {
     /// Protects the cold-ish inbox path: fetch active conversations, materialize row snapshots,
     /// and recompute the visible list model on a realistically large seeded dataset.
     func testPerformance_conversationListOpen_fetchSnapshotAndRefresh_largeInboxDataset() throws {
+        let context = try XCTUnwrap(context)
         let conversations = try PerformanceFixtureFactory.seedConversationList(in: context)
         let searchService = ConversationSearchService(debounceInterval: 60_000_000_000)
         let filterService = ConversationFilterService(contactsService: ContactsService())
@@ -153,6 +154,8 @@ final class PerformanceRegressionTests: XCTestCase {
     /// Protects the chat-thread open path by fetching a long thread, deriving sender grouping keys,
     /// and preparing visible bubble content for the most recent messages.
     func testPerformance_chatThreadOpen_fetchGroupingAndVisibleBubbleLoading_longConversation() throws {
+        let context = try XCTUnwrap(context)
+        let contentHandler = try XCTUnwrap(contentHandler)
         let seededThread = try PerformanceFixtureFactory.seedLongThread(
             in: context,
             htmlContentHandler: contentHandler
@@ -188,12 +191,12 @@ final class PerformanceRegressionTests: XCTestCase {
                 await ProcessedTextCache.shared.invalidate(messageId: messageID)
             }
 
-            self.context.performAndWait { self.context.reset() }
+            context.performAndWait { context.reset() }
 
             let conversation = try XCTUnwrap(
-                self.context.existingObject(with: conversationID) as? Conversation
+                context.existingObject(with: conversationID) as? Conversation
             )
-            let fetchedMessages = try self.context.fetch(Self.makeThreadFetchRequest(for: conversation))
+            let fetchedMessages = try context.fetch(Self.makeThreadFetchRequest(for: conversation))
             let uniqueSenderEmails = Array(Set(fetchedMessages.compactMap(\.senderEmailValue)))
             let groupingKeys = await participantLoader.senderGroupingKeys(for: uniqueSenderEmails)
 

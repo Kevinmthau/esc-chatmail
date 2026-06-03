@@ -3,8 +3,7 @@ import Foundation
 
 /// Mock implementation of TokenManagerProtocol for testing.
 /// Allows controlling token behavior without actual authentication.
-@MainActor
-final class MockTokenManager: TokenManagerProtocol {
+final class MockTokenManager: TokenManagerProtocol, @unchecked Sendable {
 
     /// The token to return from getCurrentToken()
     var currentToken: String = "mock-access-token-12345"

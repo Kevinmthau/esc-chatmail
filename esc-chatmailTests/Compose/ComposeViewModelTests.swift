@@ -33,7 +33,7 @@ final class ComposeViewModelTests: XCTestCase {
             mode: .newMessage,
             dependencies: deps.makeComposeDependencies()
         )
-        let attachment = Attachment(context: deps.viewContext)
+        let attachment = deps.viewContext.insertTestObject(Attachment.self)
         attachment.id = "local_\(UUID().uuidString)"
         attachment.filename = "photo.jpg"
         attachment.mimeType = "image/jpeg"

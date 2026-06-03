@@ -188,11 +188,10 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
 
         let updater = ConversationRollupUpdater()
         let backgroundContext = stack.newBackgroundContext()
-        var staleConversation: Conversation!
+        let conversationObjectID = conversation.objectID
         backgroundContext.performAndWait {
-            staleConversation = try? backgroundContext.existingObject(with: conversation.objectID) as? Conversation
+            XCTAssertNotNil(try? backgroundContext.existingObject(with: conversationObjectID) as? Conversation)
         }
-        XCTAssertNotNil(staleConversation)
 
         conversation.snippet = "Newest synced preview"
         conversation.lastMessageDate = syncedDate
@@ -202,15 +201,19 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         try context.save()
 
         backgroundContext.performAndWait {
+            guard let staleConversation = try? backgroundContext.existingObject(with: conversationObjectID) as? Conversation else {
+                XCTFail("Expected stale conversation in background context")
+                return
+            }
             updater.updateDisplayNameOnly(for: staleConversation, myEmail: "me@example.com")
         }
         XCTAssertTrue(stack.saveIfNeeded(context: backgroundContext))
 
         await waitUntil {
-            (try? self.fetchConversation(conversation.objectID).displayName) == "friend@example.com"
+            (try? self.fetchConversation(conversationObjectID).displayName) == "friend@example.com"
         }
 
-        let refreshed = try fetchConversation(conversation.objectID)
+        let refreshed = try fetchConversation(conversationObjectID)
         XCTAssertEqual(refreshed.displayName, "friend@example.com")
         XCTAssertEqual(refreshed.snippet, "Newest synced preview")
         XCTAssertEqual(refreshed.lastMessageDate, syncedDate)
@@ -271,7 +274,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
             .withEmail(email)
             .withDisplayName(displayName)
             .build(in: context)
-        let participant = ConversationParticipant(context: context)
+        let participant = context.insertTestObject(ConversationParticipant.self)
         participant.id = UUID()
         participant.role = ParticipantRole.normal.rawValue
         participant.person = person

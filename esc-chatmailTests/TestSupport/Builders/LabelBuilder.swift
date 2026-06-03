@@ -82,8 +82,9 @@ final class LabelBuilder {
     /// Builds the Label entity in the given context.
     /// - Parameter context: The managed object context to create the label in
     /// - Returns: The created Label entity
+    @discardableResult
     func build(in context: NSManagedObjectContext) -> Label {
-        let label = Label(context: context)
+        let label = context.insertTestObject(Label.self)
         label.id = id
         label.name = name
         return label

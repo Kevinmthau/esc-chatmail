@@ -6,3 +6,7 @@ GOOGLE_API_KEY = AIzaSyAnVWdfhCGB0raSuwStoMl6U3368E9-gxk
 GOOGLE_PROJECT_NUMBER = 999923476073
 GOOGLE_PROJECT_ID = esc-gmail-client
 GOOGLE_REDIRECT_URI = com.googleusercontent.apps.999923476073-b4m4r3o96gv30rqmo71qo210oa46au74
+
+// Keep build warnings at the same priority as build failures.
+SWIFT_TREAT_WARNINGS_AS_ERRORS = YES
+GCC_TREAT_WARNINGS_AS_ERRORS = YES

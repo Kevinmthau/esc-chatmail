@@ -240,7 +240,7 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
     }
 }
 
-private final class MutationRecordPersistenceFailingContext: NSManagedObjectContext {
+private final class MutationRecordPersistenceFailingContext: NSManagedObjectContext, @unchecked Sendable {
     var failMutationRecordPersistence = false
     var failAfterObtainingPermanentIDs = true
 

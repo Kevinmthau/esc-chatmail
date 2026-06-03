@@ -18,7 +18,8 @@ Produce a concrete ship/no-ship readout for this app with the top risks and the 
 1. Validate the build and tests with the repo defaults.
    - Project: `esc-chatmail.xcodeproj`
    - Scheme: `esc-chatmail`
-   - Default simulator: `platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4`
+   - Default simulator: `platform=iOS Simulator,name=iPhone 17 Pro`
+   - Do not pin patch-level simulator OS versions.
    - Use `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`
 
 2. Review the core user flows.

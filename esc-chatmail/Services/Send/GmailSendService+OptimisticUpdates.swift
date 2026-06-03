@@ -152,13 +152,13 @@ extension GmailSendService {
         context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
 
         try context.performAndWait {
-            let record = fetchOptimisticSendMutationRecords(
+            let record = Self.fetchOptimisticSendMutationRecords(
                 messageID: optimisticMessageID,
                 in: context
             ).first ?? OutboundSendMutationRecord(context: context)
 
             if record.isInserted {
-                initializeFallbackOptimisticSendMutationRecord(
+                Self.initializeFallbackOptimisticSendMutationRecord(
                     record,
                     optimisticMessageID: optimisticMessageID
                 )
@@ -581,7 +581,7 @@ extension GmailSendService {
         context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
 
         try context.performAndWait {
-            let record = fetchOptimisticSendMutationRecords(
+            let record = Self.fetchOptimisticSendMutationRecords(
                 messageID: snapshot.optimisticMessageID,
                 in: context
             ).first
@@ -611,7 +611,7 @@ extension GmailSendService {
 
         var snapshot: OptimisticSendMutationSnapshot?
         context.performAndWait {
-            snapshot = fetchOptimisticSendMutationRecords(
+            snapshot = Self.fetchOptimisticSendMutationRecords(
                 messageID: messageID,
                 in: context
             ).first.map(OptimisticSendMutationSnapshot.init(record:))
@@ -621,10 +621,10 @@ extension GmailSendService {
 
     @MainActor
     private func fetchOptimisticSendMutationRecords(messageID: String) -> [OutboundSendMutationRecord] {
-        fetchOptimisticSendMutationRecords(messageID: messageID, in: viewContext)
+        Self.fetchOptimisticSendMutationRecords(messageID: messageID, in: viewContext)
     }
 
-    private func fetchOptimisticSendMutationRecords(
+    private static func fetchOptimisticSendMutationRecords(
         messageID: String,
         in context: NSManagedObjectContext
     ) -> [OutboundSendMutationRecord] {
@@ -669,7 +669,7 @@ extension GmailSendService {
         }
     }
 
-    private func initializeFallbackOptimisticSendMutationRecord(
+    private static func initializeFallbackOptimisticSendMutationRecord(
         _ record: OutboundSendMutationRecord,
         optimisticMessageID: String
     ) {

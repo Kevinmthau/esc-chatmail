@@ -128,8 +128,9 @@ final class ConversationBuilder {
     /// Builds the Conversation entity in the given context.
     /// - Parameter context: The managed object context to create the conversation in
     /// - Returns: The created Conversation entity
+    @discardableResult
     func build(in context: NSManagedObjectContext) -> Conversation {
-        let conversation = Conversation(context: context)
+        let conversation = context.insertTestObject(Conversation.self)
         conversation.id = id
         conversation.keyHash = keyHash
         conversation.participantHash = participantHash
