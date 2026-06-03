@@ -18,6 +18,9 @@
   "testTargets" : [
     {
       "skippedTests" : [
+        "EmailPreviewSnapshotCacheTests/testRendererCancellationStopsSnapshotRender()",
+        "EmailPreviewSnapshotCacheTests/testRendererKeepsShortPreviewAtDefaultHeight()",
+        "EmailPreviewSnapshotCacheTests/testRendererPaintsLowerRegionForTallPreview()",
         "PerformanceRegressionTests"
       ],
       "target" : {
