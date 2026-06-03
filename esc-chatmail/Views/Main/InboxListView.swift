@@ -31,6 +31,11 @@ struct InboxListView: View {
                 ForEach(cachedFilteredMessages) { message in
                     MessageRow(message: message)
                         .onTapGesture {
+                            // Inbox rows don't pre-render while visible, so this tap is the only warm
+                            // trigger. It can't make THIS open instant (the reader's checkout runs
+                            // before the off-screen render paints), but it seeds the pool so re-opening
+                            // the same message is instant.
+                            FullEmailWebViewManager.shared.prewarmOnOpen(message: message)
                             selectedMessage = message
                             showingWebView = true
                         }

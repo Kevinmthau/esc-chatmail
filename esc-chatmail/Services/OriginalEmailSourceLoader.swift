@@ -56,6 +56,14 @@ struct OriginalEmailSource: Equatable, Sendable {
     }
 }
 
+/// The display-ready wrapped original-email HTML produced by a background warm, plus the
+/// canonical source signature it was prepared from. Returned so callers (e.g. the pre-rendered
+/// full-email WebView pool) can render the exact same HTML the full-view reader will display.
+struct WarmedOriginalEmailHTML: Sendable, Equatable {
+    let html: String
+    let sourceSignature: String
+}
+
 protocol OriginalEmailSourceLoading: Sendable {
     func loadOriginalEmailSource(
         messageId: String,
@@ -401,13 +409,18 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
     /// subsequent open returns immediately without pinning first-pass remote-image rewrites.
     /// Safe to call repeatedly and from background priority; the rendered cache dedups concurrent
     /// producers for the same key.
+    ///
+    /// Returns the display-ready wrapped HTML (and its canonical source signature) when local content
+    /// is available, so callers can pre-render the exact HTML the full-view reader will show. Returns
+    /// `nil` when there is no locally available HTML source or the row scrolled away mid-warm.
+    @discardableResult
     func warmOriginalEmailSource(
         messageId: String,
         bodyStorageURI: String?,
         bodyText: String?,
         senderEmail: String?,
         subject: String?
-    ) async {
+    ) async -> WarmedOriginalEmailHTML? {
         guard let canonicalContent = await canonicalContentLoader.loadCanonicalEmailContent(
             messageId: messageId,
             bodyStorageURI: bodyStorageURI,
@@ -415,15 +428,15 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
             allowRecovery: false
         ),
               let canonicalHTML = canonicalContent.html else {
-            return
+            return nil
         }
 
         // Skip the expensive prepare if the caller (e.g. a chat row) has already scrolled away.
         guard !Task.isCancelled else {
-            return
+            return nil
         }
 
-        _ = await renderedMessageCache.cacheAwareWrappedOriginalHTML(
+        guard let html = await renderedMessageCache.cacheAwareWrappedOriginalHTML(
             messageId: messageId,
             sourceSignature: canonicalContent.sourceSignature,
             variantKey: originalHTMLVariantKey(
@@ -440,7 +453,11 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
                     subject: subject
                 )
             }
-        )
+        ) else {
+            return nil
+        }
+
+        return WarmedOriginalEmailHTML(html: html, sourceSignature: canonicalContent.sourceSignature)
     }
 
     private func prepareOriginalHTMLWithTelemetry(

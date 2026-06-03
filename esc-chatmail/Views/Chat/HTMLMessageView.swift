@@ -429,7 +429,8 @@ struct HTMLMessageView: View {
                 htmlContent: html,
                 isDarkMode: false,
                 message: message,
-                onLoadFinished: handleWebViewPainted
+                onLoadFinished: handleWebViewPainted,
+                onAdoptedPrerendered: handleAdoptedPrerendered
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -510,6 +511,12 @@ struct HTMLMessageView: View {
         withAnimation(.easeOut(duration: 0.25)) {
             webViewPainted = true
         }
+    }
+
+    /// A pre-rendered WebView was adopted — the email is already painted, so drop the snapshot
+    /// placeholder immediately with no cross-fade (there is nothing to mask).
+    private func handleAdoptedPrerendered() {
+        webViewPainted = true
     }
 
     private func loadSnapshotPlaceholder() async {
