@@ -3,19 +3,8 @@ import UIKit
 import WebKit
 import CoreData
 
-private final class LayoutAwareWKWebView: WKWebView {
-    var onLayoutChange: ((WKWebView) -> Void)?
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        onLayoutChange?(self)
-    }
-
-    override func didMoveToWindow() {
-        super.didMoveToWindow()
-        onLayoutChange?(self)
-    }
-}
+// `LayoutAwareWKWebView` lives in `FullEmailWebViewManager.swift` so the live coordinator here and
+// the pre-rendered pool can share a single layout-reporting WebView type.
 
 /// Configuration mode for email WebView rendering
 enum EmailWebViewMode {
@@ -71,27 +60,80 @@ struct BaseEmailWebView: UIViewRepresentable {
     /// Optional callback invoked when a navigation finishes (first paint). The full-view reader uses
     /// this to cross-fade away its instant snapshot placeholder once the live WebView has rendered.
     var onLoadFinished: (() -> Void)? = nil
+    /// Invoked when the full-view reader adopts a pre-rendered, already-painted WebView from
+    /// `FullEmailWebViewManager`. The reader uses this to drop its placeholder instantly (no fade),
+    /// since the content is already on screen.
+    var onAdoptedPrerendered: (() -> Void)? = nil
 
     func makeUIView(context: Context) -> WKWebView {
+        switch mode {
+        case .fullInteractive:
+            return makeFullInteractiveUIView(context: context)
+        case .scaledPreview, .simplePreview:
+            return makePreviewUIView(context: context)
+        }
+    }
+
+    /// Full original-email path. First tries to adopt a pre-rendered, already-painted instance from
+    /// `FullEmailWebViewManager` (instant open). Falls back to a fresh WebView that loads on layout.
+    private func makeFullInteractiveUIView(context: Context) -> WKWebView {
+        if let message,
+           let checkout = FullEmailWebViewManager.shared.checkout(
+               messageId: message.id,
+               wrappedHTML: htmlContent,
+               message: message,
+               width: FullEmailWebViewMetrics.fullViewWidth()
+           ) {
+            return adoptPrerendered(checkout, context: context)
+        }
+
+        let cidHandler = CIDSchemeHandler(message: message)
+        context.coordinator.cidHandler = cidHandler
+        let configuration = FullInteractiveEmailWebView.makeConfiguration(cidHandler: cidHandler)
+        let webView = LayoutAwareWKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = context.coordinator
+        webView.onLayoutChange = { [weak coordinator = context.coordinator] webView in
+            coordinator?.loadContentIfReady(in: webView)
+        }
+        FullInteractiveEmailWebView.applySettings(to: webView)
+        context.coordinator.applyBackgroundAppearance(to: webView)
+        return webView
+    }
+
+    /// Adopts a warmed WebView: repoint its delegate/cid handler at the live coordinator, mark the
+    /// content as already loaded so it never reloads, and tell the reader to drop its placeholder.
+    private func adoptPrerendered(
+        _ checkout: FullEmailWebViewManager.Checkout,
+        context: Context
+    ) -> WKWebView {
+        let webView = checkout.webView
+        context.coordinator.updateParent(self)
+        context.coordinator.cidHandler = checkout.cidHandler
+        checkout.cidHandler.message = message
+        webView.navigationDelegate = context.coordinator
+        webView.onLayoutChange = { [weak coordinator = context.coordinator] webView in
+            coordinator?.loadContentIfReady(in: webView)
+        }
+        FullInteractiveEmailWebView.applyBackgroundAppearance(to: webView)
+        context.coordinator.adoptAlreadyLoadedContent(htmlContent, messageId: message?.id)
+
+        let onAdopted = onAdoptedPrerendered
+        let onLoadFinished = onLoadFinished
+        DispatchQueue.main.async {
+            onAdopted?()
+            onLoadFinished?()
+        }
+        return webView
+    }
+
+    private func makePreviewUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
 
         // Register cid: scheme handler for inline attachments
         let cidHandler = CIDSchemeHandler(message: message)
         context.coordinator.cidHandler = cidHandler
         configuration.setURLSchemeHandler(cidHandler, forURLScheme: "cid")
-
-        switch mode {
-        case .fullInteractive:
-            configuration.allowsInlineMediaPlayback = true
-            configuration.dataDetectorTypes = [.phoneNumber, .link, .address]
-            configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-            configuration.allowsAirPlayForMediaPlayback = true
-            configuration.mediaTypesRequiringUserActionForPlayback = []
-            configuration.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
-            configuration.setValue(true, forKey: "allowUniversalAccessFromFileURLs")
-        case .scaledPreview, .simplePreview:
-            configuration.defaultWebpagePreferences.allowsContentJavaScript = false
-        }
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
 
         let webView = LayoutAwareWKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
@@ -99,28 +141,9 @@ struct BaseEmailWebView: UIViewRepresentable {
             coordinator?.loadContentIfReady(in: webView)
         }
 
-        switch mode {
-        case .fullInteractive:
-            // Match Apple Mail's WebView behavior
-            webView.scrollView.contentInsetAdjustmentBehavior = .never
-            webView.scrollView.automaticallyAdjustsScrollIndicatorInsets = true
-            // Full original emails force a light trait environment to preserve the
-            // author's intended presentation instead of opting the document into
-            // app dark mode.
-            webView.overrideUserInterfaceStyle = mode.webViewUserInterfaceStyle
-            // Use mobile user agent to trigger responsive media queries
-            webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
-            // Prevent automatic font size adjustment that can break layouts
-            webView.configuration.preferences.minimumFontSize = 0
-        case .scaledPreview:
-            webView.scrollView.isScrollEnabled = false
-            webView.scrollView.bounces = false
-            webView.isUserInteractionEnabled = false
-        case .simplePreview:
-            webView.scrollView.isScrollEnabled = false
-            webView.scrollView.bounces = false
-            webView.isUserInteractionEnabled = false
-        }
+        webView.scrollView.isScrollEnabled = false
+        webView.scrollView.bounces = false
+        webView.isUserInteractionEnabled = false
 
         context.coordinator.applyBackgroundAppearance(to: webView)
         return webView
@@ -131,6 +154,10 @@ struct BaseEmailWebView: UIViewRepresentable {
         context.coordinator.observeAttachmentAvailabilityChanges(reloading: webView)
         context.coordinator.applyBackgroundAppearance(to: webView)
         context.coordinator.loadContentIfReady(in: webView)
+    }
+
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        coordinator.reclaimPrerenderedWebViewIfNeeded(uiView)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -160,6 +187,9 @@ struct BaseEmailWebView: UIViewRepresentable {
         private var cachedReferencedInlineCIDsHTML: String?
         /// Holds strong reference to the cid: scheme handler
         var cidHandler: CIDSchemeHandler?
+        /// Set when this coordinator adopted a pre-rendered WebView from `FullEmailWebViewManager`,
+        /// so it can be reclaimed (re-hosted for instant re-open) on dismantle.
+        private var adoptedPrerenderedMessageId: String?
 
         init(_ parent: BaseEmailWebView) {
             self.parent = parent
@@ -369,6 +399,26 @@ struct BaseEmailWebView: UIViewRepresentable {
             lastLoadedContent = parent.htmlContent
             lastLoadedReloadSignature = reloadSignature()
             hasFinishedLoad = false
+        }
+
+        /// Marks an adopted pre-rendered WebView's content as already loaded so `needsReload` is false
+        /// and no reload/first-paint occurs at display time. The instance is already painted off-screen.
+        func adoptAlreadyLoadedContent(_ html: String, messageId: String?) {
+            lastLoadedContent = html
+            lastLoadedReloadSignature = reloadSignature()
+            hasFinishedLoad = true
+            isLoading = false
+            adoptedPrerenderedMessageId = messageId
+        }
+
+        /// Returns an adopted pre-rendered WebView to the pool when the reader is dismantled, so a
+        /// re-open stays instant. No-op for freshly-created (non-adopted) WebViews.
+        func reclaimPrerenderedWebViewIfNeeded(_ webView: WKWebView) {
+            guard let messageId = adoptedPrerenderedMessageId else {
+                return
+            }
+            adoptedPrerenderedMessageId = nil
+            FullEmailWebViewManager.shared.checkin(messageId: messageId, webView: webView)
         }
 
         func recordFinishedLoad() {

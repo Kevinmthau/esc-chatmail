@@ -31,6 +31,9 @@ struct InboxListView: View {
                 ForEach(cachedFilteredMessages) { message in
                     MessageRow(message: message)
                         .onTapGesture {
+                            // Pre-render the full email during the sheet's present animation so it
+                            // opens instantly (adopts an already-painted WebView).
+                            FullEmailWebViewManager.shared.prewarmOnOpen(message: message)
                             selectedMessage = message
                             showingWebView = true
                         }

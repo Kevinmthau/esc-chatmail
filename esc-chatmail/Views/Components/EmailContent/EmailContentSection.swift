@@ -158,6 +158,13 @@ struct EmailContentSection: View {
                 request: Self.originalEmailWarmRequest(for: message)
             )
         }
+        // Pre-render the full original-email WebView off-screen while the bubble is visible, so tapping
+        // it adopts an already-painted instance and opens instantly — no live load or first-paint flash.
+        // Debounced + capacity-bounded (LRU) inside the manager so scrolling never spins up unbounded
+        // WebViews; auto-cancels when the row scrolls away.
+        .task(id: warmFullEmailKey) {
+            await warmFullEmailWebViewIfNeeded()
+        }
         .onReceive(NotificationCenter.default.publisher(for: HTMLContentLoader.remoteImageAttachmentFallbackDidWarmNotification)) { notification in
             reloadIfRemoteImageFallbackWarmed(notification)
         }
@@ -167,6 +174,25 @@ struct EmailContentSection: View {
             remoteImageFallbackOriginalWarmTask?.cancel()
             remoteImageFallbackOriginalWarmTask = nil
         }
+    }
+
+    /// Pre-renders the full original-email WebView off-screen via `FullEmailWebViewManager` so a tap on
+    /// this bubble opens instantly. Debounced so fast scrolling doesn't render WebViews for rows that
+    /// immediately leave; the manager bounds total warm instances and de-dupes already-warm content.
+    private func warmFullEmailWebViewIfNeeded() async {
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        guard !Task.isCancelled else {
+            return
+        }
+        let width = FullEmailWebViewMetrics.fullViewWidth()
+        guard width > 1 else {
+            return
+        }
+        await FullEmailWebViewManager.shared.warm(
+            request: Self.originalEmailWarmRequest(for: message),
+            message: resolvedMessageForInlineAttachments,
+            width: width
+        )
     }
 
     private func beginLoad() async -> Int {

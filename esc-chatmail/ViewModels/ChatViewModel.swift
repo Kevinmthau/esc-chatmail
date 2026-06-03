@@ -198,6 +198,10 @@ final class ChatViewModel: ObservableObject {
 
     func openFullMessage(_ message: Message) {
         Log.info("Opening full message for \(message.id)", category: .ui)
+        // Kick a pre-render now so the WebView paints off-screen during the sheet's present animation
+        // and the reader can adopt an already-painted instance — instant even if the bubble's
+        // background warm hadn't finished yet.
+        FullEmailWebViewManager.shared.prewarmOnOpen(message: message)
         messageToViewInFull = message
     }
 
