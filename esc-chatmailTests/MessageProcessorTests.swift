@@ -1795,11 +1795,13 @@ final class GoldenCorpusReplayTests: XCTestCase {
     // MARK: - Corpus Loading
 
     private func loadCorpus() throws -> GoldenCorpus {
-        let fixtureURL = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .appendingPathComponent("TestSupport")
-            .appendingPathComponent("Fixtures")
-            .appendingPathComponent("golden_message_corpus.json")
+        // Load from the test bundle, not `#filePath`: the compile-time source path is unreachable
+        // from the simulator test process in CI sandboxes (e.g. Xcode Cloud), where it resolves to a
+        // host checkout path the simulator can't read. The fixture is bundled as a test resource.
+        let bundle = Bundle(for: type(of: self))
+        guard let fixtureURL = bundle.url(forResource: "golden_message_corpus", withExtension: "json") else {
+            throw CocoaError(.fileNoSuchFile)
+        }
 
         let data = try Data(contentsOf: fixtureURL)
         let decoder = JSONDecoder()
