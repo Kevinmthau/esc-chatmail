@@ -1,4 +1,5 @@
 import CoreData
+import CoreGraphics
 import XCTest
 @testable import esc_chatmail
 
@@ -64,6 +65,76 @@ final class ChatViewModelTests: XCTestCase {
         viewModel.openFullMessage(message)
 
         XCTAssertTrue(viewModel.messageToViewInFull === message)
+    }
+
+    func testOpenFullMessage_payloadHitPresentsPreparedHTMLWithoutFallbackPrewarm() {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder()
+            .withDisplayName("Test Chat")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let message = MessageBuilder()
+            .withId("message-prepared")
+            .withSubject("Prepared")
+            .withSender(email: "sender@example.com", name: "Sender")
+            .withBody("Prepared body")
+            .inConversation(conversation)
+            .build(in: context)
+        let payload = FullEmailOpenPayload(
+            messageId: "message-prepared",
+            sourceSignature: "sha256:prepared",
+            html: "<html><body>Prepared full email</body></html>",
+            presentation: .html,
+            sourceKind: .html,
+            sourceLocation: .messageFile,
+            hasHTMLSource: true,
+            checkoutAvailability: .ready
+        )
+        let opener = MockFullEmailOpener(preparedPayload: payload)
+
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies(fullEmailOpener: opener)
+        )
+
+        viewModel.openFullMessage(message)
+
+        XCTAssertTrue(viewModel.messageToViewInFull === message)
+        XCTAssertEqual(viewModel.fullMessagePresentation?.initialOpenPayload, payload)
+        XCTAssertEqual(opener.preparedPayloadRequests.count, 1)
+        XCTAssertTrue(opener.prewarmedMessages.isEmpty)
+    }
+
+    func testOpenFullMessage_payloadMissPresentsMessageAndStartsFallbackPrewarm() {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder()
+            .withDisplayName("Test Chat")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let message = MessageBuilder()
+            .withId("message-miss")
+            .withSubject("Miss")
+            .withSender(email: "sender@example.com", name: "Sender")
+            .withBody("Miss body")
+            .inConversation(conversation)
+            .build(in: context)
+        let opener = MockFullEmailOpener(preparedPayload: nil)
+
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies(fullEmailOpener: opener)
+        )
+
+        viewModel.openFullMessage(message)
+
+        XCTAssertTrue(viewModel.messageToViewInFull === message)
+        XCTAssertNil(viewModel.fullMessagePresentation?.initialOpenPayload)
+        XCTAssertEqual(opener.preparedPayloadRequests.count, 1)
+        XCTAssertEqual(opener.prewarmedMessages.map(\.id), ["message-miss"])
     }
 
     func testDismissFullMessage_clearsPresentedMessage() {
@@ -340,6 +411,42 @@ final class ChatViewModelTests: XCTestCase {
 
         XCTAssertFalse(didSend)
         XCTAssertEqual(viewModel.replyText, "Retryable reply")
+    }
+}
+
+@MainActor
+private final class MockFullEmailOpener: FullEmailOpening {
+    struct PreparedPayloadRequest {
+        let request: OriginalEmailWarmRequest
+        let message: Message?
+        let width: CGFloat
+    }
+
+    let preparedPayload: FullEmailOpenPayload?
+    private(set) var preparedPayloadRequests: [PreparedPayloadRequest] = []
+    private(set) var prewarmedMessages: [Message] = []
+
+    init(preparedPayload: FullEmailOpenPayload?) {
+        self.preparedPayload = preparedPayload
+    }
+
+    func preparedOpenPayload(
+        request: OriginalEmailWarmRequest,
+        message: Message?,
+        width: CGFloat
+    ) -> FullEmailOpenPayload? {
+        preparedPayloadRequests.append(
+            PreparedPayloadRequest(
+                request: request,
+                message: message,
+                width: width
+            )
+        )
+        return preparedPayload
+    }
+
+    func prewarmOnOpen(message: Message) {
+        prewarmedMessages.append(message)
     }
 }
 

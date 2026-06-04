@@ -149,17 +149,8 @@ struct EmailContentSection: View {
             let generation = await beginLoad()
             await loadHTML(generation: generation)
         }
-        // Prepare the full-view "Original Email" HTML in the background while the card is visible so
-        // tapping it is an instant RenderedMessageCache hit instead of a cold multi-second prepare.
-        // Runs at .utility so it never competes with snapshot rendering or scrolling, and auto-cancels
-        // when the row scrolls away (warmOriginalEmailSource bails before the expensive prepare).
-        .task(id: warmFullEmailKey, priority: .utility) {
-            await originalEmailSourceWarmer.warmOriginalEmailSource(
-                request: Self.originalEmailWarmRequest(for: message)
-            )
-        }
         // Pre-render the full original-email WebView off-screen while the bubble is visible, so tapping
-        // it adopts an already-painted instance and opens instantly — no live load or first-paint flash.
+        // it can present prepared HTML immediately and adopt an already-painted instance when ready.
         // Debounced + capacity-bounded (LRU) inside the manager so scrolling never spins up unbounded
         // WebViews; auto-cancels when the row scrolls away.
         .task(id: warmFullEmailKey) {

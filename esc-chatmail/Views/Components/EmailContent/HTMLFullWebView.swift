@@ -6,6 +6,7 @@ struct HTMLWebView: View {
     let htmlContent: String
     let isDarkMode: Bool
     var senderEmail: String? = nil
+    var sourceSignature: String? = nil
     /// Optional message for resolving cid: URLs to inline attachments
     var message: Message?
     /// Invoked when the WebView finishes its first paint, so the reader can cross-fade its placeholder.
@@ -20,6 +21,7 @@ struct HTMLWebView: View {
             mode: .fullInteractive,
             isDarkMode: isDarkMode,
             senderEmail: senderEmail,
+            sourceSignature: sourceSignature,
             message: message,
             onLoadFinished: onLoadFinished,
             onAdoptedPrerendered: onAdoptedPrerendered

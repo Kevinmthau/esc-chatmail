@@ -259,7 +259,9 @@ final class Dependencies: ObservableObject {
         )
     }
 
-    func makeChatDependencies() -> ChatDependencies {
+    func makeChatDependencies(
+        fullEmailOpener: (any FullEmailOpening)? = nil
+    ) -> ChatDependencies {
         let contactsResolver = self.contactsResolver
         let personCache = self.personCache
         let processedTextCache = self.processedTextCache
@@ -308,7 +310,8 @@ final class Dependencies: ObservableObject {
                 makeBackgroundContext: { [coreDataStack] in
                     coreDataStack.newBackgroundContext()
                 }
-            )
+            ),
+            fullEmailOpener: fullEmailOpener ?? FullEmailWebViewManager.shared
         )
     }
 

@@ -165,22 +165,26 @@ enum FullEmailWebViewMetrics {
 // MARK: - Pre-render key
 
 /// Identifies a pre-rendered full-email WebView. A checkout only succeeds when the reader's content
-/// matches the warmed content exactly — same wrapped HTML, same inline-attachment availability, and
-/// same render width — so an adopted instance never has to re-layout.
+/// matches the warmed content exactly — same source signature, same wrapped HTML, same
+/// inline-attachment availability, and same render width — so an adopted instance never has to
+/// re-layout.
 struct FullEmailWebViewPreRenderKey: Hashable, Sendable {
     let messageId: String
+    let sourceSignature: String
     let htmlFingerprint: String
     let cidAvailabilityFingerprint: String
     let widthBucket: Int
 
     static func make(
         messageId: String,
+        sourceSignature: String,
         wrappedHTML: String,
         cidAvailabilityFingerprint: String,
         width: CGFloat
     ) -> FullEmailWebViewPreRenderKey {
         FullEmailWebViewPreRenderKey(
             messageId: messageId,
+            sourceSignature: sourceSignature,
             htmlFingerprint: fingerprint(for: wrappedHTML),
             cidAvailabilityFingerprint: cidAvailabilityFingerprint,
             widthBucket: Int(width.rounded())
@@ -194,6 +198,86 @@ struct FullEmailWebViewPreRenderKey: Hashable, Sendable {
             .joined()
         return "\(text.utf8.count):\(digest)"
     }
+}
+
+// MARK: - Full-email open payload
+
+struct FullEmailOpenPayload: Equatable, Sendable {
+    enum CheckoutAvailability: String, Sendable {
+        case ready
+        case warming
+    }
+
+    let messageId: String
+    let sourceSignature: String
+    let html: String
+    let presentation: OriginalEmailSource.Presentation
+    let sourceKind: CanonicalEmailSourceKind
+    let sourceLocation: CanonicalEmailSourceLocation
+    let hasHTMLSource: Bool
+    let checkoutAvailability: CheckoutAvailability
+
+    var originalEmailSource: OriginalEmailSource {
+        OriginalEmailSource(
+            presentation: presentation,
+            html: presentation == .html ? html : nil,
+            plainText: nil,
+            sourceKind: sourceKind,
+            sourceLocation: sourceLocation,
+            sourceSignature: sourceSignature,
+            hasHTMLSource: hasHTMLSource
+        )
+    }
+
+    func withCheckoutAvailability(_ checkoutAvailability: CheckoutAvailability) -> FullEmailOpenPayload {
+        FullEmailOpenPayload(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            html: html,
+            presentation: presentation,
+            sourceKind: sourceKind,
+            sourceLocation: sourceLocation,
+            hasHTMLSource: hasHTMLSource,
+            checkoutAvailability: checkoutAvailability
+        )
+    }
+}
+
+enum FullEmailOpenPayloadReuseDecision: Equatable {
+    case reusable
+    case staleSource(currentSourceSignature: String)
+    case keyMismatch
+}
+
+enum FullEmailOpenPayloadReuseValidator {
+    static func decision(
+        entryKey: FullEmailWebViewPreRenderKey,
+        expectedKey: FullEmailWebViewPreRenderKey,
+        payload: FullEmailOpenPayload,
+        currentSourceSignature: String?
+    ) -> FullEmailOpenPayloadReuseDecision {
+        if let currentSourceSignature,
+           currentSourceSignature != payload.sourceSignature {
+            return .staleSource(currentSourceSignature: currentSourceSignature)
+        }
+
+        guard entryKey == expectedKey else {
+            return .keyMismatch
+        }
+
+        return .reusable
+    }
+}
+
+@MainActor
+protocol FullEmailOpening: AnyObject {
+    func preparedOpenPayload(
+        request: OriginalEmailWarmRequest,
+        message: Message?,
+        width: CGFloat
+    ) -> FullEmailOpenPayload?
+
+    func prewarmOnOpen(message: Message)
 }
 
 // MARK: - Pure LRU bookkeeping
@@ -240,7 +324,7 @@ struct FullEmailWebViewPoolBookkeeping: Equatable {
 /// before the tap. When no warm instance is ready, the reader falls back to the live render path, so
 /// behavior is never worse than before.
 @MainActor
-final class FullEmailWebViewManager {
+final class FullEmailWebViewManager: FullEmailOpening {
     static let shared = FullEmailWebViewManager()
 
     struct Checkout {
@@ -250,6 +334,7 @@ final class FullEmailWebViewManager {
 
     private final class Entry {
         let key: FullEmailWebViewPreRenderKey
+        let payload: FullEmailOpenPayload
         let webView: LayoutAwareWKWebView
         let cidHandler: CIDSchemeHandler
         let delegate: WarmNavigationDelegate
@@ -260,11 +345,13 @@ final class FullEmailWebViewManager {
 
         init(
             key: FullEmailWebViewPreRenderKey,
+            payload: FullEmailOpenPayload,
             webView: LayoutAwareWKWebView,
             cidHandler: CIDSchemeHandler,
             delegate: WarmNavigationDelegate
         ) {
             self.key = key
+            self.payload = payload
             self.webView = webView
             self.cidHandler = cidHandler
             self.delegate = delegate
@@ -319,9 +406,15 @@ final class FullEmailWebViewManager {
 
         let key = makeKey(
             messageId: request.messageId,
+            sourceSignature: warmed.sourceSignature,
             wrappedHTML: warmed.html,
             message: message,
             width: width
+        )
+        let payload = makePayload(
+            request: request,
+            warmed: warmed,
+            checkoutAvailability: .warming
         )
 
         // Already warm (or warming) for this exact content + width: keep it hot and return.
@@ -341,6 +434,7 @@ final class FullEmailWebViewManager {
 
         let entry = makeEntry(
             key: key,
+            payload: payload,
             message: message,
             senderEmail: request.senderEmail,
             width: width,
@@ -369,23 +463,108 @@ final class FullEmailWebViewManager {
 
     // MARK: Checkout / checkin
 
+    /// Returns the prepared wrapped original-email HTML that the full reader can display immediately,
+    /// provided it still matches the current local source, inline CID availability, and target width.
+    func preparedOpenPayload(
+        request: OriginalEmailWarmRequest,
+        message: Message?,
+        width: CGFloat
+    ) -> FullEmailOpenPayload? {
+        guard width > 1 else {
+            logOpenPayloadMiss(messageId: request.messageId, reason: "missing_width")
+            return nil
+        }
+
+        guard let entry = entries[request.messageId], !entry.isCheckedOut else {
+            logOpenPayloadMiss(
+                messageId: request.messageId,
+                reason: entries[request.messageId]?.isCheckedOut == true ? "checked_out" : "not_warmed"
+            )
+            return nil
+        }
+
+        let expectedKey = makeKey(
+            messageId: request.messageId,
+            sourceSignature: entry.payload.sourceSignature,
+            wrappedHTML: entry.payload.html,
+            message: message,
+            width: width
+        )
+        let currentSourceSignature = loader.currentHTMLSourceSignature(
+            messageId: request.messageId,
+            bodyStorageURI: request.bodyStorageURI
+        )
+
+        switch FullEmailOpenPayloadReuseValidator.decision(
+            entryKey: entry.key,
+            expectedKey: expectedKey,
+            payload: entry.payload,
+            currentSourceSignature: currentSourceSignature
+        ) {
+        case .reusable:
+            let availability: FullEmailOpenPayload.CheckoutAvailability = entry.didFinishInitialLoad ? .ready : .warming
+            OriginalEmailTelemetry.log(
+                event: "open_payload_hit",
+                messageId: request.messageId,
+                detail: "checkoutAvailability=\(availability.rawValue)"
+            )
+            return entry.payload.withCheckoutAvailability(availability)
+        case .staleSource(let currentSourceSignature):
+            logOpenPayloadMiss(
+                messageId: request.messageId,
+                reason: "stale_source",
+                detail: "currentSourceSignature=\(currentSourceSignature)"
+            )
+            if !entry.isCheckedOut {
+                invalidate(messageId: request.messageId)
+            }
+            return nil
+        case .keyMismatch:
+            logOpenPayloadMiss(messageId: request.messageId, reason: "key_mismatch")
+            return nil
+        }
+    }
+
     /// Returns a fully-painted pre-rendered WebView for the reader to display instantly, or `nil` if
     /// none matches the reader's exact content/width yet (then the reader uses the live render path).
     func checkout(
         messageId: String,
+        sourceSignature: String?,
         wrappedHTML: String,
         message: Message?,
         width: CGFloat
     ) -> Checkout? {
         guard width > 1 else {
+            logCheckoutMiss(messageId: messageId, reason: "missing_width")
             return nil
         }
 
-        let key = makeKey(messageId: messageId, wrappedHTML: wrappedHTML, message: message, width: width)
-        guard let entry = entries[messageId],
-              entry.key == key,
-              entry.didFinishInitialLoad,
-              !entry.isCheckedOut else {
+        guard let sourceSignature else {
+            logCheckoutMiss(messageId: messageId, reason: "missing_source_signature")
+            return nil
+        }
+
+        let key = makeKey(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            wrappedHTML: wrappedHTML,
+            message: message,
+            width: width
+        )
+        guard let entry = entries[messageId] else {
+            logCheckoutMiss(messageId: messageId, reason: "not_warmed")
+            return nil
+        }
+        guard entry.key == key else {
+            logCheckoutMiss(messageId: messageId, reason: "key_mismatch")
+            return nil
+        }
+        guard entry.didFinishInitialLoad else {
+            logCheckoutMiss(messageId: messageId, reason: "still_warming")
+            return nil
+        }
+        guard !entry.isCheckedOut else {
+            logCheckoutMiss(messageId: messageId, reason: "checked_out")
             return nil
         }
 
@@ -397,7 +576,7 @@ final class FullEmailWebViewManager {
         Log.diagnostic(
             .htmlPreview,
             level: .info,
-            "FullEmailWebViewManager checkout hit message=\(messageId)",
+            "FullEmailWebViewManager webview_checkout_hit message=\(messageId)",
             category: .ui
         )
         return Checkout(webView: entry.webView, cidHandler: entry.cidHandler)
@@ -445,6 +624,7 @@ final class FullEmailWebViewManager {
 
     private func makeKey(
         messageId: String,
+        sourceSignature: String,
         wrappedHTML: String,
         message: Message?,
         width: CGFloat
@@ -455,14 +635,33 @@ final class FullEmailWebViewManager {
         )
         return FullEmailWebViewPreRenderKey.make(
             messageId: messageId,
+            sourceSignature: sourceSignature,
             wrappedHTML: wrappedHTML,
             cidAvailabilityFingerprint: cidFingerprint,
             width: width
         )
     }
 
+    private func makePayload(
+        request: OriginalEmailWarmRequest,
+        warmed: WarmedOriginalEmailHTML,
+        checkoutAvailability: FullEmailOpenPayload.CheckoutAvailability
+    ) -> FullEmailOpenPayload {
+        FullEmailOpenPayload(
+            messageId: request.messageId,
+            sourceSignature: warmed.sourceSignature,
+            html: warmed.html,
+            presentation: .html,
+            sourceKind: warmed.sourceKind,
+            sourceLocation: warmed.sourceLocation,
+            hasHTMLSource: warmed.hasHTMLSource,
+            checkoutAvailability: checkoutAvailability
+        )
+    }
+
     private func makeEntry(
         key: FullEmailWebViewPreRenderKey,
+        payload: FullEmailOpenPayload,
         message: Message?,
         senderEmail: String?,
         width: CGFloat,
@@ -479,7 +678,13 @@ final class FullEmailWebViewManager {
 
         let delegate = WarmNavigationDelegate()
         webView.navigationDelegate = delegate
-        let entry = Entry(key: key, webView: webView, cidHandler: cidHandler, delegate: delegate)
+        let entry = Entry(
+            key: key,
+            payload: payload,
+            webView: webView,
+            cidHandler: cidHandler,
+            delegate: delegate
+        )
         delegate.onFinish = { [weak self, weak entry] in
             self?.finalizeWarm(entry)
         }
@@ -531,6 +736,27 @@ final class FullEmailWebViewManager {
         entry.webView.navigationDelegate = nil
         entry.webView.onLayoutChange = nil
         host.remove(entry.webView)
+    }
+
+    private func logOpenPayloadMiss(
+        messageId: String,
+        reason: String,
+        detail: String? = nil
+    ) {
+        OriginalEmailTelemetry.log(
+            event: "open_payload_miss",
+            messageId: messageId,
+            detail: [detail, "reason=\(reason)"].compactMap { $0 }.joined(separator: " ")
+        )
+    }
+
+    private func logCheckoutMiss(messageId: String, reason: String) {
+        Log.diagnostic(
+            .htmlPreview,
+            level: .info,
+            "FullEmailWebViewManager webview_checkout_miss message=\(messageId) reason=\(reason)",
+            category: .ui
+        )
     }
 
     // Test seams.

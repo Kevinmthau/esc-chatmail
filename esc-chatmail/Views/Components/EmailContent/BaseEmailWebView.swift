@@ -53,6 +53,9 @@ struct BaseEmailWebView: UIViewRepresentable {
     let mode: EmailWebViewMode
     var isDarkMode: Bool? = nil
     var senderEmail: String? = nil
+    /// Canonical source signature for full original-email content. Used to adopt only matching
+    /// pre-rendered WebViews.
+    var sourceSignature: String? = nil
     /// Optional message for resolving cid: URLs to inline attachments
     var message: Message?
     /// Optional callback for non-interactive previews that need their rendered height.
@@ -80,6 +83,7 @@ struct BaseEmailWebView: UIViewRepresentable {
         if let message,
            let checkout = FullEmailWebViewManager.shared.checkout(
                messageId: message.id,
+               sourceSignature: sourceSignature,
                wrappedHTML: htmlContent,
                message: message,
                width: FullEmailWebViewMetrics.fullViewWidth()
@@ -469,7 +473,7 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
 
         private func reloadSignature() -> String {
-            "\(modeSignature(for: parent.mode)):\(messageIdentitySignature()):\(inlineCIDAvailabilitySignature())"
+            "\(modeSignature(for: parent.mode)):\(messageIdentitySignature()):\(sourceSignature()):\(inlineCIDAvailabilitySignature())"
         }
 
         private func messageIdentitySignature() -> String {
@@ -477,6 +481,10 @@ struct BaseEmailWebView: UIViewRepresentable {
                 return "message:none"
             }
             return "message:\(message.id)"
+        }
+
+        private func sourceSignature() -> String {
+            "source:\(parent.sourceSignature ?? "none")"
         }
 
         private func inlineCIDAvailabilitySignature() -> String {

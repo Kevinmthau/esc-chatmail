@@ -62,6 +62,9 @@ struct OriginalEmailSource: Equatable, Sendable {
 struct WarmedOriginalEmailHTML: Sendable, Equatable {
     let html: String
     let sourceSignature: String
+    let sourceKind: CanonicalEmailSourceKind
+    let sourceLocation: CanonicalEmailSourceLocation
+    let hasHTMLSource: Bool
 }
 
 protocol OriginalEmailSourceLoading: Sendable {
@@ -457,7 +460,23 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
             return nil
         }
 
-        return WarmedOriginalEmailHTML(html: html, sourceSignature: canonicalContent.sourceSignature)
+        return WarmedOriginalEmailHTML(
+            html: html,
+            sourceSignature: canonicalContent.sourceSignature,
+            sourceKind: canonicalContent.sourceKind,
+            sourceLocation: canonicalContent.sourceLocation,
+            hasHTMLSource: canonicalContent.hasHTMLSource
+        )
+    }
+
+    func currentHTMLSourceSignature(
+        messageId: String,
+        bodyStorageURI: String?
+    ) -> String? {
+        canonicalContentLoader.currentHTMLSourceSignature(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI
+        )
     }
 
     private func prepareOriginalHTMLWithTelemetry(

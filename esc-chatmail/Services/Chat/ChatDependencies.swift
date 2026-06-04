@@ -7,6 +7,7 @@ struct ChatDependencies {
     let messaging: ChatMessagingDependencies
     let contacts: ChatContactDependencies
     let storage: ChatStorageDependencies
+    let fullEmailOpener: any FullEmailOpening
 }
 
 struct ChatSessionDependencies {

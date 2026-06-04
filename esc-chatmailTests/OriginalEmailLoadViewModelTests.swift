@@ -27,6 +27,48 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
         XCTAssertEqual(loader.ensureRequestCount, 1)
     }
 
+    func testInitialLoadedHTMLStartsLoadedWithoutEnteringLoadingOrRecovering() async throws {
+        let html = "<html><body>Prepared original</body></html>"
+        let request = makeRequest(messageId: "prepared-html")
+        let initialSource = originalEmailSource(
+            presentation: .html,
+            html: html,
+            sourceKind: .html,
+            sourceLocation: .messageFile,
+            sourceSignature: "prepared-source"
+        )
+        let loader = StubOriginalEmailSourceLoader(
+            responses: [nil],
+            delayNanoseconds: 80_000_000
+        )
+        let viewModel = OriginalEmailLoadViewModel(
+            originalEmailSourceLoader: loader,
+            loadTimeout: 0.03,
+            recoveringDelay: 0.005,
+            initialLoadedSource: initialSource,
+            initialRequest: request
+        )
+
+        XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
+        XCTAssertEqual(viewModel.activeHTMLSourceSignature, "prepared-source")
+
+        let task = Task { @MainActor in
+            await viewModel.loadOriginalEmail(
+                for: request,
+                missingSourceRecoveryPolicy: .keepRecoveringWhileActive
+            )
+        }
+
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
+
+        _ = await task.value
+
+        XCTAssertEqual(viewModel.loadState, .loaded(.html(html)))
+        XCTAssertEqual(viewModel.activeHTMLSourceSignature, "prepared-source")
+        XCTAssertEqual(loader.ensureRequestCount, 1)
+    }
+
     func testSlowEnsureTimesOutBeforeForegroundRecoveryCompletes() async throws {
         let loader = StubOriginalEmailSourceLoader(
             responses: [nil],

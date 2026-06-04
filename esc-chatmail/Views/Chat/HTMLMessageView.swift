@@ -126,12 +126,22 @@ final class OriginalEmailLoadViewModel: ObservableObject {
         originalEmailSourceLoader: any OriginalEmailSourceLoading = OriginalEmailSourceLoader.shared,
         loadTimeout: TimeInterval = 5.0,
         recoveringDelay: TimeInterval = 5.0,
+        initialLoadedSource: OriginalEmailSource? = nil,
+        initialRequest: OriginalEmailLoadRequest? = nil,
         onSourceLoaded: @escaping @MainActor (OriginalEmailSource) -> Void = { _ in }
     ) {
         self.originalEmailSourceLoader = originalEmailSourceLoader
         self.loadTimeout = loadTimeout
         self.recoveringDelay = recoveringDelay
         self.onSourceLoaded = onSourceLoaded
+
+        if let initialLoadedSource, let initialRequest {
+            let baseLoadKey = initialRequest.identity.baseLoadKey
+            activeBaseLoadKey = baseLoadKey
+            activeLoadTaskKey = "\(baseLoadKey)|reload:\(reloadGeneration)"
+            activeHTMLSourceSignature = initialLoadedSource.sourceSignature
+            applyLoadedSource(initialLoadedSource)
+        }
     }
 
     func loadOriginalEmail(
@@ -307,6 +317,7 @@ final class OriginalEmailLoadViewModel: ObservableObject {
 
 struct HTMLMessageView: View {
     let message: Message
+    private let initialOpenPayload: FullEmailOpenPayload?
     @Environment(\.dismiss) private var dismiss
     @StateObject private var loadViewModel: OriginalEmailLoadViewModel
     /// The already-rendered chat preview snapshot, shown instantly while the live WebView paints.
@@ -314,19 +325,33 @@ struct HTMLMessageView: View {
     /// Set once the live WebView reports its first paint, cross-fading the snapshot away.
     @State private var webViewPainted = false
     @State private var loadedContentSignature: String?
+    @State private var readerStartLogged = false
 
     init(
         message: Message,
+        initialOpenPayload: FullEmailOpenPayload? = nil,
         originalEmailSourceLoader: any OriginalEmailSourceLoading = OriginalEmailSourceLoader.shared,
         originalEmailLoadTimeout: TimeInterval = 5.0,
         recoveringDelay: TimeInterval = 5.0
     ) {
+        let validInitialPayload = initialOpenPayload?.messageId == message.id ? initialOpenPayload : nil
+        let request = OriginalEmailLoadRequest(
+            messageId: message.id,
+            bodyStorageURI: message.bodyStorageURI,
+            bodyText: message.bodyText,
+            subject: message.subject,
+            senderEmail: message.senderEmail
+        )
+
         self.message = message
+        self.initialOpenPayload = validInitialPayload
         self._loadViewModel = StateObject(
             wrappedValue: OriginalEmailLoadViewModel(
                 originalEmailSourceLoader: originalEmailSourceLoader,
                 loadTimeout: originalEmailLoadTimeout,
                 recoveringDelay: recoveringDelay,
+                initialLoadedSource: validInitialPayload?.originalEmailSource,
+                initialRequest: validInitialPayload == nil ? nil : request,
                 onSourceLoaded: { source in
                     Self.updateBodyStorageURIIfNeeded(for: message, source: source)
                 }
@@ -428,6 +453,7 @@ struct HTMLMessageView: View {
             HTMLWebView(
                 htmlContent: html,
                 isDarkMode: false,
+                sourceSignature: loadViewModel.activeHTMLSourceSignature,
                 message: message,
                 onLoadFinished: handleWebViewPainted,
                 onAdoptedPrerendered: handleAdoptedPrerendered
@@ -535,6 +561,9 @@ struct HTMLMessageView: View {
 
     private func loadHTMLContent() async {
         Log.diagnostic(.htmlPreview, level: .info, "HTMLMessageView loading message \(message.id)", category: .ui)
+        if initialOpenPayload != nil {
+            logReaderStartIfNeeded(mode: "prepared_html")
+        }
         let source = await loadViewModel.loadOriginalEmail(
             for: loadRequest,
             missingSourceRecoveryPolicy: .keepRecoveringWhileActive
@@ -545,13 +574,33 @@ struct HTMLMessageView: View {
         }
 
         if let source {
+            if initialOpenPayload == nil {
+                logReaderStartIfNeeded(
+                    mode: source.sourceLocation == .recoveredHTML ? "recovery" : "live_load"
+                )
+            }
             Log.diagnostic(
                 .htmlPreview,
                 level: .info,
                 "HTMLMessageView loaded message \(message.id) sourceKind=\(source.sourceKind.rawValue) sourceLocation=\(source.sourceLocation.rawValue) presentation=\(source.presentation.rawValue) hasHTML=\(source.html != nil)",
                 category: .ui
             )
+        } else if initialOpenPayload == nil {
+            logReaderStartIfNeeded(mode: "live_load")
         }
+    }
+
+    private func logReaderStartIfNeeded(mode: String) {
+        guard !readerStartLogged else {
+            return
+        }
+
+        readerStartLogged = true
+        OriginalEmailTelemetry.log(
+            event: "reader_started",
+            messageId: message.id,
+            detail: "mode=\(mode)"
+        )
     }
 
     private static func updateBodyStorageURIIfNeeded(for message: Message, source: OriginalEmailSource) {

@@ -2,6 +2,15 @@ import Foundation
 import CoreData
 import Combine
 
+struct FullMessagePresentation: Identifiable {
+    let message: Message
+    let initialOpenPayload: FullEmailOpenPayload?
+
+    var id: NSManagedObjectID {
+        message.objectID
+    }
+}
+
 /// ViewModel for ChatView - manages chat state and message operations
 @MainActor
 final class ChatViewModel: ObservableObject {
@@ -10,7 +19,7 @@ final class ChatViewModel: ObservableObject {
     @Published var replyText = ""
     @Published var replyingTo: Message?
     @Published var forwardComposeContext: ComposeForwardModeContext?
-    @Published var messageToViewInFull: Message?
+    @Published var fullMessagePresentation: FullMessagePresentation?
     @Published var resolvedDisplayName: String?
     @Published var effectiveParticipantCount: Int?
     @Published var sendErrorAlert: ChatSendErrorAlert?
@@ -38,6 +47,7 @@ final class ChatViewModel: ObservableObject {
     private let replyOptimisticConversation: OptimisticConversationReference
     private let processedTextCache: ProcessedTextCache
     private let contactsResolver: any ContactsResolving
+    private let fullEmailOpener: any FullEmailOpening
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Task Management
@@ -69,6 +79,7 @@ final class ChatViewModel: ObservableObject {
         )
         self.processedTextCache = chatDependencies.content.processedTextCache
         self.contactsResolver = chatDependencies.contacts.contactsResolver
+        self.fullEmailOpener = chatDependencies.fullEmailOpener
         self.messageActions = chatDependencies.messaging.messageActions
         self.outboundMessageCoordinator = chatDependencies.messaging.outboundMessageCoordinator
         self.outboundAttachmentContextBuilder = chatDependencies.messaging.outboundAttachmentContextBuilder
@@ -78,6 +89,10 @@ final class ChatViewModel: ObservableObject {
 
         // Forward child observable changes to trigger view updates
         forwardChanges(from: contactManager, storing: &cancellables)
+    }
+
+    var messageToViewInFull: Message? {
+        fullMessagePresentation?.message
     }
 
     // MARK: - Message Actions
@@ -199,12 +214,27 @@ final class ChatViewModel: ObservableObject {
 
     func openFullMessage(_ message: Message) {
         Log.info("Opening full message for \(message.id)", category: .ui)
-        // Seed the off-screen pre-render for this message. The visible chat bubble normally warms it
-        // already; this is a backstop for a tap that beats that warm. It can't speed up THIS open —
-        // the reader's checkout runs synchronously, before any off-screen render can paint — but it
-        // makes a later re-open instant.
-        FullEmailWebViewManager.shared.prewarmOnOpen(message: message)
-        messageToViewInFull = message
+        let request = OriginalEmailWarmRequest(
+            messageId: message.id,
+            bodyStorageURI: message.bodyStorageURI,
+            bodyText: message.bodyText,
+            senderEmail: message.senderEmail,
+            subject: message.subject
+        )
+        let payload = fullEmailOpener.preparedOpenPayload(
+            request: request,
+            message: message,
+            width: FullEmailWebViewMetrics.fullViewWidth()
+        )
+        if payload == nil {
+            // Backstop for a tap that beats visible-row warming. The current open will use the
+            // existing loader path; a later re-open can adopt the warmed WebView.
+            fullEmailOpener.prewarmOnOpen(message: message)
+        }
+        fullMessagePresentation = FullMessagePresentation(
+            message: message,
+            initialOpenPayload: payload
+        )
     }
 
     func openFullMessage(messageObjectID: NSManagedObjectID) {
@@ -214,7 +244,7 @@ final class ChatViewModel: ObservableObject {
 
     func dismissFullMessage() {
         Log.info("Dismissed full message view", category: .ui)
-        messageToViewInFull = nil
+        fullMessagePresentation = nil
     }
 
     /// Sends a reply with optional attachments

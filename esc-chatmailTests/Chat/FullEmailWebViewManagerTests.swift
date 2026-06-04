@@ -65,12 +65,14 @@ final class FullEmailWebViewPoolBookkeepingTests: XCTestCase {
 final class FullEmailWebViewPreRenderKeyTests: XCTestCase {
     private func makeKey(
         messageId: String = "m1",
+        sourceSignature: String = "sha256:source",
         html: String = "<html>body</html>",
         cid: String = "cid:none",
         width: CGFloat = 390
     ) -> FullEmailWebViewPreRenderKey {
         FullEmailWebViewPreRenderKey.make(
             messageId: messageId,
+            sourceSignature: sourceSignature,
             wrappedHTML: html,
             cidAvailabilityFingerprint: cid,
             width: width
@@ -89,6 +91,13 @@ final class FullEmailWebViewPreRenderKeyTests: XCTestCase {
         XCTAssertNotEqual(makeKey(messageId: "m1"), makeKey(messageId: "m2"))
     }
 
+    func testDifferentSourceSignatureProducesDifferentKey() {
+        XCTAssertNotEqual(
+            makeKey(sourceSignature: "sha256:first"),
+            makeKey(sourceSignature: "sha256:second")
+        )
+    }
+
     func testDifferentCIDAvailabilityProducesDifferentKey() {
         XCTAssertNotEqual(makeKey(cid: "cid:none"), makeKey(cid: "cid:available"))
     }
@@ -103,6 +112,100 @@ final class FullEmailWebViewPreRenderKeyTests: XCTestCase {
     func testHTMLFingerprintIncludesLengthGuardingAgainstCollisions() {
         // Same prefix, different length must not collide.
         XCTAssertNotEqual(makeKey(html: "abc"), makeKey(html: "abcd"))
+    }
+}
+
+final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
+    private func makeKey(
+        sourceSignature: String = "sha256:source",
+        html: String = "<html>body</html>",
+        cid: String = "cid:none",
+        width: CGFloat = 390
+    ) -> FullEmailWebViewPreRenderKey {
+        FullEmailWebViewPreRenderKey.make(
+            messageId: "message-1",
+            sourceSignature: sourceSignature,
+            wrappedHTML: html,
+            cidAvailabilityFingerprint: cid,
+            width: width
+        )
+    }
+
+    private func makePayload(
+        sourceSignature: String = "sha256:source",
+        html: String = "<html>body</html>"
+    ) -> FullEmailOpenPayload {
+        FullEmailOpenPayload(
+            messageId: "message-1",
+            sourceSignature: sourceSignature,
+            html: html,
+            presentation: .html,
+            sourceKind: .html,
+            sourceLocation: .messageFile,
+            hasHTMLSource: true,
+            checkoutAvailability: .ready
+        )
+    }
+
+    func testSameHTMLSourceWidthAndCIDAvailabilityIsReusable() {
+        let key = makeKey()
+        XCTAssertEqual(
+            FullEmailOpenPayloadReuseValidator.decision(
+                entryKey: key,
+                expectedKey: key,
+                payload: makePayload(),
+                currentSourceSignature: "sha256:source"
+            ),
+            .reusable
+        )
+    }
+
+    func testChangedSourceSignatureMissesReuse() {
+        XCTAssertEqual(
+            FullEmailOpenPayloadReuseValidator.decision(
+                entryKey: makeKey(),
+                expectedKey: makeKey(),
+                payload: makePayload(),
+                currentSourceSignature: "sha256:new-source"
+            ),
+            .staleSource(currentSourceSignature: "sha256:new-source")
+        )
+    }
+
+    func testChangedHTMLMissesReuse() {
+        XCTAssertEqual(
+            FullEmailOpenPayloadReuseValidator.decision(
+                entryKey: makeKey(html: "<html>old</html>"),
+                expectedKey: makeKey(html: "<html>new</html>"),
+                payload: makePayload(html: "<html>old</html>"),
+                currentSourceSignature: "sha256:source"
+            ),
+            .keyMismatch
+        )
+    }
+
+    func testChangedCIDAvailabilityMissesReuse() {
+        XCTAssertEqual(
+            FullEmailOpenPayloadReuseValidator.decision(
+                entryKey: makeKey(cid: "cid:none"),
+                expectedKey: makeKey(cid: "cid:image=available"),
+                payload: makePayload(),
+                currentSourceSignature: "sha256:source"
+            ),
+            .keyMismatch
+        )
+    }
+
+    func testChangedWidthMissesReuse() {
+        XCTAssertEqual(
+            FullEmailOpenPayloadReuseValidator.decision(
+                entryKey: makeKey(width: 390),
+                expectedKey: makeKey(width: 393),
+                payload: makePayload(),
+                currentSourceSignature: "sha256:source"
+            ),
+            .keyMismatch
+        )
     }
 }
 
