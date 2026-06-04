@@ -90,6 +90,8 @@ extension MessagePersister {
             existingMessage.snippet = processedMessage.snippet
             existingMessage.cleanedSnippet = processedMessage.cleanedSnippet
             existingMessage.chatPreviewText = processedMessage.chatPreviewText
+            existingMessage.deliveredToAddress = processedMessage.headers.deliveredToAddress
+            existingMessage.replyFromAddress = processedMessage.headers.replyFromAddress
             existingMessage.setValue(processedMessage.headers.messageId, forKey: "messageId")
             existingMessage.setValue(
                 processedMessage.headers.references.isEmpty ? nil : processedMessage.headers.references.joined(separator: " "),

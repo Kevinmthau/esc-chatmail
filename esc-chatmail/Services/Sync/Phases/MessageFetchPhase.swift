@@ -46,6 +46,7 @@ struct MessageFetchPhase: SyncPhase {
                 messages,
                 labelIds: context.labelIds,
                 myAliases: context.myAliases,
+                sendAsAliases: context.sendAsAliases,
                 modificationTransaction: context.modificationTransaction,
                 in: context.coreDataContext
             )

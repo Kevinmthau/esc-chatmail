@@ -38,6 +38,7 @@ final class InitialSyncOrchestrator {
     private let log = LogCategory.sync.logger
 
     private var myAliases: Set<String> = []
+    private var sendAsAliases: [SendAsAlias] = []
 
     // MARK: - Initialization
 
@@ -86,11 +87,14 @@ final class InitialSyncOrchestrator {
             // Phase 1: Fetch profile and aliases
             progressHandler(0.05, "Fetching profile...")
             let profileTimer = timing.start("profileAndAliases")
-            let (profile, aliases) = try await fetchProfileAndAliases()
+            let (profile, aliases, validSendAsAliases) = try await fetchProfileAndAliases()
+            sendAsAliases = validSendAsAliases
             myAliases = await AliasManager.shared.setAliases(Set([profile.emailAddress] + aliases))
+            await SendAsAliasManager.shared.setAliases(validSendAsAliases)
             try await messagePersister.saveAccount(
                 profile: profile,
                 aliases: aliases,
+                sendAsAliases: validSendAsAliases,
                 in: context,
                 saveHistoryId: false
             )
@@ -223,13 +227,15 @@ final class InitialSyncOrchestrator {
         }
     }
 
-    private func fetchProfileAndAliases() async throws -> (GmailProfile, [String]) {
+    private func fetchProfileAndAliases() async throws -> (GmailProfile, [String], [SendAsAlias]) {
         let profile = try await messageFetcher.getProfile()
         let sendAsList = try await messageFetcher.listSendAs()
-        let aliases = sendAsList
-            .filter { $0.treatAsAlias == true || $0.isPrimary == true }
-            .map { $0.sendAsEmail }
-        return (profile, aliases)
+        let sendAsAliases = SendAsAlias.validAliases(
+            from: sendAsList,
+            accountEmail: profile.emailAddress
+        )
+        let aliases = sendAsAliases.map(\.emailAddress)
+        return (profile, aliases, sendAsAliases)
     }
 
     private func buildInitialSyncQuery() -> String {
@@ -269,12 +275,13 @@ final class InitialSyncOrchestrator {
             await MainActor.run {
                 progressHandler(progress, "Processing messages... \(processed)/\(total)")
             }
-        } messageHandler: { [messagePersister, myAliases] messages in
+        } messageHandler: { [messagePersister, myAliases, sendAsAliases] messages in
             // Capture dependencies strongly to prevent message loss if orchestrator is deallocated
             await messagePersister.saveMessages(
                 messages,
                 labelIds: labelIds,
                 myAliases: myAliases,
+                sendAsAliases: sendAsAliases,
                 modificationTransaction: modificationTransaction,
                 in: context
             )
@@ -298,12 +305,13 @@ final class InitialSyncOrchestrator {
             let stillFailedIds = await BatchProcessor.retryFailedMessages(
                 failedIds: result.failedIds,
                 messageFetcher: messageFetcher
-            ) { [messagePersister, myAliases] messages in
+            ) { [messagePersister, myAliases, sendAsAliases] messages in
                 // Capture dependencies strongly to prevent message loss if orchestrator is deallocated
                 await messagePersister.saveMessages(
                     messages,
                     labelIds: labelIds,
                     myAliases: myAliases,
+                    sendAsAliases: sendAsAliases,
                     modificationTransaction: modificationTransaction,
                     in: context
                 )

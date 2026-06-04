@@ -26,10 +26,17 @@ struct OutboundReplyContextBuilder {
             throw GmailSendService.SendError.conversationNotFound
         }
 
-        let replyingTo = context.replyingToMessageObjectID.flatMap(makeReplyTargetSnapshot)
-        return replyMetadataBuilder.buildReplyMetadata(
-            conversation: ReplyConversationSnapshot(conversation: conversation),
-            replyingTo: replyingTo
+        let sendAsAliases = loadSendAsAliases()
+        let replyingTo = context.replyingToMessageObjectID.flatMap {
+            makeReplyTargetSnapshot(objectID: $0, sendAsAliases: sendAsAliases)
+        }
+        return try replyMetadataBuilder.buildReplyMetadata(
+            conversation: ReplyConversationSnapshot(
+                conversation: conversation,
+                sendAsAliases: sendAsAliases
+            ),
+            replyingTo: replyingTo,
+            sendAsAliases: sendAsAliases
         )
     }
 
@@ -46,7 +53,10 @@ struct OutboundReplyContextBuilder {
         }
     }
 
-    private func makeReplyTargetSnapshot(objectID: NSManagedObjectID) -> ReplyTargetSnapshot? {
+    private func makeReplyTargetSnapshot(
+        objectID: NSManagedObjectID,
+        sendAsAliases: [SendAsAlias]
+    ) -> ReplyTargetSnapshot? {
         let message: Message
         do {
             guard let fetchedMessage = try viewContext.existingObject(with: objectID) as? Message else {
@@ -64,6 +74,7 @@ struct OutboundReplyContextBuilder {
 
         return ReplyTargetSnapshot(
             message: message,
+            sendAsAliases: sendAsAliases,
             originalHTML: loadOriginalReplyHTML(for: message)
         )
     }
@@ -76,5 +87,35 @@ struct OutboundReplyContextBuilder {
             senderEmail: message.senderEmailValue,
             subject: message.subject
         )
+    }
+
+    private func loadSendAsAliases() -> [SendAsAlias] {
+        let request = Account.fetchRequest()
+        request.fetchLimit = 1
+
+        do {
+            guard let account = try viewContext.fetch(request).first else {
+                return []
+            }
+
+            let aliases = account.sendAsAliasesArray
+            guard !aliases.isEmpty else {
+                return SendAsAlias.deduplicated(
+                    ([account.email] + account.aliasesArray).map {
+                        SendAsAlias(
+                            emailAddress: $0,
+                            isDefault: $0.caseInsensitiveCompare(account.email) == .orderedSame,
+                            isPrimary: $0.caseInsensitiveCompare(account.email) == .orderedSame,
+                            verificationStatus: "accepted"
+                        )
+                    }
+                )
+            }
+
+            return aliases
+        } catch {
+            Log.error("Failed to fetch send-as aliases for reply metadata", category: .coreData, error: error)
+            return []
+        }
     }
 }

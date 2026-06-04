@@ -168,6 +168,13 @@ struct ChatView: View {
                 )
             }
         }
+        .alert(item: $viewModel.sendErrorAlert) { alert in
+            Alert(
+                title: Text("Couldn’t Send Reply"),
+                message: Text(alert.message),
+                dismissButton: .default(Text("OK"))
+            )
+        }
     }
 
     private var navigationDisplayName: String {

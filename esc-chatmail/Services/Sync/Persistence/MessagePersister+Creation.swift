@@ -51,6 +51,8 @@ extension MessagePersister {
             message.snippet = processedMessage.snippet
             message.cleanedSnippet = processedMessage.cleanedSnippet
             message.chatPreviewText = processedMessage.chatPreviewText
+            message.deliveredToAddress = processedMessage.headers.deliveredToAddress
+            message.replyFromAddress = processedMessage.headers.replyFromAddress
             message.conversation = conversation
             message.internalDate = processedMessage.internalDate
             message.subject = processedMessage.headers.subject

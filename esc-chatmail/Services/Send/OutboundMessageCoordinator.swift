@@ -13,6 +13,8 @@ enum OutboundMessageRequest {
 
     struct ReplyMetadata: Sendable {
         let recipientEmails: [String]
+        let fromEmail: String
+        let fromName: String?
         let subject: String?
         let threadId: String?
         let inReplyTo: String?

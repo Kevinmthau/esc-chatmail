@@ -223,11 +223,13 @@ final class SyncEngine: ObservableObject {
     ) async {
         // Use centralized AliasManager for alias resolution
         let myAliases = await AliasManager.shared.getAliases(from: context)
+        let sendAsAliases = await SendAsAliasManager.shared.getAliases(from: context)
 
         await messagePersister.saveMessage(
             gmailMessage,
             labelIds: labelIds,
             myAliases: myAliases,
+            sendAsAliases: sendAsAliases,
             modificationTransaction: modificationTransaction,
             in: context
         )

@@ -13,6 +13,7 @@ final class ChatViewModel: ObservableObject {
     @Published var messageToViewInFull: Message?
     @Published var resolvedDisplayName: String?
     @Published var effectiveParticipantCount: Int?
+    @Published var sendErrorAlert: ChatSendErrorAlert?
 
     // MARK: - Composed Services
 
@@ -241,6 +242,7 @@ final class ChatViewModel: ObservableObject {
             )
         } catch {
             Log.error("Failed to create optimistic message for reply", category: .message, error: error)
+            sendErrorAlert = ChatSendErrorAlert(message: error.localizedDescription)
             return false
         }
         guard result != nil else { return false }
@@ -411,4 +413,9 @@ final class ChatViewModel: ObservableObject {
 
         return resolved
     }
+}
+
+struct ChatSendErrorAlert: Identifiable {
+    let id = UUID()
+    let message: String
 }

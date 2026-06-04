@@ -32,6 +32,7 @@ final class IncrementalSyncOrchestrator {
     private let log = LogCategory.sync.logger
 
     private var myAliases: Set<String> = []
+    private var sendAsAliases: [SendAsAlias] = []
 
     // MARK: - Phases (lazily initialized)
 
@@ -120,18 +121,20 @@ final class IncrementalSyncOrchestrator {
 
         log.info("Starting incremental sync with historyId: \(historyId)")
         let setupTimer = timing.start("setup")
-        myAliases = await AliasManager.shared.getAliases(from: coreDataStack.newBackgroundContext())
 
         let context = coreDataStack.newBackgroundContext()
         let modificationTransaction = await ModificationTracker.shared.beginTransaction()
         var committedModificationTransaction = false
+        sendAsAliases = await refreshSendAsAliases(accountEmail: accountData.email, in: context)
+        myAliases = await AliasManager.shared.getAliases(from: context)
         let labelIds = await messagePersister.prefetchLabelIds(in: context)
-        timing.finish(setupTimer, detail: "aliases=\(myAliases.count) labels=\(labelIds.count)")
+        timing.finish(setupTimer, detail: "aliases=\(myAliases.count) sendAs=\(sendAsAliases.count) labels=\(labelIds.count)")
 
         let historyCollectionContext = SyncPhaseContext(
             coreDataContext: context,
             labelIds: labelIds,
             myAliases: myAliases,
+            sendAsAliases: sendAsAliases,
             modificationTransaction: modificationTransaction,
             syncStartTime: syncStartTime,
             progressHandler: progressHandler,
@@ -156,6 +159,7 @@ final class IncrementalSyncOrchestrator {
                 coreDataContext: context,
                 labelIds: labelIds,
                 myAliases: myAliases,
+                sendAsAliases: sendAsAliases,
                 modificationTransaction: modificationTransaction,
                 allowsIntermediateContextSaves: allowsIntermediateContextSaves,
                 syncStartTime: syncStartTime,
@@ -338,12 +342,13 @@ final class IncrementalSyncOrchestrator {
                 await MainActor.run {
                     progressHandler(progress, "Recovering... \(processed)/\(total)")
                 }
-            } messageHandler: { [messagePersister, myAliases] messages in
+            } messageHandler: { [messagePersister, myAliases, sendAsAliases] messages in
                 // Capture dependencies strongly to prevent message loss if orchestrator is deallocated
                 await messagePersister.saveMessages(
                     messages,
                     labelIds: labelIds,
                     myAliases: myAliases,
+                    sendAsAliases: sendAsAliases,
                     modificationTransaction: modificationTransaction,
                     in: context
                 )
@@ -416,6 +421,29 @@ final class IncrementalSyncOrchestrator {
 
         let timeSinceLastReconciliation = Date().timeIntervalSince1970 - lastReconciliation
         return timeSinceLastReconciliation >= SyncConfig.reconciliationInterval
+    }
+
+    private func refreshSendAsAliases(
+        accountEmail: String,
+        in context: NSManagedObjectContext
+    ) async -> [SendAsAlias] {
+        do {
+            let aliases = SendAsAlias.validAliases(
+                from: try await messageFetcher.listSendAs(),
+                accountEmail: accountEmail
+            )
+            await messagePersister.updateSendAsAliases(
+                accountEmail: accountEmail,
+                sendAsAliases: aliases,
+                in: context
+            )
+            await SendAsAliasManager.shared.setAliases(aliases)
+            _ = await AliasManager.shared.setAliases(Set([accountEmail] + aliases.map(\.emailAddress)))
+            return aliases
+        } catch {
+            Log.warning("Failed to refresh send-as aliases; using cached aliases: \(error.localizedDescription)", category: .sync)
+            return await SendAsAliasManager.shared.getAliases(from: context)
+        }
     }
 
     /// Records the current time as the last reconciliation time

@@ -20,6 +20,7 @@ struct SyncPhaseContext {
     let coreDataContext: NSManagedObjectContext
     let labelIds: Set<String>
     let myAliases: Set<String>
+    let sendAsAliases: [SendAsAlias]
     let modificationTransaction: ModificationTracker.Transaction?
     let allowsIntermediateContextSaves: Bool
     let syncStartTime: Date
@@ -30,6 +31,7 @@ struct SyncPhaseContext {
         coreDataContext: NSManagedObjectContext,
         labelIds: Set<String>,
         myAliases: Set<String>,
+        sendAsAliases: [SendAsAlias] = [],
         modificationTransaction: ModificationTracker.Transaction? = nil,
         allowsIntermediateContextSaves: Bool = true,
         syncStartTime: Date,
@@ -39,6 +41,7 @@ struct SyncPhaseContext {
         self.coreDataContext = coreDataContext
         self.labelIds = labelIds
         self.myAliases = myAliases
+        self.sendAsAliases = sendAsAliases
         self.modificationTransaction = modificationTransaction
         self.allowsIntermediateContextSaves = allowsIntermediateContextSaves
         self.syncStartTime = syncStartTime

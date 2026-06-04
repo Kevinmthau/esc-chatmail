@@ -6,6 +6,7 @@ struct AccountData {
     let historyId: String?
     let email: String
     let aliases: [String]
+    let sendAsAliases: [SendAsAlias]
 }
 
 /// Errors that can occur during account persistence operations
@@ -30,16 +31,26 @@ extension MessagePersister {
     func saveAccount(
         profile: GmailProfile,
         aliases: [String],
+        sendAsAliases: [SendAsAlias]? = nil,
         in context: NSManagedObjectContext,
         saveHistoryId: Bool = true
     ) async throws {
         try await context.perform {
+            let validSendAsAliases = sendAsAliases.map(SendAsAlias.deduplicated)
             let request = Account.fetchRequest()
             request.predicate = NSPredicate(format: "email == %@", profile.emailAddress)
 
             do {
                 if let existing = try context.fetch(request).first {
                     existing.aliasesArray = aliases
+                    if let validSendAsAliases {
+                        existing.sendAsAliasesArray = validSendAsAliases
+                    } else if existing.sendAsAliasesArray.isEmpty {
+                        existing.sendAsAliasesArray = Self.fallbackSendAsAliases(
+                            accountEmail: profile.emailAddress,
+                            aliases: aliases
+                        )
+                    }
                     if saveHistoryId {
                         existing.historyId = profile.historyId
                     }
@@ -62,6 +73,10 @@ extension MessagePersister {
             account.email = profile.emailAddress
             account.historyId = saveHistoryId ? profile.historyId : nil
             account.aliasesArray = aliases
+            account.sendAsAliasesArray = validSendAsAliases ?? Self.fallbackSendAsAliases(
+                accountEmail: profile.emailAddress,
+                aliases: aliases
+            )
             let savedHistoryId = saveHistoryId ? profile.historyId : "nil"
             Log.info("Created new account: \(Log.redact(email: profile.emailAddress)) with historyId: \(savedHistoryId)", category: .sync)
         }
@@ -79,8 +94,31 @@ extension MessagePersister {
             return AccountData(
                 historyId: account.historyId,
                 email: account.email,
-                aliases: account.aliasesArray
+                aliases: account.aliasesArray,
+                sendAsAliases: account.sendAsAliasesArray
             )
+        }
+    }
+
+    func updateSendAsAliases(
+        accountEmail: String,
+        sendAsAliases: [SendAsAlias],
+        in context: NSManagedObjectContext
+    ) async {
+        await context.perform {
+            let validAliases = SendAsAlias.deduplicated(sendAsAliases)
+            let request = Account.fetchRequest()
+            request.predicate = NSPredicate(format: "email == %@", accountEmail)
+            request.fetchLimit = 1
+
+            guard let account = try? context.fetch(request).first else {
+                Log.warning("No account found to update send-as aliases", category: .sync)
+                return
+            }
+
+            account.aliasesArray = validAliases.map(\.emailAddress)
+            account.sendAsAliasesArray = validAliases
+            Log.debug("Updated send-as aliases for account: \(Log.redact(email: accountEmail))", category: .sync)
         }
     }
 
@@ -184,5 +222,21 @@ extension MessagePersister {
 
         Log.error("Failed to save history ID after all retries. Last error: \(lastError?.localizedDescription ?? "unknown")", category: .sync)
         return false
+    }
+}
+
+private extension MessagePersister {
+    static func fallbackSendAsAliases(accountEmail: String, aliases: [String]) -> [SendAsAlias] {
+        let allEmails = [accountEmail] + aliases
+        return SendAsAlias.deduplicated(
+            allEmails.map {
+                SendAsAlias(
+                    emailAddress: $0,
+                    isDefault: $0.caseInsensitiveCompare(accountEmail) == .orderedSame,
+                    isPrimary: $0.caseInsensitiveCompare(accountEmail) == .orderedSame,
+                    verificationStatus: "accepted"
+                )
+            }
+        )
     }
 }
