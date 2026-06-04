@@ -38,7 +38,8 @@ class MessageProcessor: @unchecked Sendable {
         processedMessage.headers = extractHeaders(
             from: headers,
             myAliases: myAliases,
-            sendAsAliases: sendAsAliases
+            sendAsAliases: sendAsAliases,
+            isSentMessage: gmailMessage.labelIds?.contains("SENT") == true
         )
 
         // Process content (may fetch large body parts via API)
@@ -319,7 +320,8 @@ class MessageProcessor: @unchecked Sendable {
     private func extractHeaders(
         from headers: [MessageHeader],
         myAliases: Set<String>,
-        sendAsAliases: [SendAsAlias]
+        sendAsAliases: [SendAsAlias],
+        isSentMessage: Bool
     ) -> ProcessedHeaders {
         var processedHeaders = ProcessedHeaders()
 
@@ -361,7 +363,7 @@ class MessageProcessor: @unchecked Sendable {
 
         let replyFromResolution = ReplyFromAddressResolver(
             sendAsAliases: sendAsAliases
-        ).resolve(headers: headers)
+        ).resolve(headers: headers, isSentMessage: isSentMessage)
         processedHeaders.deliveredToAddress = replyFromResolution.deliveredToAddress
         processedHeaders.replyFromAddress = replyFromResolution.replyFromAddress
 

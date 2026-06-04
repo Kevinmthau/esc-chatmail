@@ -230,11 +230,22 @@ struct ReplyFromAddressResolution: Equatable, Sendable {
 struct ReplyFromAddressResolver {
     let sendAsAliases: [SendAsAlias]
 
-    func resolve(headers: [MessageHeader]) -> ReplyFromAddressResolution {
+    func resolve(headers: [MessageHeader], isSentMessage: Bool = false) -> ReplyFromAddressResolution {
         let validAliases = SendAsAlias.deduplicated(sendAsAliases)
         let defaultAlias = SendAsAlias.defaultAlias(in: validAliases)
 
         let directRecipientCandidates = recipientCandidates(for: ["to", "cc"], headers: headers)
+        let senderAlias = isSentMessage ? firstMatchingAlias(
+            in: recipientCandidates(for: ["from"], headers: headers),
+            aliases: validAliases
+        ) : nil
+        if let senderAlias {
+            return ReplyFromAddressResolution(
+                deliveredToAddress: senderAlias.emailAddress,
+                replyFromAddress: senderAlias.emailAddress
+            )
+        }
+
         let nonDefaultAliases = validAliases.filter { !$0.isDefault }
         if let matchedAlias = firstMatchingAlias(in: directRecipientCandidates, aliases: nonDefaultAliases) {
             return ReplyFromAddressResolution(
@@ -268,13 +279,14 @@ struct ReplyFromAddressResolver {
         if let firstForwardingCandidate {
             return ReplyFromAddressResolution(
                 deliveredToAddress: firstForwardingCandidate,
-                replyFromAddress: defaultAlias?.emailAddress
+                replyFromAddress: senderAlias?.emailAddress ?? defaultAlias?.emailAddress
             )
         }
 
+        let fallbackAlias = senderAlias ?? defaultAlias
         return ReplyFromAddressResolution(
-            deliveredToAddress: defaultAlias?.emailAddress,
-            replyFromAddress: defaultAlias?.emailAddress
+            deliveredToAddress: fallbackAlias?.emailAddress,
+            replyFromAddress: fallbackAlias?.emailAddress
         )
     }
 

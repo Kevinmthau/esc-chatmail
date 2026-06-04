@@ -80,6 +80,73 @@ final class SendAsReplyFromTests: XCTestCase {
         XCTAssertEqual(processed?.headers.replyFromAddress, "alias@customdomain.com")
     }
 
+    func testProcessMessage_sentFromAliasFallsBackToFromAlias() async throws {
+        let message = makeGmailMessage(
+            id: "sent-from-alias",
+            labelIds: ["SENT"],
+            headers: [
+                MessageHeader(name: "Subject", value: "Alias reply"),
+                MessageHeader(name: "From", value: "Kevin Alias <alias@customdomain.com>"),
+                MessageHeader(name: "To", value: "Jane Example <jane@example.com>"),
+                MessageHeader(name: "Message-ID", value: "<sent-from-alias@example.com>")
+            ]
+        )
+
+        let processed = await MessageProcessor().processGmailMessage(
+            message,
+            myAliases: myAliases,
+            sendAsAliases: sendAsAliases
+        )
+
+        XCTAssertEqual(processed?.headers.deliveredToAddress, "alias@customdomain.com")
+        XCTAssertEqual(processed?.headers.replyFromAddress, "alias@customdomain.com")
+    }
+
+    func testProcessMessage_sentFromAliasWinsOverRecipientAlias() async throws {
+        let message = makeGmailMessage(
+            id: "sent-from-alias-self-cc",
+            labelIds: ["SENT"],
+            headers: [
+                MessageHeader(name: "Subject", value: "Alias reply with self cc"),
+                MessageHeader(name: "From", value: "Kevin Alias <alias@customdomain.com>"),
+                MessageHeader(name: "To", value: "Jane Example <jane@example.com>"),
+                MessageHeader(name: "Cc", value: "Kevin Primary <primary@gmail.com>"),
+                MessageHeader(name: "Message-ID", value: "<sent-from-alias-self-cc@example.com>")
+            ]
+        )
+
+        let processed = await MessageProcessor().processGmailMessage(
+            message,
+            myAliases: myAliases,
+            sendAsAliases: sendAsAliases
+        )
+
+        XCTAssertEqual(processed?.headers.deliveredToAddress, "alias@customdomain.com")
+        XCTAssertEqual(processed?.headers.replyFromAddress, "alias@customdomain.com")
+    }
+
+    func testProcessMessage_nonSentFromAliasFallsBackToDefaultAlias() async throws {
+        let message = makeGmailMessage(
+            id: "non-sent-from-alias",
+            labelIds: ["INBOX"],
+            headers: [
+                MessageHeader(name: "Subject", value: "Inbound from alias"),
+                MessageHeader(name: "From", value: "Kevin Alias <alias@customdomain.com>"),
+                MessageHeader(name: "To", value: "Jane Example <jane@example.com>"),
+                MessageHeader(name: "Message-ID", value: "<non-sent-from-alias@example.com>")
+            ]
+        )
+
+        let processed = await MessageProcessor().processGmailMessage(
+            message,
+            myAliases: myAliases,
+            sendAsAliases: sendAsAliases
+        )
+
+        XCTAssertEqual(processed?.headers.deliveredToAddress, "primary@gmail.com")
+        XCTAssertEqual(processed?.headers.replyFromAddress, "primary@gmail.com")
+    }
+
     func testReplyMetadata_unconfiguredDeliveredToAddressSurfacesSendAsError() throws {
         let context = stack.viewContext
         let conversation = makeReplyConversation(in: context)
@@ -247,11 +314,15 @@ final class SendAsReplyFromTests: XCTestCase {
         Set(["primary@gmail.com", "alias@customdomain.com"].map(EmailNormalizer.normalize))
     }
 
-    private func makeGmailMessage(id: String, headers: [MessageHeader]) -> GmailMessage {
+    private func makeGmailMessage(
+        id: String,
+        labelIds: [String] = ["INBOX"],
+        headers: [MessageHeader]
+    ) -> GmailMessage {
         GmailMessage(
             id: id,
             threadId: "thread-\(id)",
-            labelIds: ["INBOX"],
+            labelIds: labelIds,
             snippet: "Snippet",
             historyId: "history-\(id)",
             internalDate: "1700000000000",
