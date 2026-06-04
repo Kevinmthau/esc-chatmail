@@ -246,19 +246,63 @@ struct FullEmailOpenPayload: Equatable, Sendable {
 enum FullEmailOpenPayloadReuseDecision: Equatable {
     case reusable
     case staleSource(currentSourceSignature: String)
+    case wrapperInputsMismatch
     case keyMismatch
+}
+
+private struct OriginalEmailWarmWrapperInputs: Equatable {
+    let bodyTextFingerprint: String
+    let senderEmail: String?
+    let subject: String?
+
+    init(request: OriginalEmailWarmRequest) {
+        self.bodyTextFingerprint = Self.canonicalBodyTextFingerprint(for: request.bodyText)
+        self.senderEmail = Self.normalized(request.senderEmail)
+        self.subject = Self.normalized(request.subject)
+    }
+
+    private static func canonicalBodyTextFingerprint(for text: String?) -> String {
+        guard let normalizedText = CanonicalEmailContentLoader.normalizedMeaningfulPlainText(from: text) else {
+            return "nil"
+        }
+
+        return fingerprint(for: normalizedText)
+    }
+
+    private static func fingerprint(for text: String) -> String {
+        SHA256.hash(data: Data(text.utf8))
+            .prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private static func normalized(_ text: String?) -> String? {
+        guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else {
+            return nil
+        }
+        return text
+    }
 }
 
 enum FullEmailOpenPayloadReuseValidator {
     static func decision(
         entryKey: FullEmailWebViewPreRenderKey,
         expectedKey: FullEmailWebViewPreRenderKey,
+        entryRequest: OriginalEmailWarmRequest,
+        currentRequest: OriginalEmailWarmRequest,
         payload: FullEmailOpenPayload,
         currentSourceSignature: String?
     ) -> FullEmailOpenPayloadReuseDecision {
         if let currentSourceSignature,
            currentSourceSignature != payload.sourceSignature {
             return .staleSource(currentSourceSignature: currentSourceSignature)
+        }
+
+        let entryWrapperInputs = OriginalEmailWarmWrapperInputs(request: entryRequest)
+        let currentWrapperInputs = OriginalEmailWarmWrapperInputs(request: currentRequest)
+        guard entryWrapperInputs == currentWrapperInputs else {
+            return .wrapperInputsMismatch
         }
 
         guard entryKey == expectedKey else {
@@ -334,7 +378,8 @@ final class FullEmailWebViewManager: FullEmailOpening {
 
     private final class Entry {
         let key: FullEmailWebViewPreRenderKey
-        let payload: FullEmailOpenPayload
+        var request: OriginalEmailWarmRequest
+        var payload: FullEmailOpenPayload
         let webView: LayoutAwareWKWebView
         let cidHandler: CIDSchemeHandler
         let delegate: WarmNavigationDelegate
@@ -345,12 +390,14 @@ final class FullEmailWebViewManager: FullEmailOpening {
 
         init(
             key: FullEmailWebViewPreRenderKey,
+            request: OriginalEmailWarmRequest,
             payload: FullEmailOpenPayload,
             webView: LayoutAwareWKWebView,
             cidHandler: CIDSchemeHandler,
             delegate: WarmNavigationDelegate
         ) {
             self.key = key
+            self.request = request
             self.payload = payload
             self.webView = webView
             self.cidHandler = cidHandler
@@ -419,6 +466,8 @@ final class FullEmailWebViewManager: FullEmailOpening {
 
         // Already warm (or warming) for this exact content + width: keep it hot and return.
         if let existing = entries[request.messageId], existing.key == key, !existing.isCheckedOut {
+            existing.request = request
+            existing.payload = payload
             applyEvictions(bookkeeping.touch(request.messageId))
             return
         }
@@ -434,6 +483,7 @@ final class FullEmailWebViewManager: FullEmailOpening {
 
         let entry = makeEntry(
             key: key,
+            request: request,
             payload: payload,
             message: message,
             senderEmail: request.senderEmail,
@@ -498,6 +548,8 @@ final class FullEmailWebViewManager: FullEmailOpening {
         switch FullEmailOpenPayloadReuseValidator.decision(
             entryKey: entry.key,
             expectedKey: expectedKey,
+            entryRequest: entry.request,
+            currentRequest: request,
             payload: entry.payload,
             currentSourceSignature: currentSourceSignature
         ) {
@@ -515,6 +567,12 @@ final class FullEmailWebViewManager: FullEmailOpening {
                 reason: "stale_source",
                 detail: "currentSourceSignature=\(currentSourceSignature)"
             )
+            if !entry.isCheckedOut {
+                invalidate(messageId: request.messageId)
+            }
+            return nil
+        case .wrapperInputsMismatch:
+            logOpenPayloadMiss(messageId: request.messageId, reason: "wrapper_input_mismatch")
             if !entry.isCheckedOut {
                 invalidate(messageId: request.messageId)
             }
@@ -661,6 +719,7 @@ final class FullEmailWebViewManager: FullEmailOpening {
 
     private func makeEntry(
         key: FullEmailWebViewPreRenderKey,
+        request: OriginalEmailWarmRequest,
         payload: FullEmailOpenPayload,
         message: Message?,
         senderEmail: String?,
@@ -680,6 +739,7 @@ final class FullEmailWebViewManager: FullEmailOpening {
         webView.navigationDelegate = delegate
         let entry = Entry(
             key: key,
+            request: request,
             payload: payload,
             webView: webView,
             cidHandler: cidHandler,

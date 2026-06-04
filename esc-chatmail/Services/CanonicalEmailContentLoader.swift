@@ -54,7 +54,7 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
         bodyText: String?,
         allowRecovery: Bool = true
     ) async -> CanonicalEmailContent? {
-        let normalizedPlainText = normalizedMeaningfulPlainText(from: bodyText)
+        let normalizedPlainText = Self.normalizedMeaningfulPlainText(from: bodyText)
 
         if contentHandler.htmlFileExists(for: messageId),
            let html = canonicalHTMLSource(from: contentHandler.loadHTML(for: messageId)) {
@@ -217,7 +217,7 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
         return logAndReturn(
             CanonicalEmailContent(
                 html: html,
-                plainText: normalizedMeaningfulPlainText(from: bodyText),
+                plainText: Self.normalizedMeaningfulPlainText(from: bodyText),
                 sourceKind: .recoveredHTML,
                 sourceLocation: .recoveredHTML
             ),
@@ -264,7 +264,7 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
         return trimmed
     }
 
-    private func normalizedPlainTextFallback(from text: String) -> String {
+    private static func normalizedPlainTextFallback(from text: String) -> String {
         var normalized = RawEmailSourceSanitizer.extractDisplayText(from: text)
         normalized = HTMLEntityDecoder.decode(normalized)
 
@@ -294,14 +294,14 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
         return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func normalizedMeaningfulPlainText(from text: String?) -> String? {
+    static func normalizedMeaningfulPlainText(from text: String?) -> String? {
         guard let text, !text.isEmpty else { return nil }
         let normalized = normalizedPlainTextFallback(from: text)
         let nonWhitespace = normalized.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
         return nonWhitespace.isEmpty ? nil : normalized
     }
 
-    private func looksQuotedPrintable(_ text: String) -> Bool {
+    private static func looksQuotedPrintable(_ text: String) -> Bool {
         let lower = text.lowercased()
         return lower.contains("=\r\n") ||
             lower.contains("=\n") ||

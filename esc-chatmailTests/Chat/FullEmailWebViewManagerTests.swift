@@ -147,12 +147,75 @@ final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
         )
     }
 
+    private func makeRequest(
+        bodyStorageURI: String? = nil,
+        bodyText: String? = "Body",
+        senderEmail: String? = "sender@example.com",
+        subject: String? = "Subject"
+    ) -> OriginalEmailWarmRequest {
+        OriginalEmailWarmRequest(
+            messageId: "message-1",
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            senderEmail: senderEmail,
+            subject: subject
+        )
+    }
+
     func testSameHTMLSourceWidthAndCIDAvailabilityIsReusable() {
+        let key = makeKey()
+        let request = makeRequest()
+        XCTAssertEqual(
+            FullEmailOpenPayloadReuseValidator.decision(
+                entryKey: key,
+                expectedKey: key,
+                entryRequest: request,
+                currentRequest: request,
+                payload: makePayload(),
+                currentSourceSignature: "sha256:source"
+            ),
+            .reusable
+        )
+    }
+
+    func testChangedBodyStorageURIDoesNotMissReuseWhenSourceAndWrapperInputsMatch() {
         let key = makeKey()
         XCTAssertEqual(
             FullEmailOpenPayloadReuseValidator.decision(
                 entryKey: key,
                 expectedKey: key,
+                entryRequest: makeRequest(bodyStorageURI: nil),
+                currentRequest: makeRequest(bodyStorageURI: "file:///tmp/message-1.html"),
+                payload: makePayload(),
+                currentSourceSignature: "sha256:source"
+            ),
+            .reusable
+        )
+    }
+
+    func testWhitespaceOnlyWrapperInputChangesAreReusable() {
+        let key = makeKey()
+        XCTAssertEqual(
+            FullEmailOpenPayloadReuseValidator.decision(
+                entryKey: key,
+                expectedKey: key,
+                entryRequest: makeRequest(senderEmail: " sender@example.com ", subject: " Subject "),
+                currentRequest: makeRequest(senderEmail: "sender@example.com", subject: "Subject"),
+                payload: makePayload(),
+                currentSourceSignature: "sha256:source"
+            ),
+            .reusable
+        )
+    }
+
+    func testCanonicalEquivalentBodyTextChangesAreReusable() {
+        let key = makeKey()
+        XCTAssertEqual(
+            FullEmailOpenPayloadReuseValidator.decision(
+                entryKey: key,
+                expectedKey: key,
+                entryRequest: makeRequest(bodyText: "Hello&nbsp;=26&nbsp;team=3Cok=3E\n\n\nThanks"),
+                currentRequest: makeRequest(bodyText: "Hello & team<ok>\n\nThanks"),
                 payload: makePayload(),
                 currentSourceSignature: "sha256:source"
             ),
@@ -165,6 +228,8 @@ final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
             FullEmailOpenPayloadReuseValidator.decision(
                 entryKey: makeKey(),
                 expectedKey: makeKey(),
+                entryRequest: makeRequest(),
+                currentRequest: makeRequest(),
                 payload: makePayload(),
                 currentSourceSignature: "sha256:new-source"
             ),
@@ -177,6 +242,8 @@ final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
             FullEmailOpenPayloadReuseValidator.decision(
                 entryKey: makeKey(html: "<html>old</html>"),
                 expectedKey: makeKey(html: "<html>new</html>"),
+                entryRequest: makeRequest(),
+                currentRequest: makeRequest(),
                 payload: makePayload(html: "<html>old</html>"),
                 currentSourceSignature: "sha256:source"
             ),
@@ -189,6 +256,8 @@ final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
             FullEmailOpenPayloadReuseValidator.decision(
                 entryKey: makeKey(cid: "cid:none"),
                 expectedKey: makeKey(cid: "cid:image=available"),
+                entryRequest: makeRequest(),
+                currentRequest: makeRequest(),
                 payload: makePayload(),
                 currentSourceSignature: "sha256:source"
             ),
@@ -201,10 +270,40 @@ final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
             FullEmailOpenPayloadReuseValidator.decision(
                 entryKey: makeKey(width: 390),
                 expectedKey: makeKey(width: 393),
+                entryRequest: makeRequest(),
+                currentRequest: makeRequest(),
                 payload: makePayload(),
                 currentSourceSignature: "sha256:source"
             ),
             .keyMismatch
+        )
+    }
+
+    func testChangedBodyTextMissesReuse() {
+        XCTAssertEqual(
+            FullEmailOpenPayloadReuseValidator.decision(
+                entryKey: makeKey(),
+                expectedKey: makeKey(),
+                entryRequest: makeRequest(bodyText: "Old body"),
+                currentRequest: makeRequest(bodyText: "New body"),
+                payload: makePayload(),
+                currentSourceSignature: "sha256:source"
+            ),
+            .wrapperInputsMismatch
+        )
+    }
+
+    func testChangedWrapperInputsMissReuse() {
+        XCTAssertEqual(
+            FullEmailOpenPayloadReuseValidator.decision(
+                entryKey: makeKey(),
+                expectedKey: makeKey(),
+                entryRequest: makeRequest(subject: "Old subject"),
+                currentRequest: makeRequest(subject: "New subject"),
+                payload: makePayload(),
+                currentSourceSignature: "sha256:source"
+            ),
+            .wrapperInputsMismatch
         )
     }
 }
