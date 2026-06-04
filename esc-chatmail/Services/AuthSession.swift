@@ -188,6 +188,8 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
         // Clear conversation cache to prevent leaking previous user's data
         clearConversationCaches()
+        await AliasManager.shared.invalidate()
+        await SendAsAliasManager.shared.invalidate()
 
         // Clear attachment downloader tracking data
         cleanupDownloads()
@@ -291,6 +293,8 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
         // Clear conversation cache to prevent leaking previous user's data
         clearConversationCaches()
+        await AliasManager.shared.invalidate()
+        await SendAsAliasManager.shared.invalidate()
 
         // Clear attachment downloader tracking data
         cleanupDownloads()

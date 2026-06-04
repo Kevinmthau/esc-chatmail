@@ -19,6 +19,7 @@ extension Message {
     @NSManaged public var snippet: String?
     @NSManaged public var cleanedSnippet: String?
     @NSManaged public var chatPreviewText: String?
+    @NSManaged public var deliveredToAddress: String?
     @NSManaged public var isFromMe: Bool
     @NSManaged public var isUnread: Bool
     @NSManaged public var isNewsletter: Bool
@@ -29,6 +30,7 @@ extension Message {
     @NSManaged public var senderEmail: String?
     @NSManaged public var messageId: String?
     @NSManaged public var references: String?
+    @NSManaged public var replyFromAddress: String?
     @NSManaged public var localModifiedAt: Date?
     @NSManaged public var conversation: Conversation?
     @NSManaged public var labels: Set<Label>?

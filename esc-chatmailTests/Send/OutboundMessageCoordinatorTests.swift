@@ -497,6 +497,8 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
 
     struct SendReplyCall {
         let recipients: [String]
+        let fromEmail: String?
+        let fromName: String?
         let body: String
         let subject: String
         let threadId: String
@@ -600,6 +602,8 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
 
     func sendReply(
         to recipients: [String],
+        fromEmail: String?,
+        fromName: String?,
         body: String,
         subject: String,
         threadId: String,
@@ -612,6 +616,8 @@ private final class MockOutboundMessageSendService: OutboundMessageSendServicing
             replyCalls.append(
                 SendReplyCall(
                     recipients: recipients,
+                    fromEmail: fromEmail,
+                    fromName: fromName,
                     body: body,
                     subject: subject,
                     threadId: threadId,

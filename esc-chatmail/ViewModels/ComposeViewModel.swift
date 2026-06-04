@@ -256,7 +256,7 @@ final class ComposeViewModel: ObservableObject {
             result = try await outboundMessageCoordinator.send(request)
         } catch {
             Log.error("Failed to create optimistic message", category: .message, error: error)
-            self.error = GmailSendService.SendError.optimisticCreationFailed
+            self.error = error
             showError = true
             isSending = false
             return false

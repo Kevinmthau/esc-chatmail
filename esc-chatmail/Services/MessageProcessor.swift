@@ -10,7 +10,11 @@ class MessageProcessor: @unchecked Sendable {
     private let emailNormalizer = EmailNormalizer.self
     private let previewClassifier = EmailPreviewClassifier()
 
-    func processGmailMessage(_ gmailMessage: GmailMessage, myAliases: Set<String>) async -> ProcessedMessage? {
+    func processGmailMessage(
+        _ gmailMessage: GmailMessage,
+        myAliases: Set<String>,
+        sendAsAliases: [SendAsAlias] = []
+    ) async -> ProcessedMessage? {
         guard let payload = gmailMessage.payload,
               let headers = payload.headers else { return nil }
 
@@ -31,7 +35,12 @@ class MessageProcessor: @unchecked Sendable {
         }
 
         // Process headers
-        processedMessage.headers = extractHeaders(from: headers, myAliases: myAliases)
+        processedMessage.headers = extractHeaders(
+            from: headers,
+            myAliases: myAliases,
+            sendAsAliases: sendAsAliases,
+            isSentMessage: gmailMessage.labelIds?.contains("SENT") == true
+        )
 
         // Process content (may fetch large body parts via API)
         let content = await extractContent(from: payload, messageId: gmailMessage.id)
@@ -308,7 +317,12 @@ class MessageProcessor: @unchecked Sendable {
         return NewsletterDetectionResult(isNewsletter: isNewsletter, score: score, signals: signals)
     }
     
-    private func extractHeaders(from headers: [MessageHeader], myAliases: Set<String>) -> ProcessedHeaders {
+    private func extractHeaders(
+        from headers: [MessageHeader],
+        myAliases: Set<String>,
+        sendAsAliases: [SendAsAlias],
+        isSentMessage: Bool
+    ) -> ProcessedHeaders {
         var processedHeaders = ProcessedHeaders()
 
         for header in headers {
@@ -347,12 +361,17 @@ class MessageProcessor: @unchecked Sendable {
             }
         }
 
+        let replyFromResolution = ReplyFromAddressResolver(
+            sendAsAliases: sendAsAliases
+        ).resolve(headers: headers, isSentMessage: isSentMessage)
+        processedHeaders.deliveredToAddress = replyFromResolution.deliveredToAddress
+        processedHeaders.replyFromAddress = replyFromResolution.replyFromAddress
+
         return processedHeaders
     }
     
     private func parseEmailAddresses(from headerValue: String) -> [EmailAddress] {
-        return headerValue.split(separator: ",").compactMap { emailStr in
-            let trimmed = emailStr.trimmingCharacters(in: .whitespaces)
+        EmailAddressListParser.addressTokens(from: headerValue).compactMap { trimmed in
             guard let email = emailNormalizer.extractEmail(from: trimmed) else { return nil }
             return EmailAddress(
                 email: emailNormalizer.normalize(email),
@@ -972,6 +991,8 @@ struct ProcessedHeaders: Sendable {
     var to: [EmailAddress] = []
     var cc: [EmailAddress] = []
     var bcc: [EmailAddress] = []
+    var deliveredToAddress: String?
+    var replyFromAddress: String?
     var isFromMe: Bool = false
     var inReplyTo: String?
     var references: [String] = []

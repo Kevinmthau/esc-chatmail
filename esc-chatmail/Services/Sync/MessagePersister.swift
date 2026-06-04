@@ -74,10 +74,15 @@ actor MessagePersister {
         _ gmailMessage: GmailMessage,
         labelIds: Set<String>? = nil,
         myAliases: Set<String>,
+        sendAsAliases: [SendAsAlias] = [],
         modificationTransaction: ModificationTracker.Transaction? = nil,
         in context: NSManagedObjectContext
     ) async {
-        let prepared = await prepareMessage(gmailMessage, myAliases: myAliases)
+        let prepared = await prepareMessage(
+            gmailMessage,
+            myAliases: myAliases,
+            sendAsAliases: sendAsAliases
+        )
         await persist(
             prepared,
             labelIds: labelIds,
@@ -99,12 +104,17 @@ actor MessagePersister {
         _ gmailMessages: [GmailMessage],
         labelIds: Set<String>? = nil,
         myAliases: Set<String>,
+        sendAsAliases: [SendAsAlias] = [],
         modificationTransaction: ModificationTracker.Transaction? = nil,
         in context: NSManagedObjectContext
     ) async {
         guard !gmailMessages.isEmpty else { return }
 
-        let prepared = await prepareMessagesConcurrently(gmailMessages, myAliases: myAliases)
+        let prepared = await prepareMessagesConcurrently(
+            gmailMessages,
+            myAliases: myAliases,
+            sendAsAliases: sendAsAliases
+        )
 
         for outcome in prepared {
             await persist(
@@ -123,7 +133,8 @@ actor MessagePersister {
     /// so it is safe to run concurrently across many messages.
     nonisolated func prepareMessage(
         _ gmailMessage: GmailMessage,
-        myAliases: Set<String>
+        myAliases: Set<String>,
+        sendAsAliases: [SendAsAlias] = []
     ) async -> PreparedMessage {
         if let messageLabelIds = gmailMessage.labelIds,
            let excludedMailboxLabel = messageLabelIds.first(where: Self.excludedMailboxLabelIDs.contains) {
@@ -138,7 +149,8 @@ actor MessagePersister {
         // Process the Gmail message (may fetch large body parts via API)
         guard let processedMessage = await messageProcessor.processGmailMessage(
             gmailMessage,
-            myAliases: myAliases
+            myAliases: myAliases,
+            sendAsAliases: sendAsAliases
         ) else {
             return .unprocessable(id: gmailMessage.id)
         }
@@ -149,7 +161,8 @@ actor MessagePersister {
     /// Prepares messages concurrently with bounded parallelism, preserving input order.
     nonisolated func prepareMessagesConcurrently(
         _ gmailMessages: [GmailMessage],
-        myAliases: Set<String>
+        myAliases: Set<String>,
+        sendAsAliases: [SendAsAlias] = []
     ) async -> [PreparedMessage] {
         let maxConcurrent = max(1, min(SyncConfig.maxConcurrentMessageProcessing, gmailMessages.count))
 
@@ -161,7 +174,11 @@ actor MessagePersister {
                 let index = nextIndex
                 let message = gmailMessages[index]
                 group.addTask { [self] in
-                    (index, await self.prepareMessage(message, myAliases: myAliases))
+                    (index, await self.prepareMessage(
+                        message,
+                        myAliases: myAliases,
+                        sendAsAliases: sendAsAliases
+                    ))
                 }
                 nextIndex += 1
             }
@@ -172,7 +189,11 @@ actor MessagePersister {
                     let refillIndex = nextIndex
                     let message = gmailMessages[refillIndex]
                     group.addTask { [self] in
-                        (refillIndex, await self.prepareMessage(message, myAliases: myAliases))
+                        (refillIndex, await self.prepareMessage(
+                            message,
+                            myAliases: myAliases,
+                            sendAsAliases: sendAsAliases
+                        ))
                     }
                     nextIndex += 1
                 }

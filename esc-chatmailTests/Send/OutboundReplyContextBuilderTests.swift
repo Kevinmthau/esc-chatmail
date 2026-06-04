@@ -144,6 +144,116 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertFalse(metadata.originalMessage?.originalHTML?.contains("Before HTML") == true)
     }
 
+    func testBuildReplyMetadata_withoutReplyTargetUsesLatestInboundReplyFromAlias() throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        let account = AccountBuilder()
+            .withEmail("me@example.com")
+            .build(in: context)
+        account.sendAsAliasesArray = sendAsAliases
+
+        let inbound = MessageBuilder()
+            .withId("inbound-alias")
+            .withThreadId("thread-alias")
+            .withSender(email: "friend@example.com", name: "Friend")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        inbound.deliveredToAddress = "alias@example.com"
+        inbound.replyFromAddress = "alias@example.com"
+
+        _ = MessageBuilder()
+            .withId("latest-optimistic")
+            .withThreadId("thread-alias")
+            .withSender(email: "me@example.com", name: "Me")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        var optimisticObjects = Array(conversation.messages ?? []).map { $0 as NSManagedObject }
+        optimisticObjects.append(conversation)
+        try context.obtainPermanentIDs(for: optimisticObjects)
+
+        let metadata = try makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
+            .init(
+                conversationObjectID: conversation.objectID,
+                replyingToMessageObjectID: nil,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertEqual(metadata.fromEmail, "alias@example.com")
+        XCTAssertEqual(metadata.threadId, "thread-alias")
+        XCTAssertEqual(metadata.recipientEmails, ["friend@example.com"])
+    }
+
+    func testBuildReplyMetadata_backfillsReplyFromAliasFromLegacyTargetParticipants() throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        let account = AccountBuilder()
+            .withEmail("me@example.com")
+            .build(in: context)
+        account.sendAsAliasesArray = sendAsAliases
+
+        let replyingTo = MessageBuilder()
+            .withId("legacy-target")
+            .withThreadId("thread-legacy")
+            .withSender(email: "friend@example.com", name: "Friend")
+            .inConversation(conversation)
+            .build(in: context)
+        let aliasPerson = PersonBuilder()
+            .withEmail("alias@example.com")
+            .noDisplayName()
+            .build(in: context)
+        addMessageParticipant(person: aliasPerson, kind: .to, to: replyingTo)
+        try context.obtainPermanentIDs(for: [conversation, replyingTo])
+
+        let metadata = try makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
+            .init(
+                conversationObjectID: conversation.objectID,
+                replyingToMessageObjectID: replyingTo.objectID,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertEqual(metadata.fromEmail, "alias@example.com")
+    }
+
+    func testBuildReplyMetadata_usesLegacyAccountAliasesWhenSendAsAliasesAreMissing() throws {
+        let context = coreDataStack.viewContext
+        let conversation = makeReplyConversation(in: context, friendEmail: "friend@example.com")
+        _ = AccountBuilder()
+            .withEmail("me@example.com")
+            .withAliases(["alias@example.com"])
+            .build(in: context)
+
+        let replyingTo = MessageBuilder()
+            .withId("legacy-alias-account")
+            .withThreadId("thread-legacy-account")
+            .withSender(email: "friend@example.com", name: "Friend")
+            .inConversation(conversation)
+            .build(in: context)
+        replyingTo.deliveredToAddress = "alias@example.com"
+        replyingTo.replyFromAddress = "alias@example.com"
+        try context.obtainPermanentIDs(for: [conversation, replyingTo])
+
+        let metadata = try makeBuilder(userEmail: "me@example.com").buildReplyMetadata(
+            .init(
+                conversationObjectID: conversation.objectID,
+                replyingToMessageObjectID: replyingTo.objectID,
+                optimisticConversation: .existingConversation(
+                    ConversationReference(objectID: conversation.objectID)
+                )
+            )
+        )
+
+        XCTAssertEqual(metadata.fromEmail, "alias@example.com")
+    }
+
     private func makeBuilder(userEmail: String = "me@example.com") -> OutboundReplyContextBuilder {
         OutboundReplyContextBuilder(
             viewContext: coreDataStack.viewContext,
@@ -190,6 +300,35 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         friendParticipant.conversation = conversation
 
         return conversation
+    }
+
+    private var sendAsAliases: [SendAsAlias] {
+        [
+            SendAsAlias(
+                emailAddress: "me@example.com",
+                displayName: "Me",
+                isDefault: true,
+                isPrimary: true,
+                verificationStatus: "accepted"
+            ),
+            SendAsAlias(
+                emailAddress: "alias@example.com",
+                displayName: "Alias",
+                verificationStatus: "accepted"
+            )
+        ]
+    }
+
+    private func addMessageParticipant(
+        person: Person,
+        kind: ParticipantKind,
+        to message: Message
+    ) {
+        let participant = coreDataStack.viewContext.insertTestObject(MessageParticipant.self)
+        participant.id = UUID()
+        participant.participantKind = kind
+        participant.person = person
+        participant.message = message
     }
 
     private func makeTestAuthSession(userEmail: String? = nil) -> AuthSession {

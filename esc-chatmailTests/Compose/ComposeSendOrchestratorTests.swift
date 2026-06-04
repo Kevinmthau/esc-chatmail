@@ -51,6 +51,8 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
         let replyMetadata = OutboundMessageRequest.ReplyMetadata(
             recipientEmails: ["to@example.com"],
+            fromEmail: "alias@example.com",
+            fromName: "Alias",
             subject: "Re: Hello",
             threadId: "thread-1",
             inReplyTo: "<id-1>",
@@ -78,6 +80,8 @@ final class ComposeSendOrchestratorTests: XCTestCase {
 
         let replyMetadata = OutboundMessageRequest.ReplyMetadata(
             recipientEmails: ["to@example.com"],
+            fromEmail: "alias@example.com",
+            fromName: "Alias",
             subject: nil,
             threadId: "thread-1",
             inReplyTo: "<id-1>",
@@ -283,6 +287,8 @@ private final class MockComposeSendService: ComposeSendServicing {
 
     func sendReply(
         to recipients: [String],
+        fromEmail: String?,
+        fromName: String?,
         body: String,
         subject: String,
         threadId: String,

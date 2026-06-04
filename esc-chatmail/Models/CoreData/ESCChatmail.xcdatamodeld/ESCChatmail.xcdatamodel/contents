@@ -5,6 +5,7 @@
         <attribute name="email" attributeType="String"/>
         <attribute name="historyId" optional="YES" attributeType="String"/>
         <attribute name="id" attributeType="String"/>
+        <attribute name="sendAsAliasesJSON" optional="YES" attributeType="String"/>
     </entity>
     <entity name="Attachment" representedClassName="Attachment" syncable="YES">
         <attribute name="byteSize" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
@@ -109,6 +110,7 @@
         <attribute name="bodyText" optional="YES" attributeType="String"/>
         <attribute name="chatPreviewText" optional="YES" attributeType="String"/>
         <attribute name="cleanedSnippet" optional="YES" attributeType="String"/>
+        <attribute name="deliveredToAddress" optional="YES" attributeType="String"/>
         <attribute name="gmThreadId" attributeType="String"/>
         <attribute name="hasAttachments" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="id" attributeType="String"/>
@@ -119,6 +121,7 @@
         <attribute name="localModifiedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="messageId" optional="YES" attributeType="String"/>
         <attribute name="references" optional="YES" attributeType="String"/>
+        <attribute name="replyFromAddress" optional="YES" attributeType="String"/>
         <attribute name="senderEmail" optional="YES" attributeType="String"/>
         <attribute name="senderName" optional="YES" attributeType="String"/>
         <attribute name="snippet" optional="YES" attributeType="String"/>

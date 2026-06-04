@@ -12,6 +12,8 @@ protocol ComposeSendServicing: AnyObject {
     @MainActor func markAttachmentsAsUploaded(references: [LocalAttachmentReference])
     func sendReply(
         to recipients: [String],
+        fromEmail: String?,
+        fromName: String?,
         body: String,
         subject: String,
         threadId: String,
@@ -99,6 +101,8 @@ struct ComposeSendOrchestrator {
                            !threadId.isEmpty {
                             result = try await sendService.sendReply(
                                 to: replyMetadata.recipientEmails,
+                                fromEmail: replyMetadata.fromEmail,
+                                fromName: replyMetadata.fromName,
                                 body: input.body,
                                 subject: replyMetadata.subject ?? "",
                                 threadId: threadId,

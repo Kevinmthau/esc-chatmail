@@ -2275,7 +2275,11 @@ private final class StubMessageProcessor: MessageProcessor, @unchecked Sendable 
         self.processedMessage = processedMessage
     }
 
-    override func processGmailMessage(_ gmailMessage: GmailMessage, myAliases: Set<String>) async -> ProcessedMessage? {
+    override func processGmailMessage(
+        _ gmailMessage: GmailMessage,
+        myAliases: Set<String>,
+        sendAsAliases: [SendAsAlias] = []
+    ) async -> ProcessedMessage? {
         processedMessage
     }
 }

@@ -64,6 +64,8 @@ final class GmailSendService: ObservableObject {
     /// Sends a reply to an existing thread.
     nonisolated func sendReply(
         to recipients: [String],
+        fromEmail: String? = nil,
+        fromName: String? = nil,
         body: String,
         subject: String,
         threadId: String,
@@ -72,16 +74,18 @@ final class GmailSendService: ObservableObject {
         originalMessage: QuotedMessage? = nil,
         attachmentInfos: [AttachmentInfo] = []
     ) async throws -> SendResult {
-        let (fromEmail, fromName) = await MainActor.run { (authSession.userEmail, authSession.userName) }
-        guard let fromEmail = fromEmail else {
+        let sessionFrom = await MainActor.run { (authSession.userEmail, authSession.userName) }
+        let resolvedFromEmail = fromEmail ?? sessionFrom.0
+        let resolvedFromName = fromName ?? sessionFrom.1
+        guard let resolvedFromEmail else {
             throw SendError.authenticationFailed
         }
 
         let attachmentData = try await prepareAttachmentInfos(attachmentInfos)
         let mimeData = MimeBuilder.buildReply(
             to: recipients,
-            from: fromEmail,
-            fromName: fromName,
+            from: resolvedFromEmail,
+            fromName: resolvedFromName,
             body: body,
             subject: subject,
             inReplyTo: inReplyTo,
