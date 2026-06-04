@@ -62,6 +62,317 @@ final class FullEmailWebViewPoolBookkeepingTests: XCTestCase {
     }
 }
 
+final class FullEmailRemoteImageFallbackBookkeepingTests: XCTestCase {
+    private func makeRequest(messageId: String = "message-1") -> OriginalEmailWarmRequest {
+        OriginalEmailWarmRequest(
+            messageId: messageId,
+            bodyStorageURI: "file:///tmp/\(messageId).html",
+            bodyText: "Body",
+            senderEmail: "sender@example.com",
+            subject: "Subject"
+        )
+    }
+
+    func testGenerationStartsAtZero() {
+        let bookkeeping = FullEmailRemoteImageFallbackBookkeeping()
+
+        XCTAssertEqual(bookkeeping.generation(for: "message-1"), 0)
+        XCTAssertTrue(bookkeeping.isCurrent(messageId: "message-1", generation: 0))
+    }
+
+    func testFallbackWarmInvalidatesStartedWarmGeneration() {
+        var bookkeeping = FullEmailRemoteImageFallbackBookkeeping()
+        let startedGeneration = bookkeeping.generation(for: "message-1")
+
+        bookkeeping.markFallbackWarmed(messageId: "message-1")
+
+        XCTAssertFalse(bookkeeping.isCurrent(messageId: "message-1", generation: startedGeneration))
+        XCTAssertTrue(bookkeeping.isCurrent(messageId: "message-1", generation: startedGeneration + 1))
+    }
+
+    func testFallbackWarmForDifferentMessageDoesNotInvalidateStartedWarmGeneration() {
+        var bookkeeping = FullEmailRemoteImageFallbackBookkeeping()
+        let startedGeneration = bookkeeping.generation(for: "message-1")
+
+        bookkeeping.markFallbackWarmed(messageId: "message-2")
+
+        XCTAssertTrue(bookkeeping.isCurrent(messageId: "message-1", generation: startedGeneration))
+    }
+
+    func testRememberedWarmContextSurvivesFallbackGenerationBump() {
+        var bookkeeping = FullEmailRemoteImageFallbackBookkeeping()
+        let request = makeRequest()
+        let context = FullEmailRemoteImageFallbackBookkeeping.WarmContext(
+            request: request,
+            width: 390
+        )
+
+        bookkeeping.rememberWarmContext(request: request, width: 390)
+        bookkeeping.markFallbackWarmed(messageId: "message-1")
+
+        XCTAssertEqual(bookkeeping.warmContext(for: "message-1"), context)
+    }
+
+    func testRemovingWarmContextDropsReplacementRewarmInputs() {
+        var bookkeeping = FullEmailRemoteImageFallbackBookkeeping()
+        let request = makeRequest()
+
+        bookkeeping.rememberWarmContext(request: request, width: 390)
+        bookkeeping.removeWarmContext(messageId: "message-1")
+        bookkeeping.markFallbackWarmed(messageId: "message-1")
+
+        XCTAssertNil(bookkeeping.warmContext(for: "message-1"))
+    }
+
+    func testRemoveAllWarmContextsDropsReplacementRewarmInputs() {
+        var bookkeeping = FullEmailRemoteImageFallbackBookkeeping()
+
+        bookkeeping.rememberWarmContext(request: makeRequest(messageId: "message-1"), width: 390)
+        bookkeeping.rememberWarmContext(request: makeRequest(messageId: "message-2"), width: 390)
+        bookkeeping.removeAllWarmContexts()
+
+        XCTAssertNil(bookkeeping.warmContext(for: "message-1"))
+        XCTAssertNil(bookkeeping.warmContext(for: "message-2"))
+    }
+}
+
+final class FullEmailPreparedOpenPayloadBookkeepingTests: XCTestCase {
+    private func makeKey(
+        messageId: String = "message-1",
+        sourceSignature: String = "sha256:source",
+        html: String = "<html>body</html>",
+        width: CGFloat = 390
+    ) -> FullEmailWebViewPreRenderKey {
+        FullEmailWebViewPreRenderKey.make(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            wrappedHTML: html,
+            cidAvailabilityFingerprint: "cid:none",
+            width: width
+        )
+    }
+
+    private func makeRequest(
+        messageId: String = "message-1",
+        subject: String = "Subject"
+    ) -> OriginalEmailWarmRequest {
+        OriginalEmailWarmRequest(
+            messageId: messageId,
+            bodyStorageURI: "file:///tmp/\(messageId).html",
+            bodyText: "Body",
+            senderEmail: "sender@example.com",
+            subject: subject
+        )
+    }
+
+    private func makePayload(
+        messageId: String = "message-1",
+        sourceSignature: String = "sha256:source",
+        html: String = "<html>body</html>"
+    ) -> FullEmailOpenPayload {
+        FullEmailOpenPayload(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            html: html,
+            presentation: .html,
+            sourceKind: .html,
+            sourceLocation: .messageFile,
+            hasHTMLSource: true,
+            checkoutAvailability: .warming
+        )
+    }
+
+    func testStoreAndReadPreparedPayload() {
+        var bookkeeping = FullEmailPreparedOpenPayloadBookkeeping()
+        let key = makeKey()
+        let request = makeRequest()
+        let payload = makePayload()
+
+        bookkeeping.store(key: key, request: request, payload: payload)
+
+        XCTAssertEqual(
+            bookkeeping.entry(for: "message-1"),
+            FullEmailPreparedOpenPayloadBookkeeping.Entry(
+                key: key,
+                request: request,
+                payload: payload
+            )
+        )
+        XCTAssertEqual(bookkeeping.messageIds, ["message-1"])
+    }
+
+    func testStoreReplacesExistingPayloadForMessage() {
+        var bookkeeping = FullEmailPreparedOpenPayloadBookkeeping()
+        bookkeeping.store(
+            key: makeKey(html: "<html>old</html>"),
+            request: makeRequest(subject: "Old"),
+            payload: makePayload(html: "<html>old</html>")
+        )
+
+        let newKey = makeKey(sourceSignature: "sha256:new", html: "<html>new</html>")
+        let newRequest = makeRequest(subject: "New")
+        let newPayload = makePayload(sourceSignature: "sha256:new", html: "<html>new</html>")
+        bookkeeping.store(key: newKey, request: newRequest, payload: newPayload)
+
+        XCTAssertEqual(
+            bookkeeping.entry(for: "message-1"),
+            FullEmailPreparedOpenPayloadBookkeeping.Entry(
+                key: newKey,
+                request: newRequest,
+                payload: newPayload
+            )
+        )
+        XCTAssertEqual(bookkeeping.messageIds, ["message-1"])
+    }
+
+    func testRemoveAndRemoveAllDropPreparedPayloads() {
+        var bookkeeping = FullEmailPreparedOpenPayloadBookkeeping()
+        bookkeeping.store(
+            key: makeKey(messageId: "message-1"),
+            request: makeRequest(messageId: "message-1"),
+            payload: makePayload(messageId: "message-1")
+        )
+        bookkeeping.store(
+            key: makeKey(messageId: "message-2"),
+            request: makeRequest(messageId: "message-2"),
+            payload: makePayload(messageId: "message-2")
+        )
+
+        bookkeeping.remove("message-1")
+
+        XCTAssertNil(bookkeeping.entry(for: "message-1"))
+        XCTAssertNotNil(bookkeeping.entry(for: "message-2"))
+
+        bookkeeping.removeAll()
+
+        XCTAssertTrue(bookkeeping.messageIds.isEmpty)
+    }
+}
+
+@MainActor
+final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
+    func testPayloadOnlyEvictionDropsRemoteImageFallbackWarmContext() async throws {
+        let messagesDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "FullEmailWebViewManagerTests-\(UUID().uuidString)"
+        )
+        let contentHandler = HTMLContentHandler(messagesDirectory: messagesDirectory)
+        defer {
+            try? FileManager.default.removeItem(at: messagesDirectory)
+        }
+
+        let firstMessageId = "payload-only-first-\(UUID().uuidString)"
+        let secondMessageId = "payload-only-second-\(UUID().uuidString)"
+        _ = contentHandler.saveHTML(simpleHTML(title: "First"), for: firstMessageId)
+        _ = contentHandler.saveHTML(simpleHTML(title: "Second"), for: secondMessageId)
+
+        let manager = FullEmailWebViewManager(capacity: 1, loader: makeLoader(contentHandler: contentHandler))
+
+        await manager.warm(
+            request: makeRequest(messageId: firstMessageId),
+            message: nil,
+            width: 390
+        )
+
+        XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: firstMessageId))
+        XCTAssertTrue(manager.hasRemoteImageFallbackWarmContextForTesting(messageId: firstMessageId))
+
+        await manager.warm(
+            request: makeRequest(messageId: secondMessageId),
+            message: nil,
+            width: 390
+        )
+
+        XCTAssertFalse(manager.hasPreparedPayloadForTesting(messageId: firstMessageId))
+        XCTAssertFalse(manager.hasRemoteImageFallbackWarmContextForTesting(messageId: firstMessageId))
+        XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: secondMessageId))
+        XCTAssertTrue(manager.hasRemoteImageFallbackWarmContextForTesting(messageId: secondMessageId))
+
+        manager.clear()
+    }
+
+    private func makeLoader(contentHandler: HTMLContentHandler) -> OriginalEmailSourceLoader {
+        let recoveryService = NoopHTMLContentRecoveryService()
+        return OriginalEmailSourceLoader(
+            canonicalContentLoader: CanonicalEmailContentLoader(
+                contentHandler: contentHandler,
+                recoveryService: recoveryService
+            ),
+            htmlContentLoader: HTMLContentLoader(
+                contentHandler: contentHandler,
+                sanitizer: .shared,
+                remoteImageAttachmentFallback: HTMLRemoteImageAttachmentFallback(
+                    requestExecutor: { _ in throw URLError(.unsupportedURL) }
+                ),
+                recoveryService: recoveryService
+            ),
+            renderedMessageCache: RenderedMessageCache()
+        )
+    }
+
+    private func makeRequest(messageId: String) -> OriginalEmailWarmRequest {
+        OriginalEmailWarmRequest(
+            messageId: messageId,
+            bodyStorageURI: nil,
+            bodyText: "Body \(messageId)",
+            senderEmail: "sender@example.com",
+            subject: "Subject"
+        )
+    }
+
+    private func simpleHTML(title: String) -> String {
+        """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <h1>\(title)</h1>
+          <p>Prepared full email content.</p>
+        </body>
+        </html>
+        """
+    }
+}
+
+final class FullEmailWebViewAdoptionPolicyTests: XCTestCase {
+    func testAdoptionIsDisabledByDefault() {
+        XCTAssertFalse(
+            FullEmailWebViewAdoptionPolicy.isEnabled(
+                arguments: [],
+                environment: [:]
+            )
+        )
+    }
+
+    func testLaunchArgumentEnablesAdoption() {
+        XCTAssertTrue(
+            FullEmailWebViewAdoptionPolicy.isEnabled(
+                arguments: [FullEmailWebViewAdoptionPolicy.launchArgument],
+                environment: [:]
+            )
+        )
+    }
+
+    func testEnvironmentVariableEnablesAdoptionOnlyWhenSetToOne() {
+        XCTAssertTrue(
+            FullEmailWebViewAdoptionPolicy.isEnabled(
+                arguments: [],
+                environment: [FullEmailWebViewAdoptionPolicy.environmentKey: "1"]
+            )
+        )
+        XCTAssertFalse(
+            FullEmailWebViewAdoptionPolicy.isEnabled(
+                arguments: [],
+                environment: [FullEmailWebViewAdoptionPolicy.environmentKey: "true"]
+            )
+        )
+    }
+}
+
+private final class NoopHTMLContentRecoveryService: HTMLContentRecovering, @unchecked Sendable {
+    func recoverHTMLContent(messageId: String) async -> String? {
+        nil
+    }
+}
+
 final class FullEmailWebViewPreRenderKeyTests: XCTestCase {
     private func makeKey(
         messageId: String = "m1",

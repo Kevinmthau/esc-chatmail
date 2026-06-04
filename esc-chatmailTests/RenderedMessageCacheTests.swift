@@ -112,6 +112,45 @@ final class RenderedMessageCacheTests: XCTestCase {
         XCTAssertNil(artifacts)
     }
 
+    func testInvalidationPreventsWrappedOriginalHTMLFromReusingStaleInFlightWork() async throws {
+        let cache = RenderedMessageCache()
+        let gate = AsyncGate()
+        let freshProducer = Counter()
+        let variantKey = RenderedMessageVariantKey("original")
+
+        async let staleResult = cache.cacheAwareWrappedOriginalHTML(
+            messageId: "message-1",
+            sourceSignature: "source-1",
+            variantKey: variantKey
+        ) {
+            await gate.markStarted()
+            await gate.waitForRelease()
+            return PreparedOriginalHTML(html: "<html>stale</html>", shouldCache: false)
+        }
+
+        await gate.waitForStart()
+        await cache.invalidate(messageId: "message-1")
+
+        let freshResult = await cache.cacheAwareWrappedOriginalHTML(
+            messageId: "message-1",
+            sourceSignature: "source-1",
+            variantKey: variantKey
+        ) {
+            await freshProducer.increment()
+            return PreparedOriginalHTML(html: "<html>fresh</html>", shouldCache: true)
+        }
+
+        await gate.release()
+        let stale = await staleResult
+        let artifacts = await cache.artifacts(messageId: "message-1", sourceSignature: "source-1")
+        let freshProducerCount = await freshProducer.value()
+
+        XCTAssertNil(stale)
+        XCTAssertEqual(freshResult, "<html>fresh</html>")
+        XCTAssertEqual(freshProducerCount, 1)
+        XCTAssertEqual(artifacts?.wrappedOriginalHTMLByVariant[variantKey], "<html>fresh</html>")
+    }
+
     func testClearCancelsInFlightWorkAndDoesNotStoreResult() async throws {
         let cache = RenderedMessageCache()
         let gate = AsyncGate()

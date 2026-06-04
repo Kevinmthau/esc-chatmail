@@ -228,7 +228,7 @@ final class ChatViewModel: ObservableObject {
         )
         if payload == nil {
             // Backstop for a tap that beats visible-row warming. The current open will use the
-            // existing loader path; a later re-open can adopt the warmed WebView.
+            // existing loader path; a later re-open can use warmed prepared HTML.
             fullEmailOpener.prewarmOnOpen(message: message)
         }
         fullMessagePresentation = FullMessagePresentation(

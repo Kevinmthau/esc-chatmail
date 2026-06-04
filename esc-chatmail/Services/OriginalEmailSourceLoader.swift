@@ -469,6 +469,10 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
         )
     }
 
+    func invalidateWarmedOriginalEmailSource(messageId: String) async {
+        await renderedMessageCache.invalidate(messageId: messageId, reason: .explicit)
+    }
+
     func currentHTMLSourceSignature(
         messageId: String,
         bodyStorageURI: String?

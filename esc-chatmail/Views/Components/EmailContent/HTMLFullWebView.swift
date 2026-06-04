@@ -11,8 +11,8 @@ struct HTMLWebView: View {
     var message: Message?
     /// Invoked when the WebView finishes its first paint, so the reader can cross-fade its placeholder.
     var onLoadFinished: (() -> Void)? = nil
-    /// Invoked when a pre-rendered, already-painted WebView is adopted, so the reader can drop its
-    /// placeholder instantly (the email is already on screen — no fade needed).
+    /// Invoked when the guarded pre-render adoption path supplies an already-painted WebView, so the
+    /// reader can drop its placeholder instantly.
     var onAdoptedPrerendered: (() -> Void)? = nil
 
     var body: some View {
