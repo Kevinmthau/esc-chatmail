@@ -245,6 +245,7 @@ struct FullEmailOpenPayload: Equatable, Sendable {
 
 enum FullEmailOpenPayloadReuseDecision: Equatable {
     case reusable
+    case missingCurrentHTMLSource
     case staleSource(currentSourceSignature: String)
     case wrapperInputsMismatch
     case keyMismatch
@@ -310,9 +311,12 @@ enum FullEmailOpenPayloadReuseValidator {
         payload: FullEmailOpenPayload,
         currentSourceSignature: String?
     ) -> FullEmailOpenPayloadReuseDecision {
-        if let currentSourceSignature,
-           currentSourceSignature != payload.sourceSignature {
-            return .staleSource(currentSourceSignature: currentSourceSignature)
+        if let currentSourceSignature {
+            if currentSourceSignature != payload.sourceSignature {
+                return .staleSource(currentSourceSignature: currentSourceSignature)
+            }
+        } else if payload.presentation == .html {
+            return .missingCurrentHTMLSource
         }
 
         let entryWrapperInputs = OriginalEmailWarmWrapperInputs(request: entryRequest)
@@ -710,6 +714,10 @@ final class FullEmailWebViewManager: FullEmailOpening {
                 reason: "stale_source",
                 detail: "currentSourceSignature=\(currentSourceSignature)"
             )
+            invalidate(messageId: request.messageId)
+            return nil
+        case .missingCurrentHTMLSource:
+            logOpenPayloadMiss(messageId: request.messageId, reason: "missing_current_html_source")
             invalidate(messageId: request.messageId)
             return nil
         case .wrapperInputsMismatch:

@@ -548,6 +548,22 @@ final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
         )
     }
 
+    func testMissingCurrentHTMLSourceMissesReuse() {
+        let key = makeKey()
+        let request = makeRequest()
+        XCTAssertEqual(
+            FullEmailOpenPayloadReuseValidator.decision(
+                entryKey: key,
+                expectedKey: key,
+                entryRequest: request,
+                currentRequest: request,
+                payload: makePayload(),
+                currentSourceSignature: nil
+            ),
+            .missingCurrentHTMLSource
+        )
+    }
+
     func testChangedHTMLMissesReuse() {
         XCTAssertEqual(
             FullEmailOpenPayloadReuseValidator.decision(
