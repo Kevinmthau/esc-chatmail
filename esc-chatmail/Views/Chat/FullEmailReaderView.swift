@@ -518,8 +518,8 @@ private struct EmailReaderMetadataChrome: View {
             return nil
         }
 
-        if totalCount == 1, let first = groups.first?.people.first {
-            return "To \(first)"
+        if totalCount == 1, let group = groups.first, let first = group.people.first {
+            return "\(group.label) \(first)"
         }
 
         return "Recipients \(totalCount)"

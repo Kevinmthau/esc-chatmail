@@ -6,6 +6,7 @@ import UIKit
 struct ChatView: View {
     @ObservedObject var conversation: Conversation
     @StateObject private var viewModel: ChatViewModel
+    @State private var presentedSheetDestination: ChatDestination?
     private let chatDependencies: ChatDependencies
     private let makeForwardComposeView: @MainActor (ComposeForwardModeContext) -> ComposeView
 
@@ -102,6 +103,9 @@ struct ChatView: View {
             dismissActiveDestination()
         }) { destination in
             destinationSheet(destination)
+                .onAppear {
+                    presentedSheetDestination = destination
+                }
         }
         .alert(item: $viewModel.contactManager.contactActionAlert) { alert in
             switch alert.kind {
@@ -253,10 +257,19 @@ struct ChatView: View {
     }
 
     private func dismissActiveDestination() {
+        let dismissedDestination = presentedSheetDestination
+        presentedSheetDestination = nil
+        let shouldCancelContactPicker: Bool
+        if case .contactPicker = dismissedDestination, viewModel.contactManager.showingContactPicker {
+            shouldCancelContactPicker = true
+        } else {
+            shouldCancelContactPicker = false
+        }
+
         viewModel.dismissDestination()
         viewModel.contactManager.contactToAdd = nil
         viewModel.contactManager.showingParticipantsList = false
-        if viewModel.contactManager.showingContactPicker {
+        if shouldCancelContactPicker {
             viewModel.contactManager.handleContactPickerCancelled()
         }
     }
