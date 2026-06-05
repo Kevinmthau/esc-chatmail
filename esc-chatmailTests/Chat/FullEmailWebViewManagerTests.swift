@@ -2,6 +2,27 @@ import WebKit
 import XCTest
 @testable import esc_chatmail
 
+private func withEnvironmentValue(
+    _ value: String?,
+    for key: String,
+    run body: () throws -> Void
+) rethrows {
+    let previousValue = getenv(key).map { String(cString: $0) }
+    if let value {
+        _ = setenv(key, value, 1)
+    } else {
+        _ = unsetenv(key)
+    }
+    defer {
+        if let previousValue {
+            _ = setenv(key, previousValue, 1)
+        } else {
+            _ = unsetenv(key)
+        }
+    }
+    try body()
+}
+
 final class FullEmailWebViewPoolBookkeepingTests: XCTestCase {
     func testTouchKeepsMostRecentlyUsedAndDoesNotEvictUnderCapacity() {
         var pool = FullEmailWebViewPoolBookkeeping(capacity: 3)
@@ -305,7 +326,7 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
         manager.clear()
     }
 
-    func testPrepaintAfterExplicitOpenDoesNotCreateWebViewEntryForWarmingPayload() {
+    func testPrepaintAfterExplicitOpenCreatesWebViewEntryForWarmingPayload() {
         XCTAssertFalse(
             FullEmailWebViewAdoptionPolicy.isEnabled(
                 arguments: [],
@@ -342,11 +363,11 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
             width: 390
         )
 
-        XCTAssertFalse(manager.hasPreparedPayloadForTesting(messageId: messageId))
-        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
+        XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: messageId))
+        XCTAssertTrue(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
     }
 
-    func testPrepaintAfterExplicitOpenDoesNotCreateWebViewEntryWithoutReadyEntry() {
+    func testPrepaintAfterExplicitOpenCreatesWebViewEntryWithoutExistingEntry() {
         let testStack = TestCoreDataStack()
         let messageId = "explicit-open-no-ready-entry-\(UUID().uuidString)"
         let message = MessageBuilder()
@@ -376,7 +397,46 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
             width: 390
         )
 
-        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
+        XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: messageId))
+        XCTAssertTrue(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
+    }
+
+    func testPrepaintAfterExplicitOpenDoesNotCreateWebViewEntryWhenAdoptionExplicitlyDisabled() {
+        withEnvironmentValue("1", for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
+            XCTAssertTrue(FullEmailWebViewAdoptionPolicy.explicitlyDisablesPrerenderedWebViewAdoption)
+
+            let testStack = TestCoreDataStack()
+            let messageId = "explicit-open-disabled-\(UUID().uuidString)"
+            let message = MessageBuilder()
+                .withId(messageId)
+                .withSubject("Subject")
+                .withSender(email: "sender@example.com", name: "Sender")
+                .withBody("Body \(messageId)")
+                .build(in: testStack.viewContext)
+            let request = makeRequest(messageId: messageId)
+            let payload = FullEmailOpenPayload(
+                messageId: messageId,
+                sourceSignature: "sha256:\(messageId)",
+                html: simpleHTML(title: "Explicit prepaint"),
+                presentation: .html,
+                sourceKind: .html,
+                sourceLocation: .messageFile,
+                hasHTMLSource: true,
+                checkoutAvailability: .warming
+            )
+            let manager = FullEmailWebViewManager()
+            defer { manager.clear() }
+
+            manager.prepaintAfterExplicitOpen(
+                request: request,
+                message: message,
+                payload: payload,
+                width: 390
+            )
+
+            XCTAssertFalse(manager.hasPreparedPayloadForTesting(messageId: messageId))
+            XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
+        }
     }
 
     func testPayloadOnlyEvictionDropsRemoteImageFallbackWarmContext() async throws {
@@ -466,6 +526,33 @@ final class FullEmailWebViewAdoptionPolicyTests: XCTestCase {
             FullEmailWebViewAdoptionPolicy.isEnabled(
                 arguments: [],
                 environment: [:]
+            )
+        )
+    }
+
+    func testExplicitDisablePredicateIsFalseByDefault() {
+        XCTAssertFalse(
+            FullEmailWebViewAdoptionPolicy.isExplicitlyDisabled(
+                arguments: [],
+                environment: [:]
+            )
+        )
+    }
+
+    func testExplicitDisablePredicateDetectsLaunchArgument() {
+        XCTAssertTrue(
+            FullEmailWebViewAdoptionPolicy.isExplicitlyDisabled(
+                arguments: [FullEmailWebViewAdoptionPolicy.disableLaunchArgument],
+                environment: [:]
+            )
+        )
+    }
+
+    func testExplicitDisablePredicateDetectsEnvironmentVariable() {
+        XCTAssertTrue(
+            FullEmailWebViewAdoptionPolicy.isExplicitlyDisabled(
+                arguments: [],
+                environment: [FullEmailWebViewAdoptionPolicy.disableEnvironmentKey: "1"]
             )
         )
     }

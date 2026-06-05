@@ -55,7 +55,7 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
         XCTAssertTrue(opener.prewarmedMessages.isEmpty)
     }
 
-    func testOpenSession_warmingPreparedPayloadCreatesPresentableSessionWithoutExplicitPrepaint() {
+    func testOpenSession_warmingPreparedPayloadCreatesPresentableSessionAndDefersExplicitPrepaint() async {
         let message = makeMessage(
             id: "warming-prepared-message",
             subject: "Prepared subject",
@@ -80,6 +80,19 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
         XCTAssertEqual(session.readerState, .preparedHTML(payload, placeholder: session.immediatePlaceholder))
         XCTAssertEqual(opener.preparedPayloadRequests.count, 1)
         XCTAssertTrue(opener.prepaintRequests.isEmpty)
+
+        for _ in 0..<3 {
+            if !opener.prepaintRequests.isEmpty {
+                break
+            }
+            await Task.yield()
+        }
+
+        XCTAssertEqual(opener.prepaintRequests.count, 1)
+        XCTAssertEqual(opener.prepaintRequests.first?.request.messageId, "warming-prepared-message")
+        XCTAssertEqual(opener.prepaintRequests.first?.message.id, "warming-prepared-message")
+        XCTAssertEqual(opener.prepaintRequests.first?.payload, payload)
+        XCTAssertEqual(opener.prepaintRequests.first?.width, 390)
         XCTAssertTrue(opener.prewarmedMessages.isEmpty)
     }
 

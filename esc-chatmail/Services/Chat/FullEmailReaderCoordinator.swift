@@ -30,16 +30,6 @@ final class FullEmailReaderCoordinator {
             message: message,
             width: width
         )
-        if let payload, payload.checkoutAvailability == .ready {
-            // The reader only gets one checkout attempt in makeUIView. If a prepared payload is still
-            // warming, let the live reader load it instead of starting duplicate off-screen WebKit work.
-            fullEmailOpener.prepaintAfterExplicitOpen(
-                request: request,
-                message: message,
-                payload: payload,
-                width: width
-            )
-        }
         let session = FullEmailOpenSession(
             message: message,
             request: request,
@@ -47,7 +37,27 @@ final class FullEmailReaderCoordinator {
             immediatePlaceholder: FullEmailPlaceholder(message: message)
         )
 
-        if payload == nil {
+        if let payload {
+            // A warming payload cannot help this checkout and prepaint may create WebKit work, so
+            // defer it until the session is handed back for presentation.
+            if payload.checkoutAvailability == .warming {
+                Task { @MainActor [fullEmailOpener] in
+                    fullEmailOpener.prepaintAfterExplicitOpen(
+                        request: request,
+                        message: message,
+                        payload: payload,
+                        width: width
+                    )
+                }
+            } else {
+                fullEmailOpener.prepaintAfterExplicitOpen(
+                    request: request,
+                    message: message,
+                    payload: payload,
+                    width: width
+                )
+            }
+        } else {
             // Backstop for a tap that beats visible-row warming. This is a fire-and-forget follow-up:
             // the session above is already presentable and does not wait for WebKit preparation.
             fullEmailOpener.prewarmOnOpen(message: message)

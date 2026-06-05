@@ -268,8 +268,15 @@ enum FullEmailWebViewAdoptionPolicy {
         )
     }
 
+    static var explicitlyDisablesPrerenderedWebViewAdoption: Bool {
+        isExplicitlyDisabled(
+            arguments: ProcessInfo.processInfo.arguments,
+            environment: ProcessInfo.processInfo.environment
+        )
+    }
+
     static func isEnabled(arguments: [String], environment: [String: String]) -> Bool {
-        if arguments.contains(disableLaunchArgument) || isEnabledEnvironmentValue(environment[disableEnvironmentKey]) {
+        if isExplicitlyDisabled(arguments: arguments, environment: environment) {
             return false
         }
 
@@ -278,6 +285,10 @@ enum FullEmailWebViewAdoptionPolicy {
         }
 
         return false
+    }
+
+    static func isExplicitlyDisabled(arguments: [String], environment: [String: String]) -> Bool {
+        arguments.contains(disableLaunchArgument) || isEnabledEnvironmentValue(environment[disableEnvironmentKey])
     }
 
     private static func isEnabledEnvironmentValue(_ value: String?) -> Bool {
@@ -498,8 +509,8 @@ struct FullEmailPreparedOpenPayloadBookkeeping: Equatable {
 ///
 /// Prepared HTML warming is the default safe path. Active off-screen `WKWebView` adoption remains
 /// opt-in for scroll-time visible-row warming through `FullEmailWebViewAdoptionPolicy`. A separate
-/// explicit-open path may make an already-painted matching WebView checkout-eligible after the user
-/// opens the full original email.
+/// explicit-open path can start or promote a matching WebView after the user opens the full original
+/// email, making later opens eligible for checkout.
 @MainActor
 final class FullEmailWebViewManager: FullEmailOpening {
     static let shared = FullEmailWebViewManager()
@@ -687,9 +698,9 @@ final class FullEmailWebViewManager: FullEmailOpening {
         applyEvictions(bookkeeping.touch(request.messageId))
     }
 
-    /// Makes an already-painted matching full-interactive WebView eligible for checkout only after
-    /// the user explicitly opens the full original email. This intentionally does not start a new
-    /// WebView load: the live reader has no later retry path if a fresh prepaint is still warming.
+    /// Starts or promotes a matching full-interactive WebView for checkout only after the user
+    /// explicitly opens the full original email. A new prepaint cannot help the current open because
+    /// the reader only attempts checkout once, but it can make later opens instant.
     func prepaintAfterExplicitOpen(
         request: OriginalEmailWarmRequest,
         message: Message,
@@ -700,7 +711,7 @@ final class FullEmailWebViewManager: FullEmailOpening {
               request.messageId == message.id,
               payload.messageId == request.messageId,
               payload.presentation == .html,
-              payload.checkoutAvailability == .ready else {
+              !FullEmailWebViewAdoptionPolicy.explicitlyDisablesPrerenderedWebViewAdoption else {
             return
         }
 
@@ -711,22 +722,49 @@ final class FullEmailWebViewManager: FullEmailOpening {
             message: message,
             width: width
         )
-        guard let existing = entries[request.messageId],
-              existing.key == key,
-              existing.didFinishInitialLoad,
-              !existing.isCheckedOut else {
-            return
+        if let existing = entries[request.messageId] {
+            guard !existing.isCheckedOut else {
+                return
+            }
+
+            if existing.key == key {
+                let availability: FullEmailOpenPayload.CheckoutAvailability = existing.didFinishInitialLoad
+                    ? .ready
+                    : .warming
+                let updatedPayload = payload.withCheckoutAvailability(availability)
+                preparedPayloads.store(
+                    key: key,
+                    request: request,
+                    payload: updatedPayload
+                )
+                existing.request = request
+                existing.payload = updatedPayload
+                existing.prepaintSource = .explicitOpen
+                applyEvictions(bookkeeping.touch(request.messageId))
+                return
+            }
+
+            teardown(existing)
+            entries.removeValue(forKey: request.messageId)
         }
 
-        let readyPayload = payload.withCheckoutAvailability(.ready)
+        let warmingPayload = payload.withCheckoutAvailability(.warming)
         preparedPayloads.store(
             key: key,
             request: request,
-            payload: readyPayload
+            payload: warmingPayload
         )
-        existing.request = request
-        existing.payload = readyPayload
-        existing.prepaintSource = .explicitOpen
+        let entry = makeEntry(
+            key: key,
+            request: request,
+            payload: warmingPayload,
+            prepaintSource: .explicitOpen,
+            message: message,
+            senderEmail: request.senderEmail,
+            width: width,
+            html: payload.html
+        )
+        entries[request.messageId] = entry
         applyEvictions(bookkeeping.touch(request.messageId))
     }
 
@@ -743,6 +781,19 @@ final class FullEmailWebViewManager: FullEmailOpening {
         let width = FullEmailWebViewMetrics.fullViewWidth()
         Task { @MainActor in
             await warm(request: request, message: message, width: width)
+            guard let payload = preparedOpenPayload(
+                request: request,
+                message: message,
+                width: width
+            ) else {
+                return
+            }
+            prepaintAfterExplicitOpen(
+                request: request,
+                message: message,
+                payload: payload,
+                width: width
+            )
         }
     }
 
@@ -1035,6 +1086,10 @@ final class FullEmailWebViewManager: FullEmailOpening {
     }
 
     private func canCheckoutActiveWebView(messageId: String) -> Bool {
+        if FullEmailWebViewAdoptionPolicy.explicitlyDisablesPrerenderedWebViewAdoption {
+            return false
+        }
+
         if FullEmailWebViewAdoptionPolicy.allowsPrerenderedWebViewAdoption {
             return true
         }
