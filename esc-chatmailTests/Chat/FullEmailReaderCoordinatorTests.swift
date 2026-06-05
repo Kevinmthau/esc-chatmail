@@ -99,6 +99,90 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
         XCTAssertTrue(session.hasImmediateVisualSurface)
     }
 
+    func testPlaceholder_bodyTextFallbackOnlyNormalizesBoundedPrefix() {
+        let body = "Visible body text"
+            + String(repeating: " ", count: FullEmailPlaceholder.bodyTextPreviewScanLimit)
+            + "Late body text"
+        let message = makeMessage(
+            id: "bounded-body-preview",
+            snippet: "",
+            body: body
+        )
+        message.snippet = nil
+
+        let placeholder = FullEmailPlaceholder(message: message)
+
+        XCTAssertEqual(placeholder.previewText, "Visible body text")
+    }
+
+    func testPlaceholder_hugeBodyFallbackDoesNotExceedPreviewLimit() throws {
+        let body = String(repeating: "a", count: FullEmailPlaceholder.bodyTextPreviewScanLimit * 2)
+        let message = makeMessage(
+            id: "huge-body-preview",
+            snippet: "",
+            body: body
+        )
+        message.snippet = nil
+
+        let previewText = try XCTUnwrap(FullEmailPlaceholder(message: message).previewText)
+
+        XCTAssertEqual(previewText.count, FullEmailPlaceholder.previewCharacterLimit)
+        XCTAssertEqual(previewText, String(repeating: "a", count: FullEmailPlaceholder.previewCharacterLimit))
+    }
+
+    func testPlaceholder_previewFieldsTakePriorityOverBodyText() {
+        let chatPreviewMessage = makeMessage(
+            id: "priority-chat-preview",
+            snippet: "Snippet preview",
+            body: "Body preview"
+        )
+        chatPreviewMessage.chatPreviewText = "Chat preview"
+        chatPreviewMessage.cleanedSnippet = "Cleaned preview"
+        XCTAssertEqual(FullEmailPlaceholder(message: chatPreviewMessage).previewText, "Chat preview")
+
+        let cleanedSnippetMessage = makeMessage(
+            id: "priority-cleaned-snippet",
+            snippet: "Snippet preview",
+            body: "Body preview"
+        )
+        cleanedSnippetMessage.chatPreviewText = " \n\t "
+        cleanedSnippetMessage.cleanedSnippet = "Cleaned preview"
+        XCTAssertEqual(FullEmailPlaceholder(message: cleanedSnippetMessage).previewText, "Cleaned preview")
+
+        let snippetMessage = makeMessage(
+            id: "priority-snippet",
+            snippet: "Snippet preview",
+            body: "Body preview"
+        )
+        snippetMessage.chatPreviewText = nil
+        snippetMessage.cleanedSnippet = " \n\t "
+        XCTAssertEqual(FullEmailPlaceholder(message: snippetMessage).previewText, "Snippet preview")
+    }
+
+    func testOpenSession_preparedPayloadDoesNotNormalizeBodyBeyondFallbackScanLimit() {
+        let body = "Prepared visible body"
+            + String(repeating: " ", count: FullEmailPlaceholder.bodyTextPreviewScanLimit)
+            + "Late prepared body"
+        let message = makeMessage(
+            id: "prepared-bounded-body-preview",
+            snippet: "",
+            body: body
+        )
+        message.snippet = nil
+        let payload = makePayload(messageId: "prepared-bounded-body-preview")
+        let opener = MockFullEmailReaderOpener(preparedPayload: payload)
+        let coordinator = FullEmailReaderCoordinator(
+            fullEmailOpener: opener,
+            widthProvider: { 390 }
+        )
+
+        let session = coordinator.openSession(for: message)
+
+        XCTAssertEqual(session.state, .presentingPreparedPayload)
+        XCTAssertEqual(session.immediatePlaceholder.previewText, "Prepared visible body")
+        XCTAssertTrue(opener.prewarmedMessages.isEmpty)
+    }
+
     func testReaderViewIsDrivenByOpenSession() {
         let message = makeMessage(id: "reader-view-message")
         let session = FullEmailOpenSession(

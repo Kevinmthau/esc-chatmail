@@ -27,9 +27,38 @@ enum OriginalEmailMissingSourceRecoveryPolicy: Sendable {
     case keepRecoveringWhileActive
 }
 
+enum FullEmailPlaceholderOverlayState: Equatable {
+    case loading(String)
+    case message(String)
+
+    static func resolving(isRecovering: Bool) -> FullEmailPlaceholderOverlayState {
+        .loading(isRecovering ? "Recovering original email…" : "Loading full email…")
+    }
+
+    static func failure(allowsRetry: Bool) -> FullEmailPlaceholderOverlayState? {
+        allowsRetry ? nil : .message("Original email unavailable")
+    }
+
+    var text: String {
+        switch self {
+        case .loading(let text), .message(let text):
+            return text
+        }
+    }
+
+    var showsProgress: Bool {
+        switch self {
+        case .loading:
+            return true
+        case .message:
+            return false
+        }
+    }
+}
+
 private struct FullEmailPlaceholderSurface: View {
     let placeholder: FullEmailPlaceholder
-    let overlayText: String?
+    let overlayState: FullEmailPlaceholderOverlayState?
     var retryAction: (() -> Void)?
 
     var body: some View {
@@ -88,10 +117,12 @@ private struct FullEmailPlaceholderSurface: View {
             }
             .buttonStyle(.borderedProminent)
             .padding(.bottom, 20)
-        } else if let overlayText {
+        } else if let overlayState {
             HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text(overlayText)
+                if overlayState.showsProgress {
+                    ProgressView().controlSize(.small)
+                }
+                Text(overlayState.text)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -514,17 +545,15 @@ struct HTMLMessageView: View {
         if let snapshotPlaceholder {
             snapshotPlaceholderView(snapshotPlaceholder)
                 .overlay(alignment: .bottom) {
-                    if isRecovering {
-                        loadingBanner(text: "Loading full email…")
-                    }
+                    loadingBanner(text: FullEmailPlaceholderOverlayState.resolving(isRecovering: isRecovering).text)
                 }
         } else if let initialPlaceholder {
             FullEmailPlaceholderSurface(
                 placeholder: initialPlaceholder,
-                overlayText: isRecovering ? "Loading full email…" : "Loading original email…"
+                overlayState: .resolving(isRecovering: isRecovering)
             )
         } else {
-            ProgressView(isRecovering ? "Recovering original email..." : "Loading...")
+            ProgressView(FullEmailPlaceholderOverlayState.resolving(isRecovering: isRecovering).text)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
@@ -578,7 +607,7 @@ struct HTMLMessageView: View {
         } else if let initialPlaceholder {
             FullEmailPlaceholderSurface(
                 placeholder: initialPlaceholder,
-                overlayText: allowsRetry ? nil : "Original email unavailable",
+                overlayState: .failure(allowsRetry: allowsRetry),
                 retryAction: allowsRetry ? { loadViewModel.retry() } : nil
             )
         } else {

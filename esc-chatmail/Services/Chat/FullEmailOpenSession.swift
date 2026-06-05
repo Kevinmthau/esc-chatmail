@@ -3,6 +3,10 @@ import CoreData
 import Combine
 
 struct FullEmailPlaceholder: Equatable {
+    static let previewCharacterLimit = 500
+    static let bodyTextPreviewScanLimit = 4_000
+    private static let normalizationWhitespace = CharacterSet.whitespacesAndNewlines
+
     let messageId: String
     let subject: String
     let senderName: String?
@@ -24,15 +28,17 @@ struct FullEmailPlaceholder: Equatable {
     }
 
     private static func previewText(for message: Message) -> String? {
-        [
-            message.chatPreviewTextValue,
-            message.cleanedSnippet,
-            message.snippet,
-            message.bodyTextValue
-        ]
-        .lazy
-        .compactMap(normalizedPreviewText)
-        .first
+        if let previewText = normalizedPreviewText(message.chatPreviewTextValue) {
+            return previewText
+        }
+        if let cleanedSnippet = normalizedPreviewText(message.cleanedSnippet) {
+            return cleanedSnippet
+        }
+        if let snippet = normalizedPreviewText(message.snippet) {
+            return snippet
+        }
+
+        return normalizedBodyPreviewText(message.bodyTextValue)
     }
 
     private static func normalizedSingleLine(_ value: String?) -> String? {
@@ -40,23 +46,53 @@ struct FullEmailPlaceholder: Equatable {
     }
 
     private static func normalizedPreviewText(_ value: String?) -> String? {
-        normalizedText(value, maxLength: 500)
+        normalizedText(value, maxLength: previewCharacterLimit)
     }
 
-    private static func normalizedText(_ value: String?, maxLength: Int) -> String? {
-        guard let value else { return nil }
-        let collapsed = value
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !collapsed.isEmpty else { return nil }
+    private static func normalizedBodyPreviewText(_ value: String?) -> String? {
+        normalizedText(
+            value,
+            maxLength: previewCharacterLimit,
+            scanLimit: bodyTextPreviewScanLimit
+        )
+    }
 
-        guard collapsed.count > maxLength else {
-            return collapsed
+    private static func normalizedText(_ value: String?, maxLength: Int, scanLimit: Int? = nil) -> String? {
+        guard let value else { return nil }
+        var result = ""
+        result.reserveCapacity(maxLength)
+        var pendingWhitespace = false
+        var scannedCharacters = 0
+
+        for character in value {
+            if let scanLimit, scannedCharacters >= scanLimit {
+                break
+            }
+            scannedCharacters += 1
+
+            if isWhitespaceOrNewline(character) {
+                if !result.isEmpty {
+                    pendingWhitespace = true
+                }
+                continue
+            }
+
+            if pendingWhitespace {
+                guard result.count < maxLength else { break }
+                result.append(" ")
+                pendingWhitespace = false
+            }
+
+            guard result.count < maxLength else { break }
+            result.append(character)
         }
 
-        return String(collapsed.prefix(maxLength)).trimmingCharacters(in: .whitespacesAndNewlines)
+        let collapsed = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        return collapsed.isEmpty ? nil : collapsed
+    }
+
+    private static func isWhitespaceOrNewline(_ character: Character) -> Bool {
+        character.unicodeScalars.allSatisfy { normalizationWhitespace.contains($0) }
     }
 }
 
