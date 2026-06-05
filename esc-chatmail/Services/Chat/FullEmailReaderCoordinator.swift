@@ -24,11 +24,22 @@ final class FullEmailReaderCoordinator {
             senderEmail: message.senderEmailValue,
             subject: message.subject
         )
+        let width = widthProvider()
         let payload = fullEmailOpener.preparedOpenPayload(
             request: request,
             message: message,
-            width: widthProvider()
+            width: width
         )
+        if let payload, payload.checkoutAvailability == .ready {
+            // The reader only gets one checkout attempt in makeUIView. If a prepared payload is still
+            // warming, let the live reader load it instead of starting duplicate off-screen WebKit work.
+            fullEmailOpener.prepaintAfterExplicitOpen(
+                request: request,
+                message: message,
+                payload: payload,
+                width: width
+            )
+        }
         let session = FullEmailOpenSession(
             message: message,
             request: request,

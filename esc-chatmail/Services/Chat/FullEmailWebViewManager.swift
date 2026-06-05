@@ -362,7 +362,23 @@ protocol FullEmailOpening: AnyObject {
         width: CGFloat
     ) -> FullEmailOpenPayload?
 
+    func prepaintAfterExplicitOpen(
+        request: OriginalEmailWarmRequest,
+        message: Message,
+        payload: FullEmailOpenPayload,
+        width: CGFloat
+    )
+
     func prewarmOnOpen(message: Message)
+}
+
+extension FullEmailOpening {
+    func prepaintAfterExplicitOpen(
+        request: OriginalEmailWarmRequest,
+        message: Message,
+        payload: FullEmailOpenPayload,
+        width: CGFloat
+    ) {}
 }
 
 // MARK: - Pure LRU bookkeeping
@@ -481,8 +497,9 @@ struct FullEmailPreparedOpenPayloadBookkeeping: Equatable {
 /// then hands that HTML to the reader so the open can skip cold sanitization/wrapping.
 ///
 /// Prepared HTML warming is the default safe path. Active off-screen `WKWebView` adoption remains
-/// opt-in through `FullEmailWebViewAdoptionPolicy`, and active WebView warming must not happen from
-/// scroll-time visible-row warming unless that policy is explicitly enabled.
+/// opt-in for scroll-time visible-row warming through `FullEmailWebViewAdoptionPolicy`. A separate
+/// explicit-open path may make an already-painted matching WebView checkout-eligible after the user
+/// opens the full original email.
 @MainActor
 final class FullEmailWebViewManager: FullEmailOpening {
     static let shared = FullEmailWebViewManager()
@@ -493,9 +510,15 @@ final class FullEmailWebViewManager: FullEmailOpening {
     }
 
     private final class Entry {
+        enum PrepaintSource {
+            case visibleRowWarm
+            case explicitOpen
+        }
+
         let key: FullEmailWebViewPreRenderKey
         var request: OriginalEmailWarmRequest
         var payload: FullEmailOpenPayload
+        var prepaintSource: PrepaintSource
         let webView: LayoutAwareWKWebView
         let cidHandler: CIDSchemeHandler
         let delegate: WarmNavigationDelegate
@@ -508,6 +531,7 @@ final class FullEmailWebViewManager: FullEmailOpening {
             key: FullEmailWebViewPreRenderKey,
             request: OriginalEmailWarmRequest,
             payload: FullEmailOpenPayload,
+            prepaintSource: PrepaintSource,
             webView: LayoutAwareWKWebView,
             cidHandler: CIDSchemeHandler,
             delegate: WarmNavigationDelegate
@@ -515,6 +539,7 @@ final class FullEmailWebViewManager: FullEmailOpening {
             self.key = key
             self.request = request
             self.payload = payload
+            self.prepaintSource = prepaintSource
             self.webView = webView
             self.cidHandler = cidHandler
             self.delegate = delegate
@@ -652,12 +677,56 @@ final class FullEmailWebViewManager: FullEmailOpening {
             key: key,
             request: request,
             payload: payload,
+            prepaintSource: .visibleRowWarm,
             message: message,
             senderEmail: request.senderEmail,
             width: width,
             html: warmed.html
         )
         entries[request.messageId] = entry
+        applyEvictions(bookkeeping.touch(request.messageId))
+    }
+
+    /// Makes an already-painted matching full-interactive WebView eligible for checkout only after
+    /// the user explicitly opens the full original email. This intentionally does not start a new
+    /// WebView load: the live reader has no later retry path if a fresh prepaint is still warming.
+    func prepaintAfterExplicitOpen(
+        request: OriginalEmailWarmRequest,
+        message: Message,
+        payload: FullEmailOpenPayload,
+        width: CGFloat
+    ) {
+        guard width > 1,
+              request.messageId == message.id,
+              payload.messageId == request.messageId,
+              payload.presentation == .html,
+              payload.checkoutAvailability == .ready else {
+            return
+        }
+
+        let key = makeKey(
+            messageId: request.messageId,
+            sourceSignature: payload.sourceSignature,
+            wrappedHTML: payload.html,
+            message: message,
+            width: width
+        )
+        guard let existing = entries[request.messageId],
+              existing.key == key,
+              existing.didFinishInitialLoad,
+              !existing.isCheckedOut else {
+            return
+        }
+
+        let readyPayload = payload.withCheckoutAvailability(.ready)
+        preparedPayloads.store(
+            key: key,
+            request: request,
+            payload: readyPayload
+        )
+        existing.request = request
+        existing.payload = readyPayload
+        existing.prepaintSource = .explicitOpen
         applyEvictions(bookkeeping.touch(request.messageId))
     }
 
@@ -761,7 +830,7 @@ final class FullEmailWebViewManager: FullEmailOpening {
         message: Message?,
         width: CGFloat
     ) -> Checkout? {
-        guard FullEmailWebViewAdoptionPolicy.allowsPrerenderedWebViewAdoption else {
+        guard canCheckoutActiveWebView(messageId: messageId) else {
             logCheckoutMiss(messageId: messageId, reason: "adoption_disabled")
             return nil
         }
@@ -916,7 +985,7 @@ final class FullEmailWebViewManager: FullEmailOpening {
         for messageId: String,
         matching key: FullEmailWebViewPreRenderKey
     ) -> FullEmailOpenPayload.CheckoutAvailability {
-        guard FullEmailWebViewAdoptionPolicy.allowsPrerenderedWebViewAdoption,
+        guard canCheckoutActiveWebView(messageId: messageId),
               let entry = entries[messageId],
               entry.key == key else {
             return .warming
@@ -929,6 +998,7 @@ final class FullEmailWebViewManager: FullEmailOpening {
         key: FullEmailWebViewPreRenderKey,
         request: OriginalEmailWarmRequest,
         payload: FullEmailOpenPayload,
+        prepaintSource: Entry.PrepaintSource,
         message: Message?,
         senderEmail: String?,
         width: CGFloat,
@@ -949,6 +1019,7 @@ final class FullEmailWebViewManager: FullEmailOpening {
             key: key,
             request: request,
             payload: payload,
+            prepaintSource: prepaintSource,
             webView: webView,
             cidHandler: cidHandler,
             delegate: delegate
@@ -961,6 +1032,14 @@ final class FullEmailWebViewManager: FullEmailOpening {
         let baseURL = FullInteractiveEmailWebView.baseURL(message: message, senderEmail: senderEmail)
         webView.loadHTMLString(html, baseURL: baseURL)
         return entry
+    }
+
+    private func canCheckoutActiveWebView(messageId: String) -> Bool {
+        if FullEmailWebViewAdoptionPolicy.allowsPrerenderedWebViewAdoption {
+            return true
+        }
+
+        return entries[messageId]?.prepaintSource == .explicitOpen
     }
 
     /// Marks a warmed instance ready only after forcing a render pass. `WKNavigationDelegate.didFinish`

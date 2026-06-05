@@ -110,6 +110,10 @@ final class ChatViewModelTests: XCTestCase {
             .preparedHTML(payload, placeholder: FullEmailPlaceholder(message: message))
         )
         XCTAssertEqual(opener.preparedPayloadRequests.count, 1)
+        XCTAssertEqual(opener.prepaintRequests.count, 1)
+        XCTAssertEqual(opener.prepaintRequests.first?.request.messageId, "message-prepared")
+        XCTAssertEqual(opener.prepaintRequests.first?.message.id, "message-prepared")
+        XCTAssertEqual(opener.prepaintRequests.first?.payload, payload)
         XCTAssertTrue(opener.prewarmedMessages.isEmpty)
     }
 
@@ -146,6 +150,7 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.fullEmailOpenSession?.immediatePlaceholder.subject, "Miss")
         XCTAssertTrue(viewModel.fullEmailOpenSession?.hasImmediateVisualSurface == true)
         XCTAssertEqual(opener.preparedPayloadRequests.count, 1)
+        XCTAssertTrue(opener.prepaintRequests.isEmpty)
         XCTAssertEqual(opener.prewarmedMessages.map(\.id), ["message-miss"])
     }
 
@@ -434,8 +439,16 @@ private final class MockFullEmailOpener: FullEmailOpening {
         let width: CGFloat
     }
 
+    struct PrepaintRequest {
+        let request: OriginalEmailWarmRequest
+        let message: Message
+        let payload: FullEmailOpenPayload
+        let width: CGFloat
+    }
+
     let preparedPayload: FullEmailOpenPayload?
     private(set) var preparedPayloadRequests: [PreparedPayloadRequest] = []
+    private(set) var prepaintRequests: [PrepaintRequest] = []
     private(set) var prewarmedMessages: [Message] = []
 
     init(preparedPayload: FullEmailOpenPayload?) {
@@ -455,6 +468,22 @@ private final class MockFullEmailOpener: FullEmailOpening {
             )
         )
         return preparedPayload
+    }
+
+    func prepaintAfterExplicitOpen(
+        request: OriginalEmailWarmRequest,
+        message: Message,
+        payload: FullEmailOpenPayload,
+        width: CGFloat
+    ) {
+        prepaintRequests.append(
+            PrepaintRequest(
+                request: request,
+                message: message,
+                payload: payload,
+                width: width
+            )
+        )
     }
 
     func prewarmOnOpen(message: Message) {

@@ -305,6 +305,80 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
         manager.clear()
     }
 
+    func testPrepaintAfterExplicitOpenDoesNotCreateWebViewEntryForWarmingPayload() {
+        XCTAssertFalse(
+            FullEmailWebViewAdoptionPolicy.isEnabled(
+                arguments: [],
+                environment: [:]
+            )
+        )
+
+        let testStack = TestCoreDataStack()
+        let messageId = "explicit-open-prepaint-\(UUID().uuidString)"
+        let message = MessageBuilder()
+            .withId(messageId)
+            .withSubject("Subject")
+            .withSender(email: "sender@example.com", name: "Sender")
+            .withBody("Body \(messageId)")
+            .build(in: testStack.viewContext)
+        let request = makeRequest(messageId: messageId)
+        let payload = FullEmailOpenPayload(
+            messageId: messageId,
+            sourceSignature: "sha256:\(messageId)",
+            html: simpleHTML(title: "Explicit prepaint"),
+            presentation: .html,
+            sourceKind: .html,
+            sourceLocation: .messageFile,
+            hasHTMLSource: true,
+            checkoutAvailability: .warming
+        )
+        let manager = FullEmailWebViewManager()
+        defer { manager.clear() }
+
+        manager.prepaintAfterExplicitOpen(
+            request: request,
+            message: message,
+            payload: payload,
+            width: 390
+        )
+
+        XCTAssertFalse(manager.hasPreparedPayloadForTesting(messageId: messageId))
+        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
+    }
+
+    func testPrepaintAfterExplicitOpenDoesNotCreateWebViewEntryWithoutReadyEntry() {
+        let testStack = TestCoreDataStack()
+        let messageId = "explicit-open-no-ready-entry-\(UUID().uuidString)"
+        let message = MessageBuilder()
+            .withId(messageId)
+            .withSubject("Subject")
+            .withSender(email: "sender@example.com", name: "Sender")
+            .withBody("Body \(messageId)")
+            .build(in: testStack.viewContext)
+        let request = makeRequest(messageId: messageId)
+        let payload = FullEmailOpenPayload(
+            messageId: messageId,
+            sourceSignature: "sha256:\(messageId)",
+            html: simpleHTML(title: "Explicit prepaint"),
+            presentation: .html,
+            sourceKind: .html,
+            sourceLocation: .messageFile,
+            hasHTMLSource: true,
+            checkoutAvailability: .ready
+        )
+        let manager = FullEmailWebViewManager()
+        defer { manager.clear() }
+
+        manager.prepaintAfterExplicitOpen(
+            request: request,
+            message: message,
+            payload: payload,
+            width: 390
+        )
+
+        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
+    }
+
     func testPayloadOnlyEvictionDropsRemoteImageFallbackWarmContext() async throws {
         let messagesDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "FullEmailWebViewManagerTests-\(UUID().uuidString)"
