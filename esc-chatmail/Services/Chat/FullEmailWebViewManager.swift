@@ -5,11 +5,11 @@ import CryptoKit
 
 // MARK: - Reusable layout-aware WKWebView
 
-/// A `WKWebView` subclass that reports layout/window changes so the email WebView coordinator can
-/// (re)load content once it has a window and a valid width.
+/// A `WKWebView` subclass that reports layout/window changes so email WebView coordinators can
+/// (re)load content once they have a window and valid dimensions.
 ///
-/// Shared between the live `BaseEmailWebView` and the pre-rendered `FullEmailWebViewManager` so a
-/// warmed instance can be adopted by the live coordinator without losing its layout callbacks.
+/// Shared by preview WebViews, the full reader, and the pre-rendered `FullEmailWebViewManager` so a
+/// warmed full-reader instance can be adopted without losing its layout callbacks.
 final class LayoutAwareWKWebView: WKWebView {
     var onLayoutChange: ((WKWebView) -> Void)?
 
@@ -28,7 +28,7 @@ final class LayoutAwareWKWebView: WKWebView {
 
 /// Configuration, settings, and navigation policy for the full original-email WebView.
 ///
-/// Factored out so the live `BaseEmailWebView` and the pre-rendered `FullEmailWebViewManager`
+/// Factored out so the live `FullEmailReaderWebView` and the pre-rendered `FullEmailWebViewManager`
 /// produce byte-identical renders. If they diverged, a pre-rendered instance would re-layout (and
 /// flash) the moment it was adopted into the full-view reader, defeating the point of warming.
 enum FullInteractiveEmailWebView {
@@ -480,9 +480,9 @@ struct FullEmailPreparedOpenPayloadBookkeeping: Equatable {
 /// Prepares full original-email HTML while chat bubbles are visible (and when a bubble is tapped),
 /// then hands that HTML to the reader so the open can skip cold sanitization/wrapping.
 ///
-/// Off-screen `WKWebView` adoption is the warmed-open production fast path, guarded by
-/// `FullEmailWebViewAdoptionPolicy` so it can be disabled quickly if needed. The prepared HTML payload
-/// remains the correctness backstop when no fully-painted matching WebView is available.
+/// Prepared HTML warming is the default safe path. Active off-screen `WKWebView` adoption remains
+/// opt-in through `FullEmailWebViewAdoptionPolicy`, and active WebView warming must not happen from
+/// scroll-time visible-row warming unless that policy is explicitly enabled.
 @MainActor
 final class FullEmailWebViewManager: FullEmailOpening {
     static let shared = FullEmailWebViewManager()
@@ -562,8 +562,9 @@ final class FullEmailWebViewManager: FullEmailOpening {
     // MARK: Warming
 
     /// Resolves the locally-available wrapped original HTML (no network recovery) and keeps a prepared
-    /// payload ready for the reader. When WebView adoption is allowed, also pre-renders an off-screen
-    /// WebView. Cheap to call repeatedly: it no-ops when up-to-date state is already warm.
+    /// payload ready for the reader. When active WebView adoption is explicitly enabled, also
+    /// pre-renders an off-screen WebView. Cheap to call repeatedly: it no-ops when up-to-date state is
+    /// already warm.
     func warm(request: OriginalEmailWarmRequest, message: Message?, width: CGFloat) async {
         guard width > 1 else {
             return

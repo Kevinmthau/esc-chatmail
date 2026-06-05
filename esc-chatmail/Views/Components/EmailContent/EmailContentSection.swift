@@ -150,7 +150,7 @@ struct EmailContentSection: View {
             await loadHTML(generation: generation)
         }
         // Warm the full original-email HTML while the bubble is visible, so tapping can present
-        // prepared content immediately and adopt a painted WebView when the cache is ready.
+        // prepared content immediately. Active WebView adoption is policy-gated inside the manager.
         // Debounced + capacity-bounded (LRU) inside the manager; auto-cancels when the row scrolls away.
         .task(id: warmFullEmailKey) {
             await warmFullEmailWebViewIfNeeded()
@@ -168,7 +168,8 @@ struct EmailContentSection: View {
 
     /// Warms the wrapped full original-email HTML via `FullEmailWebViewManager` so a tap can skip cold
     /// preparation. Debounced so fast scrolling does not do work for rows that immediately leave; the
-    /// manager bounds total warmed payloads and de-dupes already-warm content.
+    /// manager bounds total warmed payloads, de-dupes already-warm content, and keeps active WebView
+    /// warming disabled unless adoption is explicitly enabled.
     private func warmFullEmailWebViewIfNeeded() async {
         try? await Task.sleep(nanoseconds: 200_000_000)
         guard !Task.isCancelled else {

@@ -1,18 +1,12 @@
 import SwiftUI
 import UIKit
 import WebKit
-import CoreData
 
-// `LayoutAwareWKWebView` lives in `FullEmailWebViewManager.swift` so the live coordinator here and
-// the pre-rendered pool can share a single layout-reporting WebView type.
+// `LayoutAwareWKWebView` lives in `FullEmailWebViewManager.swift` so preview WebViews, the full
+// reader, and the pre-rendered pool can share a single layout-reporting WebView type.
 
-/// Configuration mode for email WebView rendering
+/// Configuration mode for non-interactive email preview rendering.
 enum EmailWebViewMode {
-    /// Full interactive original-email view with JavaScript, scrolling, and link handling.
-    ///
-    /// This mode follows the original-email policy: preserve author intent by
-    /// rendering in a light trait environment even when the app is in dark mode.
-    case fullInteractive
     /// Scaled preview (e.g., 50%) with no interaction.
     ///
     /// Preview modes follow the preview policy: the wrapped HTML and native
@@ -27,113 +21,34 @@ enum EmailWebViewMode {
 
 extension EmailWebViewMode {
     var displayPurpose: HTMLDisplayPurpose {
-        switch self {
-        case .fullInteractive:
-            return .original
-        case .scaledPreview, .simplePreview:
-            return .preview
-        }
+        .preview
     }
 
     var webViewUserInterfaceStyle: UIUserInterfaceStyle {
-        switch self {
-        case .fullInteractive:
-            return .light
-        case .scaledPreview, .simplePreview:
-            return .unspecified
-        }
+        .unspecified
     }
 }
 
-/// Unified WebView for rendering email HTML content.
-/// Used by the full original-email view, compose previews, and the
-/// MiniEmailWebView snapshot-failure fallback.
+/// Unified preview WebView for rendering non-interactive email HTML content.
+/// Used by compose previews and the MiniEmailWebView snapshot-failure fallback.
 struct BaseEmailWebView: UIViewRepresentable {
     let htmlContent: String
     let mode: EmailWebViewMode
     var isDarkMode: Bool? = nil
     var senderEmail: String? = nil
-    /// Canonical source signature for full original-email content. Used to adopt only matching
-    /// pre-rendered WebViews.
-    var sourceSignature: String? = nil
-    /// Optional message for resolving cid: URLs to inline attachments
+    /// Optional message for resolving cid: URLs to inline attachments.
     var message: Message?
     /// Optional callback for non-interactive previews that need their rendered height.
     var onPreviewHeightChange: ((CGFloat) -> Void)? = nil
-    /// Optional callback invoked when a navigation finishes (first paint). The full-view reader uses
-    /// this to cross-fade away its instant snapshot placeholder once the live WebView has rendered.
-    var onLoadFinished: (() -> Void)? = nil
-    /// Invoked when the full-view reader adopts a pre-rendered, already-painted WebView from
-    /// `FullEmailWebViewManager`. The reader uses this to drop its placeholder instantly (no fade),
-    /// since the content is already on screen.
-    var onAdoptedPrerendered: (() -> Void)? = nil
 
     func makeUIView(context: Context) -> WKWebView {
-        switch mode {
-        case .fullInteractive:
-            return makeFullInteractiveUIView(context: context)
-        case .scaledPreview, .simplePreview:
-            return makePreviewUIView(context: context)
-        }
-    }
-
-    /// Full original-email path. Adopts a pre-rendered instance when the manager has an exact painted
-    /// match; otherwise it falls back to a fresh live WebView.
-    private func makeFullInteractiveUIView(context: Context) -> WKWebView {
-        if let message,
-           let checkout = FullEmailWebViewManager.shared.checkout(
-               messageId: message.id,
-               sourceSignature: sourceSignature,
-               wrappedHTML: htmlContent,
-               message: message,
-               width: FullEmailWebViewMetrics.fullViewWidth()
-           ) {
-            return adoptPrerendered(checkout, context: context)
-        }
-
-        let cidHandler = CIDSchemeHandler(message: message)
-        context.coordinator.cidHandler = cidHandler
-        let configuration = FullInteractiveEmailWebView.makeConfiguration(cidHandler: cidHandler)
-        let webView = LayoutAwareWKWebView(frame: .zero, configuration: configuration)
-        webView.navigationDelegate = context.coordinator
-        webView.onLayoutChange = { [weak coordinator = context.coordinator] webView in
-            coordinator?.loadContentIfReady(in: webView)
-        }
-        FullInteractiveEmailWebView.applySettings(to: webView)
-        context.coordinator.applyBackgroundAppearance(to: webView)
-        return webView
-    }
-
-    /// Adopts a warmed WebView: repoint its delegate/cid handler at the live coordinator, mark the
-    /// content as already loaded so it never reloads, and tell the reader to drop its placeholder.
-    private func adoptPrerendered(
-        _ checkout: FullEmailWebViewManager.Checkout,
-        context: Context
-    ) -> WKWebView {
-        let webView = checkout.webView
-        context.coordinator.updateParent(self)
-        context.coordinator.cidHandler = checkout.cidHandler
-        checkout.cidHandler.message = message
-        webView.navigationDelegate = context.coordinator
-        webView.onLayoutChange = { [weak coordinator = context.coordinator] webView in
-            coordinator?.loadContentIfReady(in: webView)
-        }
-        FullInteractiveEmailWebView.applyBackgroundAppearance(to: webView)
-        context.coordinator.adoptAlreadyLoadedContent(htmlContent, messageId: message?.id)
-
-        let onAdopted = onAdoptedPrerendered
-        let onLoadFinished = onLoadFinished
-        DispatchQueue.main.async {
-            onAdopted?()
-            onLoadFinished?()
-        }
-        return webView
+        makePreviewUIView(context: context)
     }
 
     private func makePreviewUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
 
-        // Register cid: scheme handler for inline attachments
+        // Register cid: scheme handler for inline attachments.
         let cidHandler = CIDSchemeHandler(message: message)
         context.coordinator.cidHandler = cidHandler
         configuration.setURLSchemeHandler(cidHandler, forURLScheme: "cid")
@@ -155,13 +70,8 @@ struct BaseEmailWebView: UIViewRepresentable {
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.updateParent(self)
-        context.coordinator.observeAttachmentAvailabilityChanges(reloading: webView)
         context.coordinator.applyBackgroundAppearance(to: webView)
         context.coordinator.loadContentIfReady(in: webView)
-    }
-
-    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
-        coordinator.reclaimPrerenderedWebViewIfNeeded(uiView)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -184,23 +94,11 @@ struct BaseEmailWebView: UIViewRepresentable {
         private var shouldReloadAfterCurrentLoad = false
         private var lastDeliveredPreviewHeight: CGFloat = 0
         private var previewMeasurementGeneration = 0
-        private var attachmentAvailabilityObserver: NSObjectProtocol?
-        private weak var observedContext: NSManagedObjectContext?
-        private var observedMessageObjectID: NSManagedObjectID?
-        private var cachedReferencedInlineCIDs: Set<String>?
-        private var cachedReferencedInlineCIDsHTML: String?
-        /// Holds strong reference to the cid: scheme handler
+        /// Holds strong reference to the cid: scheme handler.
         var cidHandler: CIDSchemeHandler?
-        /// Set when this coordinator adopted a pre-rendered WebView from `FullEmailWebViewManager`,
-        /// so it can be reclaimed (re-hosted for instant re-open) on dismantle.
-        private var adoptedPrerenderedMessageId: String?
 
         init(_ parent: BaseEmailWebView) {
             self.parent = parent
-        }
-
-        deinit {
-            stopObservingAttachmentAvailabilityChanges()
         }
 
         var needsReload: Bool {
@@ -210,98 +108,6 @@ struct BaseEmailWebView: UIViewRepresentable {
         func updateParent(_ parent: BaseEmailWebView) {
             self.parent = parent
             cidHandler?.message = parent.message
-        }
-
-        func observeAttachmentAvailabilityChanges(reloading webView: WKWebView) {
-            guard case .fullInteractive = parent.mode,
-                  let message = parent.message,
-                  let context = message.managedObjectContext else {
-                stopObservingAttachmentAvailabilityChanges()
-                return
-            }
-
-            let messageObjectID = message.objectID
-            if let observedContext,
-               observedContext === context,
-               observedMessageObjectID == messageObjectID {
-                return
-            }
-
-            stopObservingAttachmentAvailabilityChanges()
-            observedContext = context
-            observedMessageObjectID = messageObjectID
-            attachmentAvailabilityObserver = NotificationCenter.default.addObserver(
-                forName: .NSManagedObjectContextObjectsDidChange,
-                object: context,
-                queue: .main
-            ) { [weak self, weak webView] notification in
-                guard let self, let webView else { return }
-                self.reloadIfAttachmentAvailabilityChanged(notification, in: webView)
-            }
-        }
-
-        private func stopObservingAttachmentAvailabilityChanges() {
-            if let attachmentAvailabilityObserver {
-                NotificationCenter.default.removeObserver(attachmentAvailabilityObserver)
-            }
-            attachmentAvailabilityObserver = nil
-            observedContext = nil
-            observedMessageObjectID = nil
-        }
-
-        private func reloadIfAttachmentAvailabilityChanged(_ notification: Notification, in webView: WKWebView) {
-            guard notificationMayAffectCurrentMessageAttachments(notification) else {
-                return
-            }
-
-            guard needsReload else {
-                return
-            }
-
-            if isLoading {
-                shouldReloadAfterCurrentLoad = true
-                return
-            }
-
-            loadContentIfReady(in: webView)
-        }
-
-        private func notificationMayAffectCurrentMessageAttachments(_ notification: Notification) -> Bool {
-            guard let messageObjectID = parent.message?.objectID else {
-                return false
-            }
-
-            for object in changedObjects(in: notification) {
-                if object.objectID == messageObjectID {
-                    return true
-                }
-
-                guard let attachment = object as? Attachment else {
-                    continue
-                }
-
-                if attachment.message?.objectID == messageObjectID {
-                    return true
-                }
-
-                if parent.message?.attachments?.contains(where: { $0.objectID == attachment.objectID }) == true {
-                    return true
-                }
-            }
-
-            return false
-        }
-
-        private func changedObjects(in notification: Notification) -> [NSManagedObject] {
-            [
-                NSInsertedObjectsKey,
-                NSUpdatedObjectsKey,
-                NSDeletedObjectsKey,
-                NSRefreshedObjectsKey,
-                NSInvalidatedObjectsKey
-            ].flatMap { key in
-                (notification.userInfo?[key] as? Set<NSManagedObject>) ?? []
-            }
         }
 
         func loadContent(in webView: WKWebView) {
@@ -323,13 +129,12 @@ struct BaseEmailWebView: UIViewRepresentable {
                     "HTML_PREVIEW scale_milli=\(scaleMilli) estimated_width=\(estimatedWidth)",
                     category: .ui
                 )
-            case .fullInteractive, .simplePreview:
+            case .simplePreview:
                 htmlToLoad = parent.htmlContent
             }
 
             // Use sender domain as baseURL to provide correct Referer header for CDN images
-            // (e.g., Beehiiv CDN checks Referer for hotlink protection)
-            // Falls back to about:blank if no sender information available
+            // (e.g., Beehiiv CDN checks Referer for hotlink protection). Falls back to about:blank.
             let baseURL = deriveBaseURL(from: parent.message, senderEmail: parent.senderEmail) ?? URL(string: "about:blank")
             webView.loadHTMLString(htmlToLoad, baseURL: baseURL)
         }
@@ -370,15 +175,11 @@ struct BaseEmailWebView: UIViewRepresentable {
                 return .deferred(reason: "missing-width")
             }
 
-            switch parent.mode {
-            case .fullInteractive:
-                return .ready
-            case .scaledPreview, .simplePreview:
-                guard height > 1 else {
-                    return .deferred(reason: "missing-height")
-                }
-                return .ready
+            guard height > 1 else {
+                return .deferred(reason: "missing-height")
             }
+
+            return .ready
         }
 
         private func logDeferredLoad(
@@ -403,26 +204,6 @@ struct BaseEmailWebView: UIViewRepresentable {
             lastLoadedContent = parent.htmlContent
             lastLoadedReloadSignature = reloadSignature()
             hasFinishedLoad = false
-        }
-
-        /// Marks an adopted pre-rendered WebView's content as already loaded so `needsReload` is false
-        /// and no reload/first-paint occurs at display time. The instance is already painted off-screen.
-        func adoptAlreadyLoadedContent(_ html: String, messageId: String?) {
-            lastLoadedContent = html
-            lastLoadedReloadSignature = reloadSignature()
-            hasFinishedLoad = true
-            isLoading = false
-            adoptedPrerenderedMessageId = messageId
-        }
-
-        /// Returns an adopted pre-rendered WebView to the pool when the reader is dismantled, so a
-        /// re-open stays instant. No-op for freshly-created (non-adopted) WebViews.
-        func reclaimPrerenderedWebViewIfNeeded(_ webView: WKWebView) {
-            guard let messageId = adoptedPrerenderedMessageId else {
-                return
-            }
-            adoptedPrerenderedMessageId = nil
-            FullEmailWebViewManager.shared.checkin(messageId: messageId, webView: webView)
         }
 
         func recordFinishedLoad() {
@@ -456,14 +237,6 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
 
         func applyBackgroundAppearance(to webView: WKWebView) {
-            // Full original emails force the light surface. Delegate to the shared helper so the live
-            // reader and the pre-render pool apply byte-identical appearance; otherwise an adopted
-            // warm instance could repaint its background on display. Previews stay unspecified and
-            // rely on their wrapped preview theme.
-            if case .fullInteractive = parent.mode {
-                FullInteractiveEmailWebView.applyBackgroundAppearance(to: webView)
-                return
-            }
             webView.isOpaque = false
             webView.overrideUserInterfaceStyle = parent.mode.webViewUserInterfaceStyle
             let backgroundColor = nativeBackgroundColor(for: parent.mode) ?? .clear
@@ -473,7 +246,7 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
 
         private func reloadSignature() -> String {
-            "\(modeSignature(for: parent.mode)):\(messageIdentitySignature()):\(sourceSignature()):\(inlineCIDAvailabilitySignature())"
+            "\(modeSignature(for: parent.mode)):\(messageIdentitySignature()):source:none:cid:unchanged"
         }
 
         private func messageIdentitySignature() -> String {
@@ -481,38 +254,6 @@ struct BaseEmailWebView: UIViewRepresentable {
                 return "message:none"
             }
             return "message:\(message.id)"
-        }
-
-        private func sourceSignature() -> String {
-            "source:\(parent.sourceSignature ?? "none")"
-        }
-
-        private func inlineCIDAvailabilitySignature() -> String {
-            guard case .fullInteractive = parent.mode else {
-                return "cid:unchanged"
-            }
-
-            // `InlineCIDAttachmentAvailabilityFingerprint` scans the whole HTML for `cid:`
-            // references and stats attachment files on disk, and `needsReload` evaluates
-            // this on every SwiftUI update. Cache only the HTML-derived reference scan
-            // (it changes solely with the HTML); attachment availability is re-evaluated
-            // every call because it can change on disk without the HTML changing, and
-            // `needsReload` must observe that.
-            let referencedContentIDs: Set<String>
-            if let cachedReferencedInlineCIDs, cachedReferencedInlineCIDsHTML == parent.htmlContent {
-                referencedContentIDs = cachedReferencedInlineCIDs
-            } else {
-                referencedContentIDs = InlineCIDAttachmentAvailabilityFingerprint.referencedInlineContentIDs(
-                    in: parent.htmlContent
-                )
-                cachedReferencedInlineCIDs = referencedContentIDs
-                cachedReferencedInlineCIDsHTML = parent.htmlContent
-            }
-
-            return InlineCIDAttachmentAvailabilityFingerprint.fingerprint(
-                referencedContentIDs: referencedContentIDs,
-                message: parent.message
-            )
         }
 
         private func modeSignature(for mode: EmailWebViewMode) -> String {
@@ -526,8 +267,6 @@ struct BaseEmailWebView: UIViewRepresentable {
                 colorSchemeSignature = "unspecified"
             }
             switch mode {
-            case .fullInteractive:
-                return "fullInteractive"
             case .simplePreview:
                 return "simplePreview:\(colorSchemeSignature)"
             case .scaledPreview(let scale):
@@ -539,8 +278,6 @@ struct BaseEmailWebView: UIViewRepresentable {
 
         private func readinessModeDescription() -> String {
             switch parent.mode {
-            case .fullInteractive:
-                return "fullInteractive"
             case .simplePreview:
                 return "simplePreview"
             case .scaledPreview(let scale):
@@ -561,7 +298,7 @@ struct BaseEmailWebView: UIViewRepresentable {
             return UIColor(hex: theme.backgroundColorHex) ?? .systemBackground
         }
 
-        /// Derives a baseURL from the sender's email domain for proper Referer headers
+        /// Derives a baseURL from the sender's email domain for proper Referer headers.
         private func deriveBaseURL(from message: Message?, senderEmail: String?) -> URL? {
             EmailSenderBaseURLResolver.baseURL(from: message?.senderEmail ?? senderEmail)
         }
@@ -573,40 +310,7 @@ struct BaseEmailWebView: UIViewRepresentable {
         // MARK: - WKNavigationDelegate
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            switch parent.mode {
-            case .fullInteractive:
-                handleFullInteractiveNavigation(navigationAction, decisionHandler: decisionHandler)
-            case .scaledPreview, .simplePreview:
-                handlePreviewNavigation(navigationAction, decisionHandler: decisionHandler)
-            }
-        }
-
-        private func handleFullInteractiveNavigation(_ navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            // The decision logic lives in the shared, unit-tested `FullInteractiveEmailWebView`
-            // `navigationDecision` so this live reader and the off-screen warm delegate stay in
-            // lockstep. This wrapper only performs the WebKit-side side effects: opening external
-            // links and logging blocked private/reserved ones.
-            switch FullInteractiveEmailWebView.navigationDecision(
-                navigationType: navigationAction.navigationType,
-                url: navigationAction.request.url
-            ) {
-            case .allow:
-                decisionHandler(.allow)
-            case .cancel:
-                decisionHandler(.cancel)
-            case .blockedPrivateNetwork(let url):
-                Log.warning("Blocked private/reserved email link: \(Log.redact(url: url))", category: .ui)
-                decisionHandler(.cancel)
-            case .openExternally(let url):
-                if UIApplication.shared.canOpenURL(url) {
-                    UIApplication.shared.open(url)
-                }
-                decisionHandler(.cancel)
-            }
-        }
-
-        private func handlePreviewNavigation(_ navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            // Only allow initial load and reload for previews
+            // Only allow initial load and reload for previews.
             if navigationAction.navigationType == .other || navigationAction.navigationType == .reload {
                 decisionHandler(.allow)
             } else {
@@ -617,7 +321,6 @@ struct BaseEmailWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             isLoading = false
             recordFinishedLoad()
-            parent.onLoadFinished?()
             schedulePreviewHeightMeasurement(
                 in: webView,
                 generation: previewMeasurementGeneration
@@ -713,94 +416,5 @@ struct BaseEmailWebView: UIViewRepresentable {
                 callback?(roundedHeight)
             }
         }
-    }
-}
-
-enum InlineCIDAttachmentAvailabilityFingerprint {
-    static func make(html: String, message: Message?) -> String {
-        fingerprint(referencedContentIDs: referencedInlineContentIDs(in: html), message: message)
-    }
-
-    /// Builds the availability fingerprint for an already-extracted set of referenced
-    /// `cid:` content IDs. Split out from `make` so callers can cache the (HTML-only)
-    /// reference extraction while still re-evaluating live attachment availability, which
-    /// can change on disk (a CID image finishing download) without the HTML changing.
-    static func fingerprint(referencedContentIDs: Set<String>, message: Message?) -> String {
-        guard !referencedContentIDs.isEmpty else {
-            return "cid:none"
-        }
-
-        guard let message else {
-            return "cid:message:none"
-        }
-
-        let attachments = message.attachmentsArray.sorted {
-            sortKey(for: $0) < sortKey(for: $1)
-        }
-
-        let entries = referencedContentIDs.sorted().map { contentID in
-            let matches = matchingAttachments(for: contentID, in: attachments)
-            guard !matches.isEmpty else {
-                return "\(contentID)=missing"
-            }
-
-            let matchSignatures = matches
-                .map(availabilitySignature(for:))
-                .joined(separator: ",")
-            return "\(contentID)=\(matchSignatures)"
-        }
-
-        return "cid:\(entries.joined(separator: "|"))"
-    }
-
-    static func referencedInlineContentIDs(in html: String) -> Set<String> {
-        EmailDocument.referencedContentIDs(in: html, terminators: EmailDocument.CIDScanTerminators.cssAndWhitespace)
-    }
-
-    private static func matchingAttachments(for contentID: String, in attachments: [Attachment]) -> [Attachment] {
-        let exactMatches = attachments.filter {
-            EmailDocument.normalizedContentID($0.contentId) == contentID
-        }
-
-        if !exactMatches.isEmpty {
-            return exactMatches
-        }
-
-        let contentIDWithoutDomain = contentID.components(separatedBy: "@").first ?? contentID
-        return attachments.filter {
-            guard let attachmentContentID = EmailDocument.normalizedContentID($0.contentId) else {
-                return false
-            }
-            let attachmentIDWithoutDomain = attachmentContentID.components(separatedBy: "@").first ?? attachmentContentID
-            return attachmentIDWithoutDomain == contentIDWithoutDomain
-        }
-    }
-
-    private static func availabilitySignature(for attachment: Attachment) -> String {
-        let attachmentIdentity = attachment.id ?? attachment.objectID.uriRepresentation().absoluteString
-        let availability: String
-
-        if hasUsableLocalFile(attachment) {
-            availability = "available:\(attachment.localURL ?? "")"
-        } else if attachment.isReady {
-            availability = "readyMissingLocalFile"
-        } else {
-            availability = "unavailable"
-        }
-
-        return "\(attachmentIdentity):\(availability)"
-    }
-
-    private static func hasUsableLocalFile(_ attachment: Attachment) -> Bool {
-        guard let localURL = attachment.localURL,
-              let fileURL = AttachmentPaths.fullURL(for: localURL) else {
-            return false
-        }
-
-        return FileManager.default.fileExists(atPath: fileURL.path)
-    }
-
-    private static func sortKey(for attachment: Attachment) -> String {
-        attachment.id ?? attachment.objectID.uriRepresentation().absoluteString
     }
 }

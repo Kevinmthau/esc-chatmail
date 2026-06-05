@@ -46,7 +46,7 @@ final class BaseEmailWebViewTests: XCTestCase {
         XCTAssertTrue(coordinator.needsReload)
     }
 
-    func testCoordinatorDoesNotReloadFullOriginalEmailWhenAppDarkModeToggles() {
+    func testCoordinatorNeedsReloadWhenPreviewDarkModeToggles() {
         let message = makeMessage(id: "message-dark-toggle")
         let lightView = makeWebView(message: message, isDarkMode: false)
         let darkView = makeWebView(message: message, isDarkMode: true)
@@ -57,92 +57,7 @@ final class BaseEmailWebViewTests: XCTestCase {
 
         coordinator.updateParent(darkView)
 
-        XCTAssertFalse(coordinator.needsReload)
-    }
-
-    func testCoordinatorNeedsReloadWhenReferencedCIDAttachmentBecomesLocallyAvailable() throws {
-        AttachmentPaths.setupDirectories()
-        let message = makeMessage(id: "message-cid-reload")
-        let attachment = AttachmentBuilder()
-            .withId("att-cid-reload")
-            .withFilename("image001.png")
-            .withMimeType("image/png")
-            .withContentId("image001@example.com")
-            .queued()
-            .forMessage(message)
-            .build(in: coreDataStack.viewContext)
-        try coreDataStack.saveViewContext()
-
-        let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: message))
-        coordinator.recordLoadedSignature()
-        XCTAssertFalse(coordinator.needsReload)
-
-        let localPath = AttachmentPaths.originalPath(idOrUUID: "att-cid-reload-\(UUID().uuidString)", ext: "png")
-        XCTAssertTrue(AttachmentPaths.saveData(Data([0x89, 0x50, 0x4E, 0x47]), to: localPath))
-        defer { AttachmentPaths.deleteFile(at: localPath) }
-
-        attachment.localURL = localPath
-        attachment.state = .downloaded
-        try coreDataStack.saveViewContext()
-
         XCTAssertTrue(coordinator.needsReload)
-    }
-
-    func testCoordinatorDoesNotReloadWhenUnreferencedAttachmentBecomesLocallyAvailable() throws {
-        AttachmentPaths.setupDirectories()
-        let message = makeMessage(id: "message-unreferenced-cid")
-        let attachment = AttachmentBuilder()
-            .withId("att-unreferenced-cid")
-            .withFilename("other.png")
-            .withMimeType("image/png")
-            .withContentId("other@example.com")
-            .queued()
-            .forMessage(message)
-            .build(in: coreDataStack.viewContext)
-        try coreDataStack.saveViewContext()
-
-        let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: message))
-        coordinator.recordLoadedSignature()
-        XCTAssertFalse(coordinator.needsReload)
-
-        let localPath = AttachmentPaths.originalPath(idOrUUID: "att-unreferenced-cid-\(UUID().uuidString)", ext: "png")
-        XCTAssertTrue(AttachmentPaths.saveData(Data([0x89, 0x50, 0x4E, 0x47]), to: localPath))
-        defer { AttachmentPaths.deleteFile(at: localPath) }
-
-        attachment.localURL = localPath
-        attachment.state = .downloaded
-        try coreDataStack.saveViewContext()
-
-        XCTAssertFalse(coordinator.needsReload)
-    }
-
-    func testCoordinatorDoesNotReloadForUnrelatedMessageAttachmentAvailabilityChange() throws {
-        AttachmentPaths.setupDirectories()
-        let currentMessage = makeMessage(id: "message-current-cid")
-        let unrelatedMessage = makeMessage(id: "message-unrelated-cid")
-        let unrelatedAttachment = AttachmentBuilder()
-            .withId("att-unrelated-cid")
-            .withFilename("image001.png")
-            .withMimeType("image/png")
-            .withContentId("image001@example.com")
-            .queued()
-            .forMessage(unrelatedMessage)
-            .build(in: coreDataStack.viewContext)
-        try coreDataStack.saveViewContext()
-
-        let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: currentMessage))
-        coordinator.recordLoadedSignature()
-        XCTAssertFalse(coordinator.needsReload)
-
-        let localPath = AttachmentPaths.originalPath(idOrUUID: "att-unrelated-cid-\(UUID().uuidString)", ext: "png")
-        XCTAssertTrue(AttachmentPaths.saveData(Data([0x89, 0x50, 0x4E, 0x47]), to: localPath))
-        defer { AttachmentPaths.deleteFile(at: localPath) }
-
-        unrelatedAttachment.localURL = localPath
-        unrelatedAttachment.state = .downloaded
-        try coreDataStack.saveViewContext()
-
-        XCTAssertFalse(coordinator.needsReload)
     }
 
     func testResetLoadedSignatureAfterFailureMakesCurrentContentEligibleForRetry() {
@@ -183,14 +98,6 @@ final class BaseEmailWebViewTests: XCTestCase {
         XCTAssertFalse(coordinator.needsReload)
     }
 
-    func testFullInteractiveLoadReadinessDoesNotRequireMeasuredHeight() {
-        let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: nil, mode: .fullInteractive))
-
-        let readiness = coordinator.loadReadiness(windowPresent: true, width: 320, height: 0.5)
-
-        XCTAssertEqual(readiness, .ready)
-    }
-
     func testScaledPreviewLoadReadinessStillRequiresMeasuredHeight() {
         let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: nil, mode: .scaledPreview(scale: 0.5)))
 
@@ -207,21 +114,32 @@ final class BaseEmailWebViewTests: XCTestCase {
         XCTAssertEqual(readiness, .deferred(reason: "missing-height"))
     }
 
-    func testModeDisplayPurposeUsesOriginalPolicyOnlyForFullInteractiveEmail() {
-        XCTAssertEqual(EmailWebViewMode.fullInteractive.displayPurpose, .original)
+    func testPreviewLoadReadinessRequiresWindowAndWidth() {
+        let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: nil, mode: .simplePreview))
+
+        XCTAssertEqual(
+            coordinator.loadReadiness(windowPresent: false, width: 320, height: 200),
+            .deferred(reason: "missing-window")
+        )
+        XCTAssertEqual(
+            coordinator.loadReadiness(windowPresent: true, width: 0.5, height: 200),
+            .deferred(reason: "missing-width")
+        )
+    }
+
+    func testModeDisplayPurposeUsesPreviewPolicy() {
         XCTAssertEqual(EmailWebViewMode.scaledPreview(scale: 0.5).displayPurpose, .preview)
         XCTAssertEqual(EmailWebViewMode.simplePreview.displayPurpose, .preview)
     }
 
-    func testModeUserInterfaceStyleForcesLightOnlyForFullOriginalEmail() {
-        XCTAssertEqual(EmailWebViewMode.fullInteractive.webViewUserInterfaceStyle, .light)
+    func testModeUserInterfaceStyleLeavesPreviewsUnspecified() {
         XCTAssertEqual(EmailWebViewMode.scaledPreview(scale: 0.5).webViewUserInterfaceStyle, .unspecified)
         XCTAssertEqual(EmailWebViewMode.simplePreview.webViewUserInterfaceStyle, .unspecified)
     }
 
     private func makeWebView(
         message: Message?,
-        mode: EmailWebViewMode = .fullInteractive,
+        mode: EmailWebViewMode = .simplePreview,
         isDarkMode: Bool? = nil
     ) -> BaseEmailWebView {
         BaseEmailWebView(

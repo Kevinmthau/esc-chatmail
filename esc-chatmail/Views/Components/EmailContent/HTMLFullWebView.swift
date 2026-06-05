@@ -1,7 +1,6 @@
 import SwiftUI
 
-/// Full interactive WebView for displaying email HTML content
-/// Wraps BaseEmailWebView with fullInteractive mode
+/// Full interactive WebView for displaying original email HTML.
 struct HTMLWebView: View {
     let htmlContent: String
     let isDarkMode: Bool
@@ -16,11 +15,8 @@ struct HTMLWebView: View {
     var onAdoptedPrerendered: (() -> Void)? = nil
 
     var body: some View {
-        BaseEmailWebView(
+        FullEmailReaderWebView(
             htmlContent: htmlContent,
-            mode: .fullInteractive,
-            isDarkMode: isDarkMode,
-            senderEmail: senderEmail,
             sourceSignature: sourceSignature,
             message: message,
             onLoadFinished: onLoadFinished,
