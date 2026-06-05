@@ -42,7 +42,7 @@ final class ChatViewModelTests: XCTestCase {
         return participant
     }
 
-    func testOpenFullMessage_setsPresentedMessage() {
+    func testOpenFullMessage_setsPresentedSession() {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let context = deps.viewContext
         let conversation = ConversationBuilder()
@@ -64,7 +64,9 @@ final class ChatViewModelTests: XCTestCase {
 
         viewModel.openFullMessage(message)
 
-        XCTAssertTrue(viewModel.messageToViewInFull === message)
+        XCTAssertTrue(viewModel.fullEmailOpenSession?.message === message)
+        XCTAssertEqual(viewModel.fullEmailOpenSession?.messageObjectID, message.objectID)
+        XCTAssertTrue(viewModel.fullEmailOpenSession?.hasImmediateVisualSurface == true)
     }
 
     func testOpenFullMessage_payloadHitPresentsPreparedHTMLWithoutFallbackPrewarm() {
@@ -101,8 +103,9 @@ final class ChatViewModelTests: XCTestCase {
 
         viewModel.openFullMessage(message)
 
-        XCTAssertTrue(viewModel.messageToViewInFull === message)
-        XCTAssertEqual(viewModel.fullMessagePresentation?.initialOpenPayload, payload)
+        XCTAssertTrue(viewModel.fullEmailOpenSession?.message === message)
+        XCTAssertEqual(viewModel.fullEmailOpenSession?.initialOpenPayload, payload)
+        XCTAssertEqual(viewModel.fullEmailOpenSession?.state, .presentingPreparedPayload)
         XCTAssertEqual(opener.preparedPayloadRequests.count, 1)
         XCTAssertTrue(opener.prewarmedMessages.isEmpty)
     }
@@ -131,8 +134,11 @@ final class ChatViewModelTests: XCTestCase {
 
         viewModel.openFullMessage(message)
 
-        XCTAssertTrue(viewModel.messageToViewInFull === message)
-        XCTAssertNil(viewModel.fullMessagePresentation?.initialOpenPayload)
+        XCTAssertTrue(viewModel.fullEmailOpenSession?.message === message)
+        XCTAssertNil(viewModel.fullEmailOpenSession?.initialOpenPayload)
+        XCTAssertEqual(viewModel.fullEmailOpenSession?.state, .presentingPlaceholder)
+        XCTAssertEqual(viewModel.fullEmailOpenSession?.immediatePlaceholder.subject, "Miss")
+        XCTAssertTrue(viewModel.fullEmailOpenSession?.hasImmediateVisualSurface == true)
         XCTAssertEqual(opener.preparedPayloadRequests.count, 1)
         XCTAssertEqual(opener.prewarmedMessages.map(\.id), ["message-miss"])
     }
@@ -160,7 +166,7 @@ final class ChatViewModelTests: XCTestCase {
 
         viewModel.dismissFullMessage()
 
-        XCTAssertNil(viewModel.messageToViewInFull)
+        XCTAssertNil(viewModel.fullEmailOpenSession)
     }
 
     func testSetMessageToForward_buildsForwardSnapshotsAtViewModelEdge() {
