@@ -6,12 +6,16 @@ struct VirtualScrollChatView: View {
     @ObservedObject var conversation: Conversation
     @StateObject private var scrollState: VirtualScrollState
     @State private var scrollViewReader: ScrollViewProxy?
-    @State private var messageToViewInFull: Message?
+    @State private var fullEmailOpenSession: FullEmailOpenSession?
     private let chatDependencies: ChatDependencies
+    private let fullEmailReaderCoordinator: FullEmailReaderCoordinator
 
     init(conversation: Conversation, chatDependencies: ChatDependencies) {
         self.conversation = conversation
         self.chatDependencies = chatDependencies
+        self.fullEmailReaderCoordinator = FullEmailReaderCoordinator(
+            fullEmailOpener: chatDependencies.fullEmailOpener
+        )
         self._scrollState = StateObject(
             wrappedValue: VirtualScrollState(
                 conversationId: conversation.id.uuidString,
@@ -39,7 +43,7 @@ struct VirtualScrollChatView: View {
                                     isEffectivelyOneToOneConversation: conversation.conversationType == .oneToOne,
                                     style: .compact,
                                     onOpenFullMessage: { messageObjectID in
-                                        messageToViewInFull = resolveMessage(with: messageObjectID)
+                                        openFullMessage(messageObjectID: messageObjectID)
                                     }
                                 )
                             }
@@ -64,10 +68,15 @@ struct VirtualScrollChatView: View {
                     proxy.scrollTo(lastMessage.objectID, anchor: .bottom)
                 }
             }
-            .sheet(item: $messageToViewInFull) { message in
-                HTMLMessageView(message: message)
+            .sheet(item: $fullEmailOpenSession) { session in
+                FullEmailReaderView(session: session)
             }
         }
+    }
+
+    private func openFullMessage(messageObjectID: NSManagedObjectID) {
+        guard let message = resolveMessage(with: messageObjectID) else { return }
+        fullEmailOpenSession = fullEmailReaderCoordinator.openSession(for: message)
     }
 
     private func resolveMessage(with objectID: NSManagedObjectID) -> Message? {

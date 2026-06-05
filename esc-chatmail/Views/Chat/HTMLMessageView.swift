@@ -27,6 +27,113 @@ enum OriginalEmailMissingSourceRecoveryPolicy: Sendable {
     case keepRecoveringWhileActive
 }
 
+enum FullEmailPlaceholderOverlayState: Equatable {
+    case loading(String)
+    case message(String)
+
+    static func resolving(isRecovering: Bool) -> FullEmailPlaceholderOverlayState {
+        .loading(isRecovering ? "Recovering original email…" : "Loading full email…")
+    }
+
+    static func failure(allowsRetry: Bool) -> FullEmailPlaceholderOverlayState? {
+        allowsRetry ? nil : .message("Original email unavailable")
+    }
+
+    var text: String {
+        switch self {
+        case .loading(let text), .message(let text):
+            return text
+        }
+    }
+
+    var showsProgress: Bool {
+        switch self {
+        case .loading:
+            return true
+        case .message:
+            return false
+        }
+    }
+}
+
+private struct FullEmailPlaceholderSurface: View {
+    let placeholder: FullEmailPlaceholder
+    let overlayState: FullEmailPlaceholderOverlayState?
+    var retryAction: (() -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text(placeholder.senderDisplayText)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 12)
+
+                    if let date = placeholder.date {
+                        Text(date, style: .date)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+
+                Text(placeholder.subject)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            if let previewText = placeholder.previewText {
+                Text(previewText)
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 22)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(uiColor: .systemBackground))
+        .overlay(alignment: .bottom) {
+            overlay
+        }
+    }
+
+    @ViewBuilder
+    private var overlay: some View {
+        if let retryAction {
+            Button {
+                retryAction()
+            } label: {
+                SwiftUI.Label("Reload full email", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.borderedProminent)
+            .padding(.bottom, 20)
+        } else if let overlayState {
+            HStack(spacing: 8) {
+                if overlayState.showsProgress {
+                    ProgressView().controlSize(.small)
+                }
+                Text(overlayState.text)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial, in: Capsule())
+            .padding(.bottom, 20)
+        }
+    }
+}
+
 enum OriginalEmailContentSourceReloadPolicy {
     static func shouldReload(
         changedMessageId: String?,
@@ -318,6 +425,7 @@ final class OriginalEmailLoadViewModel: ObservableObject {
 struct HTMLMessageView: View {
     let message: Message
     private let initialOpenPayload: FullEmailOpenPayload?
+    private let initialPlaceholder: FullEmailPlaceholder?
     @Environment(\.dismiss) private var dismiss
     @StateObject private var loadViewModel: OriginalEmailLoadViewModel
     /// The already-rendered chat preview snapshot, shown instantly while the live WebView paints.
@@ -330,11 +438,13 @@ struct HTMLMessageView: View {
     init(
         message: Message,
         initialOpenPayload: FullEmailOpenPayload? = nil,
+        initialPlaceholder: FullEmailPlaceholder? = nil,
         originalEmailSourceLoader: any OriginalEmailSourceLoading = OriginalEmailSourceLoader.shared,
         originalEmailLoadTimeout: TimeInterval = 5.0,
         recoveringDelay: TimeInterval = 5.0
     ) {
         let validInitialPayload = initialOpenPayload?.messageId == message.id ? initialOpenPayload : nil
+        let validInitialPlaceholder = initialPlaceholder?.messageId == message.id ? initialPlaceholder : nil
         let request = OriginalEmailLoadRequest(
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
@@ -345,6 +455,7 @@ struct HTMLMessageView: View {
 
         self.message = message
         self.initialOpenPayload = validInitialPayload
+        self.initialPlaceholder = validInitialPlaceholder
         self._loadViewModel = StateObject(
             wrappedValue: OriginalEmailLoadViewModel(
                 originalEmailSourceLoader: originalEmailSourceLoader,
@@ -434,12 +545,15 @@ struct HTMLMessageView: View {
         if let snapshotPlaceholder {
             snapshotPlaceholderView(snapshotPlaceholder)
                 .overlay(alignment: .bottom) {
-                    if isRecovering {
-                        loadingBanner(text: "Loading full email…")
-                    }
+                    loadingBanner(text: FullEmailPlaceholderOverlayState.resolving(isRecovering: isRecovering).text)
                 }
+        } else if let initialPlaceholder {
+            FullEmailPlaceholderSurface(
+                placeholder: initialPlaceholder,
+                overlayState: .resolving(isRecovering: isRecovering)
+            )
         } else {
-            ProgressView(isRecovering ? "Recovering original email..." : "Loading...")
+            ProgressView(FullEmailPlaceholderOverlayState.resolving(isRecovering: isRecovering).text)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
@@ -490,6 +604,12 @@ struct HTMLMessageView: View {
                         .padding(.bottom, 20)
                     }
                 }
+        } else if let initialPlaceholder {
+            FullEmailPlaceholderSurface(
+                placeholder: initialPlaceholder,
+                overlayState: .failure(allowsRetry: allowsRetry),
+                retryAction: allowsRetry ? { loadViewModel.retry() } : nil
+            )
         } else {
             ContentUnavailableView {
                 SwiftUI.Label("Original Email Unavailable", systemImage: "doc.text")

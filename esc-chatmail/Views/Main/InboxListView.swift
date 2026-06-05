@@ -5,11 +5,16 @@ struct InboxListView: View {
     @FetchRequest private var messages: FetchedResults<Message>
     @StateObject private var messageActions: MessageActions
     private let deps: Dependencies
+    private let fullEmailReaderCoordinator: FullEmailReaderCoordinator
 
     @MainActor
-    init(deps: Dependencies? = nil) {
+    init(
+        deps: Dependencies? = nil,
+        fullEmailReaderCoordinator: FullEmailReaderCoordinator? = nil
+    ) {
         let resolvedDeps = deps ?? Dependencies.shared
         self.deps = resolvedDeps
+        self.fullEmailReaderCoordinator = fullEmailReaderCoordinator ?? FullEmailReaderCoordinator()
         let request = NSFetchRequest<Message>(entityName: "Message")
         request.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: false)]
         // Only show inbox messages that are not drafts
@@ -20,8 +25,7 @@ struct InboxListView: View {
     }
 
     @State private var searchText = ""
-    @State private var selectedMessage: Message?
-    @State private var showingWebView = false
+    @State private var fullEmailOpenSession: FullEmailOpenSession?
     @State private var showingComposer = false
     @State private var cachedFilteredMessages: [Message] = []
     
@@ -31,13 +35,7 @@ struct InboxListView: View {
                 ForEach(cachedFilteredMessages) { message in
                     MessageRow(message: message)
                         .onTapGesture {
-                            // Inbox rows don't pre-render while visible, so this tap is the only warm
-                            // trigger. It can't make THIS open instant (the reader's checkout runs
-                            // before the off-screen render paints), but it seeds the pool so re-opening
-                            // the same message is instant.
-                            FullEmailWebViewManager.shared.prewarmOnOpen(message: message)
-                            selectedMessage = message
-                            showingWebView = true
+                            fullEmailOpenSession = fullEmailReaderCoordinator.openSession(for: message)
                         }
                         .swipeActions(edge: .trailing) {
                             Button(action: { archiveMessage(message) }) {
@@ -63,10 +61,8 @@ struct InboxListView: View {
                     }
                 }
             }
-            .sheet(isPresented: $showingWebView) {
-                if let message = selectedMessage {
-                    HTMLMessageView(message: message)
-                }
+            .sheet(item: $fullEmailOpenSession) { session in
+                FullEmailReaderView(session: session)
             }
             .sheet(isPresented: $showingComposer) {
                 ComposeView(mode: .newMessage, deps: deps)

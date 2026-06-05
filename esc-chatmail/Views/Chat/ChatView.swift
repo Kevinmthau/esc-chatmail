@@ -97,13 +97,10 @@ struct ChatView: View {
         .sheet(item: $viewModel.forwardComposeContext) { context in
             makeForwardComposeView(context)
         }
-        .sheet(item: $viewModel.fullMessagePresentation, onDismiss: {
+        .sheet(item: $viewModel.fullEmailOpenSession, onDismiss: {
             viewModel.dismissFullMessage()
-        }) { presentation in
-            HTMLMessageView(
-                message: presentation.message,
-                initialOpenPayload: presentation.initialOpenPayload
-            )
+        }) { session in
+            FullEmailReaderView(session: session)
         }
         .sheet(item: $viewModel.contactManager.contactToAdd) { wrapper in
             AddContactView(contact: wrapper.contact)
