@@ -8,7 +8,7 @@ struct HTMLWebView: View {
     var sourceSignature: String? = nil
     /// Optional message for resolving cid: URLs to inline attachments
     var message: Message?
-    /// Invoked when the WebView finishes its first paint, so the reader can cross-fade its placeholder.
+    /// Invoked when the WebView reports paint-confirmed readiness, so the reader can cross-fade its placeholder.
     var onLoadFinished: (() -> Void)? = nil
     /// Invoked when the guarded pre-render adoption path supplies an already-painted WebView, so the
     /// reader can drop its placeholder instantly.

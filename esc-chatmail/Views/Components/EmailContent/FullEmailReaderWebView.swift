@@ -11,6 +11,7 @@ struct FullEmailReaderWebView: UIViewRepresentable {
     let htmlContent: String
     let sourceSignature: String?
     let message: Message?
+    /// Invoked after the live WebView confirms a render pass, so the reader can drop its placeholder.
     var onLoadFinished: (() -> Void)?
     var onAdoptedPrerendered: (() -> Void)?
 
@@ -40,7 +41,8 @@ struct FullEmailReaderWebView: UIViewRepresentable {
     }
 
     /// Adopts a warmed WebView: repoint its delegate/cid handler at the live coordinator, mark the
-    /// content as already loaded so it never reloads, and tell the reader to drop its placeholder.
+    /// already paint-confirmed content as loaded so it never reloads, and tell the reader to drop
+    /// its placeholder.
     private func adoptPrerendered(
         _ checkout: FullEmailWebViewManager.Checkout,
         context: Context
@@ -94,6 +96,8 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         private var isLoading = false
         private var hasFinishedLoad = false
         private var shouldReloadAfterCurrentLoad = false
+        private let paintConfirmer: FullEmailReaderPaintConfirming
+        private var paintConfirmationGeneration = 0
         private var attachmentAvailabilityObserver: NSObjectProtocol?
         private weak var observedContext: NSManagedObjectContext?
         private var observedMessageObjectID: NSManagedObjectID?
@@ -105,8 +109,12 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         /// so it can be reclaimed (re-hosted for instant re-open) on dismantle.
         private var adoptedPrerenderedMessageId: String?
 
-        init(_ parent: FullEmailReaderWebView) {
+        init(
+            _ parent: FullEmailReaderWebView,
+            paintConfirmer: FullEmailReaderPaintConfirming = FullEmailReaderSnapshotPaintConfirmer()
+        ) {
             self.parent = parent
+            self.paintConfirmer = paintConfirmer
         }
 
         deinit {
@@ -285,14 +293,16 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         }
 
         func recordLoadedSignature() {
+            invalidatePendingPaintConfirmation()
             lastLoadedContent = parent.htmlContent
             lastLoadedReloadSignature = reloadSignature()
             hasFinishedLoad = false
         }
 
         /// Marks an adopted pre-rendered WebView's content as already loaded so `needsReload` is false
-        /// and no reload/first-paint occurs at display time. The instance is already painted off-screen.
+        /// and no live paint confirmation occurs at display time. The instance is already painted off-screen.
         func adoptAlreadyLoadedContent(_ html: String, messageId: String?) {
+            invalidatePendingPaintConfirmation()
             lastLoadedContent = html
             lastLoadedReloadSignature = reloadSignature()
             hasFinishedLoad = true
@@ -315,6 +325,7 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         }
 
         func resetLoadedSignatureAfterFailure() {
+            invalidatePendingPaintConfirmation()
             lastLoadedContent = ""
             lastLoadedReloadSignature = ""
             hasFinishedLoad = false
@@ -408,8 +419,12 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             isLoading = false
             recordFinishedLoad()
-            parent.onLoadFinished?()
-            reloadAfterCurrentLoadIfNeeded(in: webView)
+            let generation = paintConfirmationGeneration
+            confirmPaint(in: webView, generation: generation) { [weak self, weak webView] in
+                guard let self, let webView else { return }
+                self.parent.onLoadFinished?()
+                self.reloadAfterCurrentLoadIfNeeded(in: webView)
+            }
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -433,6 +448,46 @@ struct FullEmailReaderWebView: UIViewRepresentable {
 
             shouldReloadAfterCurrentLoad = false
             loadContentIfReady(in: webView)
+        }
+
+        private func invalidatePendingPaintConfirmation() {
+            paintConfirmationGeneration += 1
+        }
+
+        private func confirmPaint(
+            in webView: WKWebView,
+            generation: Int,
+            completion: @escaping () -> Void
+        ) {
+            paintConfirmer.confirmPaint(in: webView) { [weak self] in
+                guard let self, generation == self.paintConfirmationGeneration else {
+                    return
+                }
+                completion()
+            }
+        }
+    }
+}
+
+protocol FullEmailReaderPaintConfirming {
+    func confirmPaint(in webView: WKWebView, completion: @escaping () -> Void)
+}
+
+struct FullEmailReaderSnapshotPaintConfirmer: FullEmailReaderPaintConfirming {
+    func confirmPaint(in webView: WKWebView, completion: @escaping () -> Void) {
+        let bounds = webView.bounds
+        guard bounds.width > 1, bounds.height > 1 else {
+            DispatchQueue.main.async(execute: completion)
+            return
+        }
+
+        webView.layoutIfNeeded()
+
+        let configuration = WKSnapshotConfiguration()
+        configuration.rect = bounds
+
+        webView.takeSnapshot(with: configuration) { _, _ in
+            DispatchQueue.main.async(execute: completion)
         }
     }
 }

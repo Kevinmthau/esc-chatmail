@@ -4,9 +4,9 @@ import UIKit
 struct FullEmailReaderView: View {
     @ObservedObject var session: FullEmailOpenSession
     @Environment(\.dismiss) private var dismiss
-    /// The already-rendered chat preview snapshot, shown instantly while the live WebView paints.
+    /// The already-rendered chat preview snapshot, shown instantly until the live WebView confirms paint.
     @State private var snapshotPlaceholder: UIImage?
-    /// Set once the live WebView reports its first paint, cross-fading the snapshot away.
+    /// Set once the live WebView reports paint-confirmed readiness, cross-fading the snapshot away.
     @State private var webViewPainted = false
     @State private var loadedContentSignature: String?
 
@@ -75,8 +75,8 @@ struct FullEmailReaderView: View {
         }
     }
 
-    /// Loaded HTML: render the interactive WebView, covering its first-paint flash with the snapshot
-    /// placeholder and cross-fading the placeholder out once the WebView reports it has painted.
+    /// Loaded HTML: render the interactive WebView, covering its paint gap with the snapshot
+    /// placeholder and cross-fading the placeholder out once the WebView reports paint-confirmed readiness.
     @ViewBuilder
     private func loadedHTMLContent(html: String, sourceSignature: String?) -> some View {
         let contentSignature = loadedHTMLContentSignature(for: html, sourceSignature: sourceSignature)
