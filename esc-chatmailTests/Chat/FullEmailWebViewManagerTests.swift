@@ -333,8 +333,8 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
 }
 
 final class FullEmailWebViewAdoptionPolicyTests: XCTestCase {
-    func testAdoptionIsDisabledByDefault() {
-        XCTAssertFalse(
+    func testAdoptionIsEnabledByDefault() {
+        XCTAssertTrue(
             FullEmailWebViewAdoptionPolicy.isEnabled(
                 arguments: [],
                 environment: [:]
@@ -342,7 +342,46 @@ final class FullEmailWebViewAdoptionPolicyTests: XCTestCase {
         )
     }
 
-    func testLaunchArgumentEnablesAdoption() {
+    func testDisableLaunchArgumentDisablesAdoption() {
+        XCTAssertFalse(
+            FullEmailWebViewAdoptionPolicy.isEnabled(
+                arguments: [FullEmailWebViewAdoptionPolicy.disableLaunchArgument],
+                environment: [:]
+            )
+        )
+    }
+
+    func testDisableEnvironmentVariableDisablesAdoptionWhenTruthy() {
+        XCTAssertFalse(
+            FullEmailWebViewAdoptionPolicy.isEnabled(
+                arguments: [],
+                environment: [FullEmailWebViewAdoptionPolicy.disableEnvironmentKey: "1"]
+            )
+        )
+        XCTAssertFalse(
+            FullEmailWebViewAdoptionPolicy.isEnabled(
+                arguments: [],
+                environment: [FullEmailWebViewAdoptionPolicy.disableEnvironmentKey: "true"]
+            )
+        )
+    }
+
+    func testDisableEnvironmentVariableDoesNotDisableAdoptionWhenFalsey() {
+        XCTAssertTrue(
+            FullEmailWebViewAdoptionPolicy.isEnabled(
+                arguments: [],
+                environment: [FullEmailWebViewAdoptionPolicy.disableEnvironmentKey: "0"]
+            )
+        )
+        XCTAssertTrue(
+            FullEmailWebViewAdoptionPolicy.isEnabled(
+                arguments: [],
+                environment: [FullEmailWebViewAdoptionPolicy.disableEnvironmentKey: "false"]
+            )
+        )
+    }
+
+    func testLegacyLaunchArgumentStillAllowsAdoption() {
         XCTAssertTrue(
             FullEmailWebViewAdoptionPolicy.isEnabled(
                 arguments: [FullEmailWebViewAdoptionPolicy.launchArgument],
@@ -351,17 +390,41 @@ final class FullEmailWebViewAdoptionPolicyTests: XCTestCase {
         )
     }
 
-    func testEnvironmentVariableEnablesAdoptionOnlyWhenSetToOne() {
+    func testLegacyEnvironmentVariableStillAllowsAdoption() {
         XCTAssertTrue(
             FullEmailWebViewAdoptionPolicy.isEnabled(
                 arguments: [],
                 environment: [FullEmailWebViewAdoptionPolicy.environmentKey: "1"]
             )
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             FullEmailWebViewAdoptionPolicy.isEnabled(
                 arguments: [],
                 environment: [FullEmailWebViewAdoptionPolicy.environmentKey: "true"]
+            )
+        )
+    }
+
+    func testDisableLaunchArgumentWinsOverLegacyEnableLaunchArgument() {
+        XCTAssertFalse(
+            FullEmailWebViewAdoptionPolicy.isEnabled(
+                arguments: [
+                    FullEmailWebViewAdoptionPolicy.launchArgument,
+                    FullEmailWebViewAdoptionPolicy.disableLaunchArgument
+                ],
+                environment: [:]
+            )
+        )
+    }
+
+    func testDisableEnvironmentVariableWinsOverLegacyEnableEnvironmentVariable() {
+        XCTAssertFalse(
+            FullEmailWebViewAdoptionPolicy.isEnabled(
+                arguments: [],
+                environment: [
+                    FullEmailWebViewAdoptionPolicy.environmentKey: "1",
+                    FullEmailWebViewAdoptionPolicy.disableEnvironmentKey: "1"
+                ]
             )
         )
     }

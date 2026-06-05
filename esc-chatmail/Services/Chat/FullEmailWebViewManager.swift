@@ -252,8 +252,14 @@ enum FullEmailOpenPayloadReuseDecision: Equatable {
 }
 
 enum FullEmailWebViewAdoptionPolicy {
-    static let launchArgument = "-ESCEnableFullEmailWebViewAdoption"
-    static let environmentKey = "ESC_ENABLE_FULL_EMAIL_WEBVIEW_ADOPTION"
+    static let enableLaunchArgument = "-ESCEnableFullEmailWebViewAdoption"
+    static let enableEnvironmentKey = "ESC_ENABLE_FULL_EMAIL_WEBVIEW_ADOPTION"
+    static let disableLaunchArgument = "-ESCDisableFullEmailWebViewAdoption"
+    static let disableEnvironmentKey = "ESC_DISABLE_FULL_EMAIL_WEBVIEW_ADOPTION"
+
+    // Backward-compatible names for the former opt-in switch.
+    static let launchArgument = enableLaunchArgument
+    static let environmentKey = enableEnvironmentKey
 
     static var allowsPrerenderedWebViewAdoption: Bool {
         isEnabled(
@@ -263,7 +269,28 @@ enum FullEmailWebViewAdoptionPolicy {
     }
 
     static func isEnabled(arguments: [String], environment: [String: String]) -> Bool {
-        arguments.contains(launchArgument) || environment[environmentKey] == "1"
+        if arguments.contains(disableLaunchArgument) || isTruthy(environment[disableEnvironmentKey]) {
+            return false
+        }
+
+        if arguments.contains(enableLaunchArgument) || isTruthy(environment[enableEnvironmentKey]) {
+            return true
+        }
+
+        return true
+    }
+
+    private static func isTruthy(_ value: String?) -> Bool {
+        guard let value else {
+            return false
+        }
+
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "y", "on":
+            return true
+        default:
+            return false
+        }
     }
 }
 
@@ -459,9 +486,9 @@ struct FullEmailPreparedOpenPayloadBookkeeping: Equatable {
 /// Prepares full original-email HTML while chat bubbles are visible (and when a bubble is tapped),
 /// then hands that HTML to the reader so the open can skip cold sanitization/wrapping.
 ///
-/// Off-screen `WKWebView` adoption is intentionally guarded by `FullEmailWebViewAdoptionPolicy` and
-/// disabled by default. The live full-email WebView remains the correctness path; adopting a
-/// pre-rendered instance is an optional acceleration path for targeted debugging/experiments.
+/// Off-screen `WKWebView` adoption is the warmed-open production fast path, guarded by
+/// `FullEmailWebViewAdoptionPolicy` so it can be disabled quickly if needed. The prepared HTML payload
+/// remains the correctness backstop when no fully-painted matching WebView is available.
 @MainActor
 final class FullEmailWebViewManager: FullEmailOpening {
     static let shared = FullEmailWebViewManager()
@@ -541,8 +568,8 @@ final class FullEmailWebViewManager: FullEmailOpening {
     // MARK: Warming
 
     /// Resolves the locally-available wrapped original HTML (no network recovery) and keeps a prepared
-    /// payload ready for the reader. When WebView adoption is explicitly enabled, also pre-renders an
-    /// off-screen WebView. Cheap to call repeatedly: it no-ops when up-to-date state is already warm.
+    /// payload ready for the reader. When WebView adoption is allowed, also pre-renders an off-screen
+    /// WebView. Cheap to call repeatedly: it no-ops when up-to-date state is already warm.
     func warm(request: OriginalEmailWarmRequest, message: Message?, width: CGFloat) async {
         guard width > 1 else {
             return

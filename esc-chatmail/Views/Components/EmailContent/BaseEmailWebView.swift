@@ -77,8 +77,8 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
     }
 
-    /// Full original-email path. Uses a fresh WebView by default. It can adopt a pre-rendered instance
-    /// only when `FullEmailWebViewManager` explicitly permits that guarded acceleration path.
+    /// Full original-email path. Adopts a pre-rendered instance when the manager has an exact painted
+    /// match; otherwise it falls back to a fresh live WebView.
     private func makeFullInteractiveUIView(context: Context) -> WKWebView {
         if let message,
            let checkout = FullEmailWebViewManager.shared.checkout(
