@@ -105,7 +105,10 @@ final class ChatViewModelTests: XCTestCase {
 
         XCTAssertTrue(viewModel.fullEmailOpenSession?.message === message)
         XCTAssertEqual(viewModel.fullEmailOpenSession?.initialOpenPayload, payload)
-        XCTAssertEqual(viewModel.fullEmailOpenSession?.state, .presentingPreparedPayload)
+        XCTAssertEqual(
+            viewModel.fullEmailOpenSession?.readerState,
+            .preparedHTML(payload, placeholder: FullEmailPlaceholder(message: message))
+        )
         XCTAssertEqual(opener.preparedPayloadRequests.count, 1)
         XCTAssertTrue(opener.prewarmedMessages.isEmpty)
     }
@@ -136,7 +139,10 @@ final class ChatViewModelTests: XCTestCase {
 
         XCTAssertTrue(viewModel.fullEmailOpenSession?.message === message)
         XCTAssertNil(viewModel.fullEmailOpenSession?.initialOpenPayload)
-        XCTAssertEqual(viewModel.fullEmailOpenSession?.state, .presentingPlaceholder)
+        XCTAssertEqual(
+            viewModel.fullEmailOpenSession?.readerState,
+            .loading(FullEmailPlaceholder(message: message))
+        )
         XCTAssertEqual(viewModel.fullEmailOpenSession?.immediatePlaceholder.subject, "Miss")
         XCTAssertTrue(viewModel.fullEmailOpenSession?.hasImmediateVisualSurface == true)
         XCTAssertEqual(opener.preparedPayloadRequests.count, 1)

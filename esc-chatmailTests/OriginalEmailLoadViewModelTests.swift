@@ -1,5 +1,165 @@
+import CoreData
 import XCTest
 @testable import esc_chatmail
+
+private enum OriginalEmailLoadedContent: Equatable {
+    case html(String)
+    case plainText(String)
+}
+
+private enum OriginalEmailLoadState: Equatable {
+    case loading
+    case recovering
+    case loaded(OriginalEmailLoadedContent)
+    case retryableFailure(String)
+    case unrecoverableFailure(String)
+}
+
+@MainActor
+private final class OriginalEmailLoadViewModel {
+    private let testStack = TestCoreDataStack()
+    private let originalEmailSourceLoader: any OriginalEmailSourceLoading
+    private let loadTimeout: TimeInterval
+    private let recoveringDelay: TimeInterval
+    private let onSourceLoaded: @MainActor (OriginalEmailSource) -> Void
+    private var session: FullEmailOpenSession?
+
+    init(
+        originalEmailSourceLoader: any OriginalEmailSourceLoading = OriginalEmailSourceLoader.shared,
+        loadTimeout: TimeInterval = 5.0,
+        recoveringDelay: TimeInterval = 5.0,
+        initialLoadedSource: OriginalEmailSource? = nil,
+        initialRequest: OriginalEmailLoadRequest? = nil,
+        onSourceLoaded: @escaping @MainActor (OriginalEmailSource) -> Void = { _ in }
+    ) {
+        self.originalEmailSourceLoader = originalEmailSourceLoader
+        self.loadTimeout = loadTimeout
+        self.recoveringDelay = recoveringDelay
+        self.onSourceLoaded = onSourceLoaded
+
+        if let initialRequest {
+            self.session = makeSession(for: initialRequest, initialLoadedSource: initialLoadedSource)
+        }
+    }
+
+    var loadState: OriginalEmailLoadState {
+        guard let session else {
+            return .loading
+        }
+        return Self.loadState(from: session.readerState)
+    }
+
+    var reloadGeneration: Int {
+        session?.loadingGeneration ?? 0
+    }
+
+    var activeHTMLSourceSignature: String? {
+        session?.activeHTMLSourceSignature
+    }
+
+    @discardableResult
+    func loadOriginalEmail(
+        for request: OriginalEmailLoadRequest,
+        missingSourceRecoveryPolicy: OriginalEmailMissingSourceRecoveryPolicy = .markUnavailableAfterRetries
+    ) async -> OriginalEmailSource? {
+        let session = existingOrNewSession(for: request)
+        return await session.loadOriginalEmail(
+            for: request,
+            missingSourceRecoveryPolicy: missingSourceRecoveryPolicy
+        )
+    }
+
+    func retry() {
+        session?.retry()
+    }
+
+    func reloadPreservingContent() {
+        session?.reloadPreservingContent()
+    }
+
+    private func existingOrNewSession(for request: OriginalEmailLoadRequest) -> FullEmailOpenSession {
+        if let session {
+            return session
+        }
+
+        let session = makeSession(for: request, initialLoadedSource: nil)
+        self.session = session
+        return session
+    }
+
+    private func makeSession(
+        for request: OriginalEmailLoadRequest,
+        initialLoadedSource: OriginalEmailSource?
+    ) -> FullEmailOpenSession {
+        let message = MessageBuilder()
+            .withId(request.messageId)
+            .withSubject(request.subject ?? "Original")
+            .withSender(email: request.senderEmail ?? "sender@example.com", name: "Sender")
+            .withBody(request.bodyText ?? "")
+            .build(in: testStack.viewContext)
+        message.bodyStorageURI = request.bodyStorageURI
+
+        return FullEmailOpenSession(
+            message: message,
+            request: OriginalEmailWarmRequest(
+                messageId: request.messageId,
+                bodyStorageURI: request.bodyStorageURI,
+                bodyText: request.bodyText,
+                senderEmail: request.senderEmail,
+                subject: request.subject
+            ),
+            initialOpenPayload: Self.openPayload(from: initialLoadedSource, request: request),
+            immediatePlaceholder: FullEmailPlaceholder(message: message),
+            originalEmailSourceLoader: originalEmailSourceLoader,
+            originalEmailLoadTimeout: loadTimeout,
+            recoveringDelay: recoveringDelay,
+            onSourceLoaded: { [onSourceLoaded] _, source in
+                onSourceLoaded(source)
+            }
+        )
+    }
+
+    private static func openPayload(
+        from source: OriginalEmailSource?,
+        request: OriginalEmailLoadRequest
+    ) -> FullEmailOpenPayload? {
+        guard let source,
+              source.presentation == .html,
+              let html = source.html else {
+            return nil
+        }
+
+        return FullEmailOpenPayload(
+            messageId: request.messageId,
+            sourceSignature: source.sourceSignature,
+            html: html,
+            presentation: source.presentation,
+            sourceKind: source.sourceKind,
+            sourceLocation: source.sourceLocation,
+            hasHTMLSource: source.hasHTMLSource,
+            checkoutAvailability: .ready
+        )
+    }
+
+    private static func loadState(from readerState: FullEmailReaderState) -> OriginalEmailLoadState {
+        switch readerState {
+        case .preparedHTML(let payload, placeholder: _):
+            return .loaded(.html(payload.html))
+        case .loading:
+            return .loading
+        case .recovering:
+            return .recovering
+        case .loadedHTML(let html, sourceSignature: _, placeholder: _):
+            return .loaded(.html(html))
+        case .loadedPlainText(let text):
+            return .loaded(.plainText(text))
+        case .retryableFailure(_, let reason):
+            return .retryableFailure(reason)
+        case .unrecoverableFailure(_, let reason):
+            return .unrecoverableFailure(reason)
+        }
+    }
+}
 
 @MainActor
 final class OriginalEmailLoadViewModelTests: XCTestCase {
@@ -475,29 +635,38 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
     }
 
     func testContentSourceReloadPolicyReloadsWhileSourceIsResolving() {
-        let resolvingStates: [OriginalEmailLoadState] = [.loading, .recovering]
+        let placeholder = makePlaceholder(messageId: "message-1")
+        let resolvingStates: [FullEmailReaderState] = [
+            .loading(placeholder),
+            .recovering(placeholder)
+        ]
 
-        for loadState in resolvingStates {
+        for readerState in resolvingStates {
             XCTAssertTrue(
                 OriginalEmailContentSourceReloadPolicy.shouldReload(
                     changedMessageId: "message-1",
                     currentMessageId: "message-1",
                     changedSourceSignature: "new-source",
                     activeSourceSignature: nil,
-                    loadState: loadState
+                    readerState: readerState
                 )
             )
         }
     }
 
     func testContentSourceReloadPolicySkipsAlreadyLoadedSourceSignature() {
+        let placeholder = makePlaceholder(messageId: "message-1")
         XCTAssertFalse(
             OriginalEmailContentSourceReloadPolicy.shouldReload(
                 changedMessageId: "message-1",
                 currentMessageId: "message-1",
                 changedSourceSignature: "loaded-source",
                 activeSourceSignature: "loaded-source",
-                loadState: .loaded(.html("<html></html>"))
+                readerState: .loadedHTML(
+                    html: "<html></html>",
+                    sourceSignature: "loaded-source",
+                    placeholder: placeholder
+                )
             )
         )
     }
@@ -578,6 +747,17 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
             subject: "Original",
             senderEmail: "sender@example.com"
         )
+    }
+
+    private func makePlaceholder(messageId: String) -> FullEmailPlaceholder {
+        let stack = TestCoreDataStack()
+        let message = MessageBuilder()
+            .withId(messageId)
+            .withSubject("Original")
+            .withSender(email: "sender@example.com", name: "Sender")
+            .withBody("Plain fallback")
+            .build(in: stack.viewContext)
+        return FullEmailPlaceholder(message: message)
     }
 
     private func originalEmailSource(

@@ -41,7 +41,7 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
         XCTAssertEqual(session.messageId, "prepared-message")
         XCTAssertEqual(session.messageObjectID, message.objectID)
         XCTAssertEqual(session.initialOpenPayload, payload)
-        XCTAssertEqual(session.state, .presentingPreparedPayload)
+        XCTAssertEqual(session.readerState, .preparedHTML(payload, placeholder: session.immediatePlaceholder))
         XCTAssertEqual(session.immediatePlaceholder.subject, "Prepared subject")
         XCTAssertTrue(session.hasImmediateVisualSurface)
         XCTAssertEqual(opener.preparedPayloadRequests.count, 1)
@@ -68,7 +68,7 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
 
         XCTAssertTrue(session.message === message)
         XCTAssertNil(session.initialOpenPayload)
-        XCTAssertEqual(session.state, .presentingPlaceholder)
+        XCTAssertEqual(session.readerState, .loading(session.immediatePlaceholder))
         XCTAssertEqual(session.immediatePlaceholder.subject, "Miss subject")
         XCTAssertEqual(session.immediatePlaceholder.senderDisplayText, "Miss Sender")
         XCTAssertEqual(session.immediatePlaceholder.previewText, "Miss snippet")
@@ -95,7 +95,7 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
         XCTAssertEqual(session.immediatePlaceholder.subject, "No Subject")
         XCTAssertEqual(session.immediatePlaceholder.senderDisplayText, "fallback@example.com")
         XCTAssertEqual(session.immediatePlaceholder.previewText, "Body preview from the message")
-        XCTAssertEqual(session.state, .presentingPlaceholder)
+        XCTAssertEqual(session.readerState, .loading(session.immediatePlaceholder))
         XCTAssertTrue(session.hasImmediateVisualSurface)
     }
 
@@ -178,9 +178,159 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
 
         let session = coordinator.openSession(for: message)
 
-        XCTAssertEqual(session.state, .presentingPreparedPayload)
+        XCTAssertEqual(session.readerState, .preparedHTML(payload, placeholder: session.immediatePlaceholder))
         XCTAssertEqual(session.immediatePlaceholder.previewText, "Prepared visible body")
         XCTAssertTrue(opener.prewarmedMessages.isEmpty)
+    }
+
+    func testSessionWithInitialPayloadDoesNotEnterLoadingDuringFirstLoadTask() async throws {
+        let message = makeMessage(id: "prepared-load-task")
+        let payload = makePayload(messageId: "prepared-load-task")
+        let loader = SessionStubOriginalEmailSourceLoader(
+            responses: [nil],
+            delayNanoseconds: 80_000_000
+        )
+        let session = makeSession(
+            message: message,
+            initialOpenPayload: payload,
+            loader: loader,
+            loadTimeout: 0.03,
+            recoveringDelay: 0.005
+        )
+
+        XCTAssertEqual(session.readerState, .preparedHTML(payload, placeholder: session.immediatePlaceholder))
+
+        let task = Task { @MainActor in
+            await session.loadOriginalEmail(
+                for: session.loadRequest,
+                missingSourceRecoveryPolicy: .keepRecoveringWhileActive
+            )
+        }
+
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(session.readerState, .preparedHTML(payload, placeholder: session.immediatePlaceholder))
+
+        _ = await task.value
+
+        XCTAssertEqual(session.readerState, .preparedHTML(payload, placeholder: session.immediatePlaceholder))
+        XCTAssertEqual(loader.ensureRequestCount, 1)
+    }
+
+    func testSessionWithoutInitialPayloadTransitionsRecoveringThenLoadedHTML() async throws {
+        let html = "<html><body>Recovered full email</body></html>"
+        let message = makeMessage(id: "recovering-load-task")
+        let source = makeSource(
+            html: html,
+            sourceSignature: "loaded-source",
+            sourceKind: .recoveredHTML,
+            sourceLocation: .recoveredHTML
+        )
+        let loader = SessionStubOriginalEmailSourceLoader(
+            responses: [source],
+            delayNanoseconds: 40_000_000
+        )
+        let session = makeSession(
+            message: message,
+            initialOpenPayload: nil,
+            loader: loader,
+            loadTimeout: 0.1,
+            recoveringDelay: 0.005
+        )
+
+        XCTAssertEqual(session.readerState, .loading(session.immediatePlaceholder))
+
+        let task = Task { @MainActor in
+            await session.loadOriginalEmail(
+                for: session.loadRequest,
+                missingSourceRecoveryPolicy: .keepRecoveringWhileActive
+            )
+        }
+
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(session.readerState, .recovering(session.immediatePlaceholder))
+
+        _ = await task.value
+
+        XCTAssertEqual(
+            session.readerState,
+            .loadedHTML(html: html, sourceSignature: "loaded-source", placeholder: session.immediatePlaceholder)
+        )
+        XCTAssertEqual(session.activeHTMLSourceSignature, "loaded-source")
+        XCTAssertEqual(loader.ensureRequestCount, 1)
+    }
+
+    func testSessionRetryableFailureStoresPlaceholderAndRetryAdvancesGeneration() async {
+        let message = makeMessage(id: "retryable-failure")
+        let loader = SessionStubOriginalEmailSourceLoader(responses: [nil])
+        let session = makeSession(
+            message: message,
+            initialOpenPayload: nil,
+            loader: loader,
+            loadTimeout: 0.01,
+            recoveringDelay: 0.005
+        )
+
+        _ = await session.loadOriginalEmail(for: session.loadRequest)
+
+        XCTAssertEqual(
+            session.readerState,
+            .retryableFailure(session.immediatePlaceholder, reason: "original_email_unavailable")
+        )
+
+        let generationBeforeRetry = session.loadingGeneration
+        session.retry()
+
+        XCTAssertEqual(session.readerState, .loading(session.immediatePlaceholder))
+        XCTAssertEqual(session.loadingGeneration, generationBeforeRetry + 1)
+    }
+
+    func testSessionContentSourceNotificationReloadUsesSessionSourceSignature() async {
+        let html = "<html><body>Loaded source</body></html>"
+        let message = makeMessage(id: "content-source-notification")
+        let loader = SessionStubOriginalEmailSourceLoader(
+            responses: [
+                makeSource(
+                    html: html,
+                    sourceSignature: "loaded-source",
+                    sourceKind: .html,
+                    sourceLocation: .messageFile
+                )
+            ]
+        )
+        let session = makeSession(
+            message: message,
+            initialOpenPayload: nil,
+            loader: loader,
+            loadTimeout: 0.1,
+            recoveringDelay: 0.005
+        )
+
+        _ = await session.loadOriginalEmail(for: session.loadRequest)
+        XCTAssertEqual(session.activeHTMLSourceSignature, "loaded-source")
+
+        session.reloadIfContentSourceChanged(
+            Notification(
+                name: HTMLContentLoader.contentSourceDidChangeNotification,
+                object: nil,
+                userInfo: [
+                    HTMLContentLoader.contentSourceDidChangeMessageIdUserInfoKey: message.id,
+                    HTMLContentLoader.contentSourceDidChangeSourceSignatureUserInfoKey: "loaded-source"
+                ]
+            )
+        )
+        XCTAssertEqual(session.loadingGeneration, 0)
+
+        session.reloadIfContentSourceChanged(
+            Notification(
+                name: HTMLContentLoader.contentSourceDidChangeNotification,
+                object: nil,
+                userInfo: [
+                    HTMLContentLoader.contentSourceDidChangeMessageIdUserInfoKey: message.id,
+                    HTMLContentLoader.contentSourceDidChangeSourceSignatureUserInfoKey: "new-source"
+                ]
+            )
+        )
+        XCTAssertEqual(session.loadingGeneration, 1)
     }
 
     func testReaderViewIsDrivenByOpenSession() {
@@ -234,6 +384,48 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
             checkoutAvailability: .ready
         )
     }
+
+    private func makeSession(
+        message: Message,
+        initialOpenPayload: FullEmailOpenPayload?,
+        loader: any OriginalEmailSourceLoading,
+        loadTimeout: TimeInterval,
+        recoveringDelay: TimeInterval
+    ) -> FullEmailOpenSession {
+        FullEmailOpenSession(
+            message: message,
+            request: OriginalEmailWarmRequest(
+                messageId: message.id,
+                bodyStorageURI: message.bodyStorageURI,
+                bodyText: message.bodyTextValue,
+                senderEmail: message.senderEmailValue,
+                subject: message.subject
+            ),
+            initialOpenPayload: initialOpenPayload,
+            immediatePlaceholder: FullEmailPlaceholder(message: message),
+            originalEmailSourceLoader: loader,
+            originalEmailLoadTimeout: loadTimeout,
+            recoveringDelay: recoveringDelay,
+            onSourceLoaded: { _, _ in }
+        )
+    }
+
+    private func makeSource(
+        html: String,
+        sourceSignature: String,
+        sourceKind: CanonicalEmailSourceKind,
+        sourceLocation: CanonicalEmailSourceLocation
+    ) -> OriginalEmailSource {
+        OriginalEmailSource(
+            presentation: .html,
+            html: html,
+            plainText: nil,
+            sourceKind: sourceKind,
+            sourceLocation: sourceLocation,
+            sourceSignature: sourceSignature,
+            hasHTMLSource: true
+        )
+    }
 }
 
 @MainActor
@@ -269,5 +461,57 @@ private final class MockFullEmailReaderOpener: FullEmailOpening {
 
     func prewarmOnOpen(message: Message) {
         prewarmedMessages.append(message)
+    }
+}
+
+private final class SessionStubOriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Sendable {
+    private let stateQueue = DispatchQueue(label: "SessionStubOriginalEmailSourceLoader.state")
+    private var responses: [OriginalEmailSource?]
+    private let delayNanoseconds: UInt64
+    private var ensureCalls = 0
+
+    init(responses: [OriginalEmailSource?], delayNanoseconds: UInt64 = 0) {
+        self.responses = responses
+        self.delayNanoseconds = delayNanoseconds
+    }
+
+    var ensureRequestCount: Int {
+        stateQueue.sync { ensureCalls }
+    }
+
+    func loadOriginalEmailSource(
+        messageId: String,
+        bodyStorageURI: String?,
+        bodyText: String?,
+        senderEmail: String?,
+        subject: String?,
+        timeout: TimeInterval
+    ) async -> OriginalEmailSource? {
+        await ensureOriginalEmailAvailable(
+            messageId: messageId,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText,
+            senderEmail: senderEmail,
+            subject: subject
+        )
+    }
+
+    func ensureOriginalEmailAvailable(
+        messageId _: String,
+        bodyStorageURI _: String?,
+        bodyText _: String?,
+        senderEmail _: String?,
+        subject _: String?
+    ) async -> OriginalEmailSource? {
+        let response = stateQueue.sync { () -> OriginalEmailSource? in
+            ensureCalls += 1
+            return responses.isEmpty ? nil : responses.removeFirst()
+        }
+
+        if delayNanoseconds > 0 {
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+        }
+
+        return response
     }
 }
