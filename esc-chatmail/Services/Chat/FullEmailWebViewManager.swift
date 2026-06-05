@@ -257,7 +257,7 @@ enum FullEmailWebViewAdoptionPolicy {
     static let disableLaunchArgument = "-ESCDisableFullEmailWebViewAdoption"
     static let disableEnvironmentKey = "ESC_DISABLE_FULL_EMAIL_WEBVIEW_ADOPTION"
 
-    // Backward-compatible names for the former opt-in switch.
+    // Backward-compatible aliases for the opt-in switch.
     static let launchArgument = enableLaunchArgument
     static let environmentKey = enableEnvironmentKey
 
@@ -269,28 +269,22 @@ enum FullEmailWebViewAdoptionPolicy {
     }
 
     static func isEnabled(arguments: [String], environment: [String: String]) -> Bool {
-        if arguments.contains(disableLaunchArgument) || isTruthy(environment[disableEnvironmentKey]) {
+        if arguments.contains(disableLaunchArgument) || isEnabledEnvironmentValue(environment[disableEnvironmentKey]) {
             return false
         }
 
-        if arguments.contains(enableLaunchArgument) || isTruthy(environment[enableEnvironmentKey]) {
+        if arguments.contains(enableLaunchArgument) || isEnabledEnvironmentValue(environment[enableEnvironmentKey]) {
             return true
         }
 
-        return true
+        return false
     }
 
-    private static func isTruthy(_ value: String?) -> Bool {
+    private static func isEnabledEnvironmentValue(_ value: String?) -> Bool {
         guard let value else {
             return false
         }
-
-        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "1", "true", "yes", "y", "on":
-            return true
-        default:
-            return false
-        }
+        return value == "1"
     }
 }
 
@@ -1079,6 +1073,10 @@ final class FullEmailWebViewManager: FullEmailOpening {
 
     func isWarmedForTesting(messageId: String) -> Bool {
         entries[messageId]?.didFinishInitialLoad == true
+    }
+
+    func hasPrerenderedWebViewEntryForTesting(messageId: String) -> Bool {
+        entries[messageId] != nil
     }
 }
 
