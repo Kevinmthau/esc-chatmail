@@ -150,7 +150,7 @@ struct EmailContentSection: View {
             await loadHTML(generation: generation)
         }
         // Warm the full original-email HTML while the bubble is visible, so tapping can present
-        // prepared content immediately. WebView adoption remains a guarded manager-level experiment.
+        // prepared content immediately and adopt a painted WebView when the cache is ready.
         // Debounced + capacity-bounded (LRU) inside the manager; auto-cancels when the row scrolls away.
         .task(id: warmFullEmailKey) {
             await warmFullEmailWebViewIfNeeded()
