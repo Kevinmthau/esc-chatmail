@@ -16,7 +16,7 @@ struct MessageBubble: View {
     private let htmlContentHandler: HTMLContentHandler
 
     @StateObject private var viewModel: MessageBubbleViewModel
-    let onOpenFullMessage: (NSManagedObjectID) -> Void
+    let onOpenFullMessage: (NSManagedObjectID, EmailReaderOpenSource) -> Void
 
     private var showHTMLPreview: Bool {
         guard resolvedForwardedDisplayContent == nil else {
@@ -54,7 +54,7 @@ struct MessageBubble: View {
         contactRefreshToken: Int = 0,
         isLastFromSender: Bool = true,
         style: MessageBubbleStyle = .standard,
-        onOpenFullMessage: @escaping (NSManagedObjectID) -> Void
+        onOpenFullMessage: @escaping (NSManagedObjectID, EmailReaderOpenSource) -> Void
     ) {
         self.message = message
         self.htmlContentHandler = htmlContentHandler
@@ -96,7 +96,7 @@ struct MessageBubble: View {
                     sharedDocumentLinks: viewModel.sharedDocumentLinks,
                     hasLoadedContent: viewModel.hasLoadedContent,
                     forwardedDisplayContent: resolvedForwardedDisplayContent,
-                    onOpenFullMessage: openFullMessage
+                    onOpenFullMessage: openFullMessage(source:)
                 )
 
                 sendStatusView
@@ -229,8 +229,8 @@ struct MessageBubble: View {
         )
     }
 
-    private func openFullMessage() {
-        onOpenFullMessage(message.messageObjectID)
+    private func openFullMessage(source: EmailReaderOpenSource) {
+        onOpenFullMessage(message.messageObjectID, source)
     }
 
     static func contentSignature(

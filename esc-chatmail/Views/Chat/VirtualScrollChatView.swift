@@ -42,7 +42,7 @@ struct VirtualScrollChatView: View {
                                     htmlContentHandler: chatDependencies.content.htmlContentHandler,
                                     isEffectivelyOneToOneConversation: conversation.conversationType == .oneToOne,
                                     style: .compact,
-                                    onOpenFullMessage: { messageObjectID in
+                                    onOpenFullMessage: { messageObjectID, _ in
                                         openFullMessage(messageObjectID: messageObjectID)
                                     }
                                 )

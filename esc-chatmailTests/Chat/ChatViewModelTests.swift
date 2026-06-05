@@ -1,5 +1,4 @@
 import CoreData
-import CoreGraphics
 import XCTest
 @testable import esc_chatmail
 
@@ -42,7 +41,7 @@ final class ChatViewModelTests: XCTestCase {
         return participant
     }
 
-    func testOpenFullMessage_setsPresentedSession() {
+    func testOpenEmailReaderFromBubbleAccessoryCreatesReaderRoute() throws {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let context = deps.viewContext
         let conversation = ConversationBuilder()
@@ -62,14 +61,20 @@ final class ChatViewModelTests: XCTestCase {
             chatDependencies: deps.makeChatDependencies()
         )
 
-        viewModel.openFullMessage(message)
+        viewModel.openEmailReader(
+            for: message.objectID,
+            source: .bubbleAccessory,
+            initialMode: .original
+        )
 
-        XCTAssertTrue(viewModel.fullEmailOpenSession?.message === message)
-        XCTAssertEqual(viewModel.fullEmailOpenSession?.messageObjectID, message.objectID)
-        XCTAssertTrue(viewModel.fullEmailOpenSession?.hasImmediateVisualSurface == true)
+        let route = try XCTUnwrap(viewModel.emailReaderRoute)
+        XCTAssertEqual(route.messageObjectID, message.objectID)
+        XCTAssertEqual(route.conversationObjectID, conversation.objectID)
+        XCTAssertEqual(route.source, .bubbleAccessory)
+        XCTAssertEqual(route.initialMode, .original)
     }
 
-    func testOpenFullMessage_payloadHitPresentsPreparedHTMLWithoutFallbackPrewarm() {
+    func testOpenEmailReaderFromContextMenuCreatesReaderRoute() throws {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let context = deps.viewContext
         let conversation = ConversationBuilder()
@@ -78,46 +83,29 @@ final class ChatViewModelTests: XCTestCase {
             .recentlyActive()
             .build(in: context)
         let message = MessageBuilder()
-            .withId("message-prepared")
-            .withSubject("Prepared")
+            .withId("message-context-menu")
+            .withSubject("Context Menu")
             .withSender(email: "sender@example.com", name: "Sender")
-            .withBody("Prepared body")
             .inConversation(conversation)
             .build(in: context)
-        let payload = FullEmailOpenPayload(
-            messageId: "message-prepared",
-            sourceSignature: "sha256:prepared",
-            html: "<html><body>Prepared full email</body></html>",
-            presentation: .html,
-            sourceKind: .html,
-            sourceLocation: .messageFile,
-            hasHTMLSource: true,
-            checkoutAvailability: .ready
-        )
-        let opener = MockFullEmailOpener(preparedPayload: payload)
 
         let viewModel = ChatViewModel(
             conversation: conversation,
-            chatDependencies: deps.makeChatDependencies(fullEmailOpener: opener)
+            chatDependencies: deps.makeChatDependencies()
         )
 
-        viewModel.openFullMessage(message)
-
-        XCTAssertTrue(viewModel.fullEmailOpenSession?.message === message)
-        XCTAssertEqual(viewModel.fullEmailOpenSession?.initialOpenPayload, payload)
-        XCTAssertEqual(
-            viewModel.fullEmailOpenSession?.readerState,
-            .preparedHTML(payload, placeholder: FullEmailPlaceholder(message: message))
+        viewModel.openEmailReader(
+            for: message.objectID,
+            source: .contextMenu,
+            initialMode: .original
         )
-        XCTAssertEqual(opener.preparedPayloadRequests.count, 1)
-        XCTAssertEqual(opener.prepaintRequests.count, 1)
-        XCTAssertEqual(opener.prepaintRequests.first?.request.messageId, "message-prepared")
-        XCTAssertEqual(opener.prepaintRequests.first?.message.id, "message-prepared")
-        XCTAssertEqual(opener.prepaintRequests.first?.payload, payload)
-        XCTAssertTrue(opener.prewarmedMessages.isEmpty)
+
+        let route = try XCTUnwrap(viewModel.emailReaderRoute)
+        XCTAssertEqual(route.messageObjectID, message.objectID)
+        XCTAssertEqual(route.source, .contextMenu)
     }
 
-    func testOpenFullMessage_payloadMissPresentsMessageAndStartsFallbackPrewarm() {
+    func testOpenEmailReaderFromPreviewCardCreatesReaderRoute() throws {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let context = deps.viewContext
         let conversation = ConversationBuilder()
@@ -126,35 +114,29 @@ final class ChatViewModelTests: XCTestCase {
             .recentlyActive()
             .build(in: context)
         let message = MessageBuilder()
-            .withId("message-miss")
-            .withSubject("Miss")
+            .withId("message-preview-card")
+            .withSubject("Preview Card")
             .withSender(email: "sender@example.com", name: "Sender")
-            .withBody("Miss body")
             .inConversation(conversation)
             .build(in: context)
-        let opener = MockFullEmailOpener(preparedPayload: nil)
 
         let viewModel = ChatViewModel(
             conversation: conversation,
-            chatDependencies: deps.makeChatDependencies(fullEmailOpener: opener)
+            chatDependencies: deps.makeChatDependencies()
         )
 
-        viewModel.openFullMessage(message)
-
-        XCTAssertTrue(viewModel.fullEmailOpenSession?.message === message)
-        XCTAssertNil(viewModel.fullEmailOpenSession?.initialOpenPayload)
-        XCTAssertEqual(
-            viewModel.fullEmailOpenSession?.readerState,
-            .loading(FullEmailPlaceholder(message: message))
+        viewModel.openEmailReader(
+            for: message.objectID,
+            source: .previewCard,
+            initialMode: .original
         )
-        XCTAssertEqual(viewModel.fullEmailOpenSession?.immediatePlaceholder.subject, "Miss")
-        XCTAssertTrue(viewModel.fullEmailOpenSession?.hasImmediateVisualSurface == true)
-        XCTAssertEqual(opener.preparedPayloadRequests.count, 1)
-        XCTAssertTrue(opener.prepaintRequests.isEmpty)
-        XCTAssertEqual(opener.prewarmedMessages.map(\.id), ["message-miss"])
+
+        let route = try XCTUnwrap(viewModel.emailReaderRoute)
+        XCTAssertEqual(route.messageObjectID, message.objectID)
+        XCTAssertEqual(route.source, .previewCard)
     }
 
-    func testDismissFullMessage_clearsPresentedMessage() {
+    func testDismissDestination_clearsEmailReaderRoute() {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let context = deps.viewContext
         let conversation = ConversationBuilder()
@@ -173,11 +155,15 @@ final class ChatViewModelTests: XCTestCase {
             conversation: conversation,
             chatDependencies: deps.makeChatDependencies()
         )
-        viewModel.openFullMessage(message)
+        viewModel.openEmailReader(
+            for: message.objectID,
+            source: .bubbleAccessory,
+            initialMode: .original
+        )
 
-        viewModel.dismissFullMessage()
+        viewModel.dismissDestination()
 
-        XCTAssertNil(viewModel.fullEmailOpenSession)
+        XCTAssertNil(viewModel.destination)
     }
 
     func testSetMessageToForward_buildsForwardSnapshotsAtViewModelEdge() {
@@ -266,6 +252,10 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.forwardComposeContext?.forwardedInlineAttachmentInfos.first?.contentId, "cid-inline")
         XCTAssertEqual(viewModel.forwardComposeContext?.forwardedRegularAttachments.count, 1)
         XCTAssertEqual(viewModel.forwardComposeContext?.forwardedRegularAttachments.first?.filename, "report.pdf")
+        guard case .forwardCompose(let context) = viewModel.destination else {
+            return XCTFail("Expected forward compose destination")
+        }
+        XCTAssertEqual(context.id, "message-forward")
     }
 
     func testSendReply_buildsStableReplyRequestAtViewModelEdge() async {
@@ -428,66 +418,6 @@ final class ChatViewModelTests: XCTestCase {
 
         XCTAssertFalse(didSend)
         XCTAssertEqual(viewModel.replyText, "Retryable reply")
-    }
-}
-
-@MainActor
-private final class MockFullEmailOpener: FullEmailOpening {
-    struct PreparedPayloadRequest {
-        let request: OriginalEmailWarmRequest
-        let message: Message?
-        let width: CGFloat
-    }
-
-    struct PrepaintRequest {
-        let request: OriginalEmailWarmRequest
-        let message: Message
-        let payload: FullEmailOpenPayload
-        let width: CGFloat
-    }
-
-    let preparedPayload: FullEmailOpenPayload?
-    private(set) var preparedPayloadRequests: [PreparedPayloadRequest] = []
-    private(set) var prepaintRequests: [PrepaintRequest] = []
-    private(set) var prewarmedMessages: [Message] = []
-
-    init(preparedPayload: FullEmailOpenPayload?) {
-        self.preparedPayload = preparedPayload
-    }
-
-    func preparedOpenPayload(
-        request: OriginalEmailWarmRequest,
-        message: Message?,
-        width: CGFloat
-    ) -> FullEmailOpenPayload? {
-        preparedPayloadRequests.append(
-            PreparedPayloadRequest(
-                request: request,
-                message: message,
-                width: width
-            )
-        )
-        return preparedPayload
-    }
-
-    func prepaintAfterExplicitOpen(
-        request: OriginalEmailWarmRequest,
-        message: Message,
-        payload: FullEmailOpenPayload,
-        width: CGFloat
-    ) {
-        prepaintRequests.append(
-            PrepaintRequest(
-                request: request,
-                message: message,
-                payload: payload,
-                width: width
-            )
-        )
-    }
-
-    func prewarmOnOpen(message: Message) {
-        prewarmedMessages.append(message)
     }
 }
 

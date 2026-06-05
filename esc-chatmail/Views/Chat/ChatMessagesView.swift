@@ -12,7 +12,7 @@ struct ChatMessagesView: View {
     @ObservedObject var viewModel: ChatViewModel
     let chatDependencies: ChatDependencies
     var isTextFieldFocused: FocusState<Bool>.Binding
-    let onOpenFullMessage: (NSManagedObjectID) -> Void
+    let onOpenFullMessage: (NSManagedObjectID, EmailReaderOpenSource) -> Void
     @StateObject private var scrollState: VirtualScrollState
     @StateObject private var coordinator: ChatMessagesCoordinator
     @State private var replyBarHeight: CGFloat = 0
@@ -28,7 +28,7 @@ struct ChatMessagesView: View {
         viewModel: ChatViewModel,
         chatDependencies: ChatDependencies,
         isTextFieldFocused: FocusState<Bool>.Binding,
-        onOpenFullMessage: @escaping (NSManagedObjectID) -> Void
+        onOpenFullMessage: @escaping (NSManagedObjectID, EmailReaderOpenSource) -> Void
     ) {
         self.conversation = conversation
         self.messages = messages
@@ -294,6 +294,14 @@ struct ChatMessagesView: View {
             viewModel.setMessageToForward(messageObjectID: message.messageObjectID)
         }) {
             SwiftUI.Label("Forward", systemImage: "arrow.turn.up.right")
+        }
+
+        if message.hasOriginalEmailContent {
+            Button(action: {
+                onOpenFullMessage(message.messageObjectID, .contextMenu)
+            }) {
+                SwiftUI.Label("View original email", systemImage: "doc.richtext")
+            }
         }
     }
 

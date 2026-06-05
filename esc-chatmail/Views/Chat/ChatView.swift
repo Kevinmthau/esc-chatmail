@@ -56,8 +56,12 @@ struct ChatView: View {
             viewModel: viewModel,
             chatDependencies: chatDependencies,
             isTextFieldFocused: $isTextFieldFocused,
-            onOpenFullMessage: { messageObjectID in
-                viewModel.openFullMessage(messageObjectID: messageObjectID)
+            onOpenFullMessage: { messageObjectID, source in
+                viewModel.openEmailReader(
+                    for: messageObjectID,
+                    source: source,
+                    initialMode: .original
+                )
             }
         )
         .navigationTitle(navigationDisplayName)
@@ -94,43 +98,10 @@ struct ChatView: View {
                 }
             }
         }
-        .sheet(item: $viewModel.forwardComposeContext) { context in
-            makeForwardComposeView(context)
-        }
-        .sheet(item: $viewModel.fullEmailOpenSession, onDismiss: {
-            viewModel.dismissFullMessage()
-        }) { session in
-            FullEmailReaderView(session: session)
-        }
-        .sheet(item: $viewModel.contactManager.contactToAdd) { wrapper in
-            AddContactView(contact: wrapper.contact)
-        }
-        .sheet(isPresented: $viewModel.contactManager.showingContactPicker) {
-            ContactPickerView(
-                onContactSelected: { contact in
-                    viewModel.contactManager.handleContactSelected(contact)
-                },
-                onCancel: {
-                    viewModel.contactManager.handleContactPickerCancelled()
-                },
-                // Use name-only rows for consistent search results when picking an existing contact.
-                displayedPropertyKeys: [] as [String]
-            )
-        }
-        .sheet(isPresented: $viewModel.contactManager.showingParticipantsList) {
-            ParticipantsListView(
-                conversation: conversation,
-                chatDependencies: chatDependencies,
-                onCreateNewContact: { person in
-                    viewModel.contactManager.createNewContact(for: person)
-                },
-                onAddToExistingContact: { person in
-                    viewModel.contactManager.addToExistingContact(for: person)
-                },
-                onEditContact: { identifier in
-                    viewModel.contactManager.editExistingContact(identifier: identifier)
-                }
-            )
+        .sheet(item: activeDestinationBinding, onDismiss: {
+            dismissActiveDestination()
+        }) { destination in
+            destinationSheet(destination)
         }
         .alert(item: $viewModel.contactManager.contactActionAlert) { alert in
             switch alert.kind {
@@ -202,5 +173,91 @@ struct ChatView: View {
         ) ?? PersonDisplayNameResolver.fallbackConversationName(
             participantEmails: participantEmails
         )
+    }
+
+    private var activeDestination: ChatDestination? {
+        if let destination = viewModel.destination {
+            return destination
+        }
+
+        if let wrapper = viewModel.contactManager.contactToAdd {
+            return .addContact(wrapper)
+        }
+
+        if viewModel.contactManager.showingContactPicker {
+            return .contactPicker
+        }
+
+        if viewModel.contactManager.showingParticipantsList {
+            return .participants
+        }
+
+        return nil
+    }
+
+    private var activeDestinationBinding: Binding<ChatDestination?> {
+        Binding {
+            activeDestination
+        } set: { newValue in
+            if newValue == nil {
+                dismissActiveDestination()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func destinationSheet(_ destination: ChatDestination) -> some View {
+        switch destination {
+        case .emailReader(let route):
+            EmailReaderView(
+                route: route,
+                chatDependencies: chatDependencies,
+                onReply: {
+                    viewModel.setReplyingTo(messageObjectID: route.messageObjectID)
+                    viewModel.dismissDestination()
+                },
+                onForward: {
+                    viewModel.setMessageToForward(messageObjectID: route.messageObjectID)
+                }
+            )
+        case .forwardCompose(let context):
+            makeForwardComposeView(context)
+        case .addContact(let wrapper):
+            AddContactView(contact: wrapper.contact)
+        case .contactPicker:
+            ContactPickerView(
+                onContactSelected: { contact in
+                    viewModel.contactManager.handleContactSelected(contact)
+                },
+                onCancel: {
+                    viewModel.contactManager.handleContactPickerCancelled()
+                },
+                // Use name-only rows for consistent search results when picking an existing contact.
+                displayedPropertyKeys: [] as [String]
+            )
+        case .participants:
+            ParticipantsListView(
+                conversation: conversation,
+                chatDependencies: chatDependencies,
+                onCreateNewContact: { person in
+                    viewModel.contactManager.createNewContact(for: person)
+                },
+                onAddToExistingContact: { person in
+                    viewModel.contactManager.addToExistingContact(for: person)
+                },
+                onEditContact: { identifier in
+                    viewModel.contactManager.editExistingContact(identifier: identifier)
+                }
+            )
+        }
+    }
+
+    private func dismissActiveDestination() {
+        viewModel.dismissDestination()
+        viewModel.contactManager.contactToAdd = nil
+        viewModel.contactManager.showingParticipantsList = false
+        if viewModel.contactManager.showingContactPicker {
+            viewModel.contactManager.handleContactPickerCancelled()
+        }
     }
 }

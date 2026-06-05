@@ -228,6 +228,14 @@ struct ChatMessageRowModel: Equatable {
     /// Precomputed so MessageBubble body recomputation does not hash message text.
     let loadSignatureComponents: MessageBubbleLoadSignatureComponents
 
+    var hasOriginalEmailContent: Bool {
+        MessageOriginalEmailOpenPolicy.hasOriginalEmailContent(
+            hasHTMLSource: hasHTMLSource,
+            bodyStorageURI: bodyStorageURI,
+            bodyText: bodyText
+        )
+    }
+
     var objectID: NSManagedObjectID {
         messageObjectID
     }

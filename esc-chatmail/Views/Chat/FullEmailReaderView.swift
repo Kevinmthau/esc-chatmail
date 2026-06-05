@@ -3,6 +3,11 @@ import UIKit
 
 struct FullEmailReaderView: View {
     @ObservedObject var session: FullEmailOpenSession
+    let mode: EmailReaderMode
+    let availableModes: [EmailReaderMode]
+    let onModeSelected: (EmailReaderMode) -> Void
+    let onReply: (() -> Void)?
+    let onForward: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
     /// The already-rendered chat preview snapshot, shown instantly until the live WebView confirms paint.
     @State private var snapshotPlaceholder: UIImage?
@@ -10,10 +15,44 @@ struct FullEmailReaderView: View {
     @State private var webViewPainted = false
     @State private var loadedContentSignature: String?
 
+    init(
+        session: FullEmailOpenSession,
+        mode: EmailReaderMode = .original,
+        availableModes: [EmailReaderMode] = [.original],
+        onModeSelected: @escaping (EmailReaderMode) -> Void = { _ in },
+        onReply: (() -> Void)? = nil,
+        onForward: (() -> Void)? = nil
+    ) {
+        self.session = session
+        self.mode = mode
+        self.availableModes = availableModes
+        self.onModeSelected = onModeSelected
+        self.onReply = onReply
+        self.onForward = onForward
+    }
+
     var body: some View {
         NavigationStack {
-            content
-                .navigationTitle("Original Email")
+            VStack(spacing: 0) {
+                EmailReaderMetadataChrome(
+                    message: session.message,
+                    mode: mode,
+                    availableModes: availableModes,
+                    onModeSelected: onModeSelected,
+                    onReply: onReply.map { reply in
+                        {
+                            reply()
+                            dismiss()
+                        }
+                    },
+                    onForward: onForward
+                )
+
+                Divider()
+
+                content
+            }
+                .navigationTitle("Email")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .navigationBarTrailing) {
@@ -49,7 +88,7 @@ struct FullEmailReaderView: View {
         case .loadedHTML(let html, let sourceSignature, placeholder: _):
             loadedHTMLContent(html: html, sourceSignature: sourceSignature)
         case .loadedPlainText(let text):
-            OriginalEmailReadableView(message: session.message, text: text)
+            OriginalEmailReadableView(text: text)
         case .retryableFailure(let placeholder, reason: _):
             failureContent(placeholder: placeholder, allowsRetry: true)
         case .unrecoverableFailure(let placeholder, reason: _):
@@ -241,31 +280,6 @@ private struct FullEmailPlaceholderSurface: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text(placeholder.senderDisplayText)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-
-                    Spacer(minLength: 12)
-
-                    if let date = placeholder.date {
-                        Text(date, style: .date)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-
-                Text(placeholder.subject)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Divider()
-
             if let previewText = placeholder.previewText {
                 Text(previewText)
                     .font(.body)
@@ -313,26 +327,16 @@ private struct FullEmailPlaceholderSurface: View {
 }
 
 private struct OriginalEmailReadableView: View {
-    let message: Message
     let text: String
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                OriginalEmailMetadataCard(message: message)
-
-                Text(Self.linkifiedAttributedString(from: text))
-                    .font(.body)
-                    .foregroundStyle(.primary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-                    .padding(18)
-                    .background(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .fill(Color(uiColor: .secondarySystemBackground))
-                    )
-            }
-            .padding(16)
+            Text(Self.linkifiedAttributedString(from: text))
+                .font(.body)
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+                .padding(18)
         }
         .background(Color(uiColor: .systemBackground))
         .tint(.blue)
@@ -358,6 +362,228 @@ private struct OriginalEmailReadableView: View {
         }
 
         return AttributedString(attributed)
+    }
+}
+
+private struct EmailReaderMetadataChrome: View {
+    let message: Message
+    let mode: EmailReaderMode
+    let availableModes: [EmailReaderMode]
+    let onModeSelected: (EmailReaderMode) -> Void
+    let onReply: (() -> Void)?
+    let onForward: (() -> Void)?
+
+    @State private var showingRecipients = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                Text(subject)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Spacer(minLength: 8)
+
+                modeControl
+            }
+
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(senderLine)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+
+                    Text(message.internalDate.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 8)
+
+                actionButtons
+            }
+
+            if let recipientSummary {
+                DisclosureGroup(isExpanded: $showingRecipients) {
+                    recipientDetailRows
+                        .padding(.top, 4)
+                } label: {
+                    Text(recipientSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .font(.caption)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(Color(uiColor: .systemBackground))
+    }
+
+    @ViewBuilder
+    private var modeControl: some View {
+        if availableModes.count > 1 {
+            Menu {
+                ForEach(availableModes, id: \.self) { mode in
+                    Button {
+                        onModeSelected(mode)
+                    } label: {
+                        SwiftUI.Label(mode.displayName, systemImage: mode.systemImage)
+                    }
+                }
+            } label: {
+                SwiftUI.Label(mode.displayName, systemImage: mode.systemImage)
+                    .font(.caption.weight(.medium))
+            }
+        } else {
+            SwiftUI.Label(mode.displayName, systemImage: mode.systemImage)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var actionButtons: some View {
+        if onReply != nil || onForward != nil {
+            HStack(spacing: 8) {
+                if let onReply {
+                    Button(action: onReply) {
+                        Image(systemName: "arrow.turn.up.left")
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("Reply")
+                }
+
+                if let onForward {
+                    Button(action: onForward) {
+                        Image(systemName: "arrow.turn.up.right")
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("Forward")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var recipientDetailRows: some View {
+        let groups = recipientGroups
+        if groups.isEmpty, let deliveredToAddress = nonEmptyText(message.deliveredToAddress) {
+            recipientRow(label: "To", value: deliveredToAddress)
+        } else {
+            ForEach(groups, id: \.label) { group in
+                recipientRow(label: group.label, value: group.people.joined(separator: ", "))
+            }
+        }
+    }
+
+    private func recipientRow(label: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .foregroundStyle(.secondary)
+                .frame(width: 32, alignment: .leading)
+
+            Text(value)
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+        }
+    }
+
+    private var subject: String {
+        nonEmptyText(message.subject) ?? "No Subject"
+    }
+
+    private var senderLine: String {
+        OriginalEmailMetadataFormatter.senderLine(
+            senderName: message.senderName,
+            senderEmail: message.senderEmail
+        ) ?? PersonDisplayNameResolver.fallbackSenderName()
+    }
+
+    private var recipientSummary: String? {
+        let groups = recipientGroups
+        if groups.isEmpty {
+            guard let deliveredToAddress = nonEmptyText(message.deliveredToAddress) else {
+                return nil
+            }
+            return "To \(deliveredToAddress)"
+        }
+
+        let totalCount = groups.reduce(0) { $0 + $1.people.count }
+        guard totalCount > 0 else {
+            return nil
+        }
+
+        if totalCount == 1, let first = groups.first?.people.first {
+            return "To \(first)"
+        }
+
+        return "Recipients \(totalCount)"
+    }
+
+    private var recipientGroups: [RecipientGroup] {
+        let participants = Array(message.participants ?? [])
+            .filter { participant in
+                switch participant.participantKind {
+                case .to, .cc, .bcc:
+                    return true
+                case .from:
+                    return false
+                }
+            }
+
+        return [
+            makeRecipientGroup(kind: .to, label: "To", participants: participants),
+            makeRecipientGroup(kind: .cc, label: "Cc", participants: participants),
+            makeRecipientGroup(kind: .bcc, label: "Bcc", participants: participants)
+        ].compactMap { $0 }
+    }
+
+    private func makeRecipientGroup(
+        kind: ParticipantKind,
+        label: String,
+        participants: [MessageParticipant]
+    ) -> RecipientGroup? {
+        let people = participants
+            .filter { $0.participantKind == kind }
+            .compactMap { participant -> String? in
+                guard let person = participant.person else {
+                    return nil
+                }
+                return Self.personLine(person)
+            }
+            .filter { !$0.isEmpty }
+            .sorted()
+
+        guard !people.isEmpty else {
+            return nil
+        }
+
+        return RecipientGroup(label: label, people: people)
+    }
+
+    private static func personLine(_ person: Person) -> String {
+        OriginalEmailMetadataFormatter.senderLine(
+            senderName: person.displayName,
+            senderEmail: person.email
+        ) ?? person.email
+    }
+
+    private func nonEmptyText(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    private struct RecipientGroup {
+        let label: String
+        let people: [String]
     }
 }
 

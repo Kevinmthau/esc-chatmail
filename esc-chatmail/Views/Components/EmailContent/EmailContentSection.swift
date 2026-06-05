@@ -31,7 +31,7 @@ extension OriginalEmailSourceLoader: OriginalEmailSourceWarming {
 /// Other rich HTML renders through a cached snapshot preview, with MiniEmailWebView as failure fallback.
 struct EmailContentSection: View {
     let message: ChatMessageRowModel
-    let onOpenFullMessage: () -> Void
+    let onOpenFullMessage: (EmailReaderOpenSource) -> Void
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.managedObjectContext) private var viewContext
@@ -45,7 +45,7 @@ struct EmailContentSection: View {
 
     init(
         message: ChatMessageRowModel,
-        onOpenFullMessage: @escaping () -> Void,
+        onOpenFullMessage: @escaping (EmailReaderOpenSource) -> Void,
         originalEmailSourceWarmer: any OriginalEmailSourceWarming = OriginalEmailSourceLoader.shared
     ) {
         self.message = message
@@ -133,7 +133,9 @@ struct EmailContentSection: View {
             if let renderedPreview {
                 previewView(for: renderedPreview)
             } else if isLoading {
-                Button(action: onOpenFullMessage) {
+                Button {
+                    onOpenFullMessage(.debugOrFallback)
+                } label: {
                     EmailContentPlaceholder()
                 }
                 .buttonStyle(.plain)
@@ -141,7 +143,7 @@ struct EmailContentSection: View {
                 // Fallback when no HTML content available
                 // (EmailContentFallback is already tappable, no extra button needed)
                 EmailContentFallback(subject: message.subject) {
-                    onOpenFullMessage()
+                    onOpenFullMessage(.debugOrFallback)
                 }
             }
         }
@@ -268,35 +270,45 @@ struct EmailContentSection: View {
     private func previewView(for renderedPreview: EmailPreviewRenderModel) -> some View {
         switch renderedPreview {
         case .calendarInvite(let model):
-            Button(action: onOpenFullMessage) {
+            Button {
+                onOpenFullMessage(.previewCard)
+            } label: {
                 CalendarInvitePreviewCard(model: model)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Calendar invite: \(model.title)")
             .accessibilityHint("Opens the full original email")
         case .newsletter(let model):
-            Button(action: onOpenFullMessage) {
+            Button {
+                onOpenFullMessage(.previewCard)
+            } label: {
                 NewsletterPreviewCard(model: model)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Email preview: \(model.title)")
             .accessibilityHint("Opens the full original email")
         case .transactional(let model):
-            Button(action: onOpenFullMessage) {
+            Button {
+                onOpenFullMessage(.previewCard)
+            } label: {
                 TransactionalPreviewCard(model: model)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Email preview: \(model.title)")
             .accessibilityHint("Opens the full original email")
         case .netlifyDeploy(let model):
-            Button(action: onOpenFullMessage) {
+            Button {
+                onOpenFullMessage(.previewCard)
+            } label: {
                 NetlifyDeployPreviewCard(model: model)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Netlify deploy preview: \(model.title), \(model.status.displayText)")
             .accessibilityHint("Opens the full original email")
         case .html(let payload):
-            Button(action: onOpenFullMessage) {
+            Button {
+                onOpenFullMessage(.previewCard)
+            } label: {
                 htmlFallbackPreview(payload)
             }
             .buttonStyle(.plain)

@@ -10,7 +10,7 @@ final class ChatViewModel: ObservableObject {
     @Published var replyText = ""
     @Published var replyingTo: Message?
     @Published var forwardComposeContext: ComposeForwardModeContext?
-    @Published var fullEmailOpenSession: FullEmailOpenSession?
+    @Published var destination: ChatDestination?
     @Published var resolvedDisplayName: String?
     @Published var effectiveParticipantCount: Int?
     @Published var sendErrorAlert: ChatSendErrorAlert?
@@ -38,7 +38,6 @@ final class ChatViewModel: ObservableObject {
     private let replyOptimisticConversation: OptimisticConversationReference
     private let processedTextCache: ProcessedTextCache
     private let contactsResolver: any ContactsResolving
-    private let fullEmailReaderCoordinator: FullEmailReaderCoordinator
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Task Management
@@ -52,6 +51,13 @@ final class ChatViewModel: ObservableObject {
         }
 
         return conversation.conversationType == .oneToOne
+    }
+
+    var emailReaderRoute: EmailReaderRoute? {
+        guard case .emailReader(let route) = destination else {
+            return nil
+        }
+        return route
     }
 
     // MARK: - Initialization
@@ -70,9 +76,6 @@ final class ChatViewModel: ObservableObject {
         )
         self.processedTextCache = chatDependencies.content.processedTextCache
         self.contactsResolver = chatDependencies.contacts.contactsResolver
-        self.fullEmailReaderCoordinator = FullEmailReaderCoordinator(
-            fullEmailOpener: chatDependencies.fullEmailOpener
-        )
         self.messageActions = chatDependencies.messaging.messageActions
         self.outboundMessageCoordinator = chatDependencies.messaging.outboundMessageCoordinator
         self.outboundAttachmentContextBuilder = chatDependencies.messaging.outboundAttachmentContextBuilder
@@ -188,9 +191,11 @@ final class ChatViewModel: ObservableObject {
 
     func setMessageToForward(_ message: Message) {
         do {
-            forwardComposeContext = try composeForwardModeContextBuilder.build(
+            let context = try composeForwardModeContextBuilder.build(
                 input: makeForwardModeInput(message)
             )
+            forwardComposeContext = context
+            destination = .forwardCompose(context)
         } catch {
             Log.error("Failed to prepare forward compose context", category: .message, error: error)
         }
@@ -201,18 +206,30 @@ final class ChatViewModel: ObservableObject {
         setMessageToForward(message)
     }
 
-    func openFullMessage(_ message: Message) {
-        fullEmailOpenSession = fullEmailReaderCoordinator.openSession(for: message)
+    func openEmailReader(
+        for messageID: NSManagedObjectID,
+        source: EmailReaderOpenSource,
+        initialMode: EmailReaderMode = .original
+    ) {
+        guard let message = resolveMessage(with: messageID) else { return }
+        destination = .emailReader(
+            EmailReaderRoute(
+                messageObjectID: message.objectID,
+                conversationObjectID: message.conversation?.objectID ?? conversationObjectID,
+                source: source,
+                initialMode: initialMode
+            )
+        )
     }
 
-    func openFullMessage(messageObjectID: NSManagedObjectID) {
-        guard let message = resolveMessage(with: messageObjectID) else { return }
-        openFullMessage(message)
-    }
-
-    func dismissFullMessage() {
-        Log.info("Dismissed full message view", category: .ui)
-        fullEmailOpenSession = nil
+    func dismissDestination() {
+        if case .emailReader = destination {
+            Log.info("Dismissed full message view", category: .ui)
+        }
+        if case .forwardCompose = destination {
+            forwardComposeContext = nil
+        }
+        destination = nil
     }
 
     /// Sends a reply with optional attachments
