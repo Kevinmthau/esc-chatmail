@@ -546,6 +546,27 @@ final class FullEmailWebViewAdoptionPolicyTests: XCTestCase {
         }
     }
 
+    func testVisibleRowWarmWidthEstimateIsNilWhenAdoptionDisabled() {
+        withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.enableEnvironmentKey) {
+            withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
+                XCTAssertNil(
+                    EmailReaderRenderingConfiguration.visibleRowWarmWidthEstimate(sceneScreenWidth: 390)
+                )
+            }
+        }
+    }
+
+    func testVisibleRowWarmWidthEstimateUsesSceneWidthWhenAdoptionEnabled() {
+        withEnvironmentValue("1", for: FullEmailWebViewAdoptionPolicy.enableEnvironmentKey) {
+            withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
+                XCTAssertEqual(
+                    EmailReaderRenderingConfiguration.visibleRowWarmWidthEstimate(sceneScreenWidth: 390),
+                    390
+                )
+            }
+        }
+    }
+
     func testRenderingConfigurationDisableOverrideWins() {
         withEnvironmentValue("1", for: FullEmailWebViewAdoptionPolicy.enableEnvironmentKey) {
             withEnvironmentValue("1", for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {

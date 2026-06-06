@@ -145,6 +145,22 @@ enum EmailReaderRenderingConfiguration {
     static var enablesOffscreenWebViewAdoption: Bool {
         FullEmailWebViewAdoptionPolicy.allowsPrerenderedWebViewAdoption
     }
+
+    static func visibleRowWarmWidthEstimate(sceneScreenWidth: CGFloat?) -> CGFloat? {
+        guard enablesOffscreenWebViewAdoption,
+              let sceneScreenWidth,
+              sceneScreenWidth > 1 else {
+            return nil
+        }
+        return sceneScreenWidth
+    }
+
+    @MainActor
+    static func currentVisibleRowWarmWidthEstimate() -> CGFloat? {
+        visibleRowWarmWidthEstimate(
+            sceneScreenWidth: FullEmailWebViewMetrics.activeWindowScene()?.screen.bounds.width
+        )
+    }
 }
 
 // MARK: - Metrics

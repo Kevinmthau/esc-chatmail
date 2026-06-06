@@ -161,7 +161,7 @@ struct EmailContentSection: View {
         await fullEmailOpener.warm(
             request: Self.originalEmailWarmRequest(for: message),
             message: resolvedMessageForInlineAttachments,
-            width: nil
+            width: EmailReaderRenderingConfiguration.currentVisibleRowWarmWidthEstimate()
         )
     }
 
