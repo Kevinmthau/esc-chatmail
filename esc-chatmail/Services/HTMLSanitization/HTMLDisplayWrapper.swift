@@ -6,6 +6,17 @@ enum HTMLDisplayPurpose: String, CaseIterable, Sendable {
     case original
 }
 
+/// How `HTMLDisplayWrapper` injects its `<head>` styles into a document that already has structure.
+enum HTMLHeadInjectionSerialization: Sendable {
+    /// Parse + re-serialize with SwiftSoup, falling back to string insertion (legacy behavior).
+    case domPreferred
+    /// Skip SwiftSoup entirely and insert the injected head via cheap string surgery, falling back
+    /// to the partial-document template when no insertion point is found. Used on the full-reader
+    /// open path, where a SwiftSoup `parse` per open is unnecessary work (50–200ms on large
+    /// newsletters) for a document we only need to splice a `<head>` block into.
+    case stringOnly
+}
+
 /// Wraps HTML content for display in WebView with proper styling and security
 /// Designed to match Apple Mail's rendering behavior as closely as possible
 struct HTMLDisplayWrapper {
@@ -52,7 +63,8 @@ struct HTMLDisplayWrapper {
     func wrapHTMLForDisplay(
         _ html: String,
         isDarkMode: Bool,
-        displayPurpose: HTMLDisplayPurpose = .preview
+        displayPurpose: HTMLDisplayPurpose = .preview,
+        headSerialization: HTMLHeadInjectionSerialization = .domPreferred
     ) -> String {
         // Content is pre-sanitized by HTMLSanitizerService, so we just wrap it
         let sanitized = html
@@ -73,7 +85,8 @@ struct HTMLDisplayWrapper {
                 isDarkMode: isDarkMode,
                 theme: theme,
                 displayPurpose: displayPurpose,
-                fallbackTypographyCSS: fallbackTypographyCSS
+                fallbackTypographyCSS: fallbackTypographyCSS,
+                headSerialization: headSerialization
             )
         }
 
@@ -93,7 +106,8 @@ struct HTMLDisplayWrapper {
         isDarkMode: Bool,
         theme: Theme,
         displayPurpose: HTMLDisplayPurpose,
-        fallbackTypographyCSS: String
+        fallbackTypographyCSS: String,
+        headSerialization: HTMLHeadInjectionSerialization = .domPreferred
     ) -> String {
         // Inject our viewport meta, CSP, and minimal styles into the existing document
         // This preserves the email's original <style> tags and media queries
@@ -108,7 +122,7 @@ struct HTMLDisplayWrapper {
         let injectedHead = """
         \(viewportMetaTag)
         \(originalColorSchemeHead)
-        <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none';">
+        <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none';">
         <style id="esc-mail-styles">
             /* Minimal resets - don't override email's own styles */
             html {
@@ -136,38 +150,79 @@ struct HTMLDisplayWrapper {
         </style>
         """
 
-        if let wrapped = wrapExistingDocumentWithDOM(
-            html,
-            injectedHead: injectedHead
-        ) {
+        // The full-reader open path opts out of the SwiftSoup parse/serialize round-trip and splices
+        // the head in by string surgery instead; the DOM path stays the default for previews and any
+        // caller that wants normalized output.
+        if headSerialization == .domPreferred,
+           let wrapped = wrapExistingDocumentWithDOM(
+               html,
+               injectedHead: injectedHead
+           ) {
             return wrapped
         }
 
+        if var result = injectHeadByStringSurgery(into: html, injectedHead: injectedHead) {
+            // Ensure we have a proper doctype
+            if !result.lowercased().contains("<!doctype") {
+                result = "<!DOCTYPE html>\n" + result
+            }
+            return result
+        }
+
+        // No <head>/<html> insertion point was found. On the string-only path, render the document
+        // body inside our partial template so the viewport/CSP/styles are still applied instead of
+        // returning raw, unstyled HTML.
+        if headSerialization == .stringOnly {
+            return wrapPartialHTML(
+                html,
+                isDarkMode: isDarkMode,
+                theme: theme,
+                displayPurpose: displayPurpose,
+                fallbackTypographyCSS: fallbackTypographyCSS
+            )
+        }
+
+        // Legacy fallback: keep the original markup, just guarantee a doctype.
+        var result = html
+        if !result.lowercased().contains("<!doctype") {
+            result = "<!DOCTYPE html>\n" + result
+        }
+        return result
+    }
+
+    /// Inserts `injectedHead` into an existing document via string surgery, returning the modified
+    /// HTML when an insertion point was found and `nil` otherwise (so callers can choose a fallback).
+    private func injectHeadByStringSurgery(into html: String, injectedHead: String) -> String? {
         var result = html
 
         // Try to inject after existing <head> tag
         if let headRange = result.range(of: "<head>", options: .caseInsensitive) {
             result.insert(contentsOf: "\n" + injectedHead + "\n", at: headRange.upperBound)
-        } else if let headRange = result.range(of: "<head ", options: .caseInsensitive) {
+            return result
+        }
+
+        if let headRange = result.range(of: "<head ", options: .caseInsensitive) {
             // Handle <head ...> with attributes
             if let closingBracket = result[headRange.upperBound...].range(of: ">") {
                 result.insert(contentsOf: "\n" + injectedHead + "\n", at: closingBracket.upperBound)
+                return result
             }
-        } else if let htmlRange = result.range(of: "<html>", options: .caseInsensitive) {
+        }
+
+        if let htmlRange = result.range(of: "<html>", options: .caseInsensitive) {
             // No head tag, inject after <html>
             result.insert(contentsOf: "\n<head>\n" + injectedHead + "\n</head>\n", at: htmlRange.upperBound)
-        } else if let htmlRange = result.range(of: "<html ", options: .caseInsensitive) {
+            return result
+        }
+
+        if let htmlRange = result.range(of: "<html ", options: .caseInsensitive) {
             if let closingBracket = result[htmlRange.upperBound...].range(of: ">") {
                 result.insert(contentsOf: "\n<head>\n" + injectedHead + "\n</head>\n", at: closingBracket.upperBound)
+                return result
             }
         }
 
-        // Ensure we have a proper doctype
-        if !result.lowercased().contains("<!doctype") {
-            result = "<!DOCTYPE html>\n" + result
-        }
-
-        return result
+        return nil
     }
 
     private func wrapExistingDocumentWithDOM(
@@ -245,7 +300,7 @@ struct HTMLDisplayWrapper {
             <meta charset="UTF-8">
             \(viewportMetaTag)
             \(originalColorSchemeHead)
-            <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none';">
+            <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none';">
             <style>
                 * {
                     box-sizing: border-box;

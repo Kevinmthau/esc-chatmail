@@ -1003,6 +1003,35 @@ final class HTMLContentLoader {
         originalHTMLPreference: OriginalEmailHTMLPreference
     ) async -> PreparedLoadResult? {
         let preparedHTML = prepareHTMLForDisplay(html, cleanupMode: cleanupMode)
+
+        // Full original-email reader open path (preferHTML): JavaScript is disabled in every
+        // reader/preview WebView config, links are gated by the navigation policy, and the wrapper
+        // emits a hardened CSP — so the per-open regex sanitize + remote-image rewrite are redundant
+        // work (100–600ms on large newsletters) and a known corruption risk for complex nested-table
+        // HTML. Skip them and wrap with cheap string-only head injection so the open is essentially
+        // disk-read → wrap → loadHTMLString. Remote http(s) images load directly via WebKit; inline
+        // cid: images still resolve through CIDSchemeHandler. The automatic-preference original path
+        // (chat-derived previews, quality fallback) keeps full sanitization below.
+        if displayPurpose == .original, originalHTMLPreference == .preferHTML {
+            guard HTMLMeaningfulContentChecker.hasMeaningfulContent(preparedHTML) else {
+                Log.debug("wrappedHTMLIfMeaningful: original preferHTML content not meaningful for \(messageId) (len=\(preparedHTML.count))", category: .ui)
+                return nil
+            }
+
+            let wrapped = sanitizer.wrapSanitizedHTMLForDisplay(
+                preparedHTML,
+                isDarkMode: isDarkMode,
+                displayPurpose: .original,
+                headSerialization: .stringOnly
+            )
+            guard HTMLMeaningfulContentChecker.hasMeaningfulContent(wrapped) else {
+                Log.debug("wrappedHTMLIfMeaningful: wrapped original preferHTML not meaningful for \(messageId) (len=\(wrapped.count))", category: .ui)
+                return nil
+            }
+
+            return .html(WrappedHTMLResult(html: wrapped, shouldCache: true))
+        }
+
         let rewriteImageHints = displayPurpose != .original
         let sanitizedHTML = sanitizer.sanitize(
             preparedHTML,

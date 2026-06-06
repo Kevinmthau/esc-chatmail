@@ -114,7 +114,7 @@ struct FullEmailReaderWebView: UIViewRepresentable {
 
         init(
             _ parent: FullEmailReaderWebView,
-            paintConfirmer: FullEmailReaderPaintConfirming = FullEmailReaderSnapshotPaintConfirmer()
+            paintConfirmer: FullEmailReaderPaintConfirming = FullEmailReaderOneFramePaintConfirmer()
         ) {
             self.parent = parent
             self.paintConfirmer = paintConfirmer
@@ -476,22 +476,26 @@ protocol FullEmailReaderPaintConfirming {
     func confirmPaint(in webView: WKWebView, completion: @escaping () -> Void)
 }
 
-struct FullEmailReaderSnapshotPaintConfirmer: FullEmailReaderPaintConfirming {
+/// Confirms first paint by waiting a single composited frame instead of taking a snapshot.
+///
+/// `WKNavigationDelegate.didFinish` reports load completion, not paint completion, so the reader
+/// still needs a beat before the live content is on screen. The previous implementation forced a
+/// full off-screen `takeSnapshot` (200–800ms of dead time after the email had already rendered);
+/// here we just force a layout pass and signal on the next runloop turn after Core Animation commits
+/// the frame that contains the loaded content. This reveals the email as soon as the first frame is
+/// composited — matching Apple Mail — without blocking on rasterization. Security is unaffected: this
+/// is purely a reveal-timing seam.
+struct FullEmailReaderOneFramePaintConfirmer: FullEmailReaderPaintConfirming {
     func confirmPaint(in webView: WKWebView, completion: @escaping () -> Void) {
-        let bounds = webView.bounds
-        guard bounds.width > 1, bounds.height > 1 else {
-            DispatchQueue.main.async(execute: completion)
-            return
-        }
-
         webView.layoutIfNeeded()
 
-        let configuration = WKSnapshotConfiguration()
-        configuration.rect = bounds
-
-        webView.takeSnapshot(with: configuration) { _, _ in
+        CATransaction.begin()
+        CATransaction.setCompletionBlock {
+            // Hop to the next runloop turn so the just-committed frame is on screen before the
+            // reader cross-fades its placeholder away.
             DispatchQueue.main.async(execute: completion)
         }
+        CATransaction.commit()
     }
 }
 

@@ -443,7 +443,10 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
         XCTAssertTrue(html.contains("Mountain Utility Pack"))
         XCTAssertTrue(html.contains("https://assets.example.test/topo/hero.jpg"))
         XCTAssertFalse(html.contains("=3D"))
-        XCTAssertFalse(html.contains("https://tracking.example.test/open"))
+        // New posture: the full-reader path no longer scrubs trackers — it always loads remote
+        // images for fidelity, relying on JS-off + the hardened CSP instead. The 1x1 pixel is
+        // preserved (and inert), so its URL survives the wrap.
+        XCTAssertTrue(html.contains("https://tracking.example.test/open"))
         let requestCount = await requestRecorder.count
         XCTAssertEqual(requestCount, 0)
         XCTAssertEqual(recoveryService.recoveryRequestCount, 0)
@@ -803,36 +806,15 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
         XCTAssertEqual(artifacts.wrappedOriginalHTMLByVariant.count, 1)
     }
 
-    func testWarmOriginalEmailSourceDoesNotCachePendingRemoteImageRewrite() async throws {
-        let messageId = "warm-pending-rewrite-\(UUID().uuidString)"
+    func testWarmOriginalEmailSourceKeepsRemoteImageURLAndCachesImmediately() async throws {
+        // New posture: the full-reader path always loads remote images directly (no inline data:
+        // rewrite), so there is no "pending rewrite" to wait on — warming can cache the wrapped
+        // HTML immediately and the open reuses it.
+        let messageId = "warm-remote-image-\(UUID().uuidString)"
         let renderedCache = RenderedMessageCache()
         let imageURL = "https://cdn.example.com/hero.webp?format=auto"
-        let html = remoteImageHTML(title: "Needs image rewrite", imageURL: imageURL)
-        let imageData = onePixelPNGData()
-        let remoteImageAttachmentFallback = HTMLRemoteImageAttachmentFallback { request in
-            let headers: [String: String] = [
-                "Content-Type": "image/webp",
-                "Content-Length": "\(imageData.count)"
-            ]
-            let response = try XCTUnwrap(
-                HTTPURLResponse(
-                    url: try XCTUnwrap(request.url),
-                    statusCode: 200,
-                    httpVersion: nil,
-                    headerFields: headers
-                )
-            )
-
-            if request.httpMethod == "HEAD" {
-                return (Data(), response)
-            }
-
-            return (imageData, response)
-        }
-        let loader = makeLoader(
-            renderedMessageCache: renderedCache,
-            remoteImageAttachmentFallback: remoteImageAttachmentFallback
-        )
+        let html = remoteImageHTML(title: "Keeps remote image", imageURL: imageURL)
+        let loader = makeLoader(renderedMessageCache: renderedCache)
         defer { contentHandler.deleteHTML(for: messageId) }
 
         _ = contentHandler.saveHTML(html, for: messageId)
@@ -840,35 +822,31 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
         await loader.warmOriginalEmailSource(
             messageId: messageId,
             bodyStorageURI: nil,
-            bodyText: "Needs image rewrite",
+            bodyText: "Keeps remote image",
             senderEmail: "newsletter@example.com",
-            subject: "Needs image rewrite"
+            subject: "Keeps remote image"
         )
 
         let statsAfterWarm = await renderedCache.getStatistics()
-        XCTAssertEqual(statsAfterWarm.producedArtifacts, 0, "Warm must not cache first-pass HTML while image rewrites are pending")
-        XCTAssertEqual(statsAfterWarm.currentEntryCount, 0)
-
-        _ = await remoteImageAttachmentFallback.inlineAttachmentStyleImages(
-            in: html,
-            senderEmail: "newsletter@example.com"
-        )
+        XCTAssertEqual(statsAfterWarm.producedArtifacts, 1, "Warm caches the wrapped HTML immediately now that remote images are not rewritten")
+        XCTAssertEqual(statsAfterWarm.currentEntryCount, 1)
 
         let openedSource = await loader.loadOriginalEmailSourceToCompletion(
             messageId: messageId,
             bodyStorageURI: nil,
-            bodyText: "Needs image rewrite",
+            bodyText: "Keeps remote image",
             senderEmail: "newsletter@example.com",
-            subject: "Needs image rewrite"
+            subject: "Keeps remote image"
         )
         let source = try XCTUnwrap(openedSource)
         let openedHTML = try XCTUnwrap(source.html)
 
-        XCTAssertTrue(openedHTML.contains("data:image/"))
-        XCTAssertFalse(openedHTML.contains(imageURL))
+        // The remote image URL is preserved (loaded directly by WebKit); no data: rewrite occurs.
+        XCTAssertTrue(openedHTML.contains(imageURL))
+        XCTAssertFalse(openedHTML.contains("data:image/"))
 
         let statsAfterOpen = await renderedCache.getStatistics()
-        XCTAssertEqual(statsAfterOpen.producedArtifacts, 1)
+        XCTAssertEqual(statsAfterOpen.producedArtifacts, 1, "Open reuses the warmed cache entry")
         XCTAssertEqual(statsAfterOpen.currentEntryCount, 1)
     }
 
@@ -921,13 +899,6 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
         </body>
         </html>
         """
-    }
-
-    private func onePixelPNGData() -> Data {
-        UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1)).pngData { context in
-            UIColor.systemBlue.setFill()
-            context.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
-        }
     }
 
     private func rawMultipartAlternativeSource(plainText: String, html: String) -> String {

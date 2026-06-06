@@ -591,6 +591,45 @@ final class HTMLContentLoaderTests: XCTestCase {
 #endif
     }
 
+    func testPrepareOriginalHTML_skipsSanitizeAndInjectsHardenedCSP() async {
+        let messageId = "html-loader-original-noscrub-\(UUID().uuidString)"
+        let originalHTML = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <img src="https://track.example.com/open.gif?id=1" width="1" height="1" alt="">
+          <img src="https://cdn.example.com/hero.jpg" alt="Hero">
+          <p>Reader body text</p>
+        </body>
+        </html>
+        """
+
+        let prepared = await loader.prepareOriginalHTML(
+            fromCanonicalHTML: originalHTML,
+            messageId: messageId,
+            sourceLocation: .messageFile,
+            plainText: nil,
+            senderEmail: "sender@example.com",
+            subject: "Subject",
+            isDarkMode: false
+        )
+
+        guard let html = prepared else {
+            XCTFail("Expected prepared original HTML")
+            return
+        }
+
+        XCTAssertTrue(html.contains("Reader body text"))
+        // Remote images load directly via WebKit; their src must survive untouched.
+        XCTAssertTrue(html.contains("https://cdn.example.com/hero.jpg"))
+        // Sanitize is skipped on the full-reader path, so the 1x1 tracking pixel is NOT stripped
+        // (it is inert: JavaScript is disabled and the CSP forbids scripts/forms).
+        XCTAssertTrue(html.contains("https://track.example.com/open.gif?id=1"))
+        // The wrapper injects the hardened CSP that now backs the no-scrub posture.
+        XCTAssertTrue(html.contains("script-src 'none'"))
+        XCTAssertTrue(html.contains("form-action 'none'; base-uri 'none'"))
+    }
+
     func testLoadContent_cleanupModeQuotedOnlyPreservesSignatureBlock() async {
         let messageId = "html-loader-signature-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }

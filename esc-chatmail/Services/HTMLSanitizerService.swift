@@ -117,12 +117,14 @@ final class HTMLSanitizerService {
     func wrapSanitizedHTMLForDisplay(
         _ html: String,
         isDarkMode: Bool,
-        displayPurpose: HTMLDisplayPurpose = .preview
+        displayPurpose: HTMLDisplayPurpose = .preview,
+        headSerialization: HTMLHeadInjectionSerialization = .domPreferred
     ) -> String {
         displayWrapper.wrapHTMLForDisplay(
             html,
             isDarkMode: isDarkMode,
-            displayPurpose: displayPurpose
+            displayPurpose: displayPurpose,
+            headSerialization: headSerialization
         )
     }
 }

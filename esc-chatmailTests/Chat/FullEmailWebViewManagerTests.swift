@@ -269,8 +269,11 @@ final class FullEmailPreparedOpenPayloadBookkeepingTests: XCTestCase {
 
 @MainActor
 final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
-    func testWarmWithDefaultDisabledAdoptionStoresPayloadWithoutWebViewEntry() async throws {
-        XCTAssertFalse(
+    func testWarmWithoutWidthStoresPayloadWithoutWebViewEntry() async throws {
+        // Adoption is on by default now, but warming without a target width still cannot pre-render an
+        // off-screen WebView, so only the prepared payload is stored and checkout has nothing to hand
+        // back.
+        XCTAssertTrue(
             FullEmailWebViewAdoptionPolicy.isEnabled(
                 arguments: [],
                 environment: [:]
@@ -331,8 +334,10 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
         manager.clear()
     }
 
-    func testPrepaintAfterExplicitOpenDoesNotCreateWebViewEntryByDefault() {
-        XCTAssertFalse(
+    func testPrepaintAfterExplicitOpenCreatesWebViewEntryByDefault() {
+        // Adoption defaults on, so an explicit-open prepaint stores both the prepared payload and an
+        // off-screen WebView entry without needing any opt-in flag.
+        XCTAssertTrue(
             FullEmailWebViewAdoptionPolicy.isEnabled(
                 arguments: [],
                 environment: [:]
@@ -359,8 +364,8 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
             width: 390
         )
 
-        XCTAssertFalse(manager.hasPreparedPayloadForTesting(messageId: messageId))
-        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
+        XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: messageId))
+        XCTAssertTrue(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
     }
 
     func testPrepaintAfterExplicitOpenCreatesWebViewEntryWhenAdoptionEnabled() {
@@ -524,16 +529,16 @@ final class FullEmailWebViewAdoptionPolicyTests: XCTestCase {
         XCTAssertTrue(EmailReaderRenderingConfiguration.enablesPreparedHTMLWarmup)
     }
 
-    func testRenderingConfigurationDisablesOffscreenWebViewAdoptionByDefault() {
+    func testRenderingConfigurationEnablesOffscreenWebViewAdoptionByDefault() {
         withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.enableEnvironmentKey) {
             withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
-                XCTAssertFalse(
+                XCTAssertTrue(
                     FullEmailWebViewAdoptionPolicy.isEnabled(
                         arguments: [],
                         environment: [:]
                     )
                 )
-                XCTAssertFalse(EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption)
+                XCTAssertTrue(EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption)
             }
         }
     }
@@ -548,7 +553,7 @@ final class FullEmailWebViewAdoptionPolicyTests: XCTestCase {
 
     func testVisibleRowWarmWidthEstimateIsNilWhenAdoptionDisabled() {
         withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.enableEnvironmentKey) {
-            withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
+            withEnvironmentValue("1", for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
                 XCTAssertNil(
                     EmailReaderRenderingConfiguration.visibleRowWarmWidthEstimate(sceneScreenWidth: 390)
                 )
@@ -575,8 +580,8 @@ final class FullEmailWebViewAdoptionPolicyTests: XCTestCase {
         }
     }
 
-    func testAdoptionIsDisabledByDefault() {
-        XCTAssertFalse(
+    func testAdoptionIsEnabledByDefault() {
+        XCTAssertTrue(
             FullEmailWebViewAdoptionPolicy.isEnabled(
                 arguments: [],
                 environment: [:]
@@ -656,9 +661,12 @@ final class FullEmailWebViewAdoptionPolicyTests: XCTestCase {
         )
     }
 
-    func testEnvironmentVariableValuesOtherThanOneDoNotEnableAdoption() {
-        for value in ["", "0", "false", "true", "yes", "on", "2"] {
-            XCTAssertFalse(
+    func testLegacyEnableEnvironmentValuesDoNotChangeDefaultOnAdoption() {
+        // The legacy enable flag is now redundant (adoption is on by default), so any value for it —
+        // including ones that previously did not opt in — leaves adoption enabled as long as the
+        // disable kill switch is not set.
+        for value in ["", "0", "false", "true", "yes", "on", "2", "1"] {
+            XCTAssertTrue(
                 FullEmailWebViewAdoptionPolicy.isEnabled(
                     arguments: [],
                     environment: [FullEmailWebViewAdoptionPolicy.enableEnvironmentKey: value]
@@ -1001,8 +1009,19 @@ final class FullInteractiveEmailWebViewNavigationDecisionTests: XCTestCase {
         XCTAssertEqual(decide(.linkActivated, "http://192.168.0.1/"), .blockedPrivateNetwork(privateHost))
     }
 
-    func testNonLinkNavigationsFallThroughToAllow() {
-        // e.g. form submissions to a normal URL are allowed (matches pre-refactor behavior).
-        XCTAssertEqual(decide(.formSubmitted, "https://example.com/submit"), .allow)
+    func testFormSubmissionsAreCancelled() {
+        // Full original emails are read-only: form submissions and resubmissions never leave the
+        // reader, even to an otherwise-public URL.
+        XCTAssertEqual(decide(.formSubmitted, "https://example.com/submit"), .cancel)
+        XCTAssertEqual(decide(.formResubmitted, "https://example.com/submit"), .cancel)
+    }
+
+    func testDangerousSchemesAreCancelledEvenForNonLinkNavigations() {
+        // Scheme screening runs before the blanket .other/.reload allow, so a scripted location
+        // change to a javascript:/file: URL is cancelled rather than slipping through as .other.
+        XCTAssertEqual(decide(.other, "javascript:alert(1)"), .cancel)
+        XCTAssertEqual(decide(.other, "file:///etc/passwd"), .cancel)
+        // The document's own initial load (about:/base URL via .other) is still permitted.
+        XCTAssertEqual(decide(.other, "about:blank"), .allow)
     }
 }
