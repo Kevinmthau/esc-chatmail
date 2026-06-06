@@ -91,6 +91,60 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
         XCTAssertTrue(opener.prewarmedMessages.isEmpty)
     }
 
+    func testOpenSession_prepaintsUpdatedArtifactAtPreviouslyMeasuredWidth() async {
+        let message = makeMessage(
+            id: "updated-artifact-prepaint",
+            subject: "Prepared subject",
+            senderEmail: "sender@example.com",
+            senderName: "Sender",
+            snippet: "Prepared preview"
+        )
+        let initialArtifact = makeArtifact(
+            message: message,
+            html: "<html><body>Initial full email</body></html>",
+            sourceSignature: "initial-source"
+        )
+        let updatedHTML = "<html><body>Updated full email</body></html>"
+        let loader = SessionStubOriginalEmailSourceLoader(
+            responses: [
+                makeSource(
+                    html: updatedHTML,
+                    sourceSignature: "updated-source",
+                    sourceKind: .html,
+                    sourceLocation: .messageFile
+                )
+            ]
+        )
+        let opener = MockFullEmailReaderOpener(preparedArtifact: initialArtifact)
+        let session = FullEmailOpenSession(
+            message: message,
+            request: OriginalEmailWarmRequest(
+                messageId: message.id,
+                bodyStorageURI: message.bodyStorageURI,
+                bodyText: message.bodyTextValue,
+                senderEmail: message.senderEmailValue,
+                subject: message.subject
+            ),
+            initialArtifact: initialArtifact,
+            immediatePlaceholder: FullEmailPlaceholder(message: message),
+            fullEmailOpener: opener,
+            originalEmailSourceLoader: loader,
+            originalEmailLoadTimeout: 0.1,
+            recoveringDelay: 0.005,
+            onSourceLoaded: { _, _ in }
+        )
+
+        session.prepareForMeasuredReaderWidth(390)
+        _ = await session.loadOriginalEmail(for: session.loadRequest)
+        session.prepareForMeasuredReaderWidth(390)
+
+        XCTAssertEqual(opener.prepaintRequests.count, 2)
+        XCTAssertEqual(opener.prepaintRequests[0].artifact, initialArtifact)
+        XCTAssertEqual(opener.prepaintRequests[1].artifact.sourceSignature, "updated-source")
+        XCTAssertEqual(opener.prepaintRequests[1].artifact.body, .html(updatedHTML))
+        XCTAssertEqual(opener.prepaintRequests[1].width, 390)
+    }
+
     func testOpenSession_payloadMissCreatesPlaceholderAndStartsPrewarmFollowUp() {
         let message = makeMessage(
             id: "miss-message",

@@ -143,6 +143,12 @@ private enum OriginalEmailTimedLoadResult {
     case timedOut
 }
 
+private struct PrepaintedReaderArtifactWidthKey: Hashable {
+    let sourceSignature: String
+    let renderSignature: String
+    let widthBucket: Int
+}
+
 struct OriginalEmailLoadIdentity: Equatable, Sendable {
     let baseLoadKey: String
 
@@ -243,7 +249,7 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
     private var activeLoadTaskKey: String?
     private var timedOutSourceObservationTask: Task<Void, Never>?
     private var readerStartLogged = false
-    private var prepaintedWidthBuckets: Set<Int> = []
+    private var prepaintedArtifactWidthKeys: Set<PrepaintedReaderArtifactWidthKey> = []
 
     var hasImmediateVisualSurface: Bool {
         initialArtifact != nil || !immediatePlaceholder.subject.isEmpty
@@ -365,8 +371,12 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
             return
         }
 
-        let widthBucket = Int(width.rounded())
-        guard prepaintedWidthBuckets.insert(widthBucket).inserted else {
+        let prepaintKey = PrepaintedReaderArtifactWidthKey(
+            sourceSignature: artifact.sourceSignature,
+            renderSignature: artifact.renderSignature,
+            widthBucket: Int(width.rounded())
+        )
+        guard prepaintedArtifactWidthKeys.insert(prepaintKey).inserted else {
             return
         }
 
