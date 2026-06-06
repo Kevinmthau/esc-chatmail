@@ -82,6 +82,8 @@ struct ChatMessagesView: View {
                                         message: message,
                                         messageBubbleLoader: chatDependencies.content.makeMessageBubbleLoader(),
                                         htmlContentHandler: chatDependencies.content.htmlContentHandler,
+                                        fullEmailOpener: chatDependencies.fullEmailOpener,
+                                        originalEmailSourceWarmer: chatDependencies.content.originalEmailSourceWarmer,
                                         isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
                                         contactRefreshToken: coordinator.contactRefreshToken,
                                         isLastFromSender: isLastFromSender,

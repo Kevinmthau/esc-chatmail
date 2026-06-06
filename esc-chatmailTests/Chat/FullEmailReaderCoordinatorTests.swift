@@ -20,7 +20,7 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
         super.tearDown()
     }
 
-    func testOpenSession_readyPreparedPayloadCreatesPresentableSessionAndStartsExplicitPrepaint() {
+    func testOpenSession_readyPreparedArtifactCreatesPresentableSessionAndPrepaintsAfterMeasuredWidth() {
         let message = makeMessage(
             id: "prepared-message",
             subject: "Prepared subject",
@@ -28,34 +28,35 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
             senderName: "Sender",
             snippet: "Prepared preview"
         )
-        let payload = makePayload(messageId: "prepared-message")
-        let opener = MockFullEmailReaderOpener(preparedPayload: payload)
-        let coordinator = FullEmailReaderCoordinator(
-            fullEmailOpener: opener,
-            widthProvider: { 390 }
-        )
+        let artifact = makeArtifact(message: message)
+        let opener = MockFullEmailReaderOpener(preparedArtifact: artifact)
+        let coordinator = FullEmailReaderCoordinator(fullEmailOpener: opener)
 
         let session = coordinator.openSession(for: message)
 
         XCTAssertTrue(session.message === message)
         XCTAssertEqual(session.messageId, "prepared-message")
         XCTAssertEqual(session.messageObjectID, message.objectID)
-        XCTAssertEqual(session.initialOpenPayload, payload)
-        XCTAssertEqual(session.readerState, .preparedHTML(payload, placeholder: session.immediatePlaceholder))
+        XCTAssertEqual(session.initialArtifact, artifact)
+        XCTAssertEqual(session.readerState, .preparedArtifact(artifact, placeholder: session.immediatePlaceholder))
         XCTAssertEqual(session.immediatePlaceholder.subject, "Prepared subject")
         XCTAssertTrue(session.hasImmediateVisualSurface)
         XCTAssertEqual(opener.preparedPayloadRequests.count, 1)
         XCTAssertEqual(opener.preparedPayloadRequests.first?.request.messageId, "prepared-message")
-        XCTAssertEqual(opener.preparedPayloadRequests.first?.width, 390)
+        XCTAssertNil(opener.preparedPayloadRequests.first?.width)
+        XCTAssertTrue(opener.prepaintRequests.isEmpty)
+
+        session.prepareForMeasuredReaderWidth(390)
+
         XCTAssertEqual(opener.prepaintRequests.count, 1)
         XCTAssertEqual(opener.prepaintRequests.first?.request.messageId, "prepared-message")
         XCTAssertEqual(opener.prepaintRequests.first?.message.id, "prepared-message")
-        XCTAssertEqual(opener.prepaintRequests.first?.payload, payload)
+        XCTAssertEqual(opener.prepaintRequests.first?.artifact, artifact)
         XCTAssertEqual(opener.prepaintRequests.first?.width, 390)
         XCTAssertTrue(opener.prewarmedMessages.isEmpty)
     }
 
-    func testOpenSession_warmingPreparedPayloadCreatesPresentableSessionAndDefersExplicitPrepaint() async {
+    func testOpenSession_preparedArtifactOnlyPrepaintsOncePerMeasuredWidth() {
         let message = makeMessage(
             id: "warming-prepared-message",
             subject: "Prepared subject",
@@ -63,36 +64,30 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
             senderName: "Sender",
             snippet: "Prepared preview"
         )
-        let payload = makePayload(
-            messageId: "warming-prepared-message",
+        let artifact = makeArtifact(message: message)
+        let opener = MockFullEmailReaderOpener(
+            preparedArtifact: artifact,
             checkoutAvailability: .warming
         )
-        let opener = MockFullEmailReaderOpener(preparedPayload: payload)
-        let coordinator = FullEmailReaderCoordinator(
-            fullEmailOpener: opener,
-            widthProvider: { 390 }
-        )
+        let coordinator = FullEmailReaderCoordinator(fullEmailOpener: opener)
 
         let session = coordinator.openSession(for: message)
 
         XCTAssertTrue(session.message === message)
-        XCTAssertEqual(session.initialOpenPayload, payload)
-        XCTAssertEqual(session.readerState, .preparedHTML(payload, placeholder: session.immediatePlaceholder))
+        XCTAssertEqual(session.initialArtifact, artifact)
+        XCTAssertEqual(session.readerState, .preparedArtifact(artifact, placeholder: session.immediatePlaceholder))
         XCTAssertEqual(opener.preparedPayloadRequests.count, 1)
         XCTAssertTrue(opener.prepaintRequests.isEmpty)
 
-        for _ in 0..<3 {
-            if !opener.prepaintRequests.isEmpty {
-                break
-            }
-            await Task.yield()
-        }
+        session.prepareForMeasuredReaderWidth(390.2)
+        session.prepareForMeasuredReaderWidth(390.4)
+        session.prepareForMeasuredReaderWidth(391)
 
-        XCTAssertEqual(opener.prepaintRequests.count, 1)
+        XCTAssertEqual(opener.prepaintRequests.count, 2)
         XCTAssertEqual(opener.prepaintRequests.first?.request.messageId, "warming-prepared-message")
         XCTAssertEqual(opener.prepaintRequests.first?.message.id, "warming-prepared-message")
-        XCTAssertEqual(opener.prepaintRequests.first?.payload, payload)
-        XCTAssertEqual(opener.prepaintRequests.first?.width, 390)
+        XCTAssertEqual(opener.prepaintRequests.first?.artifact, artifact)
+        XCTAssertEqual(opener.prepaintRequests.first?.width, 390.2)
         XCTAssertTrue(opener.prewarmedMessages.isEmpty)
     }
 
@@ -104,16 +99,13 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
             senderName: "Miss Sender",
             snippet: "Miss snippet"
         )
-        let opener = MockFullEmailReaderOpener(preparedPayload: nil)
-        let coordinator = FullEmailReaderCoordinator(
-            fullEmailOpener: opener,
-            widthProvider: { 390 }
-        )
+        let opener = MockFullEmailReaderOpener(preparedArtifact: nil)
+        let coordinator = FullEmailReaderCoordinator(fullEmailOpener: opener)
 
         let session = coordinator.openSession(for: message)
 
         XCTAssertTrue(session.message === message)
-        XCTAssertNil(session.initialOpenPayload)
+        XCTAssertNil(session.initialArtifact)
         XCTAssertEqual(session.readerState, .loading(session.immediatePlaceholder))
         XCTAssertEqual(session.immediatePlaceholder.subject, "Miss subject")
         XCTAssertEqual(session.immediatePlaceholder.senderDisplayText, "Miss Sender")
@@ -121,7 +113,8 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
         XCTAssertTrue(session.hasImmediateVisualSurface)
         XCTAssertEqual(opener.preparedPayloadRequests.count, 1)
         XCTAssertTrue(opener.prepaintRequests.isEmpty)
-        XCTAssertEqual(opener.prewarmedMessages.map(\.id), ["miss-message"])
+        XCTAssertEqual(opener.prewarmedMessages.map(\.message.id), ["miss-message"])
+        XCTAssertNil(opener.prewarmedMessages.first?.width)
     }
 
     func testOpenSession_withoutInitialPayloadIsImmediatelyPresentable() {
@@ -133,12 +126,12 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
             snippet: " \n ",
             body: "Body preview from the message"
         )
-        let opener = MockFullEmailReaderOpener(preparedPayload: nil)
+        let opener = MockFullEmailReaderOpener(preparedArtifact: nil)
         let coordinator = FullEmailReaderCoordinator(fullEmailOpener: opener)
 
         let session = coordinator.openSession(for: message)
 
-        XCTAssertNil(session.initialOpenPayload)
+        XCTAssertNil(session.initialArtifact)
         XCTAssertEqual(session.immediatePlaceholder.subject, "No Subject")
         XCTAssertEqual(session.immediatePlaceholder.senderDisplayText, "fallback@example.com")
         XCTAssertEqual(session.immediatePlaceholder.previewText, "Body preview from the message")
@@ -216,37 +209,34 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
             body: body
         )
         message.snippet = nil
-        let payload = makePayload(messageId: "prepared-bounded-body-preview")
-        let opener = MockFullEmailReaderOpener(preparedPayload: payload)
-        let coordinator = FullEmailReaderCoordinator(
-            fullEmailOpener: opener,
-            widthProvider: { 390 }
-        )
+        let artifact = makeArtifact(message: message)
+        let opener = MockFullEmailReaderOpener(preparedArtifact: artifact)
+        let coordinator = FullEmailReaderCoordinator(fullEmailOpener: opener)
 
         let session = coordinator.openSession(for: message)
 
-        XCTAssertEqual(session.readerState, .preparedHTML(payload, placeholder: session.immediatePlaceholder))
+        XCTAssertEqual(session.readerState, .preparedArtifact(artifact, placeholder: session.immediatePlaceholder))
         XCTAssertEqual(session.immediatePlaceholder.previewText, "Prepared visible body")
-        XCTAssertEqual(opener.prepaintRequests.count, 1)
+        XCTAssertTrue(opener.prepaintRequests.isEmpty)
         XCTAssertTrue(opener.prewarmedMessages.isEmpty)
     }
 
     func testSessionWithInitialPayloadDoesNotEnterLoadingDuringFirstLoadTask() async throws {
         let message = makeMessage(id: "prepared-load-task")
-        let payload = makePayload(messageId: "prepared-load-task")
+        let artifact = makeArtifact(message: message)
         let loader = SessionStubOriginalEmailSourceLoader(
             responses: [nil],
             delayNanoseconds: 80_000_000
         )
         let session = makeSession(
             message: message,
-            initialOpenPayload: payload,
+            initialArtifact: artifact,
             loader: loader,
             loadTimeout: 0.03,
             recoveringDelay: 0.005
         )
 
-        XCTAssertEqual(session.readerState, .preparedHTML(payload, placeholder: session.immediatePlaceholder))
+        XCTAssertEqual(session.readerState, .preparedArtifact(artifact, placeholder: session.immediatePlaceholder))
 
         let task = Task { @MainActor in
             await session.loadOriginalEmail(
@@ -256,11 +246,11 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
         }
 
         try await Task.sleep(nanoseconds: 20_000_000)
-        XCTAssertEqual(session.readerState, .preparedHTML(payload, placeholder: session.immediatePlaceholder))
+        XCTAssertEqual(session.readerState, .preparedArtifact(artifact, placeholder: session.immediatePlaceholder))
 
         _ = await task.value
 
-        XCTAssertEqual(session.readerState, .preparedHTML(payload, placeholder: session.immediatePlaceholder))
+        XCTAssertEqual(session.readerState, .preparedArtifact(artifact, placeholder: session.immediatePlaceholder))
         XCTAssertEqual(loader.ensureRequestCount, 1)
     }
 
@@ -279,7 +269,7 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
         )
         let session = makeSession(
             message: message,
-            initialOpenPayload: nil,
+            initialArtifact: nil,
             loader: loader,
             loadTimeout: 0.1,
             recoveringDelay: 0.005
@@ -299,10 +289,20 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
 
         _ = await task.value
 
-        XCTAssertEqual(
-            session.readerState,
-            .loadedHTML(html: html, sourceSignature: "loaded-source", placeholder: session.immediatePlaceholder)
+        guard case .loadedArtifact(let loadedArtifact, let placeholder) = session.readerState else {
+            return XCTFail("Expected loaded artifact, got \(session.readerState)")
+        }
+        let expectedArtifact = makeArtifact(
+            message: message,
+            html: html,
+            sourceSignature: "loaded-source",
+            sourceKind: .recoveredHTML,
+            sourceLocation: .recoveredHTML
         )
+        XCTAssertEqual(loadedArtifact.body, expectedArtifact.body)
+        XCTAssertEqual(loadedArtifact.sourceSignature, expectedArtifact.sourceSignature)
+        XCTAssertEqual(loadedArtifact.renderSignature, expectedArtifact.renderSignature)
+        XCTAssertEqual(placeholder, session.immediatePlaceholder)
         XCTAssertEqual(session.activeHTMLSourceSignature, "loaded-source")
         XCTAssertEqual(loader.ensureRequestCount, 1)
     }
@@ -312,7 +312,7 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
         let loader = SessionStubOriginalEmailSourceLoader(responses: [nil])
         let session = makeSession(
             message: message,
-            initialOpenPayload: nil,
+            initialArtifact: nil,
             loader: loader,
             loadTimeout: 0.01,
             recoveringDelay: 0.005
@@ -347,7 +347,7 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
         )
         let session = makeSession(
             message: message,
-            initialOpenPayload: nil,
+            initialArtifact: nil,
             loader: loader,
             loadTimeout: 0.1,
             recoveringDelay: 0.005
@@ -392,14 +392,14 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
                 senderEmail: message.senderEmailValue,
                 subject: message.subject
             ),
-            initialOpenPayload: nil,
+            initialArtifact: nil,
             immediatePlaceholder: FullEmailPlaceholder(message: message)
         )
 
         let readerView = FullEmailReaderView(session: session)
 
         XCTAssertEqual(readerView.session.messageObjectID, message.objectID)
-        XCTAssertNil(readerView.session.initialOpenPayload)
+        XCTAssertNil(readerView.session.initialArtifact)
         XCTAssertTrue(readerView.session.hasImmediateVisualSurface)
     }
 
@@ -420,6 +420,29 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
             .build(in: context)
     }
 
+    private func makeArtifact(
+        message: Message,
+        html: String = "<html><body>Prepared</body></html>",
+        sourceSignature: String? = nil,
+        sourceKind: CanonicalEmailSourceKind = .html,
+        sourceLocation: CanonicalEmailSourceLocation = .messageFile
+    ) -> EmailReaderArtifact {
+        EmailReaderArtifact(
+            messageID: message.id,
+            sourceSignature: sourceSignature ?? "sha256:\(message.id)",
+            body: .html(html),
+            metadata: EmailMetadataSnapshot(message: message),
+            inlineAttachmentAvailabilitySignature: InlineCIDAttachmentAvailabilityFingerprint.make(
+                html: html,
+                message: message
+            ),
+            sourceKind: sourceKind,
+            sourceLocation: sourceLocation,
+            hasHTMLSource: true,
+            producedAt: Date(timeIntervalSince1970: 0)
+        )
+    }
+
     private func makePayload(
         messageId: String,
         checkoutAvailability: FullEmailOpenPayload.CheckoutAvailability = .ready
@@ -438,7 +461,7 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
 
     private func makeSession(
         message: Message,
-        initialOpenPayload: FullEmailOpenPayload?,
+        initialArtifact: EmailReaderArtifact?,
         loader: any OriginalEmailSourceLoading,
         loadTimeout: TimeInterval,
         recoveringDelay: TimeInterval
@@ -452,7 +475,7 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
                 senderEmail: message.senderEmailValue,
                 subject: message.subject
             ),
-            initialOpenPayload: initialOpenPayload,
+            initialArtifact: initialArtifact,
             immediatePlaceholder: FullEmailPlaceholder(message: message),
             originalEmailSourceLoader: loader,
             originalEmailLoadTimeout: loadTimeout,
@@ -484,30 +507,40 @@ private final class MockFullEmailReaderOpener: FullEmailOpening {
     struct PreparedPayloadRequest {
         let request: OriginalEmailWarmRequest
         let message: Message?
-        let width: CGFloat
+        let width: CGFloat?
     }
 
     struct PrepaintRequest {
         let request: OriginalEmailWarmRequest
         let message: Message
-        let payload: FullEmailOpenPayload
+        let artifact: EmailReaderArtifact
         let width: CGFloat
     }
 
-    let preparedPayload: FullEmailOpenPayload?
-    private(set) var preparedPayloadRequests: [PreparedPayloadRequest] = []
-    private(set) var prepaintRequests: [PrepaintRequest] = []
-    private(set) var prewarmedMessages: [Message] = []
-
-    init(preparedPayload: FullEmailOpenPayload?) {
-        self.preparedPayload = preparedPayload
+    struct PrewarmRequest {
+        let message: Message
+        let width: CGFloat?
     }
 
-    func preparedOpenPayload(
+    let preparedArtifact: EmailReaderArtifact?
+    let checkoutAvailability: FullEmailOpenPayload.CheckoutAvailability
+    private(set) var preparedPayloadRequests: [PreparedPayloadRequest] = []
+    private(set) var prepaintRequests: [PrepaintRequest] = []
+    private(set) var prewarmedMessages: [PrewarmRequest] = []
+
+    init(
+        preparedArtifact: EmailReaderArtifact?,
+        checkoutAvailability: FullEmailOpenPayload.CheckoutAvailability = .ready
+    ) {
+        self.preparedArtifact = preparedArtifact
+        self.checkoutAvailability = checkoutAvailability
+    }
+
+    func preparedOpenArtifact(
         request: OriginalEmailWarmRequest,
         message: Message?,
-        width: CGFloat
-    ) -> FullEmailOpenPayload? {
+        width: CGFloat?
+    ) -> EmailReaderPreparedArtifact? {
         preparedPayloadRequests.append(
             PreparedPayloadRequest(
                 request: request,
@@ -515,27 +548,33 @@ private final class MockFullEmailReaderOpener: FullEmailOpening {
                 width: width
             )
         )
-        return preparedPayload
+        guard let preparedArtifact else {
+            return nil
+        }
+        return EmailReaderPreparedArtifact(
+            artifact: preparedArtifact,
+            checkoutAvailability: checkoutAvailability
+        )
     }
 
     func prepaintAfterExplicitOpen(
         request: OriginalEmailWarmRequest,
         message: Message,
-        payload: FullEmailOpenPayload,
+        artifact: EmailReaderArtifact,
         width: CGFloat
     ) {
         prepaintRequests.append(
             PrepaintRequest(
                 request: request,
                 message: message,
-                payload: payload,
+                artifact: artifact,
                 width: width
             )
         )
     }
 
-    func prewarmOnOpen(message: Message) {
-        prewarmedMessages.append(message)
+    func prewarmOnOpen(message: Message, width: CGFloat?) {
+        prewarmedMessages.append(PrewarmRequest(message: message, width: width))
     }
 }
 

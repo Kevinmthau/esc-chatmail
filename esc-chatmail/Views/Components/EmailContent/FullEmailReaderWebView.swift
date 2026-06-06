@@ -10,19 +10,22 @@ import CoreData
 struct FullEmailReaderWebView: UIViewRepresentable {
     let htmlContent: String
     let sourceSignature: String?
+    var readerWidth: CGFloat = 0
     let message: Message?
+    var webViewAdoptionProvider: (any FullEmailWebViewAdopting)? = nil
     /// Invoked after the live WebView confirms a render pass, so the reader can drop its placeholder.
     var onLoadFinished: (() -> Void)?
     var onAdoptedPrerendered: (() -> Void)?
 
     func makeUIView(context: Context) -> WKWebView {
         if let message,
-           let checkout = FullEmailWebViewManager.shared.checkout(
+           EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption,
+           let checkout = webViewAdoptionProvider?.checkout(
                messageId: message.id,
                sourceSignature: sourceSignature,
                wrappedHTML: htmlContent,
                message: message,
-               width: FullEmailWebViewMetrics.fullViewWidth()
+               width: readerWidth
            ) {
             return adoptPrerendered(checkout, context: context)
         }
@@ -317,7 +320,7 @@ struct FullEmailReaderWebView: UIViewRepresentable {
                 return
             }
             adoptedPrerenderedMessageId = nil
-            FullEmailWebViewManager.shared.checkin(messageId: messageId, webView: webView)
+            parent.webViewAdoptionProvider?.checkin(messageId: messageId, webView: webView)
         }
 
         func recordFinishedLoad() {

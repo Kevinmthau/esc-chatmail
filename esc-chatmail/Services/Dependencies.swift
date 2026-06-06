@@ -283,6 +283,7 @@ final class Dependencies: ObservableObject {
             content: ChatContentDependencies(
                 htmlContentHandler: htmlContentHandler,
                 processedTextCache: processedTextCache,
+                originalEmailSourceWarmer: OriginalEmailSourceLoader.shared,
                 makeMessageBubbleLoader: makeMessageBubbleLoader
             ),
             messaging: ChatMessagingDependencies(

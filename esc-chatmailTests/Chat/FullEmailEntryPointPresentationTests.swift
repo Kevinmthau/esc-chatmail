@@ -9,7 +9,7 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
         let view = InboxListView(
             deps: deps,
             fullEmailReaderCoordinator: FullEmailReaderCoordinator(
-                fullEmailOpener: MockEntryPointFullEmailOpener(preparedPayload: nil)
+                fullEmailOpener: MockEntryPointFullEmailOpener(preparedArtifact: nil)
             )
         )
 
@@ -30,7 +30,7 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
         let view = VirtualScrollChatView(
             conversation: conversation,
             chatDependencies: deps.makeChatDependencies(
-                fullEmailOpener: MockEntryPointFullEmailOpener(preparedPayload: nil)
+                fullEmailOpener: MockEntryPointFullEmailOpener(preparedArtifact: nil)
             )
         )
 
@@ -65,19 +65,23 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
 
 @MainActor
 private final class MockEntryPointFullEmailOpener: FullEmailOpening {
-    let preparedPayload: FullEmailOpenPayload?
+    let preparedArtifact: EmailReaderArtifact?
 
-    init(preparedPayload: FullEmailOpenPayload?) {
-        self.preparedPayload = preparedPayload
+    init(preparedArtifact: EmailReaderArtifact?) {
+        self.preparedArtifact = preparedArtifact
     }
 
-    func preparedOpenPayload(
+    func preparedOpenArtifact(
         request: OriginalEmailWarmRequest,
         message: Message?,
-        width: CGFloat
-    ) -> FullEmailOpenPayload? {
-        preparedPayload
+        width: CGFloat?
+    ) -> EmailReaderPreparedArtifact? {
+        guard let preparedArtifact else {
+            return nil
+        }
+        return EmailReaderPreparedArtifact(
+            artifact: preparedArtifact,
+            checkoutAvailability: .ready
+        )
     }
-
-    func prewarmOnOpen(message: Message) {}
 }

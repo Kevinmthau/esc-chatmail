@@ -161,15 +161,12 @@ final class FullEmailPreparedOpenPayloadBookkeepingTests: XCTestCase {
     private func makeKey(
         messageId: String = "message-1",
         sourceSignature: String = "sha256:source",
-        html: String = "<html>body</html>",
-        width: CGFloat = 390
-    ) -> FullEmailWebViewPreRenderKey {
-        FullEmailWebViewPreRenderKey.make(
+        html: String = "<html>body</html>"
+    ) -> FullEmailPreparedArtifactKey {
+        FullEmailPreparedArtifactKey.make(
             messageId: messageId,
             sourceSignature: sourceSignature,
-            wrappedHTML: html,
-            cidAvailabilityFingerprint: "cid:none",
-            width: width
+            wrappedHTML: html
         )
     }
 
@@ -294,30 +291,38 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
         let manager = FullEmailWebViewManager(loader: makeLoader(contentHandler: contentHandler))
         let request = makeRequest(messageId: messageId)
 
-        await manager.warm(
-            request: request,
-            message: nil,
-            width: 390
-        )
+        await manager.warm(request: request, message: nil, width: nil)
 
         XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: messageId))
         XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
         XCTAssertFalse(manager.isWarmedForTesting(messageId: messageId))
 
-        let preparedPayload = try XCTUnwrap(
-            manager.preparedOpenPayload(
+        let prepared = try XCTUnwrap(
+            manager.preparedOpenArtifact(
                 request: request,
                 message: nil,
                 width: 390
             )
         )
-        XCTAssertEqual(preparedPayload.checkoutAvailability, .warming)
+        XCTAssertEqual(prepared.checkoutAvailability, .warming)
+        XCTAssertEqual(prepared.artifact.messageID, messageId)
+        let widerPrepared = try XCTUnwrap(
+            manager.preparedOpenArtifact(
+                request: request,
+                message: nil,
+                width: 700
+            )
+        )
+        XCTAssertEqual(widerPrepared.artifact.renderSignature, prepared.artifact.renderSignature)
+        guard case .html(let preparedHTML) = prepared.artifact.body else {
+            return XCTFail("Expected prepared HTML artifact")
+        }
 
         XCTAssertNil(
             manager.checkout(
                 messageId: messageId,
-                sourceSignature: preparedPayload.sourceSignature,
-                wrappedHTML: preparedPayload.html,
+                sourceSignature: prepared.artifact.sourceSignature,
+                wrappedHTML: preparedHTML,
                 message: nil,
                 width: 390
             )
@@ -326,7 +331,7 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
         manager.clear()
     }
 
-    func testPrepaintAfterExplicitOpenCreatesWebViewEntryForWarmingPayload() {
+    func testPrepaintAfterExplicitOpenDoesNotCreateWebViewEntryByDefault() {
         XCTAssertFalse(
             FullEmailWebViewAdoptionPolicy.isEnabled(
                 arguments: [],
@@ -343,62 +348,48 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
             .withBody("Body \(messageId)")
             .build(in: testStack.viewContext)
         let request = makeRequest(messageId: messageId)
-        let payload = FullEmailOpenPayload(
-            messageId: messageId,
-            sourceSignature: "sha256:\(messageId)",
-            html: simpleHTML(title: "Explicit prepaint"),
-            presentation: .html,
-            sourceKind: .html,
-            sourceLocation: .messageFile,
-            hasHTMLSource: true,
-            checkoutAvailability: .warming
-        )
+        let artifact = makeArtifact(message: message, html: simpleHTML(title: "Explicit prepaint"))
         let manager = FullEmailWebViewManager()
         defer { manager.clear() }
 
         manager.prepaintAfterExplicitOpen(
             request: request,
             message: message,
-            payload: payload,
+            artifact: artifact,
             width: 390
         )
 
-        XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: messageId))
-        XCTAssertTrue(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
+        XCTAssertFalse(manager.hasPreparedPayloadForTesting(messageId: messageId))
+        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
     }
 
-    func testPrepaintAfterExplicitOpenCreatesWebViewEntryWithoutExistingEntry() {
-        let testStack = TestCoreDataStack()
-        let messageId = "explicit-open-no-ready-entry-\(UUID().uuidString)"
-        let message = MessageBuilder()
-            .withId(messageId)
-            .withSubject("Subject")
-            .withSender(email: "sender@example.com", name: "Sender")
-            .withBody("Body \(messageId)")
-            .build(in: testStack.viewContext)
-        let request = makeRequest(messageId: messageId)
-        let payload = FullEmailOpenPayload(
-            messageId: messageId,
-            sourceSignature: "sha256:\(messageId)",
-            html: simpleHTML(title: "Explicit prepaint"),
-            presentation: .html,
-            sourceKind: .html,
-            sourceLocation: .messageFile,
-            hasHTMLSource: true,
-            checkoutAvailability: .ready
-        )
-        let manager = FullEmailWebViewManager()
-        defer { manager.clear() }
+    func testPrepaintAfterExplicitOpenCreatesWebViewEntryWhenAdoptionEnabled() {
+        withEnvironmentValue("1", for: FullEmailWebViewAdoptionPolicy.enableEnvironmentKey) {
+            withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
+                let testStack = TestCoreDataStack()
+                let messageId = "explicit-open-enabled-\(UUID().uuidString)"
+                let message = MessageBuilder()
+                    .withId(messageId)
+                    .withSubject("Subject")
+                    .withSender(email: "sender@example.com", name: "Sender")
+                    .withBody("Body \(messageId)")
+                    .build(in: testStack.viewContext)
+                let request = makeRequest(messageId: messageId)
+                let artifact = makeArtifact(message: message, html: simpleHTML(title: "Explicit prepaint"))
+                let manager = FullEmailWebViewManager()
+                defer { manager.clear() }
 
-        manager.prepaintAfterExplicitOpen(
-            request: request,
-            message: message,
-            payload: payload,
-            width: 390
-        )
+                manager.prepaintAfterExplicitOpen(
+                    request: request,
+                    message: message,
+                    artifact: artifact,
+                    width: 390
+                )
 
-        XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: messageId))
-        XCTAssertTrue(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
+                XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: messageId))
+                XCTAssertTrue(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
+            }
+        }
     }
 
     func testPrepaintAfterExplicitOpenDoesNotCreateWebViewEntryWhenAdoptionExplicitlyDisabled() {
@@ -414,23 +405,14 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
                 .withBody("Body \(messageId)")
                 .build(in: testStack.viewContext)
             let request = makeRequest(messageId: messageId)
-            let payload = FullEmailOpenPayload(
-                messageId: messageId,
-                sourceSignature: "sha256:\(messageId)",
-                html: simpleHTML(title: "Explicit prepaint"),
-                presentation: .html,
-                sourceKind: .html,
-                sourceLocation: .messageFile,
-                hasHTMLSource: true,
-                checkoutAvailability: .warming
-            )
+            let artifact = makeArtifact(message: message, html: simpleHTML(title: "Explicit prepaint"))
             let manager = FullEmailWebViewManager()
             defer { manager.clear() }
 
             manager.prepaintAfterExplicitOpen(
                 request: request,
                 message: message,
-                payload: payload,
+                artifact: artifact,
                 width: 390
             )
 
@@ -518,9 +500,60 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
         </html>
         """
     }
+
+    private func makeArtifact(message: Message, html: String) -> EmailReaderArtifact {
+        EmailReaderArtifact(
+            messageID: message.id,
+            sourceSignature: "sha256:\(message.id)",
+            body: .html(html),
+            metadata: EmailMetadataSnapshot(message: message),
+            inlineAttachmentAvailabilitySignature: InlineCIDAttachmentAvailabilityFingerprint.make(
+                html: html,
+                message: message
+            ),
+            sourceKind: .html,
+            sourceLocation: .messageFile,
+            hasHTMLSource: true,
+            producedAt: Date(timeIntervalSince1970: 0)
+        )
+    }
 }
 
 final class FullEmailWebViewAdoptionPolicyTests: XCTestCase {
+    func testRenderingConfigurationEnablesPreparedHTMLWarmupByDefault() {
+        XCTAssertTrue(EmailReaderRenderingConfiguration.enablesPreparedHTMLWarmup)
+    }
+
+    func testRenderingConfigurationDisablesOffscreenWebViewAdoptionByDefault() {
+        withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.enableEnvironmentKey) {
+            withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
+                XCTAssertFalse(
+                    FullEmailWebViewAdoptionPolicy.isEnabled(
+                        arguments: [],
+                        environment: [:]
+                    )
+                )
+                XCTAssertFalse(EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption)
+            }
+        }
+    }
+
+    func testRenderingConfigurationEnablesOffscreenWebViewAdoptionWhenExplicitlyEnabled() {
+        withEnvironmentValue("1", for: FullEmailWebViewAdoptionPolicy.enableEnvironmentKey) {
+            withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
+                XCTAssertTrue(EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption)
+            }
+        }
+    }
+
+    func testRenderingConfigurationDisableOverrideWins() {
+        withEnvironmentValue("1", for: FullEmailWebViewAdoptionPolicy.enableEnvironmentKey) {
+            withEnvironmentValue("1", for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
+                XCTAssertFalse(EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption)
+            }
+        }
+    }
+
     func testAdoptionIsDisabledByDefault() {
         XCTAssertFalse(
             FullEmailWebViewAdoptionPolicy.isEnabled(
@@ -710,16 +743,12 @@ final class FullEmailWebViewPreRenderKeyTests: XCTestCase {
 final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
     private func makeKey(
         sourceSignature: String = "sha256:source",
-        html: String = "<html>body</html>",
-        cid: String = "cid:none",
-        width: CGFloat = 390
-    ) -> FullEmailWebViewPreRenderKey {
-        FullEmailWebViewPreRenderKey.make(
+        html: String = "<html>body</html>"
+    ) -> FullEmailPreparedArtifactKey {
+        FullEmailPreparedArtifactKey.make(
             messageId: "message-1",
             sourceSignature: sourceSignature,
-            wrappedHTML: html,
-            cidAvailabilityFingerprint: cid,
-            width: width
+            wrappedHTML: html
         )
     }
 
@@ -754,7 +783,7 @@ final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
         )
     }
 
-    func testSameHTMLSourceWidthAndCIDAvailabilityIsReusable() {
+    func testSameHTMLSourceAndWrapperInputsAreReusable() {
         let key = makeKey()
         let request = makeRequest()
         XCTAssertEqual(
@@ -859,31 +888,17 @@ final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
         )
     }
 
-    func testChangedCIDAvailabilityMissesReuse() {
+    func testPreparedReuseIgnoresWidthDependentAdoptionIdentity() {
         XCTAssertEqual(
             FullEmailOpenPayloadReuseValidator.decision(
-                entryKey: makeKey(cid: "cid:none"),
-                expectedKey: makeKey(cid: "cid:image=available"),
+                entryKey: makeKey(),
+                expectedKey: makeKey(),
                 entryRequest: makeRequest(),
                 currentRequest: makeRequest(),
                 payload: makePayload(),
                 currentSourceSignature: "sha256:source"
             ),
-            .keyMismatch
-        )
-    }
-
-    func testChangedWidthMissesReuse() {
-        XCTAssertEqual(
-            FullEmailOpenPayloadReuseValidator.decision(
-                entryKey: makeKey(width: 390),
-                expectedKey: makeKey(width: 393),
-                entryRequest: makeRequest(),
-                currentRequest: makeRequest(),
-                payload: makePayload(),
-                currentSourceSignature: "sha256:source"
-            ),
-            .keyMismatch
+            .reusable
         )
     }
 

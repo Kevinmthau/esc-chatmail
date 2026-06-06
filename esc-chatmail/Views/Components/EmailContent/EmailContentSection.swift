@@ -2,29 +2,11 @@ import SwiftUI
 import CoreData
 import CryptoKit
 
-struct OriginalEmailWarmRequest: Equatable, Sendable {
-    let messageId: String
-    let bodyStorageURI: String?
-    let bodyText: String?
-    let senderEmail: String?
-    let subject: String?
+protocol HTMLSourceSignaturing {
+    func htmlSourceSignature(messageId: String, bodyStorageURI: String?) -> String
 }
 
-protocol OriginalEmailSourceWarming: Sendable {
-    func warmOriginalEmailSource(request: OriginalEmailWarmRequest) async
-}
-
-extension OriginalEmailSourceLoader: OriginalEmailSourceWarming {
-    func warmOriginalEmailSource(request: OriginalEmailWarmRequest) async {
-        await warmOriginalEmailSource(
-            messageId: request.messageId,
-            bodyStorageURI: request.bodyStorageURI,
-            bodyText: request.bodyText,
-            senderEmail: request.senderEmail,
-            subject: request.subject
-        )
-    }
-}
+extension HTMLContentHandler: HTMLSourceSignaturing {}
 
 /// Container view that routes chat previews by content type.
 /// Newsletter and strongly-structured transactional emails render as derived native cards.
@@ -41,23 +23,30 @@ struct EmailContentSection: View {
     @State private var remoteImageFallbackReloadTask: Task<Void, Never>?
     @State private var remoteImageFallbackOriginalWarmTask: Task<Void, Never>?
     private let originalEmailSourceWarmer: any OriginalEmailSourceWarming
+    private let fullEmailOpener: any FullEmailOpening
+    private let htmlSourceSignaturer: any HTMLSourceSignaturing
     private let previewPipeline = EmailPreviewPipeline.shared
 
+    @MainActor
     init(
         message: ChatMessageRowModel,
         onOpenFullMessage: @escaping (EmailReaderOpenSource) -> Void,
-        originalEmailSourceWarmer: any OriginalEmailSourceWarming = OriginalEmailSourceLoader.shared
+        originalEmailSourceWarmer: any OriginalEmailSourceWarming,
+        fullEmailOpener: any FullEmailOpening,
+        htmlSourceSignaturer: any HTMLSourceSignaturing
     ) {
         self.message = message
         self.onOpenFullMessage = onOpenFullMessage
         self.originalEmailSourceWarmer = originalEmailSourceWarmer
+        self.fullEmailOpener = fullEmailOpener
+        self.htmlSourceSignaturer = htmlSourceSignaturer
     }
 
     private var loadKey: String {
         Self.makeLoadKey(
             for: message,
             isDarkMode: colorScheme == .dark,
-            htmlSourceSignature: HTMLContentHandler.shared.htmlSourceSignature(
+            htmlSourceSignature: htmlSourceSignaturer.htmlSourceSignature(
                 messageId: message.id,
                 bodyStorageURI: message.bodyStorageURI
             )
@@ -68,22 +57,11 @@ struct EmailContentSection: View {
     /// independent (forced light), so this deliberately omits dark mode: a single warm serves both.
     /// Keyed on the source signature so a recovered/changed source re-warms the new content.
     private var warmFullEmailKey: String {
-        let sourceSignature = HTMLContentHandler.shared.htmlSourceSignature(
+        let sourceSignature = htmlSourceSignaturer.htmlSourceSignature(
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI
         )
         return "\(message.id)|\(message.bodyStorageURI ?? "")|warm-original|source:\(sourceSignature)"
-    }
-
-    static func makeLoadKey(for message: ChatMessageRowModel, isDarkMode: Bool) -> String {
-        makeLoadKey(
-            for: message,
-            isDarkMode: isDarkMode,
-            htmlSourceSignature: HTMLContentHandler.shared.htmlSourceSignature(
-                messageId: message.id,
-                bodyStorageURI: message.bodyStorageURI
-            )
-        )
     }
 
     static func makeLoadKey(
@@ -177,14 +155,13 @@ struct EmailContentSection: View {
         guard !Task.isCancelled else {
             return
         }
-        let width = FullEmailWebViewMetrics.fullViewWidth()
-        guard width > 1 else {
+        guard EmailReaderRenderingConfiguration.enablesPreparedHTMLWarmup else {
             return
         }
-        await FullEmailWebViewManager.shared.warm(
+        await fullEmailOpener.warm(
             request: Self.originalEmailWarmRequest(for: message),
             message: resolvedMessageForInlineAttachments,
-            width: width
+            width: nil
         )
     }
 

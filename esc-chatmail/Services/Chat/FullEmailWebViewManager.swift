@@ -1,7 +1,6 @@
 import Foundation
 import UIKit
 import WebKit
-import CryptoKit
 
 // MARK: - Reusable layout-aware WKWebView
 
@@ -37,13 +36,11 @@ enum FullInteractiveEmailWebView {
         let configuration = WKWebViewConfiguration()
         // Register cid: scheme handler for inline attachments.
         configuration.setURLSchemeHandler(cidHandler, forURLScheme: "cid")
-        configuration.allowsInlineMediaPlayback = true
+        configuration.allowsInlineMediaPlayback = false
         configuration.dataDetectorTypes = [.phoneNumber, .link, .address]
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-        configuration.allowsAirPlayForMediaPlayback = true
-        configuration.mediaTypesRequiringUserActionForPlayback = []
-        configuration.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
-        configuration.setValue(true, forKey: "allowUniversalAccessFromFileURLs")
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+        configuration.allowsAirPlayForMediaPlayback = false
+        configuration.mediaTypesRequiringUserActionForPlayback = .all
         return configuration
     }
 
@@ -140,21 +137,19 @@ enum FullInteractiveEmailWebView {
     }
 }
 
+enum EmailReaderRenderingConfiguration {
+    static var enablesPreparedHTMLWarmup: Bool {
+        true
+    }
+
+    static var enablesOffscreenWebViewAdoption: Bool {
+        FullEmailWebViewAdoptionPolicy.allowsPrerenderedWebViewAdoption
+    }
+}
+
 // MARK: - Metrics
 
 enum FullEmailWebViewMetrics {
-    /// The width the full original-email reader renders at. The reader is presented as a full-width
-    /// sheet, so on iPhone this equals the active scene's screen width. Both warming and checkout use
-    /// this single value so their pre-render keys agree. Returns 0 when no scene is available, which
-    /// callers treat as "skip pre-rendering and use the live path."
-    @MainActor
-    static func fullViewWidth() -> CGFloat {
-        guard let scene = activeWindowScene() else {
-            return 0
-        }
-        return scene.screen.bounds.width
-    }
-
     @MainActor
     static func activeWindowScene() -> UIWindowScene? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
@@ -192,11 +187,25 @@ struct FullEmailWebViewPreRenderKey: Hashable, Sendable {
     }
 
     private static func fingerprint(for text: String) -> String {
-        let digest = SHA256.hash(data: Data(text.utf8))
-            .prefix(8)
-            .map { String(format: "%02x", $0) }
-            .joined()
-        return "\(text.utf8.count):\(digest)"
+        "\(text.utf8.count):\(StableFingerprint.sha256Prefix(text))"
+    }
+}
+
+struct FullEmailPreparedArtifactKey: Hashable, Sendable {
+    let messageId: String
+    let sourceSignature: String
+    let htmlFingerprint: String
+
+    static func make(
+        messageId: String,
+        sourceSignature: String,
+        wrappedHTML: String
+    ) -> FullEmailPreparedArtifactKey {
+        FullEmailPreparedArtifactKey(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            htmlFingerprint: "\(wrappedHTML.utf8.count):\(StableFingerprint.sha256Prefix(wrappedHTML))"
+        )
     }
 }
 
@@ -216,6 +225,26 @@ struct FullEmailOpenPayload: Equatable, Sendable {
     let sourceLocation: CanonicalEmailSourceLocation
     let hasHTMLSource: Bool
     let checkoutAvailability: CheckoutAvailability
+
+    init(
+        messageId: String,
+        sourceSignature: String,
+        html: String,
+        presentation: OriginalEmailSource.Presentation,
+        sourceKind: CanonicalEmailSourceKind,
+        sourceLocation: CanonicalEmailSourceLocation,
+        hasHTMLSource: Bool,
+        checkoutAvailability: CheckoutAvailability
+    ) {
+        self.messageId = messageId
+        self.sourceSignature = sourceSignature
+        self.html = html
+        self.presentation = presentation
+        self.sourceKind = sourceKind
+        self.sourceLocation = sourceLocation
+        self.hasHTMLSource = hasHTMLSource
+        self.checkoutAvailability = checkoutAvailability
+    }
 
     var originalEmailSource: OriginalEmailSource {
         OriginalEmailSource(
@@ -239,6 +268,46 @@ struct FullEmailOpenPayload: Equatable, Sendable {
             sourceLocation: sourceLocation,
             hasHTMLSource: hasHTMLSource,
             checkoutAvailability: checkoutAvailability
+        )
+    }
+
+    init(
+        artifact: EmailReaderArtifact,
+        checkoutAvailability: CheckoutAvailability
+    ) {
+        self.messageId = artifact.messageID
+        self.sourceSignature = artifact.sourceSignature
+        switch artifact.body {
+        case .html(let html):
+            self.html = html
+        case .plainText:
+            self.html = ""
+        }
+        self.presentation = .html
+        self.sourceKind = artifact.sourceKind
+        self.sourceLocation = artifact.sourceLocation
+        self.hasHTMLSource = artifact.hasHTMLSource
+        self.checkoutAvailability = checkoutAvailability
+    }
+
+    func artifact(
+        metadata: EmailMetadataSnapshot,
+        message: Message?,
+        producedAt: Date = Date()
+    ) -> EmailReaderArtifact {
+        EmailReaderArtifact(
+            messageID: messageId,
+            sourceSignature: sourceSignature,
+            body: .html(html),
+            metadata: metadata,
+            inlineAttachmentAvailabilitySignature: InlineCIDAttachmentAvailabilityFingerprint.make(
+                html: html,
+                message: message
+            ),
+            sourceKind: sourceKind,
+            sourceLocation: sourceLocation,
+            hasHTMLSource: hasHTMLSource,
+            producedAt: producedAt
         )
     }
 }
@@ -319,10 +388,7 @@ private struct OriginalEmailWarmWrapperInputs: Equatable {
     }
 
     private static func fingerprint(for text: String) -> String {
-        SHA256.hash(data: Data(text.utf8))
-            .prefix(8)
-            .map { String(format: "%02x", $0) }
-            .joined()
+        StableFingerprint.sha256Prefix(text)
     }
 
     private static func normalized(_ text: String?) -> String? {
@@ -336,8 +402,8 @@ private struct OriginalEmailWarmWrapperInputs: Equatable {
 
 enum FullEmailOpenPayloadReuseValidator {
     static func decision(
-        entryKey: FullEmailWebViewPreRenderKey,
-        expectedKey: FullEmailWebViewPreRenderKey,
+        entryKey: FullEmailPreparedArtifactKey,
+        expectedKey: FullEmailPreparedArtifactKey,
         entryRequest: OriginalEmailWarmRequest,
         currentRequest: OriginalEmailWarmRequest,
         payload: FullEmailOpenPayload,
@@ -367,29 +433,48 @@ enum FullEmailOpenPayloadReuseValidator {
 
 @MainActor
 protocol FullEmailOpening: AnyObject {
-    func preparedOpenPayload(
+    func preparedOpenArtifact(
         request: OriginalEmailWarmRequest,
         message: Message?,
-        width: CGFloat
-    ) -> FullEmailOpenPayload?
+        width: CGFloat?
+    ) -> EmailReaderPreparedArtifact?
 
     func prepaintAfterExplicitOpen(
         request: OriginalEmailWarmRequest,
         message: Message,
-        payload: FullEmailOpenPayload,
+        artifact: EmailReaderArtifact,
         width: CGFloat
     )
 
-    func prewarmOnOpen(message: Message)
+    func warm(request: OriginalEmailWarmRequest, message: Message?, width: CGFloat?) async
+
+    func prewarmOnOpen(message: Message, width: CGFloat?)
 }
 
 extension FullEmailOpening {
     func prepaintAfterExplicitOpen(
         request: OriginalEmailWarmRequest,
         message: Message,
-        payload: FullEmailOpenPayload,
+        artifact: EmailReaderArtifact,
         width: CGFloat
     ) {}
+
+    func prewarmOnOpen(message: Message, width: CGFloat?) {}
+
+    func warm(request: OriginalEmailWarmRequest, message: Message?, width: CGFloat?) async {}
+}
+
+@MainActor
+protocol FullEmailWebViewAdopting: AnyObject {
+    func checkout(
+        messageId: String,
+        sourceSignature: String?,
+        wrappedHTML: String,
+        message: Message?,
+        width: CGFloat
+    ) -> FullEmailWebViewManager.Checkout?
+
+    func checkin(messageId: String, webView: WKWebView)
 }
 
 // MARK: - Pure LRU bookkeeping
@@ -429,7 +514,7 @@ struct FullEmailWebViewPoolBookkeeping: Equatable {
 struct FullEmailRemoteImageFallbackBookkeeping: Equatable {
     struct WarmContext: Equatable {
         let request: OriginalEmailWarmRequest
-        let width: CGFloat
+        let width: CGFloat?
     }
 
     private var generations: [String: Int] = [:]
@@ -447,7 +532,7 @@ struct FullEmailRemoteImageFallbackBookkeeping: Equatable {
         generations[messageId, default: 0] &+= 1
     }
 
-    mutating func rememberWarmContext(request: OriginalEmailWarmRequest, width: CGFloat) {
+    mutating func rememberWarmContext(request: OriginalEmailWarmRequest, width: CGFloat?) {
         warmContexts[request.messageId] = WarmContext(request: request, width: width)
     }
 
@@ -466,7 +551,7 @@ struct FullEmailRemoteImageFallbackBookkeeping: Equatable {
 
 struct FullEmailPreparedOpenPayloadBookkeeping: Equatable {
     struct Entry: Equatable {
-        let key: FullEmailWebViewPreRenderKey
+        let key: FullEmailPreparedArtifactKey
         var request: OriginalEmailWarmRequest
         var payload: FullEmailOpenPayload
     }
@@ -474,7 +559,7 @@ struct FullEmailPreparedOpenPayloadBookkeeping: Equatable {
     private var entries: [String: Entry] = [:]
 
     mutating func store(
-        key: FullEmailWebViewPreRenderKey,
+        key: FullEmailPreparedArtifactKey,
         request: OriginalEmailWarmRequest,
         payload: FullEmailOpenPayload
     ) {
@@ -512,7 +597,7 @@ struct FullEmailPreparedOpenPayloadBookkeeping: Equatable {
 /// explicit-open path can start or promote a matching WebView after the user opens the full original
 /// email, making later opens eligible for checkout.
 @MainActor
-final class FullEmailWebViewManager: FullEmailOpening {
+final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting {
     static let shared = FullEmailWebViewManager()
 
     struct Checkout {
@@ -601,10 +686,7 @@ final class FullEmailWebViewManager: FullEmailOpening {
     /// payload ready for the reader. When active WebView adoption is explicitly enabled, also
     /// pre-renders an off-screen WebView. Cheap to call repeatedly: it no-ops when up-to-date state is
     /// already warm.
-    func warm(request: OriginalEmailWarmRequest, message: Message?, width: CGFloat) async {
-        guard width > 1 else {
-            return
-        }
+    func warm(request: OriginalEmailWarmRequest, message: Message?, width: CGFloat?) async {
         let remoteImageFallbackGeneration = remoteImageFallbackBookkeeping.generation(for: request.messageId)
         rememberRemoteImageFallbackWarmContext(request: request, message: message, width: width)
 
@@ -644,12 +726,10 @@ final class FullEmailWebViewManager: FullEmailOpening {
             return
         }
 
-        let key = makeKey(
+        let preparedKey = makePreparedKey(
             messageId: request.messageId,
             sourceSignature: warmed.sourceSignature,
-            wrappedHTML: warmed.html,
-            message: message,
-            width: width
+            wrappedHTML: warmed.html
         )
         let payload = makePayload(
             request: request,
@@ -657,15 +737,25 @@ final class FullEmailWebViewManager: FullEmailOpening {
             checkoutAvailability: .warming
         )
         preparedPayloads.store(
-            key: key,
+            key: preparedKey,
             request: request,
             payload: payload
         )
         applyEvictions(bookkeeping.touch(request.messageId))
 
-        guard FullEmailWebViewAdoptionPolicy.allowsPrerenderedWebViewAdoption else {
+        guard EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption,
+              let width,
+              width > 1 else {
             return
         }
+
+        let key = makePreRenderKey(
+            messageId: request.messageId,
+            sourceSignature: warmed.sourceSignature,
+            wrappedHTML: warmed.html,
+            message: message,
+            width: width
+        )
 
         // Already warm (or warming) for this exact content + width: keep it hot and return.
         if let existing = entries[request.messageId], existing.key == key, !existing.isCheckedOut {
@@ -704,21 +794,34 @@ final class FullEmailWebViewManager: FullEmailOpening {
     func prepaintAfterExplicitOpen(
         request: OriginalEmailWarmRequest,
         message: Message,
-        payload: FullEmailOpenPayload,
+        artifact: EmailReaderArtifact,
         width: CGFloat
     ) {
-        guard width > 1,
-              request.messageId == message.id,
-              payload.messageId == request.messageId,
-              payload.presentation == .html,
-              !FullEmailWebViewAdoptionPolicy.explicitlyDisablesPrerenderedWebViewAdoption else {
+        guard case .html(let html) = artifact.body else {
             return
         }
 
-        let key = makeKey(
+        let payload = FullEmailOpenPayload(
+            artifact: artifact,
+            checkoutAvailability: .warming
+        )
+
+        guard width > 1,
+              request.messageId == message.id,
+              artifact.messageID == request.messageId,
+              EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption else {
+            return
+        }
+
+        let preparedKey = makePreparedKey(
             messageId: request.messageId,
-            sourceSignature: payload.sourceSignature,
-            wrappedHTML: payload.html,
+            sourceSignature: artifact.sourceSignature,
+            wrappedHTML: html
+        )
+        let key = makePreRenderKey(
+            messageId: request.messageId,
+            sourceSignature: artifact.sourceSignature,
+            wrappedHTML: html,
             message: message,
             width: width
         )
@@ -733,7 +836,7 @@ final class FullEmailWebViewManager: FullEmailOpening {
                     : .warming
                 let updatedPayload = payload.withCheckoutAvailability(availability)
                 preparedPayloads.store(
-                    key: key,
+                    key: preparedKey,
                     request: request,
                     payload: updatedPayload
                 )
@@ -750,7 +853,7 @@ final class FullEmailWebViewManager: FullEmailOpening {
 
         let warmingPayload = payload.withCheckoutAvailability(.warming)
         preparedPayloads.store(
-            key: key,
+            key: preparedKey,
             request: request,
             payload: warmingPayload
         )
@@ -762,7 +865,7 @@ final class FullEmailWebViewManager: FullEmailOpening {
             message: message,
             senderEmail: request.senderEmail,
             width: width,
-            html: payload.html
+            html: html
         )
         entries[request.messageId] = entry
         applyEvictions(bookkeeping.touch(request.messageId))
@@ -770,7 +873,7 @@ final class FullEmailWebViewManager: FullEmailOpening {
 
     /// Fire-and-forget warm for a message that is about to be opened (e.g. on tap). This prepares the
     /// wrapped original HTML for a later open without blocking synchronous UI code.
-    func prewarmOnOpen(message: Message) {
+    func prewarmOnOpen(message: Message, width: CGFloat?) {
         let request = OriginalEmailWarmRequest(
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
@@ -778,10 +881,9 @@ final class FullEmailWebViewManager: FullEmailOpening {
             senderEmail: message.senderEmail,
             subject: message.subject
         )
-        let width = FullEmailWebViewMetrics.fullViewWidth()
         Task { @MainActor in
             await warm(request: request, message: message, width: width)
-            guard let payload = preparedOpenPayload(
+            guard let prepared = preparedOpenArtifact(
                 request: request,
                 message: message,
                 width: width
@@ -791,8 +893,8 @@ final class FullEmailWebViewManager: FullEmailOpening {
             prepaintAfterExplicitOpen(
                 request: request,
                 message: message,
-                payload: payload,
-                width: width
+                artifact: prepared.artifact,
+                width: width ?? 0
             )
         }
     }
@@ -801,16 +903,11 @@ final class FullEmailWebViewManager: FullEmailOpening {
 
     /// Returns the prepared wrapped original-email HTML that the full reader can display immediately,
     /// provided it still matches the current local source, inline CID availability, and target width.
-    func preparedOpenPayload(
+    func preparedOpenArtifact(
         request: OriginalEmailWarmRequest,
         message: Message?,
-        width: CGFloat
-    ) -> FullEmailOpenPayload? {
-        guard width > 1 else {
-            logOpenPayloadMiss(messageId: request.messageId, reason: "missing_width")
-            return nil
-        }
-
+        width: CGFloat?
+    ) -> EmailReaderPreparedArtifact? {
         guard let preparedEntry = preparedPayloads.entry(for: request.messageId) else {
             logOpenPayloadMiss(
                 messageId: request.messageId,
@@ -819,12 +916,10 @@ final class FullEmailWebViewManager: FullEmailOpening {
             return nil
         }
 
-        let expectedKey = makeKey(
+        let expectedKey = makePreparedKey(
             messageId: request.messageId,
             sourceSignature: preparedEntry.payload.sourceSignature,
-            wrappedHTML: preparedEntry.payload.html,
-            message: message,
-            width: width
+            wrappedHTML: preparedEntry.payload.html
         )
         let currentSourceSignature = loader.currentHTMLSourceSignature(
             messageId: request.messageId,
@@ -840,16 +935,29 @@ final class FullEmailWebViewManager: FullEmailOpening {
             currentSourceSignature: currentSourceSignature
         ) {
         case .reusable:
-            let availability = checkoutAvailability(for: request.messageId, matching: preparedEntry.key)
+            let availability = checkoutAvailability(
+                for: request.messageId,
+                payload: preparedEntry.payload,
+                message: message,
+                width: width
+            )
             OriginalEmailTelemetry.log(
                 event: "open_payload_hit",
                 messageId: request.messageId,
                 detail: [
                     "checkoutAvailability=\(availability.rawValue)",
-                    "webViewAdoption=\(FullEmailWebViewAdoptionPolicy.allowsPrerenderedWebViewAdoption ? "enabled" : "disabled")"
+                    "webViewAdoption=\(EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption ? "enabled" : "disabled")"
                 ].joined(separator: " ")
             )
-            return preparedEntry.payload.withCheckoutAvailability(availability)
+            let metadata = message.map(EmailMetadataSnapshot.init(message:)) ?? EmailMetadataSnapshot(request: request)
+            let artifact = preparedEntry.payload.artifact(
+                metadata: metadata,
+                message: message
+            )
+            return EmailReaderPreparedArtifact(
+                artifact: artifact,
+                checkoutAvailability: availability
+            )
         case .staleSource(let currentSourceSignature):
             logOpenPayloadMiss(
                 messageId: request.messageId,
@@ -896,7 +1004,7 @@ final class FullEmailWebViewManager: FullEmailOpening {
             return nil
         }
 
-        let key = makeKey(
+        let key = makePreRenderKey(
             messageId: messageId,
             sourceSignature: sourceSignature,
             wrappedHTML: wrappedHTML,
@@ -945,7 +1053,7 @@ final class FullEmailWebViewManager: FullEmailOpening {
         entry.webView.navigationDelegate = entry.delegate
         entry.webView.onLayoutChange = nil
         entry.webView.scrollView.setContentOffset(.zero, animated: false)
-        host.host(entry.webView)
+        host.host(entry.webView, width: CGFloat(entry.key.widthBucket))
         applyEvictions(bookkeeping.touch(messageId))
     }
 
@@ -995,7 +1103,19 @@ final class FullEmailWebViewManager: FullEmailOpening {
 
     // MARK: - Internals
 
-    private func makeKey(
+    private func makePreparedKey(
+        messageId: String,
+        sourceSignature: String,
+        wrappedHTML: String
+    ) -> FullEmailPreparedArtifactKey {
+        FullEmailPreparedArtifactKey.make(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            wrappedHTML: wrappedHTML
+        )
+    }
+
+    private func makePreRenderKey(
         messageId: String,
         sourceSignature: String,
         wrappedHTML: String,
@@ -1034,11 +1154,21 @@ final class FullEmailWebViewManager: FullEmailOpening {
 
     private func checkoutAvailability(
         for messageId: String,
-        matching key: FullEmailWebViewPreRenderKey
+        payload: FullEmailOpenPayload,
+        message: Message?,
+        width: CGFloat?
     ) -> FullEmailOpenPayload.CheckoutAvailability {
-        guard canCheckoutActiveWebView(messageId: messageId),
+        guard let width,
+              width > 1,
+              canCheckoutActiveWebView(messageId: messageId),
               let entry = entries[messageId],
-              entry.key == key else {
+              entry.key == makePreRenderKey(
+                messageId: messageId,
+                sourceSignature: payload.sourceSignature,
+                wrappedHTML: payload.html,
+                message: message,
+                width: width
+              ) else {
             return .warming
         }
 
@@ -1079,22 +1209,14 @@ final class FullEmailWebViewManager: FullEmailOpening {
             self?.finalizeWarm(entry)
         }
 
-        host.host(webView)
+        host.host(webView, width: width)
         let baseURL = FullInteractiveEmailWebView.baseURL(message: message, senderEmail: senderEmail)
         webView.loadHTMLString(html, baseURL: baseURL)
         return entry
     }
 
     private func canCheckoutActiveWebView(messageId: String) -> Bool {
-        if FullEmailWebViewAdoptionPolicy.explicitlyDisablesPrerenderedWebViewAdoption {
-            return false
-        }
-
-        if FullEmailWebViewAdoptionPolicy.allowsPrerenderedWebViewAdoption {
-            return true
-        }
-
-        return entries[messageId]?.prepaintSource == .explicitOpen
+        EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption && entries[messageId] != nil
     }
 
     /// Marks a warmed instance ready only after forcing a render pass. `WKNavigationDelegate.didFinish`
@@ -1157,7 +1279,7 @@ final class FullEmailWebViewManager: FullEmailOpening {
     private func rememberRemoteImageFallbackWarmContext(
         request: OriginalEmailWarmRequest,
         message: Message?,
-        width: CGFloat
+        width: CGFloat?
     ) {
         remoteImageFallbackBookkeeping.rememberWarmContext(request: request, width: width)
         if let message {
@@ -1254,11 +1376,14 @@ private final class WarmNavigationDelegate: NSObject, WKNavigationDelegate {
 private final class OffscreenWebViewHost {
     private var window: UIWindow?
 
-    func host(_ view: UIView) {
+    func host(_ view: UIView, width: CGFloat) {
         guard let window = ensureWindow() else {
             return
         }
-        view.frame = CGRect(origin: .zero, size: window.bounds.size)
+        view.frame = CGRect(
+            origin: .zero,
+            size: CGSize(width: width, height: window.bounds.height)
+        )
         view.autoresizingMask = []
         window.rootViewController?.view.addSubview(view)
     }

@@ -1,17 +1,13 @@
-import CoreGraphics
 import Foundation
 
 @MainActor
 final class FullEmailReaderCoordinator {
     private let fullEmailOpener: any FullEmailOpening
-    private let widthProvider: @MainActor () -> CGFloat
 
     init(
-        fullEmailOpener: (any FullEmailOpening)? = nil,
-        widthProvider: (@MainActor () -> CGFloat)? = nil
+        fullEmailOpener: (any FullEmailOpening)? = nil
     ) {
         self.fullEmailOpener = fullEmailOpener ?? FullEmailWebViewManager.shared
-        self.widthProvider = widthProvider ?? { FullEmailWebViewMetrics.fullViewWidth() }
     }
 
     func openSession(for message: Message) -> FullEmailOpenSession {
@@ -24,43 +20,23 @@ final class FullEmailReaderCoordinator {
             senderEmail: message.senderEmailValue,
             subject: message.subject
         )
-        let width = widthProvider()
-        let payload = fullEmailOpener.preparedOpenPayload(
+        let prepared = fullEmailOpener.preparedOpenArtifact(
             request: request,
             message: message,
-            width: width
+            width: nil
         )
         let session = FullEmailOpenSession(
             message: message,
             request: request,
-            initialOpenPayload: payload,
-            immediatePlaceholder: FullEmailPlaceholder(message: message)
+            initialArtifact: prepared?.artifact,
+            immediatePlaceholder: FullEmailPlaceholder(message: message),
+            fullEmailOpener: fullEmailOpener
         )
 
-        if let payload {
-            // A warming payload cannot help this checkout and prepaint may create WebKit work, so
-            // defer it until the session is handed back for presentation.
-            if payload.checkoutAvailability == .warming {
-                Task { @MainActor [fullEmailOpener] in
-                    fullEmailOpener.prepaintAfterExplicitOpen(
-                        request: request,
-                        message: message,
-                        payload: payload,
-                        width: width
-                    )
-                }
-            } else {
-                fullEmailOpener.prepaintAfterExplicitOpen(
-                    request: request,
-                    message: message,
-                    payload: payload,
-                    width: width
-                )
-            }
-        } else {
+        if prepared == nil {
             // Backstop for a tap that beats visible-row warming. This is a fire-and-forget follow-up:
             // the session above is already presentable and does not wait for WebKit preparation.
-            fullEmailOpener.prewarmOnOpen(message: message)
+            fullEmailOpener.prewarmOnOpen(message: message, width: nil)
         }
 
         return session

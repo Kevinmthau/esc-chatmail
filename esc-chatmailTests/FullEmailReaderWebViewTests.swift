@@ -26,6 +26,17 @@ final class FullEmailReaderWebViewTests: XCTestCase {
         XCTAssertEqual(String(describing: type(of: body)), "FullEmailReaderWebView")
     }
 
+    func testFullInteractiveConfigurationDisablesUnneededCapabilitiesAndKeepsCIDHandler() {
+        let cidHandler = CIDSchemeHandler(message: nil)
+        let configuration = FullInteractiveEmailWebView.makeConfiguration(cidHandler: cidHandler)
+
+        XCTAssertFalse(configuration.defaultWebpagePreferences.allowsContentJavaScript)
+        XCTAssertFalse(configuration.allowsInlineMediaPlayback)
+        XCTAssertFalse(configuration.allowsAirPlayForMediaPlayback)
+        XCTAssertEqual(configuration.mediaTypesRequiringUserActionForPlayback, .all)
+        XCTAssertTrue(configuration.urlSchemeHandler(forURLScheme: "cid") === cidHandler)
+    }
+
     func testUpdateParentRefreshesCIDHandlerMessage() {
         let originalMessage = makeMessage(id: "message-a")
         let updatedMessage = makeMessage(id: "message-b")

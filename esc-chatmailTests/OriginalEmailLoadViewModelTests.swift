@@ -108,7 +108,7 @@ private final class OriginalEmailLoadViewModel {
                 senderEmail: request.senderEmail,
                 subject: request.subject
             ),
-            initialOpenPayload: Self.openPayload(from: initialLoadedSource, request: request),
+            initialArtifact: Self.artifact(from: initialLoadedSource, request: request, message: message),
             immediatePlaceholder: FullEmailPlaceholder(message: message),
             originalEmailSourceLoader: originalEmailSourceLoader,
             originalEmailLoadTimeout: loadTimeout,
@@ -119,44 +119,47 @@ private final class OriginalEmailLoadViewModel {
         )
     }
 
-    private static func openPayload(
+    private static func artifact(
         from source: OriginalEmailSource?,
-        request: OriginalEmailLoadRequest
-    ) -> FullEmailOpenPayload? {
-        guard let source,
-              source.presentation == .html,
-              let html = source.html else {
+        request: OriginalEmailLoadRequest,
+        message: Message
+    ) -> EmailReaderArtifact? {
+        guard let source else {
             return nil
         }
 
-        return FullEmailOpenPayload(
-            messageId: request.messageId,
-            sourceSignature: source.sourceSignature,
-            html: html,
-            presentation: source.presentation,
-            sourceKind: source.sourceKind,
-            sourceLocation: source.sourceLocation,
-            hasHTMLSource: source.hasHTMLSource,
-            checkoutAvailability: .ready
+        return EmailReaderArtifact.make(
+            messageID: request.messageId,
+            source: source,
+            metadata: EmailMetadataSnapshot(message: message),
+            message: message,
+            producedAt: Date(timeIntervalSince1970: 0)
         )
     }
 
     private static func loadState(from readerState: FullEmailReaderState) -> OriginalEmailLoadState {
         switch readerState {
-        case .preparedHTML(let payload, placeholder: _):
-            return .loaded(.html(payload.html))
+        case .preparedArtifact(let artifact, placeholder: _):
+            return Self.loadState(from: artifact)
         case .loading:
             return .loading
         case .recovering:
             return .recovering
-        case .loadedHTML(let html, sourceSignature: _, placeholder: _):
-            return .loaded(.html(html))
-        case .loadedPlainText(let text):
-            return .loaded(.plainText(text))
+        case .loadedArtifact(let artifact, placeholder: _):
+            return Self.loadState(from: artifact)
         case .retryableFailure(_, let reason):
             return .retryableFailure(reason)
         case .unrecoverableFailure(_, let reason):
             return .unrecoverableFailure(reason)
+        }
+    }
+
+    private static func loadState(from artifact: EmailReaderArtifact) -> OriginalEmailLoadState {
+        switch artifact.body {
+        case .html(let html):
+            return .loaded(.html(html))
+        case .plainText(let text):
+            return .loaded(.plainText(text))
         }
     }
 }
@@ -662,9 +665,18 @@ final class OriginalEmailLoadViewModelTests: XCTestCase {
                 currentMessageId: "message-1",
                 changedSourceSignature: "loaded-source",
                 activeSourceSignature: "loaded-source",
-                readerState: .loadedHTML(
-                    html: "<html></html>",
-                    sourceSignature: "loaded-source",
+                readerState: .loadedArtifact(
+                    EmailReaderArtifact(
+                        messageID: "message-1",
+                        sourceSignature: "loaded-source",
+                        body: .html("<html></html>"),
+                        metadata: EmailMetadataSnapshot(placeholder: placeholder),
+                        inlineAttachmentAvailabilitySignature: "cid:none",
+                        sourceKind: .html,
+                        sourceLocation: .messageFile,
+                        hasHTMLSource: true,
+                        producedAt: Date(timeIntervalSince1970: 0)
+                    ),
                     placeholder: placeholder
                 )
             )

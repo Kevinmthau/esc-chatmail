@@ -889,13 +889,15 @@ final class EmailContentSectionTests: XCTestCase {
         message.cleanedSnippet = "Original cleaned snippet"
         let initialKey = EmailContentSection.makeLoadKey(
             for: ChatMessageRowModelMapper.map(message),
-            isDarkMode: false
+            isDarkMode: false,
+            htmlSourceSignature: "sha256:test-source"
         )
 
         message.cleanedSnippet = "Updated cleaned snippet"
         let updatedKey = EmailContentSection.makeLoadKey(
             for: ChatMessageRowModelMapper.map(message),
-            isDarkMode: false
+            isDarkMode: false,
+            htmlSourceSignature: "sha256:test-source"
         )
 
         XCTAssertNotEqual(initialKey, updatedKey)
@@ -910,8 +912,16 @@ final class EmailContentSectionTests: XCTestCase {
             .build(in: context)
 
         let row = ChatMessageRowModelMapper.map(message)
-        let lightKey = EmailContentSection.makeLoadKey(for: row, isDarkMode: false)
-        let darkKey = EmailContentSection.makeLoadKey(for: row, isDarkMode: true)
+        let lightKey = EmailContentSection.makeLoadKey(
+            for: row,
+            isDarkMode: false,
+            htmlSourceSignature: "sha256:test-source"
+        )
+        let darkKey = EmailContentSection.makeLoadKey(
+            for: row,
+            isDarkMode: true,
+            htmlSourceSignature: "sha256:test-source"
+        )
 
         XCTAssertNotEqual(lightKey, darkKey)
     }

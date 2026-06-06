@@ -6,8 +6,10 @@ struct HTMLWebView: View {
     let isDarkMode: Bool
     var senderEmail: String? = nil
     var sourceSignature: String? = nil
+    var readerWidth: CGFloat = 0
     /// Optional message for resolving cid: URLs to inline attachments
     var message: Message?
+    var webViewAdoptionProvider: (any FullEmailWebViewAdopting)?
     /// Invoked when the WebView reports paint-confirmed readiness, so the reader can cross-fade its placeholder.
     var onLoadFinished: (() -> Void)? = nil
     /// Invoked when the guarded pre-render adoption path supplies an already-painted WebView, so the
@@ -18,7 +20,9 @@ struct HTMLWebView: View {
         FullEmailReaderWebView(
             htmlContent: htmlContent,
             sourceSignature: sourceSignature,
+            readerWidth: readerWidth,
             message: message,
+            webViewAdoptionProvider: webViewAdoptionProvider,
             onLoadFinished: onLoadFinished,
             onAdoptedPrerendered: onAdoptedPrerendered
         )

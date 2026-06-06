@@ -14,6 +14,8 @@ struct MessageBubble: View {
     /// Display style configuration
     var style: MessageBubbleStyle = .standard
     private let htmlContentHandler: HTMLContentHandler
+    private let fullEmailOpener: any FullEmailOpening
+    private let originalEmailSourceWarmer: any OriginalEmailSourceWarming
 
     @StateObject private var viewModel: MessageBubbleViewModel
     let onOpenFullMessage: (NSManagedObjectID, EmailReaderOpenSource) -> Void
@@ -49,6 +51,8 @@ struct MessageBubble: View {
         message: ChatMessageRowModel,
         messageBubbleLoader: any MessageBubbleLoading,
         htmlContentHandler: HTMLContentHandler,
+        fullEmailOpener: any FullEmailOpening,
+        originalEmailSourceWarmer: any OriginalEmailSourceWarming,
         prefetchedSenderName: String? = nil,
         isEffectivelyOneToOneConversation: Bool,
         contactRefreshToken: Int = 0,
@@ -58,6 +62,8 @@ struct MessageBubble: View {
     ) {
         self.message = message
         self.htmlContentHandler = htmlContentHandler
+        self.fullEmailOpener = fullEmailOpener
+        self.originalEmailSourceWarmer = originalEmailSourceWarmer
         self.prefetchedSenderName = prefetchedSenderName
         self.isEffectivelyOneToOneConversation = isEffectivelyOneToOneConversation
         self.contactRefreshToken = contactRefreshToken
@@ -96,6 +102,9 @@ struct MessageBubble: View {
                     sharedDocumentLinks: viewModel.sharedDocumentLinks,
                     hasLoadedContent: viewModel.hasLoadedContent,
                     forwardedDisplayContent: resolvedForwardedDisplayContent,
+                    fullEmailOpener: fullEmailOpener,
+                    originalEmailSourceWarmer: originalEmailSourceWarmer,
+                    htmlSourceSignaturer: htmlContentHandler,
                     onOpenFullMessage: openFullMessage(source:)
                 )
 

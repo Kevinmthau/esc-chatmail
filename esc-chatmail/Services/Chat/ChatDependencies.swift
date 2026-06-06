@@ -17,6 +17,7 @@ struct ChatSessionDependencies {
 struct ChatContentDependencies {
     let htmlContentHandler: HTMLContentHandler
     let processedTextCache: ProcessedTextCache
+    let originalEmailSourceWarmer: any OriginalEmailSourceWarming
     /// Use a factory so visible bubbles do not serialize through one shared actor.
     let makeMessageBubbleLoader: () -> MessageBubbleLoader
 }

@@ -50,7 +50,16 @@ struct FullEmailReaderView: View {
 
                 Divider()
 
-                content
+                GeometryReader { geometry in
+                    content(readerWidth: geometry.size.width)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .onAppear {
+                            session.prepareForMeasuredReaderWidth(geometry.size.width)
+                        }
+                        .onChange(of: geometry.size.width) { _, newWidth in
+                            session.prepareForMeasuredReaderWidth(newWidth)
+                        }
+                }
             }
                 .navigationTitle("Email")
                 .navigationBarTitleDisplayMode(.inline)
@@ -77,22 +86,30 @@ struct FullEmailReaderView: View {
     }
 
     @ViewBuilder
-    private var content: some View {
+    private func content(readerWidth: CGFloat) -> some View {
         switch session.readerState {
-        case .preparedHTML(let payload, placeholder: _):
-            loadedHTMLContent(html: payload.html, sourceSignature: payload.sourceSignature)
+        case .preparedArtifact(let artifact, placeholder: _):
+            loadedContent(artifact: artifact, readerWidth: readerWidth)
         case .loading(let placeholder):
             loadingContent(placeholder: placeholder, isRecovering: false)
         case .recovering(let placeholder):
             loadingContent(placeholder: placeholder, isRecovering: true)
-        case .loadedHTML(let html, let sourceSignature, placeholder: _):
-            loadedHTMLContent(html: html, sourceSignature: sourceSignature)
-        case .loadedPlainText(let text):
-            OriginalEmailReadableView(text: text)
+        case .loadedArtifact(let artifact, placeholder: _):
+            loadedContent(artifact: artifact, readerWidth: readerWidth)
         case .retryableFailure(let placeholder, reason: _):
             failureContent(placeholder: placeholder, allowsRetry: true)
         case .unrecoverableFailure(let placeholder, reason: _):
             failureContent(placeholder: placeholder, allowsRetry: false)
+        }
+    }
+
+    @ViewBuilder
+    private func loadedContent(artifact: EmailReaderArtifact, readerWidth: CGFloat) -> some View {
+        switch artifact.body {
+        case .html:
+            loadedHTMLContent(artifact: artifact, readerWidth: readerWidth)
+        case .plainText(let text):
+            OriginalEmailReadableView(text: text)
         }
     }
 
@@ -117,13 +134,16 @@ struct FullEmailReaderView: View {
     /// Loaded HTML: render the interactive WebView, covering its paint gap with the snapshot
     /// placeholder and cross-fading the placeholder out once the WebView reports paint-confirmed readiness.
     @ViewBuilder
-    private func loadedHTMLContent(html: String, sourceSignature: String?) -> some View {
-        let contentSignature = loadedHTMLContentSignature(for: html, sourceSignature: sourceSignature)
+    private func loadedHTMLContent(artifact: EmailReaderArtifact, readerWidth: CGFloat) -> some View {
+        let html = artifact.body.content
+        let contentSignature = artifact.renderSignature
         ZStack {
             HTMLMessageView(
                 message: session.message,
                 html: html,
-                sourceSignature: sourceSignature,
+                sourceSignature: artifact.sourceSignature,
+                readerWidth: readerWidth,
+                webViewAdoptionProvider: session.webViewAdoptionProvider,
                 onLoadFinished: handleWebViewPainted,
                 onAdoptedPrerendered: handleAdoptedPrerendered
             )
@@ -137,9 +157,11 @@ struct FullEmailReaderView: View {
         }
         .onAppear {
             handleLoadedContentSignature(contentSignature)
+            session.prepareForMeasuredReaderWidth(readerWidth)
         }
         .onChange(of: contentSignature) { _, newSignature in
             handleLoadedContentSignature(newSignature)
+            session.prepareForMeasuredReaderWidth(readerWidth)
         }
     }
 
@@ -219,19 +241,6 @@ struct FullEmailReaderView: View {
         if !session.readerState.hasLoadedContent {
             session.reloadPreservingContent()
         }
-    }
-
-    private func loadedHTMLContentSignature(for html: String, sourceSignature: String?) -> String {
-        let htmlSignature = CanonicalEmailContent(
-            html: html,
-            plainText: nil,
-            sourceKind: .html,
-            sourceLocation: .messageFile
-        ).sourceSignature
-        return [
-            sourceSignature ?? "source:nil",
-            htmlSignature
-        ].joined(separator: "|")
     }
 
     private func handleLoadedContentSignature(_ signature: String) {

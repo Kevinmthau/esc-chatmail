@@ -40,6 +40,8 @@ struct VirtualScrollChatView: View {
                                     message: message,
                                     messageBubbleLoader: chatDependencies.content.makeMessageBubbleLoader(),
                                     htmlContentHandler: chatDependencies.content.htmlContentHandler,
+                                    fullEmailOpener: chatDependencies.fullEmailOpener,
+                                    originalEmailSourceWarmer: chatDependencies.content.originalEmailSourceWarmer,
                                     isEffectivelyOneToOneConversation: conversation.conversationType == .oneToOne,
                                     style: .compact,
                                     onOpenFullMessage: { messageObjectID, _ in

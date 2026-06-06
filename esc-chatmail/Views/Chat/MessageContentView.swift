@@ -12,6 +12,9 @@ struct MessageContentView: View {
     let sharedDocumentLinks: [SharedDocumentLink]
     let hasLoadedContent: Bool
     let forwardedDisplayContent: ForwardedMessageDisplayContent?
+    let fullEmailOpener: any FullEmailOpening
+    let originalEmailSourceWarmer: any OriginalEmailSourceWarming
+    let htmlSourceSignaturer: any HTMLSourceSignaturing
     let onOpenFullMessage: (EmailReaderOpenSource) -> Void
 
     var body: some View {
@@ -30,13 +33,19 @@ struct MessageContentView: View {
         if sharedDocumentLinks.isEmpty {
             EmailContentSection(
                 message: message,
-                onOpenFullMessage: openOriginalEmail(source:)
+                onOpenFullMessage: openOriginalEmail(source:),
+                originalEmailSourceWarmer: originalEmailSourceWarmer,
+                fullEmailOpener: fullEmailOpener,
+                htmlSourceSignaturer: htmlSourceSignaturer
             )
         } else {
             VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 10) {
                 EmailContentSection(
                     message: message,
-                    onOpenFullMessage: openOriginalEmail(source:)
+                    onOpenFullMessage: openOriginalEmail(source:),
+                    originalEmailSourceWarmer: originalEmailSourceWarmer,
+                    fullEmailOpener: fullEmailOpener,
+                    htmlSourceSignaturer: htmlSourceSignaturer
                 )
                 sharedDocumentCards
             }

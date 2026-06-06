@@ -2,7 +2,7 @@ import Foundation
 import CoreData
 import Combine
 
-struct FullEmailPlaceholder: Equatable {
+struct FullEmailPlaceholder: Equatable, Sendable {
     static let previewCharacterLimit = 500
     static let bodyTextPreviewScanLimit = 4_000
     private static let normalizationWhitespace = CharacterSet.whitespacesAndNewlines
@@ -25,6 +25,15 @@ struct FullEmailPlaceholder: Equatable {
         self.senderEmail = Self.normalizedSingleLine(message.senderEmailValue)
         self.previewText = Self.previewText(for: message)
         self.date = message.internalDate
+    }
+
+    init(metadata: EmailMetadataSnapshot) {
+        self.messageId = metadata.messageId
+        self.subject = metadata.subject
+        self.senderName = metadata.senderName
+        self.senderEmail = metadata.senderEmail
+        self.previewText = metadata.previewText
+        self.date = metadata.date
     }
 
     private static func previewText(for message: Message) -> String? {
@@ -57,7 +66,7 @@ struct FullEmailPlaceholder: Equatable {
         )
     }
 
-    private static func normalizedText(_ value: String?, maxLength: Int, scanLimit: Int? = nil) -> String? {
+    static func normalizedText(_ value: String?, maxLength: Int, scanLimit: Int? = nil) -> String? {
         guard let value else { return nil }
         var result = ""
         result.reserveCapacity(maxLength)
@@ -97,20 +106,29 @@ struct FullEmailPlaceholder: Equatable {
 }
 
 enum FullEmailReaderState: Equatable {
-    case preparedHTML(FullEmailOpenPayload, placeholder: FullEmailPlaceholder)
+    case preparedArtifact(EmailReaderArtifact, placeholder: FullEmailPlaceholder)
     case loading(FullEmailPlaceholder)
     case recovering(FullEmailPlaceholder)
-    case loadedHTML(html: String, sourceSignature: String?, placeholder: FullEmailPlaceholder)
-    case loadedPlainText(String)
+    case loadedArtifact(EmailReaderArtifact, placeholder: FullEmailPlaceholder)
     case retryableFailure(FullEmailPlaceholder, reason: String)
     case unrecoverableFailure(FullEmailPlaceholder, reason: String)
 
     var hasLoadedContent: Bool {
         switch self {
-        case .preparedHTML, .loadedHTML, .loadedPlainText:
+        case .preparedArtifact, .loadedArtifact:
             return true
         case .loading, .recovering, .retryableFailure, .unrecoverableFailure:
             return false
+        }
+    }
+
+    var artifact: EmailReaderArtifact? {
+        switch self {
+        case .preparedArtifact(let artifact, placeholder: _),
+             .loadedArtifact(let artifact, placeholder: _):
+            return artifact
+        case .loading, .recovering, .retryableFailure, .unrecoverableFailure:
+            return nil
         }
     }
 }
@@ -138,9 +156,9 @@ struct OriginalEmailLoadIdentity: Equatable, Sendable {
         let baseLoadKey = [
             messageId,
             bodyStorageURI ?? "",
-            "\(bodyText?.hashValue ?? 0)",
-            "\(subject?.hashValue ?? 0)",
-            "\(senderEmail?.hashValue ?? 0)"
+            StableFingerprint.sha256Prefix(bodyText),
+            StableFingerprint.sha256Prefix(subject),
+            StableFingerprint.sha256Prefix(senderEmail)
         ].joined(separator: "|")
 
         return OriginalEmailLoadIdentity(baseLoadKey: baseLoadKey)
@@ -195,7 +213,7 @@ enum OriginalEmailContentSourceReloadPolicy {
         }
 
         switch readerState {
-        case .preparedHTML, .loading, .recovering, .loadedHTML, .loadedPlainText, .retryableFailure, .unrecoverableFailure:
+        case .preparedArtifact, .loading, .recovering, .loadedArtifact, .retryableFailure, .unrecoverableFailure:
             return true
         }
     }
@@ -208,8 +226,9 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
     let messageObjectID: NSManagedObjectID
     let message: Message
     let request: OriginalEmailWarmRequest
-    let initialOpenPayload: FullEmailOpenPayload?
+    let initialArtifact: EmailReaderArtifact?
     let immediatePlaceholder: FullEmailPlaceholder
+    let webViewAdoptionProvider: (any FullEmailWebViewAdopting)?
 
     @Published private(set) var readerState: FullEmailReaderState
     @Published private(set) var loadingGeneration = 0
@@ -218,14 +237,16 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
     private let originalEmailSourceLoader: any OriginalEmailSourceLoading
     private let loadTimeout: TimeInterval
     private let recoveringDelay: TimeInterval
+    private let fullEmailOpener: (any FullEmailOpening)?
     private let onSourceLoaded: @MainActor (Message, OriginalEmailSource) -> Void
     private var activeBaseLoadKey: String?
     private var activeLoadTaskKey: String?
     private var timedOutSourceObservationTask: Task<Void, Never>?
     private var readerStartLogged = false
+    private var prepaintedWidthBuckets: Set<Int> = []
 
     var hasImmediateVisualSurface: Bool {
-        initialOpenPayload != nil || !immediatePlaceholder.subject.isEmpty
+        initialArtifact != nil || !immediatePlaceholder.subject.isEmpty
     }
 
     var loadRequest: OriginalEmailLoadRequest {
@@ -245,14 +266,15 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
     init(
         message: Message,
         request: OriginalEmailWarmRequest,
-        initialOpenPayload: FullEmailOpenPayload?,
+        initialArtifact: EmailReaderArtifact?,
         immediatePlaceholder: FullEmailPlaceholder,
+        fullEmailOpener: (any FullEmailOpening)? = nil,
         originalEmailSourceLoader: any OriginalEmailSourceLoading = OriginalEmailSourceLoader.shared,
         originalEmailLoadTimeout: TimeInterval = 5.0,
         recoveringDelay: TimeInterval = 5.0,
         onSourceLoaded: (@MainActor (Message, OriginalEmailSource) -> Void)? = nil
     ) {
-        let validInitialPayload = initialOpenPayload?.messageId == message.id ? initialOpenPayload : nil
+        let validInitialArtifact = initialArtifact?.messageID == message.id ? initialArtifact : nil
         let initialRequest = OriginalEmailLoadRequest(
             messageId: message.id,
             bodyStorageURI: message.bodyStorageURI,
@@ -266,8 +288,10 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
         self.messageObjectID = message.objectID
         self.message = message
         self.request = request
-        self.initialOpenPayload = validInitialPayload
+        self.initialArtifact = validInitialArtifact
         self.immediatePlaceholder = immediatePlaceholder
+        self.webViewAdoptionProvider = fullEmailOpener as? any FullEmailWebViewAdopting
+        self.fullEmailOpener = fullEmailOpener
         self.originalEmailSourceLoader = originalEmailSourceLoader
         self.loadTimeout = originalEmailLoadTimeout
         self.recoveringDelay = recoveringDelay
@@ -275,9 +299,9 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
             Self.updateBodyStorageURIIfNeeded(for: message, source: source)
         }
 
-        if let validInitialPayload {
-            self.readerState = .preparedHTML(validInitialPayload, placeholder: immediatePlaceholder)
-            self.activeHTMLSourceSignature = validInitialPayload.sourceSignature
+        if let validInitialArtifact {
+            self.readerState = .preparedArtifact(validInitialArtifact, placeholder: immediatePlaceholder)
+            self.activeHTMLSourceSignature = validInitialArtifact.sourceSignature
             self.activeBaseLoadKey = initialRequest.identity.baseLoadKey
             self.activeLoadTaskKey = "\(initialRequest.identity.baseLoadKey)|reload:0"
         } else {
@@ -295,7 +319,7 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
     @discardableResult
     func loadReaderContent() async -> OriginalEmailSource? {
         Log.diagnostic(.htmlPreview, level: .info, "FullEmailOpenSession loading message \(message.id)", category: .ui)
-        if initialOpenPayload != nil {
+        if initialArtifact != nil {
             logReaderStartIfNeeded(mode: "prepared_html")
         }
 
@@ -309,7 +333,7 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
         }
 
         if let source {
-            if initialOpenPayload == nil {
+            if initialArtifact == nil {
                 logReaderStartIfNeeded(
                     mode: source.sourceLocation == .recoveredHTML ? "recovery" : "live_load"
                 )
@@ -320,11 +344,38 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
                 "FullEmailOpenSession loaded message \(message.id) sourceKind=\(source.sourceKind.rawValue) sourceLocation=\(source.sourceLocation.rawValue) presentation=\(source.presentation.rawValue) hasHTML=\(source.html != nil)",
                 category: .ui
             )
-        } else if initialOpenPayload == nil {
+        } else if initialArtifact == nil {
             logReaderStartIfNeeded(mode: "live_load")
         }
 
         return source
+    }
+
+    func prepareForMeasuredReaderWidth(_ width: CGFloat) {
+        guard width > 1 else {
+            return
+        }
+
+        guard let artifact = readerState.artifact else {
+            fullEmailOpener?.prewarmOnOpen(message: message, width: width)
+            return
+        }
+
+        guard case .html = artifact.body else {
+            return
+        }
+
+        let widthBucket = Int(width.rounded())
+        guard prepaintedWidthBuckets.insert(widthBucket).inserted else {
+            return
+        }
+
+        fullEmailOpener?.prepaintAfterExplicitOpen(
+            request: request,
+            message: message,
+            artifact: artifact,
+            width: width
+        )
     }
 
     @discardableResult
@@ -505,24 +556,22 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
     }
 
     private func applyLoadedSource(_ source: OriginalEmailSource) {
-        switch source.presentation {
-        case .html:
-            if let html = source.html {
-                readerState = .loadedHTML(
-                    html: html,
-                    sourceSignature: source.sourceSignature,
-                    placeholder: immediatePlaceholder
-                )
-            } else {
+        guard let artifact = EmailReaderArtifact.make(
+            messageID: message.id,
+            source: source,
+            metadata: EmailMetadataSnapshot(placeholder: immediatePlaceholder),
+            message: message
+        ) else {
+            switch source.presentation {
+            case .html:
                 readerState = .unrecoverableFailure(immediatePlaceholder, reason: "missing_html_payload")
-            }
-        case .nativePlainText:
-            if let plainText = source.plainText {
-                readerState = .loadedPlainText(plainText)
-            } else {
+            case .nativePlainText:
                 readerState = .unrecoverableFailure(immediatePlaceholder, reason: "missing_plain_text_payload")
             }
+            return
         }
+
+        readerState = .loadedArtifact(artifact, placeholder: immediatePlaceholder)
     }
 
     private func acceptLoadedSource(_ source: OriginalEmailSource) {
