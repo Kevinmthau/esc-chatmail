@@ -11,14 +11,27 @@ final class HTMLSanitizerService {
     private let trackingRemover = HTMLTrackingRemover()
     private let displayWrapper = HTMLDisplayWrapper()
     private let dangerousMarkupSanitizer: (String) throws -> String
+    private let originalReaderActiveMarkupSanitizer: (String) throws -> String
 
     // MARK: - Dangerous Tags Configuration
 
     private static let dangerousTags = EmailDOMHTMLSanitizer.dangerousTags
+    private static let originalReaderActiveMarkupTags = EmailDOMHTMLSanitizer.originalReaderActiveMarkupTags
 
     // Pre-compiled regex patterns for dangerous tag removal (performance optimization)
     private static let compiledDangerousTagPatterns: [NSRegularExpression] = {
         dangerousTags.compactMap { RegexSanitizer.compileTagPattern($0) }
+    }()
+    private static let compiledOriginalReaderActiveMarkupPatterns: [NSRegularExpression] = {
+        originalReaderActiveMarkupTags.compactMap { RegexSanitizer.compileTagPattern($0) }
+    }()
+
+    // swiftlint:disable:next force_try
+    private static let formTagRegex: NSRegularExpression = {
+        try! NSRegularExpression(
+            pattern: "</?form\\b[^>]*>",
+            options: .caseInsensitive
+        )
     }()
 
     // Pre-compiled event handler removal pattern
@@ -34,9 +47,12 @@ final class HTMLSanitizerService {
 
     init(
         dangerousMarkupSanitizer: @escaping (String) throws -> String =
-            EmailDOMHTMLSanitizer.removeDangerousElementsAndEventHandlers
+            EmailDOMHTMLSanitizer.removeDangerousElementsAndEventHandlers,
+        originalReaderActiveMarkupSanitizer: @escaping (String) throws -> String =
+            EmailDOMHTMLSanitizer.removeOriginalReaderActiveMarkupAndEventHandlers
     ) {
         self.dangerousMarkupSanitizer = dangerousMarkupSanitizer
+        self.originalReaderActiveMarkupSanitizer = originalReaderActiveMarkupSanitizer
     }
 
     // MARK: - Main Sanitization Method
@@ -73,6 +89,14 @@ final class HTMLSanitizerService {
         }
     }
 
+    func removeOriginalReaderActiveMarkupAndEventHandlers(_ html: String) -> String {
+        do {
+            return try originalReaderActiveMarkupSanitizer(html)
+        } catch {
+            return removeOriginalReaderActiveMarkupAndEventHandlersWithLegacyRegex(html)
+        }
+    }
+
     private func removeDangerousElementsAndEventHandlersWithLegacyRegex(_ html: String) -> String {
         var sanitized = html
 
@@ -82,6 +106,18 @@ final class HTMLSanitizerService {
         // Note: We intentionally preserve <style> tags to keep responsive CSS/media queries.
         // Marketing emails need these for proper mobile layouts.
 
+        sanitized = removeEventHandlers(sanitized)
+        return sanitized
+    }
+
+    private func removeOriginalReaderActiveMarkupAndEventHandlersWithLegacyRegex(_ html: String) -> String {
+        var sanitized = html
+
+        sanitized = RegexSanitizer.removeTags(
+            from: sanitized,
+            compiledPatterns: Self.compiledOriginalReaderActiveMarkupPatterns
+        )
+        sanitized = RegexSanitizer.replace(in: sanitized, regex: Self.formTagRegex)
         sanitized = removeEventHandlers(sanitized)
         return sanitized
     }

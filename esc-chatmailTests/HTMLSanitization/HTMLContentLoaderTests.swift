@@ -591,15 +591,29 @@ final class HTMLContentLoaderTests: XCTestCase {
 #endif
     }
 
-    func testPrepareOriginalHTML_skipsSanitizeAndInjectsHardenedCSP() async {
+    func testPrepareOriginalHTML_stripsDangerousMarkupAndInjectsHardenedCSP() async {
         let messageId = "html-loader-original-noscrub-\(UUID().uuidString)"
         let originalHTML = """
         <!DOCTYPE html>
         <html>
+        <head>
+          <meta http-equiv="refresh" content="0;url=https://phishing.example.com">
+          <link rel="stylesheet" href="https://cdn.example.com/email.css">
+        </head>
         <body>
+          <iframe src="https://phishing.example.com/overlay"></iframe>
+          <script>alert('xss')</script>
+          <noscript><p>NOSCRIPT_FALLBACK_TOKEN</p></noscript>
+          <button onclick="alert('xss')">BUTTON_CTA_TOKEN</button>
+          <label onclick="alert('xss')">LABEL_RECEIPT_TOKEN</label>
+          <form action="https://phishing.example.com/post">
+            <label>FORM_LABEL_TOKEN</label>
+            <button>FORM_BUTTON_TOKEN</button>
+            <input name="token">
+          </form>
           <img src="https://track.example.com/open.gif?id=1" width="1" height="1" alt="">
           <img src="https://cdn.example.com/hero.jpg" alt="Hero">
-          <p>Reader body text</p>
+          <p onclick="alert('xss')">Reader body text</p>
         </body>
         </html>
         """
@@ -620,12 +634,23 @@ final class HTMLContentLoaderTests: XCTestCase {
         }
 
         XCTAssertTrue(html.contains("Reader body text"))
+        XCTAssertTrue(html.contains("NOSCRIPT_FALLBACK_TOKEN"))
+        XCTAssertTrue(html.contains("BUTTON_CTA_TOKEN"))
+        XCTAssertTrue(html.contains("LABEL_RECEIPT_TOKEN"))
+        XCTAssertTrue(html.contains("FORM_LABEL_TOKEN"))
+        XCTAssertTrue(html.contains("FORM_BUTTON_TOKEN"))
+        XCTAssertFalse(html.contains("phishing.example.com"))
+        XCTAssertFalse(html.lowercased().contains("<iframe"))
+        XCTAssertFalse(html.lowercased().contains("<script"))
+        XCTAssertFalse(html.lowercased().contains("<form"))
+        XCTAssertFalse(html.lowercased().contains("<link"))
+        XCTAssertFalse(html.lowercased().contains("onclick="))
         // Remote images load directly via WebKit; their src must survive untouched.
         XCTAssertTrue(html.contains("https://cdn.example.com/hero.jpg"))
-        // Sanitize is skipped on the full-reader path, so the 1x1 tracking pixel is NOT stripped
-        // (it is inert: JavaScript is disabled and the CSP forbids scripts/forms).
+        // URL/tracking rewrites are skipped on the full-reader path, so the 1x1 tracking pixel is
+        // not stripped by the preparation pass.
         XCTAssertTrue(html.contains("https://track.example.com/open.gif?id=1"))
-        // The wrapper injects the hardened CSP that now backs the no-scrub posture.
+        // The wrapper still injects the hardened CSP for defense in depth.
         XCTAssertTrue(html.contains("script-src 'none'"))
         XCTAssertTrue(html.contains("form-action 'none'; base-uri 'none'"))
     }

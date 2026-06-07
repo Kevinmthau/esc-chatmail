@@ -140,6 +140,37 @@ final class HTMLSanitizerServiceTests: XCTestCase {
         XCTAssertFalse(result.contains("stealCookies"))
     }
 
+    func testRemoveOriginalReaderActiveMarkup_domFailurePreservesInertVisibleContent() {
+        let failingSUT = HTMLSanitizerService(originalReaderActiveMarkupSanitizer: { _ in
+            throw NSError(domain: "HTMLSanitizerServiceTests", code: 1)
+        })
+        let html = """
+        <meta http-equiv="refresh" content="0;url=https://phishing.example.com">
+        <script>alert('xss')</script>
+        <noscript><p>NOSCRIPT_FALLBACK_TOKEN</p></noscript>
+        <button onclick="alert('xss')">BUTTON_CTA_TOKEN</button>
+        <label onclick="alert('xss')">LABEL_RECEIPT_TOKEN</label>
+        <form action="https://phishing.example.com/post">
+          <label>FORM_LABEL_TOKEN</label>
+          <button>FORM_BUTTON_TOKEN</button>
+        </form>
+        """
+
+        let result = failingSUT.removeOriginalReaderActiveMarkupAndEventHandlers(html)
+        let lowercasedResult = result.lowercased()
+
+        XCTAssertTrue(result.contains("NOSCRIPT_FALLBACK_TOKEN"))
+        XCTAssertTrue(result.contains("BUTTON_CTA_TOKEN"))
+        XCTAssertTrue(result.contains("LABEL_RECEIPT_TOKEN"))
+        XCTAssertTrue(result.contains("FORM_LABEL_TOKEN"))
+        XCTAssertTrue(result.contains("FORM_BUTTON_TOKEN"))
+        XCTAssertFalse(lowercasedResult.contains("<meta"))
+        XCTAssertFalse(lowercasedResult.contains("<script"))
+        XCTAssertFalse(lowercasedResult.contains("<form"))
+        XCTAssertFalse(lowercasedResult.contains("onclick"))
+        XCTAssertFalse(result.contains("phishing.example.com"))
+    }
+
     func testSanitize_cloudflareImageDirectiveInSrc_preservesDirectiveAndRewritesFormat() {
         let html = """
         <img src="https://content.app-us1.com/cdn-cgi/image/onerror=redirect,width=650,dpr=2,fit=scale-down,format=auto/NvzAv/2026/02/24/73b955fe-1bf1-4daa-b38c-fc1d230937e2.jpeg" alt="">

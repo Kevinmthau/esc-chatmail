@@ -1006,20 +1006,22 @@ final class HTMLContentLoader {
 
         // Full original-email reader open path (preferHTML): JavaScript is disabled in every
         // reader/preview WebView config, links are gated by the navigation policy, and the wrapper
-        // emits a hardened CSP — so the per-open regex sanitize + remote-image rewrite are redundant
-        // work (100–600ms on large newsletters) and a known corruption risk for complex nested-table
-        // HTML. Skip them and wrap with cheap string-only head injection so the open is essentially
-        // disk-read → wrap → loadHTMLString. Remote http(s) images load directly via WebKit; inline
-        // cid: images still resolve through CIDSchemeHandler. The automatic-preference original path
-        // (chat-derived previews, quality fallback) keeps full sanitization below.
+        // emits a hardened CSP. Keep a narrow active-markup/event-handler strip so scripts, meta
+        // refresh, frames, base/link/object/svg markup cannot load or navigate, but preserve inert
+        // visible content such as noscript fallbacks and CTA/receipt text in button/label markup.
+        // URL/CSS/tracking rewrites are redundant work here and can corrupt complex nested-table
+        // HTML. Remote http(s) images load directly via WebKit; inline cid: images still resolve
+        // through CIDSchemeHandler. The automatic-preference original path (chat-derived previews,
+        // quality fallback) keeps full sanitization below.
         if displayPurpose == .original, originalHTMLPreference == .preferHTML {
-            guard HTMLMeaningfulContentChecker.hasMeaningfulContent(preparedHTML) else {
-                Log.debug("wrappedHTMLIfMeaningful: original preferHTML content not meaningful for \(messageId) (len=\(preparedHTML.count))", category: .ui)
+            let safeHTML = sanitizer.removeOriginalReaderActiveMarkupAndEventHandlers(preparedHTML)
+            guard HTMLMeaningfulContentChecker.hasMeaningfulContent(safeHTML) else {
+                Log.debug("wrappedHTMLIfMeaningful: original preferHTML content not meaningful for \(messageId) (len=\(safeHTML.count))", category: .ui)
                 return nil
             }
 
             let wrapped = sanitizer.wrapSanitizedHTMLForDisplay(
-                preparedHTML,
+                safeHTML,
                 isDarkMode: isDarkMode,
                 displayPurpose: .original,
                 headSerialization: .stringOnly

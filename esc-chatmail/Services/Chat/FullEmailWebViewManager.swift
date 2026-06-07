@@ -373,12 +373,12 @@ enum FullEmailWebViewAdoptionPolicy {
     }
 
     static func isEnabled(arguments: [String], environment: [String: String]) -> Bool {
-        // Pre-rendered WebView adoption is on by default now that the reader open path no longer
-        // does cold sanitize/SwiftSoup work (Stages 1–3), so warming an off-screen instance is the
-        // remaining win for instant re-opens. The `ESC_DISABLE_FULL_EMAIL_WEBVIEW_ADOPTION` /
-        // `-ESCDisableFullEmailWebViewAdoption` kill switch still forces it off. The legacy enable
-        // flags are retained for compatibility but are now redundant.
-        !isExplicitlyDisabled(arguments: arguments, environment: environment)
+        guard !isExplicitlyDisabled(arguments: arguments, environment: environment) else {
+            return false
+        }
+
+        return arguments.contains(enableLaunchArgument) ||
+            isEnabledEnvironmentValue(environment[enableEnvironmentKey])
     }
 
     static func isExplicitlyDisabled(arguments: [String], environment: [String: String]) -> Bool {

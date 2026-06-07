@@ -195,34 +195,134 @@ struct HTMLDisplayWrapper {
     private func injectHeadByStringSurgery(into html: String, injectedHead: String) -> String? {
         var result = html
 
-        // Try to inject after existing <head> tag
-        if let headRange = result.range(of: "<head>", options: .caseInsensitive) {
+        if let headRange = openingTagRange(named: "head", in: result) {
             result.insert(contentsOf: "\n" + injectedHead + "\n", at: headRange.upperBound)
             return result
         }
 
-        if let headRange = result.range(of: "<head ", options: .caseInsensitive) {
-            // Handle <head ...> with attributes
-            if let closingBracket = result[headRange.upperBound...].range(of: ">") {
-                result.insert(contentsOf: "\n" + injectedHead + "\n", at: closingBracket.upperBound)
-                return result
-            }
-        }
-
-        if let htmlRange = result.range(of: "<html>", options: .caseInsensitive) {
-            // No head tag, inject after <html>
+        if let htmlRange = openingTagRange(named: "html", in: result) {
             result.insert(contentsOf: "\n<head>\n" + injectedHead + "\n</head>\n", at: htmlRange.upperBound)
             return result
         }
 
-        if let htmlRange = result.range(of: "<html ", options: .caseInsensitive) {
-            if let closingBracket = result[htmlRange.upperBound...].range(of: ">") {
-                result.insert(contentsOf: "\n<head>\n" + injectedHead + "\n</head>\n", at: closingBracket.upperBound)
-                return result
+        return nil
+    }
+
+    private func openingTagRange(named tagName: String, in html: String) -> Range<String.Index>? {
+        var index = html.startIndex
+
+        while let tagStart = html[index...].firstIndex(of: "<") {
+            let afterOpen = html.index(after: tagStart)
+            guard afterOpen < html.endIndex else {
+                return nil
+            }
+
+            if html[afterOpen...].hasPrefix("!--") {
+                guard let commentEnd = html[afterOpen...].range(of: "-->")?.upperBound else {
+                    return nil
+                }
+                index = commentEnd
+                continue
+            }
+
+            if html[afterOpen] == "!" || html[afterOpen] == "?" || html[afterOpen] == "/" {
+                guard let tagEnd = tagEndIndex(in: html, from: afterOpen) else {
+                    return nil
+                }
+                index = html.index(after: tagEnd)
+                continue
+            }
+
+            guard html[afterOpen].isLetter else {
+                index = afterOpen
+                continue
+            }
+
+            var nameEnd = afterOpen
+            while nameEnd < html.endIndex, isTagNameCharacter(html[nameEnd]) {
+                nameEnd = html.index(after: nameEnd)
+            }
+
+            guard let tagEnd = tagEndIndex(in: html, from: nameEnd) else {
+                return nil
+            }
+
+            let name = String(html[afterOpen..<nameEnd]).lowercased()
+            let range = tagStart..<html.index(after: tagEnd)
+            if name == tagName.lowercased() {
+                return range
+            }
+
+            if isRawTextElement(name),
+               let afterClosingTag = indexAfterClosingRawTextElement(named: name, in: html, after: range.upperBound) {
+                index = afterClosingTag
+            } else {
+                index = range.upperBound
             }
         }
 
         return nil
+    }
+
+    private func tagEndIndex(in html: String, from startIndex: String.Index) -> String.Index? {
+        var index = startIndex
+        var quote: Character?
+
+        while index < html.endIndex {
+            let character = html[index]
+            if let currentQuote = quote {
+                if character == currentQuote {
+                    quote = nil
+                }
+                index = html.index(after: index)
+                continue
+            }
+
+            if character == "\"" || character == "'" {
+                quote = character
+            } else if character == ">" {
+                return index
+            }
+            index = html.index(after: index)
+        }
+
+        return nil
+    }
+
+    private func indexAfterClosingRawTextElement(
+        named tagName: String,
+        in html: String,
+        after startIndex: String.Index
+    ) -> String.Index? {
+        var index = startIndex
+        let closingPrefix = "</\(tagName)"
+
+        while let range = html.range(
+            of: closingPrefix,
+            options: .caseInsensitive,
+            range: index..<html.endIndex
+        ) {
+            let nameEnd = range.upperBound
+            if nameEnd < html.endIndex, isTagNameCharacter(html[nameEnd]) {
+                index = nameEnd
+                continue
+            }
+
+            guard let tagEnd = tagEndIndex(in: html, from: nameEnd) else {
+                return nil
+            }
+            return html.index(after: tagEnd)
+        }
+
+        return nil
+    }
+
+    private func isRawTextElement(_ tagName: String) -> Bool {
+        tagName == "script" || tagName == "style" || tagName == "textarea" || tagName == "title"
+    }
+
+    private func isTagNameCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || character == "-" || character == ":" || character == "_"
     }
 
     private func wrapExistingDocumentWithDOM(

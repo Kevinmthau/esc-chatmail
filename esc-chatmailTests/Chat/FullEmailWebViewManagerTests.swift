@@ -270,10 +270,9 @@ final class FullEmailPreparedOpenPayloadBookkeepingTests: XCTestCase {
 @MainActor
 final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
     func testWarmWithoutWidthStoresPayloadWithoutWebViewEntry() async throws {
-        // Adoption is on by default now, but warming without a target width still cannot pre-render an
-        // off-screen WebView, so only the prepared payload is stored and checkout has nothing to hand
-        // back.
-        XCTAssertTrue(
+        // Visible-row warming prepares the open payload by default, but WebView adoption stays
+        // opt-in so scroll-time warming cannot load remote email assets off screen.
+        XCTAssertFalse(
             FullEmailWebViewAdoptionPolicy.isEnabled(
                 arguments: [],
                 environment: [:]
@@ -334,10 +333,8 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
         manager.clear()
     }
 
-    func testPrepaintAfterExplicitOpenCreatesWebViewEntryByDefault() {
-        // Adoption defaults on, so an explicit-open prepaint stores both the prepared payload and an
-        // off-screen WebView entry without needing any opt-in flag.
-        XCTAssertTrue(
+    func testPrepaintAfterExplicitOpenDoesNotCreateWebViewEntryByDefault() {
+        XCTAssertFalse(
             FullEmailWebViewAdoptionPolicy.isEnabled(
                 arguments: [],
                 environment: [:]
@@ -364,8 +361,8 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
             width: 390
         )
 
-        XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: messageId))
-        XCTAssertTrue(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
+        XCTAssertFalse(manager.hasPreparedPayloadForTesting(messageId: messageId))
+        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
     }
 
     func testPrepaintAfterExplicitOpenCreatesWebViewEntryWhenAdoptionEnabled() {
@@ -529,16 +526,16 @@ final class FullEmailWebViewAdoptionPolicyTests: XCTestCase {
         XCTAssertTrue(EmailReaderRenderingConfiguration.enablesPreparedHTMLWarmup)
     }
 
-    func testRenderingConfigurationEnablesOffscreenWebViewAdoptionByDefault() {
+    func testRenderingConfigurationDisablesOffscreenWebViewAdoptionByDefault() {
         withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.enableEnvironmentKey) {
             withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
-                XCTAssertTrue(
+                XCTAssertFalse(
                     FullEmailWebViewAdoptionPolicy.isEnabled(
                         arguments: [],
                         environment: [:]
                     )
                 )
-                XCTAssertTrue(EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption)
+                XCTAssertFalse(EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption)
             }
         }
     }
@@ -580,8 +577,8 @@ final class FullEmailWebViewAdoptionPolicyTests: XCTestCase {
         }
     }
 
-    func testAdoptionIsEnabledByDefault() {
-        XCTAssertTrue(
+    func testAdoptionIsDisabledByDefault() {
+        XCTAssertFalse(
             FullEmailWebViewAdoptionPolicy.isEnabled(
                 arguments: [],
                 environment: [:]
@@ -661,12 +658,9 @@ final class FullEmailWebViewAdoptionPolicyTests: XCTestCase {
         )
     }
 
-    func testLegacyEnableEnvironmentValuesDoNotChangeDefaultOnAdoption() {
-        // The legacy enable flag is now redundant (adoption is on by default), so any value for it —
-        // including ones that previously did not opt in — leaves adoption enabled as long as the
-        // disable kill switch is not set.
-        for value in ["", "0", "false", "true", "yes", "on", "2", "1"] {
-            XCTAssertTrue(
+    func testEnableEnvironmentValuesOtherThanOneDoNotEnableAdoption() {
+        for value in ["", "0", "false", "true", "yes", "on", "2"] {
+            XCTAssertFalse(
                 FullEmailWebViewAdoptionPolicy.isEnabled(
                     arguments: [],
                     environment: [FullEmailWebViewAdoptionPolicy.enableEnvironmentKey: value]
