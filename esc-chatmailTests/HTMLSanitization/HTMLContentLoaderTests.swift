@@ -599,6 +599,7 @@ final class HTMLContentLoaderTests: XCTestCase {
         <head>
           <meta http-equiv="refresh" content="0;url=https://phishing.example.com">
           <link rel="stylesheet" href="https://cdn.example.com/email.css">
+          <style>@import url(https://tracker.example.com/style.css); .hero { width: 600px; }</style>
         </head>
         <body>
           <iframe src="https://phishing.example.com/overlay"></iframe>
@@ -610,6 +611,8 @@ final class HTMLContentLoaderTests: XCTestCase {
             <label>FORM_LABEL_TOKEN</label>
             <button>FORM_BUTTON_TOKEN</button>
             <input name="token">
+            <select><option>SELECT_OPTION_TOKEN</option></select>
+            <textarea>TEXTAREA_VALUE_TOKEN</textarea>
           </form>
           <img src="https://track.example.com/open.gif?id=1" width="1" height="1" alt="">
           <img src="https://cdn.example.com/hero.jpg" alt="Hero">
@@ -639,10 +642,17 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertTrue(html.contains("LABEL_RECEIPT_TOKEN"))
         XCTAssertTrue(html.contains("FORM_LABEL_TOKEN"))
         XCTAssertTrue(html.contains("FORM_BUTTON_TOKEN"))
+        XCTAssertTrue(html.contains("SELECT_OPTION_TOKEN"))
+        XCTAssertTrue(html.contains("TEXTAREA_VALUE_TOKEN"))
         XCTAssertFalse(html.contains("phishing.example.com"))
         XCTAssertFalse(html.lowercased().contains("<iframe"))
         XCTAssertFalse(html.lowercased().contains("<script"))
         XCTAssertFalse(html.lowercased().contains("<form"))
+        XCTAssertFalse(html.lowercased().contains("<button"))
+        XCTAssertFalse(html.lowercased().contains("<input"))
+        XCTAssertFalse(html.lowercased().contains("<select"))
+        XCTAssertFalse(html.lowercased().contains("<textarea"))
+        XCTAssertFalse(html.lowercased().contains("<option"))
         XCTAssertFalse(html.lowercased().contains("<link"))
         XCTAssertFalse(html.lowercased().contains("onclick="))
         // Remote images load directly via WebKit; their src must survive untouched.
@@ -652,6 +662,7 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertTrue(html.contains("https://track.example.com/open.gif?id=1"))
         // The wrapper still injects the hardened CSP for defense in depth.
         XCTAssertTrue(html.contains("script-src 'none'"))
+        XCTAssertTrue(html.contains("style-src 'unsafe-inline'"))
         XCTAssertTrue(html.contains("form-action 'none'; base-uri 'none'"))
     }
 

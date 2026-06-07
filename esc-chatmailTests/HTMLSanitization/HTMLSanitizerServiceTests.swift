@@ -153,6 +153,11 @@ final class HTMLSanitizerServiceTests: XCTestCase {
         <form action="https://phishing.example.com/post">
           <label>FORM_LABEL_TOKEN</label>
           <button>FORM_BUTTON_TOKEN</button>
+          <input name="token" value="SECRET_TOKEN">
+          <select><option>SELECT_OPTION_TOKEN</option></select>
+          <textarea>TEXTAREA_VALUE_TOKEN</textarea>
+          <textarea><img src="https://tracking.example/open.png"></textarea>
+          <textarea><script>example</script></textarea>
         </form>
         """
 
@@ -164,10 +169,22 @@ final class HTMLSanitizerServiceTests: XCTestCase {
         XCTAssertTrue(result.contains("LABEL_RECEIPT_TOKEN"))
         XCTAssertTrue(result.contains("FORM_LABEL_TOKEN"))
         XCTAssertTrue(result.contains("FORM_BUTTON_TOKEN"))
+        XCTAssertTrue(result.contains("SELECT_OPTION_TOKEN"))
+        XCTAssertTrue(result.contains("TEXTAREA_VALUE_TOKEN"))
+        XCTAssertTrue(result.contains("&lt;img"))
+        XCTAssertTrue(result.contains("https://tracking.example/open.png"))
+        XCTAssertTrue(result.contains("&lt;script&gt;example&lt;/script&gt;"))
         XCTAssertFalse(lowercasedResult.contains("<meta"))
         XCTAssertFalse(lowercasedResult.contains("<script"))
         XCTAssertFalse(lowercasedResult.contains("<form"))
+        XCTAssertFalse(lowercasedResult.contains("<button"))
+        XCTAssertFalse(lowercasedResult.contains("<input"))
+        XCTAssertFalse(lowercasedResult.contains("<select"))
+        XCTAssertFalse(lowercasedResult.contains("<textarea"))
+        XCTAssertFalse(lowercasedResult.contains("<option"))
+        XCTAssertFalse(lowercasedResult.contains("<img"))
         XCTAssertFalse(lowercasedResult.contains("onclick"))
+        XCTAssertFalse(result.contains("SECRET_TOKEN"))
         XCTAssertFalse(result.contains("phishing.example.com"))
     }
 

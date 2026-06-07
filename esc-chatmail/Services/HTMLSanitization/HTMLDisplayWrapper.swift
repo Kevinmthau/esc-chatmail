@@ -122,7 +122,7 @@ struct HTMLDisplayWrapper {
         let injectedHead = """
         \(viewportMetaTag)
         \(originalColorSchemeHead)
-        <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none';">
+        <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none';">
         <style id="esc-mail-styles">
             /* Minimal resets - don't override email's own styles */
             html {
@@ -400,7 +400,7 @@ struct HTMLDisplayWrapper {
             <meta charset="UTF-8">
             \(viewportMetaTag)
             \(originalColorSchemeHead)
-            <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none';">
+            <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none';">
             <style>
                 * {
                     box-sizing: border-box;

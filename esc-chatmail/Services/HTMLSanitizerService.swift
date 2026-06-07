@@ -27,10 +27,19 @@ final class HTMLSanitizerService {
     }()
 
     // swiftlint:disable:next force_try
-    private static let formTagRegex: NSRegularExpression = {
-        try! NSRegularExpression(
-            pattern: "</?form\\b[^>]*>",
+    private static let originalReaderUnwrappedTagRegex: NSRegularExpression = {
+        let tagPattern = EmailDOMHTMLSanitizer.originalReaderUnwrappedTags.joined(separator: "|")
+        return try! NSRegularExpression(
+            pattern: "</?(?:\(tagPattern))\\b[^>]*>",
             options: .caseInsensitive
+        )
+    }()
+    // swiftlint:disable:next force_try
+    private static let originalReaderEscapedTextTagRegex: NSRegularExpression = {
+        let tagPattern = EmailDOMHTMLSanitizer.originalReaderEscapedTextTags.joined(separator: "|")
+        return try! NSRegularExpression(
+            pattern: "<(\(tagPattern))\\b[^>]*>(.*?)</\\1>",
+            options: [.caseInsensitive, .dotMatchesLineSeparators]
         )
     }()
 
@@ -113,11 +122,12 @@ final class HTMLSanitizerService {
     private func removeOriginalReaderActiveMarkupAndEventHandlersWithLegacyRegex(_ html: String) -> String {
         var sanitized = html
 
+        sanitized = replaceOriginalReaderEscapedTextTagsWithLegacyRegex(sanitized)
         sanitized = RegexSanitizer.removeTags(
             from: sanitized,
             compiledPatterns: Self.compiledOriginalReaderActiveMarkupPatterns
         )
-        sanitized = RegexSanitizer.replace(in: sanitized, regex: Self.formTagRegex)
+        sanitized = RegexSanitizer.replace(in: sanitized, regex: Self.originalReaderUnwrappedTagRegex)
         sanitized = removeEventHandlers(sanitized)
         return sanitized
     }
@@ -128,6 +138,37 @@ final class HTMLSanitizerService {
 
     private func removeEventHandlers(_ html: String) -> String {
         RegexSanitizer.replace(in: html, regex: Self.eventHandlerRegex)
+    }
+
+    private func replaceOriginalReaderEscapedTextTagsWithLegacyRegex(_ html: String) -> String {
+        let matches = Self.originalReaderEscapedTextTagRegex.matches(
+            in: html,
+            options: [],
+            range: NSRange(location: 0, length: html.utf16.count)
+        )
+        guard !matches.isEmpty else { return html }
+
+        var result = ""
+        var currentIndex = html.startIndex
+        for match in matches {
+            guard let fullRange = Range(match.range(at: 0), in: html),
+                  let contentRange = Range(match.range(at: 2), in: html) else {
+                return html
+            }
+
+            result.append(contentsOf: html[currentIndex..<fullRange.lowerBound])
+            result.append(Self.escapeHTML(HTMLEntityDecoder.decode(String(html[contentRange]))))
+            currentIndex = fullRange.upperBound
+        }
+        result.append(contentsOf: html[currentIndex...])
+        return result
+    }
+
+    private static func escapeHTML(_ input: String) -> String {
+        input
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
     }
 
     // MARK: - HTML Wrapping for Display

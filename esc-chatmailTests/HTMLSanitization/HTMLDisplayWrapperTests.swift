@@ -1528,7 +1528,7 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         // Author markup is spliced, not re-serialized, so original style rules survive verbatim.
         XCTAssertTrue(result.contains(".hero { width: 600px; }"))
         // The injected head still applies the hardened CSP and light original surface.
-        XCTAssertTrue(result.contains("script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none';"))
+        XCTAssertTrue(result.contains("script-src 'none'; object-src 'none'; frame-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none';"))
         XCTAssertTrue(result.contains("background-color: #ffffff"))
     }
 
