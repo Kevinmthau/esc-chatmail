@@ -666,6 +666,44 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertTrue(html.contains("form-action 'none'; base-uri 'none'"))
     }
 
+    func testPrepareOriginalHTML_sanitizesUnsafeImageSourcesWithoutRemovingTrackingPixel() async {
+        let messageId = "html-loader-original-src-safety-\(UUID().uuidString)"
+        let originalHTML = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <img src="data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+">
+          <img src="file:///private/var/mobile/Containers/Data/logo.png">
+          <img src="">
+          <img src="https://track.example.com/open.gif?id=1" width="1" height="1" alt="">
+          <img src="https://cdn.example.com/hero.jpg?format=webp" alt="Hero">
+          <p>Reader body text</p>
+        </body>
+        </html>
+        """
+
+        let prepared = await loader.prepareOriginalHTML(
+            fromCanonicalHTML: originalHTML,
+            messageId: messageId,
+            sourceLocation: .messageFile,
+            plainText: nil,
+            senderEmail: "sender@example.com",
+            subject: "Subject",
+            isDarkMode: false
+        )
+
+        guard let html = prepared else {
+            XCTFail("Expected prepared original HTML")
+            return
+        }
+
+        XCTAssertFalse(html.contains("data:image/svg+xml"))
+        XCTAssertFalse(html.contains("file:///"))
+        XCTAssertEqual(html.components(separatedBy: "data:image/gif;base64").count - 1, 3)
+        XCTAssertTrue(html.contains("https://track.example.com/open.gif?id=1"))
+        XCTAssertTrue(html.contains("https://cdn.example.com/hero.jpg?format=webp"))
+    }
+
     func testLoadContent_cleanupModeQuotedOnlyPreservesSignatureBlock() async {
         let messageId = "html-loader-signature-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }

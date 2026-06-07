@@ -69,6 +69,8 @@ struct HTMLURLSanitizer {
 
         result = sanitizeURLAttributes(
             result,
+            sanitizeHrefs: true,
+            sanitizeSrcs: true,
             rewriteModernFormatQueryHints: rewriteModernFormatQueryHints
         )
 
@@ -78,7 +80,28 @@ struct HTMLURLSanitizer {
         return result
     }
 
-    private func sanitizeURLAttributes(_ html: String, rewriteModernFormatQueryHints: Bool) -> String {
+    /// Sanitizes only image/source-bearing `src` attributes.
+    func sanitizeImageSourceURLs(_ html: String, rewriteModernFormatQueryHints: Bool = true) -> String {
+        var result = sanitizeURLAttributes(
+            html,
+            sanitizeHrefs: false,
+            sanitizeSrcs: true,
+            rewriteModernFormatQueryHints: rewriteModernFormatQueryHints
+        )
+
+        if rewriteModernFormatQueryHints {
+            result = rewriteCloudflareCDNImageURLs(result)
+        }
+
+        return result
+    }
+
+    private func sanitizeURLAttributes(
+        _ html: String,
+        sanitizeHrefs: Bool,
+        sanitizeSrcs: Bool,
+        rewriteModernFormatQueryHints: Bool
+    ) -> String {
         let replacements = urlAttributes(in: html).compactMap { attribute -> (NSRange, String)? in
             guard let valueRange = Range(attribute.valueRange, in: html) else {
                 return nil
@@ -87,11 +110,13 @@ struct HTMLURLSanitizer {
             let url = String(html[valueRange])
 
             if isHrefAttribute(attribute.lowercasedName) {
+                guard sanitizeHrefs else { return nil }
                 return isURLSafe(url) ? nil : (attribute.fullRange, "\(attribute.name)=\"#\"")
             }
 
             switch attribute.lowercasedName {
             case "src":
+                guard sanitizeSrcs else { return nil }
                 guard let replacement = sanitizedSrcReplacement(
                     for: url,
                     rewriteModernFormatQueryHints: rewriteModernFormatQueryHints
@@ -135,6 +160,8 @@ struct HTMLURLSanitizer {
             return transparentPixel
         } else if normalized.hasPrefix("data:") && !isDataURL(normalized) {
             // Block non-image data URLs (e.g., data:text/html)
+            return transparentPixel
+        } else if !isURLSafe(decodedURL) {
             return transparentPixel
         } else if rewriteModernFormatQueryHints,
                   let rewrittenURL = rewriteModernImageFormatHints(in: decodedURL),

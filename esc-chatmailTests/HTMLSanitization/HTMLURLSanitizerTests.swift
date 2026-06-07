@@ -211,6 +211,13 @@ final class HTMLURLSanitizerTests: XCTestCase {
         XCTAssertTrue(result.contains("cid:image001@example.com"))
     }
 
+    func testSanitizeURLs_srcUnknownProtocol_replacedWithTransparentPixel() {
+        let html = "<img src=\"file:///private/var/mobile/Containers/Data/logo.png\">"
+        let result = sut.sanitizeURLs(html)
+        XCTAssertFalse(result.contains("file:///"))
+        XCTAssertTrue(result.contains("data:image/gif;base64"))
+    }
+
     func testSanitizeURLs_srcSafeDataImage_preserved() {
         let html = "<img src=\"data:image/png;base64,iVBORw0KGgo=\">"
         let result = sut.sanitizeURLs(html)

@@ -1009,12 +1009,14 @@ final class HTMLContentLoader {
         // emits a hardened CSP. Keep a narrow active-markup/event-handler strip so scripts, meta
         // refresh, frames, base/link/object/svg markup cannot load or navigate, but preserve inert
         // visible content such as noscript fallbacks and CTA/receipt text in button/label markup.
-        // URL/CSS/tracking rewrites are redundant work here and can corrupt complex nested-table
-        // HTML. Remote http(s) images load directly via WebKit; inline cid: images still resolve
-        // through CIDSchemeHandler. The automatic-preference original path (chat-derived previews,
-        // quality fallback) keeps full sanitization below.
+        // Keep the existing src URL safety pass so empty, unsafe data, and unsupported-scheme image
+        // sources never reach WebKit. Broader URL/CSS/tracking rewrites are redundant work here and
+        // can corrupt complex nested-table HTML. Remote http(s) images load directly via WebKit;
+        // inline cid: images still resolve through CIDSchemeHandler. The automatic-preference
+        // original path (chat-derived previews, quality fallback) keeps full sanitization below.
         if displayPurpose == .original, originalHTMLPreference == .preferHTML {
-            let safeHTML = sanitizer.removeOriginalReaderActiveMarkupAndEventHandlers(preparedHTML)
+            let activeMarkupSafeHTML = sanitizer.removeOriginalReaderActiveMarkupAndEventHandlers(preparedHTML)
+            let safeHTML = sanitizer.sanitizeOriginalReaderImageSourceURLs(activeMarkupSafeHTML)
             guard HTMLMeaningfulContentChecker.hasMeaningfulContent(safeHTML) else {
                 Log.debug("wrappedHTMLIfMeaningful: original preferHTML content not meaningful for \(messageId) (len=\(safeHTML.count))", category: .ui)
                 return nil

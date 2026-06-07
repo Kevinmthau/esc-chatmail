@@ -114,7 +114,7 @@ struct FullEmailReaderWebView: UIViewRepresentable {
 
         init(
             _ parent: FullEmailReaderWebView,
-            paintConfirmer: FullEmailReaderPaintConfirming = FullEmailReaderOneFramePaintConfirmer()
+            paintConfirmer: FullEmailReaderPaintConfirming = FullEmailReaderSnapshotPaintConfirmer()
         ) {
             self.parent = parent
             self.paintConfirmer = paintConfirmer
@@ -476,26 +476,19 @@ protocol FullEmailReaderPaintConfirming {
     func confirmPaint(in webView: WKWebView, completion: @escaping () -> Void)
 }
 
-/// Confirms first paint by waiting a single composited frame instead of taking a snapshot.
+/// Confirms first paint by taking a snapshot.
 ///
 /// `WKNavigationDelegate.didFinish` reports load completion, not paint completion, so the reader
-/// still needs a beat before the live content is on screen. The previous implementation forced a
-/// full off-screen `takeSnapshot` (200–800ms of dead time after the email had already rendered);
-/// here we just force a layout pass and signal on the next runloop turn after Core Animation commits
-/// the frame that contains the loaded content. This reveals the email as soon as the first frame is
-/// composited — matching Apple Mail — without blocking on rasterization. Security is unaffected: this
-/// is purely a reveal-timing seam.
-struct FullEmailReaderOneFramePaintConfirmer: FullEmailReaderPaintConfirming {
+/// still needs a real paint signal before the placeholder is removed. `takeSnapshot` forces WebKit
+/// to rasterize the loaded content, so its completion is tied to a painted frame instead of an empty
+/// Core Animation transaction.
+struct FullEmailReaderSnapshotPaintConfirmer: FullEmailReaderPaintConfirming {
     func confirmPaint(in webView: WKWebView, completion: @escaping () -> Void) {
         webView.layoutIfNeeded()
 
-        CATransaction.begin()
-        CATransaction.setCompletionBlock {
-            // Hop to the next runloop turn so the just-committed frame is on screen before the
-            // reader cross-fades its placeholder away.
+        webView.takeSnapshot(with: nil) { _, _ in
             DispatchQueue.main.async(execute: completion)
         }
-        CATransaction.commit()
     }
 }
 

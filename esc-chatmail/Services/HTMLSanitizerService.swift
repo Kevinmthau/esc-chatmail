@@ -106,6 +106,10 @@ final class HTMLSanitizerService {
         }
     }
 
+    func sanitizeOriginalReaderImageSourceURLs(_ html: String) -> String {
+        urlSanitizer.sanitizeImageSourceURLs(html, rewriteModernFormatQueryHints: false)
+    }
+
     private func removeDangerousElementsAndEventHandlersWithLegacyRegex(_ html: String) -> String {
         var sanitized = html
 
