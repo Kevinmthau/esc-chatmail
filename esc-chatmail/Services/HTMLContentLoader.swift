@@ -45,29 +45,6 @@ struct HTMLLoadResult {
     }
 }
 
-private final class CachedHTMLLoadResultBox {
-    let cacheKey: String
-    let variantKey: String
-    let messageId: String
-    let result: HTMLLoadResult
-
-    init(_ result: HTMLLoadResult, cacheKey: String, variantKey: String, messageId: String) {
-        self.cacheKey = cacheKey
-        self.variantKey = variantKey
-        self.messageId = messageId
-        self.result = result
-    }
-}
-
-private final class HTMLContentCacheDelegate: NSObject, NSCacheDelegate {
-    weak var owner: HTMLContentLoader?
-
-    func cache(_ cache: NSCache<AnyObject, AnyObject>, willEvictObject obj: Any) {
-        guard let box = obj as? CachedHTMLLoadResultBox else { return }
-        owner?.removeTrackedCacheKey(box.cacheKey, variantKey: box.variantKey, for: box.messageId)
-    }
-}
-
 // Internal (not private): the +SourcePreparation extension produces these and
 // the loader's cache orchestration (this file) consumes them.
 struct WrappedHTMLResult {
@@ -111,13 +88,10 @@ final class HTMLContentLoader {
     let parsedEmailProvider: any ParsedEmailProviding
     private let recoveryService: any HTMLContentRecovering
 
-    /// In-memory cache for wrapped HTML content to avoid repeated disk I/O.
-    /// Keys include the display variant plus automatic original-view evaluator inputs when needed.
-    private let htmlCache = NSCache<NSString, CachedHTMLLoadResultBox>()
-    private let htmlCacheDelegate: HTMLContentCacheDelegate
-    private let htmlCacheKeyLock = NSLock()
-    private var htmlCacheKeysByMessageID: [String: Set<String>] = [:]
-    private var htmlCacheKeyByVariantKey: [String: String] = [:]
+    /// In-memory cache for prepared HTML content to avoid repeated disk I/O.
+    /// Keyed by the display variant (plus automatic original-view evaluator
+    /// inputs) and the source content signature.
+    private let resultCache = HTMLContentResultCache()
 
     init(
         contentHandler: HTMLContentHandler = HTMLContentHandler(),
@@ -133,12 +107,6 @@ final class HTMLContentLoader {
         self.qualityEvaluator = qualityEvaluator
         self.parsedEmailProvider = parsedEmailProvider
         self.recoveryService = recoveryService
-        self.htmlCacheDelegate = HTMLContentCacheDelegate()
-        // Limit cache to ~50MB with both count and cost limits for proper memory pressure response
-        htmlCache.countLimit = 1000
-        htmlCache.totalCostLimit = 50 * 1024 * 1024 // 50 MB
-        htmlCache.delegate = htmlCacheDelegate
-        htmlCacheDelegate.owner = self
     }
 
     /// Loads HTML content for a message, trying multiple sources
@@ -259,7 +227,7 @@ final class HTMLContentLoader {
 
         if !rejectedHTMLSources.isEmpty {
             invalidateCachedResults(messageId: messageId) { _ in true }
-        } else if let cachedResult = cachedHTMLResultForUnavailableSource(variantKey: variantKey) {
+        } else if let cachedResult = resultCache.resultForVariant(variantKey as String) {
             return cachedResult
         }
 
@@ -596,44 +564,16 @@ final class HTMLContentLoader {
         messageId: String,
         matching shouldInvalidate: (HTMLLoadResult.HTMLLoadSource) -> Bool
     ) {
-        let keys: [String]
-        htmlCacheKeyLock.lock()
-        let trackedKeys = htmlCacheKeysByMessageID[messageId] ?? []
-        keys = trackedKeys.filter { key in
-            guard let box = htmlCache.object(forKey: key as NSString) else {
-                return true
-            }
-            return shouldInvalidate(box.result.source)
-        }
-        if !keys.isEmpty {
-            let keySet = Set(keys)
-            let remainingKeys = trackedKeys.subtracting(keySet)
-            if remainingKeys.isEmpty {
-                htmlCacheKeysByMessageID.removeValue(forKey: messageId)
-            } else {
-                htmlCacheKeysByMessageID[messageId] = remainingKeys
-            }
-            htmlCacheKeyByVariantKey = htmlCacheKeyByVariantKey.filter { !keySet.contains($0.value) }
-        }
-        htmlCacheKeyLock.unlock()
-
-        for key in keys {
-            htmlCache.removeObject(forKey: key as NSString)
-        }
+        resultCache.invalidate(messageId: messageId, matching: shouldInvalidate)
     }
 
 #if DEBUG
     func debugCachedVariantCount(for messageId: String) -> Int {
-        htmlCacheKeyLock.lock()
-        defer { htmlCacheKeyLock.unlock() }
-        return syncTrackedCacheKeysWithLiveCache(for: messageId)
+        resultCache.variantCount(for: messageId)
     }
 
     func debugTotalCachedVariantCount() -> Int {
-        htmlCacheKeyLock.lock()
-        defer { htmlCacheKeyLock.unlock() }
-        let messageIDs = Array(htmlCacheKeysByMessageID.keys)
-        return messageIDs.reduce(0) { $0 + syncTrackedCacheKeysWithLiveCache(for: $1) }
+        resultCache.totalVariantCount()
     }
 #endif
 
@@ -690,8 +630,8 @@ final class HTMLContentLoader {
             sourceSignature: sourceSignature
         )
 
-        if let cachedResult = htmlCache.object(forKey: cacheKey) {
-            return CacheableHTMLLoadResult(result: cachedResult.result, shouldCache: true)
+        if let cachedResult = resultCache.result(forKey: cacheKey) {
+            return CacheableHTMLLoadResult(result: cachedResult, shouldCache: true)
         }
 
         guard let prepared = await wrappedHTMLIfMeaningful(
@@ -728,25 +668,6 @@ final class HTMLContentLoader {
         }
     }
 
-    private func cachedHTMLResultForUnavailableSource(variantKey: NSString) -> HTMLLoadResult? {
-        let trackedCacheKey: String?
-
-        htmlCacheKeyLock.lock()
-        trackedCacheKey = htmlCacheKeyByVariantKey[variantKey as String]
-        htmlCacheKeyLock.unlock()
-
-        guard let trackedCacheKey else {
-            return nil
-        }
-
-        if let cachedResult = htmlCache.object(forKey: trackedCacheKey as NSString) {
-            return cachedResult.result
-        }
-
-        removeTrackedVariantKey(variantKey as String, ifMappedTo: trackedCacheKey)
-        return nil
-    }
-
     private func cachedHTMLResult(
         html: String,
         source: HTMLLoadResult.HTMLLoadSource,
@@ -762,85 +683,15 @@ final class HTMLContentLoader {
             return result
         }
 
-        let cost = html.utf8.count
-        let trackedCacheKey = cacheKey as String
-        let trackedVariantKey = variantKey as String
-        let staleCacheKey = trackCacheKey(trackedCacheKey, variantKey: trackedVariantKey, for: messageId)
-        if let staleCacheKey {
-            htmlCache.removeObject(forKey: staleCacheKey as NSString)
-        }
-        htmlCache.setObject(
-            CachedHTMLLoadResultBox(
-                result,
-                cacheKey: trackedCacheKey,
-                variantKey: trackedVariantKey,
-                messageId: messageId
-            ),
-            forKey: cacheKey,
-            cost: cost
+        resultCache.store(
+            result,
+            cacheKey: cacheKey,
+            variantKey: variantKey,
+            messageId: messageId,
+            cost: html.utf8.count
         )
 
         return result
     }
-
-    private func trackCacheKey(_ cacheKey: String, variantKey: String, for messageId: String) -> String? {
-        htmlCacheKeyLock.lock()
-        let staleCacheKey = htmlCacheKeyByVariantKey[variantKey]
-        if let staleCacheKey, staleCacheKey != cacheKey {
-            htmlCacheKeysByMessageID[messageId]?.remove(staleCacheKey)
-        }
-        htmlCacheKeysByMessageID[messageId, default: []].insert(cacheKey)
-        htmlCacheKeyByVariantKey[variantKey] = cacheKey
-        htmlCacheKeyLock.unlock()
-
-        return staleCacheKey == cacheKey ? nil : staleCacheKey
-    }
-
-    fileprivate func removeTrackedCacheKey(_ cacheKey: String, variantKey: String, for messageId: String) {
-        htmlCacheKeyLock.lock()
-        defer { htmlCacheKeyLock.unlock() }
-
-        guard var trackedKeys = htmlCacheKeysByMessageID[messageId] else { return }
-        trackedKeys.remove(cacheKey)
-
-        if trackedKeys.isEmpty {
-            htmlCacheKeysByMessageID.removeValue(forKey: messageId)
-        } else {
-            htmlCacheKeysByMessageID[messageId] = trackedKeys
-        }
-
-        if htmlCacheKeyByVariantKey[variantKey] == cacheKey {
-            htmlCacheKeyByVariantKey.removeValue(forKey: variantKey)
-        }
-    }
-
-    private func removeTrackedVariantKey(_ variantKey: String, ifMappedTo cacheKey: String) {
-        htmlCacheKeyLock.lock()
-        defer { htmlCacheKeyLock.unlock() }
-
-        guard htmlCacheKeyByVariantKey[variantKey] == cacheKey else {
-            return
-        }
-
-        htmlCacheKeyByVariantKey.removeValue(forKey: variantKey)
-    }
-
-#if DEBUG
-    private func syncTrackedCacheKeysWithLiveCache(for messageId: String) -> Int {
-        guard let trackedKeys = htmlCacheKeysByMessageID[messageId] else { return 0 }
-
-        let liveKeys = Set(trackedKeys.filter { htmlCache.object(forKey: $0 as NSString) != nil })
-        if liveKeys.isEmpty {
-            htmlCacheKeysByMessageID.removeValue(forKey: messageId)
-            return 0
-        }
-
-        if liveKeys != trackedKeys {
-            htmlCacheKeysByMessageID[messageId] = liveKeys
-        }
-
-        return liveKeys.count
-    }
-#endif
 
 }
