@@ -140,6 +140,54 @@ final class HTMLSanitizerServiceTests: XCTestCase {
         XCTAssertFalse(result.contains("stealCookies"))
     }
 
+    func testRemoveOriginalReaderActiveMarkup_domFailurePreservesInertVisibleContent() {
+        let failingSUT = HTMLSanitizerService(originalReaderActiveMarkupSanitizer: { _ in
+            throw NSError(domain: "HTMLSanitizerServiceTests", code: 1)
+        })
+        let html = """
+        <meta http-equiv="refresh" content="0;url=https://phishing.example.com">
+        <script>alert('xss')</script>
+        <noscript><p>NOSCRIPT_FALLBACK_TOKEN</p></noscript>
+        <button onclick="alert('xss')">BUTTON_CTA_TOKEN</button>
+        <label onclick="alert('xss')">LABEL_RECEIPT_TOKEN</label>
+        <form action="https://phishing.example.com/post">
+          <label>FORM_LABEL_TOKEN</label>
+          <button>FORM_BUTTON_TOKEN</button>
+          <input name="token" value="SECRET_TOKEN">
+          <select><option>SELECT_OPTION_TOKEN</option></select>
+          <textarea>TEXTAREA_VALUE_TOKEN</textarea>
+          <textarea><img src="https://tracking.example/open.png"></textarea>
+          <textarea><script>example</script></textarea>
+        </form>
+        """
+
+        let result = failingSUT.removeOriginalReaderActiveMarkupAndEventHandlers(html)
+        let lowercasedResult = result.lowercased()
+
+        XCTAssertTrue(result.contains("NOSCRIPT_FALLBACK_TOKEN"))
+        XCTAssertTrue(result.contains("BUTTON_CTA_TOKEN"))
+        XCTAssertTrue(result.contains("LABEL_RECEIPT_TOKEN"))
+        XCTAssertTrue(result.contains("FORM_LABEL_TOKEN"))
+        XCTAssertTrue(result.contains("FORM_BUTTON_TOKEN"))
+        XCTAssertTrue(result.contains("SELECT_OPTION_TOKEN"))
+        XCTAssertTrue(result.contains("TEXTAREA_VALUE_TOKEN"))
+        XCTAssertTrue(result.contains("&lt;img"))
+        XCTAssertTrue(result.contains("https://tracking.example/open.png"))
+        XCTAssertTrue(result.contains("&lt;script&gt;example&lt;/script&gt;"))
+        XCTAssertFalse(lowercasedResult.contains("<meta"))
+        XCTAssertFalse(lowercasedResult.contains("<script"))
+        XCTAssertFalse(lowercasedResult.contains("<form"))
+        XCTAssertFalse(lowercasedResult.contains("<button"))
+        XCTAssertFalse(lowercasedResult.contains("<input"))
+        XCTAssertFalse(lowercasedResult.contains("<select"))
+        XCTAssertFalse(lowercasedResult.contains("<textarea"))
+        XCTAssertFalse(lowercasedResult.contains("<option"))
+        XCTAssertFalse(lowercasedResult.contains("<img"))
+        XCTAssertFalse(lowercasedResult.contains("onclick"))
+        XCTAssertFalse(result.contains("SECRET_TOKEN"))
+        XCTAssertFalse(result.contains("phishing.example.com"))
+    }
+
     func testSanitize_cloudflareImageDirectiveInSrc_preservesDirectiveAndRewritesFormat() {
         let html = """
         <img src="https://content.app-us1.com/cdn-cgi/image/onerror=redirect,width=650,dpr=2,fit=scale-down,format=auto/NvzAv/2026/02/24/73b955fe-1bf1-4daa-b38c-fc1d230937e2.jpeg" alt="">
@@ -174,15 +222,16 @@ final class HTMLSanitizerServiceTests: XCTestCase {
         let html = "<a href=\"javascript:alert('xss')\">Click me</a>"
         let result = sut.sanitize(html)
         XCTAssertFalse(result.contains("javascript:"))
-        // Should replace with safe value
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
+        XCTAssertTrue(result.contains("Click me"))
     }
 
     func testSanitize_vbscriptURL_removes() {
         let html = "<a href=\"vbscript:MsgBox('xss')\">Click me</a>"
         let result = sut.sanitize(html)
         XCTAssertFalse(result.contains("vbscript:"))
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
+        XCTAssertTrue(result.contains("Click me"))
     }
 
     func testSanitize_javascriptSrcInImage_removes() {
@@ -586,35 +635,40 @@ final class HTMLSanitizerServiceTests: XCTestCase {
         let html = "<a href=\"java%73cript:alert('xss')\">Click</a>"
         let result = sut.sanitize(html)
         XCTAssertFalse(result.contains("java%73cript:"))
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
+        XCTAssertTrue(result.contains("Click"))
     }
 
     func testSanitize_htmlEntityEncodedJavascript_blocks() {
         // &#106;avascript: should be detected after decoding (&#106; = 'j')
         let html = "<a href=\"&#106;avascript:alert('xss')\">Click</a>"
         let result = sut.sanitize(html)
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
+        XCTAssertTrue(result.contains("Click"))
     }
 
     func testSanitize_hexEntityEncodedJavascript_blocks() {
         // &#x6A;avascript: should be detected after decoding (&#x6A; = 'j')
         let html = "<a href=\"&#x6A;avascript:alert('xss')\">Click</a>"
         let result = sut.sanitize(html)
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
+        XCTAssertTrue(result.contains("Click"))
     }
 
     func testSanitize_whitespaceInjectedProtocol_blocks() {
         // Tabs/newlines in protocol should be normalized
         let html = "<a href=\"java\tscript:alert('xss')\">Click</a>"
         let result = sut.sanitize(html)
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
+        XCTAssertTrue(result.contains("Click"))
     }
 
     func testSanitize_doubleEncodedJavascript_blocks() {
         // Double percent-encoding: %25 -> % after first decode
         let html = "<a href=\"java%2573cript:alert('xss')\">Click</a>"
         let result = sut.sanitize(html)
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
+        XCTAssertTrue(result.contains("Click"))
     }
 
     // MARK: - Security: Malicious CSS in Style Tags
@@ -803,21 +857,21 @@ final class HTMLSanitizerServiceHTMLURLSanitizerTests: XCTestCase {
         let html = "<a href=\"javascript:alert('xss')\">Click</a>"
         let result = sut.sanitizeURLs(html)
         XCTAssertFalse(result.contains("javascript:"))
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
     }
 
     func testSanitizeURLs_unquotedJavascriptHref_replaces() {
         let html = "<a href=javascript:alert(1)>Click</a>"
         let result = sut.sanitizeURLs(html)
         XCTAssertFalse(result.contains("javascript:"))
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
     }
 
     func testSanitizeURLs_unquotedEncodedJavascriptHref_replaces() {
         let html = "<a href=java%73cript:alert(1)>Click</a>"
         let result = sut.sanitizeURLs(html)
         XCTAssertFalse(result.contains("java%73cript:"))
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
     }
 
     func testSanitizeURLs_safeHref_preserves() {

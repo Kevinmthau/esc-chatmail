@@ -591,6 +591,323 @@ final class HTMLContentLoaderTests: XCTestCase {
 #endif
     }
 
+    func testPrepareOriginalHTML_stripsDangerousMarkupAndInjectsHardenedCSP() async {
+        let messageId = "html-loader-original-noscrub-\(UUID().uuidString)"
+        let originalHTML = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta http-equiv="refresh" content="0;url=https://phishing.example.com">
+          <link rel="stylesheet" href="https://cdn.example.com/email.css">
+          <style>@import url(https://tracker.example.com/style.css); .hero { width: 600px; }</style>
+        </head>
+        <body>
+          <iframe src="https://phishing.example.com/overlay"></iframe>
+          <script>alert('xss')</script>
+          <noscript><p>NOSCRIPT_FALLBACK_TOKEN</p></noscript>
+          <button onclick="alert('xss')">BUTTON_CTA_TOKEN</button>
+          <label onclick="alert('xss')">LABEL_RECEIPT_TOKEN</label>
+          <form action="https://phishing.example.com/post">
+            <label>FORM_LABEL_TOKEN</label>
+            <button>FORM_BUTTON_TOKEN</button>
+            <input name="token">
+            <select><option>SELECT_OPTION_TOKEN</option></select>
+            <textarea>TEXTAREA_VALUE_TOKEN</textarea>
+          </form>
+          <img src="https://track.example.com/open.gif?id=1" width="1" height="1" alt="">
+          <img src="https://cdn.example.com/hero.jpg" alt="Hero">
+          <p onclick="alert('xss')">Reader body text</p>
+        </body>
+        </html>
+        """
+
+        let prepared = await loader.prepareOriginalHTML(
+            fromCanonicalHTML: originalHTML,
+            messageId: messageId,
+            sourceLocation: .messageFile,
+            plainText: nil,
+            senderEmail: "sender@example.com",
+            subject: "Subject",
+            isDarkMode: false
+        )
+
+        guard let html = prepared else {
+            XCTFail("Expected prepared original HTML")
+            return
+        }
+
+        XCTAssertTrue(html.contains("Reader body text"))
+        XCTAssertTrue(html.contains("NOSCRIPT_FALLBACK_TOKEN"))
+        XCTAssertTrue(html.contains("BUTTON_CTA_TOKEN"))
+        XCTAssertTrue(html.contains("LABEL_RECEIPT_TOKEN"))
+        XCTAssertTrue(html.contains("FORM_LABEL_TOKEN"))
+        XCTAssertTrue(html.contains("FORM_BUTTON_TOKEN"))
+        XCTAssertTrue(html.contains("SELECT_OPTION_TOKEN"))
+        XCTAssertTrue(html.contains("TEXTAREA_VALUE_TOKEN"))
+        XCTAssertFalse(html.contains("phishing.example.com"))
+        XCTAssertFalse(html.lowercased().contains("<iframe"))
+        XCTAssertFalse(html.lowercased().contains("<script"))
+        XCTAssertFalse(html.lowercased().contains("<form"))
+        XCTAssertFalse(html.lowercased().contains("<button"))
+        XCTAssertFalse(html.lowercased().contains("<input"))
+        XCTAssertFalse(html.lowercased().contains("<select"))
+        XCTAssertFalse(html.lowercased().contains("<textarea"))
+        XCTAssertFalse(html.lowercased().contains("<option"))
+        XCTAssertFalse(html.lowercased().contains("<link"))
+        XCTAssertFalse(html.lowercased().contains("onclick="))
+        // Remote images load directly via WebKit; their src must survive untouched.
+        XCTAssertTrue(html.contains("https://cdn.example.com/hero.jpg"))
+        // URL/tracking rewrites are skipped on the full-reader path, so the 1x1 tracking pixel is
+        // not stripped by the preparation pass.
+        XCTAssertTrue(html.contains("https://track.example.com/open.gif?id=1"))
+        // The wrapper still injects the hardened CSP for defense in depth.
+        XCTAssertTrue(html.contains("script-src 'none'"))
+        XCTAssertTrue(html.contains("style-src 'unsafe-inline'"))
+        XCTAssertTrue(html.contains("form-action 'none'; base-uri 'none'"))
+    }
+
+    func testPrepareOriginalHTML_sanitizesUnsafeImageSourcesWithoutRemovingTrackingPixel() async {
+        let messageId = "html-loader-original-src-safety-\(UUID().uuidString)"
+        let originalHTML = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <img src="data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+">
+          <img src="file:///private/var/mobile/Containers/Data/logo.png">
+          <img src="">
+          <img src="https://track.example.com/open.gif?id=1" width="1" height="1" alt="">
+          <img src="https://cdn.example.com/hero.jpg?width=600" alt="Hero">
+          <p>Reader body text</p>
+        </body>
+        </html>
+        """
+
+        let prepared = await loader.prepareOriginalHTML(
+            fromCanonicalHTML: originalHTML,
+            messageId: messageId,
+            sourceLocation: .messageFile,
+            plainText: nil,
+            senderEmail: "sender@example.com",
+            subject: "Subject",
+            isDarkMode: false
+        )
+
+        guard let html = prepared else {
+            XCTFail("Expected prepared original HTML")
+            return
+        }
+
+        XCTAssertFalse(html.contains("data:image/svg+xml"))
+        XCTAssertFalse(html.contains("file:///"))
+        XCTAssertEqual(html.components(separatedBy: "data:image/gif;base64").count - 1, 3)
+        XCTAssertTrue(html.contains("https://track.example.com/open.gif?id=1"))
+        XCTAssertTrue(html.contains("https://cdn.example.com/hero.jpg?width=600"))
+    }
+
+    func testPrepareOriginalHTML_sanitizesUnsafeLinksWithoutRemovingSafeLinks() async {
+        let messageId = "html-loader-original-href-safety-\(UUID().uuidString)"
+        let originalHTML = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <a href="https://safe.example.com/path">Safe web link</a>
+          <a href="mailto:support@example.com">Safe mail link</a>
+          <a href="data:text/html,<script>alert(1)</script>">Data link</a>
+          <a href="itms-services://?action=download-manifest&url=https://example.com/app.plist">Install link</a>
+          <a href="facetime:attacker@example.com">FaceTime link</a>
+          <p>Reader body text</p>
+        </body>
+        </html>
+        """
+
+        let prepared = await loader.prepareOriginalHTML(
+            fromCanonicalHTML: originalHTML,
+            messageId: messageId,
+            sourceLocation: .messageFile,
+            plainText: nil,
+            senderEmail: "sender@example.com",
+            subject: "Subject",
+            isDarkMode: false
+        )
+
+        guard let html = prepared else {
+            XCTFail("Expected prepared original HTML")
+            return
+        }
+
+        XCTAssertTrue(html.contains("https://safe.example.com/path"))
+        XCTAssertTrue(html.contains("mailto:support@example.com"))
+        XCTAssertTrue(html.contains("Safe web link"))
+        XCTAssertTrue(html.contains("Safe mail link"))
+        XCTAssertTrue(html.contains("Data link"))
+        XCTAssertTrue(html.contains("Install link"))
+        XCTAssertTrue(html.contains("FaceTime link"))
+        XCTAssertFalse(html.contains("data:text/html"))
+        XCTAssertFalse(html.contains("itms-services://"))
+        XCTAssertFalse(html.contains("facetime:"))
+        XCTAssertFalse(html.contains("href=\"#\""))
+        XCTAssertEqual(html.components(separatedBy: "href=").count - 1, 2)
+    }
+
+    func testPrepareOriginalHTMLForCachingDoesNotWarmOrdinaryDynamicRemoteImages() async {
+        let messageId = "html-loader-original-dynamic-image-\(UUID().uuidString)"
+        let recorder = RequestRecorder()
+        let imageData = onePixelPNG
+        let remoteImageFallback = HTMLRemoteImageAttachmentFallback { request in
+            await recorder.record(request)
+
+            let response = HTTPURLResponse(
+                url: request.url ?? URL(string: "https://cdn.example.com/open")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [
+                    "Content-Type": "image/png",
+                    "Content-Disposition": "attachment; filename=\"open.png\"",
+                    "Content-Length": "\(imageData.count)"
+                ]
+            )!
+
+            if request.httpMethod == "HEAD" {
+                return (Data(), response)
+            }
+
+            return (imageData, response)
+        }
+
+        loader = HTMLContentLoader(
+            contentHandler: contentHandler,
+            sanitizer: .shared,
+            remoteImageAttachmentFallback: remoteImageFallback
+        )
+
+        let originalHTML = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <img src="https://cdn.example.com/open?id=1" alt="Ordinary dynamic image">
+          <p>Reader body text</p>
+        </body>
+        </html>
+        """
+
+        let prepared = await loader.prepareOriginalHTMLForCaching(
+            fromCanonicalHTML: originalHTML,
+            messageId: messageId,
+            sourceLocation: .messageFile,
+            plainText: nil,
+            senderEmail: "sender@example.com",
+            subject: "Subject",
+            isDarkMode: false
+        )
+
+        XCTAssertNotNil(prepared?.html)
+        XCTAssertTrue(prepared?.shouldCache ?? false)
+        XCTAssertTrue((prepared?.html ?? "").contains("Reader body text"))
+        XCTAssertTrue((prepared?.html ?? "").contains("https://cdn.example.com/open?id=1"))
+        XCTAssertFalse((prepared?.html ?? "").contains("src=\"data:image/"))
+
+        for _ in 0..<3 {
+            await Task.yield()
+        }
+        let snapshot = await recorder.snapshot()
+        XCTAssertTrue(snapshot.methods.isEmpty)
+    }
+
+    func testPrepareOriginalHTMLForCachingWarmsRiskyModernImagesAfterFirstRender() async {
+        let messageId = "html-loader-original-prefer-webp-\(UUID().uuidString)"
+        let recorder = RequestRecorder()
+        let imageData = onePixelPNG
+        let remoteImageFallback = HTMLRemoteImageAttachmentFallback { request in
+            await recorder.record(request)
+
+            let response = HTTPURLResponse(
+                url: request.url ?? URL(string: "https://cdn.example.com/banner.jpg")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [
+                    "Content-Type": "image/webp",
+                    "Content-Disposition": "inline; filename=\"hero.webp\"",
+                    "Content-Length": "\(imageData.count)"
+                ]
+            )!
+
+            if request.httpMethod == "HEAD" {
+                return (Data(), response)
+            }
+
+            return (imageData, response)
+        }
+
+        loader = HTMLContentLoader(
+            contentHandler: contentHandler,
+            sanitizer: .shared,
+            remoteImageAttachmentFallback: remoteImageFallback
+        )
+
+        let warmNotification = expectation(description: "Original preferHTML remote image fallback warm notification")
+        let observer = NotificationCenter.default.addObserver(
+            forName: HTMLContentLoader.remoteImageAttachmentFallbackDidWarmNotification,
+            object: nil,
+            queue: .main
+        ) { notification in
+            guard notification.userInfo?[HTMLContentLoader.remoteImageAttachmentFallbackMessageIdUserInfoKey] as? String == messageId else {
+                return
+            }
+            warmNotification.fulfill()
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        let originalHTML = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <img src="https://cdn.example.com/banner.jpg?format=webp&width=600" alt="Banner">
+          <img src="https://cdn.example.com/open?id=1" alt="Ordinary dynamic image">
+          <p>Reader body text</p>
+        </body>
+        </html>
+        """
+
+        let first = await loader.prepareOriginalHTMLForCaching(
+            fromCanonicalHTML: originalHTML,
+            messageId: messageId,
+            sourceLocation: .messageFile,
+            plainText: nil,
+            senderEmail: "sender@example.com",
+            subject: "Subject",
+            isDarkMode: false
+        )
+
+        XCTAssertNotNil(first?.html)
+        XCTAssertFalse(first?.shouldCache ?? true)
+        XCTAssertTrue((first?.html ?? "").contains("Reader body text"))
+        XCTAssertTrue((first?.html ?? "").contains("format=webp"))
+        XCTAssertTrue((first?.html ?? "").contains("https://cdn.example.com/open?id=1"))
+        XCTAssertFalse((first?.html ?? "").contains("src=\"data:image/"))
+
+        await fulfillment(of: [warmNotification], timeout: 1.0)
+
+        let second = await loader.prepareOriginalHTMLForCaching(
+            fromCanonicalHTML: originalHTML,
+            messageId: messageId,
+            sourceLocation: .messageFile,
+            plainText: nil,
+            senderEmail: "sender@example.com",
+            subject: "Subject",
+            isDarkMode: false
+        )
+
+        XCTAssertNotNil(second?.html)
+        XCTAssertTrue(second?.shouldCache ?? false)
+        XCTAssertTrue((second?.html ?? "").contains("Reader body text"))
+        XCTAssertTrue((second?.html ?? "").contains("src=\"data:image/"))
+        XCTAssertTrue((second?.html ?? "").contains("https://cdn.example.com/open?id=1"))
+        XCTAssertFalse((second?.html ?? "").contains("format=webp"))
+
+        let snapshot = await recorder.snapshot()
+        XCTAssertEqual(snapshot.methods, ["HEAD", "GET"])
+    }
+
     func testLoadContent_cleanupModeQuotedOnlyPreservesSignatureBlock() async {
         let messageId = "html-loader-signature-\(UUID().uuidString)"
         defer { contentHandler.deleteHTML(for: messageId) }

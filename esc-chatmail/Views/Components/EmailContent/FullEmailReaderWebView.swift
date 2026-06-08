@@ -476,20 +476,17 @@ protocol FullEmailReaderPaintConfirming {
     func confirmPaint(in webView: WKWebView, completion: @escaping () -> Void)
 }
 
+/// Confirms first paint by taking a snapshot.
+///
+/// `WKNavigationDelegate.didFinish` reports load completion, not paint completion, so the reader
+/// still needs a real paint signal before the placeholder is removed. `takeSnapshot` forces WebKit
+/// to rasterize the loaded content, so its completion is tied to a painted frame instead of an empty
+/// Core Animation transaction.
 struct FullEmailReaderSnapshotPaintConfirmer: FullEmailReaderPaintConfirming {
     func confirmPaint(in webView: WKWebView, completion: @escaping () -> Void) {
-        let bounds = webView.bounds
-        guard bounds.width > 1, bounds.height > 1 else {
-            DispatchQueue.main.async(execute: completion)
-            return
-        }
-
         webView.layoutIfNeeded()
 
-        let configuration = WKSnapshotConfiguration()
-        configuration.rect = bounds
-
-        webView.takeSnapshot(with: configuration) { _, _ in
+        webView.takeSnapshot(with: nil) { _, _ in
             DispatchQueue.main.async(execute: completion)
         }
     }

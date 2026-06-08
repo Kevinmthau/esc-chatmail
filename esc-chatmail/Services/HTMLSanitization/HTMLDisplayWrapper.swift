@@ -6,6 +6,17 @@ enum HTMLDisplayPurpose: String, CaseIterable, Sendable {
     case original
 }
 
+/// How `HTMLDisplayWrapper` injects its `<head>` styles into a document that already has structure.
+enum HTMLHeadInjectionSerialization: Sendable {
+    /// Parse + re-serialize with SwiftSoup, falling back to string insertion (legacy behavior).
+    case domPreferred
+    /// Skip SwiftSoup entirely and insert the injected head via cheap string surgery, falling back
+    /// to the partial-document template when no insertion point is found. Used on the full-reader
+    /// open path, where a SwiftSoup `parse` per open is unnecessary work (50–200ms on large
+    /// newsletters) for a document we only need to splice a `<head>` block into.
+    case stringOnly
+}
+
 /// Wraps HTML content for display in WebView with proper styling and security
 /// Designed to match Apple Mail's rendering behavior as closely as possible
 struct HTMLDisplayWrapper {
@@ -52,7 +63,8 @@ struct HTMLDisplayWrapper {
     func wrapHTMLForDisplay(
         _ html: String,
         isDarkMode: Bool,
-        displayPurpose: HTMLDisplayPurpose = .preview
+        displayPurpose: HTMLDisplayPurpose = .preview,
+        headSerialization: HTMLHeadInjectionSerialization = .domPreferred
     ) -> String {
         // Content is pre-sanitized by HTMLSanitizerService, so we just wrap it
         let sanitized = html
@@ -73,7 +85,8 @@ struct HTMLDisplayWrapper {
                 isDarkMode: isDarkMode,
                 theme: theme,
                 displayPurpose: displayPurpose,
-                fallbackTypographyCSS: fallbackTypographyCSS
+                fallbackTypographyCSS: fallbackTypographyCSS,
+                headSerialization: headSerialization
             )
         }
 
@@ -93,7 +106,8 @@ struct HTMLDisplayWrapper {
         isDarkMode: Bool,
         theme: Theme,
         displayPurpose: HTMLDisplayPurpose,
-        fallbackTypographyCSS: String
+        fallbackTypographyCSS: String,
+        headSerialization: HTMLHeadInjectionSerialization = .domPreferred
     ) -> String {
         // Inject our viewport meta, CSP, and minimal styles into the existing document
         // This preserves the email's original <style> tags and media queries
@@ -108,7 +122,7 @@ struct HTMLDisplayWrapper {
         let injectedHead = """
         \(viewportMetaTag)
         \(originalColorSchemeHead)
-        <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none';">
+        <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none';">
         <style id="esc-mail-styles">
             /* Minimal resets - don't override email's own styles */
             html {
@@ -136,38 +150,179 @@ struct HTMLDisplayWrapper {
         </style>
         """
 
-        if let wrapped = wrapExistingDocumentWithDOM(
-            html,
-            injectedHead: injectedHead
-        ) {
+        // The full-reader open path opts out of the SwiftSoup parse/serialize round-trip and splices
+        // the head in by string surgery instead; the DOM path stays the default for previews and any
+        // caller that wants normalized output.
+        if headSerialization == .domPreferred,
+           let wrapped = wrapExistingDocumentWithDOM(
+               html,
+               injectedHead: injectedHead
+           ) {
             return wrapped
         }
 
-        var result = html
-
-        // Try to inject after existing <head> tag
-        if let headRange = result.range(of: "<head>", options: .caseInsensitive) {
-            result.insert(contentsOf: "\n" + injectedHead + "\n", at: headRange.upperBound)
-        } else if let headRange = result.range(of: "<head ", options: .caseInsensitive) {
-            // Handle <head ...> with attributes
-            if let closingBracket = result[headRange.upperBound...].range(of: ">") {
-                result.insert(contentsOf: "\n" + injectedHead + "\n", at: closingBracket.upperBound)
+        if var result = injectHeadByStringSurgery(into: html, injectedHead: injectedHead) {
+            // Ensure we have a proper doctype
+            if !result.lowercased().contains("<!doctype") {
+                result = "<!DOCTYPE html>\n" + result
             }
-        } else if let htmlRange = result.range(of: "<html>", options: .caseInsensitive) {
-            // No head tag, inject after <html>
-            result.insert(contentsOf: "\n<head>\n" + injectedHead + "\n</head>\n", at: htmlRange.upperBound)
-        } else if let htmlRange = result.range(of: "<html ", options: .caseInsensitive) {
-            if let closingBracket = result[htmlRange.upperBound...].range(of: ">") {
-                result.insert(contentsOf: "\n<head>\n" + injectedHead + "\n</head>\n", at: closingBracket.upperBound)
-            }
+            return result
         }
 
-        // Ensure we have a proper doctype
+        // No <head>/<html> insertion point was found. On the string-only path, render the document
+        // body inside our partial template so the viewport/CSP/styles are still applied instead of
+        // returning raw, unstyled HTML.
+        if headSerialization == .stringOnly {
+            return wrapPartialHTML(
+                html,
+                isDarkMode: isDarkMode,
+                theme: theme,
+                displayPurpose: displayPurpose,
+                fallbackTypographyCSS: fallbackTypographyCSS
+            )
+        }
+
+        // Legacy fallback: keep the original markup, just guarantee a doctype.
+        var result = html
         if !result.lowercased().contains("<!doctype") {
             result = "<!DOCTYPE html>\n" + result
         }
-
         return result
+    }
+
+    /// Inserts `injectedHead` into an existing document via string surgery, returning the modified
+    /// HTML when an insertion point was found and `nil` otherwise (so callers can choose a fallback).
+    private func injectHeadByStringSurgery(into html: String, injectedHead: String) -> String? {
+        var result = html
+
+        if let headRange = openingTagRange(named: "head", in: result) {
+            result.insert(contentsOf: "\n" + injectedHead + "\n", at: headRange.upperBound)
+            return result
+        }
+
+        if let htmlRange = openingTagRange(named: "html", in: result) {
+            result.insert(contentsOf: "\n<head>\n" + injectedHead + "\n</head>\n", at: htmlRange.upperBound)
+            return result
+        }
+
+        return nil
+    }
+
+    private func openingTagRange(named tagName: String, in html: String) -> Range<String.Index>? {
+        var index = html.startIndex
+
+        while let tagStart = html[index...].firstIndex(of: "<") {
+            let afterOpen = html.index(after: tagStart)
+            guard afterOpen < html.endIndex else {
+                return nil
+            }
+
+            if html[afterOpen...].hasPrefix("!--") {
+                guard let commentEnd = html[afterOpen...].range(of: "-->")?.upperBound else {
+                    return nil
+                }
+                index = commentEnd
+                continue
+            }
+
+            if html[afterOpen] == "!" || html[afterOpen] == "?" || html[afterOpen] == "/" {
+                guard let tagEnd = tagEndIndex(in: html, from: afterOpen) else {
+                    return nil
+                }
+                index = html.index(after: tagEnd)
+                continue
+            }
+
+            guard html[afterOpen].isLetter else {
+                index = afterOpen
+                continue
+            }
+
+            var nameEnd = afterOpen
+            while nameEnd < html.endIndex, isTagNameCharacter(html[nameEnd]) {
+                nameEnd = html.index(after: nameEnd)
+            }
+
+            guard let tagEnd = tagEndIndex(in: html, from: nameEnd) else {
+                return nil
+            }
+
+            let name = String(html[afterOpen..<nameEnd]).lowercased()
+            let range = tagStart..<html.index(after: tagEnd)
+            if name == tagName.lowercased() {
+                return range
+            }
+
+            if isRawTextElement(name),
+               let afterClosingTag = indexAfterClosingRawTextElement(named: name, in: html, after: range.upperBound) {
+                index = afterClosingTag
+            } else {
+                index = range.upperBound
+            }
+        }
+
+        return nil
+    }
+
+    private func tagEndIndex(in html: String, from startIndex: String.Index) -> String.Index? {
+        var index = startIndex
+        var quote: Character?
+
+        while index < html.endIndex {
+            let character = html[index]
+            if let currentQuote = quote {
+                if character == currentQuote {
+                    quote = nil
+                }
+                index = html.index(after: index)
+                continue
+            }
+
+            if character == "\"" || character == "'" {
+                quote = character
+            } else if character == ">" {
+                return index
+            }
+            index = html.index(after: index)
+        }
+
+        return nil
+    }
+
+    private func indexAfterClosingRawTextElement(
+        named tagName: String,
+        in html: String,
+        after startIndex: String.Index
+    ) -> String.Index? {
+        var index = startIndex
+        let closingPrefix = "</\(tagName)"
+
+        while let range = html.range(
+            of: closingPrefix,
+            options: .caseInsensitive,
+            range: index..<html.endIndex
+        ) {
+            let nameEnd = range.upperBound
+            if nameEnd < html.endIndex, isTagNameCharacter(html[nameEnd]) {
+                index = nameEnd
+                continue
+            }
+
+            guard let tagEnd = tagEndIndex(in: html, from: nameEnd) else {
+                return nil
+            }
+            return html.index(after: tagEnd)
+        }
+
+        return nil
+    }
+
+    private func isRawTextElement(_ tagName: String) -> Bool {
+        tagName == "script" || tagName == "style" || tagName == "textarea" || tagName == "title"
+    }
+
+    private func isTagNameCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || character == "-" || character == ":" || character == "_"
     }
 
     private func wrapExistingDocumentWithDOM(
@@ -245,7 +400,7 @@ struct HTMLDisplayWrapper {
             <meta charset="UTF-8">
             \(viewportMetaTag)
             \(originalColorSchemeHead)
-            <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none';">
+            <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none';">
             <style>
                 * {
                     box-sizing: border-box;

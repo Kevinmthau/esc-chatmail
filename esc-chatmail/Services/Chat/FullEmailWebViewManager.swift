@@ -99,8 +99,27 @@ enum FullInteractiveEmailWebView {
         navigationType: WKNavigationType,
         url: URL?
     ) -> NavigationDecision {
-        // Allow initial load and resource loads first (before other checks). This is critical for
-        // loadHTMLString with an about:blank baseURL.
+        // Screen dangerous/unsupported schemes first, for every navigation type, so a
+        // javascript:/vbscript:/file: URL can never load — not even disguised as an .other or
+        // .reload navigation (e.g. a scripted location change). The document's own initial
+        // `loadHTMLString` navigation arrives as .other with an about:/base-URL scheme, which is not
+        // screened here, so the initial load still proceeds. Note: "cid" is NOT blocked — it is
+        // handled by CIDSchemeHandler.
+        if let url {
+            let scheme = url.scheme?.lowercased() ?? ""
+            let unsupportedSchemes = ["javascript", "vbscript", "file"]
+            if unsupportedSchemes.contains(scheme) {
+                return .cancel
+            }
+        }
+
+        // Full original emails are read-only: never submit (or resubmit) a form from email content.
+        if navigationType == .formSubmitted || navigationType == .formResubmitted {
+            return .cancel
+        }
+
+        // Allow the initial document load, resource loads, and reloads. This is critical for
+        // loadHTMLString with an about:blank/base-URL baseURL, which arrives as .other.
         if navigationType == .other || navigationType == .reload {
             return .allow
         }
@@ -109,13 +128,6 @@ enum FullInteractiveEmailWebView {
             let urlString = url.absoluteString
             // Block obviously malformed URLs.
             if urlString.isEmpty || urlString == "about:blank" {
-                return .cancel
-            }
-            // Block unsupported schemes that cause errors. Note: "cid" is NOT blocked — it is handled
-            // by CIDSchemeHandler.
-            let scheme = url.scheme?.lowercased() ?? ""
-            let unsupportedSchemes = ["javascript", "vbscript", "file"]
-            if unsupportedSchemes.contains(scheme) {
                 return .cancel
             }
         }
@@ -337,12 +349,14 @@ enum FullEmailOpenPayloadReuseDecision: Equatable {
 }
 
 enum FullEmailWebViewAdoptionPolicy {
+    // Legacy opt-in flags. Adoption is now on by default, so these are retained only as no-ops for
+    // backward compatibility; nothing reads them.
     static let enableLaunchArgument = "-ESCEnableFullEmailWebViewAdoption"
     static let enableEnvironmentKey = "ESC_ENABLE_FULL_EMAIL_WEBVIEW_ADOPTION"
     static let disableLaunchArgument = "-ESCDisableFullEmailWebViewAdoption"
     static let disableEnvironmentKey = "ESC_DISABLE_FULL_EMAIL_WEBVIEW_ADOPTION"
 
-    // Backward-compatible aliases for the opt-in switch.
+    // Backward-compatible aliases for the now-no-op enable flags.
     static let launchArgument = enableLaunchArgument
     static let environmentKey = enableEnvironmentKey
 
@@ -361,15 +375,11 @@ enum FullEmailWebViewAdoptionPolicy {
     }
 
     static func isEnabled(arguments: [String], environment: [String: String]) -> Bool {
-        if isExplicitlyDisabled(arguments: arguments, environment: environment) {
-            return false
-        }
-
-        if arguments.contains(enableLaunchArgument) || isEnabledEnvironmentValue(environment[enableEnvironmentKey]) {
-            return true
-        }
-
-        return false
+        // Adoption is on by default; only the explicit kill switch
+        // (`-ESCDisableFullEmailWebViewAdoption` / `ESC_DISABLE_FULL_EMAIL_WEBVIEW_ADOPTION=1`)
+        // disables it. The legacy enable flags (`enableLaunchArgument` / `enableEnvironmentKey`) are
+        // retained as no-ops for backward compatibility.
+        !isExplicitlyDisabled(arguments: arguments, environment: environment)
     }
 
     static func isExplicitlyDisabled(arguments: [String], environment: [String: String]) -> Bool {

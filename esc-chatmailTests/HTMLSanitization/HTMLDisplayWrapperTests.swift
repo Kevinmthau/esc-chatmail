@@ -1501,4 +1501,78 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertFalse(fragmentResult.contains(appleMailFallbackFontStack))
         XCTAssertFalse(documentResult.contains(appleMailFallbackFontStack))
     }
+
+    func testWrapHTMLForDisplay_stringOnlySerialization_preservesAuthorMarkupAndInjectsHardenedCSP() {
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>.hero { width: 600px; }</style>
+        </head>
+        <body>
+            <img src="https://cdn.example.com/hero.jpg" alt="Hero">
+            <p>Reader body</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(
+            html,
+            isDarkMode: false,
+            displayPurpose: .original,
+            headSerialization: .stringOnly
+        )
+
+        XCTAssertTrue(result.contains("Reader body"))
+        XCTAssertTrue(result.contains("https://cdn.example.com/hero.jpg"))
+        // Author markup is spliced, not re-serialized, so original style rules survive verbatim.
+        XCTAssertTrue(result.contains(".hero { width: 600px; }"))
+        // The injected head still applies the hardened CSP and light original surface.
+        XCTAssertTrue(result.contains("script-src 'none'; object-src 'none'; frame-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none';"))
+        XCTAssertTrue(result.contains("background-color: #ffffff"))
+    }
+
+    func testWrapHTMLForDisplay_stringOnlySerialization_ignoresHeadTextInsideComment() throws {
+        let html = """
+        <!DOCTYPE html>
+        <!-- fake <head> marker -->
+        <html>
+        <head>
+            <title>Reader</title>
+        </head>
+        <body>
+            <p>Reader body</p>
+        </body>
+        </html>
+        """
+
+        let result = sut.wrapHTMLForDisplay(
+            html,
+            isDarkMode: false,
+            displayPurpose: .original,
+            headSerialization: .stringOnly
+        )
+
+        let commentEnd = try XCTUnwrap(result.range(of: "-->")?.upperBound)
+        let realHead = try XCTUnwrap(result.range(of: "<head>", range: commentEnd..<result.endIndex))
+        let csp = try XCTUnwrap(result.range(of: "Content-Security-Policy"))
+
+        XCTAssertGreaterThan(csp.lowerBound, realHead.upperBound)
+        XCTAssertTrue(result.contains("Reader body"))
+    }
+
+    func testWrapHTMLForDisplay_stringOnlySerialization_fragmentFallsBackToPartialTemplate() {
+        // A bare fragment (no <html>/<head>) still receives the full template + hardened CSP.
+        let html = "<div>Fragment body</div>"
+
+        let result = sut.wrapHTMLForDisplay(
+            html,
+            isDarkMode: false,
+            displayPurpose: .original,
+            headSerialization: .stringOnly
+        )
+
+        XCTAssertTrue(result.contains("Fragment body"))
+        XCTAssertTrue(result.contains("form-action 'none'; base-uri 'none'"))
+    }
 }

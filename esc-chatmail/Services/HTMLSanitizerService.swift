@@ -11,14 +11,36 @@ final class HTMLSanitizerService {
     private let trackingRemover = HTMLTrackingRemover()
     private let displayWrapper = HTMLDisplayWrapper()
     private let dangerousMarkupSanitizer: (String) throws -> String
+    private let originalReaderActiveMarkupSanitizer: (String) throws -> String
 
     // MARK: - Dangerous Tags Configuration
 
     private static let dangerousTags = EmailDOMHTMLSanitizer.dangerousTags
+    private static let originalReaderActiveMarkupTags = EmailDOMHTMLSanitizer.originalReaderActiveMarkupTags
 
     // Pre-compiled regex patterns for dangerous tag removal (performance optimization)
     private static let compiledDangerousTagPatterns: [NSRegularExpression] = {
         dangerousTags.compactMap { RegexSanitizer.compileTagPattern($0) }
+    }()
+    private static let compiledOriginalReaderActiveMarkupPatterns: [NSRegularExpression] = {
+        originalReaderActiveMarkupTags.compactMap { RegexSanitizer.compileTagPattern($0) }
+    }()
+
+    // swiftlint:disable:next force_try
+    private static let originalReaderUnwrappedTagRegex: NSRegularExpression = {
+        let tagPattern = EmailDOMHTMLSanitizer.originalReaderUnwrappedTags.joined(separator: "|")
+        return try! NSRegularExpression(
+            pattern: "</?(?:\(tagPattern))\\b[^>]*>",
+            options: .caseInsensitive
+        )
+    }()
+    // swiftlint:disable:next force_try
+    private static let originalReaderEscapedTextTagRegex: NSRegularExpression = {
+        let tagPattern = EmailDOMHTMLSanitizer.originalReaderEscapedTextTags.joined(separator: "|")
+        return try! NSRegularExpression(
+            pattern: "<(\(tagPattern))\\b[^>]*>(.*?)</\\1>",
+            options: [.caseInsensitive, .dotMatchesLineSeparators]
+        )
     }()
 
     // Pre-compiled event handler removal pattern
@@ -34,9 +56,12 @@ final class HTMLSanitizerService {
 
     init(
         dangerousMarkupSanitizer: @escaping (String) throws -> String =
-            EmailDOMHTMLSanitizer.removeDangerousElementsAndEventHandlers
+            EmailDOMHTMLSanitizer.removeDangerousElementsAndEventHandlers,
+        originalReaderActiveMarkupSanitizer: @escaping (String) throws -> String =
+            EmailDOMHTMLSanitizer.removeOriginalReaderActiveMarkupAndEventHandlers
     ) {
         self.dangerousMarkupSanitizer = dangerousMarkupSanitizer
+        self.originalReaderActiveMarkupSanitizer = originalReaderActiveMarkupSanitizer
     }
 
     // MARK: - Main Sanitization Method
@@ -73,6 +98,18 @@ final class HTMLSanitizerService {
         }
     }
 
+    func removeOriginalReaderActiveMarkupAndEventHandlers(_ html: String) -> String {
+        do {
+            return try originalReaderActiveMarkupSanitizer(html)
+        } catch {
+            return removeOriginalReaderActiveMarkupAndEventHandlersWithLegacyRegex(html)
+        }
+    }
+
+    func sanitizeOriginalReaderURLs(_ html: String) -> String {
+        urlSanitizer.sanitizeHrefAndImageSourceURLs(html, rewriteModernFormatQueryHints: false)
+    }
+
     private func removeDangerousElementsAndEventHandlersWithLegacyRegex(_ html: String) -> String {
         var sanitized = html
 
@@ -86,12 +123,56 @@ final class HTMLSanitizerService {
         return sanitized
     }
 
+    private func removeOriginalReaderActiveMarkupAndEventHandlersWithLegacyRegex(_ html: String) -> String {
+        var sanitized = html
+
+        sanitized = replaceOriginalReaderEscapedTextTagsWithLegacyRegex(sanitized)
+        sanitized = RegexSanitizer.removeTags(
+            from: sanitized,
+            compiledPatterns: Self.compiledOriginalReaderActiveMarkupPatterns
+        )
+        sanitized = RegexSanitizer.replace(in: sanitized, regex: Self.originalReaderUnwrappedTagRegex)
+        sanitized = removeEventHandlers(sanitized)
+        return sanitized
+    }
+
     private func removeDangerousElements(_ html: String) -> String {
         RegexSanitizer.removeTags(from: html, compiledPatterns: Self.compiledDangerousTagPatterns)
     }
 
     private func removeEventHandlers(_ html: String) -> String {
         RegexSanitizer.replace(in: html, regex: Self.eventHandlerRegex)
+    }
+
+    private func replaceOriginalReaderEscapedTextTagsWithLegacyRegex(_ html: String) -> String {
+        let matches = Self.originalReaderEscapedTextTagRegex.matches(
+            in: html,
+            options: [],
+            range: NSRange(location: 0, length: html.utf16.count)
+        )
+        guard !matches.isEmpty else { return html }
+
+        var result = ""
+        var currentIndex = html.startIndex
+        for match in matches {
+            guard let fullRange = Range(match.range(at: 0), in: html),
+                  let contentRange = Range(match.range(at: 2), in: html) else {
+                return html
+            }
+
+            result.append(contentsOf: html[currentIndex..<fullRange.lowerBound])
+            result.append(Self.escapeHTML(HTMLEntityDecoder.decode(String(html[contentRange]))))
+            currentIndex = fullRange.upperBound
+        }
+        result.append(contentsOf: html[currentIndex...])
+        return result
+    }
+
+    private static func escapeHTML(_ input: String) -> String {
+        input
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
     }
 
     // MARK: - HTML Wrapping for Display
@@ -117,12 +198,14 @@ final class HTMLSanitizerService {
     func wrapSanitizedHTMLForDisplay(
         _ html: String,
         isDarkMode: Bool,
-        displayPurpose: HTMLDisplayPurpose = .preview
+        displayPurpose: HTMLDisplayPurpose = .preview,
+        headSerialization: HTMLHeadInjectionSerialization = .domPreferred
     ) -> String {
         displayWrapper.wrapHTMLForDisplay(
             html,
             isDarkMode: isDarkMode,
-            displayPurpose: displayPurpose
+            displayPurpose: displayPurpose,
+            headSerialization: headSerialization
         )
     }
 }

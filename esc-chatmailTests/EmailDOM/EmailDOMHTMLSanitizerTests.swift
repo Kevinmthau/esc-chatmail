@@ -33,6 +33,43 @@ final class EmailDOMHTMLSanitizerTests: XCTestCase {
         XCTAssertTrue(result.contains("<p>Safe after</p>"))
     }
 
+    func testOriginalReaderTextareaMarkup_isEscapedAsText() throws {
+        let html = #"""
+        <form action="https://phishing.example/post">
+          <label>Notes</label>
+          <textarea><img src="https://tracking.example/open.png"></textarea>
+          <p>Safe after</p>
+        </form>
+        """#
+
+        let result = try EmailDOMHTMLSanitizer.removeOriginalReaderActiveMarkupAndEventHandlers(from: html)
+        let lowercasedResult = result.lowercased()
+
+        XCTAssertTrue(result.contains("Notes"))
+        XCTAssertTrue(result.contains("&lt;img"))
+        XCTAssertTrue(result.contains("https://tracking.example/open.png"))
+        XCTAssertTrue(result.contains("<p>Safe after</p>"))
+        XCTAssertFalse(lowercasedResult.contains("<form"))
+        XCTAssertFalse(lowercasedResult.contains("<label"))
+        XCTAssertFalse(lowercasedResult.contains("<textarea"))
+        XCTAssertFalse(lowercasedResult.contains("<img"))
+        XCTAssertFalse(result.contains("phishing.example"))
+    }
+
+    func testOriginalReaderMalformedTextarea_doesNotConsumeFollowingMarkup() throws {
+        let html = #"""
+        <textarea>
+        <p>Safe after</p>
+        """#
+
+        let result = try EmailDOMHTMLSanitizer.removeOriginalReaderActiveMarkupAndEventHandlers(from: html)
+        let lowercasedResult = result.lowercased()
+
+        XCTAssertTrue(result.contains("<p>Safe after</p>"))
+        XCTAssertFalse(result.contains("&lt;p&gt;Safe after&lt;/p&gt;"))
+        XCTAssertFalse(lowercasedResult.contains("<textarea"))
+    }
+
     func testRemoveEventHandlers_preservesCloudflareImageDirectiveInURLPath() throws {
         let html = """
         <img src="https://content.example/cdn-cgi/image/onerror=redirect,width=650,dpr=2,format=auto/photo.jpeg" onerror="alert('xss')" alt="Photo">
@@ -582,7 +619,7 @@ final class EmailDOMHTMLSanitizerPipelineTests: XCTestCase {
 
         XCTAssertTrue(result.contains("Body"), file: file, line: line)
         XCTAssertTrue(result.contains("Styled body"), file: file, line: line)
-        XCTAssertTrue(result.contains("href=\"#\""), file: file, line: line)
+        XCTAssertFalse(lowercasedResult.contains("href="), file: file, line: line)
         XCTAssertTrue(
             result.contains("cid:image001.png@01D12345.67890ABC"),
             file: file,

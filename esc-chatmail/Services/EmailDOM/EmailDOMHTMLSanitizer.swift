@@ -22,7 +22,21 @@ enum EmailDOMHTMLSanitizer {
         "set", "use", "image", "feimage"
     ]
 
+    static let originalReaderActiveMarkupTags = [
+        "script", "object", "embed", "applet",
+        "frame", "frameset", "iframe", "base", "basefont",
+        "input",
+        "meta", "link",
+        "svg", "foreignobject", "animate", "animatemotion", "animatetransform",
+        "set", "use", "image", "feimage"
+    ]
+
     private static let dangerousTagSet = Set(dangerousTags)
+    static let originalReaderUnwrappedTags = [
+        "form", "button", "select", "option", "optgroup",
+        "fieldset", "legend", "label"
+    ]
+    static let originalReaderEscapedTextTags = ["textarea"]
     private static let dangerousTagsRequiringMarkupEvidence: Set<String> = [
         "foreignobject", "animate", "animatemotion", "animatetransform",
         "set", "use", "image", "feimage"
@@ -43,15 +57,40 @@ enum EmailDOMHTMLSanitizer {
             "table", "tbody", "td", "template", "tfoot", "th", "thead", "time", "title", "tr", "track",
             "u", "ul", "var", "video", "wbr"
         ])
-    private static let dangerousSelector = dangerousTags.joined(separator: ",")
 
     static func removeDangerousElementsAndEventHandlers(from html: String) throws -> String {
+        try removeElementsAndEventHandlers(
+            from: html,
+            removingTags: dangerousTags,
+            unwrappingTags: [],
+            escapingTextTags: []
+        )
+    }
+
+    static func removeOriginalReaderActiveMarkupAndEventHandlers(from html: String) throws -> String {
+        try removeElementsAndEventHandlers(
+            from: html,
+            removingTags: originalReaderActiveMarkupTags,
+            unwrappingTags: originalReaderUnwrappedTags,
+            escapingTextTags: originalReaderEscapedTextTags
+        )
+    }
+
+    private static func removeElementsAndEventHandlers(
+        from html: String,
+        removingTags: [String],
+        unwrappingTags: [String],
+        escapingTextTags: [String]
+    ) throws -> String {
         guard containsLikelyHTMLTag(html) else {
             return html
         }
 
         let inputIsFragment = !hasDocumentWrapper(html)
-        let parseableHTML = normalizeDangerousTagBoundaries(in: html)
+        let parseableHTML = normalizeDangerousTagBoundaries(
+            in: html,
+            tagSet: Set(removingTags).union(unwrappingTags).union(escapingTextTags)
+        )
         let document = try EmailDOMFragmentParser.parse(
             parseableHTML,
             inputIsFragment: inputIsFragment
@@ -59,7 +98,9 @@ enum EmailDOMHTMLSanitizer {
 
         document.outputSettings().prettyPrint(pretty: false)
 
-        try removeDangerousElements(in: document)
+        try removeElements(in: document, matching: selector(for: removingTags))
+        try replaceElementsWithEscapedText(in: document, matching: selector(for: escapingTextTags))
+        try unwrapElements(in: document, matching: selector(for: unwrappingTags))
         try removeEventHandlerAttributes(in: document)
 
         if inputIsFragment, let body = document.body() {
@@ -68,9 +109,33 @@ enum EmailDOMHTMLSanitizer {
         return preserveOriginalDoctypeCasing(in: try document.outerHtml(), originalHTML: html)
     }
 
-    private static func removeDangerousElements(in document: Document) throws {
-        let elements = try document.select(dangerousSelector)
+    private static func removeElements(in document: Document, matching selector: String?) throws {
+        guard let selector else { return }
+        let elements = try document.select(selector)
         try elements.remove()
+    }
+
+    private static func unwrapElements(in document: Document, matching selector: String?) throws {
+        guard let selector else { return }
+        let elements = try document.select(selector)
+        try elements.unwrap()
+    }
+
+    private static func replaceElementsWithEscapedText(in document: Document, matching selector: String?) throws {
+        guard let selector else { return }
+        let elements = try document.select(selector)
+        for element in elements.array() {
+            try element.replaceWith(TextNode(rawTextValue(from: element), element.getBaseUri()))
+        }
+    }
+
+    private static func rawTextValue(from element: Element) throws -> String {
+        HTMLEntityDecoder.decode(try element.html())
+    }
+
+    private static func selector(for tags: [String]) -> String? {
+        guard !tags.isEmpty else { return nil }
+        return tags.joined(separator: ",")
     }
 
     private static func removeEventHandlerAttributes(in document: Document) throws {
@@ -162,8 +227,11 @@ enum EmailDOMHTMLSanitizer {
 
     /// SwiftSoup follows HTML parser rules, so invalid self-closing tags like
     /// `<iframe/>` can otherwise consume following sibling content. Close only
-    /// dangerous tags before parsing so their removal does not eat safe content.
-    private static func normalizeDangerousTagBoundaries(in html: String) -> String {
+    /// targeted tags before parsing so their handling does not eat safe content.
+    private static func normalizeDangerousTagBoundaries(
+        in html: String,
+        tagSet: Set<String>
+    ) -> String {
         var output = ""
         var index = html.startIndex
 
@@ -193,7 +261,7 @@ enum EmailDOMHTMLSanitizer {
             }
 
             let tagName = String(html[tagNameStart..<tagNameEnd]).lowercased()
-            guard dangerousTagSet.contains(tagName),
+            guard tagSet.contains(tagName),
                   let tagEnd = tagEndIndex(in: html, from: tagNameEnd) else {
                 guard let tagEnd = tagEndIndex(in: html, from: afterOpen) else {
                     output.append(contentsOf: html[tagStart...])
