@@ -155,10 +155,8 @@ struct EmailContentSection: View {
     /// preparation. Debounced so fast scrolling does not do work for rows that immediately leave; the
     /// manager bounds total warmed payloads, de-dupes already-warm content, and keeps active WebView
     /// warming disabled unless adoption is explicitly enabled.
-    private func warmFullEmailWebViewIfNeeded(delayNanoseconds: UInt64 = 200_000_000) async {
-        if delayNanoseconds > 0 {
-            try? await Task.sleep(nanoseconds: delayNanoseconds)
-        }
+    private func warmFullEmailWebViewIfNeeded() async {
+        try? await Task.sleep(nanoseconds: 200_000_000)
         guard !Task.isCancelled else {
             return
         }
@@ -216,9 +214,6 @@ struct EmailContentSection: View {
         }
 
         await finishLoad(with: renderedPreview, generation: generation)
-        if renderedPreview != nil {
-            await warmFullEmailWebViewIfNeeded(delayNanoseconds: 0)
-        }
     }
 
     private func finishLoad(with preview: EmailPreviewRenderModel?, generation: Int) async {
