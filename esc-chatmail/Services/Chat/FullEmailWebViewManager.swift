@@ -349,12 +349,14 @@ enum FullEmailOpenPayloadReuseDecision: Equatable {
 }
 
 enum FullEmailWebViewAdoptionPolicy {
+    // Legacy opt-in flags. Adoption is now on by default, so these are retained only as no-ops for
+    // backward compatibility; nothing reads them.
     static let enableLaunchArgument = "-ESCEnableFullEmailWebViewAdoption"
     static let enableEnvironmentKey = "ESC_ENABLE_FULL_EMAIL_WEBVIEW_ADOPTION"
     static let disableLaunchArgument = "-ESCDisableFullEmailWebViewAdoption"
     static let disableEnvironmentKey = "ESC_DISABLE_FULL_EMAIL_WEBVIEW_ADOPTION"
 
-    // Backward-compatible aliases for the opt-in switch.
+    // Backward-compatible aliases for the now-no-op enable flags.
     static let launchArgument = enableLaunchArgument
     static let environmentKey = enableEnvironmentKey
 
@@ -373,12 +375,11 @@ enum FullEmailWebViewAdoptionPolicy {
     }
 
     static func isEnabled(arguments: [String], environment: [String: String]) -> Bool {
-        guard !isExplicitlyDisabled(arguments: arguments, environment: environment) else {
-            return false
-        }
-
-        return arguments.contains(enableLaunchArgument) ||
-            isEnabledEnvironmentValue(environment[enableEnvironmentKey])
+        // Adoption is on by default; only the explicit kill switch
+        // (`-ESCDisableFullEmailWebViewAdoption` / `ESC_DISABLE_FULL_EMAIL_WEBVIEW_ADOPTION=1`)
+        // disables it. The legacy enable flags (`enableLaunchArgument` / `enableEnvironmentKey`) are
+        // retained as no-ops for backward compatibility.
+        !isExplicitlyDisabled(arguments: arguments, environment: environment)
     }
 
     static func isExplicitlyDisabled(arguments: [String], environment: [String: String]) -> Bool {
