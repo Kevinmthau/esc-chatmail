@@ -22,6 +22,8 @@ struct EmailContentSection: View {
     @State private var loadGeneration = 0
     @State private var remoteImageFallbackReloadTask: Task<Void, Never>?
     @State private var remoteImageFallbackOriginalWarmTask: Task<Void, Never>?
+    @State private var fullEmailOpenPreparationTask: Task<Void, Never>?
+    @State private var isPreparingFullEmailOpen = false
     private let originalEmailSourceWarmer: any OriginalEmailSourceWarming
     private let fullEmailOpener: any FullEmailOpening
     private let htmlSourceSignaturer: any HTMLSourceSignaturing
@@ -143,6 +145,9 @@ struct EmailContentSection: View {
             remoteImageFallbackReloadTask = nil
             remoteImageFallbackOriginalWarmTask?.cancel()
             remoteImageFallbackOriginalWarmTask = nil
+            fullEmailOpenPreparationTask?.cancel()
+            fullEmailOpenPreparationTask = nil
+            isPreparingFullEmailOpen = false
         }
     }
 
@@ -150,8 +155,10 @@ struct EmailContentSection: View {
     /// preparation. Debounced so fast scrolling does not do work for rows that immediately leave; the
     /// manager bounds total warmed payloads, de-dupes already-warm content, and keeps active WebView
     /// warming disabled unless adoption is explicitly enabled.
-    private func warmFullEmailWebViewIfNeeded() async {
-        try? await Task.sleep(nanoseconds: 200_000_000)
+    private func warmFullEmailWebViewIfNeeded(delayNanoseconds: UInt64 = 200_000_000) async {
+        if delayNanoseconds > 0 {
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+        }
         guard !Task.isCancelled else {
             return
         }
@@ -209,6 +216,9 @@ struct EmailContentSection: View {
         }
 
         await finishLoad(with: renderedPreview, generation: generation)
+        if renderedPreview != nil {
+            await warmFullEmailWebViewIfNeeded(delayNanoseconds: 0)
+        }
     }
 
     private func finishLoad(with preview: EmailPreviewRenderModel?, generation: Int) async {
@@ -248,7 +258,7 @@ struct EmailContentSection: View {
         switch renderedPreview {
         case .calendarInvite(let model):
             Button {
-                onOpenFullMessage(.previewCard)
+                openPreviewCard(renderedPreview)
             } label: {
                 CalendarInvitePreviewCard(model: model)
             }
@@ -257,16 +267,17 @@ struct EmailContentSection: View {
             .accessibilityHint("Opens the full original email")
         case .newsletter(let model):
             Button {
-                onOpenFullMessage(.previewCard)
+                openPreviewCard(renderedPreview)
             } label: {
                 NewsletterPreviewCard(model: model)
             }
             .buttonStyle(.plain)
+            .disabled(isPreparingFullEmailOpen)
             .accessibilityLabel("Email preview: \(model.title)")
             .accessibilityHint("Opens the full original email")
         case .transactional(let model):
             Button {
-                onOpenFullMessage(.previewCard)
+                openPreviewCard(renderedPreview)
             } label: {
                 TransactionalPreviewCard(model: model)
             }
@@ -275,7 +286,7 @@ struct EmailContentSection: View {
             .accessibilityHint("Opens the full original email")
         case .netlifyDeploy(let model):
             Button {
-                onOpenFullMessage(.previewCard)
+                openPreviewCard(renderedPreview)
             } label: {
                 NetlifyDeployPreviewCard(model: model)
             }
@@ -284,13 +295,60 @@ struct EmailContentSection: View {
             .accessibilityHint("Opens the full original email")
         case .html(let payload):
             Button {
-                onOpenFullMessage(.previewCard)
+                openPreviewCard(renderedPreview)
             } label: {
                 htmlFallbackPreview(payload)
             }
             .buttonStyle(.plain)
             .accessibilityLabel(transactionalPreviewAccessibilityLabel)
             .accessibilityHint("Opens the full original email")
+        }
+    }
+
+    static func shouldPrepareFullEmailBeforeOpening(_ renderedPreview: EmailPreviewRenderModel) -> Bool {
+        switch renderedPreview {
+        case .newsletter:
+            return true
+        case .calendarInvite, .transactional, .netlifyDeploy, .html:
+            return false
+        }
+    }
+
+    private func openPreviewCard(_ renderedPreview: EmailPreviewRenderModel) {
+        guard Self.shouldPrepareFullEmailBeforeOpening(renderedPreview) else {
+            onOpenFullMessage(.previewCard)
+            return
+        }
+
+        prepareFullEmailThenOpen(source: .previewCard)
+    }
+
+    private func prepareFullEmailThenOpen(source: EmailReaderOpenSource) {
+        guard !isPreparingFullEmailOpen else {
+            return
+        }
+
+        isPreparingFullEmailOpen = true
+        fullEmailOpenPreparationTask?.cancel()
+
+        let request = Self.originalEmailWarmRequest(for: message)
+        let messageForInlineAttachments = resolvedMessageForInlineAttachments
+        fullEmailOpenPreparationTask = Task { @MainActor in
+            await fullEmailOpener.warm(
+                request: request,
+                message: messageForInlineAttachments,
+                width: nil
+            )
+
+            guard !Task.isCancelled else {
+                isPreparingFullEmailOpen = false
+                fullEmailOpenPreparationTask = nil
+                return
+            }
+
+            isPreparingFullEmailOpen = false
+            fullEmailOpenPreparationTask = nil
+            onOpenFullMessage(source)
         }
     }
 
