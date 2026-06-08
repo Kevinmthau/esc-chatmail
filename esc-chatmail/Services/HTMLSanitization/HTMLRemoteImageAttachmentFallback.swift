@@ -38,6 +38,11 @@ actor HTMLRemoteImageAttachmentFallback {
         case pending
     }
 
+    private enum CandidateEligibility {
+        case attachmentStyle
+        case riskyModernFormat
+    }
+
     private struct CostBoundedStringCache: Sendable {
         private var values: [String: String] = [:]
         private var costs: [String: Int] = [:]
@@ -153,13 +158,25 @@ actor HTMLRemoteImageAttachmentFallback {
     }
 
     func cachedInlineAttachmentStyleImages(in html: String, senderEmail: String?) -> CachedRewriteResult {
+        cachedImages(in: html, senderEmail: senderEmail, eligibility: .attachmentStyle)
+    }
+
+    func cachedRiskyModernFormatImages(in html: String, senderEmail: String?) -> CachedRewriteResult {
+        cachedImages(in: html, senderEmail: senderEmail, eligibility: .riskyModernFormat)
+    }
+
+    private func cachedImages(
+        in html: String,
+        senderEmail: String?,
+        eligibility: CandidateEligibility
+    ) -> CachedRewriteResult {
         let matches = Self.imageSourceMatches(in: html)
         guard !matches.isEmpty else {
             return CachedRewriteResult(html: html, hasPendingUpdates: false, needsWarmup: false)
         }
 
         let senderBaseURL = EmailSenderBaseURLResolver.baseURL(from: senderEmail)
-        let candidateURLs = eligibleCandidateURLs(from: matches)
+        let candidateURLs = eligibleCandidateURLs(from: matches, eligibility: eligibility)
         guard !candidateURLs.isEmpty else {
             return CachedRewriteResult(html: html, hasPendingUpdates: false, needsWarmup: false)
         }
@@ -263,11 +280,38 @@ actor HTMLRemoteImageAttachmentFallback {
         senderEmail: String?,
         perURLTimeoutNanoseconds: UInt64? = nil
     ) async -> String {
+        await inlineImages(
+            in: html,
+            senderEmail: senderEmail,
+            perURLTimeoutNanoseconds: perURLTimeoutNanoseconds,
+            eligibility: .attachmentStyle
+        )
+    }
+
+    func inlineRiskyModernFormatImages(
+        in html: String,
+        senderEmail: String?,
+        perURLTimeoutNanoseconds: UInt64? = nil
+    ) async -> String {
+        await inlineImages(
+            in: html,
+            senderEmail: senderEmail,
+            perURLTimeoutNanoseconds: perURLTimeoutNanoseconds,
+            eligibility: .riskyModernFormat
+        )
+    }
+
+    private func inlineImages(
+        in html: String,
+        senderEmail: String?,
+        perURLTimeoutNanoseconds: UInt64?,
+        eligibility: CandidateEligibility
+    ) async -> String {
         let matches = Self.imageSourceMatches(in: html)
         guard !matches.isEmpty else { return html }
 
         let senderBaseURL = EmailSenderBaseURLResolver.baseURL(from: senderEmail)
-        let candidateURLs = eligibleCandidateURLs(from: matches)
+        let candidateURLs = eligibleCandidateURLs(from: matches, eligibility: eligibility)
         guard !candidateURLs.isEmpty else { return html }
 
         let rewrittenURLs = await resolveCandidateDataURLs(
@@ -379,13 +423,16 @@ actor HTMLRemoteImageAttachmentFallback {
         }
     }
 
-    private func eligibleCandidateURLs(from matches: [ImageSourceMatch]) -> [String] {
+    private func eligibleCandidateURLs(
+        from matches: [ImageSourceMatch],
+        eligibility: CandidateEligibility = .attachmentStyle
+    ) -> [String] {
         var candidates: [String] = []
         var seen = Set<String>()
 
         for match in matches {
             guard let url = URL(string: match.resolvedURL),
-                  isEligibleCandidate(url),
+                  isEligibleCandidate(url, eligibility: eligibility),
                   seen.insert(match.resolvedURL).inserted else {
                 continue
             }
@@ -647,7 +694,7 @@ actor HTMLRemoteImageAttachmentFallback {
         return "\(referer)|\(urlString)"
     }
 
-    private func isEligibleCandidate(_ url: URL) -> Bool {
+    private func isEligibleCandidate(_ url: URL, eligibility: CandidateEligibility) -> Bool {
         guard let scheme = url.scheme?.lowercased(),
               (scheme == "http" || scheme == "https"),
               let host = url.host?.lowercased(),
@@ -665,6 +712,10 @@ actor HTMLRemoteImageAttachmentFallback {
 
         if Self.isRiskyModernImageURL(url) {
             return true
+        }
+
+        guard eligibility == .attachmentStyle else {
+            return false
         }
 
         let path = url.path.lowercased()

@@ -111,39 +111,44 @@ final class HTMLURLSanitizerTests: XCTestCase {
 
     // MARK: - sanitizeURLs: href
 
-    func testSanitizeURLs_hrefJavascript_rewrittenToHash() {
+    func testSanitizeURLs_hrefJavascript_removesHref() {
         let html = "<a href=\"javascript:alert(1)\">Click</a>"
         let result = sut.sanitizeURLs(html)
         XCTAssertFalse(result.contains("javascript:"))
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
+        XCTAssertTrue(result.contains(">Click</a>"))
     }
 
-    func testSanitizeURLs_strayQuoteBeforeHref_rewrittenToHash() {
+    func testSanitizeURLs_strayQuoteBeforeHref_removesHref() {
         let html = "<a ' href=\"javascript:alert(1)\">Click</a>"
         let result = sut.sanitizeURLs(html)
         XCTAssertFalse(result.contains("javascript:"))
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
+        XCTAssertTrue(result.contains(">Click</a>"))
     }
 
-    func testSanitizeURLs_strayEqualsQuoteBeforeHref_rewrittenToHash() {
+    func testSanitizeURLs_strayEqualsQuoteBeforeHref_removesHref() {
         let html = "<a =' href=\"javascript:alert(1)\">Click</a>"
         let result = sut.sanitizeURLs(html)
         XCTAssertFalse(result.contains("javascript:"))
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
+        XCTAssertTrue(result.contains(">Click</a>"))
     }
 
-    func testSanitizeURLs_slashDelimitedHrefAfterQuotedAttribute_rewrittenToHash() {
+    func testSanitizeURLs_slashDelimitedHrefAfterQuotedAttribute_removesHref() {
         let html = "<a/title=\">\" href=\"javascript:alert(1)\">Click</a>"
         let result = sut.sanitizeURLs(html)
         XCTAssertFalse(result.contains("javascript:"))
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
+        XCTAssertTrue(result.contains(">Click</a>"))
     }
 
-    func testSanitizeURLs_namespacedHrefJavascript_rewrittenToHash() {
+    func testSanitizeURLs_namespacedHrefJavascript_removesHref() {
         let html = "<svg><use xlink:href=\"javascript:alert(1)\"></use></svg>"
         let result = sut.sanitizeURLs(html)
         XCTAssertFalse(result.contains("javascript:"))
-        XCTAssertTrue(result.contains("xlink:href=\"#\""))
+        XCTAssertFalse(result.contains("xlink:href="))
+        XCTAssertTrue(result.contains("<use "))
     }
 
     func testSanitizeURLs_hrefHttpsPreserved() {

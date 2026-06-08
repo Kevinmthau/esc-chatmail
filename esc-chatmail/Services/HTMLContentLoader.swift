@@ -83,6 +83,11 @@ private enum PreparedLoadResult {
     case nativePlainText(String)
 }
 
+private enum RemoteImageFallbackWarmupScope {
+    case attachmentStyle
+    case riskyModernFormat
+}
+
 /// Service for loading HTML content from various sources
 final class HTMLContentLoader {
     static let shared = HTMLContentLoader()
@@ -1009,21 +1014,36 @@ final class HTMLContentLoader {
         // emits a hardened CSP. Keep a narrow active-markup/event-handler strip so scripts, meta
         // refresh, frames, base/link/object/svg markup cannot load or navigate, but preserve inert
         // visible content such as noscript fallbacks and CTA/receipt text in button/label markup.
-        // Keep the existing src URL safety pass so empty, unsafe data, and unsupported-scheme image
-        // sources never reach WebKit. Broader URL/CSS/tracking rewrites are redundant work here and
-        // can corrupt complex nested-table HTML. Remote http(s) images load directly via WebKit;
-        // inline cid: images still resolve through CIDSchemeHandler. The automatic-preference
-        // original path (chat-derived previews, quality fallback) keeps full sanitization below.
+        // Keep the existing href/src URL safety pass so unsupported links stay inert and unsafe
+        // image sources never reach WebKit. Broader URL/CSS/tracking rewrites are redundant work
+        // here and can corrupt complex nested-table HTML. Remote http(s) images load directly via
+        // WebKit when possible; risky modern-format image candidates still use the original
+        // nonblocking attachment fallback below. The automatic-preference original path
+        // (chat-derived previews, quality fallback) keeps full sanitization below.
         if displayPurpose == .original, originalHTMLPreference == .preferHTML {
             let activeMarkupSafeHTML = sanitizer.removeOriginalReaderActiveMarkupAndEventHandlers(preparedHTML)
-            let safeHTML = sanitizer.sanitizeOriginalReaderImageSourceURLs(activeMarkupSafeHTML)
+            let safeHTML = sanitizer.sanitizeOriginalReaderURLs(activeMarkupSafeHTML)
             guard HTMLMeaningfulContentChecker.hasMeaningfulContent(safeHTML) else {
                 Log.debug("wrappedHTMLIfMeaningful: original preferHTML content not meaningful for \(messageId) (len=\(safeHTML.count))", category: .ui)
                 return nil
             }
 
+            let cachedRewrite = await remoteImageAttachmentFallback.cachedRiskyModernFormatImages(
+                in: safeHTML,
+                senderEmail: senderEmail
+            )
+            if cachedRewrite.hasPendingUpdates {
+                warmRemoteImageAttachmentFallback(
+                    in: safeHTML,
+                    currentHTML: cachedRewrite.html,
+                    messageId: messageId,
+                    senderEmail: senderEmail,
+                    scope: .riskyModernFormat
+                )
+            }
+
             let wrapped = sanitizer.wrapSanitizedHTMLForDisplay(
-                safeHTML,
+                cachedRewrite.html,
                 isDarkMode: isDarkMode,
                 displayPurpose: .original,
                 headSerialization: .stringOnly
@@ -1033,7 +1053,7 @@ final class HTMLContentLoader {
                 return nil
             }
 
-            return .html(WrappedHTMLResult(html: wrapped, shouldCache: true))
+            return .html(WrappedHTMLResult(html: wrapped, shouldCache: !cachedRewrite.hasPendingUpdates))
         }
 
         let rewriteImageHints = displayPurpose != .original
@@ -1142,20 +1162,34 @@ final class HTMLContentLoader {
         in html: String,
         currentHTML: String,
         messageId: String,
-        senderEmail: String?
+        senderEmail: String?,
+        scope: RemoteImageFallbackWarmupScope = .attachmentStyle
     ) {
         let remoteImageAttachmentFallback = self.remoteImageAttachmentFallback
         // Warm rewritten image data promptly so a near-immediate reopen can pick up the cached
         // result instead of waiting behind low-priority detached work.
         Task(priority: .userInitiated) {
-            _ = await remoteImageAttachmentFallback.inlineAttachmentStyleImages(
-                in: html,
-                senderEmail: senderEmail
-            )
-            let warmedRewrite = await remoteImageAttachmentFallback.cachedInlineAttachmentStyleImages(
-                in: html,
-                senderEmail: senderEmail
-            )
+            let warmedRewrite: HTMLRemoteImageAttachmentFallback.CachedRewriteResult
+            switch scope {
+            case .attachmentStyle:
+                _ = await remoteImageAttachmentFallback.inlineAttachmentStyleImages(
+                    in: html,
+                    senderEmail: senderEmail
+                )
+                warmedRewrite = await remoteImageAttachmentFallback.cachedInlineAttachmentStyleImages(
+                    in: html,
+                    senderEmail: senderEmail
+                )
+            case .riskyModernFormat:
+                _ = await remoteImageAttachmentFallback.inlineRiskyModernFormatImages(
+                    in: html,
+                    senderEmail: senderEmail
+                )
+                warmedRewrite = await remoteImageAttachmentFallback.cachedRiskyModernFormatImages(
+                    in: html,
+                    senderEmail: senderEmail
+                )
+            }
 
             if !warmedRewrite.hasPendingUpdates, warmedRewrite.html != currentHTML {
                 Log.debug(

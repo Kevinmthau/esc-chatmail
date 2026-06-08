@@ -80,11 +80,11 @@ struct HTMLURLSanitizer {
         return result
     }
 
-    /// Sanitizes only image/source-bearing `src` attributes.
-    func sanitizeImageSourceURLs(_ html: String, rewriteModernFormatQueryHints: Bool = true) -> String {
+    /// Sanitizes hrefs and image/source-bearing `src` attributes without broad CSS/tracking rewrites.
+    func sanitizeHrefAndImageSourceURLs(_ html: String, rewriteModernFormatQueryHints: Bool = true) -> String {
         var result = sanitizeURLAttributes(
             html,
-            sanitizeHrefs: false,
+            sanitizeHrefs: true,
             sanitizeSrcs: true,
             rewriteModernFormatQueryHints: rewriteModernFormatQueryHints
         )
@@ -111,7 +111,7 @@ struct HTMLURLSanitizer {
 
             if isHrefAttribute(attribute.lowercasedName) {
                 guard sanitizeHrefs else { return nil }
-                return isURLSafe(url) ? nil : (attribute.fullRange, "\(attribute.name)=\"#\"")
+                return isURLSafe(url) ? nil : (attribute.fullRange, "")
             }
 
             switch attribute.lowercasedName {

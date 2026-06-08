@@ -222,15 +222,16 @@ final class HTMLSanitizerServiceTests: XCTestCase {
         let html = "<a href=\"javascript:alert('xss')\">Click me</a>"
         let result = sut.sanitize(html)
         XCTAssertFalse(result.contains("javascript:"))
-        // Should replace with safe value
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
+        XCTAssertTrue(result.contains("Click me"))
     }
 
     func testSanitize_vbscriptURL_removes() {
         let html = "<a href=\"vbscript:MsgBox('xss')\">Click me</a>"
         let result = sut.sanitize(html)
         XCTAssertFalse(result.contains("vbscript:"))
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
+        XCTAssertTrue(result.contains("Click me"))
     }
 
     func testSanitize_javascriptSrcInImage_removes() {
@@ -634,35 +635,40 @@ final class HTMLSanitizerServiceTests: XCTestCase {
         let html = "<a href=\"java%73cript:alert('xss')\">Click</a>"
         let result = sut.sanitize(html)
         XCTAssertFalse(result.contains("java%73cript:"))
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
+        XCTAssertTrue(result.contains("Click"))
     }
 
     func testSanitize_htmlEntityEncodedJavascript_blocks() {
         // &#106;avascript: should be detected after decoding (&#106; = 'j')
         let html = "<a href=\"&#106;avascript:alert('xss')\">Click</a>"
         let result = sut.sanitize(html)
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
+        XCTAssertTrue(result.contains("Click"))
     }
 
     func testSanitize_hexEntityEncodedJavascript_blocks() {
         // &#x6A;avascript: should be detected after decoding (&#x6A; = 'j')
         let html = "<a href=\"&#x6A;avascript:alert('xss')\">Click</a>"
         let result = sut.sanitize(html)
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
+        XCTAssertTrue(result.contains("Click"))
     }
 
     func testSanitize_whitespaceInjectedProtocol_blocks() {
         // Tabs/newlines in protocol should be normalized
         let html = "<a href=\"java\tscript:alert('xss')\">Click</a>"
         let result = sut.sanitize(html)
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
+        XCTAssertTrue(result.contains("Click"))
     }
 
     func testSanitize_doubleEncodedJavascript_blocks() {
         // Double percent-encoding: %25 -> % after first decode
         let html = "<a href=\"java%2573cript:alert('xss')\">Click</a>"
         let result = sut.sanitize(html)
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
+        XCTAssertTrue(result.contains("Click"))
     }
 
     // MARK: - Security: Malicious CSS in Style Tags
