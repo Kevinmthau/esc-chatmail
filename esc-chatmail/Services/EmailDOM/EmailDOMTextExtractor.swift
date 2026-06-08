@@ -306,11 +306,3 @@ private extension Character {
         return self.isWhitespace
     }
 }
-
-private extension Element {
-    /// SwiftSoup's `tagName()` may return capitalized values for SVG / XML
-    /// elements; lowercasing once at the call site keeps comparisons cheap.
-    func tagNameNormal() -> String {
-        tagName().lowercased()
-    }
-}
