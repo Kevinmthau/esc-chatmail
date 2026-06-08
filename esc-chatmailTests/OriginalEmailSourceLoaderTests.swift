@@ -812,7 +812,7 @@ final class OriginalEmailSourceLoaderTests: XCTestCase {
         // HTML immediately and the open reuses it.
         let messageId = "warm-remote-image-\(UUID().uuidString)"
         let renderedCache = RenderedMessageCache()
-        let imageURL = "https://cdn.example.com/hero.webp?format=auto"
+        let imageURL = "https://cdn.example.com/hero.jpg"
         let html = remoteImageHTML(title: "Keeps remote image", imageURL: imageURL)
         let loader = makeLoader(renderedMessageCache: renderedCache)
         defer { contentHandler.deleteHTML(for: messageId) }

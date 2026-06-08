@@ -857,21 +857,21 @@ final class HTMLSanitizerServiceHTMLURLSanitizerTests: XCTestCase {
         let html = "<a href=\"javascript:alert('xss')\">Click</a>"
         let result = sut.sanitizeURLs(html)
         XCTAssertFalse(result.contains("javascript:"))
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
     }
 
     func testSanitizeURLs_unquotedJavascriptHref_replaces() {
         let html = "<a href=javascript:alert(1)>Click</a>"
         let result = sut.sanitizeURLs(html)
         XCTAssertFalse(result.contains("javascript:"))
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
     }
 
     func testSanitizeURLs_unquotedEncodedJavascriptHref_replaces() {
         let html = "<a href=java%73cript:alert(1)>Click</a>"
         let result = sut.sanitizeURLs(html)
         XCTAssertFalse(result.contains("java%73cript:"))
-        XCTAssertTrue(result.contains("href=\"#\""))
+        XCTAssertFalse(result.contains("href="))
     }
 
     func testSanitizeURLs_safeHref_preserves() {

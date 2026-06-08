@@ -619,7 +619,7 @@ final class EmailDOMHTMLSanitizerPipelineTests: XCTestCase {
 
         XCTAssertTrue(result.contains("Body"), file: file, line: line)
         XCTAssertTrue(result.contains("Styled body"), file: file, line: line)
-        XCTAssertTrue(result.contains("href=\"#\""), file: file, line: line)
+        XCTAssertFalse(lowercasedResult.contains("href="), file: file, line: line)
         XCTAssertTrue(
             result.contains("cid:image001.png@01D12345.67890ABC"),
             file: file,
