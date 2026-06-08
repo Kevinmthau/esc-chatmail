@@ -878,29 +878,6 @@ enum EmailDOMQuoteRemover {
             .replacingOccurrences(of: "\"", with: "&quot;")
     }
 
-    // MARK: - Footer containers (newsletter unsubscribe, social icons)
-
-    private static let footerSelectors: [String] = [
-        "div[class*=footer]",
-        "table[class*=footer]",
-        "div[id*=footer]",
-        "table[class*=social]",
-        "div[class*=social]",
-        "div[class*=unsubscribe]",
-        "p[class*=unsubscribe]",
-        "div[class*=sig]",
-        "table[class*=signature]"
-    ]
-
-    private static func removeFooterContainers(in document: Document) throws {
-        for selector in footerSelectors {
-            let elements = try document.select(selector)
-            for element in elements.array() {
-                try element.remove()
-            }
-        }
-    }
-
     // MARK: - Signature text markers
 
     private static let signatureTextMarkers: [NSRegularExpression] = {
@@ -1559,10 +1536,4 @@ enum EmailDOMQuoteRemover {
         }
     }
 
-}
-
-private extension Element {
-    func tagNameNormal() -> String {
-        tagName().lowercased()
-    }
 }
