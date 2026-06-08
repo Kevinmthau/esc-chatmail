@@ -24,7 +24,7 @@ final class CacheCoordinator {
     private var cancellables = Set<AnyCancellable>()
     private var isStarted = false
 
-    private struct CacheInvalidationPlan: Sendable {
+    struct CacheInvalidationPlan: Sendable {
         struct DeletedHTMLArtifact: Sendable, Hashable {
             let messageId: String
             let bodyStorageURI: String?
@@ -76,78 +76,106 @@ final class CacheCoordinator {
         guard !updatedObjectIDs.isEmpty || !deletedObjectIDs.isEmpty else { return }
 
         sourceContext.perform { [weak self] in
-            var localPlan = CacheInvalidationPlan()
-
-            // Access managed object values on the source context's queue to avoid cross-queue reads.
-            for objectID in updatedObjectIDs.union(deletedObjectIDs) {
-                let object = sourceContext.object(with: objectID)
-                if let conversation = object as? Conversation {
-                    // Deleted objects can fault/lose property values; use KVC defensively.
-                    if let id = conversation.value(forKey: "id") as? NSUUID {
-                        localPlan.conversationIdsToInvalidate.insert(id.uuidString)
-                    } else if let id = conversation.value(forKey: "id") as? UUID {
-                        localPlan.conversationIdsToInvalidate.insert(id.uuidString)
-                    } else {
-                        localPlan.shouldClearConversationCache = true
-                    }
-                    continue
-                }
-
-                if let person = object as? Person {
-                    if let email = person.value(forKey: "email") as? String, !email.isEmpty {
-                        localPlan.personEmailsToInvalidate.insert(email)
-                    } else {
-                        localPlan.shouldClearPersonCache = true
-                    }
-                    continue
-                }
-
-                if deletedObjectIDs.contains(objectID),
-                   let message = object as? Message,
-                   let messageId = message.value(forKey: "id") as? String,
-                   !messageId.isEmpty {
-                    localPlan.messageIdsToInvalidate.insert(messageId)
-                    localPlan.deletedHTMLArtifacts.insert(
-                        CacheInvalidationPlan.DeletedHTMLArtifact(
-                            messageId: messageId,
-                            bodyStorageURI: message.value(forKey: "bodyStorageURI") as? String
-                        )
-                    )
-
-                    if let attachments = message.value(forKey: "attachments") as? Set<NSManagedObject> {
-                        for attachment in attachments {
-                            if let localURL = attachment.value(forKey: "localURL") as? String, !localURL.isEmpty {
-                                localPlan.attachmentPathsToDelete.insert(localURL)
-                            }
-                            if let previewURL = attachment.value(forKey: "previewURL") as? String, !previewURL.isEmpty {
-                                localPlan.attachmentPathsToDelete.insert(previewURL)
-                            }
-                            if let attachmentId = attachment.value(forKey: "id") as? String, !attachmentId.isEmpty {
-                                localPlan.attachmentIdsToInvalidate.insert(attachmentId)
-                            }
-                        }
-                    }
-                    continue
-                }
-
-                if deletedObjectIDs.contains(objectID),
-                   let attachment = object as? Attachment {
-                    if let localURL = attachment.value(forKey: "localURL") as? String, !localURL.isEmpty {
-                        localPlan.attachmentPathsToDelete.insert(localURL)
-                    }
-                    if let previewURL = attachment.value(forKey: "previewURL") as? String, !previewURL.isEmpty {
-                        localPlan.attachmentPathsToDelete.insert(previewURL)
-                    }
-                    if let attachmentId = attachment.value(forKey: "id") as? String, !attachmentId.isEmpty {
-                        localPlan.attachmentIdsToInvalidate.insert(attachmentId)
-                    }
-                }
-            }
+            let localPlan = CacheCoordinator.computeInvalidationPlan(
+                updatedObjectIDs: updatedObjectIDs,
+                deletedObjectIDs: deletedObjectIDs,
+                in: sourceContext
+            )
 
             Task { @MainActor [weak self] in
                 self?.applyInvalidationPlan(localPlan)
             }
         }
+    }
+
+    /// Computes the cache-invalidation plan for a set of changed Core Data object IDs.
+    ///
+    /// Pure and side-effect-free: it inspects the changed managed objects and
+    /// decides which caches need invalidating, returning the decision as a
+    /// `CacheInvalidationPlan`. It performs no invalidation itself — that is the
+    /// job of `applyInvalidationPlan(_:)`.
+    ///
+    /// Declared `nonisolated` so it can run on the source context's queue (where
+    /// these managed objects are safe to read), and so the invalidation contract
+    /// can be unit-tested directly without driving the global
+    /// `NSManagedObjectContextDidSave` notification and async-apply path.
+    ///
+    /// - Note: Reads managed-object values via KVC defensively because deleted
+    ///   objects can fault and lose their property values.
+    nonisolated static func computeInvalidationPlan(
+        updatedObjectIDs: Set<NSManagedObjectID>,
+        deletedObjectIDs: Set<NSManagedObjectID>,
+        in context: NSManagedObjectContext
+    ) -> CacheInvalidationPlan {
+        var plan = CacheInvalidationPlan()
+
+        // Access managed object values on the context's queue to avoid cross-queue reads.
+        for objectID in updatedObjectIDs.union(deletedObjectIDs) {
+            let object = context.object(with: objectID)
+            if let conversation = object as? Conversation {
+                // Deleted objects can fault/lose property values; use KVC defensively.
+                if let id = conversation.value(forKey: "id") as? NSUUID {
+                    plan.conversationIdsToInvalidate.insert(id.uuidString)
+                } else if let id = conversation.value(forKey: "id") as? UUID {
+                    plan.conversationIdsToInvalidate.insert(id.uuidString)
+                } else {
+                    plan.shouldClearConversationCache = true
+                }
+                continue
+            }
+
+            if let person = object as? Person {
+                if let email = person.value(forKey: "email") as? String, !email.isEmpty {
+                    plan.personEmailsToInvalidate.insert(email)
+                } else {
+                    plan.shouldClearPersonCache = true
+                }
+                continue
+            }
+
+            if deletedObjectIDs.contains(objectID),
+               let message = object as? Message,
+               let messageId = message.value(forKey: "id") as? String,
+               !messageId.isEmpty {
+                plan.messageIdsToInvalidate.insert(messageId)
+                plan.deletedHTMLArtifacts.insert(
+                    CacheInvalidationPlan.DeletedHTMLArtifact(
+                        messageId: messageId,
+                        bodyStorageURI: message.value(forKey: "bodyStorageURI") as? String
+                    )
+                )
+
+                if let attachments = message.value(forKey: "attachments") as? Set<NSManagedObject> {
+                    for attachment in attachments {
+                        if let localURL = attachment.value(forKey: "localURL") as? String, !localURL.isEmpty {
+                            plan.attachmentPathsToDelete.insert(localURL)
+                        }
+                        if let previewURL = attachment.value(forKey: "previewURL") as? String, !previewURL.isEmpty {
+                            plan.attachmentPathsToDelete.insert(previewURL)
+                        }
+                        if let attachmentId = attachment.value(forKey: "id") as? String, !attachmentId.isEmpty {
+                            plan.attachmentIdsToInvalidate.insert(attachmentId)
+                        }
+                    }
+                }
+                continue
+            }
+
+            if deletedObjectIDs.contains(objectID),
+               let attachment = object as? Attachment {
+                if let localURL = attachment.value(forKey: "localURL") as? String, !localURL.isEmpty {
+                    plan.attachmentPathsToDelete.insert(localURL)
+                }
+                if let previewURL = attachment.value(forKey: "previewURL") as? String, !previewURL.isEmpty {
+                    plan.attachmentPathsToDelete.insert(previewURL)
+                }
+                if let attachmentId = attachment.value(forKey: "id") as? String, !attachmentId.isEmpty {
+                    plan.attachmentIdsToInvalidate.insert(attachmentId)
+                }
+            }
+        }
+
+        return plan
     }
 
     private func applyInvalidationPlan(_ plan: CacheInvalidationPlan) {
