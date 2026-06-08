@@ -69,46 +69,6 @@ enum EmailDOMQuoteRemover {
         }
     }
 
-    // MARK: - Containers (provider-specific)
-
-    /// CSS selectors for elements whose entire subtree should be removed
-    /// because they are the quoted history.
-    private static let quotedContainerSelectors: [String] = [
-        // Gmail
-        "div.gmail_quote",
-        "div.gmail_attr",
-        // Apple Mail
-        "blockquote[type=cite]",
-        "div.AppleMailSignature",
-        // Mozilla / Thunderbird
-        "div.moz-cite-prefix",
-        // Outlook desktop
-        "div.OutlookMessageHeader",
-        // Generic
-        "blockquote",
-        // HTML comment markers handled separately because SwiftSoup represents
-        // them as Comment nodes, not Elements.
-    ]
-
-    private static func removeQuotedContainers(in document: Document) throws {
-        // border-left styled divs are commonly used as quote blocks; match by
-        // attribute value substring rather than encoded inline style strings.
-        let borderLeftDivs = try document.select("div[style*=border-left]")
-        for element in borderLeftDivs.array() {
-            try element.remove()
-        }
-
-        for selector in quotedContainerSelectors {
-            let elements = try document.select(selector)
-            for element in elements.array() {
-                try element.remove()
-            }
-        }
-
-        // Remove `<!-- originalMessage --> … <!-- /originalMessage -->` pairs.
-        removeCommentDelimitedRegions(in: document, openHint: "originalmessage", closeHint: "/originalmessage")
-    }
-
     // MARK: - Structural boundaries (truncate from this node onward)
 
     private static let structuralQuoteSelectors: [String] = [
