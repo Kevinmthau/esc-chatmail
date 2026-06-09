@@ -83,7 +83,13 @@ struct NewsletterPreviewBuilder {
             sourceDomain: sourceDomain
         )
         let title = resolvedTitle(from: htmlSummary, subject: subject)
-        let lines = cleanedPreviewLines(
+        let lineAnalyzer = NewsletterLineAnalyzer(
+            lineProcessor: lineProcessor,
+            shouldSkipLine: shouldSkipLine,
+            lineLooksLikePreviewNoise: lineLooksLikePreviewNoise,
+            trimmingLeadingPreviewURLNoise: trimmingLeadingPreviewURLNoise
+        )
+        let lines = lineAnalyzer.cleanedLines(
             plainText: plainText,
             canonicalHTML: canonicalHTML,
             extractedText: extractedText
@@ -96,7 +102,7 @@ struct NewsletterPreviewBuilder {
         )
         let heroImageSelector = NewsletterHeroImageSelector(
             lineProcessor: lineProcessor,
-            previewLines: previewLines,
+            previewLines: lineAnalyzer.previewLines,
             shouldSkipLine: shouldSkipLine
         )
         let heroImage = heroImageSelector.bestCandidate(from: extractedImages)
@@ -205,130 +211,6 @@ struct NewsletterPreviewBuilder {
 
         let joined = collected.joined(separator: " ")
         return joined.isEmpty ? nil : lineProcessor.truncate(joined, limit: 190)
-    }
-
-    private func cleanedPreviewLines(
-        plainText: String?,
-        canonicalHTML: String,
-        extractedText: String? = nil
-    ) -> [String] {
-        let bodyLines = previewLines(from: plainText ?? "")
-        let htmlText = PreviewTextUtilities.normalizedPreviewText(extractedText)
-            ?? PreviewTextUtilities.normalizedText(TextProcessing.extractPlainText(from: canonicalHTML))
-        let htmlLines = previewLines(from: htmlText)
-
-        guard !bodyLines.isEmpty else {
-            return htmlLines
-        }
-
-        guard !htmlLines.isEmpty else {
-            return bodyLines
-        }
-
-        let bodyScore = previewQualityScore(for: bodyLines)
-        let htmlScore = previewQualityScore(for: htmlLines)
-        return htmlScore >= bodyScore + 8 ? htmlLines : bodyLines
-    }
-
-    private func previewLines(from rawText: String) -> [String] {
-        guard !rawText.isEmpty else { return [] }
-
-        let rawLines = rawText.components(separatedBy: .newlines)
-        var lines: [String] = []
-        var leadingURLFallbackLines: [String] = []
-
-        for line in rawLines {
-            let normalizedLine = PreviewTextUtilities.normalizedText(line)
-            guard !normalizedLine.isEmpty else {
-                continue
-            }
-
-            let lineWithoutLeadingURL = trimmingLeadingPreviewURLNoise(from: normalizedLine, requiringTrackingURL: true)
-            let usesLeadingURLFallback = lineWithoutLeadingURL != normalizedLine
-            let candidateLine = usesLeadingURLFallback ? lineWithoutLeadingURL : normalizedLine
-
-            guard !candidateLine.isEmpty else {
-                continue
-            }
-
-            if lineProcessor.shouldStopAtFooter(candidateLine), !lines.isEmpty || !leadingURLFallbackLines.isEmpty {
-                break
-            }
-
-            if shouldSkipLine(candidateLine) {
-                continue
-            }
-
-            if lines.contains(where: { PreviewTextUtilities.normalizedComparableText($0) == PreviewTextUtilities.normalizedComparableText(candidateLine) }) ||
-                leadingURLFallbackLines.contains(where: { PreviewTextUtilities.normalizedComparableText($0) == PreviewTextUtilities.normalizedComparableText(candidateLine) }) {
-                continue
-            }
-
-            if usesLeadingURLFallback {
-                leadingURLFallbackLines.append(candidateLine)
-            } else {
-                lines.append(candidateLine)
-            }
-
-            if lines.count >= 10 {
-                break
-            }
-        }
-
-        if lines.isEmpty {
-            return Array(leadingURLFallbackLines.prefix(10))
-        }
-
-        guard !leadingURLFallbackLines.isEmpty else {
-            return lines
-        }
-
-        if lines.count < 10 {
-            return lines + Array(leadingURLFallbackLines.prefix(10 - lines.count))
-        }
-
-        if lines.contains(where: { $0.count >= 30 }) {
-            return lines
-        }
-
-        return Array(lines.prefix(9)) + Array(leadingURLFallbackLines.prefix(1))
-    }
-
-    private func previewQualityScore(for lines: [String]) -> Int {
-        var score = 0
-
-        for line in lines.prefix(4) {
-            if lineLooksLikePreviewNoise(line) {
-                score -= 40
-                continue
-            }
-
-            if line.count >= 24 {
-                score += 12
-            } else if line.count >= 12 {
-                score += 7
-            } else {
-                score += 2
-            }
-
-            if line.contains(" ") {
-                score += 4
-            }
-
-            if line.range(of: "[.!?]$", options: .regularExpression) != nil {
-                score += 3
-            }
-        }
-
-        if lines.count >= 2 {
-            score += 10
-        }
-
-        if lines.count >= 3 {
-            score += 6
-        }
-
-        return score
     }
 
     private func normalizedPreviewSummary(
