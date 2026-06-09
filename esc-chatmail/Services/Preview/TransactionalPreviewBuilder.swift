@@ -211,7 +211,7 @@ struct TransactionalPreviewBuilder {
             return lineProcessor.truncate(cleanedSnippet, limit: 90)
         }
 
-        if let reservationSubtitle = resolvedReservationSubtitle(from: lines, excluding: excludedValues) {
+        if let reservationSubtitle = makeReservationExtractor().subtitle(from: lines, excluding: excludedValues) {
             return reservationSubtitle
         }
 
@@ -291,7 +291,7 @@ struct TransactionalPreviewBuilder {
             return lineProcessor.truncate(segments.prefix(2).joined(separator: " • "), limit: 90)
         }
 
-        if let reservationDetailLine = resolvedReservationDetailLine(from: lines) {
+        if let reservationDetailLine = makeReservationExtractor().detailLine(from: lines) {
             return reservationDetailLine
         }
 
@@ -711,137 +711,12 @@ struct TransactionalPreviewBuilder {
         return lowercased.range(of: #"^\d{1,2}/\d{1,2}/\d{2,4}$"#, options: .regularExpression) != nil
     }
 
-    private func resolvedReservationDetailLine(from lines: [String]) -> String? {
-        let combinedText = lines.joined(separator: "\n").lowercased()
-        guard combinedText.contains("reservation") else {
-            return nil
-        }
-
-        var dateLine: String?
-        var dateLineIndex: Int?
-        var partyLine: String?
-        var partyLineIndex: Int?
-
-        for (index, line) in lines.enumerated() {
-            let normalized = PreviewTextUtilities.normalizedText(line)
-            guard !normalized.isEmpty else {
-                continue
-            }
-
-            if dateLine == nil, looksLikeDate(normalized) {
-                dateLine = normalized
-                dateLineIndex = index
-            }
-
-            if partyLine == nil, let candidate = reservationPartySize(in: normalized) {
-                partyLine = candidate
-                partyLineIndex = index
-            }
-        }
-
-        var timeLine: String?
-        for (index, line) in lines.enumerated() {
-            let normalized = PreviewTextUtilities.normalizedText(line)
-            guard !normalized.isEmpty else {
-                continue
-            }
-
-            if timeLine == nil,
-               let candidate = reservationTime(in: normalized),
-               isReservationTimeLine(
-                index: index,
-                line: normalized,
-                dateLineIndex: dateLineIndex,
-                partyLineIndex: partyLineIndex
-               ) {
-                timeLine = candidate
-            }
-        }
-
-        let segments = [dateLine, partyLine, timeLine].compactMap { $0 }
-        guard !segments.isEmpty else {
-            return nil
-        }
-
-        return lineProcessor.truncate(segments.joined(separator: " • "), limit: 90)
-    }
-
-    private func resolvedReservationSubtitle(from lines: [String], excluding excludedValues: Set<String>) -> String? {
-        for line in lines {
-            guard let candidate = normalizedCandidateLine(line) else {
-                continue
-            }
-
-            let comparable = PreviewTextUtilities.normalizedComparableText(candidate)
-            let isReservationCancellation =
-                comparable.contains("reservation has been cancelled") ||
-                comparable.contains("reservation has been canceled")
-            guard !excludedValues.contains(comparable),
-                  isReservationCancellation else {
-                continue
-            }
-
-            return lineProcessor.truncate(candidate, limit: 90)
-        }
-
-        return nil
-    }
-
-    private func reservationPartySize(in line: String) -> String? {
-        guard let range = line.range(
-            of: #"\b\d+\s+(?:guest|guests|person|people)\b"#,
-            options: [.regularExpression, .caseInsensitive]
-        ) else {
-            return nil
-        }
-
-        return normalizedReservationPartyTimeLine(String(line[range]))
-    }
-
-    private func isReservationTimeLine(index: Int, line: String, dateLineIndex: Int?, partyLineIndex: Int?) -> Bool {
-        if index == dateLineIndex || index == partyLineIndex {
-            return true
-        }
-
-        guard isStandaloneReservationTime(line) || isLabelledReservationTime(line) else {
-            return false
-        }
-
-        return [dateLineIndex, partyLineIndex]
-            .compactMap { $0 }
-            .contains { abs($0 - index) == 1 }
-    }
-
-    private func isStandaloneReservationTime(_ line: String) -> Bool {
-        line.range(
-            of: #"^\d{1,2}:\d{2}\s*(?:AM|PM)$"#,
-            options: [.regularExpression, .caseInsensitive]
-        ) != nil
-    }
-
-    private func isLabelledReservationTime(_ line: String) -> Bool {
-        line.range(
-            of: #"^(?:reservation\s+)?time(?:\s*:\s*|\s+)\d{1,2}:\d{2}\s*(?:AM|PM)$"#,
-            options: [.regularExpression, .caseInsensitive]
-        ) != nil
-    }
-
-    private func reservationTime(in line: String) -> String? {
-        guard let range = line.range(
-            of: #"\b\d{1,2}:\d{2}\s*(?:AM|PM)\b"#,
-            options: [.regularExpression, .caseInsensitive]
-        ) else {
-            return nil
-        }
-
-        return normalizedReservationPartyTimeLine(String(line[range]))
-    }
-
-    private func normalizedReservationPartyTimeLine(_ line: String) -> String {
-        PreviewTextUtilities.normalizedText(line)
-            .replacingOccurrences(of: "⋅", with: " • ")
-            .replacingOccurrences(of: "·", with: " • ")
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+    private func makeReservationExtractor() -> ReservationPreviewExtractor {
+        ReservationPreviewExtractor(
+            lineProcessor: lineProcessor,
+            normalizeLine: self.normalizedCandidateLine,
+            isLikelyDate: self.looksLikeDate
+        )
     }
 
     private func isDetailFieldLabel(_ text: String) -> Bool {
