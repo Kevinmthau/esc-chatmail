@@ -28,54 +28,74 @@ is behavior-preserving and anchored by characterization tests.
 | EmailDOMQuoteRemover | #57–#63 | 7-part decomposition (input detection, footers/shared `tagNameNormal`, provider containers, tree-surgery keystone, text markers, structural boundaries, signatures) |
 | HTMLContentLoader | #64–#67 | 4-part decomposition (plain-text/HTML conversion, cache-key derivation, source preparation, `HTMLContentResultCache` type) |
 | MessageBubbleLoader | #68–#74 | 7-part decomposition (HTML-analysis builder, value types, analysis-cache type, legacy outgoing body fallback, forwarded content, HTML-analysis caching, compatibility content) |
+| TransactionalPreviewBuilder | (1–4/n) | 4-part decomposition — extracted four self-contained subsystems (see closeout below). 1519 → 835 lines (−45%). |
 
 ## Remaining targets (largest source files, excl. tests)
 
 | File | Lines | Shape | Disposition |
 |---|---|---|---|
-| `Services/Preview/TransactionalPreviewBuilder.swift` | 1519 | 1 type, 219 members, 0 MARK | **In progress** — decomposing (see below) |
 | `Services/Chat/FullEmailWebViewManager.swift` | 1452 | 17 types, 14 MARK | Already organized; lower priority |
 | `Services/ProcessedTextCache.swift` | 1259 | 5 types, 0 MARK | Legacy-compat cache; narrow/delete candidate (pending the data backfill noted in the phase-1 closeout) rather than decompose |
 | `Services/ParticipantLoader.swift` | 1104 | 4 types, 3 MARK | Candidate |
-| `Services/Preview/NewsletterPreviewBuilder.swift` | 1093 | 1 type, 0 MARK | Sibling builder — natural follow-on to TransactionalPreviewBuilder |
+| `Services/Preview/NewsletterPreviewBuilder.swift` | 1093 | 1 type, 0 MARK | Sibling builder — same 1-type/0-MARK god-struct shape; natural next target |
 
-## Current target: TransactionalPreviewBuilder
+## TransactionalPreviewBuilder — closeout
 
-A single struct (219 members, no internal structure) that bundles several
-self-contained subsystems. Decomposition plan, one concern per PR:
+Was a single 1519-line struct (219 members, no internal structure). Four
+cohesive, self-contained subsystems were extracted, one per PR, each
+behavior-preserving and verified against the existing characterization tests
+(17/17 pass after every step):
 
-1. **App Store / TestFlight notifications → `AppStoreNotificationPreviewExtractor`** *(in progress)*
-   — 15 functions detecting and extracting App Store Connect build-processing and
-   TestFlight availability emails (`appleDeveloperNotification` and helpers), plus
-   the `firstRegexCapture(s)` helpers and the `AppleDeveloperNotification` /
-   `TestFlightBuildInfo` value types. Injects `PreviewLineProcessor` (truncation)
-   and the shared `sanitizeTitle` / `normalizeLine` helpers.
-   Anchored by the existing `…AppStoreConnect…` / `…TestFlight…` tests plus a new
+1. **App Store / TestFlight notifications → `AppStoreNotificationPreviewExtractor`** (1/n)
+   — detection + metadata extraction for App Store Connect build-processing and
+   TestFlight availability emails, plus the `firstRegexCapture(s)` helpers and the
+   `AppleDeveloperNotification` / `TestFlightBuildInfo` value types. Added a
    non-Apple-sender negative test.
-2. **Reservation parsing → `ReservationPreviewExtractor`** — `resolvedReservation*`,
-   `reservationPartySize`, `isStandaloneReservationTime`, etc.
-3. **Line cleanup + quality scoring → `TransactionalLineAnalyzer`** —
-   `cleanedPreviewLines`, `previewLines`, `transactionalQualityScore`,
-   `detailFields`, `shouldSkipLine`, …
-4. **Image-candidate selection → `TransactionalImageSelector`** —
-   `bestImageCandidate`, `safeImageURL`, `TransactionalImageCandidate`.
-5. **Shared text normalization helpers** — `sanitizedTransactionTitle`,
-   `normalizedCandidateLine`, `isMeaningfulTitle`, `firstAmount`, … Finish,
-   leaving `TransactionalPreviewBuilder` a thin orchestrator. These are the
-   helpers injected in steps 1–4, so this step removes the injection seams.
+2. **Reservation parsing → `ReservationPreviewExtractor`** (2/n) — date/party/time
+   detail assembly and cancellation subtitles.
+3. **Image-candidate selection → `TransactionalImageSelector`** (3/n) —
+   `bestCandidate`, `safeImageURL`, `TransactionalImageCandidate`; owns its own
+   sanitizer/tracking-remover. Also removed the builder's now-unused
+   `urlSanitizer` / `trackingRemover` members.
+4. **Line preparation + quality scoring → `TransactionalLineAnalyzer`** (4/n) —
+   `cleanedLines`, `previewLines`, `transactionalQualityScore` (body-vs-HTML
+   source selection).
+
+Each extractor injects the few shared helpers it still needs (line truncation,
+`sanitizeTitle` / `normalizeLine` / `shouldSkipLine` / `transactionLine` /
+`firstAmount` / `isLikelyDate`) rather than duplicating them.
+
+### Not extracted: the shared text layer (deliberately deferred)
+
+The remaining ~16 text helpers (`sanitizedTransactionTitle`,
+`normalizedCandidateLine`, `normalizedStatus`, `isMeaningfulTitle`, `firstAmount`,
+`transactionLine`, `shouldSkipLine`, the `looksLike*` predicates,
+`restatesExcludedContent`, `detailFields`/`canonicalDetailField`/`isDetailFieldLabel`,
+`sourceLabel`) were **left in the builder**. Unlike the four subsystems above,
+they are not a separable concern: they form the builder's intrinsic
+text-understanding vocabulary, call each other densely, are used at ~40 sites
+across the core resolution methods, and share a web of pattern constants with
+both the core (`resolvedActionLabel`, the `lineProcessor` footer config) and the
+already-extracted image selector. Extracting them would relocate the builder's
+core behind an indirection at high call-site churn and regression risk for
+debatable gain. The builder at 835 lines is now a focused resolution
+orchestrator + its text vocabulary, which is a coherent unit. Revisit only if a
+second consumer genuinely needs this text layer.
 
 ## Validation
 
 The project builds/tests via the iOS simulator (requires Xcode, not just
-Command Line Tools):
+Command Line Tools). `-only-testing` takes `Target/TestClass` identifiers, NOT
+directory paths (e.g. `esc-chatmailTests/Preview` matches zero tests):
 
 ```bash
 ./Scripts/codex-build.sh
-./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/Preview'
+./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/TransactionalPreviewBuilderTests'
 ```
 
-For a single file slice during decomposition:
+If the simulator intermittently fails to launch the test runner
+("Application failed preflight checks"), reset and retry:
 
 ```bash
-./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/Preview/TransactionalPreviewBuilderTests'
+xcrun simctl shutdown all
 ```
