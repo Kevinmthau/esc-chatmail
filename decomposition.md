@@ -30,6 +30,7 @@ is behavior-preserving and anchored by characterization tests.
 | MessageBubbleLoader | #68–#74 | 7-part decomposition (HTML-analysis builder, value types, analysis-cache type, legacy outgoing body fallback, forwarded content, HTML-analysis caching, compatibility content) |
 | TransactionalPreviewBuilder | (1–4/n) | 4-part decomposition — extracted four self-contained subsystems (see closeout below). 1519 → 835 lines (−45%). |
 | NewsletterPreviewBuilder | (1–3/n) | 3-part decomposition — source-label resolver, hero-image selector, line analyzer (see closeout below). 1093 → 630 lines (−42%). |
+| ParticipantLoader | (1–4/n) | 4-part decomposition — dependency-tracker file split, rollup cache, Core Data extractor, info resolver (see closeout below). 1104 → 402 lines (−63%). |
 
 ## Remaining targets (largest source files, excl. tests)
 
@@ -37,7 +38,12 @@ is behavior-preserving and anchored by characterization tests.
 |---|---|---|---|
 | `Services/Chat/FullEmailWebViewManager.swift` | 1452 | 17 types, 14 MARK | Already organized; lower priority |
 | `Services/ProcessedTextCache.swift` | 1259 | 5 types, 0 MARK | Legacy-compat cache; narrow/delete candidate (pending the data backfill noted in the phase-1 closeout) rather than decompose |
-| `Services/ParticipantLoader.swift` | 1104 | 4 types, 3 MARK | Candidate — natural next target |
+
+No remaining 1-type/0-MARK god-objects: the clear decomposition targets are
+done. The two files above are deliberately out of scope (one already
+well-organized into 17 types/14 MARKs; one a delete/narrow candidate pending a
+data backfill). Revisit the campaign if a new large god-object appears or the
+backfill unblocks `ProcessedTextCache`.
 
 ## TransactionalPreviewBuilder — closeout
 
@@ -128,6 +134,46 @@ snippet-resolution hot path (`normalizedPreviewSummary`) — same intrinsic-voca
 situation deferred for TransactionalPreviewBuilder. Extracting it would inject
 four predicates to relocate the builder's core behind an indirection for
 debatable gain. Revisit only if a second consumer needs this layer.
+
+## ParticipantLoader — closeout
+
+Was a 1104-line file: a small self-contained dependency tracker plus a
+~1000-line `@MainActor` `ParticipantLoader` god-object mixing caching, Core Data
+parsing, contact/name/photo resolution, and load orchestration. Unlike the
+preview builders (stateless structs of pure text helpers), this is a stateful
+actor-isolated class with async methods and a wide external API, so the
+extractions inject collaborators and keep the public surface stable via thin
+delegators. Four units extracted, one per PR, each behavior-preserving and
+verified against the existing characterization tests (27 `ParticipantLoaderTests`
++ 3 `ConversationRowViewTests` green after every step):
+
+1. **Dependency tracker → `ParticipantRollupDependencyTracker.swift`** (1/n) —
+   pure file-split of the three already-independent top-level types (protocol,
+   fingerprint, tracker); also dropped the now-unused `import Contacts` from the
+   loader.
+2. **Rollup cache → `ParticipantRollupCache`** (2/n) — the cache key/token/entry
+   types, the dictionary, and the lookup/store/token-match/fingerprint-validate/
+   LRU-trim/photo-upgrade methods. `@MainActor` like the loader; injects the
+   dependency tracker + TTL/max-entries; the public `cachedParticipantInfo`
+   becomes a delegator and the photo upgrade is supplied as a closure.
+3. **Core Data extraction → `ConversationParticipantExtractor`** (3/n) — the four
+   `nonisolated static` readers (`extractNonMeParticipants`,
+   `participantDisplayNamesByEmail`, `headerDisplayNamesByEmail`,
+   `normalizedAliasSet`) as a plain enum; the two public `extractNonMeParticipants`
+   forwarders stay and delegate.
+4. **Resolution → `ParticipantInfoResolver`** (4/n) — `senderGroupingKeys`,
+   `resolveParticipants`, `resolveDisplayName`, `buildParticipantInfo`,
+   `upgradeParticipantInfoWithPhotos`, `prefetchNamesIfNeeded`, `loadPhotoSlots`.
+   `@MainActor`; owns the contacts/person/photo collaborators + the three
+   prefetch/cached-name/photo-loader overrides; the loader forwards them and
+   delegates its public resolution methods.
+
+The remaining 402-line `ParticipantLoader` is a focused orchestrator: the load
+flow (`loadParticipants` overloads, `fetchConversationParticipantSnapshot`,
+`buildAndCacheParticipantInfo`), current-user alias loading, the public
+`ParticipantInfo`/`ResolvedParticipant` value types (referenced widely by views,
+so kept in place), and thin delegators to the cache/extractor/resolver. The init
+keeps its full public signature and wires the three collaborators.
 
 ## Validation
 
