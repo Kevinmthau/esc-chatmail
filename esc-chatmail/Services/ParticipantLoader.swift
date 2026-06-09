@@ -15,36 +15,6 @@ final class ParticipantLoader {
         let participantHash: String?
     }
 
-    private struct ParticipantRollupCacheKey: Hashable {
-        let conversationObjectID: NSManagedObjectID
-        let currentUserEmail: String
-        let maxParticipants: Int
-    }
-
-    private struct ParticipantRollupCacheToken: Equatable {
-        let participantHash: String
-        let fallbackDisplayName: String?
-        let headerDisplayNamesByEmail: [String: String]?
-    }
-
-    private struct CachedParticipantRollup {
-        let token: ParticipantRollupCacheToken
-        let sourceEmails: [String]
-        let dependencyFingerprint: ParticipantRollupDependencyFingerprint
-        let baseInfo: ParticipantInfo
-        var photoInfo: ParticipantInfo?
-        let cachedAt: Date
-        var lastAccessedAt: Date
-
-        func isExpired(now: Date, ttl: TimeInterval) -> Bool {
-            now.timeIntervalSince(cachedAt) > ttl
-        }
-
-        func participantInfo(includePhotos: Bool) -> ParticipantInfo? {
-            includePhotos ? photoInfo : baseInfo
-        }
-    }
-
     private let personCache: PersonCache
     private let photoResolver: ProfilePhotoResolver
     private let contactsResolver: any ContactsResolving
@@ -52,10 +22,7 @@ final class ParticipantLoader {
     private let prefetchDisplayNames: (@Sendable ([String]) async -> Void)?
     private let cachedDisplayNameProvider: (@Sendable (String) async -> String?)?
     private let photoLoader: (@Sendable ([String]) async -> [ProfilePhoto])?
-    private let rollupDependencyTracker: any ParticipantRollupDependencyTracking
-    private let participantRollupCacheTTL: TimeInterval
-    private let maxParticipantRollupCacheEntries: Int
-    private var participantRollupCache: [ParticipantRollupCacheKey: CachedParticipantRollup] = [:]
+    private let rollupCache: ParticipantRollupCache
 
     init(
         personCache: PersonCache = .shared,
@@ -76,9 +43,11 @@ final class ParticipantLoader {
         self.prefetchDisplayNames = prefetchDisplayNames
         self.cachedDisplayNameProvider = cachedDisplayNameProvider
         self.photoLoader = photoLoader
-        self.rollupDependencyTracker = rollupDependencyTracker
-        self.participantRollupCacheTTL = participantRollupCacheTTL
-        self.maxParticipantRollupCacheEntries = maxParticipantRollupCacheEntries
+        self.rollupCache = ParticipantRollupCache(
+            rollupDependencyTracker: rollupDependencyTracker,
+            participantRollupCacheTTL: participantRollupCacheTTL,
+            maxParticipantRollupCacheEntries: maxParticipantRollupCacheEntries
+        )
     }
 
     // MARK: - Public Types
@@ -128,25 +97,14 @@ final class ParticipantLoader {
         headerDisplayNamesByEmail: [String: String]? = nil,
         evictOnTokenMismatch: Bool = false
     ) -> ParticipantInfo? {
-        guard let token = makeCacheToken(
-            participantHash: participantHash,
-            sourceEmails: nil,
-            fallbackDisplayName: fallbackDisplayName,
-            headerDisplayNamesByEmail: headerDisplayNamesByEmail
-        ) else {
-            return nil
-        }
-
-        let cacheKey = makeCacheKey(
+        rollupCache.cachedParticipantInfo(
             conversationObjectID: conversationObjectID,
+            participantHash: participantHash,
             currentUserEmail: currentUserEmail,
-            maxParticipants: maxParticipants
-        )
-
-        return cachedParticipantInfo(
-            for: cacheKey,
-            token: token,
+            maxParticipants: maxParticipants,
+            fallbackDisplayName: fallbackDisplayName,
             includePhotos: includePhotos,
+            headerDisplayNamesByEmail: headerDisplayNamesByEmail,
             evictOnTokenMismatch: evictOnTokenMismatch
         )
     }
@@ -241,13 +199,14 @@ final class ParticipantLoader {
         }
 
         if includePhotos,
-           let upgradedCachedInfo = await upgradeCachedBaseParticipantInfoWithPhotos(
+           let upgradedCachedInfo = await rollupCache.upgradeCachedBaseParticipantInfoWithPhotos(
                 conversationObjectID: conversationObjectID,
                 participantHash: participantHash,
                 currentUserEmail: currentUserEmail,
                 maxParticipants: maxParticipants,
                 fallbackDisplayName: fallbackDisplayName,
-                headerDisplayNamesByEmail: [:]
+                headerDisplayNamesByEmail: [:],
+                upgrade: upgradeParticipantInfoWithPhotos
            ) {
             return upgradedCachedInfo
         }
@@ -275,14 +234,15 @@ final class ParticipantLoader {
         }
 
         if includePhotos,
-           let upgradedCachedInfo = await upgradeCachedBaseParticipantInfoWithPhotos(
+           let upgradedCachedInfo = await rollupCache.upgradeCachedBaseParticipantInfoWithPhotos(
                 conversationObjectID: conversationObjectID,
                 participantHash: effectiveParticipantHash,
                 currentUserEmail: currentUserEmail,
                 maxParticipants: maxParticipants,
                 fallbackDisplayName: snapshot.fallbackDisplayName,
                 headerDisplayNamesByEmail: snapshot.headerDisplayNamesByEmail,
-                evictOnTokenMismatch: true
+                evictOnTokenMismatch: true,
+                upgrade: upgradeParticipantInfoWithPhotos
            ) {
             return upgradedCachedInfo
         }
@@ -537,7 +497,7 @@ final class ParticipantLoader {
             fullInfo = nil
         }
 
-        cacheParticipantInfo(
+        rollupCache.cacheParticipantInfo(
             conversationObjectID: conversationObjectID,
             participantHash: participantHash,
             currentUserEmail: currentUserEmail,
@@ -689,256 +649,6 @@ final class ParticipantLoader {
             avatarDisplayNames: baseInfo.avatarDisplayNames,
             avatarPhotos: avatarPhotos
         )
-    }
-
-    private func cachedParticipantInfo(
-        for cacheKey: ParticipantRollupCacheKey,
-        token: ParticipantRollupCacheToken,
-        includePhotos: Bool,
-        evictOnTokenMismatch: Bool
-    ) -> ParticipantInfo? {
-        cachedParticipantRollup(
-            for: cacheKey,
-            token: token,
-            evictOnTokenMismatch: evictOnTokenMismatch
-        )?.participantInfo(includePhotos: includePhotos)
-    }
-
-    private func cachedParticipantRollup(
-        for cacheKey: ParticipantRollupCacheKey,
-        token: ParticipantRollupCacheToken,
-        evictOnTokenMismatch: Bool
-    ) -> CachedParticipantRollup? {
-        guard var entry = participantRollupCache[cacheKey] else {
-            return nil
-        }
-
-        let now = Date()
-        guard !entry.isExpired(now: now, ttl: participantRollupCacheTTL) else {
-            participantRollupCache.removeValue(forKey: cacheKey)
-            return nil
-        }
-
-        guard cacheTokensMatch(entry.token, requestToken: token) else {
-            if evictOnTokenMismatch {
-                participantRollupCache.removeValue(forKey: cacheKey)
-            }
-            return nil
-        }
-
-        let currentFingerprint = rollupDependencyTracker.fingerprint(for: entry.sourceEmails)
-        guard currentFingerprint == entry.dependencyFingerprint else {
-            participantRollupCache.removeValue(forKey: cacheKey)
-            return nil
-        }
-
-        entry.lastAccessedAt = now
-        participantRollupCache[cacheKey] = entry
-        return entry
-    }
-
-    private func upgradeCachedBaseParticipantInfoWithPhotos(
-        conversationObjectID: NSManagedObjectID,
-        participantHash: String?,
-        currentUserEmail: String,
-        maxParticipants: Int,
-        fallbackDisplayName: String?,
-        headerDisplayNamesByEmail: [String: String]? = nil,
-        evictOnTokenMismatch: Bool = false
-    ) async -> ParticipantInfo? {
-        guard let token = makeCacheToken(
-            participantHash: participantHash,
-            sourceEmails: nil,
-            fallbackDisplayName: fallbackDisplayName,
-            headerDisplayNamesByEmail: headerDisplayNamesByEmail
-        ) else {
-            return nil
-        }
-
-        let cacheKey = makeCacheKey(
-            conversationObjectID: conversationObjectID,
-            currentUserEmail: currentUserEmail,
-            maxParticipants: maxParticipants
-        )
-
-        guard let cachedRollup = cachedParticipantRollup(
-            for: cacheKey,
-            token: token,
-            evictOnTokenMismatch: evictOnTokenMismatch
-        ) else {
-            return nil
-        }
-
-        if let photoInfo = cachedRollup.photoInfo {
-            return photoInfo
-        }
-
-        let upgradedInfo = await upgradeParticipantInfoWithPhotos(cachedRollup.baseInfo)
-        let now = Date()
-
-        participantRollupCache[cacheKey] = CachedParticipantRollup(
-            token: cachedRollup.token,
-            sourceEmails: cachedRollup.sourceEmails,
-            dependencyFingerprint: cachedRollup.dependencyFingerprint,
-            baseInfo: cachedRollup.baseInfo,
-            photoInfo: cacheablePhotoInfo(from: upgradedInfo),
-            cachedAt: cachedRollup.cachedAt,
-            lastAccessedAt: now
-        )
-
-        return upgradedInfo
-    }
-
-    private func cacheParticipantInfo(
-        conversationObjectID: NSManagedObjectID,
-        participantHash: String?,
-        currentUserEmail: String,
-        maxParticipants: Int,
-        fallbackDisplayName: String?,
-        sourceEmails: [String],
-        headerDisplayNamesByEmail: [String: String] = [:],
-        baseInfo: ParticipantInfo,
-        fullInfo: ParticipantInfo?
-    ) {
-        guard let token = makeCacheToken(
-            participantHash: participantHash,
-            sourceEmails: sourceEmails,
-            fallbackDisplayName: fallbackDisplayName,
-            headerDisplayNamesByEmail: headerDisplayNamesByEmail
-        ) else {
-            return
-        }
-
-        let cacheKey = makeCacheKey(
-            conversationObjectID: conversationObjectID,
-            currentUserEmail: currentUserEmail,
-            maxParticipants: maxParticipants
-        )
-        let now = Date()
-
-        participantRollupCache[cacheKey] = CachedParticipantRollup(
-            token: token,
-            sourceEmails: sourceEmails,
-            dependencyFingerprint: rollupDependencyTracker.fingerprint(for: sourceEmails),
-            baseInfo: baseInfo,
-            photoInfo: cacheablePhotoInfo(from: fullInfo),
-            cachedAt: now,
-            lastAccessedAt: now
-        )
-
-        trimParticipantRollupCacheIfNeeded()
-    }
-
-    private func makeCacheKey(
-        conversationObjectID: NSManagedObjectID,
-        currentUserEmail: String,
-        maxParticipants: Int
-    ) -> ParticipantRollupCacheKey {
-        ParticipantRollupCacheKey(
-            conversationObjectID: conversationObjectID,
-            currentUserEmail: EmailNormalizer.normalize(currentUserEmail),
-            maxParticipants: maxParticipants
-        )
-    }
-
-    private func makeCacheToken(
-        participantHash: String?,
-        sourceEmails: [String]?,
-        fallbackDisplayName: String?,
-        headerDisplayNamesByEmail: [String: String]? = nil
-    ) -> ParticipantRollupCacheToken? {
-        let trimmedParticipantHash = participantHash?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let effectiveParticipantHash: String?
-
-        if let trimmedParticipantHash, !trimmedParticipantHash.isEmpty {
-            effectiveParticipantHash = trimmedParticipantHash
-        } else if let sourceEmails {
-            let normalizedEmails = sourceEmails
-                .map(EmailNormalizer.normalize)
-                .filter { !$0.isEmpty }
-            effectiveParticipantHash = calculateParticipantHash(from: normalizedEmails)
-        } else {
-            effectiveParticipantHash = nil
-        }
-
-        guard let effectiveParticipantHash, !effectiveParticipantHash.isEmpty else {
-            return nil
-        }
-
-        return ParticipantRollupCacheToken(
-            participantHash: effectiveParticipantHash,
-            fallbackDisplayName: fallbackDisplayName,
-            headerDisplayNamesByEmail: headerDisplayNamesByEmail.map(Self.cacheHeaderDisplayNamesByEmail)
-        )
-    }
-
-    private func cacheTokensMatch(
-        _ cachedToken: ParticipantRollupCacheToken,
-        requestToken: ParticipantRollupCacheToken
-    ) -> Bool {
-        guard cachedToken.participantHash == requestToken.participantHash,
-              cachedToken.fallbackDisplayName == requestToken.fallbackDisplayName else {
-            return false
-        }
-
-        guard let requestHeaderDisplayNames = requestToken.headerDisplayNamesByEmail else {
-            return true
-        }
-
-        return cachedToken.headerDisplayNamesByEmail == requestHeaderDisplayNames
-    }
-
-    private static func cacheHeaderDisplayNamesByEmail(_ displayNamesByEmail: [String: String]) -> [String: String] {
-        var result: [String: String] = [:]
-
-        for (email, displayName) in displayNamesByEmail {
-            let normalizedEmail = EmailNormalizer.normalize(email)
-            guard !normalizedEmail.isEmpty,
-                  let sanitizedDisplayName = PersonDisplayNameResolver.sanitizedExplicitDisplayName(
-                    displayName,
-                    forEmail: normalizedEmail
-                  ) else {
-                continue
-            }
-
-            if EmailNormalizer.isBetterDisplayName(
-                sanitizedDisplayName,
-                than: result[normalizedEmail],
-                forEmail: normalizedEmail
-            ) {
-                result[normalizedEmail] = sanitizedDisplayName
-            }
-        }
-
-        return result
-    }
-
-    private func cacheablePhotoInfo(from participantInfo: ParticipantInfo?) -> ParticipantInfo? {
-        guard let participantInfo else {
-            return nil
-        }
-
-        // Keep raw avatar bytes in ProfilePhotoResolver's bounded cache, not this rollup dictionary.
-        guard participantInfo.photos.allSatisfy({ $0.imageData == nil }) else {
-            return nil
-        }
-
-        return participantInfo
-    }
-
-    private func trimParticipantRollupCacheIfNeeded() {
-        guard participantRollupCache.count > maxParticipantRollupCacheEntries else {
-            return
-        }
-
-        let entriesByAge = participantRollupCache.sorted { lhs, rhs in
-            lhs.value.lastAccessedAt < rhs.value.lastAccessedAt
-        }
-        let overflowCount = participantRollupCache.count - maxParticipantRollupCacheEntries
-
-        for (cacheKey, _) in entriesByAge.prefix(overflowCount) {
-            participantRollupCache.removeValue(forKey: cacheKey)
-        }
     }
 
     private func prefetchNamesIfNeeded(for emails: [String]) async {
