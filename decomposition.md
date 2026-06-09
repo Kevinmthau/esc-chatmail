@@ -29,6 +29,7 @@ is behavior-preserving and anchored by characterization tests.
 | HTMLContentLoader | #64–#67 | 4-part decomposition (plain-text/HTML conversion, cache-key derivation, source preparation, `HTMLContentResultCache` type) |
 | MessageBubbleLoader | #68–#74 | 7-part decomposition (HTML-analysis builder, value types, analysis-cache type, legacy outgoing body fallback, forwarded content, HTML-analysis caching, compatibility content) |
 | TransactionalPreviewBuilder | (1–4/n) | 4-part decomposition — extracted four self-contained subsystems (see closeout below). 1519 → 835 lines (−45%). |
+| NewsletterPreviewBuilder | (1–3/n) | 3-part decomposition — source-label resolver, hero-image selector, line analyzer (see closeout below). 1093 → 630 lines (−42%). |
 
 ## Remaining targets (largest source files, excl. tests)
 
@@ -36,8 +37,7 @@ is behavior-preserving and anchored by characterization tests.
 |---|---|---|---|
 | `Services/Chat/FullEmailWebViewManager.swift` | 1452 | 17 types, 14 MARK | Already organized; lower priority |
 | `Services/ProcessedTextCache.swift` | 1259 | 5 types, 0 MARK | Legacy-compat cache; narrow/delete candidate (pending the data backfill noted in the phase-1 closeout) rather than decompose |
-| `Services/ParticipantLoader.swift` | 1104 | 4 types, 3 MARK | Candidate |
-| `Services/Preview/NewsletterPreviewBuilder.swift` | 1093 | 1 type, 0 MARK | Sibling builder — same 1-type/0-MARK god-struct shape; natural next target |
+| `Services/ParticipantLoader.swift` | 1104 | 4 types, 3 MARK | Candidate — natural next target |
 
 ## TransactionalPreviewBuilder — closeout
 
@@ -81,6 +81,53 @@ core behind an indirection at high call-site churn and regression risk for
 debatable gain. The builder at 835 lines is now a focused resolution
 orchestrator + its text vocabulary, which is a coherent unit. Revisit only if a
 second consumer genuinely needs this text layer.
+
+## NewsletterPreviewBuilder — closeout
+
+Was a single 1093-line struct (1 type, no internal structure) — the sibling
+god-struct to TransactionalPreviewBuilder. Three cohesive, self-contained
+subsystems were extracted, one per PR, each behavior-preserving and verified
+against the existing characterization tests (29/29 pass after every step):
+
+1. **Source-label resolution → `NewsletterSourceLabelResolver`** (1/n) —
+   `sourceLabel` + `normalizedSenderName` + the `ignoredSourceSubdomains` list
+   (publisher name from sender display name, else a capitalized primary domain
+   segment). Injects only the shared `PreviewLineProcessor` for truncation.
+2. **Hero-image selection → `NewsletterHeroImageSelector`** (2/n) —
+   `bestCandidate`, `safeHeroImageURL`, `heroImageDisplayMode`, the sizing/hint
+   predicates, image-context scoring + followup-line predicates, the
+   `HeroImageCandidate` type, and the four hero-hint lists. Owns its
+   sanitizer/tracking-remover; injects `previewLines` + `shouldSkipLine` +
+   `PreviewLineProcessor`. Also removed the builder's now-unused
+   `urlSanitizer` / `trackingRemover` members.
+3. **Line preparation + quality scoring → `NewsletterLineAnalyzer`** (3/n) —
+   `cleanedLines`, `previewLines`, `previewQualityScore` (body-vs-HTML source
+   selection). Exposes `previewLines` so the hero selector sources its line
+   preparation from the analyzer rather than the builder.
+
+(2/n and 3/n are direct parallels to `TransactionalImageSelector` /
+`TransactionalLineAnalyzer`; there is no Newsletter analog to the Transactional
+App Store / reservation extractors, so this builder yields three extractions
+rather than four.)
+
+### Not extracted: the shared text + URL-noise layer (deliberately deferred)
+
+The remaining builder (630 lines) is the resolution orchestrator (`buildPreview`,
+`resolvedTitle`, `resolvedSubtitle`, `resolvedSnippet`, `normalizedPreviewSummary`)
+plus its intrinsic text vocabulary — `shouldSkipLine`, `lineLooksLikePreviewNoise`,
+`looksLikeShortTitleCluster`, `startsWithPreviewURLNoise`, `looksLikeNavigationLabelRun`,
+`previewWordTokens`, `isMeaningfulTitle`, the boundary trimmers, and the
+leading-URL / tracking-classification cluster (`trimmingLeadingPreviewURLNoise`,
+`leadingPreviewURLMatch`, `isTrackingLikePreviewURL`, `isUTMTrackingLikePreviewURL`,
+`postURLTextLooksLikePreviewTeaser`) with their pattern constants. The
+URL-noise cluster looks separable but isn't cleanly: its orchestrator
+`postURLTextLooksLikePreviewTeaser` is woven into the text vocabulary
+(`shouldSkipLine` / `looksLikeNavigationLabelRun` / `previewWordTokens` /
+footer detection) and `trimmingLeadingPreviewURLNoise` sits on the
+snippet-resolution hot path (`normalizedPreviewSummary`) — same intrinsic-vocabulary
+situation deferred for TransactionalPreviewBuilder. Extracting it would inject
+four predicates to relocate the builder's core behind an indirection for
+debatable gain. Revisit only if a second consumer needs this layer.
 
 ## Validation
 
