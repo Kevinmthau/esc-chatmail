@@ -45,6 +45,61 @@ func withSoftTimeout<T: Sendable>(
     }
 }
 
+/// Awaits `work` for up to `seconds`. If the deadline fires first, returns `nil`
+/// immediately **and cancels** the `work` task.
+///
+/// This is the *hard* counterpart to `withSoftTimeout`. Use it on user-facing
+/// paths where an operation must not run unbounded — e.g. a network recovery the
+/// user is actively waiting on. It makes two guarantees:
+///
+/// 1. The caller is always unblocked within `seconds` (plus scheduling jitter),
+///    regardless of whether `work` honors cancellation — the result is delivered
+///    through a single-fire gate that the laggard task can no longer settle.
+/// 2. On timeout, `work` is cancelled, so cooperative work is actually torn down
+///    instead of leaking. In particular `URLSession.data(for:)` throws on Task
+///    cancellation, so an in-flight request is cancelled rather than left running.
+///    Work that ignores cancellation still finishes in the background, but its
+///    result is discarded.
+///
+/// Prefer `withSoftTimeout` when the underlying work warms a shared cache and the
+/// next caller should be able to reuse the in-flight result; prefer `withDeadline`
+/// when re-attaching to stalled work would strand the caller (the canonical case
+/// is `HTMLContentRecoveryService`'s Gmail fetch, whose in-flight dedup would
+/// otherwise make every retry wait on the same hung request).
+func withDeadline<T: Sendable>(
+    seconds: TimeInterval,
+    work: @escaping @Sendable () async -> T
+) async -> T? {
+    let timeoutNanoseconds = seconds * 1_000_000_000
+    // A non-finite or overflowing deadline (e.g. `.greatestFiniteMagnitude`) can't
+    // be represented as `UInt64` nanoseconds — `UInt64(.infinity)` traps at
+    // runtime. Treat any deadline that doesn't fit as "no deadline" and just await.
+    guard timeoutNanoseconds.isFinite, timeoutNanoseconds < Double(UInt64.max) else {
+        return await work()
+    }
+    let sleepNanoseconds = UInt64(max(0, timeoutNanoseconds))
+
+    // Hoisted out of the continuation so the timeout branch can cancel it.
+    let workTask = Task { await work() }
+
+    return await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
+        let gate = SingleFireContinuationGate<T?>(continuation)
+
+        Task {
+            let value = await workTask.value
+            gate.resume(returning: value)
+        }
+
+        Task {
+            try? await Task.sleep(nanoseconds: sleepNanoseconds)
+            gate.resume(returning: nil)
+            // No-op if `work` already won the race; otherwise propagates
+            // cancellation into the abandoned work (e.g. a URLSession request).
+            workTask.cancel()
+        }
+    }
+}
+
 /// Awaits `task.value`, but returns `cancellationValue` promptly if the *calling*
 /// task is cancelled first — without cancelling `task`, which keeps running to
 /// warm shared caches (the same soft semantics as `withSoftTimeout`). A plain

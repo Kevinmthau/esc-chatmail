@@ -61,6 +61,62 @@ final class AsyncTimeoutTests: XCTestCase {
         XCTAssertTrue(completed, "soft timeout must NOT cancel the underlying work")
     }
 
+    func testWithDeadline_returnsWorkResultWhenWorkFinishesFirst() async {
+        let result = await withDeadline(seconds: 1.0) {
+            try? await Task.sleep(nanoseconds: 10_000_000) // 10 ms
+            return 42
+        }
+
+        XCTAssertEqual(result, 42)
+    }
+
+    func testWithDeadline_returnsNilWhenDeadlineFiresFirst() async {
+        let start = Date()
+        let result = await withDeadline(seconds: 0.1) {
+            // Sleep far longer than the deadline to guarantee the timer wins.
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            return "should not surface"
+        }
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertNil(result)
+        // Caller must unblock within the deadline budget (plus headroom for CI
+        // scheduling jitter), and crucially must NOT wait for the 5s sleep.
+        XCTAssertLessThan(elapsed, 1.5)
+    }
+
+    func testWithDeadline_cancelsWorkAfterDeadline() async {
+        // The hard counterpart to the soft-timeout test above: when the deadline
+        // fires, the work task must be cancelled rather than left running.
+        actor Flag {
+            private(set) var didCompleteWork = false
+            private(set) var didObserveCancellation = false
+            func markCompleted() { didCompleteWork = true }
+            func markCancelled() { didObserveCancellation = true }
+        }
+        let flag = Flag()
+
+        let result = await withDeadline(seconds: 0.05) {
+            do {
+                try await Task.sleep(nanoseconds: 500_000_000) // 500 ms — longer than the deadline
+            } catch {
+                await flag.markCancelled()
+                return "cancelled"
+            }
+            await flag.markCompleted()
+            return "done"
+        }
+
+        XCTAssertNil(result, "caller should have given up at the deadline")
+
+        // Give the (now-cancelled) work task time to observe cancellation.
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        let didComplete = await flag.didCompleteWork
+        let didObserveCancellation = await flag.didObserveCancellation
+        XCTAssertFalse(didComplete, "hard deadline must cancel the underlying work")
+        XCTAssertTrue(didObserveCancellation, "the work task should observe cancellation at the deadline")
+    }
+
     private func droppedSoftTimeoutPayload() async -> WeakBox<TimeoutPayload> {
         let box = WeakBox<TimeoutPayload>()
         var payload: TimeoutPayload? = await withSoftTimeout(seconds: 2.0) {

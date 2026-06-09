@@ -29,26 +29,33 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
     private var recoveryTasks: [String: Task<RecoveryAttemptResult, Never>] = [:]
     private var noHTMLMisses: [String: Date] = [:]
     private let noHTMLMissCacheTTL: TimeInterval
+    /// Hard upper bound on a single Gmail recovery fetch. A slow or hung fetch is
+    /// abandoned past this (and its in-flight URLSession request cancelled), so a
+    /// user-facing open can't be stranded and a later retry starts fresh.
+    private let recoveryNetworkTimeout: TimeInterval
 
     init(
         gmailAPIClientProvider: @escaping @Sendable () async -> any GmailAPIClientProtocol = {
             await MainActor.run { GmailAPIClient.shared }
         },
         contentHandler: HTMLContentHandler = .shared,
-        noHTMLMissCacheTTL: TimeInterval = 300
+        noHTMLMissCacheTTL: TimeInterval = 300,
+        // Generous enough that a legitimately slow recovery (large body part over a
+        // poor mobile network) still completes, while still bounding a hung fetch.
+        recoveryNetworkTimeout: TimeInterval = 30
     ) {
         self.gmailAPIClientProvider = gmailAPIClientProvider
         self.contentHandler = contentHandler
         self.noHTMLMissCacheTTL = noHTMLMissCacheTTL
+        self.recoveryNetworkTimeout = recoveryNetworkTimeout
     }
 
     /// Recovers HTML content for a message by fetching from Gmail API.
     /// Returns the HTML content if successful, nil otherwise.
     ///
-    /// This call can take arbitrarily long if the Gmail API is slow: the
-    /// `await task.value` below ignores cooperative cancellation. Callers that
-    /// surface this to UI should either wrap this in a `withSoftTimeout` or show
-    /// a non-terminal recovery state while the underlying work completes.
+    /// The fetch is hard-bounded by `recoveryNetworkTimeout` (see `performRecovery`),
+    /// so this call returns within that deadline even if the Gmail API stalls.
+    /// Concurrent callers for the same message still share a single in-flight fetch.
     func recoverHTMLContent(messageId: String) async -> String? {
         guard !isCachedNoHTMLMiss(messageId) else {
             return nil
@@ -68,7 +75,29 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
         return resolvedHTML(from: result, messageId: messageId)
     }
 
+    /// Hard-bounds the recovery fetch. On timeout the in-flight fetch is cancelled
+    /// and we return `.failed` — which is *not* cached as a no-HTML miss, so the
+    /// next attempt re-fetches instead of re-attaching to abandoned work.
     private func performRecovery(messageId: String) async -> RecoveryAttemptResult {
+        let result = await withDeadline(seconds: recoveryNetworkTimeout) { [self] in
+            await performRecoveryToCompletion(messageId: messageId)
+        }
+
+        guard let result else {
+            OriginalEmailTelemetry.log(
+                event: "original_email_raw_fetch_failed",
+                messageId: messageId,
+                source: "provider_fetch",
+                detail: "provider=gmail format=full failure_reason=recovery_timed_out_\(Int(recoveryNetworkTimeout.rounded()))s"
+            )
+            Log.warning("Recovery for message \(messageId) timed out after \(Int(recoveryNetworkTimeout.rounded()))s", category: .ui)
+            return .failed
+        }
+
+        return result
+    }
+
+    private func performRecoveryToCompletion(messageId: String) async -> RecoveryAttemptResult {
         let fetchStart = CFAbsoluteTimeGetCurrent()
         OriginalEmailTelemetry.log(
             event: "original_email_raw_fetch_started",
@@ -188,6 +217,12 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
             Log.info("Recovered HTML content for message \(messageId)", category: .ui)
             return .html(html)
         } catch {
+            // Cancellation means the recovery deadline elapsed (or the caller went
+            // away). `performRecovery` already logs the timeout, so don't double-count
+            // it here as a Gmail fetch failure.
+            if Task.isCancelled {
+                return .failed
+            }
             let errorCode = redactedErrorCode(error)
             OriginalEmailTelemetry.log(
                 event: "original_email_raw_fetch_failed",

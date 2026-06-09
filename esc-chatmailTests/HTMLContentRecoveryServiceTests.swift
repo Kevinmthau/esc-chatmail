@@ -531,6 +531,54 @@ final class HTMLContentRecoveryServiceTests: XCTestCase {
         XCTAssertEqual(mockAPIClient.getMessageCallCount, 1)
     }
 
+    func testRecoverHTMLContent_timesOutSlowFetchThenAllowsFreshRetry() async {
+        let messageId = "html-recovery-timeout-\(UUID().uuidString)"
+        let attachmentId = "html-body-\(UUID().uuidString)"
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <h1>RECOVERY_TIMEOUT_TOKEN</h1>
+          <p>Recovered after the network recovers.</p>
+        </body>
+        </html>
+        """
+
+        let mockAPIClient = MockGmailAPIClient()
+        // Far longer than the recovery deadline below, so the first fetch is abandoned.
+        mockAPIClient.artificialDelay = 5.0
+        mockAPIClient.getMessageResponses[messageId] = makeHTMLAttachmentMessage(
+            id: messageId,
+            attachmentId: attachmentId
+        )
+        mockAPIClient.attachmentResponses["\(messageId):\(attachmentId)"] = Data(html.utf8)
+
+        let contentHandler = HTMLContentHandler()
+        defer { contentHandler.deleteHTML(for: messageId) }
+
+        let service = HTMLContentRecoveryService(
+            gmailAPIClientProvider: { mockAPIClient },
+            contentHandler: contentHandler,
+            recoveryNetworkTimeout: 0.2
+        )
+
+        let start = Date()
+        let timedOut = await service.recoverHTMLContent(messageId: messageId)
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertNil(timedOut, "a fetch slower than the deadline must surface as a failure, not hang")
+        XCTAssertLessThan(elapsed, 2.0, "the caller must unblock at the deadline, not wait for the slow fetch")
+
+        // A timeout is not cached as a no-HTML miss, so a retry is a genuinely fresh
+        // attempt. With the delay removed, recovery now succeeds and re-fetches
+        // rather than re-attaching to the abandoned request.
+        mockAPIClient.artificialDelay = 0
+        let recovered = await service.recoverHTMLContent(messageId: messageId)
+
+        XCTAssertEqual(recovered, html)
+        XCTAssertEqual(mockAPIClient.getMessageCallCount, 2)
+    }
+
     private func makeHTMLAttachmentMessage(id: String, attachmentId: String) -> GmailMessage {
         let plainText = "Fallback plain text body"
 
