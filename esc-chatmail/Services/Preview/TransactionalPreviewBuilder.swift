@@ -77,7 +77,13 @@ struct TransactionalPreviewBuilder {
             senderEmail: senderEmail,
             sourceDomain: sourceDomain
         )
-        let lines = cleanedPreviewLines(
+        let lineAnalyzer = TransactionalLineAnalyzer(
+            lineProcessor: lineProcessor,
+            shouldSkipLine: self.shouldSkipLine,
+            transactionLine: self.transactionLine,
+            firstAmount: self.firstAmount
+        )
+        let lines = lineAnalyzer.cleanedLines(
             plainText: plainText,
             canonicalHTML: canonicalHTML,
             extractedText: extractedText
@@ -337,95 +343,6 @@ struct TransactionalPreviewBuilder {
         }
 
         return nil
-    }
-
-    private func cleanedPreviewLines(
-        plainText: String?,
-        canonicalHTML: String,
-        extractedText: String? = nil
-    ) -> [String] {
-        let bodyLines = previewLines(from: plainText ?? "")
-        let htmlText = PreviewTextUtilities.normalizedPreviewText(extractedText)
-            ?? PreviewTextUtilities.normalizedText(TextProcessing.extractPlainText(from: canonicalHTML))
-        let htmlLines = previewLines(from: htmlText)
-
-        guard !bodyLines.isEmpty else {
-            return htmlLines
-        }
-
-        guard !htmlLines.isEmpty else {
-            return bodyLines
-        }
-
-        let bodyScore = transactionalQualityScore(for: bodyLines)
-        let htmlScore = transactionalQualityScore(for: htmlLines)
-        return htmlScore >= bodyScore + 4 ? htmlLines : bodyLines
-    }
-
-    private func previewLines(from rawText: String) -> [String] {
-        guard !rawText.isEmpty else { return [] }
-
-        let rawLines = rawText.components(separatedBy: .newlines)
-        var lines: [String] = []
-
-        for line in rawLines {
-            let normalizedLine = PreviewTextUtilities.normalizedText(line)
-            guard !normalizedLine.isEmpty else {
-                continue
-            }
-
-            if lineProcessor.shouldStopAtFooter(normalizedLine), !lines.isEmpty {
-                break
-            }
-
-            if shouldSkipLine(normalizedLine) {
-                continue
-            }
-
-            let comparable = PreviewTextUtilities.normalizedComparableText(normalizedLine)
-            if lines.contains(where: { PreviewTextUtilities.normalizedComparableText($0) == comparable }) {
-                continue
-            }
-
-            lines.append(normalizedLine)
-
-            if lines.count >= 28 {
-                break
-            }
-        }
-
-        return lines
-    }
-
-    private func transactionalQualityScore(for lines: [String]) -> Int {
-        var score = 0
-        let joined = lines.joined(separator: "\n").lowercased()
-
-        if firstAmount(in: joined) != nil {
-            score += 24
-        }
-
-        if transactionLine(from: lines, excluding: []) != nil {
-            score += 22
-        }
-
-        if joined.contains("status") {
-            score += 8
-        }
-
-        if joined.contains("date") {
-            score += 8
-        }
-
-        if joined.contains("transaction details") || joined.contains("order details") {
-            score += 8
-        }
-
-        if lines.count >= 4 {
-            score += 6
-        }
-
-        return score
     }
 
     private func detailFields(from lines: [String]) -> [String: String] {
