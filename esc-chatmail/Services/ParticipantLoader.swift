@@ -152,7 +152,7 @@ final class ParticipantLoader {
                 participantHash: conversation.participantHash,
                 currentUserEmail: currentUserEmail,
                 emails: participants,
-                storedDisplayNamesByEmail: Self.participantDisplayNamesByEmail(from: conversation),
+                storedDisplayNamesByEmail: ConversationParticipantExtractor.participantDisplayNamesByEmail(from: conversation),
                 fallbackDisplayName: conversation.displayName,
                 maxParticipants: maxParticipants,
                 includePhotos: includePhotos
@@ -352,7 +352,7 @@ final class ParticipantLoader {
         from conversation: Conversation,
         currentUserEmail: String
     ) -> [String] {
-        Self.extractNonMeParticipants(
+        ConversationParticipantExtractor.extractNonMeParticipants(
             from: conversation,
             currentUserEmail: currentUserEmail,
             currentUserAliases: [currentUserEmail]
@@ -365,68 +365,11 @@ final class ParticipantLoader {
         currentUserEmail: String,
         currentUserAliases: Set<String>
     ) -> [String] {
-        Self.extractNonMeParticipants(
+        ConversationParticipantExtractor.extractNonMeParticipants(
             from: conversation,
             currentUserEmail: currentUserEmail,
             currentUserAliases: currentUserAliases
         )
-    }
-
-    nonisolated
-    private static func extractNonMeParticipants(
-        from conversation: Conversation,
-        currentUserEmail: String,
-        currentUserAliases: Set<String>
-    ) -> [String] {
-        guard let participants = conversation.participants else { return [] }
-
-        var normalizedSelfAliases = normalizedAliasSet(from: currentUserAliases)
-        let normalizedMyEmail = EmailNormalizer.normalize(currentUserEmail)
-        if !normalizedMyEmail.isEmpty {
-            normalizedSelfAliases.insert(normalizedMyEmail)
-        }
-
-        var seenEmails = Set<String>()
-        var result: [String] = []
-
-        for participant in participants {
-            guard let person = participant.person else { continue }
-            if EmailNormalizer.isHideMyEmailDisplayName(person.displayName) {
-                continue
-            }
-
-            let email = person.email
-            let normalized = EmailNormalizer.normalize(email)
-
-            guard !normalized.isEmpty,
-                  !normalizedSelfAliases.contains(normalized),
-                  !seenEmails.contains(normalized) else { continue }
-
-            seenEmails.insert(normalized)
-            result.append(email)
-        }
-
-        return result
-    }
-
-    nonisolated
-    private static func participantDisplayNamesByEmail(from conversation: Conversation) -> [String: String] {
-        guard let participants = conversation.participants else { return [:] }
-
-        var displayNames: [String: String] = [:]
-        for participant in participants {
-            guard let person = participant.person else { continue }
-            let normalizedEmail = EmailNormalizer.normalize(person.email)
-            guard !normalizedEmail.isEmpty,
-                  let displayName = person.displayName,
-                  !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                continue
-            }
-
-            displayNames[normalizedEmail] = displayName
-        }
-
-        return displayNames
     }
 
     // MARK: - Private Helpers
@@ -450,7 +393,7 @@ final class ParticipantLoader {
                 )
             }
 
-            let emails = Self.extractNonMeParticipants(
+            let emails = ConversationParticipantExtractor.extractNonMeParticipants(
                 from: conversation,
                 currentUserEmail: currentUserEmail,
                 currentUserAliases: currentUserAliases
@@ -458,8 +401,8 @@ final class ParticipantLoader {
 
             return ConversationParticipantSnapshot(
                 emails: emails,
-                storedDisplayNamesByEmail: Self.participantDisplayNamesByEmail(from: conversation),
-                headerDisplayNamesByEmail: Self.headerDisplayNamesByEmail(
+                storedDisplayNamesByEmail: ConversationParticipantExtractor.participantDisplayNamesByEmail(from: conversation),
+                headerDisplayNamesByEmail: ConversationParticipantExtractor.headerDisplayNamesByEmail(
                     in: context,
                     conversation: conversation,
                     participantEmails: emails
@@ -516,11 +459,11 @@ final class ParticipantLoader {
         currentUserEmail: String,
         context: NSManagedObjectContext?
     ) async -> Set<String> {
-        var aliases = Self.normalizedAliasSet(from: [currentUserEmail])
+        var aliases = ConversationParticipantExtractor.normalizedAliasSet(from: [currentUserEmail])
 
         if let currentUserAliasesProvider {
             aliases.formUnion(
-                Self.normalizedAliasSet(
+                ConversationParticipantExtractor.normalizedAliasSet(
                     from: await currentUserAliasesProvider(context, currentUserEmail)
                 )
             )
@@ -531,15 +474,6 @@ final class ParticipantLoader {
         }
 
         return aliases
-    }
-
-    nonisolated
-    private static func normalizedAliasSet(from aliases: some Sequence<String>) -> Set<String> {
-        Set(
-            aliases
-                .map(EmailNormalizer.normalize)
-                .filter { !$0.isEmpty }
-        )
     }
 
     private func buildParticipantInfo(
@@ -579,61 +513,6 @@ final class ParticipantLoader {
             avatarDisplayNames: avatarDisplayNames,
             avatarPhotos: avatarPhotos
         )
-    }
-
-    nonisolated
-    private static func headerDisplayNamesByEmail(
-        in context: NSManagedObjectContext,
-        conversation: Conversation,
-        participantEmails: [String]
-    ) -> [String: String] {
-        let participantEmailSet = Set(
-            participantEmails
-                .map(EmailNormalizer.normalize)
-                .filter { !$0.isEmpty }
-        )
-        guard !participantEmailSet.isEmpty else { return [:] }
-
-        let request = NSFetchRequest<NSDictionary>(entityName: "Message")
-        request.resultType = .dictionaryResultType
-        request.propertiesToFetch = ["senderEmail", "senderName"]
-        request.returnsDistinctResults = true
-        request.predicate = NSPredicate(
-            format: "conversation == %@ AND senderEmail != nil AND senderName != nil",
-            conversation
-        )
-        request.fetchBatchSize = 50
-
-        let rows: [NSDictionary]
-        do {
-            rows = try context.fetch(request)
-        } catch {
-            Log.error("Failed to fetch message header display names", category: .coreData, error: error)
-            return [:]
-        }
-
-        var displayNames: [String: String] = [:]
-        for row in rows {
-            guard let senderEmail = row["senderEmail"] as? String else { continue }
-            let normalizedEmail = EmailNormalizer.normalize(senderEmail)
-            guard participantEmailSet.contains(normalizedEmail),
-                  let displayName = PersonDisplayNameResolver.sanitizedExplicitDisplayName(
-                    row["senderName"] as? String,
-                    forEmail: normalizedEmail
-                  ) else {
-                continue
-            }
-
-            if EmailNormalizer.isBetterDisplayName(
-                displayName,
-                than: displayNames[normalizedEmail],
-                forEmail: normalizedEmail
-            ) {
-                displayNames[normalizedEmail] = displayName
-            }
-        }
-
-        return displayNames
     }
 
     private func upgradeParticipantInfoWithPhotos(_ baseInfo: ParticipantInfo) async -> ParticipantInfo {
