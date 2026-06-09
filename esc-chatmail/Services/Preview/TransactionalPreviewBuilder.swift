@@ -2,8 +2,6 @@ import Foundation
 
 struct TransactionalPreviewBuilder {
     private let imageExtractor = EmailPreviewImageExtractor()
-    private let urlSanitizer = HTMLURLSanitizer()
-    private let trackingRemover = HTMLTrackingRemover()
     private let lineProcessor = PreviewLineProcessor(
         config: PreviewLineProcessorConfig(
             footerStopPatterns: transactionalFooterStopPatterns,
@@ -127,7 +125,11 @@ struct TransactionalPreviewBuilder {
             )
             : nil
         let actionLabel = resolvedActionLabel(from: htmlSummary)
-        let image = bestImageCandidate(from: extractedImages)
+        let imageSelector = TransactionalImageSelector(
+            promotionalPatterns: transactionalPromotionalPatterns,
+            blockedImageHints: blockedTransactionalImageHints
+        )
+        let image = imageSelector.bestCandidate(from: extractedImages)
 
         guard title != nil || amount != nil || subtitle != nil || detailLine != nil else {
             return nil
@@ -490,118 +492,6 @@ struct TransactionalPreviewBuilder {
         return lowercased.contains("payment") && firstAmount(in: line) != nil
     }
 
-    private func bestImageCandidate(from images: [EmailPreviewImage]) -> TransactionalImageCandidate? {
-        var bestCandidate: TransactionalImageCandidate?
-
-        for image in images.prefix(12) {
-            let width = image.width
-            let height = image.height
-            let descriptor = image.descriptor
-
-            guard let safeURL = safeImageURL(
-                from: image.sourceURL,
-                descriptor: descriptor,
-                width: width,
-                height: height
-            ) else {
-                continue
-            }
-
-            let lowercasedURL = safeURL.lowercased()
-            let aspectRatio = PreviewTextUtilities.aspectRatio(width: width, height: height)
-            let looksSquare = aspectRatio.map { $0 >= 0.8 && $0 <= 1.25 } ?? false
-            let impliesAvatar =
-                descriptor.contains("profile") ||
-                descriptor.contains("avatar") ||
-                lowercasedURL.contains("pics-v") ||
-                lowercasedURL.contains("profile") ||
-                lowercasedURL.contains("avatar")
-            let isAvatarLike =
-                (looksSquare &&
-                 min(width ?? 0, height ?? 0) >= 40 &&
-                 max(width ?? 0, height ?? 0) <= 160) ||
-                (impliesAvatar &&
-                 width.map { $0 > 36 } != false &&
-                 height.map { $0 > 36 } != false)
-
-            var score = 0
-
-            if isAvatarLike {
-                score += 28
-            }
-
-            if descriptor.contains("profile") || descriptor.contains("avatar") {
-                score += 22
-            }
-
-            if descriptor.contains(" image") {
-                score += 14
-            }
-
-            if lowercasedURL.contains("pics") || lowercasedURL.contains("profile") || lowercasedURL.contains("avatar") {
-                score += 16
-            }
-
-            if let aspectRatio, aspectRatio > 1.8 {
-                score -= 26
-            }
-
-            if descriptor.contains("logo") || descriptor.contains("wordmark") {
-                score -= 20
-            }
-
-            if let width, width < 36 {
-                score -= 16
-            }
-
-            if let height, height < 36 {
-                score -= 16
-            }
-
-            let style: TransactionalPreviewImageStyle
-            if isAvatarLike || impliesAvatar {
-                style = .avatar
-            } else if looksSquare {
-                style = .card
-                score += 6
-            } else {
-                continue
-            }
-
-            guard score >= 20 else {
-                continue
-            }
-
-            let candidate = TransactionalImageCandidate(url: safeURL, style: style, score: score)
-            if bestCandidate == nil || score > (bestCandidate?.score ?? Int.min) {
-                bestCandidate = candidate
-            }
-        }
-
-        return bestCandidate
-    }
-
-    private func safeImageURL(from rawURL: String, descriptor: String, width: Int?, height: Int?) -> String? {
-        let normalizedURL = PreviewTextUtilities.normalizedText(rawURL)
-        let lowercasedURL = normalizedURL.lowercased()
-
-        guard PreviewTextUtilities.isRenderableRemoteImageURL(normalizedURL),
-              urlSanitizer.isURLSafe(normalizedURL),
-              !trackingRemover.isTrackingLikeImageURL(normalizedURL),
-              !transactionalPromotionalPatterns.contains(where: descriptor.contains),
-              !transactionalPromotionalPatterns.contains(where: lowercasedURL.contains),
-              !blockedTransactionalImageHints.contains(where: descriptor.contains),
-              !blockedTransactionalImageHints.contains(where: lowercasedURL.contains) else {
-            return nil
-        }
-
-        if let width, let height, (width <= 8 || height <= 8) {
-            return nil
-        }
-
-        return EmailPreviewRemoteImageURL.normalizedForNativePreview(normalizedURL)
-    }
-
     private func firstAmount(in text: String?) -> String? {
         guard let text = text, !text.isEmpty else {
             return nil
@@ -878,12 +768,6 @@ struct TransactionalPreviewBuilder {
         ) != nil
     }
 
-}
-
-private struct TransactionalImageCandidate {
-    let url: String
-    let style: TransactionalPreviewImageStyle
-    let score: Int
 }
 
 private let transactionalTitlePatterns = [
