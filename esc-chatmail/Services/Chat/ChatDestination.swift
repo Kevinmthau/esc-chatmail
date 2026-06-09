@@ -40,27 +40,8 @@ struct EmailReaderRoute: Hashable, Identifiable {
     }
 }
 
-enum EmailReaderMode: String, Hashable, CaseIterable {
-    case readable
+enum EmailReaderMode: String, Hashable {
     case original
-
-    var displayName: String {
-        switch self {
-        case .readable:
-            return "Readable"
-        case .original:
-            return "Original"
-        }
-    }
-
-    var systemImage: String {
-        switch self {
-        case .readable:
-            return "text.alignleft"
-        case .original:
-            return "doc.richtext"
-        }
-    }
 }
 
 enum EmailReaderOpenSource: String, Hashable {

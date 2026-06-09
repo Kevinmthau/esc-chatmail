@@ -3,31 +3,14 @@ import UIKit
 
 struct FullEmailReaderView: View {
     @ObservedObject var session: FullEmailOpenSession
-    let mode: EmailReaderMode
-    let availableModes: [EmailReaderMode]
-    let onModeSelected: (EmailReaderMode) -> Void
-    let onReply: (() -> Void)?
-    let onForward: (() -> Void)?
     /// The already-rendered chat preview snapshot, shown instantly until the live WebView confirms paint.
     @State private var snapshotPlaceholder: UIImage?
     /// Set once the live WebView reports paint-confirmed readiness, cross-fading the snapshot away.
     @State private var webViewPainted = false
     @State private var loadedContentSignature: String?
 
-    init(
-        session: FullEmailOpenSession,
-        mode: EmailReaderMode = .original,
-        availableModes: [EmailReaderMode] = [.original],
-        onModeSelected: @escaping (EmailReaderMode) -> Void = { _ in },
-        onReply: (() -> Void)? = nil,
-        onForward: (() -> Void)? = nil
-    ) {
+    init(session: FullEmailOpenSession) {
         self.session = session
-        self.mode = mode
-        self.availableModes = availableModes
-        self.onModeSelected = onModeSelected
-        self.onReply = onReply
-        self.onForward = onForward
     }
 
     var body: some View {

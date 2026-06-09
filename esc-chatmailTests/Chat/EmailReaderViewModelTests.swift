@@ -78,33 +78,6 @@ final class EmailReaderViewModelTests: XCTestCase {
         XCTAssertNil(opener.prewarmedMessages.first?.width)
     }
 
-    func testReadableInitialModeFallsBackToOriginalUntilReadableReaderIsAvailable() {
-        let conversation = makeConversation()
-        let message = makeMessage(
-            id: "message-readable",
-            subject: "Readable",
-            conversation: conversation
-        )
-        let opener = MockEmailReaderViewModelFullEmailOpener(preparedArtifact: nil)
-        let route = EmailReaderRoute(
-            messageObjectID: message.objectID,
-            conversationObjectID: conversation.objectID,
-            source: .debugOrFallback,
-            initialMode: .readable
-        )
-
-        let viewModel = EmailReaderViewModel(
-            route: route,
-            viewContext: context,
-            fullEmailReaderCoordinator: FullEmailReaderCoordinator(
-                fullEmailOpener: opener
-            )
-        )
-
-        XCTAssertEqual(viewModel.mode, .original)
-        XCTAssertEqual(viewModel.availableModes, [.original])
-    }
-
     private func makeViewModel(
         message: Message,
         conversation: Conversation,

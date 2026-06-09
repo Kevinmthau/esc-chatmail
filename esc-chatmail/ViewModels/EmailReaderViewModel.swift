@@ -7,9 +7,6 @@ final class EmailReaderViewModel: ObservableObject {
 
     @Published private(set) var session: FullEmailOpenSession?
     @Published private(set) var errorMessage: String?
-    @Published private(set) var mode: EmailReaderMode
-
-    let availableModes: [EmailReaderMode] = [.original]
 
     private let viewContext: NSManagedObjectContext
     private let fullEmailReaderCoordinator: FullEmailReaderCoordinator
@@ -23,7 +20,6 @@ final class EmailReaderViewModel: ObservableObject {
         self.fullEmailReaderCoordinator = FullEmailReaderCoordinator(
             fullEmailOpener: chatDependencies.fullEmailOpener
         )
-        self.mode = Self.resolvedInitialMode(route.initialMode)
         resolveRoute()
     }
 
@@ -35,15 +31,7 @@ final class EmailReaderViewModel: ObservableObject {
         self.route = route
         self.viewContext = viewContext
         self.fullEmailReaderCoordinator = fullEmailReaderCoordinator
-        self.mode = Self.resolvedInitialMode(route.initialMode)
         resolveRoute()
-    }
-
-    func selectMode(_ mode: EmailReaderMode) {
-        guard availableModes.contains(mode) else {
-            return
-        }
-        self.mode = mode
     }
 
     func retryResolveRoute() {
@@ -74,14 +62,5 @@ final class EmailReaderViewModel: ObservableObject {
         }
 
         return resolved
-    }
-
-    private static func resolvedInitialMode(_ mode: EmailReaderMode) -> EmailReaderMode {
-        switch mode {
-        case .readable:
-            return .original
-        case .original:
-            return .original
-        }
     }
 }

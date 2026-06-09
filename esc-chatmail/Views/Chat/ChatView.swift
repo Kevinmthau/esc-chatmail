@@ -215,14 +215,7 @@ struct ChatView: View {
         case .emailReader(let route):
             EmailReaderView(
                 route: route,
-                chatDependencies: chatDependencies,
-                onReply: {
-                    viewModel.setReplyingTo(messageObjectID: route.messageObjectID)
-                    viewModel.dismissDestination()
-                },
-                onForward: {
-                    viewModel.setMessageToForward(messageObjectID: route.messageObjectID)
-                }
+                chatDependencies: chatDependencies
             )
         case .forwardCompose(let context):
             makeForwardComposeView(context)
