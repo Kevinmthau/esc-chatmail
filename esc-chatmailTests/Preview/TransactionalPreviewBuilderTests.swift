@@ -121,6 +121,40 @@ final class TransactionalPreviewBuilderTests: XCTestCase {
         XCTAssertFalse(result?.subtitle?.localizedCaseInsensitiveContains("dear") == true)
     }
 
+    func testBuildPreview_doesNotTreatAppStoreContentFromNonAppleSenderAsDeveloperNotification() {
+        // Identical App Store Connect-shaped content as the positive case, but
+        // from a sender that is not an Apple domain. The isAppleSender gate must
+        // keep this out of the Apple developer-notification path, so neither of
+        // that path's signature outputs — the "App Store Connect" source label or
+        // the "App • Version • Build" metadata subtitle — may appear.
+        let subject = "App Store Connect: Version 1.0 (37) for Stickys has completed processing."
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <table><tr><td>App Store Connect</td></tr></table>
+            <table><tr><td>Version 1.0 (37) for Stickys has completed processing.</td></tr></table>
+            <table>
+                <tr><td>App Name:</td><td>Stickys</td></tr>
+                <tr><td>Version Number:</td><td>1.0</td></tr>
+                <tr><td>Build Number:</td><td>37</td></tr>
+            </table>
+        </body>
+        </html>
+        """
+
+        let result = sut.buildPreview(
+            canonicalHTML: html,
+            bodyText: nil,
+            senderName: "Spoofed Sender",
+            senderEmail: "no_reply@notifications.example.com",
+            subject: subject
+        )
+
+        XCTAssertNotEqual(result?.sourceLabel, "App Store Connect")
+        XCTAssertNotEqual(result?.subtitle, "Stickys • Version 1.0 • Build 37")
+    }
+
     func testBuildPreview_extractsAppStoreConnectBetaApprovalMetadata() {
         let subject = "Stickys (ios) has been approved for beta testing."
         let html = """
