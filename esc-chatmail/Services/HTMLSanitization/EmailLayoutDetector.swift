@@ -148,6 +148,39 @@ enum EmailLayoutDetector {
             .max()
     }
 
+    private static let styleBlockRegex = try? NSRegularExpression(
+        // An unclosed `<style>` captures to end-of-input (browsers treat the remainder as CSS),
+        // matching the previous full-document scan for that malformed case.
+        pattern: #"<style\b[^>]*>([\s\S]*?)(?:</style>|$)"#,
+        options: [.caseInsensitive]
+    )
+
+    /// Concatenated contents of the document's `<style>` blocks.
+    ///
+    /// CSS rules (`selector { … }`) only ever live inside stylesheets, so the rule scanners below
+    /// run against this compact, brace-dense CSS rather than the full HTML body. Scanning the whole
+    /// body made the `([^{}@]+)\{…` prelude regexes backtrack catastrophically — a single brace-free
+    /// ~55KB body is O(n²) to scan — which made a full-original-email open take 20s–2.5min on large
+    /// newsletters. Selector resolution is unchanged because `CSSParser.cssSelectorText` already
+    /// strips any leading `<style …>` tag from a captured prelude, so a prelude taken from extracted
+    /// CSS yields the same cleaned selector it did from full HTML.
+    private static func stylesheetCSS(in html: String) -> String {
+        guard let regex = styleBlockRegex else {
+            return ""
+        }
+
+        let range = NSRange(html.startIndex..<html.endIndex, in: html)
+        var css = ""
+        for match in regex.matches(in: html, range: range) {
+            guard let bodyRange = Range(match.range(at: 1), in: html) else {
+                continue
+            }
+            css += html[bodyRange]
+            css += "\n"
+        }
+        return css
+    }
+
     private static func tableMaxWidthCSSSelectorTargets(
         in html: String,
         fixedWidth: Int?
@@ -162,16 +195,17 @@ enum EmailLayoutDetector {
         let selectorElements = HTMLSelectorMatcher.htmlSelectorElements(in: html)
         let elementTargets = selectorElements.map(\.target)
         let fluidWidthTableTargets = fluidWidthTableTargets(in: html)
-        let range = NSRange(html.startIndex..<html.endIndex, in: html)
-        return regex.matches(in: html, range: range).flatMap { match -> [(width: Int, target: LayoutSelectorTarget)] in
-            guard let selectorsRange = Range(match.range(at: 1), in: html),
-                  let valueRange = Range(match.range(at: 2), in: html),
-                  let width = validLayoutWidth(String(html[valueRange])),
+        let css = Self.stylesheetCSS(in: html)
+        let range = NSRange(css.startIndex..<css.endIndex, in: css)
+        return regex.matches(in: css, range: range).flatMap { match -> [(width: Int, target: LayoutSelectorTarget)] in
+            guard let selectorsRange = Range(match.range(at: 1), in: css),
+                  let valueRange = Range(match.range(at: 2), in: css),
+                  let width = validLayoutWidth(String(css[valueRange])),
                   fixedWidth == nil || fixedWidth == width else {
                 return []
             }
 
-            return String(html[selectorsRange]).split(separator: ",").compactMap { selector -> (width: Int, target: LayoutSelectorTarget)? in
+            return String(css[selectorsRange]).split(separator: ",").compactMap { selector -> (width: Int, target: LayoutSelectorTarget)? in
                 let selector = CSSParser.cssSelectorText(from: String(selector))
                 guard let target = tableSelectorTarget(
                     for: selector,
@@ -331,13 +365,14 @@ enum EmailLayoutDetector {
 
         let selectorElements = HTMLSelectorMatcher.htmlSelectorElements(in: html)
         let elementTargets = selectorElements.map(\.target)
-        let range = NSRange(html.startIndex..<html.endIndex, in: html)
-        return regex.matches(in: html, range: range).flatMap { match -> [LayoutSelectorTarget] in
-            guard let selectorsRange = Range(match.range(at: 1), in: html) else {
+        let css = Self.stylesheetCSS(in: html)
+        let range = NSRange(css.startIndex..<css.endIndex, in: css)
+        return regex.matches(in: css, range: range).flatMap { match -> [LayoutSelectorTarget] in
+            guard let selectorsRange = Range(match.range(at: 1), in: css) else {
                 return []
             }
 
-            return String(html[selectorsRange]).split(separator: ",").flatMap { selector -> [LayoutSelectorTarget] in
+            return String(css[selectorsRange]).split(separator: ",").flatMap { selector -> [LayoutSelectorTarget] in
                 let selector = CSSParser.cssSelectorText(from: String(selector))
                 guard let target = HTMLSelectorMatcher.selectorTarget(in: selector) else {
                     return []
