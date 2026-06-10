@@ -169,6 +169,7 @@ struct ConversationListView: View {
         }
         ToolbarItem(placement: .navigationBarTrailing) {
             Button(viewModel.isSelecting ? "Cancel" : "Select") {
+                isSearchFieldFocused = false
                 withAnimation {
                     viewModel.toggleSelectionMode()
                 }
@@ -263,6 +264,9 @@ struct ConversationListView: View {
         } label: {
             circleButton(icon: viewModel.currentFilter.icon)
         }
+        // Menu has no pre-presentation action hook; resign focus alongside the
+        // label tap so the keyboard isn't dismissed out-of-band by the menu.
+        .simultaneousGesture(TapGesture().onEnded { isSearchFieldFocused = false })
         .accessibilityLabel("Filter conversations")
     }
 
@@ -320,6 +324,7 @@ struct ConversationListView: View {
     /// If the conversation is not resolvable yet, defers navigation until next sheet dismissal.
     @MainActor
     private func openConversationIfAvailable(conversationReference: ConversationReference) {
+        isSearchFieldFocused = false
         guard let objectID = conversationReference.resolveObjectID(in: viewContext) else {
             pendingConversationReference = conversationReference
             return
