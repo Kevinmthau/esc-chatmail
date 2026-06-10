@@ -35,56 +35,37 @@ final class ChatContactManager: ObservableObject {
     private var pendingSelectedContactIdentifierRequiringPermission: String?
     private var pendingSelectedContactNameRequiringPermission: String?
 
-    func prepareContactToAdd(for person: Person) {
+    private func prepareContactToAdd(displayName: String?, email: String) {
         let contact = CNMutableContact()
 
-        if let displayName = person.displayName, !displayName.isEmpty {
-            let components = displayName.split(separator: " ").map(String.init)
+        let trimmedDisplayName = displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedDisplayName.isEmpty {
+            let components = trimmedDisplayName.split(separator: " ").map(String.init)
             if components.count >= 2 {
                 contact.givenName = components[0]
                 contact.familyName = components.dropFirst().joined(separator: " ")
             } else {
-                contact.givenName = displayName
+                contact.givenName = trimmedDisplayName
             }
         }
 
-        let email = person.email
         contact.emailAddresses = [CNLabeledValue(label: CNLabelWork, value: email as NSString)]
 
-        showingParticipantsList = false
         contactToAdd = ContactWrapper(contact: contact)
     }
 
     /// Called when user selects "Create New Contact"
     func createNewContact(for person: Person) {
         showingParticipantsList = false
+        // Copy values out of the managed object before suspending; the permission
+        // prompt can keep the Task suspended while a sync deletes the Person.
+        let displayName = person.displayName
+        let email = person.email
 
         Task { [weak self] in
             guard let self else { return }
-
-            let status = await requestContactsAccessIfNeeded()
-            if status == .authorized {
-                prepareContactToAdd(for: person)
-                return
-            }
-
-            if #available(iOS 18.0, *), status == .limited {
-                // Limited access still allows creating new contacts.
-                prepareContactToAdd(for: person)
-                return
-            }
-
-            if status == .notDetermined || status == .denied {
-                contactActionAlert = ContactActionAlert(kind: .contactsDenied)
-                return
-            }
-
-            if status == .restricted {
-                contactActionAlert = ContactActionAlert(kind: .contactsRestricted)
-                return
-            }
-
-            contactActionAlert = ContactActionAlert(kind: .error(message: "Contacts access is unavailable."))
+            guard await ensureContactsAccessForEditing() else { return }
+            prepareContactToAdd(displayName: displayName, email: email)
         }
     }
 
@@ -95,33 +76,11 @@ final class ChatContactManager: ObservableObject {
 
         Task { [weak self] in
             guard let self else { return }
-
-            let status = await requestContactsAccessIfNeeded()
-            if #available(iOS 18.0, *), status == .limited {
-                // Limited access can still edit permitted contacts; we may need the access picker later.
-                showingContactPicker = true
-                return
-            }
-
-            if status == .authorized {
-                showingContactPicker = true
-                return
-            }
-
-            if status == .notDetermined || status == .denied {
+            guard await ensureContactsAccessForEditing() else {
                 pendingEmailToAddToExistingContact = nil
-                contactActionAlert = ContactActionAlert(kind: .contactsDenied)
                 return
             }
-
-            if status == .restricted {
-                pendingEmailToAddToExistingContact = nil
-                contactActionAlert = ContactActionAlert(kind: .contactsRestricted)
-                return
-            }
-
-            pendingEmailToAddToExistingContact = nil
-            contactActionAlert = ContactActionAlert(kind: .error(message: "Contacts access is unavailable."))
+            showingContactPicker = true
         }
     }
 
@@ -261,6 +220,30 @@ final class ChatContactManager: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// Requests Contacts access if needed and returns whether contact creation or
+    /// editing can proceed. Sets the matching alert when it cannot.
+    private func ensureContactsAccessForEditing() async -> Bool {
+        let status = await requestContactsAccessIfNeeded()
+
+        if status == .authorized {
+            return true
+        }
+
+        if #available(iOS 18.0, *), status == .limited {
+            // Limited access can still create new contacts and edit permitted ones.
+            return true
+        }
+
+        if status == .notDetermined || status == .denied {
+            contactActionAlert = ContactActionAlert(kind: .contactsDenied)
+        } else if status == .restricted {
+            contactActionAlert = ContactActionAlert(kind: .contactsRestricted)
+        } else {
+            contactActionAlert = ContactActionAlert(kind: .error(message: "Contacts access is unavailable."))
+        }
+        return false
+    }
 
     private func requestContactsAccessIfNeeded() async -> CNAuthorizationStatus {
         let current = CNContactStore.authorizationStatus(for: .contacts)
