@@ -175,4 +175,44 @@ final class NetlifyDeployPreviewBuilderTests: XCTestCase {
 
         XCTAssertNil(result)
     }
+
+    func testBuildPreview_returnsNilForSpoofedGitHubSenderDomain() {
+        let result = sut.buildPreview(
+            canonicalHTML: validNetlifyHTML,
+            senderEmail: "notifications@github.com.evil.example",
+            subject: "[Kevinmthau/boardgpt] whatever"
+        )
+
+        XCTAssertNil(result)
+    }
+
+    func testBuildPreview_returnsNilForDisplayNameForgedGitHubSender() {
+        let result = sut.buildPreview(
+            canonicalHTML: validNetlifyHTML,
+            senderEmail: "\"notifications@github.com\" <attacker@evil.example>",
+            subject: "[Kevinmthau/boardgpt] whatever"
+        )
+
+        XCTAssertNil(result)
+    }
+
+    func testBuildPreview_acceptsDisplayNameFormattedGitHubSender() {
+        let result = sut.buildPreview(
+            canonicalHTML: validNetlifyHTML,
+            senderEmail: "GitHub <notifications@github.com>",
+            subject: "[Kevinmthau/boardgpt] whatever"
+        )
+
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.project, "boardgpt")
+    }
+
+    private var validNetlifyHTML: String {
+        """
+        <html><body>
+        <p><a href="https://github.com/apps/netlify">netlify[bot]</a> left a comment</p>
+        <h3>Deploy Preview for <em>boardgpt</em> ready.</h3>
+        </body></html>
+        """
+    }
 }

@@ -447,8 +447,6 @@ final class AttachmentDownloaderTests: XCTestCase {
             isLikelyCalendarInvite: fetchedMessage.isLikelyCalendarInvite,
             bodyText: fetchedMessage.bodyText,
             cleanedSnippet: fetchedMessage.cleanedSnippet,
-            senderName: fetchedMessage.senderName,
-            senderEmail: fetchedMessage.senderEmail,
             subject: fetchedMessage.subject,
             attachmentSnapshots: fetchedMessage.attachmentsArray.map(\.bubbleSnapshot),
             handler: handler

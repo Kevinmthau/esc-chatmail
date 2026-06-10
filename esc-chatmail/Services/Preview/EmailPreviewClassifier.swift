@@ -116,12 +116,13 @@ struct EmailPreviewClassifier {
         }
 
         if isAppStoreConnectBuildNotification(
-            sender: lowercasedSender,
+            senderEmail: senderEmail,
             subject: lowercasedSubject,
             html: lowercasedHTML,
             text: lowercasedText
         ) || (includeTestFlightAvailabilitySignal && isTestFlightAvailabilityNotification(
-            sender: lowercasedSender,
+            senderEmail: senderEmail,
+            lowercasedSender: lowercasedSender,
             subject: lowercasedSubject,
             html: lowercasedHTML,
             text: lowercasedText
@@ -208,14 +209,15 @@ struct EmailPreviewClassifier {
     }
 
     private func isAppStoreConnectBuildNotification(
-        sender: String,
+        senderEmail: String?,
         subject: String,
         html: String,
         text: String
     ) -> Bool {
-        let isAppleSender =
-            sender.contains("@email.apple.com") ||
-            sender.contains("@appstoreconnect.apple.com")
+        let isAppleSender = AppStoreNotificationPreviewExtractor.isAppleDeveloperSender(
+            senderEmail: senderEmail,
+            sourceDomain: nil
+        )
         let mentionsAppStoreConnect =
             subject.contains("app store connect") ||
             text.contains("app store connect") ||
@@ -243,16 +245,18 @@ struct EmailPreviewClassifier {
     }
 
     private func isTestFlightAvailabilityNotification(
-        sender: String,
+        senderEmail: String?,
+        lowercasedSender: String,
         subject: String,
         html: String,
         text: String
     ) -> Bool {
-        let isAppleSender =
-            sender.contains("@email.apple.com") ||
-            sender.contains("@appstoreconnect.apple.com")
+        let isAppleSender = AppStoreNotificationPreviewExtractor.isAppleDeveloperSender(
+            senderEmail: senderEmail,
+            sourceDomain: nil
+        )
         let mentionsTestFlight =
-            sender.contains("testflight") ||
+            lowercasedSender.contains("testflight") ||
             subject.contains("testflight") ||
             text.contains("testflight") ||
             html.contains("testflight")

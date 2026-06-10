@@ -1631,8 +1631,6 @@ final class MessageBubbleLoaderTests: XCTestCase {
             isLikelyCalendarInvite: false,
             bodyText: nil,
             cleanedSnippet: nil,
-            senderName: nil,
-            senderEmail: nil,
             subject: nil,
             attachmentSnapshots: []
         )

@@ -272,4 +272,16 @@ final class MessageDisplayPolicyTests: XCTestCase {
 
         XCTAssertTrue(shouldShow)
     }
+
+    func testIsTrustedTransactionalSender_rejectsSpoofedDomains() {
+        XCTAssertFalse(MessageDisplayPolicy.isTrustedTransactionalSender("x@members.ebay.com.evil.example"))
+        XCTAssertFalse(MessageDisplayPolicy.isTrustedTransactionalSender("\"ship-confirm@amazon.com\" <attacker@evil.example>"))
+        XCTAssertFalse(MessageDisplayPolicy.isTrustedTransactionalSender("x@notamazon.com"))
+    }
+
+    func testIsTrustedTransactionalSender_acceptsTrustedDomainsAndSubdomains() {
+        XCTAssertTrue(MessageDisplayPolicy.isTrustedTransactionalSender("ryfa73_izw3749pf@members.ebay.com"))
+        XCTAssertTrue(MessageDisplayPolicy.isTrustedTransactionalSender("xyz123@marketplace.amazon.com"))
+        XCTAssertTrue(MessageDisplayPolicy.isTrustedTransactionalSender("BILL <approvals@hq.bill.com>"))
+    }
 }

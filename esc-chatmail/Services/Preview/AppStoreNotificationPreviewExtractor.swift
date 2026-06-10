@@ -34,6 +34,16 @@ struct AppStoreNotificationPreviewExtractor {
         self.normalizeLine = normalizeLine
     }
 
+    /// Apple sends these notifications from subdomains like `email.apple.com` and
+    /// `appstoreconnect.apple.com`; anchoring on the `apple.com` domain suffix
+    /// covers them without accepting spoofed lookalike senders.
+    static let appleSenderDomainSuffixes: Set<String> = ["apple.com"]
+
+    static func isAppleDeveloperSender(senderEmail: String?, sourceDomain: String?) -> Bool {
+        PreviewTextUtilities.domain(sourceDomain, matchesDomainOrSuffixIn: appleSenderDomainSuffixes) ||
+            PreviewTextUtilities.senderDomain(senderEmail, matchesDomainOrSuffixIn: appleSenderDomainSuffixes)
+    }
+
     /// Returns an Apple developer notification preview when the email matches an
     /// App Store Connect build-processing or TestFlight availability message,
     /// otherwise `nil`.
@@ -72,17 +82,8 @@ struct AppStoreNotificationPreviewExtractor {
             .joined(separator: "\n")
             .lowercased()
         let lowercasedHTML = canonicalHTML.lowercased()
-        let lowercasedSender = senderEmail?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased() ?? ""
-        let lowercasedDomain = sourceDomain?.lowercased() ?? ""
 
-        let isAppleSender =
-            lowercasedDomain == "email.apple.com" ||
-            lowercasedDomain == "appstoreconnect.apple.com" ||
-            lowercasedDomain.hasSuffix(".apple.com") ||
-            lowercasedSender.contains("@email.apple.com") ||
-            lowercasedSender.contains("@appstoreconnect.apple.com")
+        let isAppleSender = Self.isAppleDeveloperSender(senderEmail: senderEmail, sourceDomain: sourceDomain)
         let mentionsAppStoreConnect =
             lowercasedText.contains("app store connect") ||
             lowercasedHTML.contains("app store connect")
@@ -141,14 +142,8 @@ struct AppStoreNotificationPreviewExtractor {
         let lowercasedSender = senderEmail?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() ?? ""
-        let lowercasedDomain = sourceDomain?.lowercased() ?? ""
 
-        let isAppleSender =
-            lowercasedDomain == "email.apple.com" ||
-            lowercasedDomain == "appstoreconnect.apple.com" ||
-            lowercasedDomain.hasSuffix(".apple.com") ||
-            lowercasedSender.contains("@email.apple.com") ||
-            lowercasedSender.contains("@appstoreconnect.apple.com")
+        let isAppleSender = Self.isAppleDeveloperSender(senderEmail: senderEmail, sourceDomain: sourceDomain)
         let mentionsTestFlight =
             lowercasedSender.contains("testflight") ||
             lowercasedText.contains("testflight") ||

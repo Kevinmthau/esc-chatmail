@@ -9,6 +9,64 @@ struct CalendarInvitePreviewBuilder {
         senderEmail: String?,
         subject: String? = nil
     ) -> CalendarInvitePreviewModel? {
+        guard let basis = previewBasis(
+            canonicalHTML: canonicalHTML,
+            bodyText: bodyText,
+            cleanedSnippet: cleanedSnippet,
+            subject: subject
+        ) else {
+            return nil
+        }
+
+        return CalendarInvitePreviewModel(
+            title: basis.title,
+            monthSymbol: basis.dateSummary.monthSymbol,
+            dayNumber: basis.dateSummary.dayNumber,
+            weekdaySymbol: basis.dateSummary.weekdaySymbol,
+            dateTimeLine: normalizedWhenLine(basis.whenLine),
+            locationLine: resolvedLocationLine(from: basis.lines, canonicalHTML: canonicalHTML),
+            organizerLine: resolvedOrganizerLine(
+                from: basis.lines,
+                senderName: senderName,
+                senderEmail: senderEmail
+            ),
+            status: resolvedStatus(subject: subject, lines: basis.lines, canonicalHTML: canonicalHTML),
+            actionLabel: "Open invite",
+            sourceLabel: resolvedSourceLabel(lines: basis.lines, canonicalHTML: canonicalHTML)
+        )
+    }
+
+    /// True exactly when `buildPreview` would return a model: the basis holds
+    /// every nil-determining field, and model construction past it is
+    /// infallible. Lets gate checks skip the location/organizer/status work.
+    /// Sender identity never affects whether a card can be built.
+    func canBuildPreview(
+        canonicalHTML: String,
+        bodyText: String?,
+        cleanedSnippet: String? = nil,
+        subject: String? = nil
+    ) -> Bool {
+        previewBasis(
+            canonicalHTML: canonicalHTML,
+            bodyText: bodyText,
+            cleanedSnippet: cleanedSnippet,
+            subject: subject
+        ) != nil
+    }
+
+    private struct PreviewBasis {
+        let lines: [String]
+        let title: String
+        let whenLine: String
+        let dateSummary: CalendarInviteDateSummary
+    }
+
+    private func previewBasis(
+        canonicalHTML: String,
+        bodyText: String?,
+        cleanedSnippet: String?,
+        subject: String?
+    ) -> PreviewBasis? {
         let bodyLines = previewLines(from: normalizedBodyText(bodyText) ?? "")
         let htmlLines = previewLines(from: normalizedText(TextProcessing.extractPlainText(from: canonicalHTML)))
         let snippetLines = previewLines(from: normalizedText(cleanedSnippet))
@@ -28,21 +86,11 @@ struct CalendarInvitePreviewBuilder {
             return nil
         }
 
-        return CalendarInvitePreviewModel(
+        return PreviewBasis(
+            lines: lines,
             title: title,
-            monthSymbol: dateSummary.monthSymbol,
-            dayNumber: dateSummary.dayNumber,
-            weekdaySymbol: dateSummary.weekdaySymbol,
-            dateTimeLine: normalizedWhenLine(whenLine),
-            locationLine: resolvedLocationLine(from: lines, canonicalHTML: canonicalHTML),
-            organizerLine: resolvedOrganizerLine(
-                from: lines,
-                senderName: senderName,
-                senderEmail: senderEmail
-            ),
-            status: resolvedStatus(subject: subject, lines: lines, canonicalHTML: canonicalHTML),
-            actionLabel: "Open invite",
-            sourceLabel: resolvedSourceLabel(lines: lines, canonicalHTML: canonicalHTML)
+            whenLine: whenLine,
+            dateSummary: dateSummary
         )
     }
 
@@ -56,9 +104,9 @@ struct CalendarInvitePreviewBuilder {
         let combinedText = lines.joined(separator: "\n").lowercased()
 
         let hasGoogleCalendarMarker =
-            Self.googleCalendarMarkers.contains { lowercasedHTML.contains($0) } ||
-            Self.googleCalendarMarkers.contains { combinedText.contains($0) }
-        let hasInvitePrefix = Self.inviteSubjectPrefixes.contains { normalizedSubject.hasPrefix($0) }
+            CalendarInviteSignals.containsGoogleCalendarMarker(lowercasedHTML) ||
+            CalendarInviteSignals.containsGoogleCalendarMarker(combinedText)
+        let hasInvitePrefix = CalendarInviteSignals.hasInviteSubjectPrefix(normalizedSubject)
         let hasCalendarStructure =
             lineFollowing(label: "when", in: lines) != nil &&
             (
@@ -189,8 +237,8 @@ struct CalendarInvitePreviewBuilder {
         let lowercasedHTML = canonicalHTML.lowercased()
         let combinedText = lines.joined(separator: "\n").lowercased()
 
-        if Self.googleCalendarMarkers.contains(where: { lowercasedHTML.contains($0) }) ||
-            Self.googleCalendarMarkers.contains(where: { combinedText.contains($0) }) {
+        if CalendarInviteSignals.containsGoogleCalendarMarker(lowercasedHTML) ||
+            CalendarInviteSignals.containsGoogleCalendarMarker(combinedText) {
             return "Google Calendar"
         }
 
@@ -380,10 +428,7 @@ struct CalendarInvitePreviewBuilder {
             return true
         }
 
-        return line.range(
-            of: Self.datePattern,
-            options: [.regularExpression, .caseInsensitive]
-        ) != nil
+        return CalendarInviteSignals.containsDateTimeSignal(line)
     }
 
     private func resolvedDateSummary(from whenLine: String) -> CalendarInviteDateSummary? {
@@ -475,16 +520,7 @@ struct CalendarInvitePreviewBuilder {
     }
 
     private func normalizedText(_ text: String?) -> String {
-        guard let text else {
-            return ""
-        }
-
-        return HTMLEntityDecoder.decode(text)
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .replacingOccurrences(of: "\u{00A0}", with: " ")
-            .replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        CalendarInviteSignals.normalizedSignalText(text)
     }
 
     private func abbreviatedUppercase(_ text: String) -> String {
@@ -505,21 +541,6 @@ struct CalendarInvitePreviewBuilder {
         return String(truncated[..<lastSpace]) + "…"
     }
 
-    private static let googleCalendarMarkers = [
-        "google calendar",
-        "calendar.google.com",
-        "meet.google.com",
-        "view all guest info",
-        "reply for "
-    ]
-
-    private static let inviteSubjectPrefixes = [
-        "invitation:",
-        "updated invitation:",
-        "canceled:",
-        "cancelled:"
-    ]
-
     private static let noiseLineValues: Set<String> = [
         "when",
         "where",
@@ -531,8 +552,6 @@ struct CalendarInvitePreviewBuilder {
         "more options",
         "invitation from google calendar"
     ]
-
-    private static let datePattern = #"\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b[\w\s,.:()\-–•]*\b\d{1,2}:\d{2}\s*(?:am|pm)\b"#
 }
 
 private struct CalendarInviteDateSummary {
