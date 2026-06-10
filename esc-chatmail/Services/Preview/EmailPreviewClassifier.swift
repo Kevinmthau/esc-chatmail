@@ -122,7 +122,6 @@ struct EmailPreviewClassifier {
             text: lowercasedText
         ) || (includeTestFlightAvailabilitySignal && isTestFlightAvailabilityNotification(
             senderEmail: senderEmail,
-            lowercasedSender: lowercasedSender,
             subject: lowercasedSubject,
             html: lowercasedHTML,
             text: lowercasedText
@@ -246,7 +245,6 @@ struct EmailPreviewClassifier {
 
     private func isTestFlightAvailabilityNotification(
         senderEmail: String?,
-        lowercasedSender: String,
         subject: String,
         html: String,
         text: String
@@ -255,6 +253,9 @@ struct EmailPreviewClassifier {
             senderEmail: senderEmail,
             sourceDomain: nil
         )
+        let lowercasedSender = senderEmail?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
         let mentionsTestFlight =
             lowercasedSender.contains("testflight") ||
             subject.contains("testflight") ||

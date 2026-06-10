@@ -200,12 +200,7 @@ private struct TransactionalPreviewThumbnail: View {
             isLoading = true
         }
 
-        let image: UIImage?
-        if let autoLoadableURL = EmailPreviewRemoteImageURL.autoLoadableNativePreviewURL(requestedURL) {
-            image = await EnhancedImageCache.shared.loadImage(from: autoLoadableURL)
-        } else {
-            image = nil
-        }
+        let image = await EmailPreviewCardImageLoader.loadImage(from: requestedURL)
         guard !Task.isCancelled else {
             return
         }
