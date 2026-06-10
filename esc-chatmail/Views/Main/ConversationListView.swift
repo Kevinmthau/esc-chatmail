@@ -40,6 +40,7 @@ struct ConversationListView: View {
 
     @State private var selectedConversation: Conversation?
     @State private var pendingConversationReference: ConversationReference?
+    @FocusState private var isSearchFieldFocused: Bool
 
     private var conversationList: some View {
         List {
@@ -57,6 +58,7 @@ struct ConversationListView: View {
                     conversationRow(for: item)
                         .contentShape(Rectangle())
                         .onTapGesture {
+                            isSearchFieldFocused = false
                             selectedConversation = resolveConversation(with: item.id)
                         }
                         .listRowInsets(EdgeInsets())
@@ -86,7 +88,7 @@ struct ConversationListView: View {
         }
         .listStyle(.plain)
         .animation(nil, value: viewModel.filteredConversationItems.count)
-        .scrollDismissesKeyboard(.interactively)
+        .scrollDismissesKeyboard(.immediately)
         .navigationTitle(viewModel.isSelecting ? "\(viewModel.selectedConversationIDs.count) Selected" : "Chats")
         .navigationDestination(item: $selectedConversation) { conversation in
             let chatDependencies = deps.makeChatDependencies()
@@ -119,6 +121,7 @@ struct ConversationListView: View {
             viewModel.onAppear(conversations: Array(conversations), in: viewContext)
         }
         .onDisappear {
+            isSearchFieldFocused = false
             viewModel.onDisappear()
         }
     }
@@ -156,13 +159,17 @@ struct ConversationListView: View {
                     viewModel.selectAllVisibleConversations()
                 }
             } else {
-                Button(action: { viewModel.showingSettings = true }) {
+                Button(action: {
+                    isSearchFieldFocused = false
+                    viewModel.showingSettings = true
+                }) {
                     Image(systemName: "gear")
                 }
             }
         }
         ToolbarItem(placement: .navigationBarTrailing) {
             Button(viewModel.isSelecting ? "Cancel" : "Select") {
+                isSearchFieldFocused = false
                 withAnimation {
                     viewModel.toggleSelectionMode()
                 }
@@ -257,6 +264,9 @@ struct ConversationListView: View {
         } label: {
             circleButton(icon: viewModel.currentFilter.icon)
         }
+        // Menu has no pre-presentation action hook; resign focus alongside the
+        // label tap so the keyboard isn't dismissed out-of-band by the menu.
+        .simultaneousGesture(TapGesture().onEnded { isSearchFieldFocused = false })
         .accessibilityLabel("Filter conversations")
     }
 
@@ -269,6 +279,7 @@ struct ConversationListView: View {
             TextField("Search", text: $viewModel.searchText, prompt: Text("Search").foregroundColor(.secondary))
                 .textFieldStyle(.plain)
                 .font(.system(size: 17, weight: .regular))
+                .focused($isSearchFieldFocused)
 
             if !viewModel.searchText.isEmpty {
                 Button(action: { viewModel.searchText = "" }) {
@@ -293,7 +304,10 @@ struct ConversationListView: View {
     }
 
     private var composeButton: some View {
-        Button(action: { viewModel.showingComposer = true }) {
+        Button(action: {
+            isSearchFieldFocused = false
+            viewModel.showingComposer = true
+        }) {
             circleButton(icon: "square.and.pencil")
         }
         .accessibilityLabel("Compose new message")
@@ -310,6 +324,7 @@ struct ConversationListView: View {
     /// If the conversation is not resolvable yet, defers navigation until next sheet dismissal.
     @MainActor
     private func openConversationIfAvailable(conversationReference: ConversationReference) {
+        isSearchFieldFocused = false
         guard let objectID = conversationReference.resolveObjectID(in: viewContext) else {
             pendingConversationReference = conversationReference
             return
