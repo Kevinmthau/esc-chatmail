@@ -112,7 +112,7 @@ struct ChatView: View {
             case .contactsDenied:
                 Alert(
                     title: Text("Contacts Access Needed"),
-                    message: Text("Allow Contacts access in Settings to add this email to an existing contact."),
+                    message: Text("Allow Contacts access in Settings to save this email to your contacts."),
                     primaryButton: .default(Text("Open Settings")) {
                         if let url = URL(string: UIApplication.openSettingsURLString) {
                             openURL(url)
@@ -252,6 +252,15 @@ struct ChatView: View {
     private func dismissActiveDestination() {
         let dismissedDestination = presentedSheetDestination
         presentedSheetDestination = nil
+
+        // A different destination already pending means this dismissal is a sheet
+        // replacement (e.g. participants -> add contact); the onDismiss belongs to
+        // the outgoing sheet, so leave the incoming destination's state intact.
+        if let pendingDestination = activeDestination,
+           pendingDestination.id != dismissedDestination?.id {
+            return
+        }
+
         let shouldCancelContactPicker: Bool
         if case .contactPicker = dismissedDestination, viewModel.contactManager.showingContactPicker {
             shouldCancelContactPicker = true

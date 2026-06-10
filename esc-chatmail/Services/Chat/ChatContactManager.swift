@@ -39,7 +39,7 @@ final class ChatContactManager: ObservableObject {
         let contact = CNMutableContact()
 
         if let displayName = person.displayName, !displayName.isEmpty {
-            let components = displayName.components(separatedBy: " ")
+            let components = displayName.split(separator: " ").map(String.init)
             if components.count >= 2 {
                 contact.givenName = components[0]
                 contact.familyName = components.dropFirst().joined(separator: " ")
@@ -57,7 +57,35 @@ final class ChatContactManager: ObservableObject {
 
     /// Called when user selects "Create New Contact"
     func createNewContact(for person: Person) {
-        prepareContactToAdd(for: person)
+        showingParticipantsList = false
+
+        Task { [weak self] in
+            guard let self else { return }
+
+            let status = await requestContactsAccessIfNeeded()
+            if status == .authorized {
+                prepareContactToAdd(for: person)
+                return
+            }
+
+            if #available(iOS 18.0, *), status == .limited {
+                // Limited access still allows creating new contacts.
+                prepareContactToAdd(for: person)
+                return
+            }
+
+            if status == .notDetermined || status == .denied {
+                contactActionAlert = ContactActionAlert(kind: .contactsDenied)
+                return
+            }
+
+            if status == .restricted {
+                contactActionAlert = ContactActionAlert(kind: .contactsRestricted)
+                return
+            }
+
+            contactActionAlert = ContactActionAlert(kind: .error(message: "Contacts access is unavailable."))
+        }
     }
 
     /// Called when user selects "Add to Existing Contact"
