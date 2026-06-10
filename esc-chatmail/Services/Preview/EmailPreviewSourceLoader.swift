@@ -310,6 +310,22 @@ enum EmailPreviewRemoteImageURL {
         components.scheme = "https"
         return components.string ?? rawURL
     }
+
+    /// Single decision point for native preview cards fetching remote images at
+    /// render time. Cards auto-load, matching the full reader and snapshot
+    /// WebViews, which also fetch remote content without a consent gate — but
+    /// only over HTTPS with a real host, so cached models from older builder
+    /// versions can never trigger cleartext or non-web loads.
+    static func autoLoadableNativePreviewURL(_ rawURL: String) -> String? {
+        let normalized = normalizedForNativePreview(rawURL)
+        guard let components = URLComponents(string: normalized),
+              components.scheme?.lowercased() == "https",
+              components.host?.isEmpty == false else {
+            return nil
+        }
+
+        return normalized
+    }
 }
 
 struct EmailPreviewImageExtractor {

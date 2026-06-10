@@ -43,16 +43,13 @@ struct NetlifyDeployPreviewBuilder {
 
     // MARK: - Predicates
 
-    private func isGitHubNotificationSender(_ senderEmail: String?) -> Bool {
-        guard let senderEmail = senderEmail?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased(),
-              !senderEmail.isEmpty else {
-            return false
-        }
+    private static let gitHubSenderDomainSuffixes: Set<String> = ["github.com"]
 
-        return senderEmail.contains("notifications@github.com")
-            || senderEmail.contains("noreply@github.com")
+    private func isGitHubNotificationSender(_ senderEmail: String?) -> Bool {
+        PreviewTextUtilities.senderDomain(
+            senderEmail,
+            matchesDomainOrSuffixIn: Self.gitHubSenderDomainSuffixes
+        )
     }
 
     private func containsNetlifyBotMarker(lowercasedHTML: String, lowercasedPlainText: String) -> Bool {

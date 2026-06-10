@@ -140,7 +140,7 @@ private struct NewsletterPreviewHeroImage: View {
             isLoading = true
         }
 
-        let image = await EnhancedImageCache.shared.loadImage(from: requestedURL)
+        let image = await EmailPreviewCardImageLoader.loadImage(from: requestedURL)
         guard !Task.isCancelled else {
             return
         }

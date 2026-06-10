@@ -76,13 +76,10 @@ enum MessageDisplayPolicy {
     }
 
     static func isTrustedTransactionalSender(_ senderEmail: String?) -> Bool {
-        guard let domain = senderDomain(from: senderEmail) else {
-            return false
-        }
-
-        return trustedTransactionalReplyDomainSuffixes.contains { suffix in
-            domain == suffix || domain.hasSuffix(".\(suffix)")
-        }
+        PreviewTextUtilities.senderDomain(
+            senderEmail,
+            matchesDomainOrSuffixIn: trustedTransactionalReplyDomainSuffixes
+        )
     }
 
     private static let trustedTransactionalReplyDomainSuffixes: Set<String> = [
@@ -105,31 +102,5 @@ enum MessageDisplayPolicy {
         }
 
         return true
-    }
-
-    private static func senderDomain(from senderEmail: String?) -> String? {
-        guard let senderEmail = senderEmail?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-            !senderEmail.isEmpty else {
-            return nil
-        }
-
-        let extractedEmail = EmailNormalizer.extractEmail(from: senderEmail) ?? senderEmail
-        let normalizedEmail = extractedEmail
-            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "<>\"'()[]"))
-
-        guard let atIndex = normalizedEmail.lastIndex(of: "@"),
-              atIndex < normalizedEmail.index(before: normalizedEmail.endIndex) else {
-            return nil
-        }
-
-        let rawDomain = normalizedEmail[normalizedEmail.index(after: atIndex)...]
-        let domain = rawDomain
-            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "<>\"'()[],:;"))
-            .lowercased()
-
-        return domain.isEmpty ? nil : domain
     }
 }

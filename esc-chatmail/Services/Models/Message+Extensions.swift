@@ -75,9 +75,9 @@ extension Message {
     }
 
     var isLikelyCalendarInvite: Bool {
-        let normalizedSubject = normalizedCalendarInviteSignalText(subject).lowercased()
-        let normalizedSnippet = normalizedCalendarInviteSignalText(cleanedSnippet ?? snippet).lowercased()
-        let normalizedBody = normalizedCalendarInviteSignalText(
+        let normalizedSubject = CalendarInviteSignals.normalizedSignalText(subject).lowercased()
+        let normalizedSnippet = CalendarInviteSignals.normalizedSignalText(cleanedSnippet ?? snippet).lowercased()
+        let normalizedBody = CalendarInviteSignals.normalizedSignalText(
             bodyText.map { RawEmailSourceSanitizer.extractDisplayText(from: $0) }
         ).lowercased()
         let combinedText = [normalizedSubject, normalizedSnippet, normalizedBody]
@@ -85,15 +85,11 @@ extension Message {
             .joined(separator: "\n")
 
         let hasCalendarAttachment = attachmentsArray.contains { $0.isCalendarInviteAttachment }
-        let hasGoogleCalendarMarker = Self.calendarInviteGoogleMarkers.contains { combinedText.contains($0) }
-        let hasInviteSubjectPrefix = Self.calendarInviteSubjectPrefixes.contains { normalizedSubject.hasPrefix($0) }
+        let hasGoogleCalendarMarker = CalendarInviteSignals.containsGoogleCalendarMarker(combinedText)
+        let hasInviteSubjectPrefix = CalendarInviteSignals.hasInviteSubjectPrefix(normalizedSubject)
         let hasCalendarStructure =
-            Self.calendarInviteStructuralMarkers.filter { combinedText.contains($0) }.count >= 2
-        let hasDateSignal =
-            combinedText.range(
-                of: Self.calendarInviteDatePattern,
-                options: [.regularExpression, .caseInsensitive]
-            ) != nil
+            CalendarInviteSignals.structuralTextMarkers.filter { combinedText.contains($0) }.count >= 2
+        let hasDateSignal = CalendarInviteSignals.containsDateTimeSignal(combinedText)
 
         if hasGoogleCalendarMarker {
             return true
@@ -296,15 +292,12 @@ extension Message {
             return false
         }
 
-        let previewBuilder = CalendarInvitePreviewBuilder()
-        return previewBuilder.buildPreview(
+        return CalendarInvitePreviewBuilder().canBuildPreview(
             canonicalHTML: canonicalHTML ?? "",
             bodyText: bodyText,
             cleanedSnippet: cleanedSnippet,
-            senderName: senderName,
-            senderEmail: senderEmail,
             subject: subject
-        ) != nil
+        )
     }
 
     private func cleanedHTMLForAttachmentFiltering(from html: String) -> String {
@@ -320,19 +313,6 @@ extension Message {
         }
 
         return html
-    }
-
-    private func normalizedCalendarInviteSignalText(_ text: String?) -> String {
-        guard let text else {
-            return ""
-        }
-
-        return HTMLEntityDecoder.decode(text)
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .replacingOccurrences(of: "\u{00A0}", with: " ")
-            .replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Extracts Content-IDs referenced via cid: URLs in HTML.
@@ -448,31 +428,6 @@ extension Message {
         "realtor",
         "membership"
     ]
-
-    private static let calendarInviteGoogleMarkers = [
-        "google calendar",
-        "calendar.google.com",
-        "meet.google.com",
-        "reply for ",
-        "view all guest info"
-    ]
-
-    private static let calendarInviteSubjectPrefixes = [
-        "invitation:",
-        "updated invitation:",
-        "canceled:",
-        "cancelled:"
-    ]
-
-    private static let calendarInviteStructuralMarkers = [
-        "\nwhen\n",
-        "\nwhere\n",
-        "\nguests\n",
-        "\nmore options\n",
-        "yes no maybe"
-    ]
-
-    private static let calendarInviteDatePattern = #"\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b[\w\s,.:()\-–•]*\b\d{1,2}:\d{2}\s*(?:am|pm)\b"#
 
     private func attachmentDeduplicationKey(for attachment: Attachment) -> AttachmentDeduplicationKey {
         if let contentId = EmailDocument.normalizedContentID(attachment.contentId) {

@@ -44,8 +44,6 @@ extension MessageBubbleLoader {
             isLikelyCalendarInvite: request.isLikelyCalendarInvite,
             bodyText: request.bodyText,
             cleanedSnippet: request.cleanedSnippet,
-            senderName: request.senderName,
-            senderEmail: request.effectiveSenderEmail,
             subject: request.subject,
             attachmentSnapshots: request.attachmentSnapshots
         )
@@ -87,6 +85,8 @@ extension MessageBubbleLoader {
             messageId: request.messageID,
             bodyStorageURI: request.bodyStorageURI
         )
+        // Sender identity is deliberately absent: the analysis output does not
+        // depend on it (calendar-card eligibility is sender-independent).
         return [
             request.messageID,
             request.bodyStorageURI ?? "storage:nil",
@@ -94,8 +94,6 @@ extension MessageBubbleLoader {
             "body:\(cacheFingerprint(for: request.bodyText))",
             "snippet:\(cacheFingerprint(for: request.cleanedSnippet))",
             "subject:\(cacheFingerprint(for: request.subject))",
-            "sender:\(cacheFingerprint(for: request.senderName))",
-            "email:\(cacheFingerprint(for: request.effectiveSenderEmail))",
             "flags:\(request.hasHTMLSource)-\(request.isForwardedEmail)-\(request.isLikelyCalendarInvite)",
             "hasAttachments:\(request.hasAttachments)",
             "attachments:\(attachmentFingerprint(for: request.attachmentSnapshots))"

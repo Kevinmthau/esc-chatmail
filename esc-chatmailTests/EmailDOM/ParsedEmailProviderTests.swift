@@ -254,8 +254,6 @@ final class ParsedEmailProviderTests: XCTestCase {
             isLikelyCalendarInvite: false,
             bodyText: nil,
             cleanedSnippet: nil,
-            senderName: nil,
-            senderEmail: nil,
             subject: nil,
             attachmentSnapshots: []
         )
@@ -266,8 +264,6 @@ final class ParsedEmailProviderTests: XCTestCase {
             isLikelyCalendarInvite: false,
             bodyText: nil,
             cleanedSnippet: nil,
-            senderName: nil,
-            senderEmail: nil,
             subject: nil,
             attachmentSnapshots: []
         )

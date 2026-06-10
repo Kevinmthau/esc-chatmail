@@ -9,8 +9,6 @@ enum MessageBubbleHTMLAnalysisBuilder {
         isLikelyCalendarInvite: Bool,
         bodyText: String?,
         cleanedSnippet: String?,
-        senderName: String?,
-        senderEmail: String?,
         subject: String?,
         attachmentSnapshots: [MessageBubbleAttachmentSnapshot]
     ) -> MessageBubbleHTMLAnalysis {
@@ -22,8 +20,6 @@ enum MessageBubbleHTMLAnalysisBuilder {
             isLikelyCalendarInvite: isLikelyCalendarInvite,
             bodyText: bodyText,
             cleanedSnippet: cleanedSnippet,
-            senderName: senderName,
-            senderEmail: senderEmail,
             subject: subject,
             attachmentSnapshots: attachmentSnapshots
         )
@@ -37,8 +33,6 @@ enum MessageBubbleHTMLAnalysisBuilder {
         isLikelyCalendarInvite: Bool,
         bodyText: String?,
         cleanedSnippet: String?,
-        senderName: String?,
-        senderEmail: String?,
         subject: String?,
         attachmentSnapshots: [MessageBubbleAttachmentSnapshot],
         handler: HTMLContentHandler
@@ -58,8 +52,6 @@ enum MessageBubbleHTMLAnalysisBuilder {
             isLikelyCalendarInvite: isLikelyCalendarInvite,
             bodyText: bodyText,
             cleanedSnippet: cleanedSnippet,
-            senderName: senderName,
-            senderEmail: senderEmail,
             subject: subject,
             attachmentSnapshots: attachmentSnapshots
         )
@@ -233,23 +225,18 @@ enum MessageBubbleHTMLAnalysisBuilder {
         isLikelyCalendarInvite: Bool,
         bodyText: String?,
         cleanedSnippet: String?,
-        senderName: String?,
-        senderEmail: String?,
         subject: String?
     ) -> Bool {
         guard !isForwardedEmail, isLikelyCalendarInvite else {
             return false
         }
 
-        let previewBuilder = CalendarInvitePreviewBuilder()
-        return previewBuilder.buildPreview(
+        return CalendarInvitePreviewBuilder().canBuildPreview(
             canonicalHTML: canonicalHTML,
             bodyText: bodyText,
             cleanedSnippet: cleanedSnippet,
-            senderName: senderName,
-            senderEmail: senderEmail,
             subject: subject
-        ) != nil
+        )
     }
 
     private static func build(
@@ -260,8 +247,6 @@ enum MessageBubbleHTMLAnalysisBuilder {
         isLikelyCalendarInvite: Bool,
         bodyText: String?,
         cleanedSnippet: String?,
-        senderName: String?,
-        senderEmail: String?,
         subject: String?,
         attachmentSnapshots: [MessageBubbleAttachmentSnapshot]
     ) -> MessageBubbleHTMLAnalysis {
@@ -286,8 +271,6 @@ enum MessageBubbleHTMLAnalysisBuilder {
                 isLikelyCalendarInvite: isLikelyCalendarInvite,
                 bodyText: bodyText,
                 cleanedSnippet: cleanedSnippet,
-                senderName: senderName,
-                senderEmail: senderEmail,
                 subject: subject
             )
         )

@@ -83,4 +83,46 @@ final class CalendarInvitePreviewBuilderTests: XCTestCase {
         XCTAssertEqual(result?.locationLine, "Google Meet")
         XCTAssertEqual(result?.organizerLine, "Hosted by Brynn")
     }
+
+    func testCanBuildPreview_matchesBuildPreviewAvailability() {
+        let inviteHTML = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <div>Invitation from Google Calendar</div>
+            <div>SAB Class observation</div>
+            <div>When</div>
+            <div>Friday Apr 24, 2026 • 5:30pm – 6:30pm (Eastern Time - New York)</div>
+            <div>Guests</div>
+            <div>kmthau@gmail.com</div>
+            <div>Reply for kmthau@gmail.com</div>
+        </body>
+        </html>
+        """
+        let plainHTML = """
+        <html><body><p>Lunch tomorrow?</p></body></html>
+        """
+
+        for (html, subject) in [
+            (inviteHTML, "Invitation: SAB Class observation @ Fri Apr 24, 2026 5:30pm - 6:30pm (EDT)"),
+            (plainHTML, "Lunch")
+        ] {
+            let canBuild = sut.canBuildPreview(
+                canonicalHTML: html,
+                bodyText: nil,
+                cleanedSnippet: nil,
+                subject: subject
+            )
+            let built = sut.buildPreview(
+                canonicalHTML: html,
+                bodyText: nil,
+                cleanedSnippet: nil,
+                senderName: nil,
+                senderEmail: nil,
+                subject: subject
+            )
+
+            XCTAssertEqual(canBuild, built != nil, "canBuildPreview must mirror buildPreview for subject: \(subject)")
+        }
+    }
 }

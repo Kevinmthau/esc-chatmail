@@ -42,6 +42,23 @@ enum PreviewTextUtilities {
         return domain.isEmpty ? nil : domain
     }
 
+    /// Trust checks must anchor on the parsed sender domain: substring matching on
+    /// the raw sender string accepts spoofs like "a@email.apple.com.evil.com" and
+    /// display-name forgeries like "notifications@github.com <a@evil.com>".
+    static func senderDomain(_ senderEmail: String?, matchesDomainOrSuffixIn domainSuffixes: Set<String>) -> Bool {
+        domain(normalizedSourceDomain(from: senderEmail), matchesDomainOrSuffixIn: domainSuffixes)
+    }
+
+    static func domain(_ domain: String?, matchesDomainOrSuffixIn domainSuffixes: Set<String>) -> Bool {
+        guard let domain = domain?.lowercased(), !domain.isEmpty else {
+            return false
+        }
+
+        return domainSuffixes.contains { suffix in
+            domain == suffix || domain.hasSuffix(".\(suffix)")
+        }
+    }
+
     static func aspectRatio(width: Int?, height: Int?) -> Double? {
         guard let width, let height, width > 0, height > 0 else {
             return nil
