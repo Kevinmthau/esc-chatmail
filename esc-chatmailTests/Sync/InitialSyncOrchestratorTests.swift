@@ -36,13 +36,20 @@ final class InitialSyncOrchestratorTests: XCTestCase {
 final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
     private var defaults: UserDefaults!
     private var suiteName: String!
+    private var testStack: TestCoreDataStack!
+    private var coreDataStack: CoreDataStack!
 
     override func setUp() async throws {
         try await super.setUp()
         suiteName = "InitialSyncOrchestratorFailureTrackerTests-\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)!
+        // Isolated per-test stack. Operating on CoreDataStack.shared here
+        // (previously via destroyAndReloadAsync) tears the shared store out
+        // from under concurrently scheduled work and leaks async Core Data
+        // activity into whatever test class runs next in this process.
+        testStack = TestCoreDataStack()
+        coreDataStack = CoreDataStack(persistentContainerForTesting: testStack.persistentContainer)
         await ModificationTracker.shared.reset()
-        try await CoreDataStack.shared.destroyAndReloadAsync()
     }
 
     override func tearDown() async throws {
@@ -50,7 +57,8 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
         defaults?.removePersistentDomain(forName: suiteName)
         defaults = nil
         suiteName = nil
-        try? await CoreDataStack.shared.destroyAndReloadAsync()
+        coreDataStack = nil
+        testStack = nil
         try await super.tearDown()
     }
 
@@ -78,28 +86,28 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
             currentUserEmail: { profile.emailAddress }
         )
         let messagePersister = MessagePersister(
-            coreDataStack: .shared,
+            coreDataStack: coreDataStack,
             saveHTML: { _, _ in nil },
             conversationManager: conversationManager
         )
-        let failureTracker = SyncFailureTracker(defaults: defaults, coreDataStack: .shared)
+        let failureTracker = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack)
         let sut = InitialSyncOrchestrator(
             messageFetcher: MessageFetcher(apiClient: apiClient),
             messagePersister: messagePersister,
             conversationManager: conversationManager,
             dataCleanupService: DataCleanupService(
-                coreDataStack: .shared,
+                coreDataStack: coreDataStack,
                 conversationManager: conversationManager
             ),
             attachmentDownloader: AttachmentDownloader.shared,
-            coreDataStack: .shared,
+            coreDataStack: coreDataStack,
             failureTracker: failureTracker,
             performanceLogger: .shared
         )
 
         await failureTracker.recordFailure(failedIds: ["stale-1", "stale-2"])
 
-        let context = CoreDataStack.shared.newBackgroundContext()
+        let context = coreDataStack.newBackgroundContext()
         try await messagePersister.saveAccount(
             profile: profile,
             aliases: [],
@@ -118,7 +126,7 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
             ],
             in: context
         )
-        try await CoreDataStack.shared.saveAsync(context: context)
+        try await coreDataStack.saveAsync(context: context)
 
         let modificationTransaction = await ModificationTracker.shared.beginTransaction()
         let hadWarnings = await sut.handleSyncCompletion(

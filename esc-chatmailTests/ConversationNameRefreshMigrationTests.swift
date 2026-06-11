@@ -34,6 +34,12 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
     }
 
     func testOnAppear_refreshesNamesWithoutRecomputingRollupsOrReorderingConversations() async throws {
+        // This test verifies merge-driven behavior: the view model's row
+        // snapshots refresh when the background migration's save merges into
+        // the view context, so it needs an automerge-enabled stack.
+        stack = TestCoreDataStack(automaticallyMergesChanges: true)
+        context = stack.viewContext
+
         let aliceDate = Date(timeIntervalSince1970: 100)
         let bobDate = Date(timeIntervalSince1970: 200)
 
@@ -296,7 +302,13 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
     private func fetchConversation(
         _ objectID: NSManagedObjectID
     ) throws -> Conversation {
-        try XCTUnwrap(context.existingObject(with: objectID) as? Conversation)
+        // The (default) test context does not auto-merge sibling saves;
+        // refresh so reads reflect background-context changes persisted to
+        // the store. The automerge-enabled test only calls this after its
+        // polls confirm the merge has landed, so the context queue is idle.
+        let conversation = try XCTUnwrap(context.existingObject(with: objectID) as? Conversation)
+        context.refresh(conversation, mergeChanges: false)
+        return conversation
     }
 
     private func waitUntil(

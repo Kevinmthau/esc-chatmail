@@ -13,8 +13,13 @@ final class ConversationMergerTests: XCTestCase {
         super.setUp()
         testStack = TestCoreDataStack()
         context = testStack.viewContext
-        // Create merger with a mock stack that uses our test context
-        merger = ConversationMerger(coreDataStack: CoreDataStack.shared)
+        // Back the merger with the test container: the merger saves through
+        // its stack and merges results into its stack's viewContext, so
+        // handing it CoreDataStack.shared would route every merge through the
+        // app's real store and main-queue context.
+        merger = ConversationMerger(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer)
+        )
     }
 
     override func tearDown() {

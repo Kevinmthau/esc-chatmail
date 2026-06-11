@@ -80,11 +80,15 @@ struct ConversationMerger: Sendable {
             if mergedCount > 0 {
                 self.coreDataStack.saveIfNeeded(context: context)
 
-                if !deletedObjectIDs.isEmpty {
+                // The work context already knows about these deletions; merging
+                // them back into it re-enters a context that is mid-perform and
+                // corrupts it. Only forward deletions to *other* contexts.
+                let mergeTargets: [NSManagedObjectContext] = [self.coreDataStack.viewContext].filter { $0 !== context }
+                if !deletedObjectIDs.isEmpty, !mergeTargets.isEmpty {
                     let changes = [NSDeletedObjectsKey: deletedObjectIDs]
                     NSManagedObjectContext.mergeChanges(
                         fromRemoteContextSave: changes,
-                        into: [self.coreDataStack.viewContext]
+                        into: mergeTargets
                     )
                 }
 
@@ -146,11 +150,15 @@ struct ConversationMerger: Sendable {
             if mergedCount > 0 {
                 self.coreDataStack.saveIfNeeded(context: context)
 
-                if !deletedObjectIDs.isEmpty {
+                // The work context already knows about these deletions; merging
+                // them back into it re-enters a context that is mid-perform and
+                // corrupts it. Only forward deletions to *other* contexts.
+                let mergeTargets: [NSManagedObjectContext] = [self.coreDataStack.viewContext].filter { $0 !== context }
+                if !deletedObjectIDs.isEmpty, !mergeTargets.isEmpty {
                     let changes = [NSDeletedObjectsKey: deletedObjectIDs]
                     NSManagedObjectContext.mergeChanges(
                         fromRemoteContextSave: changes,
-                        into: [self.coreDataStack.viewContext]
+                        into: mergeTargets
                     )
                 }
 
@@ -248,11 +256,13 @@ struct ConversationMerger: Sendable {
             if mergedCount > 0 {
                 self.coreDataStack.saveIfNeeded(context: context)
 
-                if !deletedObjectIDs.isEmpty, !contextsToMerge.isEmpty {
+                // See above: never merge deletions back into the work context.
+                let mergeTargets: [NSManagedObjectContext] = contextsToMerge.filter { $0 !== context }
+                if !deletedObjectIDs.isEmpty, !mergeTargets.isEmpty {
                     let changes = [NSDeletedObjectsKey: deletedObjectIDs]
                     NSManagedObjectContext.mergeChanges(
                         fromRemoteContextSave: changes,
-                        into: contextsToMerge
+                        into: mergeTargets
                     )
                 }
 

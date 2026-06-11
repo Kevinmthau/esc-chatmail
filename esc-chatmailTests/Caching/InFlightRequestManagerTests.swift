@@ -25,18 +25,32 @@ final class InFlightRequestManagerTests: XCTestCase {
             return 7
         }
 
-        // Wait until the first operation has registered as in-flight (bounded spin;
-        // the gate keeps it in flight, so this terminates).
-        var spins = 0
-        while await manager.isInFlight("k") == false && spins < 100_000 {
+        // Wait until the first operation has registered as in-flight. The gate
+        // keeps it in flight, so this terminates. Bound by wall-clock deadline,
+        // not yield count: under a loaded cooperative pool (parallel testing)
+        // a fixed number of yields can elapse before `first` ever schedules.
+        let registrationDeadline = Date().addingTimeInterval(10)
+        while await manager.isInFlight("k") == false && Date() < registrationDeadline {
             await Task.yield()
-            spins += 1
         }
+        let registered = await manager.isInFlight("k")
+        XCTAssertTrue(registered, "first operation never registered as in-flight")
 
         async let second: Int? = manager.deduplicated(key: "k") {
             await runCount.increment() // must NOT run — should dedupe onto `first`
             return -1
         }
+
+        // Don't release the gate until the second caller has actually joined
+        // the in-flight task. `async let` only starts the child task; under a
+        // loaded cooperative pool it may not reach `deduplicated` before the
+        // first operation would otherwise complete and deregister.
+        let joinDeadline = Date().addingTimeInterval(10)
+        while await manager.joinedExistingCount == 0 && Date() < joinDeadline {
+            await Task.yield()
+        }
+        let joined = await manager.joinedExistingCount
+        XCTAssertEqual(joined, 1, "second caller never joined the in-flight operation")
 
         await gate.signal()
 
