@@ -473,7 +473,8 @@ final class ChatMessagesCoordinator: ObservableObject {
 
         hasStartedInitialAnchor = true
         initialAnchorWasForEmptyConversation = false
-        guard shouldUseBottomAnchoring(for: messageCount) else {
+        // Single-message threads stay top-pinned at initial presentation.
+        guard messageCount > 1 else {
             isReadyToShow = true
             Log.diagnostic(
                 .chatView,
@@ -537,7 +538,10 @@ final class ChatMessagesCoordinator: ObservableObject {
         knownTotalCount: Int? = nil,
         scrollAction: @escaping BottomAnchorAction
     ) {
-        guard shouldUseBottomAnchoring(for: messageCount) else { return }
+        // Unlike performInitialScroll, single-message threads are not exempt here:
+        // keyboard/focus changes still need to reveal an occluded bubble bottom.
+        // ScrollView clamping keeps short content top-aligned either way.
+        guard messageCount > 0 else { return }
 
         var steps = [
             BottomAnchorStep(
@@ -595,9 +599,5 @@ final class ChatMessagesCoordinator: ObservableObject {
                 }
             }
         }
-    }
-
-    private func shouldUseBottomAnchoring(for messageCount: Int) -> Bool {
-        messageCount > 1
     }
 }

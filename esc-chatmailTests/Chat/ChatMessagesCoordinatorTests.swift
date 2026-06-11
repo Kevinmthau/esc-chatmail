@@ -928,6 +928,100 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
+    func testKeyboardAndFocusChanges_singleMessageThreadStillAnchorsBottom() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "only@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+
+        var loadLatestWindowCount = 0
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { _ in
+                loadLatestWindowCount += 1
+            },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: 1,
+            lastMessage: messages.first,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: 1,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("Single-message appear should not schedule bottom anchoring")
+        }
+
+        await waitUntil {
+            coordinator.isReadyToShow
+        }
+
+        XCTAssertEqual(loadLatestWindowCount, 0)
+
+        coordinator.handleKeyboardHeightChange(
+            oldHeight: 0,
+            newHeight: 240,
+            messageCount: 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await waitUntil {
+            anchorSteps.count == 1
+        }
+
+        XCTAssertEqual(loadLatestWindowCount, 1)
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: UIConfig.contentChangeScrollDelay,
+                    animated: true,
+                    logMessage: "ChatView animated scroll -> bottom anchor"
+                )
+            ]
+        )
+
+        anchorSteps.removeAll()
+
+        coordinator.handleTextFieldFocusChange(
+            isFocused: false,
+            messageCount: 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await waitUntil {
+            anchorSteps.count == 1
+        }
+
+        XCTAssertEqual(loadLatestWindowCount, 2)
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: UIConfig.initialScrollDelay,
+                    animated: true,
+                    logMessage: "ChatView animated scroll -> bottom anchor"
+                )
+            ]
+        )
+    }
+
     func testKeyboardChangeDuringInitialLoad_doesNotBlockReadyStateOrFutureAnimatedScrolls() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",
