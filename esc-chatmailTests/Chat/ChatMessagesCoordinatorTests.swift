@@ -934,10 +934,13 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         ])
         let rows = messages.map { ChatMessageRowModelMapper.map($0) }
 
+        var loadLatestWindowCount = 0
         var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
 
         let coordinator = ChatMessagesCoordinator(
-            loadLatestWindowIfNeeded: { _ in },
+            loadLatestWindowIfNeeded: { _ in
+                loadLatestWindowCount += 1
+            },
             markConversationAsReadIfNeeded: {},
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
@@ -965,6 +968,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             coordinator.isReadyToShow
         }
 
+        XCTAssertEqual(loadLatestWindowCount, 0)
+
         coordinator.handleKeyboardHeightChange(
             oldHeight: 0,
             newHeight: 240,
@@ -978,6 +983,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.count == 1
         }
 
+        XCTAssertEqual(loadLatestWindowCount, 1)
         XCTAssertEqual(
             anchorSteps,
             [
@@ -1003,6 +1009,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             anchorSteps.count == 1
         }
 
+        XCTAssertEqual(loadLatestWindowCount, 2)
         XCTAssertEqual(
             anchorSteps,
             [
