@@ -246,6 +246,103 @@ final class MessageProcessorTests: XCTestCase {
         XCTAssertFalse(processed.chatPreviewText?.contains("QUOTED_ORIGINAL_TOKEN") == true)
     }
 
+    func testProcessGmailMessage_outgoingForwardWithoutUserBodyDoesNotUseForwardedHTMLAsChatPreview() async throws {
+        let plainText = """
+
+        ---------- Forwarded message ---------
+        From: Park Avenue Armory <news@armoryonpark.org>
+        Date: Jun 10, 2026 at 5:33 PM
+        Subject: Now on View: Celeste Boursier-Mougenot's "clinamen"
+        To: solutions@armoryonpark.org
+
+        Experience the largest iteration of the aquatic and musical installation now through August 2.
+        Additional support has been provided by the Armory's Artistic Council.
+        """
+        let html = """
+        <html>
+        <body>
+          <p>Additional support has been provided by the Armory's Artistic Council.</p>
+          <div>---------- Forwarded message ---------</div>
+          <div>From: Park Avenue Armory &lt;news@armoryonpark.org&gt;</div>
+          <div>Date: Jun 10, 2026 at 5:33 PM</div>
+          <div>Subject: Now on View: Celeste Boursier-Mougenot's "clinamen"</div>
+          <p>Experience the largest iteration of the aquatic and musical installation now through August 2.</p>
+        </body>
+        </html>
+        """
+
+        let message = GmailMessageBuilder()
+            .withId("outgoing-forward-empty-note")
+            .sent()
+            .withFrom("me@example.com", name: "Me")
+            .withSubject("Fwd: Now on View: Celeste Boursier-Mougenot's \"clinamen\"")
+            .withSnippet("Additional support has been provided by the Armory's Artistic Council.")
+            .withBodyText(plainText)
+            .withBodyHtml(html)
+            .build()
+
+        let processedMessage = await processor.processGmailMessage(message, myAliases: ["me@example.com"])
+        let processed = try XCTUnwrap(processedMessage)
+
+        XCTAssertTrue(processed.headers.isFromMe)
+        XCTAssertNil(processed.chatPreviewText)
+        XCTAssertTrue(processed.plainTextBody?.contains("---------- Forwarded message ---------") == true)
+    }
+
+    func testProcessGmailMessage_outgoingForwardWithUserBodyUsesPlainTextLeadInAsChatPreview() async throws {
+        let plainText = """
+        FYI
+
+        ---------- Forwarded message ---------
+        From: Park Avenue Armory <news@armoryonpark.org>
+        Date: Jun 10, 2026 at 5:33 PM
+        Subject: Now on View
+
+        Experience the largest iteration of the aquatic and musical installation now through August 2.
+        """
+        let html = """
+        <html>
+        <body>
+          <p>Experience the largest iteration of the aquatic and musical installation now through August 2.</p>
+          <div>---------- Forwarded message ---------</div>
+          <div>From: Park Avenue Armory &lt;news@armoryonpark.org&gt;</div>
+          <div>Subject: Now on View</div>
+        </body>
+        </html>
+        """
+
+        let message = GmailMessageBuilder()
+            .withId("outgoing-forward-with-note")
+            .sent()
+            .withFrom("me@example.com", name: "Me")
+            .withSubject("Fwd: Now on View")
+            .withSnippet("FYI ---------- Forwarded message ---------")
+            .withBodyText(plainText)
+            .withBodyHtml(html)
+            .build()
+
+        let processedMessage = await processor.processGmailMessage(message, myAliases: ["me@example.com"])
+        let processed = try XCTUnwrap(processedMessage)
+
+        XCTAssertEqual(processed.chatPreviewText, "FYI")
+    }
+
+    func testProcessGmailMessage_outgoingForwardSubjectWithoutForwardMarkerUsesNormalPreviewFallback() async throws {
+        let message = GmailMessageBuilder()
+            .withId("outgoing-forward-subject-without-marker")
+            .sent()
+            .withFrom("me@example.com", name: "Me")
+            .withSubject("Fwd: Status")
+            .withBodyText("Plain fallback should not win")
+            .withBodyHtml("<html><body><p>Regular sent body.</p></body></html>")
+            .build()
+
+        let processedMessage = await processor.processGmailMessage(message, myAliases: ["me@example.com"])
+        let processed = try XCTUnwrap(processedMessage)
+
+        XCTAssertEqual(processed.chatPreviewText, "Regular sent body.")
+    }
+
     func testProcessGmailMessage_cleanedSnippetRemainsCompactWhenChatPreviewHasLineBreaks() async throws {
         let plainText = """
         Line one.
