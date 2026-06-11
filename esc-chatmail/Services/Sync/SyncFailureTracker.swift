@@ -210,6 +210,66 @@ actor SyncFailureTracker {
         }
     }
 
+    /// Returns abandoned message IDs that are still worth retrying, oldest first.
+    /// IDs whose retryCount has reached `SyncConfig.maxAbandonedMessageRetries` are
+    /// excluded permanently.
+    func fetchRetryableAbandonedMessageIds(limit: Int = SyncConfig.maxAbandonedRetriesPerSync) async -> [String] {
+        let context = coreDataStack.newBackgroundContext()
+        return await context.perform {
+            let request = NSFetchRequest<AbandonedSyncMessage>(entityName: "AbandonedSyncMessage")
+            request.predicate = NSPredicate(format: "retryCount < %d", SyncConfig.maxAbandonedMessageRetries)
+            request.sortDescriptors = [NSSortDescriptor(key: "abandonedAt", ascending: true)]
+            request.fetchLimit = limit
+
+            do {
+                let messages = try context.fetch(request)
+                return messages.compactMap { $0.value(forKey: "gmailMessageId") as? String }
+            } catch {
+                Log.error("Failed to fetch retryable abandoned sync messages", category: .sync, error: error)
+                return []
+            }
+        }
+    }
+
+    /// Applies the outcome of an abandoned-message retry pass: recovered and
+    /// server-side-deleted messages are removed from tracking; transient failures
+    /// have their retryCount incremented so they eventually age out.
+    func recordAbandonedRetryOutcome(recoveredIds: [String], goneIds: [String], failedIds: [String]) async {
+        let resolvedIds = recoveredIds + goneIds
+        guard !resolvedIds.isEmpty || !failedIds.isEmpty else { return }
+
+        if !recoveredIds.isEmpty {
+            log.info("Recovered \(recoveredIds.count) previously abandoned messages")
+        }
+        if !goneIds.isEmpty {
+            log.info("Dropping \(goneIds.count) abandoned messages deleted server-side")
+        }
+
+        let context = coreDataStack.newBackgroundContext()
+        await context.perform {
+            let request = NSFetchRequest<AbandonedSyncMessage>(entityName: "AbandonedSyncMessage")
+            request.predicate = NSPredicate(format: "gmailMessageId IN %@", resolvedIds + failedIds)
+
+            do {
+                let resolvedSet = Set(resolvedIds)
+                for record in try context.fetch(request) {
+                    guard let gmailId = record.value(forKey: "gmailMessageId") as? String else { continue }
+                    if resolvedSet.contains(gmailId) {
+                        context.delete(record)
+                    } else {
+                        let retryCount = record.value(forKey: "retryCount") as? Int16 ?? 0
+                        record.setValue(retryCount + 1, forKey: "retryCount")
+                    }
+                }
+                if context.hasChanges {
+                    try context.save()
+                }
+            } catch {
+                Log.error("Failed to record abandoned retry outcome", category: .sync, error: error)
+            }
+        }
+    }
+
     /// Removes an abandoned sync message after successful retry
     func removeAbandonedSyncMessage(gmailMessageId: String) async {
         let context = coreDataStack.newBackgroundContext()

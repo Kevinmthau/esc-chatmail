@@ -13,6 +13,15 @@ private struct BoundedFetchResult {
     let exhaustedRetryIds: [String]
 }
 
+/// Outcome of a single retry pass over previously abandoned messages
+struct AbandonedRetryFetchResult {
+    let fetched: [GmailMessage]
+    /// Failed with non-retriable errors (404 etc.) — the message no longer exists server-side
+    let goneIds: [String]
+    /// Failed with transient errors — worth retrying on a future sync
+    let failedIds: [String]
+}
+
 /// Handles fetching messages from the Gmail API with retry logic and timeout handling
 final class MessageFetcher: @unchecked Sendable {
     private let apiClient: any GmailAPIClientProtocol
@@ -176,6 +185,23 @@ final class MessageFetcher: @unchecked Sendable {
             ($0.internalDate ?? "0") < ($1.internalDate ?? "0")
         }
         await persist(sortedMessages)
+    }
+
+    /// Makes a single fetch attempt for previously abandoned messages, classifying
+    /// each ID so the caller can decide whether to keep retrying it on future syncs.
+    /// No in-place retry loop: these IDs have already failed multiple full syncs, so
+    /// one attempt per sync is enough.
+    func fetchAbandonedMessages(_ ids: [String]) async -> AbandonedRetryFetchResult {
+        guard !ids.isEmpty, !Task.isCancelled else {
+            return AbandonedRetryFetchResult(fetched: [], goneIds: [], failedIds: ids)
+        }
+
+        let result = await fetchWithBoundedConcurrency(ids: ids, isFinalAttempt: true)
+        return AbandonedRetryFetchResult(
+            fetched: result.successfulMessages,
+            goneIds: result.permanentlyFailedIds,
+            failedIds: result.retriableFailedIds + result.exhaustedRetryIds
+        )
     }
 
     /// Fetches a batch of messages by ID with automatic retry on failure
