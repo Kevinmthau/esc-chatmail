@@ -537,7 +537,10 @@ final class ChatMessagesCoordinator: ObservableObject {
         knownTotalCount: Int? = nil,
         scrollAction: @escaping BottomAnchorAction
     ) {
-        guard shouldUseBottomAnchoring(for: messageCount) else { return }
+        // Single-message threads skip initial bottom anchoring to stay top-pinned,
+        // but keyboard/focus changes still need to reveal an occluded bubble bottom.
+        // ScrollView clamping keeps short content top-aligned either way.
+        guard messageCount > 0 else { return }
 
         var steps = [
             BottomAnchorStep(
