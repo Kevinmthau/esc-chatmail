@@ -11,6 +11,12 @@ actor InFlightRequestManager<Key: Hashable & Sendable, Value: Sendable> {
     private var failedKeys: Set<Key> = []
     private let maxFailedKeys: Int
 
+    /// Number of calls that joined an already in-flight task instead of
+    /// starting their own operation. Lets tests observe that a concurrent
+    /// caller actually deduplicated rather than racing the first caller's
+    /// completion.
+    private(set) var joinedExistingCount = 0
+
     // MARK: - Initialization
 
     /// Creates a new request manager
@@ -35,6 +41,7 @@ actor InFlightRequestManager<Key: Hashable & Sendable, Value: Sendable> {
     ) async -> Value? {
         // If there's already a request in flight, wait for it
         if let existingTask = inFlightRequests[key] {
+            joinedExistingCount += 1
             return await existingTask.value
         }
 

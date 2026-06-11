@@ -746,6 +746,10 @@ final class MessagePersisterUpdateTests: XCTestCase {
             try backgroundContext.save()
         }
 
+        // The test context does not auto-merge sibling saves; refresh so the
+        // registered message picks up the background context's changes.
+        context.refreshAllObjects()
+
         let fetch = Message.fetchRequest()
         fetch.predicate = NSPredicate(format: "id == %@", processedMessage.id)
         fetch.fetchLimit = 1

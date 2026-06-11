@@ -28,12 +28,27 @@ struct esc_chatmailApp: App {
         ProcessInfo.processInfo.arguments.contains("UI_TEST_MODE")
     }
 
+    private var isRunningUnitTests: Bool {
+        RuntimeEnvironment.isRunningUnitTests
+    }
+
     private var shouldForceAuthenticatedUITestState: Bool {
         ProcessInfo.processInfo.arguments.contains("UI_TEST_AUTHENTICATED")
     }
 
     init() {
         logStartupTiming("App init started")
+
+        // When hosting unit tests, load the shared Core Data stack now —
+        // synchronously, before XCTest starts executing tests. Some tests
+        // construct services whose initializers default to
+        // `coreDataStack: .shared`; the first such touch would otherwise
+        // lazily load the model and store mid-suite, re-registering global
+        // entity↔class mappings concurrently with running tests.
+        if isRunningUnitTests {
+            _ = CoreDataStack.shared.persistentContainer
+            logStartupTiming("Unit test host — shared Core Data stack preloaded")
+        }
 
         configureGoogleSignIn()
         logStartupTiming("GoogleSignIn configured")
@@ -78,6 +93,19 @@ struct esc_chatmailApp: App {
 
     private func initializeApp() async {
         logStartupTiming("initializeApp() started")
+
+        // Unit tests run hosted inside this process. Keep the app idle so its
+        // startup machinery (fresh-install handling, Core Data store load,
+        // CacheCoordinator's global save observer, maintenance scheduling,
+        // auth restore, sync, ContentView's fetch requests) never runs
+        // concurrently with the test suite. CacheCoordinator in particular
+        // reacts to *every* NSManagedObjectContextDidSave in the process —
+        // including saves of per-test in-memory stacks — scheduling async
+        // Core Data work on test contexts that races the tests themselves.
+        if isRunningUnitTests {
+            logStartupTiming("Unit test host detected — app initialization skipped")
+            return
+        }
 
         // 1. Fresh install check (awaited - completes before continuing)
         await FreshInstallHandler().checkAndHandleFreshInstall()

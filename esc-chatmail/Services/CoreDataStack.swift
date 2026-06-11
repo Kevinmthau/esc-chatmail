@@ -20,6 +20,25 @@ final class CoreDataStack: @unchecked Sendable {
     // Extracted services
     private let recoveryHandler = CoreDataRecoveryHandler()
 
+    /// Testing seam: when set, this container (typically in-memory) backs the
+    /// stack instead of the production SQLite container.
+    private let injectedContainerForTesting: NSPersistentContainer?
+
+    init() {
+        self.injectedContainerForTesting = nil
+    }
+
+    /// Creates a stack backed by an existing, already-loaded container so that
+    /// services requiring a concrete `CoreDataStack` can run against isolated
+    /// per-test storage instead of the shared on-disk store. Unit tests that
+    /// operate on `CoreDataStack.shared` mutate state that is visible to every
+    /// other test in the same runner process and leak async Core Data work
+    /// across test boundaries.
+    init(persistentContainerForTesting container: NSPersistentContainer) {
+        self.injectedContainerForTesting = container
+        self._isStoreLoaded = true
+    }
+
     var isStoreLoaded: Bool {
         // DEBUG-only check to catch potential deadlocks when calling from actor contexts
         #if DEBUG
@@ -99,6 +118,10 @@ final class CoreDataStack: @unchecked Sendable {
 #endif
 
     lazy var persistentContainer: NSPersistentContainer = {
+        if let injectedContainerForTesting {
+            return injectedContainerForTesting
+        }
+
         let container = NSPersistentContainer(name: "ESCChatmail")
         enforceUniquenessConstraints(in: container)
 
@@ -119,6 +142,11 @@ final class CoreDataStack: @unchecked Sendable {
     }()
 
     private func enforceUniquenessConstraints(in container: NSPersistentContainer) {
+        // Under unit tests this model instance is shared with the per-test
+        // in-memory stacks (one model per process keeps +entity unambiguous),
+        // and the test suite's fixtures rely on constraint-free semantics.
+        if RuntimeEnvironment.isRunningUnitTests { return }
+
         guard let messageEntity = container.managedObjectModel.entitiesByName["Message"] else {
             Log.error("Missing Message entity for uniqueness constraints", category: .coreData)
             return
