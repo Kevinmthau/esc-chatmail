@@ -28,11 +28,8 @@ struct esc_chatmailApp: App {
         ProcessInfo.processInfo.arguments.contains("UI_TEST_MODE")
     }
 
-    /// True when this process is hosting unit tests (XCTest is loaded in-process).
-    /// UI tests run the app in a separate process without XCTest, so this stays
-    /// false for them.
     private var isRunningUnitTests: Bool {
-        NSClassFromString("XCTestCase") != nil
+        RuntimeEnvironment.isRunningUnitTests
     }
 
     private var shouldForceAuthenticatedUITestState: Bool {

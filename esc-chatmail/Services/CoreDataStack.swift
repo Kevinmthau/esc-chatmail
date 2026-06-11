@@ -145,7 +145,7 @@ final class CoreDataStack: @unchecked Sendable {
         // Under unit tests this model instance is shared with the per-test
         // in-memory stacks (one model per process keeps +entity unambiguous),
         // and the test suite's fixtures rely on constraint-free semantics.
-        if NSClassFromString("XCTestCase") != nil { return }
+        if RuntimeEnvironment.isRunningUnitTests { return }
 
         guard let messageEntity = container.managedObjectModel.entitiesByName["Message"] else {
             Log.error("Missing Message entity for uniqueness constraints", category: .coreData)

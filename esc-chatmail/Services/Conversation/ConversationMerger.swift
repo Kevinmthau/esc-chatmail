@@ -10,6 +10,23 @@ struct ConversationMerger: Sendable {
         self.coreDataStack = coreDataStack
     }
 
+    /// Forwards deletions to the given contexts, excluding the work context that
+    /// produced them. The work context already knows about these deletions;
+    /// merging them back into it re-enters a context that is mid-`perform` and
+    /// corrupts it, so it is always filtered out.
+    private func mergeDeletions(
+        _ deletedObjectIDs: [NSManagedObjectID],
+        into contexts: [NSManagedObjectContext],
+        excluding workContext: NSManagedObjectContext
+    ) {
+        let mergeTargets = contexts.filter { $0 !== workContext }
+        guard !deletedObjectIDs.isEmpty, !mergeTargets.isEmpty else { return }
+        NSManagedObjectContext.mergeChanges(
+            fromRemoteContextSave: [NSDeletedObjectsKey: deletedObjectIDs],
+            into: mergeTargets
+        )
+    }
+
     // MARK: - Duplicate Removal by KeyHash
 
     /// Removes duplicate conversations by keyHash.
@@ -80,17 +97,7 @@ struct ConversationMerger: Sendable {
             if mergedCount > 0 {
                 self.coreDataStack.saveIfNeeded(context: context)
 
-                // The work context already knows about these deletions; merging
-                // them back into it re-enters a context that is mid-perform and
-                // corrupts it. Only forward deletions to *other* contexts.
-                let mergeTargets: [NSManagedObjectContext] = [self.coreDataStack.viewContext].filter { $0 !== context }
-                if !deletedObjectIDs.isEmpty, !mergeTargets.isEmpty {
-                    let changes = [NSDeletedObjectsKey: deletedObjectIDs]
-                    NSManagedObjectContext.mergeChanges(
-                        fromRemoteContextSave: changes,
-                        into: mergeTargets
-                    )
-                }
+                self.mergeDeletions(deletedObjectIDs, into: [self.coreDataStack.viewContext], excluding: context)
 
                 let duration = CFAbsoluteTimeGetCurrent() - startTime
                 Log.info("Merged \(mergedCount) duplicate conversations in \(String(format: "%.3f", duration))s", category: .conversation)
@@ -150,17 +157,7 @@ struct ConversationMerger: Sendable {
             if mergedCount > 0 {
                 self.coreDataStack.saveIfNeeded(context: context)
 
-                // The work context already knows about these deletions; merging
-                // them back into it re-enters a context that is mid-perform and
-                // corrupts it. Only forward deletions to *other* contexts.
-                let mergeTargets: [NSManagedObjectContext] = [self.coreDataStack.viewContext].filter { $0 !== context }
-                if !deletedObjectIDs.isEmpty, !mergeTargets.isEmpty {
-                    let changes = [NSDeletedObjectsKey: deletedObjectIDs]
-                    NSManagedObjectContext.mergeChanges(
-                        fromRemoteContextSave: changes,
-                        into: mergeTargets
-                    )
-                }
+                self.mergeDeletions(deletedObjectIDs, into: [self.coreDataStack.viewContext], excluding: context)
 
                 let duration = CFAbsoluteTimeGetCurrent() - startTime
                 Log.info("Merged \(mergedCount) duplicate active conversations in \(String(format: "%.3f", duration))s", category: .conversation)
@@ -256,15 +253,7 @@ struct ConversationMerger: Sendable {
             if mergedCount > 0 {
                 self.coreDataStack.saveIfNeeded(context: context)
 
-                // See above: never merge deletions back into the work context.
-                let mergeTargets: [NSManagedObjectContext] = contextsToMerge.filter { $0 !== context }
-                if !deletedObjectIDs.isEmpty, !mergeTargets.isEmpty {
-                    let changes = [NSDeletedObjectsKey: deletedObjectIDs]
-                    NSManagedObjectContext.mergeChanges(
-                        fromRemoteContextSave: changes,
-                        into: mergeTargets
-                    )
-                }
+                self.mergeDeletions(deletedObjectIDs, into: contextsToMerge, excluding: context)
 
                 let duration = CFAbsoluteTimeGetCurrent() - startTime
                 Log.info("Merged \(mergedCount) conversation(s) by gmThreadId in \(String(format: "%.3f", duration))s", category: .conversation)
