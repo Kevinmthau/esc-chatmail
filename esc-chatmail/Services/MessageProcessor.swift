@@ -53,7 +53,9 @@ class MessageProcessor: @unchecked Sendable {
         processedMessage.chatPreviewText = createChatPreviewText(
             html: content.html,
             plainText: content.plainText,
-            snippet: gmailMessage.snippet
+            snippet: gmailMessage.snippet,
+            isOutgoingForward: processedMessage.headers.isFromMe &&
+                ForwardingHeuristics.isForwardedSubject(processedMessage.headers.subject)
         )
 
         // Process labels
@@ -727,7 +729,22 @@ class MessageProcessor: @unchecked Sendable {
         return nil
     }
 
-    private func createChatPreviewText(html: String?, plainText: String?, snippet: String?) -> String? {
+    private func createChatPreviewText(
+        html: String?,
+        plainText: String?,
+        snippet: String?,
+        isOutgoingForward: Bool = false
+    ) -> String? {
+        if isOutgoingForward {
+            let outgoingForwardPreview = createOutgoingForwardChatPreviewText(
+                plainText: plainText,
+                snippet: snippet
+            )
+            if outgoingForwardPreview.handled {
+                return outgoingForwardPreview.text
+            }
+        }
+
         if let htmlPreview = processedChatPreviewText(
             content: html,
             inputKind: .html,
@@ -749,6 +766,29 @@ class MessageProcessor: @unchecked Sendable {
             inputKind: .plainText,
             sanitizeRawEmailSource: true
         )
+    }
+
+    private func createOutgoingForwardChatPreviewText(
+        plainText: String?,
+        snippet: String?
+    ) -> (handled: Bool, text: String?) {
+        if ForwardingHeuristics.indicatesForwarding(subject: nil, contentCandidates: [plainText]) {
+            return (true, processedChatPreviewText(
+                content: plainText,
+                inputKind: .plainText,
+                sanitizeRawEmailSource: true
+            ))
+        }
+
+        if ForwardingHeuristics.indicatesForwarding(subject: nil, contentCandidates: [snippet]) {
+            return (true, processedChatPreviewText(
+                content: snippet,
+                inputKind: .plainText,
+                sanitizeRawEmailSource: true
+            ))
+        }
+
+        return (false, nil)
     }
 
     private func processedChatPreviewText(

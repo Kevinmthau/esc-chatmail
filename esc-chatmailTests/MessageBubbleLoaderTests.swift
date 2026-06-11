@@ -1519,6 +1519,92 @@ final class MessageBubbleLoaderTests: XCTestCase {
         )
     }
 
+    func testLoadContent_outgoingForwardedMessageSuppressesChatPreviewEchoFromForwardedBody() async {
+        let messageId = "bubble-forwarded-echo-preview-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: """
+                ---------- Forwarded message ---------
+                From: Park Avenue Armory &lt;news@armoryonpark.org&gt;
+                Date: Jun 10, 2026 at 5:33 PM
+                Subject: Now on View: Celeste Boursier-Mougenot's "clinamen"
+
+                Experience the largest iteration of the aquatic and musical installation now through August 2.
+                Additional support has been provided by the Armory's Artistic Council.
+                """,
+                chatPreviewText: "Additional support has been provided by the Armory's Artistic Council.",
+                bodyStorageURI: nil,
+                cleanedSnippet: "Additional support has been provided by the Armory's Artistic Council.",
+                snippet: "Additional support has been provided by the Armory's Artistic Council.",
+                subject: "Fwd: Now on View: Celeste Boursier-Mougenot's \"clinamen\"",
+                senderName: "Me",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: true,
+                isForwardedEmail: true,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "me@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertNil(result.fullTextContent)
+        XCTAssertNil(result.forwardedDisplayContent?.leadInText)
+        XCTAssertEqual(result.forwardedDisplayContent?.senderDisplayName, "Park Avenue Armory")
+        XCTAssertEqual(
+            result.forwardedDisplayContent?.previewSnippet,
+            "Experience the largest iteration of the aquatic and musical installation now through August 2. Additional support has been provided by the Armory's Artistic Council."
+        )
+    }
+
+    func testLoadContent_outgoingForwardedMessageKeepsTypedChatPreviewLeadIn() async {
+        let messageId = "bubble-forwarded-typed-preview-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: """
+                ---------- Forwarded message ---------
+                From: Jane Example &lt;jane@example.com&gt;
+                Date: Mon, Feb 16, 2026 at 5:56 PM
+                Subject: Spring plans
+
+                Looking forward to seeing you there.
+                """,
+                chatPreviewText: "Please see below.",
+                bodyStorageURI: nil,
+                cleanedSnippet: "Please see below.",
+                snippet: "Please see below. ---------- Forwarded message ---------",
+                subject: "Fwd: Spring plans",
+                senderName: "Me",
+                hasHTMLSource: false,
+                hasAttachments: false,
+                isFromMe: true,
+                isForwardedEmail: true,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "me@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "Please see below.")
+        XCTAssertEqual(result.forwardedDisplayContent?.leadInText, "Please see below.")
+        XCTAssertEqual(result.forwardedDisplayContent?.senderDisplayName, "Jane Example")
+        XCTAssertEqual(result.forwardedDisplayContent?.subject, "Spring plans")
+    }
+
     func testLoadContent_outgoingForwardedMessageSnippetFallback_parsesFlattenedHeaders() async {
         let messageId = "bubble-forwarded-snippet-only-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)

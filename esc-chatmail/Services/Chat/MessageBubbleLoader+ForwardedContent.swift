@@ -50,7 +50,9 @@ extension MessageBubbleLoader {
             )
 
             guard let chatPreviewContent = ForwardedMessageDisplayParser.parseForward(from: chatPreviewText) else {
-                return fallbackContent?.replacingLeadInText(with: chatPreviewText)
+                return fallbackContent?.replacingLeadInText(
+                    with: leadInTextForUnparsedChatPreview(chatPreviewText, request: request)
+                )
             }
 
             guard !chatPreviewContent.hasForwardedHeaderFields,
@@ -65,6 +67,77 @@ extension MessageBubbleLoader {
             from: [request.bodyText, request.cleanedSnippet, request.snippet]
         )
     }
+
+    private func leadInTextForUnparsedChatPreview(
+        _ chatPreviewText: String,
+        request: MessageBubbleContentRequest
+    ) -> String? {
+        guard request.isFromMe else {
+            return chatPreviewText
+        }
+
+        return isForwardedBodyEcho(
+            chatPreviewText,
+            in: [request.bodyText, request.cleanedSnippet, request.snippet]
+        ) ? nil : chatPreviewText
+    }
+
+    private func isForwardedBodyEcho(
+        _ text: String,
+        in candidates: [String?]
+    ) -> Bool {
+        guard let normalizedText = comparableForwardText(text),
+              normalizedText.count >= 24,
+              normalizedText.split(separator: " ").count >= 4 else {
+            return false
+        }
+
+        return candidates.contains { candidate in
+            guard let forwardedBlock = forwardedBlock(afterMarkerIn: candidate),
+                  let normalizedBlock = comparableForwardText(forwardedBlock) else {
+                return false
+            }
+
+            return normalizedBlock.contains(normalizedText)
+        }
+    }
+
+    private func forwardedBlock(afterMarkerIn text: String?) -> String? {
+        guard let text, !text.isEmpty,
+              let markerPattern = Self.forwardMarkerPattern else {
+            return nil
+        }
+
+        let normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        guard let match = markerPattern.firstMatch(
+            in: normalized,
+            range: NSRange(normalized.startIndex..., in: normalized)
+        ),
+              let range = Range(match.range, in: normalized) else {
+            return nil
+        }
+
+        return String(normalized[range.upperBound...])
+    }
+
+    private func comparableForwardText(_ text: String) -> String? {
+        let normalized = HTMLEntityDecoder.decode(text)
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .lowercased()
+
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private static let forwardMarkerPattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"(?i)(?:Begin forwarded message:|-{2,}[ \t]*Forwarded message\b(?:[ \t]*-{2,})?)"#,
+            options: []
+        )
+    }()
 
     private func firstForwardedDisplayContent(
         from texts: [String?]
