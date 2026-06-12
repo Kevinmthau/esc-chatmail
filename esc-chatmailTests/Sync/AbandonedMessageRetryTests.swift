@@ -126,6 +126,18 @@ final class AbandonedMessageRetryTests: XCTestCase {
 
         let ids = await sut.fetchRetryableAbandonedMessageIds()
         XCTAssertEqual(ids, [], "After \(SyncConfig.maxAbandonedMessageRetries) failed retries the ID is no longer offered")
+
+        let records = try await storedRecords()
+        XCTAssertTrue(records.isEmpty, "Records that hit the retry cap are deleted, not kept as dead rows")
+    }
+
+    func testRecordOutcome_deletesRecordWhenFailureReachesCap() async throws {
+        try await seedAbandonedMessage(id: "last-chance", retryCount: Int16(SyncConfig.maxAbandonedMessageRetries - 1))
+
+        await sut.recordAbandonedRetryOutcome(recoveredIds: [], goneIds: [], failedIds: ["last-chance"])
+
+        let records = try await storedRecords()
+        XCTAssertTrue(records.isEmpty, "A failure that brings retryCount to the cap deletes the record")
     }
 
     func testRecordOutcome_allEmpty_isNoOp() async throws {

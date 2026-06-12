@@ -121,8 +121,8 @@ struct SyncConfig {
     /// Maximum number of retry attempts for an abandoned message before giving up on it
     static let maxAbandonedMessageRetries = 5
 
-    /// Maximum number of abandoned messages to retry per incremental sync
-    static let maxAbandonedRetriesPerSync = 50
+    /// Maximum number of abandoned messages drained (one attempt each) per incremental sync
+    static let maxAbandonedMessagesPerSync = 50
 
     /// UserDefaults key for tracking consecutive sync failures
     static let consecutiveFailuresKey = "syncConsecutiveFailures"

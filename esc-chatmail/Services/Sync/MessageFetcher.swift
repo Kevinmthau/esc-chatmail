@@ -6,8 +6,10 @@ import Foundation
 private struct BoundedFetchResult {
     let successfulMessages: [GmailMessage]
     let retriableFailedIds: [String]
-    /// Messages that failed with non-retriable errors (4xx client errors, not found, etc.)
+    /// Messages that failed with non-retriable errors other than 404 (auth, 4xx, decoding)
     let permanentlyFailedIds: [String]
+    /// Messages the server reported as not found — they no longer exist server-side
+    let notFoundIds: [String]
     /// Messages that failed with retriable errors but we've exhausted retries
     /// These might succeed on a future sync attempt
     let exhaustedRetryIds: [String]
@@ -16,10 +18,12 @@ private struct BoundedFetchResult {
 /// Outcome of a single retry pass over previously abandoned messages
 struct AbandonedRetryFetchResult {
     let fetched: [GmailMessage]
-    /// Failed with non-retriable errors (404 etc.) — the message no longer exists server-side
+    /// The server returned 404 — the message no longer exists server-side
     let goneIds: [String]
-    /// Failed with transient errors — worth retrying on a future sync
+    /// Failed for any other reason — worth retrying on a future sync
     let failedIds: [String]
+
+    static let empty = AbandonedRetryFetchResult(fetched: [], goneIds: [], failedIds: [])
 }
 
 /// Handles fetching messages from the Gmail API with retry logic and timeout handling
@@ -93,6 +97,7 @@ final class MessageFetcher: @unchecked Sendable {
         var successfulMessages: [GmailMessage] = []
         var retriableFailedIds: [String] = []
         var permanentlyFailedIds: [String] = []
+        var notFoundIds: [String] = []
         var exhaustedRetryIds: [String] = []
 
         await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
@@ -139,8 +144,11 @@ final class MessageFetcher: @unchecked Sendable {
                         } else {
                             retriableFailedIds.append(id)
                         }
+                    } else if case APIError.notFound = error {
+                        // The server says the message doesn't exist
+                        notFoundIds.append(id)
                     } else {
-                        // Non-retriable error (4xx, auth, not found) - truly permanent
+                        // Non-retriable error (4xx, auth, decoding) - truly permanent
                         permanentlyFailedIds.append(id)
                     }
                 }
@@ -168,8 +176,17 @@ final class MessageFetcher: @unchecked Sendable {
             successfulMessages: successfulMessages,
             retriableFailedIds: retriableFailedIds,
             permanentlyFailedIds: permanentlyFailedIds,
+            notFoundIds: notFoundIds,
             exhaustedRetryIds: exhaustedRetryIds
         )
+    }
+
+    /// Sorts messages oldest-first for persistence; the persister expects pre-sorted input.
+    /// internalDate is milliseconds since epoch as a string; nil sorts to beginning.
+    private func chronologicallySorted(_ messages: [GmailMessage]) -> [GmailMessage] {
+        messages.sorted {
+            ($0.internalDate ?? "0") < ($1.internalDate ?? "0")
+        }
     }
 
     /// Sorts messages by internalDate and hands the whole batch to the persister in
@@ -180,11 +197,7 @@ final class MessageFetcher: @unchecked Sendable {
         persist: @escaping @Sendable ([GmailMessage]) async -> Void
     ) async {
         guard !messages.isEmpty else { return }
-        // internalDate is milliseconds since epoch as a string; nil sorts to beginning
-        let sortedMessages = messages.sorted {
-            ($0.internalDate ?? "0") < ($1.internalDate ?? "0")
-        }
-        await persist(sortedMessages)
+        await persist(chronologicallySorted(messages))
     }
 
     /// Makes a single fetch attempt for previously abandoned messages, classifying
@@ -192,15 +205,19 @@ final class MessageFetcher: @unchecked Sendable {
     /// No in-place retry loop: these IDs have already failed multiple full syncs, so
     /// one attempt per sync is enough.
     func fetchAbandonedMessages(_ ids: [String]) async -> AbandonedRetryFetchResult {
-        guard !ids.isEmpty, !Task.isCancelled else {
-            return AbandonedRetryFetchResult(fetched: [], goneIds: [], failedIds: ids)
-        }
+        guard !ids.isEmpty, !Task.isCancelled else { return .empty }
 
         let result = await fetchWithBoundedConcurrency(ids: ids, isFinalAttempt: true)
+
+        // A cancelled pass classifies unreliably (child tasks fail with
+        // CancellationError); record nothing rather than burn retry budget
+        // on attempts that never ran.
+        guard !Task.isCancelled else { return .empty }
+
         return AbandonedRetryFetchResult(
-            fetched: result.successfulMessages,
-            goneIds: result.permanentlyFailedIds,
-            failedIds: result.retriableFailedIds + result.exhaustedRetryIds
+            fetched: chronologicallySorted(result.successfulMessages),
+            goneIds: result.notFoundIds,
+            failedIds: result.permanentlyFailedIds + result.retriableFailedIds + result.exhaustedRetryIds
         )
     }
 
@@ -225,8 +242,9 @@ final class MessageFetcher: @unchecked Sendable {
         // First attempt
         let initialResult = await fetchWithBoundedConcurrency(ids: ids)
         permanentlyFailed.append(contentsOf: initialResult.permanentlyFailedIds)
+        permanentlyFailed.append(contentsOf: initialResult.notFoundIds)
 
-        for id in initialResult.permanentlyFailedIds {
+        for id in initialResult.permanentlyFailedIds + initialResult.notFoundIds {
             Log.warning("Non-retriable error for message \(id)", category: .sync)
         }
 
@@ -260,11 +278,12 @@ final class MessageFetcher: @unchecked Sendable {
                 Log.debug("Successfully fetched message \(message.id) on retry attempt \(attempt)", category: .sync)
             }
 
-            for id in retryResult.permanentlyFailedIds {
+            for id in retryResult.permanentlyFailedIds + retryResult.notFoundIds {
                 Log.warning("Permanently failed to fetch message \(id) after \(attempt) attempts", category: .sync)
             }
 
             permanentlyFailed.append(contentsOf: retryResult.permanentlyFailedIds)
+            permanentlyFailed.append(contentsOf: retryResult.notFoundIds)
             exhaustedRetries.append(contentsOf: retryResult.exhaustedRetryIds)
             await persistInChronologicalOrder(retryResult.successfulMessages, persist: persist)
 

@@ -116,21 +116,30 @@ enum ConnectionErrorDetector {
 
     /// Checks if an error proves the request never reached the server, making it safe
     /// to resend even a non-idempotent request. Only connection-establishment failures
-    /// qualify; timeouts and dropped connections are ambiguous because the request may
-    /// have been delivered before the failure.
+    /// (DNS, connect, TLS handshake) qualify; timeouts and dropped connections are
+    /// ambiguous because the request may have been delivered before the failure.
     static func isPreTransmissionError(_ error: Error) -> Bool {
         let nsError = error as NSError
-        guard nsError.domain == NSURLErrorDomain else { return false }
 
-        switch nsError.code {
-        case NSURLErrorNotConnectedToInternet,
-             NSURLErrorCannotFindHost,
-             NSURLErrorDNSLookupFailed,
-             NSURLErrorCannotConnectToHost:
-            return true
-        default:
-            return false
+        if nsError.domain == NSURLErrorDomain {
+            switch nsError.code {
+            case NSURLErrorNotConnectedToInternet,
+                 NSURLErrorCannotFindHost,
+                 NSURLErrorDNSLookupFailed,
+                 NSURLErrorCannotConnectToHost,
+                 NSURLErrorSecureConnectionFailed:
+                return true
+            default:
+                return false
+            }
         }
+
+        // URLSession often wraps the connection failure in a generic error
+        if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            return isPreTransmissionError(underlyingError)
+        }
+
+        return false
     }
 
     /// Checks if a URLError is retryable

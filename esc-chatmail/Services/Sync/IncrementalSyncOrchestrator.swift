@@ -345,27 +345,44 @@ final class IncrementalSyncOrchestrator {
         log.info("Retrying \(ids.count) previously abandoned messages")
         let result = await messageFetcher.fetchAbandonedMessages(ids)
 
+        // A fetched message can still be skipped by the persister (e.g. unprocessable
+        // payload), so "recovered" is determined by what actually reached the context,
+        // not by what was fetched — otherwise the tracking record would be deleted
+        // with no Message row to show for it.
+        var persistedIds: Set<String> = []
         if !result.fetched.isEmpty {
-            // internalDate is milliseconds since epoch as a string; persist oldest first
-            // to match the regular fetch path's chronological ordering.
-            let sortedMessages = result.fetched.sorted {
-                ($0.internalDate ?? "0") < ($1.internalDate ?? "0")
-            }
             await messagePersister.saveMessages(
-                sortedMessages,
+                result.fetched,
                 labelIds: phaseContext.labelIds,
                 myAliases: phaseContext.myAliases,
                 sendAsAliases: phaseContext.sendAsAliases,
                 modificationTransaction: phaseContext.modificationTransaction,
                 in: phaseContext.coreDataContext
             )
+            persistedIds = await Self.messageIdsPresent(
+                result.fetched.map { $0.id },
+                in: phaseContext.coreDataContext
+            )
         }
 
+        let unpersistedIds = result.fetched.map { $0.id }.filter { !persistedIds.contains($0) }
         return AbandonedRetryOutcome(
-            recoveredIds: result.fetched.map { $0.id },
+            recoveredIds: Array(persistedIds),
             goneIds: result.goneIds,
-            failedIds: result.failedIds
+            failedIds: result.failedIds + unpersistedIds
         )
+    }
+
+    private static func messageIdsPresent(
+        _ ids: [String],
+        in context: NSManagedObjectContext
+    ) async -> Set<String> {
+        await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id IN %@", ids)
+            let messages = (try? context.fetch(request)) ?? []
+            return Set(messages.map { $0.id })
+        }
     }
 
     // MARK: - History Recovery

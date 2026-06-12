@@ -91,6 +91,18 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         XCTAssertEqual(StubURLProtocol.requestCount, 2, "Connect failures prove the request was never delivered; retry is safe")
     }
 
+    func testSendMessage_tlsHandshakeFailure_isRetried() async throws {
+        StubURLProtocol.script = [
+            .error(URLError(.secureConnectionFailed)),
+            .data(200, Self.sendResponseBody)
+        ]
+
+        let response = try await client.sendMessage(rawMessage: "raw")
+
+        XCTAssertEqual(response.id, "sent-1")
+        XCTAssertEqual(StubURLProtocol.requestCount, 2, "A TLS handshake failure proves no application data was sent; retry is safe")
+    }
+
     func testSendMessage_rateLimited_isRetried() async throws {
         StubURLProtocol.script = [
             .status(429),

@@ -310,16 +310,11 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                 Log.error("Request failed (attempt \(attempt + 1)/\(retries)): \(error.localizedDescription)", category: .api)
 
                 // Non-idempotent requests may only be resent when the error proves the
-                // request never reached the server (DNS/connect failures). Timeouts and
-                // dropped connections are ambiguous — the send may have gone through.
-                if !allowsRetransmission && !ConnectionErrorDetector.isPreTransmissionError(error) {
-                    if error is DecodingError {
-                        throw APIError.decodingError(error)
-                    }
-                    throw error
-                }
-
-                if !retryStrategy.shouldRetry(error: error, attempt: attempt) {
+                // request never reached the server (DNS/connect/TLS failures). Timeouts
+                // and dropped connections are ambiguous — the send may have gone through.
+                let blocksRetransmission = !allowsRetransmission
+                    && !ConnectionErrorDetector.isPreTransmissionError(error)
+                if blocksRetransmission || !retryStrategy.shouldRetry(error: error, attempt: attempt) {
                     if error is DecodingError {
                         throw APIError.decodingError(error)
                     }
