@@ -380,8 +380,14 @@ final class IncrementalSyncOrchestrator {
         await context.perform {
             let request = Message.fetchRequest()
             request.predicate = NSPredicate(format: "id IN %@", ids)
-            let messages = (try? context.fetch(request)) ?? []
-            return Set(messages.map { $0.id })
+            do {
+                return Set(try context.fetch(request).map { $0.id })
+            } catch {
+                // Treating everything as unpersisted is the safe direction: the
+                // tracking records stay and the messages are retried next sync.
+                Log.error("Failed to verify persisted abandoned messages; treating batch as failed", category: .sync, error: error)
+                return []
+            }
         }
     }
 

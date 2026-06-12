@@ -193,6 +193,8 @@ actor SyncFailureTracker {
             return []
         }
 
+        await resetLegacyRetryCountsIfNeeded()
+
         let context = coreDataStack.newBackgroundContext()
         let ids: [String]? = await context.perform {
             let request = NSFetchRequest<AbandonedSyncMessage>(entityName: "AbandonedSyncMessage")
@@ -214,6 +216,39 @@ actor SyncFailureTracker {
             mayHaveRetryableAbandonedMessages = !ids.isEmpty
         }
         return ids ?? []
+    }
+
+    /// One-time reset of retryCount on records written before the retry drain
+    /// existed: the old code incremented retryCount on every re-abandonment, so a
+    /// legacy record could sit at or above the drain's cap without a single drain
+    /// attempt having run — permanently hidden by the `retryCount <` predicate.
+    private func resetLegacyRetryCountsIfNeeded() async {
+        guard !defaults.bool(forKey: SyncConfig.abandonedRetryCountResetKey) else { return }
+
+        let context = coreDataStack.newBackgroundContext()
+        let didReset: Bool = await context.perform {
+            let request = NSFetchRequest<AbandonedSyncMessage>(entityName: "AbandonedSyncMessage")
+            request.predicate = NSPredicate(format: "retryCount > 0")
+
+            do {
+                let records = try context.fetch(request)
+                for record in records {
+                    record.setValue(Int16(0), forKey: "retryCount")
+                }
+                if context.hasChanges {
+                    try context.save()
+                    Log.info("Reset legacy retryCount on \(records.count) abandoned messages", category: .sync)
+                }
+                return true
+            } catch {
+                Log.error("Failed to reset legacy abandoned retry counts", category: .sync, error: error)
+                return false
+            }
+        }
+
+        if didReset {
+            defaults.set(true, forKey: SyncConfig.abandonedRetryCountResetKey)
+        }
     }
 
     /// Applies the outcome of an abandoned-message retry pass: recovered and

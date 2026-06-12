@@ -18,6 +18,9 @@ final class AbandonedMessageRetryTests: XCTestCase {
         coreDataStack = CoreDataStack(persistentContainerForTesting: testStack.persistentContainer)
         suiteName = "AbandonedMessageRetryTests-\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)!
+        // These tests target post-migration behavior; the legacy retryCount reset
+        // is exercised explicitly in the migration test below.
+        defaults.set(true, forKey: SyncConfig.abandonedRetryCountResetKey)
         sut = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack)
     }
 
@@ -90,6 +93,20 @@ final class AbandonedMessageRetryTests: XCTestCase {
     func testFetchRetryable_emptyStore_returnsEmpty() async {
         let ids = await sut.fetchRetryableAbandonedMessageIds()
         XCTAssertEqual(ids, [])
+    }
+
+    func testFetchRetryable_resetsLegacyRetryCountsOnce() async throws {
+        // Legacy records counted re-abandonments in retryCount and can sit at or
+        // above the drain's cap without any drain attempt having run.
+        defaults.set(false, forKey: SyncConfig.abandonedRetryCountResetKey)
+        try await seedAbandonedMessage(id: "legacy", retryCount: Int16(SyncConfig.maxAbandonedMessageRetries + 2))
+
+        let ids = await sut.fetchRetryableAbandonedMessageIds()
+
+        XCTAssertEqual(ids, ["legacy"], "Legacy retryCount must be reset so the drain gets its full budget")
+        let records = try await storedRecords()
+        XCTAssertEqual(records.first?.retryCount, 0)
+        XCTAssertTrue(defaults.bool(forKey: SyncConfig.abandonedRetryCountResetKey), "Reset runs once and latches")
     }
 
     // MARK: - recordAbandonedRetryOutcome

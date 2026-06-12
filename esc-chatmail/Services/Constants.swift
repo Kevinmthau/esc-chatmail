@@ -136,6 +136,11 @@ struct SyncConfig {
     /// UserDefaults key for tracking last label reconciliation time
     static let lastReconciliationTimeKey = "lastReconciliationTime"
 
+    /// UserDefaults key marking that legacy AbandonedSyncMessage retryCounts were reset.
+    /// Before the retry drain existed, retryCount counted re-abandonments; the drain
+    /// counts actual retry attempts, so legacy values must not consume its budget.
+    static let abandonedRetryCountResetKey = "abandonedRetryCountReset"
+
     /// UserDefaults key for resuming bounded missed-message reconciliation windows
     static let missedMessageReconciliationCursorKey = "missedMessageReconciliationCursor"
 
