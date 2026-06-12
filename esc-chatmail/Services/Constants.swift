@@ -118,6 +118,12 @@ struct SyncConfig {
     /// If too many messages fail, we log them and move on to prevent sync deadlock
     static let maxFailedMessagesBeforeAdvance = 10
 
+    /// Maximum number of retry attempts for an abandoned message before giving up on it
+    static let maxAbandonedMessageRetries = 5
+
+    /// Maximum number of abandoned messages drained (one attempt each) per incremental sync
+    static let maxAbandonedMessagesPerSync = 50
+
     /// UserDefaults key for tracking consecutive sync failures
     static let consecutiveFailuresKey = "syncConsecutiveFailures"
 
@@ -129,6 +135,11 @@ struct SyncConfig {
 
     /// UserDefaults key for tracking last label reconciliation time
     static let lastReconciliationTimeKey = "lastReconciliationTime"
+
+    /// UserDefaults key marking that legacy AbandonedSyncMessage retryCounts were reset.
+    /// Before the retry drain existed, retryCount counted re-abandonments; the drain
+    /// counts actual retry attempts, so legacy values must not consume its budget.
+    static let abandonedRetryCountResetKey = "abandonedRetryCountReset"
 
     /// UserDefaults key for resuming bounded missed-message reconciliation windows
     static let missedMessageReconciliationCursorKey = "missedMessageReconciliationCursor"

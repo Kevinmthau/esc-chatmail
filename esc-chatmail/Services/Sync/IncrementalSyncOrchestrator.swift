@@ -178,6 +178,16 @@ final class IncrementalSyncOrchestrator {
                 detail: "success=\(fetchResult.successfulCount) failed=\(fetchResult.failedIds.count)"
             )
 
+            // Phase 2b: Retry previously abandoned messages. Their failures must not
+            // influence historyId advancement — the cursor moved past them when they
+            // were abandoned. Tracker bookkeeping happens after the final save below.
+            let abandonedRetryTimer = timing.start("abandonedRetry")
+            let abandonedOutcome = await retryAbandonedMessages(phaseContext: phaseContext)
+            timing.finish(
+                abandonedRetryTimer,
+                detail: "recovered=\(abandonedOutcome.recoveredIds.count) gone=\(abandonedOutcome.goneIds.count) failed=\(abandonedOutcome.failedIds.count)"
+            )
+
             // Phase 3: Process label changes (AFTER messages are fetched)
             let labelTimer = timing.start("labelProcessing")
             try await labelProcessingPhase.execute(
@@ -263,6 +273,14 @@ final class IncrementalSyncOrchestrator {
             committedModificationTransaction = true
             await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
 
+            // Only update abandoned-message tracking once the recovered messages are
+            // durably saved; if the save had failed, the records must stay for retry.
+            await failureTracker.recordAbandonedRetryOutcome(
+                recoveredIds: abandonedOutcome.recoveredIds,
+                goneIds: abandonedOutcome.goneIds,
+                failedIds: abandonedOutcome.failedIds
+            )
+
             NotificationCenter.default.post(name: .syncCompleted, object: nil)
             let cleanupTimer = timing.start("incrementalCleanup")
             await dataCleanupService.runIncrementalCleanup()
@@ -303,6 +321,73 @@ final class IncrementalSyncOrchestrator {
             }
             timing.finishRun(outcome: "failed error=\(error.localizedDescription)")
             throw error
+        }
+    }
+
+    // MARK: - Abandoned Message Retry
+
+    private struct AbandonedRetryOutcome {
+        let recoveredIds: [String]
+        let goneIds: [String]
+        let failedIds: [String]
+
+        static let empty = AbandonedRetryOutcome(recoveredIds: [], goneIds: [], failedIds: [])
+    }
+
+    /// Makes one fetch attempt for messages previously abandoned by the failure
+    /// tracker, persisting any that now succeed into the sync context. The returned
+    /// outcome must be applied to the failure tracker only after the context is
+    /// durably saved.
+    private func retryAbandonedMessages(phaseContext: SyncPhaseContext) async -> AbandonedRetryOutcome {
+        let ids = await failureTracker.fetchRetryableAbandonedMessageIds()
+        guard !ids.isEmpty else { return .empty }
+
+        log.info("Retrying \(ids.count) previously abandoned messages")
+        let result = await messageFetcher.fetchAbandonedMessages(ids)
+
+        // A fetched message can still be skipped by the persister (e.g. unprocessable
+        // payload), so "recovered" is determined by what actually reached the context,
+        // not by what was fetched — otherwise the tracking record would be deleted
+        // with no Message row to show for it.
+        var persistedIds: Set<String> = []
+        if !result.fetched.isEmpty {
+            await messagePersister.saveMessages(
+                result.fetched,
+                labelIds: phaseContext.labelIds,
+                myAliases: phaseContext.myAliases,
+                sendAsAliases: phaseContext.sendAsAliases,
+                modificationTransaction: phaseContext.modificationTransaction,
+                in: phaseContext.coreDataContext
+            )
+            persistedIds = await Self.messageIdsPresent(
+                result.fetched.map { $0.id },
+                in: phaseContext.coreDataContext
+            )
+        }
+
+        let unpersistedIds = result.fetched.map { $0.id }.filter { !persistedIds.contains($0) }
+        return AbandonedRetryOutcome(
+            recoveredIds: Array(persistedIds),
+            goneIds: result.goneIds,
+            failedIds: result.failedIds + unpersistedIds
+        )
+    }
+
+    private static func messageIdsPresent(
+        _ ids: [String],
+        in context: NSManagedObjectContext
+    ) async -> Set<String> {
+        await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id IN %@", ids)
+            do {
+                return Set(try context.fetch(request).map { $0.id })
+            } catch {
+                // Treating everything as unpersisted is the safe direction: the
+                // tracking records stay and the messages are retried next sync.
+                Log.error("Failed to verify persisted abandoned messages; treating batch as failed", category: .sync, error: error)
+                return []
+            }
         }
     }
 

@@ -72,10 +72,14 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     // MARK: - Initialization
 
     /// Initializer with injectable dependencies.
-    init(tokenManager: TokenManagerProtocol, retryStrategy: RetryStrategy = NetworkRetryStrategy()) {
+    init(
+        tokenManager: TokenManagerProtocol,
+        retryStrategy: RetryStrategy = NetworkRetryStrategy(),
+        session: URLSession? = nil
+    ) {
         self.tokenManager = tokenManager
         self.retryStrategy = retryStrategy
-        self.session = Self.createSession()
+        self.session = session ?? Self.createSession()
     }
 
     private static func createSession() -> URLSession {
@@ -161,7 +165,17 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// The circuit breaker prevents indefinite waiting by:
     /// - Capping individual Retry-After delays to `NetworkConfig.maxRetryAfterSeconds`
     /// - Aborting if total elapsed time exceeds `NetworkConfig.maxTotalRetryTime`
-    nonisolated func performRequestWithRetry<T: Decodable>(_ request: URLRequest, maxRetries: Int? = nil) async throws -> T {
+    ///
+    /// Set `allowsRetransmission` to false for non-idempotent requests (messages.send):
+    /// the request is never resent after an ambiguous failure (5xx, timeout, dropped
+    /// connection), because the server may have already processed it. Retries are still
+    /// performed when the failure proves the request was rejected or never delivered
+    /// (401 after token refresh, 429, DNS/connect failures).
+    nonisolated func performRequestWithRetry<T: Decodable>(
+        _ request: URLRequest,
+        maxRetries: Int? = nil,
+        allowsRetransmission: Bool = true
+    ) async throws -> T {
         let retries = maxRetries ?? retryStrategy.maxRetries
         let startTime = Date()
         var lastError: Error?
@@ -223,7 +237,9 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
                     case 500...599:
                         Log.warning("Server error \(httpResponse.statusCode), attempt \(attempt + 1)/\(retries)", category: .api)
-                        if attempt < retries - 1 {
+                        // A 5xx is ambiguous for non-idempotent requests: the server may
+                        // have processed the request before failing. Never resend.
+                        if allowsRetransmission, attempt < retries - 1 {
                             // Check time budget before sleeping
                             let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
                             if retryDelay > remainingTime {
@@ -293,7 +309,12 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                 lastError = error
                 Log.error("Request failed (attempt \(attempt + 1)/\(retries)): \(error.localizedDescription)", category: .api)
 
-                if !retryStrategy.shouldRetry(error: error, attempt: attempt) {
+                // Non-idempotent requests may only be resent when the error proves the
+                // request never reached the server (DNS/connect/TLS failures). Timeouts
+                // and dropped connections are ambiguous — the send may have gone through.
+                let blocksRetransmission = !allowsRetransmission
+                    && !ConnectionErrorDetector.isPreTransmissionError(error)
+                if blocksRetransmission || !retryStrategy.shouldRetry(error: error, attempt: attempt) {
                     if error is DecodingError {
                         throw APIError.decodingError(error)
                     }

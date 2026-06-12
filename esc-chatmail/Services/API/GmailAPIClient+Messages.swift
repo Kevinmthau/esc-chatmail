@@ -57,7 +57,9 @@ extension GmailAPIClient {
             SendMessageRequest(raw: rawMessage, threadId: threadId)
         )
 
-        return try await performRequestWithRetry(request)
+        // Sending is not idempotent and Gmail has no idempotency key: resending after
+        // an ambiguous failure (timeout, 5xx) could deliver the email twice.
+        return try await performRequestWithRetry(request, allowsRetransmission: false)
     }
 
     /// Archives messages by removing the INBOX label.
