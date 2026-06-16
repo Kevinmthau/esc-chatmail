@@ -78,6 +78,90 @@ final class ForwardedMessageDisplayParserTests: XCTestCase {
         XCTAssertTrue(result?.timestampText?.contains("8:12") == true)
     }
 
+    func testParseForward_outlookHeaderBlockWithoutMarker_extractsStructuredSummary() {
+        let result = ForwardedMessageDisplayParser.parseForward(
+            from: """
+            FYI - Cargo received our motion today.
+
+            From: Alex Dietrich <adietrich@example.com>
+            Sent: Monday, June 15, 2026 3:46 PM
+            To: KCargo <kcargo@example.com>
+            Cc: Monica Mazzei <mmazzei@example.com>
+            Subject: Thau - Respondent's RFO to Terminate
+
+            Dear Counsel,
+
+            Please use the Sharefile link below to access Respondent's Request for Order.
+            """
+        )
+
+        XCTAssertEqual(result?.leadInText, "FYI - Cargo received our motion today.")
+        XCTAssertEqual(result?.senderDisplayName, "Alex Dietrich")
+        XCTAssertEqual(result?.senderEmail, "adietrich@example.com")
+        XCTAssertEqual(result?.subject, "Thau - Respondent's RFO to Terminate")
+        XCTAssertEqual(result?.recipientSummary, "KCargo")
+        XCTAssertEqual(
+            result?.previewSnippet,
+            "Dear Counsel, Please use the Sharefile link below to access Respondent's Request for Order."
+        )
+        XCTAssertTrue(result?.timestampText?.contains("Jun 15") == true)
+        XCTAssertTrue(result?.timestampText?.contains("3:46") == true)
+    }
+
+    func testParseForward_markerlessBodyWithInsufficientHeaderRun_returnsNil() {
+        XCTAssertNil(
+            ForwardedMessageDisplayParser.parseForward(
+                from: """
+                FYI from the team.
+
+                From: Jane Example
+                This is just a normal line in the message body.
+                """
+            )
+        )
+    }
+
+    func testParseForward_markerlessHeaderBlockWithoutDate_returnsNil() {
+        XCTAssertNil(
+            ForwardedMessageDisplayParser.parseForward(
+                from: """
+                FYI
+
+                From: Jane Example <jane@example.com>
+                To: Kevin Thau <kevin@example.com>
+                Subject: Dinner reservation
+
+                Your table is confirmed for 7:30 PM.
+                """
+            )
+        )
+    }
+
+    func testParseForward_markerlessHeaderBlockWithInvalidSentValue_returnsNil() {
+        XCTAssertNil(
+            ForwardedMessageDisplayParser.parseForward(
+                from: """
+                FYI
+
+                From: Jane Example <jane@example.com>
+                Sent: not a date
+                To: Kevin Thau <kevin@example.com>
+                Subject: Dinner reservation
+
+                Your table is confirmed for 7:30 PM.
+                """
+            )
+        )
+    }
+
+    func testParseForward_markerlessSingleLineHeaderBlock_returnsNil() {
+        XCTAssertNil(
+            ForwardedMessageDisplayParser.parseForward(
+                from: "FYI From: Alex Dietrich <adietrich@example.com> Sent: Monday, June 15, 2026 3:46 PM To: KCargo <kcargo@example.com> Subject: Thau - Respondent's RFO to Terminate Dear Counsel, Please use the Sharefile link below."
+            )
+        )
+    }
+
     func testParseOutgoingForward_weirdHeaderPrefixStillParsesFromLine() {
         let result = ForwardedMessageDisplayParser.parseOutgoingForward(
             from: """
@@ -115,6 +199,24 @@ final class ForwardedMessageDisplayParserTests: XCTestCase {
         XCTAssertTrue(result?.timestampText?.contains("5:56") == true)
     }
 
+    func testParseOutgoingForward_multilineNaturalSentText_isNotParsedAsHeader() {
+        let result = ForwardedMessageDisplayParser.parseOutgoingForward(
+            from: """
+            ---------- Forwarded message ---------
+            From: Jane Example <jane@example.com>
+            Date: Mon, Feb 16, 2026 at 5:56 PM
+            Subject: Update
+            To: me@example.com
+            sent: the deck yesterday.
+            """
+        )
+
+        XCTAssertEqual(result?.senderDisplayName, "Jane Example")
+        XCTAssertEqual(result?.subject, "Update")
+        XCTAssertEqual(result?.recipientSummary, "me@example.com")
+        XCTAssertEqual(result?.previewSnippet, "sent: the deck yesterday.")
+    }
+
     func testParseOutgoingForward_quotedRecipientNames_doNotSplitOnDisplayNameCommas() {
         let result = ForwardedMessageDisplayParser.parseOutgoingForward(
             from: """
@@ -129,6 +231,19 @@ final class ForwardedMessageDisplayParserTests: XCTestCase {
         )
 
         XCTAssertEqual(result?.recipientSummary, "Doe, Jane +1")
+    }
+
+    func testParseOutgoingForward_inlineNaturalSentText_isNotParsedAsHeader() {
+        let result = ForwardedMessageDisplayParser.parseOutgoingForward(
+            from: """
+            FYI ---------- Forwarded message --------- From: Jane Example <jane@example.com> Date: Mon, Feb 16, 2026 at 5:56 PM Subject: Update To: me@example.com I sent: the deck yesterday.
+            """
+        )
+
+        XCTAssertEqual(result?.senderDisplayName, "Jane Example")
+        XCTAssertEqual(result?.subject, "Update")
+        XCTAssertEqual(result?.recipientSummary, "me@example.com")
+        XCTAssertEqual(result?.previewSnippet, "I sent: the deck yesterday.")
     }
 
     func testParseOutgoingForward_withoutForwardMarker_returnsNil() {

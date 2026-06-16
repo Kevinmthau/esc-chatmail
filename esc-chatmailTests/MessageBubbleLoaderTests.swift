@@ -931,6 +931,58 @@ final class MessageBubbleLoaderTests: XCTestCase {
         XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)
     }
 
+    func testLoadContent_incomingForwardedMessageWithOutlookHeaders_returnsStructuredForwardPreview() async {
+        let messageId = "bubble-incoming-forwarded-outlook-\(UUID().uuidString)"
+        await ProcessedTextCache.shared.invalidate(messageId: messageId)
+
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let result = await loader.loadContent(
+            from: MessageBubbleContentRequest(
+                messageID: messageId,
+                bodyText: """
+                FYI - Cargo received our motion today.
+
+                From: Alex Dietrich <adietrich@example.com>
+                Sent: Monday, June 15, 2026 3:46 PM
+                To: KCargo <kcargo@example.com>
+                Cc: Monica Mazzei <mmazzei@example.com>
+                Subject: Thau - Respondent's RFO to Terminate
+
+                Dear Counsel,
+
+                Please use the Sharefile link below to access Respondent's Request for Order.
+                """,
+                bodyStorageURI: nil,
+                cleanedSnippet: "FYI - Cargo received our motion today.",
+                snippet: "FYI - Cargo received our motion today. From: Alex Dietrich",
+                subject: "FW: Thau - Respondent's RFO to Terminate",
+                senderName: "Monica Mazzei",
+                hasHTMLSource: true,
+                hasAttachments: false,
+                isFromMe: false,
+                isForwardedEmail: true,
+                isLikelyCalendarInvite: false,
+                effectiveSenderEmail: "monica@example.com",
+                attachmentSnapshots: []
+            )
+        )
+
+        XCTAssertEqual(result.fullTextContent, "FYI - Cargo received our motion today.")
+        XCTAssertFalse(result.hasRichHTMLContent)
+        XCTAssertEqual(result.forwardedDisplayContent?.senderDisplayName, "Alex Dietrich")
+        XCTAssertEqual(result.forwardedDisplayContent?.senderEmail, "adietrich@example.com")
+        XCTAssertEqual(result.forwardedDisplayContent?.subject, "Thau - Respondent's RFO to Terminate")
+        XCTAssertEqual(result.forwardedDisplayContent?.recipientSummary, "KCargo")
+        XCTAssertEqual(
+            result.forwardedDisplayContent?.previewSnippet,
+            "Dear Counsel, Please use the Sharefile link below to access Respondent's Request for Order."
+        )
+        XCTAssertTrue(result.htmlAnalysis.hasHTMLSource)
+    }
+
     func testLoadContent_forwardedMessagePrefersStructuredChatPreviewOverStaleBodyText() async {
         let messageId = "bubble-forwarded-chat-preview-primary-\(UUID().uuidString)"
         await ProcessedTextCache.shared.invalidate(messageId: messageId)

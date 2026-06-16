@@ -29,6 +29,7 @@ enum ForwardedMessageDisplayParser {
     private static let knownHeaderNames: Set<String> = [
         "from",
         "date",
+        "sent",
         "subject",
         "to",
         "cc"
@@ -61,12 +62,31 @@ enum ForwardedMessageDisplayParser {
             return nil
         }
 
-        guard let markerRange = markerRange(in: text) else {
+        if let markerRange = markerRange(in: text) {
+            return parseForwardContent(
+                leadInRaw: String(text[..<markerRange.lowerBound]),
+                forwardedBlock: String(text[markerRange.upperBound...])
+            )
+        }
+
+        guard let headerRange = inferredForwardedHeaderRange(in: text) else {
             return nil
         }
 
-        let leadInRaw = String(text[..<markerRange.lowerBound])
-        let forwardedBlock = String(text[markerRange.upperBound...])
+        return parseForwardContent(
+            leadInRaw: String(text[..<headerRange.lowerBound]),
+            forwardedBlock: String(text[headerRange.lowerBound...])
+        )
+    }
+
+    static func parseOutgoingForward(from text: String?) -> ForwardedMessageDisplayContent? {
+        parseForward(from: text)
+    }
+
+    private static func parseForwardContent(
+        leadInRaw: String,
+        forwardedBlock: String
+    ) -> ForwardedMessageDisplayContent? {
         let trimmedForwardedBlock = trimLeadingBlankLines(forwardedBlock)
 
         let parsedForward = parseForwardedBlock(trimmedForwardedBlock)
@@ -90,10 +110,6 @@ enum ForwardedMessageDisplayParser {
         return content.hasVisibleSummary ? content : nil
     }
 
-    static func parseOutgoingForward(from text: String?) -> ForwardedMessageDisplayContent? {
-        parseForward(from: text)
-    }
-
     private static func markerRange(in text: String) -> Range<String.Index>? {
         guard let markerPattern,
               let match = markerPattern.firstMatch(
@@ -105,6 +121,96 @@ enum ForwardedMessageDisplayParser {
         }
 
         return range
+    }
+
+    private static func inferredForwardedHeaderRange(in text: String) -> Range<String.Index>? {
+        inferredMultiLineForwardedHeaderRange(in: text)
+    }
+
+    private static func inferredMultiLineForwardedHeaderRange(in text: String) -> Range<String.Index>? {
+        var lineStart = text.startIndex
+
+        while lineStart < text.endIndex {
+            let lineEnd = text[lineStart...].firstIndex(of: "\n") ?? text.endIndex
+            let line = String(text[lineStart..<lineEnd])
+
+            if parseHeaderLine(line)?.name == "from",
+               hasForwardedHeaderRun(in: text, startingAt: lineStart) {
+                return lineStart..<lineStart
+            }
+
+            guard lineEnd < text.endIndex else {
+                break
+            }
+
+            lineStart = text.index(after: lineEnd)
+        }
+
+        return nil
+    }
+
+    private static func hasForwardedHeaderRun(
+        in text: String,
+        startingAt startIndex: String.Index
+    ) -> Bool {
+        var lineStart = startIndex
+        var headerNames = Set<String>()
+        var hasDateLikeHeader = false
+
+        while lineStart < text.endIndex {
+            let lineEnd = text[lineStart...].firstIndex(of: "\n") ?? text.endIndex
+            let line = String(text[lineStart..<lineEnd])
+            let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if trimmedLine.isEmpty {
+                break
+            }
+
+            if let parsedHeader = parseHeaderLine(line) {
+                if headerNames.isEmpty, parsedHeader.name != "from" {
+                    break
+                }
+
+                if parsedHeader.name == "date" {
+                    guard hasDateLikeHeaderValue(parsedHeader.value) else {
+                        break
+                    }
+                    hasDateLikeHeader = true
+                }
+
+                headerNames.insert(parsedHeader.name)
+            } else if line.hasPrefix(" ") || line.hasPrefix("\t") {
+                guard !headerNames.isEmpty else {
+                    break
+                }
+            } else {
+                break
+            }
+
+            guard lineEnd < text.endIndex else {
+                break
+            }
+
+            lineStart = text.index(after: lineEnd)
+        }
+
+        return isPlausibleForwardedHeaderRun(
+            headerNames,
+            hasDateLikeHeader: hasDateLikeHeader
+        )
+    }
+
+    private static func isPlausibleForwardedHeaderRun(
+        _ headerNames: Set<String>,
+        hasDateLikeHeader: Bool
+    ) -> Bool {
+        guard headerNames.contains("from"),
+              hasDateLikeHeader else {
+            return false
+        }
+
+        let supportingHeaderNames: Set<String> = ["subject", "to", "cc"]
+        return !headerNames.intersection(supportingHeaderNames).isEmpty
     }
 
     private static func normalized(_ text: String?) -> String? {
@@ -284,7 +390,7 @@ enum ForwardedMessageDisplayParser {
                 valueEnd = text.endIndex
             }
 
-            let headerName = String(text[nameRange]).lowercased()
+            let headerName = canonicalHeaderName(String(text[nameRange]).lowercased())
             let value = String(text[valueStart..<valueEnd]).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !value.isEmpty else {
                 continue
@@ -512,17 +618,43 @@ enum ForwardedMessageDisplayParser {
             return nil
         }
 
-        let headerName = lineWithoutNoise[..<separatorIndex]
+        let parsedHeaderName = lineWithoutNoise[..<separatorIndex]
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
 
-        guard knownHeaderNames.contains(headerName) else {
+        guard knownHeaderNames.contains(parsedHeaderName) else {
             return nil
         }
+
+        let headerName = canonicalHeaderName(parsedHeaderName)
 
         let value = String(lineWithoutNoise[lineWithoutNoise.index(after: separatorIndex)...])
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
+        guard parsedHeaderName != "sent" || hasDateLikeHeaderValue(value) else {
+            return nil
+        }
+
         return (headerName, value)
+    }
+
+    private static func canonicalHeaderName(_ headerName: String) -> String {
+        headerName == "sent" ? "date" : headerName
+    }
+
+    private static func hasDateLikeHeaderValue(_ value: String) -> Bool {
+        guard value.rangeOfCharacter(from: .decimalDigits) != nil else {
+            return false
+        }
+
+        guard let dateDetector else {
+            return false
+        }
+
+        return dateDetector.firstMatch(
+            in: value,
+            options: [],
+            range: NSRange(value.startIndex..., in: value)
+        )?.date != nil
     }
 }
