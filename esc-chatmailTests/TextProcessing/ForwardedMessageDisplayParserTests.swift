@@ -78,6 +78,49 @@ final class ForwardedMessageDisplayParserTests: XCTestCase {
         XCTAssertTrue(result?.timestampText?.contains("8:12") == true)
     }
 
+    func testParseForward_outlookHeaderBlockWithoutMarker_extractsStructuredSummary() {
+        let result = ForwardedMessageDisplayParser.parseForward(
+            from: """
+            FYI - Cargo received our motion today.
+
+            From: Alex Dietrich <adietrich@example.com>
+            Sent: Monday, June 15, 2026 3:46 PM
+            To: KCargo <kcargo@example.com>
+            Cc: Monica Mazzei <mmazzei@example.com>
+            Subject: Thau - Respondent's RFO to Terminate
+
+            Dear Counsel,
+
+            Please use the Sharefile link below to access Respondent's Request for Order.
+            """
+        )
+
+        XCTAssertEqual(result?.leadInText, "FYI - Cargo received our motion today.")
+        XCTAssertEqual(result?.senderDisplayName, "Alex Dietrich")
+        XCTAssertEqual(result?.senderEmail, "adietrich@example.com")
+        XCTAssertEqual(result?.subject, "Thau - Respondent's RFO to Terminate")
+        XCTAssertEqual(result?.recipientSummary, "KCargo")
+        XCTAssertEqual(
+            result?.previewSnippet,
+            "Dear Counsel, Please use the Sharefile link below to access Respondent's Request for Order."
+        )
+        XCTAssertTrue(result?.timestampText?.contains("Jun 15") == true)
+        XCTAssertTrue(result?.timestampText?.contains("3:46") == true)
+    }
+
+    func testParseForward_markerlessBodyWithInsufficientHeaderRun_returnsNil() {
+        XCTAssertNil(
+            ForwardedMessageDisplayParser.parseForward(
+                from: """
+                FYI from the team.
+
+                From: Jane Example
+                This is just a normal line in the message body.
+                """
+            )
+        )
+    }
+
     func testParseOutgoingForward_weirdHeaderPrefixStillParsesFromLine() {
         let result = ForwardedMessageDisplayParser.parseOutgoingForward(
             from: """
