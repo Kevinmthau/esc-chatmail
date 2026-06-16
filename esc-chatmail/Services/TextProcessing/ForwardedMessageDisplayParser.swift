@@ -124,15 +124,7 @@ enum ForwardedMessageDisplayParser {
     }
 
     private static func inferredForwardedHeaderRange(in text: String) -> Range<String.Index>? {
-        if let multiLineRange = inferredMultiLineForwardedHeaderRange(in: text) {
-            return multiLineRange
-        }
-
-        guard !text.contains("\n") else {
-            return nil
-        }
-
-        return inferredSingleLineForwardedHeaderRange(in: text)
+        inferredMultiLineForwardedHeaderRange(in: text)
     }
 
     private static func inferredMultiLineForwardedHeaderRange(in text: String) -> Range<String.Index>? {
@@ -195,40 +187,6 @@ enum ForwardedMessageDisplayParser {
         }
 
         return isPlausibleForwardedHeaderRun(headerNames)
-    }
-
-    private static func inferredSingleLineForwardedHeaderRange(in text: String) -> Range<String.Index>? {
-        guard let inlineHeaderPattern else {
-            return nil
-        }
-
-        let matches = inlineHeaderPattern.matches(
-            in: text,
-            options: [],
-            range: NSRange(text.startIndex..., in: text)
-        )
-
-        for index in matches.indices {
-            let match = matches[index]
-            guard let nameRange = Range(match.range(at: 1), in: text),
-                  let fullMatchRange = Range(match.range, in: text),
-                  canonicalHeaderName(String(text[nameRange]).lowercased()) == "from" else {
-                continue
-            }
-
-            let headerNames = Set(matches[index...].compactMap { candidate -> String? in
-                guard let candidateNameRange = Range(candidate.range(at: 1), in: text) else {
-                    return nil
-                }
-                return canonicalHeaderName(String(text[candidateNameRange]).lowercased())
-            })
-
-            if isPlausibleForwardedHeaderRun(headerNames) {
-                return fullMatchRange
-            }
-        }
-
-        return nil
     }
 
     private static func isPlausibleForwardedHeaderRun(_ headerNames: Set<String>) -> Bool {

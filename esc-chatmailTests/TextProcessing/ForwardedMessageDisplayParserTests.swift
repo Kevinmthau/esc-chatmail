@@ -121,6 +121,14 @@ final class ForwardedMessageDisplayParserTests: XCTestCase {
         )
     }
 
+    func testParseForward_markerlessSingleLineHeaderBlock_returnsNil() {
+        XCTAssertNil(
+            ForwardedMessageDisplayParser.parseForward(
+                from: "FYI From: Alex Dietrich <adietrich@example.com> Sent: Monday, June 15, 2026 3:46 PM To: KCargo <kcargo@example.com> Subject: Thau - Respondent's RFO to Terminate Dear Counsel, Please use the Sharefile link below."
+            )
+        )
+    }
+
     func testParseOutgoingForward_weirdHeaderPrefixStillParsesFromLine() {
         let result = ForwardedMessageDisplayParser.parseOutgoingForward(
             from: """
