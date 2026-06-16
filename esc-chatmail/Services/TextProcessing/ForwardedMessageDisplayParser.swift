@@ -155,6 +155,7 @@ enum ForwardedMessageDisplayParser {
     ) -> Bool {
         var lineStart = startIndex
         var headerNames = Set<String>()
+        var hasDateLikeHeader = false
 
         while lineStart < text.endIndex {
             let lineEnd = text[lineStart...].firstIndex(of: "\n") ?? text.endIndex
@@ -168,6 +169,13 @@ enum ForwardedMessageDisplayParser {
             if let parsedHeader = parseHeaderLine(line) {
                 if headerNames.isEmpty, parsedHeader.name != "from" {
                     break
+                }
+
+                if parsedHeader.name == "date" {
+                    guard hasDateLikeHeaderValue(parsedHeader.value) else {
+                        break
+                    }
+                    hasDateLikeHeader = true
                 }
 
                 headerNames.insert(parsedHeader.name)
@@ -186,12 +194,18 @@ enum ForwardedMessageDisplayParser {
             lineStart = text.index(after: lineEnd)
         }
 
-        return isPlausibleForwardedHeaderRun(headerNames)
+        return isPlausibleForwardedHeaderRun(
+            headerNames,
+            hasDateLikeHeader: hasDateLikeHeader
+        )
     }
 
-    private static func isPlausibleForwardedHeaderRun(_ headerNames: Set<String>) -> Bool {
+    private static func isPlausibleForwardedHeaderRun(
+        _ headerNames: Set<String>,
+        hasDateLikeHeader: Bool
+    ) -> Bool {
         guard headerNames.contains("from"),
-              headerNames.contains("date") else {
+              hasDateLikeHeader else {
             return false
         }
 
@@ -617,10 +631,30 @@ enum ForwardedMessageDisplayParser {
         let value = String(lineWithoutNoise[lineWithoutNoise.index(after: separatorIndex)...])
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
+        guard parsedHeaderName != "sent" || hasDateLikeHeaderValue(value) else {
+            return nil
+        }
+
         return (headerName, value)
     }
 
     private static func canonicalHeaderName(_ headerName: String) -> String {
         headerName == "sent" ? "date" : headerName
+    }
+
+    private static func hasDateLikeHeaderValue(_ value: String) -> Bool {
+        guard value.rangeOfCharacter(from: .decimalDigits) != nil else {
+            return false
+        }
+
+        guard let dateDetector else {
+            return false
+        }
+
+        return dateDetector.firstMatch(
+            in: value,
+            options: [],
+            range: NSRange(value.startIndex..., in: value)
+        )?.date != nil
     }
 }
