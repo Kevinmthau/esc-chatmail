@@ -45,7 +45,7 @@ enum ForwardedMessageDisplayParser {
 
     private static let inlineHeaderPattern: NSRegularExpression? = {
         try? NSRegularExpression(
-            pattern: #"(?i)\b(from|date|sent|subject|to|cc):"#,
+            pattern: #"(?i)\b(from|date|subject|to|cc):"#,
             options: []
         )
     }()
@@ -190,12 +190,13 @@ enum ForwardedMessageDisplayParser {
     }
 
     private static func isPlausibleForwardedHeaderRun(_ headerNames: Set<String>) -> Bool {
-        guard headerNames.contains("from") else {
+        guard headerNames.contains("from"),
+              headerNames.contains("date") else {
             return false
         }
 
-        let supportingHeaderNames: Set<String> = ["date", "subject", "to", "cc"]
-        return headerNames.intersection(supportingHeaderNames).count >= 2
+        let supportingHeaderNames: Set<String> = ["subject", "to", "cc"]
+        return !headerNames.intersection(supportingHeaderNames).isEmpty
     }
 
     private static func normalized(_ text: String?) -> String? {
