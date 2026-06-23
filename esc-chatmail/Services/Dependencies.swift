@@ -30,6 +30,8 @@ final class Dependencies: ObservableObject {
 
     let coreDataStack: CoreDataStack
     let keychainService: KeychainServiceProtocol
+    let telemetryClient: any TelemetryClient
+    let remoteConfigProvider: any RemoteConfigProvider
 
     // MARK: - Security Layer
 
@@ -372,6 +374,8 @@ final class Dependencies: ObservableObject {
     init(
         coreDataStack: CoreDataStack = CoreDataStack.shared,
         keychainService: KeychainServiceProtocol = KeychainService.shared,
+        telemetryClient: (any TelemetryClient)? = nil,
+        remoteConfigProvider: (any RemoteConfigProvider)? = nil,
         authSession: AuthSession? = nil,
         tokenManager: TokenManagerProtocol? = nil,
         gmailAPIClient: GmailAPIClient? = nil,
@@ -404,6 +408,8 @@ final class Dependencies: ObservableObject {
 
         self.coreDataStack = coreDataStack
         self.keychainService = keychainService
+        self.telemetryClient = telemetryClient ?? NoopTelemetryClient.shared
+        self.remoteConfigProvider = remoteConfigProvider ?? StaticRemoteConfigProvider.shared
         self.authSession = resolvedAuthSession
         self.tokenManager = resolvedTokenManager
         self.gmailAPIClient = resolvedGmailAPIClient

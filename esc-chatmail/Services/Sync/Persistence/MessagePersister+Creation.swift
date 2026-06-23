@@ -93,7 +93,7 @@ extension MessagePersister {
             }
 
             Log.debug(
-                "New message \(processedMessage.id): labels=\(addedLabelIds), hasINBOX=\(hasInboxLabel), conversationId=\(conversation.id.uuidString)",
+                "New message \(Log.hashIdentifier(processedMessage.id)): labels=\(addedLabelIds), hasINBOX=\(hasInboxLabel), conversationId=\(Log.hashIdentifier(conversation.id.uuidString))",
                 category: .sync
             )
 

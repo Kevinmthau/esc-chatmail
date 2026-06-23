@@ -257,23 +257,16 @@ final class InitialSyncOrchestrator {
         context: NSManagedObjectContext,
         progressHandler: @escaping (Double, String) -> Void
     ) async throws -> BatchProcessingResult {
-        // Collect all message IDs using shared paginator
-        let allMessageIds = try await MessageListPaginator.fetchAllMessageIds(
+        return try await MessageListPaginator.fetchAndProcess(
             query: query,
-            using: messageFetcher
-        )
-
-        log.info("Found \(allMessageIds.count) messages to process")
-
-        // Process in batches
-        return try await BatchProcessor.processMessages(
-            messageIds: allMessageIds,
-            batchSize: SyncConfig.messageBatchSize,
             messageFetcher: messageFetcher
-        ) { processed, total in
-            let progress = Double(processed) / Double(max(total, 1))
+        ) { checkpoint in
+            let progress = Self.streamingProgressFraction(for: checkpoint)
             await MainActor.run {
-                progressHandler(progress, "Processing messages... \(processed)/\(total)")
+                progressHandler(
+                    progress,
+                    "Processing messages... \(checkpoint.processedCount)/\(checkpoint.listedCount)"
+                )
             }
         } messageHandler: { [messagePersister, myAliases, sendAsAliases] messages in
             // Capture dependencies strongly to prevent message loss if orchestrator is deallocated
@@ -285,7 +278,17 @@ final class InitialSyncOrchestrator {
                 modificationTransaction: modificationTransaction,
                 in: context
             )
+        } pageCompletion: { [coreDataStack] in
+            try await coreDataStack.saveAsync(context: context)
         }
+    }
+
+    nonisolated private static func streamingProgressFraction(for checkpoint: PagedSyncCheckpoint) -> Double {
+        let denominator = checkpoint.isComplete
+            ? max(checkpoint.listedCount, 1)
+            : max(checkpoint.listedCount + SyncConfig.maxMessagesPerRequest, 1)
+        let progress = Double(checkpoint.processedCount) / Double(denominator)
+        return min(checkpoint.isComplete ? 1.0 : 0.98, progress)
     }
 
     func handleSyncCompletion(

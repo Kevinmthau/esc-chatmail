@@ -1,11 +1,58 @@
 import SwiftUI
 import CoreData
 
+struct InboxWindowProvider {
+    static let initialLimit = VirtualScrollConfiguration.default.pageSize
+    static let pageSize = VirtualScrollConfiguration.default.pageSize
+    static let preloadThreshold = VirtualScrollConfiguration.default.preloadThreshold
+
+    func fetchWindow(
+        in context: NSManagedObjectContext,
+        limit: Int,
+        searchText: String
+    ) -> [Message] {
+        let request = NSFetchRequest<Message>(entityName: "Message")
+        request.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: false)]
+        request.predicate = predicate(searchText: searchText)
+        request.fetchLimit = limit
+        request.fetchBatchSize = min(Self.pageSize, max(limit, 1))
+        request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
+        request.includesPendingChanges = true
+
+        do {
+            return try context.fetch(request)
+        } catch {
+            Log.error("Failed to fetch inbox message window", category: .coreData, error: error)
+            return []
+        }
+    }
+
+    private func predicate(searchText: String) -> NSPredicate {
+        let inboxPredicate = NSPredicate(
+            format: "ANY labels.id == %@ AND NOT (ANY labels.id == %@)",
+            "INBOX",
+            "DRAFT"
+        )
+        let trimmedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSearchText.isEmpty else { return inboxPredicate }
+
+        let searchPredicate = NSPredicate(
+            format: "(subject CONTAINS[cd] %@) OR (snippet CONTAINS[cd] %@) OR (senderName CONTAINS[cd] %@)",
+            trimmedSearchText,
+            trimmedSearchText,
+            trimmedSearchText
+        )
+        return NSCompoundPredicate(andPredicateWithSubpredicates: [inboxPredicate, searchPredicate])
+    }
+}
+
 struct InboxListView: View {
+    @Environment(\.managedObjectContext) private var viewContext
     @FetchRequest private var messages: FetchedResults<Message>
     @StateObject private var messageActions: MessageActions
     private let deps: Dependencies
     private let fullEmailReaderCoordinator: FullEmailReaderCoordinator
+    private let inboxWindowProvider = InboxWindowProvider()
 
     @MainActor
     init(
@@ -28,12 +75,17 @@ struct InboxListView: View {
     @State private var fullEmailOpenSession: FullEmailOpenSession?
     @State private var showingComposer = false
     @State private var cachedFilteredMessages: [Message] = []
+    @State private var loadedMessageLimit = InboxWindowProvider.initialLimit
+    @State private var hasLoadedAllMessages = false
     
     var body: some View {
         NavigationStack {
             List {
                 ForEach(cachedFilteredMessages) { message in
                     MessageRow(message: message)
+                        .onAppear {
+                            loadMoreIfNeeded(currentMessage: message)
+                        }
                         .onTapGesture {
                             fullEmailOpenSession = fullEmailReaderCoordinator.openSession(for: message)
                         }
@@ -70,10 +122,12 @@ struct InboxListView: View {
             .onAppear {
                 updateFilteredMessages()
             }
-            .onChange(of: messages.map(\.objectID)) { _, _ in
+            .onReceive(NotificationCenter.default.publisher(for: .NSManagedObjectContextObjectsDidChange, object: viewContext)) { _ in
                 updateFilteredMessages()
             }
             .onChange(of: searchText) { _, _ in
+                loadedMessageLimit = InboxWindowProvider.initialLimit
+                hasLoadedAllMessages = false
                 updateFilteredMessages()
             }
         }
@@ -82,14 +136,31 @@ struct InboxListView: View {
     /// Updates the cached filtered messages when dependencies change.
     /// Caching prevents recalculation on every view body evaluation.
     private func updateFilteredMessages() {
-        if searchText.isEmpty {
-            cachedFilteredMessages = Array(messages)
+        let trimmedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let window: [Message]
+        if trimmedSearchText.isEmpty {
+            window = Array(messages.prefix(loadedMessageLimit))
         } else {
-            cachedFilteredMessages = messages.filter { message in
-                message.subject?.localizedCaseInsensitiveContains(searchText) ?? false ||
-                message.snippet?.localizedCaseInsensitiveContains(searchText) ?? false
-            }
+            window = inboxWindowProvider.fetchWindow(
+                in: viewContext,
+                limit: loadedMessageLimit,
+                searchText: trimmedSearchText
+            )
         }
+
+        hasLoadedAllMessages = window.count < loadedMessageLimit
+        cachedFilteredMessages = window
+    }
+
+    private func loadMoreIfNeeded(currentMessage message: Message) {
+        guard !hasLoadedAllMessages else { return }
+        guard let index = cachedFilteredMessages.firstIndex(where: { $0.objectID == message.objectID }) else { return }
+        guard cachedFilteredMessages.distance(from: index, to: cachedFilteredMessages.endIndex) <= InboxWindowProvider.preloadThreshold else {
+            return
+        }
+
+        loadedMessageLimit += InboxWindowProvider.pageSize
+        updateFilteredMessages()
     }
     
     private func archiveMessage(_ message: Message) {

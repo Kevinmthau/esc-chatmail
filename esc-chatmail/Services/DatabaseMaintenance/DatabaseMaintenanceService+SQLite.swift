@@ -10,17 +10,9 @@ extension DatabaseMaintenanceService {
             return false
         }
 
-        return await Task.detached {
-            do {
-                let db = try SQLiteDatabase(path: storeURL.path)
-                try db.execute("VACUUM")
-                Log.info("Database vacuum completed successfully", category: .coreData)
-                return true
-            } catch {
-                Log.error("Database vacuum failed", category: .coreData, error: error)
-                return false
-            }
-        }.value
+        return await StoreMaintenanceCoordinator.shared.runWhenStoreIsIdle(operationName: "database vacuum") {
+            await Self.performSQLiteCommand("VACUUM", storeURL: storeURL, successMessage: "Database vacuum completed successfully", failureMessage: "Database vacuum failed")
+        }
     }
 
     func performAnalyze() async -> Bool {
@@ -28,17 +20,9 @@ extension DatabaseMaintenanceService {
             return false
         }
 
-        return await Task.detached {
-            do {
-                let db = try SQLiteDatabase(path: storeURL.path)
-                try db.execute("ANALYZE")
-                Log.info("Database analyze completed successfully", category: .coreData)
-                return true
-            } catch {
-                Log.error("Database analyze failed", category: .coreData, error: error)
-                return false
-            }
-        }.value
+        return await StoreMaintenanceCoordinator.shared.runWhenStoreIsIdle(operationName: "database analyze") {
+            await Self.performSQLiteCommand("ANALYZE", storeURL: storeURL, successMessage: "Database analyze completed successfully", failureMessage: "Database analyze failed")
+        }
     }
 
     func rebuildIndexes() async -> Bool {
@@ -46,14 +30,25 @@ extension DatabaseMaintenanceService {
             return false
         }
 
-        return await Task.detached {
+        return await StoreMaintenanceCoordinator.shared.runWhenStoreIsIdle(operationName: "database reindex") {
+            await Self.performSQLiteCommand("REINDEX", storeURL: storeURL, successMessage: "Database reindex completed successfully", failureMessage: "Database reindex failed")
+        }
+    }
+
+    nonisolated private static func performSQLiteCommand(
+        _ command: String,
+        storeURL: URL,
+        successMessage: String,
+        failureMessage: String
+    ) async -> Bool {
+        await Task.detached {
             do {
                 let db = try SQLiteDatabase(path: storeURL.path)
-                try db.execute("REINDEX")
-                Log.info("Database reindex completed successfully", category: .coreData)
+                try db.execute(command)
+                Log.info(successMessage, category: .coreData)
                 return true
             } catch {
-                Log.error("Database reindex failed", category: .coreData, error: error)
+                Log.error(failureMessage, category: .coreData, error: error)
                 return false
             }
         }.value

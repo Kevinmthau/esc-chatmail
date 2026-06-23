@@ -232,13 +232,8 @@ struct ProfilePhoto {
             return UIImage(data: data)
         }
 
-        if let urlString = url, let url = URL(string: urlString) {
-            do {
-                let (data, _) = try await URLSession.shared.data(from: url)
-                return UIImage(data: data)
-            } catch {
-                Log.debug("Failed to load image from URL: \(error)", category: .general)
-            }
+        if let urlString = url {
+            return await RemoteImageFetcher.shared.image(from: urlString)
         }
 
         return nil
@@ -258,4 +253,3 @@ private class CachedPhoto {
         Date().timeIntervalSince(timestamp) > CacheConfig.photoCacheTTL
     }
 }
-

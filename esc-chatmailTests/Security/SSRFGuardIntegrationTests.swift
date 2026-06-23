@@ -102,6 +102,57 @@ final class SSRFGuardIntegrationTests: XCTestCase {
         XCTAssertEqual(result, GoogleDriveSharedFileMetadataProvider.fallbackMetadata(for: link))
         XCTAssertEqual(FailOnUseURLProtocol.startCount, 0, "Session should not have been used for non-allowed host")
     }
+
+    // MARK: - RemoteImageFetcher
+
+    func testRemoteImageFetcher_rejectsPrivateIPBeforeNetwork() async {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FailOnUseURLProtocol.self]
+        FailOnUseURLProtocol.reset()
+        let session = URLSession(configuration: config)
+        let fetcher = RemoteImageFetcher(session: session)
+
+        do {
+            _ = try await fetcher.imageData(from: "http://169.254.169.254/latest/meta-data/")
+            XCTFail("Expected private-IP URL to be rejected")
+        } catch RemoteImageFetchError.privateOrReservedHost {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(FailOnUseURLProtocol.startCount, 0, "Session should not have been used for private-IP image URL")
+    }
+
+    func testRemoteImageFetcher_rejectsNonImageContentType() async {
+        RemoteImageURLProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [RemoteImageURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let fetcher = RemoteImageFetcher(session: session)
+        let url = URL(string: "https://cdn.openai.com/avatar")!
+
+        RemoteImageURLProtocol.responder = { request in
+            let response = HTTPURLResponse(
+                url: request.url ?? url,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "text/html"]
+            )!
+            return (response, Data("<html></html>".utf8))
+        }
+
+        do {
+            _ = try await fetcher.imageData(from: url.absoluteString)
+            XCTFail("Expected non-image response to be rejected")
+        } catch RemoteImageFetchError.unsupportedContentType(let contentType) {
+            XCTAssertEqual(contentType, "text/html")
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(RemoteImageURLProtocol.requestCount, 1)
+    }
 }
 
 // MARK: - Helpers
@@ -129,6 +180,48 @@ private final class FailOnUseURLProtocol: URLProtocol {
         Self.startCount += 1
         Self.lock.unlock()
         client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
+    }
+
+    override func stopLoading() {}
+}
+
+private final class RemoteImageURLProtocol: URLProtocol {
+    typealias Responder = (URLRequest) throws -> (HTTPURLResponse, Data)
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) static var responder: Responder?
+    nonisolated(unsafe) static var requestCount = 0
+
+    static func reset() {
+        lock.lock()
+        responder = nil
+        requestCount = 0
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let currentResponder: Responder?
+        Self.lock.lock()
+        Self.requestCount += 1
+        currentResponder = Self.responder
+        Self.lock.unlock()
+
+        guard let currentResponder else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+
+        do {
+            let (response, data) = try currentResponder(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
     }
 
     override func stopLoading() {}

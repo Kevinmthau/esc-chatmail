@@ -175,7 +175,7 @@ enum Log {
 
         // Add error details if present
         if let error = error {
-            fullMessage += " | Error: \(error.localizedDescription)"
+            fullMessage += " | Error: \(Log.redact(error: error))"
             if let nsError = error as NSError? {
                 fullMessage += " (code: \(nsError.code))"
             }

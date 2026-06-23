@@ -301,6 +301,10 @@ final class IncrementalSyncOrchestrator {
             }
             if case .historyIdExpired = error {
                 log.warning("History ID expired, performing recovery sync")
+                guard await StaticRemoteConfigProvider.shared.isEnabled(.syncRecoveryEnabled) else {
+                    log.warning("History recovery skipped because sync recovery is disabled by remote config")
+                    throw error
+                }
                 let recoveryTimer = timing.start("historyRecovery")
                 do {
                     try await performHistoryRecoverySync(progressHandler: progressHandler)
@@ -411,21 +415,16 @@ final class IncrementalSyncOrchestrator {
         progressHandler(0.1, "Recovering missed messages...")
 
         do {
-            // Collect all message IDs using shared paginator
-            let allMessageIds = try await MessageListPaginator.fetchAllMessageIds(
+            let result = try await MessageListPaginator.fetchAndProcess(
                 query: query,
-                using: messageFetcher
-            )
-
-            // Fetch messages
-            let result = try await BatchProcessor.processMessages(
-                messageIds: allMessageIds,
-                batchSize: SyncConfig.messageBatchSize,
                 messageFetcher: messageFetcher
-            ) { processed, total in
-                let progress = 0.1 + (Double(processed) / Double(max(total, 1))) * 0.7
+            ) { checkpoint in
+                let progress = 0.1 + Self.streamingRecoveryProgressFraction(for: checkpoint) * 0.7
                 await MainActor.run {
-                    progressHandler(progress, "Recovering... \(processed)/\(total)")
+                    progressHandler(
+                        progress,
+                        "Recovering... \(checkpoint.processedCount)/\(checkpoint.listedCount)"
+                    )
                 }
             } messageHandler: { [messagePersister, myAliases, sendAsAliases] messages in
                 // Capture dependencies strongly to prevent message loss if orchestrator is deallocated
@@ -437,6 +436,8 @@ final class IncrementalSyncOrchestrator {
                     modificationTransaction: modificationTransaction,
                     in: context
                 )
+            } pageCompletion: { [coreDataStack] in
+                try await coreDataStack.saveAsync(context: context)
             }
 
             log.info(
@@ -494,6 +495,14 @@ final class IncrementalSyncOrchestrator {
             }
             throw error
         }
+    }
+
+    nonisolated private static func streamingRecoveryProgressFraction(for checkpoint: PagedSyncCheckpoint) -> Double {
+        let denominator = checkpoint.isComplete
+            ? max(checkpoint.listedCount, 1)
+            : max(checkpoint.listedCount + SyncConfig.maxMessagesPerRequest, 1)
+        let progress = Double(checkpoint.processedCount) / Double(denominator)
+        return min(checkpoint.isComplete ? 1.0 : 0.98, progress)
     }
 
     /// Checks if forced label reconciliation is needed based on time since last reconciliation

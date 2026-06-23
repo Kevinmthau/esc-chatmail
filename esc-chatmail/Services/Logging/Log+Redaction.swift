@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 // MARK: - Log Redaction
@@ -87,5 +88,27 @@ extension Log {
         guard let string, !string.isEmpty else { return "<none>" }
         guard let url = URL(string: string) else { return "<redacted-url>" }
         return redact(url: url)
+    }
+
+    /// Stable, short hash for provider identifiers such as message IDs or
+    /// thread IDs. This keeps correlation useful without persisting raw IDs.
+    static func hashIdentifier(_ value: String?) -> String {
+        guard let value, !value.isEmpty else { return "<none>" }
+        let digest = SHA256.hash(data: Data(value.utf8))
+        return digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Reduces errors to type/domain/code. Avoid logging localized descriptions
+    /// for production diagnostics because provider errors can include sensitive
+    /// request details.
+    static func redact(error: Error?) -> String {
+        guard let error else { return "<none>" }
+
+        if let apiError = error as? APIError {
+            return "APIError.\(String(describing: apiError).components(separatedBy: "(").first ?? "unknown")"
+        }
+
+        let nsError = error as NSError
+        return "\(nsError.domain)#\(nsError.code)"
     }
 }

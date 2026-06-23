@@ -152,6 +152,12 @@ struct esc_chatmailApp: App {
 
         // 6. Ready to show main UI
         isInitialized = true
+        await dependencies.telemetryClient.record(
+            TelemetryEvent(
+                name: .appLaunch,
+                attributes: [.outcome: "initialized"]
+            )
+        )
         logStartupTiming("initializeApp() complete")
 
         // 7. Prewarm WebKit after UI becomes available to avoid launch-path contention.

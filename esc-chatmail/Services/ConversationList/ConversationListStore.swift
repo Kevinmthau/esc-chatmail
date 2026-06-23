@@ -20,8 +20,80 @@ struct ConversationListItem: Identifiable, Equatable {
     }
 }
 
+struct ConversationWindowProvider {
+    let initialLimit: Int
+    let pageSize: Int
+    let preloadThreshold: Int
+    let contactFilterCandidateMultiplier: Int
+    let maxContactFilterCandidates: Int
+
+    init(configuration: VirtualScrollConfiguration = .default) {
+        self.initialLimit = configuration.pageSize * 2
+        self.pageSize = configuration.pageSize
+        self.preloadThreshold = configuration.preloadThreshold
+        self.contactFilterCandidateMultiplier = 5
+        self.maxContactFilterCandidates = 1_000
+    }
+
+    func window<C: Sequence>(
+        from conversations: C,
+        limit: Int,
+        matchesVisibility: (Conversation) -> Bool
+    ) -> [Conversation] where C.Element == Conversation {
+        Array(conversations.lazy.filter(matchesVisibility).prefix(limit))
+    }
+
+    func fetchWindow(
+        in context: NSManagedObjectContext,
+        limit: Int,
+        searchText: String,
+        filter: ConversationFilter,
+        matchesVisibility: (Conversation) -> Bool
+    ) -> [Conversation] {
+        let request = NSFetchRequest<Conversation>(entityName: "Conversation")
+        request.sortDescriptors = [
+            NSSortDescriptor(keyPath: \Conversation.pinned, ascending: false),
+            NSSortDescriptor(keyPath: \Conversation.lastMessageDate, ascending: false)
+        ]
+        request.predicate = predicate(searchText: searchText)
+        request.fetchLimit = fetchLimit(for: limit, filter: filter)
+        request.fetchBatchSize = min(pageSize, max(limit, 1))
+        request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
+        request.includesPendingChanges = true
+
+        do {
+            let candidates = try context.fetch(request)
+            return Array(candidates.lazy.filter(matchesVisibility).prefix(limit))
+        } catch {
+            Log.error("Failed to fetch conversation window", category: .conversation, error: error)
+            return []
+        }
+    }
+
+    private func fetchLimit(for limit: Int, filter: ConversationFilter) -> Int {
+        switch filter {
+        case .all:
+            return limit
+        case .contacts, .other:
+            return min(max(limit * contactFilterCandidateMultiplier, limit), maxContactFilterCandidates)
+        }
+    }
+
+    private func predicate(searchText: String) -> NSPredicate {
+        let activePredicate = NSPredicate(format: "archivedAt == nil")
+        let trimmedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSearchText.isEmpty else { return activePredicate }
+
+        let searchPredicate = NSPredicate(
+            format: "(displayName CONTAINS[cd] %@) OR (snippet CONTAINS[cd] %@)",
+            trimmedSearchText,
+            trimmedSearchText
+        )
+        return NSCompoundPredicate(andPredicateWithSubpredicates: [activePredicate, searchPredicate])
+    }
+}
+
 struct ConversationListStore {
-    private(set) var conversationsByID: [NSManagedObjectID: Conversation] = [:]
     private(set) var itemsByID: [NSManagedObjectID: ConversationListItem] = [:]
     private(set) var orderedIDs: [NSManagedObjectID] = []
     private(set) var visibleIDs: [NSManagedObjectID] = []
@@ -31,44 +103,22 @@ struct ConversationListStore {
         orderedIDs.isEmpty && itemsByID.isEmpty
     }
 
-    func conversation(for objectID: NSManagedObjectID) -> Conversation? {
-        conversationsByID[objectID]
-    }
-
     mutating func replaceAll(
         with conversations: [Conversation],
         matchesVisibility: (Conversation) -> Bool
     ) {
-        conversationsByID.removeAll(keepingCapacity: true)
         itemsByID.removeAll(keepingCapacity: true)
         orderedIDs.removeAll(keepingCapacity: true)
         visibleIDs.removeAll(keepingCapacity: true)
         visibleItems.removeAll(keepingCapacity: true)
 
         for conversation in conversations {
+            guard matchesVisibility(conversation) else { continue }
+
             let item = ConversationListItem(conversation: conversation)
-            conversationsByID[item.id] = conversation
             itemsByID[item.id] = item
             orderedIDs.append(item.id)
-
-            if matchesVisibility(conversation) {
-                visibleIDs.append(item.id)
-                visibleItems.append(item)
-            }
-        }
-    }
-
-    mutating func recomputeVisibleItems(matchesVisibility: (Conversation) -> Bool) {
-        visibleIDs.removeAll(keepingCapacity: true)
-        visibleItems.removeAll(keepingCapacity: true)
-
-        for objectID in orderedIDs {
-            guard let conversation = conversationsByID[objectID], matchesVisibility(conversation),
-                  let item = itemsByID[objectID] else {
-                continue
-            }
-
-            visibleIDs.append(objectID)
+            visibleIDs.append(item.id)
             visibleItems.append(item)
         }
     }
@@ -103,12 +153,39 @@ struct ConversationListStore {
         return removedIDs
     }
 
+    mutating func recomputeVisibleItems(
+        matchesVisibility: (ConversationListItem) -> Bool
+    ) {
+        visibleIDs.removeAll(keepingCapacity: true)
+        visibleItems.removeAll(keepingCapacity: true)
+
+        for objectID in orderedIDs {
+            guard let item = itemsByID[objectID], matchesVisibility(item) else { continue }
+            visibleIDs.append(objectID)
+            visibleItems.append(item)
+        }
+    }
+
     mutating func removeAll() {
-        conversationsByID.removeAll(keepingCapacity: true)
         itemsByID.removeAll(keepingCapacity: true)
         orderedIDs.removeAll(keepingCapacity: true)
         visibleIDs.removeAll(keepingCapacity: true)
         visibleItems.removeAll(keepingCapacity: true)
+    }
+
+    mutating func trimVisibleItems(to limit: Int) -> Set<NSManagedObjectID> {
+        guard visibleItems.count > limit else { return [] }
+
+        let removedIDs = Set(visibleIDs.dropFirst(limit))
+        visibleIDs = Array(visibleIDs.prefix(limit))
+        visibleItems = Array(visibleItems.prefix(limit))
+        orderedIDs.removeAll { removedIDs.contains($0) }
+
+        for id in removedIDs {
+            itemsByID.removeValue(forKey: id)
+        }
+
+        return removedIDs
     }
 
     private mutating func upsertConversation(
@@ -116,10 +193,14 @@ struct ConversationListStore {
         matchesVisibility: (Conversation) -> Bool
     ) {
         let objectID = conversation.objectID
+        guard matchesVisibility(conversation) else {
+            removeConversation(withID: objectID)
+            return
+        }
+
         let oldItem = itemsByID[objectID]
         let newItem = ConversationListItem(conversation: conversation)
 
-        conversationsByID[objectID] = conversation
         itemsByID[objectID] = newItem
 
         let needsReorder = oldItem == nil || oldItem?.sortKey != newItem.sortKey
@@ -129,23 +210,15 @@ struct ConversationListStore {
             orderedIDs.append(objectID)
         }
 
-        let shouldBeVisible = matchesVisibility(conversation)
         let currentVisibleIndex = visibleIDs.firstIndex(of: objectID)
 
-        switch (currentVisibleIndex, shouldBeVisible) {
-        case (.none, false):
-            return
-
-        case (.none, true):
+        switch currentVisibleIndex {
+        case .none:
             let insertionIndex = visibleInsertionIndex(for: objectID)
             visibleIDs.insert(objectID, at: insertionIndex)
             visibleItems.insert(newItem, at: insertionIndex)
 
-        case let (.some(index), false):
-            visibleIDs.remove(at: index)
-            visibleItems.remove(at: index)
-
-        case let (.some(index), true):
+        case let .some(index):
             if needsReorder {
                 visibleIDs.remove(at: index)
                 visibleItems.remove(at: index)
@@ -161,8 +234,7 @@ struct ConversationListStore {
 
     @discardableResult
     private mutating func removeConversation(withID objectID: NSManagedObjectID) -> Bool {
-        let existed = conversationsByID.removeValue(forKey: objectID) != nil
-        itemsByID.removeValue(forKey: objectID)
+        let existed = itemsByID.removeValue(forKey: objectID) != nil
 
         if let index = orderedIDs.firstIndex(of: objectID) {
             orderedIDs.remove(at: index)

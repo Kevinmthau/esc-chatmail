@@ -245,7 +245,7 @@ final class MessageFetcher: @unchecked Sendable {
         permanentlyFailed.append(contentsOf: initialResult.notFoundIds)
 
         for id in initialResult.permanentlyFailedIds + initialResult.notFoundIds {
-            Log.warning("Non-retriable error for message \(id)", category: .sync)
+            Log.warning("Non-retriable error for message \(Log.hashIdentifier(id))", category: .sync)
         }
 
         await persistInChronologicalOrder(initialResult.successfulMessages, persist: persist)
@@ -275,11 +275,11 @@ final class MessageFetcher: @unchecked Sendable {
             let retryResult = await fetchWithBoundedConcurrency(ids: currentFailedIds, isFinalAttempt: isFinalAttempt)
 
             for message in retryResult.successfulMessages {
-                Log.debug("Successfully fetched message \(message.id) on retry attempt \(attempt)", category: .sync)
+                Log.debug("Successfully fetched message \(Log.hashIdentifier(message.id)) on retry attempt \(attempt)", category: .sync)
             }
 
             for id in retryResult.permanentlyFailedIds + retryResult.notFoundIds {
-                Log.warning("Permanently failed to fetch message \(id) after \(attempt) attempts", category: .sync)
+                Log.warning("Permanently failed to fetch message \(Log.hashIdentifier(id)) after \(attempt) attempts", category: .sync)
             }
 
             permanentlyFailed.append(contentsOf: retryResult.permanentlyFailedIds)

@@ -1,94 +1,185 @@
 import Foundation
 
-/// Handles paginated message list fetching from Gmail API
-///
-/// Eliminates duplicate pagination loops in:
-/// - InitialSyncOrchestrator.fetchAndProcessMessages()
-/// - IncrementalSyncOrchestrator.performHistoryRecoverySync()
-struct MessageListPaginator {
+struct MessageIDPage: Equatable, Sendable {
+    let pageIndex: Int
+    let messageIds: [String]
+    let nextPageToken: String?
 
-    /// Fetches all message IDs matching a query, handling pagination automatically
-    ///
-    /// - Parameters:
-    ///   - query: Gmail search query (e.g., "after:1234567890 -label:spam -label:drafts")
-    ///   - messageFetcher: The fetcher to use for API calls
-    /// - Returns: Array of all message IDs matching the query
-    /// - Throws: Cancellation errors if task is cancelled, or API errors
-    static func fetchAllMessageIds(
+    var hasMorePages: Bool {
+        nextPageToken != nil
+    }
+}
+
+struct PagedSyncCheckpoint: Equatable, Sendable {
+    let pageIndex: Int
+    let listedCount: Int
+    let processedCount: Int
+    let successfulCount: Int
+    let failedCount: Int
+    let nextPageToken: String?
+
+    var isComplete: Bool {
+        nextPageToken == nil
+    }
+}
+
+struct MessageIDPageStream: Sendable {
+    let query: String
+    let pageSize: Int
+    let messageFetcher: MessageFetcher
+
+    init(
         query: String,
-        using messageFetcher: MessageFetcher
-    ) async throws -> [String] {
-        var pageToken: String? = nil
-        var allMessageIds: [String] = []
+        pageSize: Int = SyncConfig.maxMessagesPerRequest,
+        messageFetcher: MessageFetcher
+    ) {
+        self.query = query
+        self.pageSize = pageSize
+        self.messageFetcher = messageFetcher
+    }
+
+    func forEachPage(
+        _ handler: (MessageIDPage) async throws -> Void
+    ) async throws {
+        var pageToken: String?
+        var pageIndex = 0
 
         repeat {
             try Task.checkCancellation()
+
             let (messageIds, nextPageToken) = try await messageFetcher.listMessages(
                 query: query,
-                pageToken: pageToken
+                pageToken: pageToken,
+                maxResults: pageSize
             )
-            allMessageIds.append(contentsOf: messageIds)
+            pageIndex += 1
+
+            try await handler(
+                MessageIDPage(
+                    pageIndex: pageIndex,
+                    messageIds: messageIds,
+                    nextPageToken: nextPageToken
+                )
+            )
+
             pageToken = nextPageToken
         } while pageToken != nil
-
-        return allMessageIds
     }
+}
 
-    /// Fetches and processes all messages matching a query with progress tracking
-    ///
-    /// Combines pagination + batch processing into a single operation.
-    /// Uses `BatchProcessor.processMessages` internally for efficient batch retrieval.
+/// Handles paginated message list fetching from Gmail API.
+///
+/// Foreground initial sync and history recovery must not collect every message
+/// ID before processing. This paginator streams pages into the batch processor so
+/// very large mailboxes can make durable progress page by page.
+struct MessageListPaginator {
+
+    /// Streams and processes all messages matching a query with progress tracking.
     ///
     /// - Parameters:
     ///   - query: Gmail search query
     ///   - messageFetcher: The fetcher to use for API calls
-    ///   - progressHandler: Called after each batch with (processedCount, totalCount)
+    ///   - progressHandler: Called as batches complete with a cumulative checkpoint
     ///   - messageHandler: Called with each successfully fetched group of messages,
     ///     sorted into chronological order
+    ///   - pageCompletion: Called after each listed page is fully processed
     /// - Returns: BatchProcessingResult with success/failure counts
     /// - Throws: Cancellation errors or API errors
     static func fetchAndProcess(
         query: String,
         messageFetcher: MessageFetcher,
-        progressHandler: @escaping (Int, Int) async -> Void,
-        messageHandler: @escaping ([GmailMessage]) async -> Void
+        progressHandler: @escaping (PagedSyncCheckpoint) async -> Void,
+        messageHandler: @escaping ([GmailMessage]) async -> Void,
+        pageCompletion: (() async throws -> Void)? = nil
     ) async throws -> BatchProcessingResult {
-        let allMessageIds = try await fetchAllMessageIds(query: query, using: messageFetcher)
-
-        return try await BatchProcessor.processMessages(
-            messageIds: allMessageIds,
+        try await fetchAndProcess(
+            query: query,
             batchSize: SyncConfig.messageBatchSize,
             messageFetcher: messageFetcher,
             progressHandler: progressHandler,
-            messageHandler: messageHandler
+            messageHandler: messageHandler,
+            pageCompletion: pageCompletion
         )
     }
 
-    /// Fetches and processes messages with a custom batch size
-    ///
-    /// - Parameters:
-    ///   - query: Gmail search query
-    ///   - batchSize: Number of messages to process per batch
-    ///   - messageFetcher: The fetcher to use for API calls
-    ///   - progressHandler: Called after each batch with (processedCount, totalCount)
-    ///   - messageHandler: Called with each successfully fetched group of messages,
-    ///     sorted into chronological order
-    /// - Returns: BatchProcessingResult with success/failure counts
+    /// Streams and processes messages with a custom batch size.
     static func fetchAndProcess(
         query: String,
         batchSize: Int,
         messageFetcher: MessageFetcher,
-        progressHandler: @escaping (Int, Int) async -> Void,
-        messageHandler: @escaping ([GmailMessage]) async -> Void
+        progressHandler: @escaping (PagedSyncCheckpoint) async -> Void,
+        messageHandler: @escaping ([GmailMessage]) async -> Void,
+        pageCompletion: (() async throws -> Void)? = nil
     ) async throws -> BatchProcessingResult {
-        let allMessageIds = try await fetchAllMessageIds(query: query, using: messageFetcher)
+        var listedCount = 0
+        var processedCount = 0
+        var successfulCount = 0
+        var failedIds: [String] = []
 
-        return try await BatchProcessor.processMessages(
-            messageIds: allMessageIds,
-            batchSize: batchSize,
-            messageFetcher: messageFetcher,
-            progressHandler: progressHandler,
-            messageHandler: messageHandler
+        let stream = MessageIDPageStream(query: query, messageFetcher: messageFetcher)
+        try await stream.forEachPage { page in
+            listedCount += page.messageIds.count
+
+            guard !page.messageIds.isEmpty else {
+                await progressHandler(
+                    PagedSyncCheckpoint(
+                        pageIndex: page.pageIndex,
+                        listedCount: listedCount,
+                        processedCount: processedCount,
+                        successfulCount: successfulCount,
+                        failedCount: failedIds.count,
+                        nextPageToken: page.nextPageToken
+                    )
+                )
+                if let pageCompletion {
+                    try await pageCompletion()
+                }
+                return
+            }
+
+            let pageResult = try await BatchProcessor.processMessages(
+                messageIds: page.messageIds,
+                batchSize: batchSize,
+                messageFetcher: messageFetcher
+            ) { pageProcessed, _ in
+                await progressHandler(
+                    PagedSyncCheckpoint(
+                        pageIndex: page.pageIndex,
+                        listedCount: listedCount,
+                        processedCount: processedCount + pageProcessed,
+                        successfulCount: successfulCount,
+                        failedCount: failedIds.count,
+                        nextPageToken: page.nextPageToken
+                    )
+                )
+            } messageHandler: { messages in
+                await messageHandler(messages)
+            }
+
+            processedCount += pageResult.totalProcessed
+            successfulCount += pageResult.successfulCount
+            failedIds.append(contentsOf: pageResult.failedIds)
+
+            await progressHandler(
+                PagedSyncCheckpoint(
+                    pageIndex: page.pageIndex,
+                    listedCount: listedCount,
+                    processedCount: processedCount,
+                    successfulCount: successfulCount,
+                    failedCount: failedIds.count,
+                    nextPageToken: page.nextPageToken
+                )
+            )
+
+            if let pageCompletion {
+                try await pageCompletion()
+            }
+        }
+
+        return BatchProcessingResult(
+            totalProcessed: processedCount,
+            successfulCount: successfulCount,
+            failedIds: failedIds
         )
     }
 }

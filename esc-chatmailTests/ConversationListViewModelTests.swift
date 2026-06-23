@@ -141,6 +141,57 @@ final class ConversationListViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.filteredConversationItems[1], initialItems[2])
     }
 
+    func testOnAppearLoadsBoundedInitialWindowAndExpandsNearEnd() throws {
+        let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
+        let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
+        let carol = makeConversation(name: "Carol", snippet: "gamma", date: 100)
+        try context.save()
+
+        let viewModel = ConversationListViewModel(
+            windowProvider: ConversationWindowProvider(
+                configuration: VirtualScrollConfiguration(
+                    visibleItemCount: 1,
+                    bufferSize: 0,
+                    pageSize: 1,
+                    preloadThreshold: 1
+                )
+            )
+        )
+
+        viewModel.onAppear(conversations: [alice, bob, carol], in: context)
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID, bob.objectID])
+
+        let lastVisibleItem = try XCTUnwrap(viewModel.filteredConversationItems.last)
+        viewModel.loadMoreIfNeeded(currentItem: lastVisibleItem)
+
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID, bob.objectID, carol.objectID])
+    }
+
+    func testSearchFetchesMatchingConversationOutsideCurrentWindow() async throws {
+        let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
+        let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
+        let carol = makeConversation(name: "Carol", snippet: "needle", date: 100)
+        try context.save()
+
+        let viewModel = ConversationListViewModel(
+            searchService: ConversationSearchService(debounceInterval: 10_000_000),
+            windowProvider: ConversationWindowProvider(
+                configuration: VirtualScrollConfiguration(
+                    visibleItemCount: 1,
+                    bufferSize: 0,
+                    pageSize: 1,
+                    preloadThreshold: 1
+                )
+            )
+        )
+
+        viewModel.onAppear(conversations: [alice, bob, carol], in: context)
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID, bob.objectID])
+
+        viewModel.searchText = "needle"
+        await waitForFilteredConversationIDs([carol.objectID], in: viewModel)
+    }
+
     func testPersonDisplayNameChangeRefreshesAffectedConversationItem() async throws {
         let conversation = makeConversation(name: "Info", snippet: "alpha", date: 300)
         let person = PersonBuilder()

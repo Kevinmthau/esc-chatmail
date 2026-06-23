@@ -118,7 +118,7 @@ struct ConversationListView: View {
         }
         .onAppear {
             AppPrewarmer.prewarmAll()  // Safe to call repeatedly; each prewarm runs only once per launch.
-            viewModel.onAppear(conversations: Array(conversations), in: viewContext)
+            viewModel.onAppear(conversations: conversations, in: viewContext)
         }
         .onDisappear {
             isSearchFieldFocused = false
@@ -134,6 +134,9 @@ struct ConversationListView: View {
             currentUserEmail: deps.authSession.userEmail ?? "",
             participantLoader: deps.participantLoader
         )
+        .onAppear {
+            viewModel.loadMoreIfNeeded(currentItem: item)
+        }
     }
 
     private func selectionButton(for objectID: NSManagedObjectID) -> some View {
