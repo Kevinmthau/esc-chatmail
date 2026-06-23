@@ -204,6 +204,14 @@ final class ConversationListViewModel: ObservableObject {
     // MARK: - Filtering (Delegate to Service)
 
     func refreshConversations<C: Sequence>(_ conversations: C) where C.Element == Conversation {
+        if !canCurrentFilterMatchConversations {
+            let window = Array(conversations.lazy.prefix(loadedConversationLimit))
+            hasLoadedAllConversationWindow = true
+            listStore.replaceAll(with: window) { _ in false }
+            publishVisibleItems()
+            return
+        }
+
         let window = windowProvider.window(
             from: conversations,
             limit: loadedConversationLimit,
@@ -234,6 +242,10 @@ final class ConversationListViewModel: ObservableObject {
         let trimmedIDs = listStore.trimVisibleItems(to: loadedConversationLimit)
         if !trimmedIDs.isEmpty {
             selectionService.selectedConversationIDs.subtract(trimmedIDs)
+        }
+
+        if backfillConversationWindowIfNeeded() {
+            return
         }
 
         publishVisibleItems()
@@ -368,12 +380,34 @@ final class ConversationListViewModel: ObservableObject {
             limit: loadedConversationLimit,
             searchText: searchService.debouncedSearchText,
             filter: filterService.currentFilter,
+            canMatchCurrentFilter: canCurrentFilterMatchConversations,
             matchesVisibility: matchesVisibleConversation(_:)
         )
         hasLoadedAllConversationWindow = window.count < loadedConversationLimit
         listStore.replaceAll(with: window, matchesVisibility: matchesVisibleConversation(_:))
         publishVisibleItems()
         prefetchPersonData(from: filteredConversationItems)
+    }
+
+    @discardableResult
+    private func backfillConversationWindowIfNeeded() -> Bool {
+        guard observedConversationContext != nil,
+              !hasLoadedAllConversationWindow,
+              listStore.visibleItems.count < loadedConversationLimit else {
+            return false
+        }
+
+        reloadConversationWindowFromStore()
+        return true
+    }
+
+    private var canCurrentFilterMatchConversations: Bool {
+        switch filterService.currentFilter {
+        case .all, .other:
+            return true
+        case .contacts:
+            return !filterService.contactEmailsCache.isEmpty
+        }
     }
 
     private func hasExistingConversationsForNameRefresh() -> Bool {

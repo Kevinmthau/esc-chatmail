@@ -25,14 +25,12 @@ struct ConversationWindowProvider {
     let pageSize: Int
     let preloadThreshold: Int
     let contactFilterCandidateMultiplier: Int
-    let maxContactFilterCandidates: Int
 
     init(configuration: VirtualScrollConfiguration = .default) {
         self.initialLimit = configuration.pageSize * 2
         self.pageSize = configuration.pageSize
         self.preloadThreshold = configuration.preloadThreshold
         self.contactFilterCandidateMultiplier = 5
-        self.maxContactFilterCandidates = 1_000
     }
 
     func window<C: Sequence>(
@@ -48,35 +46,70 @@ struct ConversationWindowProvider {
         limit: Int,
         searchText: String,
         filter: ConversationFilter,
+        canMatchCurrentFilter: Bool = true,
         matchesVisibility: (Conversation) -> Bool
     ) -> [Conversation] {
+        guard limit > 0 else { return [] }
+        guard canMatchCurrentFilter else { return [] }
+
         let request = NSFetchRequest<Conversation>(entityName: "Conversation")
         request.sortDescriptors = [
             NSSortDescriptor(keyPath: \Conversation.pinned, ascending: false),
             NSSortDescriptor(keyPath: \Conversation.lastMessageDate, ascending: false)
         ]
         request.predicate = predicate(searchText: searchText)
-        request.fetchLimit = fetchLimit(for: limit, filter: filter)
         request.fetchBatchSize = min(pageSize, max(limit, 1))
         request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
         request.includesPendingChanges = true
 
         do {
-            let candidates = try context.fetch(request)
-            return Array(candidates.lazy.filter(matchesVisibility).prefix(limit))
+            switch filter {
+            case .all:
+                request.fetchLimit = limit
+                let candidates = try context.fetch(request)
+                return Array(candidates.lazy.filter(matchesVisibility).prefix(limit))
+
+            case .contacts, .other:
+                return try fetchFilteredWindow(
+                    request: request,
+                    in: context,
+                    limit: limit,
+                    matchesVisibility: matchesVisibility
+                )
+            }
         } catch {
             Log.error("Failed to fetch conversation window", category: .conversation, error: error)
             return []
         }
     }
 
-    private func fetchLimit(for limit: Int, filter: ConversationFilter) -> Int {
-        switch filter {
-        case .all:
-            return limit
-        case .contacts, .other:
-            return min(max(limit * contactFilterCandidateMultiplier, limit), maxContactFilterCandidates)
+    private func fetchFilteredWindow(
+        request: NSFetchRequest<Conversation>,
+        in context: NSManagedObjectContext,
+        limit: Int,
+        matchesVisibility: (Conversation) -> Bool
+    ) throws -> [Conversation] {
+        var visibleConversations: [Conversation] = []
+        var fetchOffset = 0
+        let candidateBatchSize = max(limit * contactFilterCandidateMultiplier, limit, pageSize)
+
+        while visibleConversations.count < limit {
+            request.fetchOffset = fetchOffset
+            request.fetchLimit = candidateBatchSize
+
+            let candidates = try context.fetch(request)
+            guard !candidates.isEmpty else { break }
+
+            for conversation in candidates where matchesVisibility(conversation) {
+                visibleConversations.append(conversation)
+                guard visibleConversations.count < limit else { break }
+            }
+
+            fetchOffset += candidates.count
+            guard candidates.count == candidateBatchSize else { break }
         }
+
+        return visibleConversations
     }
 
     private func predicate(searchText: String) -> NSPredicate {

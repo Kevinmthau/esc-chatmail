@@ -192,6 +192,119 @@ final class ConversationListViewModelTests: XCTestCase {
         await waitForFilteredConversationIDs([carol.objectID], in: viewModel)
     }
 
+    func testContactFilterFetchesPastFirstCandidateBatch() async throws {
+        let contactEmail = "contact@example.com"
+        var allConversations: [Conversation] = []
+
+        for index in 0..<10 {
+            let conversation = makeConversation(
+                name: "Other \(index)",
+                snippet: "not a contact",
+                date: TimeInterval(300 - index)
+            )
+            let person = PersonBuilder()
+                .withEmail("other\(index)@example.com")
+                .build(in: context)
+            addConversationParticipant(person: person, to: conversation)
+            allConversations.append(conversation)
+        }
+
+        let contactConversation = makeConversation(name: "Contact", snippet: "older match", date: 100)
+        let contactPerson = PersonBuilder()
+            .withEmail(contactEmail)
+            .build(in: context)
+        addConversationParticipant(person: contactPerson, to: contactConversation)
+        allConversations.append(contactConversation)
+        try context.save()
+
+        let filterService = ConversationFilterService(
+            contactsService: ContactsService(),
+            contactEmailLoader: { _ in [EmailNormalizer.normalize(contactEmail)] }
+        )
+        filterService.loadContactsCache()
+        await waitUntil {
+            filterService.contactEmailsCache.contains(EmailNormalizer.normalize(contactEmail))
+        }
+
+        let viewModel = ConversationListViewModel(
+            filterService: filterService,
+            windowProvider: ConversationWindowProvider(
+                configuration: VirtualScrollConfiguration(
+                    visibleItemCount: 1,
+                    bufferSize: 0,
+                    pageSize: 1,
+                    preloadThreshold: 1
+                )
+            )
+        )
+
+        viewModel.onAppear(conversations: allConversations, in: context)
+        viewModel.currentFilter = .contacts
+
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [contactConversation.objectID])
+    }
+
+    func testContactFilterWithEmptyCacheSkipsCandidateScan() throws {
+        for index in 0..<10 {
+            _ = makeConversation(
+                name: "Other \(index)",
+                snippet: "not a contact",
+                date: TimeInterval(300 - index)
+            )
+        }
+        try context.save()
+
+        let windowProvider = ConversationWindowProvider(
+            configuration: VirtualScrollConfiguration(
+                visibleItemCount: 1,
+                bufferSize: 0,
+                pageSize: 1,
+                preloadThreshold: 1
+            )
+        )
+
+        let window = windowProvider.fetchWindow(
+            in: context,
+            limit: 2,
+            searchText: "",
+            filter: .contacts,
+            canMatchCurrentFilter: false,
+            matchesVisibility: { _ in
+                XCTFail("Empty contact filters should not scan fetched candidates")
+                return false
+            }
+        )
+
+        XCTAssertTrue(window.isEmpty)
+    }
+
+    func testApplyConversationChangesBackfillsAfterVisibleWindowIsArchived() throws {
+        let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
+        let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
+        let carol = makeConversation(name: "Carol", snippet: "gamma", date: 100)
+        try context.save()
+
+        let viewModel = ConversationListViewModel(
+            windowProvider: ConversationWindowProvider(
+                configuration: VirtualScrollConfiguration(
+                    visibleItemCount: 1,
+                    bufferSize: 0,
+                    pageSize: 1,
+                    preloadThreshold: 1
+                )
+            )
+        )
+
+        viewModel.onAppear(conversations: [alice, bob, carol], in: context)
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID, bob.objectID])
+
+        alice.archivedAt = Date(timeIntervalSince1970: 400)
+        bob.archivedAt = Date(timeIntervalSince1970: 400)
+        viewModel.applyConversationChanges(updatedConversations: [alice, bob])
+
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [carol.objectID])
+    }
+
     func testPersonDisplayNameChangeRefreshesAffectedConversationItem() async throws {
         let conversation = makeConversation(name: "Info", snippet: "alpha", date: 300)
         let person = PersonBuilder()
