@@ -7,8 +7,22 @@ actor ImageRequestManager {
     private var inFlightRequests: [String: Task<UIImage?, Never>] = [:]
     /// Track URLs that have failed to avoid retrying (auto-prunes oldest 20% when full)
     private var failedURLs = BoundedSet<String>(maxSize: 500, prunePercentage: 0.2)
+    private let imageFetcher: any RemoteImageFetching
+    private let remoteConfig: any RemoteConfigProvider
+
+    init(
+        imageFetcher: any RemoteImageFetching = RemoteImageFetcher.shared,
+        remoteConfig: any RemoteConfigProvider = StaticRemoteConfigProvider.shared
+    ) {
+        self.imageFetcher = imageFetcher
+        self.remoteConfig = remoteConfig
+    }
 
     func loadImage(from urlString: String, onComplete: @escaping (UIImage?) -> Void) async -> UIImage? {
+        guard await remoteConfig.isEnabled(.remoteImageLoadingEnabled) else {
+            return nil
+        }
+
         // Skip URLs that have previously failed
         if failedURLs.contains(urlString) {
             return nil
@@ -20,8 +34,9 @@ actor ImageRequestManager {
         }
 
         // Create new task
+        let imageFetcher = imageFetcher
         let task = Task<UIImage?, Never> {
-            await RemoteImageFetcher.shared.image(from: urlString)
+            await imageFetcher.image(from: urlString)
         }
 
         inFlightRequests[urlString] = task
@@ -31,8 +46,8 @@ actor ImageRequestManager {
         // Cache the result or mark as failed
         if result != nil {
             onComplete(result)
-        } else {
-            // Mark as failed to avoid retrying (until app restart)
+        } else if await remoteConfig.isEnabled(.remoteImageLoadingEnabled) {
+            // Mark true failures to avoid retrying (until app restart)
             // BoundedSet automatically prunes oldest entries when full
             failedURLs.insert(urlString)
         }
