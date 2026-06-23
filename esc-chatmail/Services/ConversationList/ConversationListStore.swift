@@ -57,14 +57,14 @@ struct ConversationWindowProvider {
             NSSortDescriptor(keyPath: \Conversation.pinned, ascending: false),
             NSSortDescriptor(keyPath: \Conversation.lastMessageDate, ascending: false)
         ]
-        request.predicate = predicate(searchText: searchText)
+        request.predicate = predicate(searchText: searchText, filter: filter)
         request.fetchBatchSize = min(pageSize, max(limit, 1))
         request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
         request.includesPendingChanges = true
 
         do {
             switch filter {
-            case .all:
+            case .all, .unread:
                 request.fetchLimit = limit
                 let candidates = try context.fetch(request)
                 return Array(candidates.lazy.filter(matchesVisibility).prefix(limit))
@@ -112,17 +112,25 @@ struct ConversationWindowProvider {
         return visibleConversations
     }
 
-    private func predicate(searchText: String) -> NSPredicate {
-        let activePredicate = NSPredicate(format: "archivedAt == nil")
-        let trimmedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedSearchText.isEmpty else { return activePredicate }
+    private func predicate(searchText: String, filter: ConversationFilter) -> NSPredicate {
+        var predicates = [NSPredicate(format: "archivedAt == nil")]
 
-        let searchPredicate = NSPredicate(
-            format: "(displayName CONTAINS[cd] %@) OR (snippet CONTAINS[cd] %@)",
-            trimmedSearchText,
-            trimmedSearchText
-        )
-        return NSCompoundPredicate(andPredicateWithSubpredicates: [activePredicate, searchPredicate])
+        if filter == .unread {
+            predicates.append(NSPredicate(format: "inboxUnreadCount > 0"))
+        }
+
+        let trimmedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedSearchText.isEmpty {
+            predicates.append(
+                NSPredicate(
+                    format: "(displayName CONTAINS[cd] %@) OR (snippet CONTAINS[cd] %@)",
+                    trimmedSearchText,
+                    trimmedSearchText
+                )
+            )
+        }
+
+        return NSCompoundPredicate(andPredicateWithSubpredicates: predicates)
     }
 }
 

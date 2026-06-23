@@ -278,6 +278,38 @@ final class ConversationListViewModelTests: XCTestCase {
         XCTAssertTrue(window.isEmpty)
     }
 
+    func testUnreadFilterFetchesMatchingConversationOutsideInitialWindow() throws {
+        for index in 0..<10 {
+            _ = makeConversation(
+                name: "Read \(index)",
+                snippet: "already read",
+                date: TimeInterval(300 - index)
+            )
+        }
+
+        let unreadConversation = makeConversation(name: "Unread", snippet: "needs attention", date: 100)
+        unreadConversation.inboxUnreadCount = 2
+        try context.save()
+
+        let viewModel = ConversationListViewModel(
+            windowProvider: ConversationWindowProvider(
+                configuration: VirtualScrollConfiguration(
+                    visibleItemCount: 1,
+                    bufferSize: 0,
+                    pageSize: 1,
+                    preloadThreshold: 1
+                )
+            )
+        )
+
+        viewModel.onAppear(conversations: try fetchActiveConversations(), in: context)
+        XCTAssertFalse(filteredConversationIDs(in: viewModel).contains(unreadConversation.objectID))
+
+        viewModel.currentFilter = .unread
+
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [unreadConversation.objectID])
+    }
+
     func testApplyConversationChangesBackfillsAfterVisibleWindowIsArchived() throws {
         let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
         let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
@@ -440,6 +472,18 @@ final class ConversationListViewModelTests: XCTestCase {
             .visible()
             .withLastMessageDate(Date(timeIntervalSince1970: date))
             .build(in: context)
+    }
+
+    private func fetchActiveConversations() throws -> [Conversation] {
+        let request = NSFetchRequest<Conversation>(entityName: "Conversation")
+        request.sortDescriptors = [
+            NSSortDescriptor(keyPath: \Conversation.pinned, ascending: false),
+            NSSortDescriptor(keyPath: \Conversation.lastMessageDate, ascending: false)
+        ]
+        request.predicate = NSPredicate(format: "archivedAt == nil")
+        request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
+        request.includesPendingChanges = true
+        return try context.fetch(request)
     }
 
     private func addConversationParticipant(person: Person, to conversation: Conversation) {

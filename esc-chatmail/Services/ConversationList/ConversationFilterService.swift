@@ -13,7 +13,7 @@ final class ConversationFilterService: ObservableObject {
     @Published var currentFilter: ConversationFilter = .all {
         didSet {
             guard currentFilter != oldValue else { return }
-            if currentFilter != .all && !hasLoadedContactsCache && !isLoadingContactsCache {
+            if currentFilter.requiresContactCache && !hasLoadedContactsCache && !isLoadingContactsCache {
                 loadContactsCache(requestAccessIfNeeded: true)
             }
             onFilterStateChange?()
@@ -143,6 +143,8 @@ final class ConversationFilterService: ObservableObject {
         switch currentFilter {
         case .all:
             return true
+        case .unread:
+            return conversation.inboxUnreadCount > 0
         case .contacts:
             return isConversationWithContact(conversation)
         case .other:
@@ -212,5 +214,16 @@ final class ConversationFilterService: ObservableObject {
                 return nil
             }
         }.value
+    }
+}
+
+private extension ConversationFilter {
+    var requiresContactCache: Bool {
+        switch self {
+        case .contacts, .other:
+            return true
+        case .all, .unread:
+            return false
+        }
     }
 }

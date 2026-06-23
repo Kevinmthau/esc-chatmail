@@ -6,12 +6,14 @@ import Combine
 /// Filter options for the conversation list
 enum ConversationFilter: String, CaseIterable {
     case all = "All"
+    case unread = "Unread"
     case contacts = "Contacts"
     case other = "Other"
 
     var icon: String {
         switch self {
         case .all: return "line.3.horizontal.decrease"
+        case .unread: return "envelope.badge"
         case .contacts: return "person.crop.circle"
         case .other: return "person.crop.circle.badge.questionmark"
         }
@@ -403,7 +405,7 @@ final class ConversationListViewModel: ObservableObject {
 
     private var canCurrentFilterMatchConversations: Bool {
         switch filterService.currentFilter {
-        case .all, .other:
+        case .all, .unread, .other:
             return true
         case .contacts:
             return !filterService.contactEmailsCache.isEmpty
@@ -442,6 +444,8 @@ final class ConversationListViewModel: ObservableObject {
         switch filterService.currentFilter {
         case .all:
             return true
+        case .unread:
+            return item.snapshot.inboxUnreadCount > 0
         case .contacts:
             return item.snapshot.participantEmails.contains { email in
                 filterService.contactEmailsCache.contains(EmailNormalizer.normalize(email))
