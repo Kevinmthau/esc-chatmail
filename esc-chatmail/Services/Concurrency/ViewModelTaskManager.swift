@@ -24,7 +24,12 @@ import Foundation
 /// ```
 @MainActor
 final class ViewModelTaskManager {
-    private var tasks: [String: Task<Void, Never>] = [:]
+    private struct ManagedTask {
+        let id: UUID
+        let task: Task<Void, Never>
+    }
+
+    private var tasks: [String: ManagedTask] = [:]
 
     /// Runs an async operation, cancelling any existing task with the same key.
     ///
@@ -33,13 +38,16 @@ final class ViewModelTaskManager {
     ///   - priority: Task priority (default: nil, inherits from current context)
     ///   - operation: The async operation to perform
     func run(_ key: String, priority: TaskPriority? = nil, operation: @escaping () async -> Void) {
-        tasks[key]?.cancel()
-        tasks[key] = Task(priority: priority) { [weak self] in
+        tasks[key]?.task.cancel()
+
+        let taskID = UUID()
+        let task = Task(priority: priority) { [weak self] in
             await operation()
-            _ = await MainActor.run {
-                self?.tasks.removeValue(forKey: key)
+            await MainActor.run {
+                self?.clearTaskIfCurrent(key: key, id: taskID)
             }
         }
+        tasks[key] = ManagedTask(id: taskID, task: task)
     }
 
     /// Runs a detached async operation, cancelling any existing task with the same key.
@@ -50,21 +58,24 @@ final class ViewModelTaskManager {
     ///   - key: Unique identifier for this task type
     ///   - operation: The async operation to perform
     func runDetached(_ key: String, operation: @Sendable @escaping () async -> Void) {
-        tasks[key]?.cancel()
+        tasks[key]?.task.cancel()
+
+        let taskID = UUID()
         weak let weakSelf = self
-        tasks[key] = Task.detached {
+        let task = Task.detached {
             await operation()
-            _ = await MainActor.run {
-                weakSelf?.tasks.removeValue(forKey: key)
+            await MainActor.run {
+                weakSelf?.clearTaskIfCurrent(key: key, id: taskID)
             }
         }
+        tasks[key] = ManagedTask(id: taskID, task: task)
     }
 
     /// Cancels the task with the specified key.
     ///
     /// - Parameter key: The task key to cancel
     func cancel(_ key: String) {
-        tasks[key]?.cancel()
+        tasks[key]?.task.cancel()
         tasks[key] = nil
     }
 
@@ -72,9 +83,17 @@ final class ViewModelTaskManager {
     ///
     /// Call this in view/ViewModel cleanup (e.g., onDisappear, deinit).
     func cancelAll() {
-        for task in tasks.values {
-            task.cancel()
+        for managedTask in tasks.values {
+            managedTask.task.cancel()
         }
         tasks.removeAll()
+    }
+
+    private func clearTaskIfCurrent(key: String, id: UUID) {
+        guard tasks[key]?.id == id else {
+            return
+        }
+
+        tasks.removeValue(forKey: key)
     }
 }
