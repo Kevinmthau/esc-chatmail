@@ -157,6 +157,22 @@ final class HTMLURLSanitizerTests: XCTestCase {
         XCTAssertTrue(result.contains("https://safe.com"))
     }
 
+    func testSanitizeURLs_hrefTrackingQueryAmpersandsAreAttributeEscaped() {
+        let html = #"<a href="https://example.us4.list-manage.com/track/click?u=abc&id=def&e=ghi">Open</a>"#
+        let result = sut.sanitizeURLs(html)
+
+        XCTAssertTrue(result.contains(#"href="https://example.us4.list-manage.com/track/click?u=abc&amp;id=def&amp;e=ghi""#))
+        XCTAssertFalse(result.contains("?u=abc&id=def&e=ghi"))
+    }
+
+    func testSanitizeURLs_hrefAlreadyEscapedTrackingQueryAmpersandsAreNotDoubleEscaped() {
+        let html = #"<a href="https://example.us4.list-manage.com/track/click?u=abc&amp;id=def&amp;e=ghi">Open</a>"#
+        let result = sut.sanitizeURLs(html)
+
+        XCTAssertTrue(result.contains(#"href="https://example.us4.list-manage.com/track/click?u=abc&amp;id=def&amp;e=ghi""#))
+        XCTAssertFalse(result.contains("&amp;amp;"))
+    }
+
     func testSanitizeURLs_hrefMailtoPreserved() {
         let html = "<a href=\"mailto:me@example.com\">Email</a>"
         let result = sut.sanitizeURLs(html)
