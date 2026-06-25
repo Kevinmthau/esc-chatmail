@@ -45,6 +45,7 @@ final class VirtualScrollState: ObservableObject {
 
     // Task tracking to prevent orphaned tasks during rapid scrolling
     private let taskManager = ViewModelTaskManager()
+    private let localMutationRefreshTaskKey = "refreshLatestWindowForLocalMutation"
 
     init(
         conversationId: String,
@@ -136,7 +137,7 @@ final class VirtualScrollState: ObservableObject {
 
             let preferPendingConversationMessages =
                 self.initialWindowPosition == .end && self.hasPendingInsertedMessagesInConversation
-            let initialRange = await self.initialMessageRange(
+            var initialRange = await self.initialMessageRange(
                 preferPendingConversationMessages: preferPendingConversationMessages
             )
             Log.diagnostic(
@@ -145,10 +146,30 @@ final class VirtualScrollState: ObservableObject {
                 "VirtualScroll initial load request conv=\(self.conversationId) range=\(initialRange.lowerBound)..<\(initialRange.upperBound)",
                 category: .ui
             )
-            let page = await self.loadPage(
+            var page = await self.loadPage(
                 initialRange,
                 preferPendingConversationMessages: preferPendingConversationMessages
             )
+
+            guard !Task.isCancelled else { return }
+
+            if self.shouldReloadInitialEndWindowForPendingLocalMessages(
+                preferredPendingMessages: preferPendingConversationMessages
+            ) {
+                initialRange = await self.initialMessageRange(
+                    preferPendingConversationMessages: true
+                )
+                Log.diagnostic(
+                    .chatView,
+                    level: .info,
+                    "VirtualScroll initial load switching to pending local messages conv=\(self.conversationId) range=\(initialRange.lowerBound)..<\(initialRange.upperBound)",
+                    category: .ui
+                )
+                page = await self.loadPage(
+                    initialRange,
+                    preferPendingConversationMessages: true
+                )
+            }
 
             guard !Task.isCancelled else { return }
 
@@ -191,8 +212,18 @@ final class VirtualScrollState: ObservableObject {
         await loadLatestWindow()
     }
 
+    func refreshLatestWindowForLocalMutation(knownTotalCount: Int? = nil) async {
+        await loadLatestWindowIfNeeded(knownTotalCount: knownTotalCount)
+    }
+
     func loadLatestWindow() async {
         let preferPendingConversationMessages = hasPendingInsertedMessagesInConversation
+        Log.diagnostic(
+            .chatView,
+            level: .info,
+            "VirtualScroll latest window load start conv=\(conversationId) preferPending=\(preferPendingConversationMessages)",
+            category: .ui
+        )
         let totalCount = await loadTotalMessageCount(
             preferPendingConversationMessages: preferPendingConversationMessages
         )
@@ -203,6 +234,12 @@ final class VirtualScrollState: ObservableObject {
             preferPendingConversationMessages: preferPendingConversationMessages
         )
         scrollPosition = max(startIndex, totalCount - 1)
+        Log.diagnostic(
+            .chatView,
+            level: .info,
+            "VirtualScroll latest window load complete conv=\(conversationId) total=\(totalCount) window=\(startIndex)..<\(totalCount)",
+            category: .ui
+        )
     }
 
     private func updateVisibleMessages() {
@@ -294,6 +331,14 @@ final class VirtualScrollState: ObservableObject {
         )
 
         return metadataPage.totalCount
+    }
+
+    private func shouldReloadInitialEndWindowForPendingLocalMessages(
+        preferredPendingMessages: Bool
+    ) -> Bool {
+        initialWindowPosition == .end &&
+            !preferredPendingMessages &&
+            hasPendingInsertedMessagesInConversation
     }
 
     private func loadPage(
@@ -434,6 +479,23 @@ final class VirtualScrollState: ObservableObject {
         guard let window = messageWindow,
               !window.messageIDs.isEmpty else { return }
 
+        if shouldRefreshLatestWindowForLocalMessageMutation(
+            in: notification,
+            currentWindow: window
+        ) {
+            let knownTotalCount = estimatedTotalCountAfterLocalMessageMutation(in: notification)
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "VirtualScroll local message mutation refresh requested conv=\(conversationId) knownTotal=\(knownTotalCount)",
+                category: .ui
+            )
+            taskManager.run(localMutationRefreshTaskKey) { [weak self] in
+                guard let self = self else { return }
+                await self.refreshLatestWindowForLocalMutation(knownTotalCount: knownTotalCount)
+            }
+        }
+
         let affectedMessageIDs = refreshedVisibleMessageIDs(
             in: notification,
             visibleMessageIDs: window.messageIDs
@@ -503,6 +565,58 @@ final class VirtualScrollState: ObservableObject {
         }
 
         return affectedMessageIDs
+    }
+
+    private func shouldRefreshLatestWindowForLocalMessageMutation(
+        in notification: Notification,
+        currentWindow: MessageWindow
+    ) -> Bool {
+        guard currentWindow.endIndex >= totalMessageCount else {
+            return false
+        }
+
+        return hasVisibleInsertedMessageForCurrentConversation(in: notification)
+    }
+
+    private func hasVisibleInsertedMessageForCurrentConversation(in notification: Notification) -> Bool {
+        guard let conversationUUID = UUID(uuidString: conversationId) else { return false }
+
+        return contextObjects(forKeys: [NSInsertedObjectsKey], in: notification)
+            .contains { object in
+                guard let message = object as? Message,
+                      message.conversation?.id == conversationUUID else {
+                    return false
+                }
+
+                return isVisibleInChat(message)
+            }
+    }
+
+    private func estimatedTotalCountAfterLocalMessageMutation(in notification: Notification) -> Int {
+        let insertedCount = visibleInsertedMessageCountForCurrentConversation(in: notification)
+
+        return max(0, totalMessageCount + insertedCount)
+    }
+
+    private func visibleInsertedMessageCountForCurrentConversation(in notification: Notification) -> Int {
+        guard let conversationUUID = UUID(uuidString: conversationId) else { return 0 }
+
+        return contextObjects(forKeys: [NSInsertedObjectsKey], in: notification)
+            .reduce(into: 0) { count, object in
+                guard let message = object as? Message,
+                      message.conversation?.id == conversationUUID,
+                      isVisibleInChat(message) else {
+                    return
+                }
+
+                count += 1
+            }
+    }
+
+    private func isVisibleInChat(_ message: Message) -> Bool {
+        let excludedLabelIDs = Set(MessagePredicates.chatExcludedLabelIDs)
+        let labelIDs = message.labels?.map(\.id) ?? []
+        return labelIDs.allSatisfy { !excludedLabelIDs.contains($0) }
     }
 
     private func contextObjects(

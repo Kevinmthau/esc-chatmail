@@ -327,6 +327,40 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
     }
 
+    func handleReplySendCompleted(
+        messageCount: Int,
+        totalMessageCount: Int,
+        isInitialWindowLoaded: Bool,
+        scrollAction: @escaping BottomAnchorAction
+    ) {
+        guard isInitialWindowLoaded else {
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView deferring post-send refresh until initial window loads messages=\(messageCount) total=\(totalMessageCount)",
+                category: .ui
+            )
+            return
+        }
+
+        let anchorMessageCount = max(messageCount, totalMessageCount)
+        guard anchorMessageCount > 0 else { return }
+
+        Log.diagnostic(
+            .chatView,
+            level: .info,
+            "ChatView post-send refresh requested messages=\(messageCount) total=\(totalMessageCount)",
+            category: .ui
+        )
+        scrollToBottom(
+            messageCount: anchorMessageCount,
+            delay: UIConfig.contentChangeScrollDelay,
+            includeStabilizationStep: true,
+            knownTotalCount: anchorMessageCount,
+            scrollAction: scrollAction
+        )
+    }
+
     func handleContactStoreDidChange(senderGroupingMessages: [ChatMessageRowModel]) {
         taskManager.run("contactRefresh") { [invalidateContactsCache, clearPersonCache] in
             await invalidateContactsCache()
@@ -497,13 +531,13 @@ final class ChatMessagesCoordinator: ObservableObject {
                 BottomAnchorStep(
                     delay: UIConfig.contentChangeScrollDelay,
                     animated: false,
-                    logMessage: "ChatView initial scroll -> bottom anchor"
+                    logMessage: "ChatView initial scroll -> bottom anchor",
+                    marksReady: true
                 ),
                 BottomAnchorStep(
                     delay: UIConfig.initialScrollDelay,
                     animated: false,
-                    logMessage: "ChatView follow-up scroll -> bottom anchor",
-                    marksReady: true
+                    logMessage: "ChatView follow-up scroll -> bottom anchor"
                 ),
                 BottomAnchorStep(
                     delay: 0.25,

@@ -816,6 +816,75 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
+    func testHandleReplySendCompletedRequestsLatestWindowAndStabilizedBottomAnchor() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+
+        var latestWindowKnownCounts: [Int?] = []
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        let coordinator = ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { knownTotalCount in
+                latestWindowKnownCounts.append(knownTotalCount)
+            },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in }
+
+        await waitUntil {
+            coordinator.isReadyToShow
+        }
+
+        coordinator.handleReplySendCompleted(
+            messageCount: messages.count,
+            totalMessageCount: messages.count + 1,
+            isInitialWindowLoaded: true
+        ) { step in
+            anchorSteps.append(step)
+        }
+
+        await waitUntil {
+            anchorSteps.count == 2
+        }
+
+        XCTAssertEqual(latestWindowKnownCounts.last, messages.count + 1)
+        XCTAssertEqual(
+            anchorSteps,
+            [
+                .init(
+                    delay: UIConfig.contentChangeScrollDelay,
+                    animated: true,
+                    logMessage: "ChatView animated scroll -> bottom anchor"
+                ),
+                .init(
+                    delay: max(UIConfig.initialScrollDelay, UIConfig.scrollAnimationDuration),
+                    animated: false,
+                    logMessage: "ChatView stabilization scroll after content change -> bottom anchor"
+                )
+            ]
+        )
+    }
+
     func testKeyboardAndFocusChanges_requestExpectedBottomAnchors() async {
         var loadLatestWindowCount = 0
         var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
@@ -1072,7 +1141,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
 
         XCTAssertTrue(
-            anchorSteps.contains { $0.logMessage == "ChatView follow-up scroll -> bottom anchor" }
+            anchorSteps.contains { $0.logMessage == "ChatView initial scroll -> bottom anchor" }
         )
 
         let animatedScrollCount = anchorSteps.filter {

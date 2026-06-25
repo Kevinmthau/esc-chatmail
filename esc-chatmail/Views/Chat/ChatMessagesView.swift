@@ -125,7 +125,7 @@ struct ChatMessagesView: View {
                     }
                 }
 
-                replyBarOverlay
+                replyBarOverlay(proxy: proxy)
                     .padding(.bottom, keyboardOffset)
             }
             .ignoresSafeArea(.keyboard, edges: .bottom)
@@ -235,7 +235,7 @@ struct ChatMessagesView: View {
         }
     }
 
-    private var replyBarOverlay: some View {
+    private func replyBarOverlay(proxy: ScrollViewProxy) -> some View {
         VStack(spacing: 0) {
             Divider()
             ChatReplyBar(
@@ -243,7 +243,17 @@ struct ChatMessagesView: View {
                 replyingTo: $viewModel.replyingTo,
                 conversation: conversation,
                 onSend: { attachments in
-                    await viewModel.sendReply(with: attachments)
+                    let didSend = await viewModel.sendReply(with: attachments)
+                    if didSend {
+                        coordinator.handleReplySendCompleted(
+                            messageCount: messages.count,
+                            totalMessageCount: scrollState.totalMessageCount,
+                            isInitialWindowLoaded: scrollState.isInitialLoadComplete
+                        ) { step in
+                            performBottomAnchor(step, proxy: proxy)
+                        }
+                    }
+                    return didSend
                 },
                 focusBinding: isTextFieldFocused
             )

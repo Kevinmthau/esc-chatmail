@@ -234,6 +234,58 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertEqual(state.scrollPosition, 5)
     }
 
+    func testInitialLoadFromEnd_includesPendingMessageInsertedDuringBackgroundLoad() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+        let requestedRanges = RangeRecorder()
+        let firstRequestPause = FirstRequestPause()
+
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+            await requestedRanges.record(range)
+            await firstRequestPause.waitIfNeeded()
+            return await VirtualScrollState.loadMessagePage(
+                conversationId: conversationId,
+                range: range,
+                in: context
+            )
+        }
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            pageLoader: loader
+        )
+        defer { state.cleanup() }
+
+        await waitUntilRecordedRangeCount(1, in: requestedRanges)
+
+        let pendingMessage = try makePendingMessage(
+            id: "virtual-scroll-pending-during-initial-load",
+            date: Date(timeIntervalSince1970: 8),
+            conversation: conversation
+        )
+        await firstRequestPause.release()
+
+        let expectedIDs = Array(messages.suffix(3)).map(\.objectID) + [pendingMessage.objectID]
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == expectedIDs &&
+                state.totalMessageCount == 9 &&
+                !state.isLoadingMore
+        }
+
+        XCTAssertEqual(state.visibleRangeStartIndex, 5)
+        XCTAssertEqual(state.scrollPosition, 5)
+    }
+
     func testInitialLoadFromEnd_omitsExcludedPendingMessageWhileKeepingValidPendingMessage() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 3)
         let excludedLabels = makeExcludedLabels()
@@ -450,6 +502,86 @@ final class VirtualScrollStateTests: XCTestCase {
                 state.totalMessageCount == 9 &&
                 !state.isLoadingMore
         }
+    }
+
+    func testInsertedPendingOptimisticMessageRefreshesLatestWindowWithoutScroll() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        let initialIDs = Array(messages.suffix(4)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
+        }
+
+        let pendingMessage = try makePendingMessage(
+            id: "virtual-scroll-inserted-pending-latest",
+            date: Date(timeIntervalSince1970: 8),
+            conversation: conversation
+        )
+
+        let expectedIDs = Array(messages.suffix(3)).map(\.objectID) + [pendingMessage.objectID]
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == expectedIDs &&
+                state.totalMessageCount == 9 &&
+                !state.isLoadingMore
+        }
+    }
+
+    func testInsertedExcludedPendingMessageDoesNotChangeLatestWindow() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 3)
+        let excludedLabels = makeExcludedLabels()
+        try viewContext.save()
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 10,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        let initialIDs = messages.map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
+        }
+
+        let draftMessage = MessageBuilder()
+            .withId("virtual-scroll-inserted-draft-pending")
+            .withSubject("virtual-scroll-inserted-draft-pending")
+            .withDate(Date(timeIntervalSince1970: 3))
+            .inConversation(conversation)
+            .build(in: viewContext)
+        draftMessage.addToLabels(excludedLabels.draft)
+        try viewContext.obtainPermanentIDs(for: [draftMessage])
+        viewContext.processPendingChanges()
+
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(state.visibleMessages.map(\.objectID), initialIDs)
+        XCTAssertEqual(state.totalMessageCount, 3)
     }
 
     func testLoadLatestWindowIfNeeded_refreshesWhenKnownTotalCountIsAhead() async throws {
@@ -754,6 +886,26 @@ final class VirtualScrollStateTests: XCTestCase {
 
         XCTFail("Timed out waiting for condition", file: file, line: line)
     }
+
+    private func waitUntilRecordedRangeCount(
+        _ expectedCount: Int,
+        in recorder: RangeRecorder,
+        timeout: TimeInterval = 2.0,
+        pollIntervalNanoseconds: UInt64 = 20_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while Date() < deadline {
+            if await recorder.snapshot().count >= expectedCount {
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+
+        XCTFail("Timed out waiting for recorded range count", file: file, line: line)
+    }
 }
 
 private actor RangeRecorder {
@@ -765,5 +917,23 @@ private actor RangeRecorder {
 
     func snapshot() -> [Range<Int>] {
         ranges
+    }
+}
+
+private actor FirstRequestPause {
+    private var shouldPauseNextRequest = true
+    private var isReleased = false
+
+    func waitIfNeeded() async {
+        guard shouldPauseNextRequest else { return }
+        shouldPauseNextRequest = false
+
+        while !isReleased && !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    func release() {
+        isReleased = true
     }
 }
