@@ -33,6 +33,18 @@ final class ViewModelTaskManagerTests: XCTestCase {
         let secondGate = AsyncGate()
         let key = "replacement"
 
+#if DEBUG
+        manager.taskCleanupAttemptObserver = { cleanupKey in
+            guard cleanupKey == key else {
+                return
+            }
+
+            Task {
+                await recorder.record(.staleCleanupAttempted)
+            }
+        }
+#endif
+
         startTask(manager, key: key, mode: mode) {
             await recorder.record(.firstStarted)
             await firstGate.wait()
@@ -71,7 +83,15 @@ final class ViewModelTaskManagerTests: XCTestCase {
             file: file,
             line: line
         )
-        await drainMainActor()
+
+#if DEBUG
+        await waitUntil(
+            { await recorder.contains(.staleCleanupAttempted) },
+            "stale task cleanup should run",
+            file: file,
+            line: line
+        )
+#endif
 
         cancelCurrentTask(manager, key)
 
@@ -115,12 +135,6 @@ final class ViewModelTaskManagerTests: XCTestCase {
         }
 
         XCTFail(message, file: file, line: line)
-    }
-
-    private func drainMainActor() async {
-        for _ in 0..<5 {
-            await Task.yield()
-        }
     }
 
     private enum RunMode {
@@ -171,5 +185,6 @@ private enum TaskEvent: Equatable, Sendable {
     case firstStarted
     case firstFinished
     case secondWaiting
+    case staleCleanupAttempted
     case secondCancelled
 }

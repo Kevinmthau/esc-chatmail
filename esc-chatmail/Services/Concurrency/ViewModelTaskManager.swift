@@ -31,6 +31,10 @@ final class ViewModelTaskManager {
 
     private var tasks: [String: ManagedTask] = [:]
 
+#if DEBUG
+    var taskCleanupAttemptObserver: ((String) -> Void)?
+#endif
+
     /// Runs an async operation, cancelling any existing task with the same key.
     ///
     /// - Parameters:
@@ -90,6 +94,10 @@ final class ViewModelTaskManager {
     }
 
     private func clearTaskIfCurrent(key: String, id: UUID) {
+#if DEBUG
+        taskCleanupAttemptObserver?(key)
+#endif
+
         guard tasks[key]?.id == id else {
             return
         }
