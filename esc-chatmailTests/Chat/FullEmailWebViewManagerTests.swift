@@ -985,6 +985,39 @@ final class FullInteractiveEmailWebViewNavigationDecisionTests: XCTestCase {
         XCTAssertEqual(decide(.linkActivated, "https://example.com/path"), .openExternally(url))
     }
 
+    func testAmazonSESTrackingLinkOpensEmbeddedDestinationExternally() {
+        let destination = URL(string: "https://api2.baback.co/public/labels/example-label")!
+        let trackingURL = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/https:%2F%2Fapi2.baback.co%2Fpublic%2Flabels%2Fexample-label/1/message-id/signature=258"
+
+        XCTAssertEqual(decide(.linkActivated, trackingURL), .openExternally(destination))
+    }
+
+    func testAmazonSESTrackingLinkPreservesEncodedDestinationQuery() {
+        let destination = URL(string: "https://locator.dhl.com/results?countryCode=US&address=128%20E%2074th%20St.,New%20York")!
+        let trackingURL = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/https:%2F%2Flocator.dhl.com%2Fresults%3FcountryCode=US%26address=128%2520E%252074th%2520St.,New%2520York/1/message-id/signature=258"
+
+        XCTAssertEqual(decide(.linkActivated, trackingURL), .openExternally(destination))
+    }
+
+    func testAmazonSESTrackingLinkOpensAllowedMailDestinationExternally() {
+        let destination = URL(string: "mailto:support@example.com")!
+        let trackingURL = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/mailto:support%40example.com/1/message-id/signature=258"
+
+        XCTAssertEqual(decide(.linkActivated, trackingURL), .openExternally(destination))
+    }
+
+    func testAmazonSESTrackingLinkToDisallowedSchemeIsCancelled() {
+        let trackingURL = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/facetime:%2F%2Fuser@example.com/1/message-id/signature=258"
+
+        XCTAssertEqual(decide(.linkActivated, trackingURL), .cancel)
+    }
+
+    func testAmazonSESTrackingLinkWithMalformedDestinationIsCancelled() {
+        let trackingURL = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/%20facetime:%2F%2Fuser@example.com/1/message-id/signature=258"
+
+        XCTAssertEqual(decide(.linkActivated, trackingURL), .cancel)
+    }
+
     func testLinkActivationToBlankURLIsCancelled() {
         XCTAssertEqual(decide(.linkActivated, "about:blank"), .cancel)
     }
@@ -1001,6 +1034,12 @@ final class FullInteractiveEmailWebViewNavigationDecisionTests: XCTestCase {
         XCTAssertEqual(decide(.linkActivated, "file:///etc/passwd"), .cancel)
     }
 
+    func testAmazonSESTrackingLinkToUnsupportedSchemeIsCancelled() {
+        let trackingURL = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/javascript:alert(1)/1/message-id/signature=258"
+
+        XCTAssertEqual(decide(.linkActivated, trackingURL), .cancel)
+    }
+
     func testDataDetectorLinksAreAllowed() {
         XCTAssertEqual(decide(.linkActivated, "x-apple-data-detectors://1"), .allow)
     }
@@ -1013,6 +1052,13 @@ final class FullInteractiveEmailWebViewNavigationDecisionTests: XCTestCase {
         let privateHost = URL(string: "http://192.168.0.1/")!
         XCTAssertEqual(decide(.linkActivated, "http://127.0.0.1/admin"), .blockedPrivateNetwork(loopback))
         XCTAssertEqual(decide(.linkActivated, "http://192.168.0.1/"), .blockedPrivateNetwork(privateHost))
+    }
+
+    func testAmazonSESTrackingLinkToPrivateHostIsBlocked() {
+        let loopback = URL(string: "http://127.0.0.1/admin")!
+        let trackingURL = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/http:%2F%2F127.0.0.1%2Fadmin/1/message-id/signature=258"
+
+        XCTAssertEqual(decide(.linkActivated, trackingURL), .blockedPrivateNetwork(loopback))
     }
 
     func testFormSubmissionsAreCancelled() {

@@ -90,6 +90,20 @@ enum FullInteractiveEmailWebView {
         case openExternally(URL)
     }
 
+    private enum ExternalLinkResolution {
+        case open(URL)
+        case cancel
+    }
+
+    private enum AmazonSESTrackingDestination {
+        case notTrackingURL
+        case destination(URL)
+        case blockedDestination
+    }
+
+    private static let unsupportedNavigationSchemes = ["javascript", "vbscript", "file"]
+    private static let allowedUnwrappedAmazonSESDestinationSchemes = ["http", "https", "mailto", "tel"]
+
     /// Pure navigation decision for the full-interactive WebView, shared by the live `Coordinator`
     /// (which performs the side effects — opening external URLs, logging blocked links) and the
     /// off-screen `WarmNavigationDelegate` (which has no side effects — it permits the `.allow` cases
@@ -106,9 +120,7 @@ enum FullInteractiveEmailWebView {
         // screened here, so the initial load still proceeds. Note: "cid" is NOT blocked — it is
         // handled by CIDSchemeHandler.
         if let url {
-            let scheme = url.scheme?.lowercased() ?? ""
-            let unsupportedSchemes = ["javascript", "vbscript", "file"]
-            if unsupportedSchemes.contains(scheme) {
+            if isUnsupportedNavigationURL(url) {
                 return .cancel
             }
         }
@@ -134,18 +146,82 @@ enum FullInteractiveEmailWebView {
 
         // Handle link clicks.
         if navigationType == .linkActivated, let url {
-            let scheme = url.scheme?.lowercased() ?? ""
+            let externalURL: URL
+            switch externalLinkResolution(for: url) {
+            case .open(let resolvedURL):
+                externalURL = resolvedURL
+            case .cancel:
+                return .cancel
+            }
+            let scheme = externalURL.scheme?.lowercased() ?? ""
             if scheme == "x-apple-data-detectors" {
                 return .allow
             }
-            if scheme == "http" || scheme == "https",
-               PrivateNetworkAddressDetector.isPrivateOrReserved(url) {
-                return .blockedPrivateNetwork(url)
+            if isUnsupportedNavigationURL(externalURL) {
+                return .cancel
             }
-            return .openExternally(url)
+            if scheme == "http" || scheme == "https",
+               PrivateNetworkAddressDetector.isPrivateOrReserved(externalURL) {
+                return .blockedPrivateNetwork(externalURL)
+            }
+            return .openExternally(externalURL)
         }
 
         return .allow
+    }
+
+    private static func isUnsupportedNavigationURL(_ url: URL) -> Bool {
+        let scheme = url.scheme?.lowercased() ?? ""
+        return unsupportedNavigationSchemes.contains(scheme)
+    }
+
+    private static func externalLinkResolution(for url: URL) -> ExternalLinkResolution {
+        switch amazonSESTrackingDestination(from: url) {
+        case .notTrackingURL:
+            return .open(url)
+        case .destination(let destination):
+            return .open(destination)
+        case .blockedDestination:
+            return .cancel
+        }
+    }
+
+    private static func amazonSESTrackingDestination(from url: URL) -> AmazonSESTrackingDestination {
+        guard isAmazonSESTrackingHost(url.host),
+              let trackingMarkerIndex = url.pathComponents.firstIndex(of: "L0") else {
+            return .notTrackingURL
+        }
+
+        let destinationIndex = url.pathComponents.index(after: trackingMarkerIndex)
+        guard destinationIndex < url.pathComponents.endIndex else {
+            return .blockedDestination
+        }
+
+        guard let destination = URL(string: url.pathComponents[destinationIndex]) else {
+            return .blockedDestination
+        }
+
+        guard isAllowedUnwrappedAmazonSESDestination(destination) else {
+            return .blockedDestination
+        }
+
+        return .destination(destination)
+    }
+
+    private static func isAllowedUnwrappedAmazonSESDestination(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased() else {
+            return false
+        }
+
+        return allowedUnwrappedAmazonSESDestinationSchemes.contains(scheme)
+    }
+
+    private static func isAmazonSESTrackingHost(_ host: String?) -> Bool {
+        guard let host = host?.lowercased() else {
+            return false
+        }
+
+        return host == "awstrack.me" || host.hasSuffix(".awstrack.me")
     }
 }
 
