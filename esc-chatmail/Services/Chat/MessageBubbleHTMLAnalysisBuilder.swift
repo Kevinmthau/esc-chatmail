@@ -9,6 +9,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
         isLikelyCalendarInvite: Bool,
         bodyText: String?,
         cleanedSnippet: String?,
+        senderName: String? = nil,
+        senderEmail: String? = nil,
         subject: String?,
         attachmentSnapshots: [MessageBubbleAttachmentSnapshot]
     ) -> MessageBubbleHTMLAnalysis {
@@ -20,6 +22,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
             isLikelyCalendarInvite: isLikelyCalendarInvite,
             bodyText: bodyText,
             cleanedSnippet: cleanedSnippet,
+            senderName: senderName,
+            senderEmail: senderEmail,
             subject: subject,
             attachmentSnapshots: attachmentSnapshots
         )
@@ -33,6 +37,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
         isLikelyCalendarInvite: Bool,
         bodyText: String?,
         cleanedSnippet: String?,
+        senderName: String? = nil,
+        senderEmail: String? = nil,
         subject: String?,
         attachmentSnapshots: [MessageBubbleAttachmentSnapshot],
         handler: HTMLContentHandler
@@ -52,6 +58,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
             isLikelyCalendarInvite: isLikelyCalendarInvite,
             bodyText: bodyText,
             cleanedSnippet: cleanedSnippet,
+            senderName: senderName,
+            senderEmail: senderEmail,
             subject: subject,
             attachmentSnapshots: attachmentSnapshots
         )
@@ -225,6 +233,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
         isLikelyCalendarInvite: Bool,
         bodyText: String?,
         cleanedSnippet: String?,
+        senderName: String?,
+        senderEmail: String?,
         subject: String?
     ) -> Bool {
         guard !isForwardedEmail, isLikelyCalendarInvite else {
@@ -247,6 +257,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
         isLikelyCalendarInvite: Bool,
         bodyText: String?,
         cleanedSnippet: String?,
+        senderName: String?,
+        senderEmail: String?,
         subject: String?,
         attachmentSnapshots: [MessageBubbleAttachmentSnapshot]
     ) -> MessageBubbleHTMLAnalysis {
@@ -271,6 +283,8 @@ enum MessageBubbleHTMLAnalysisBuilder {
                 isLikelyCalendarInvite: isLikelyCalendarInvite,
                 bodyText: bodyText,
                 cleanedSnippet: cleanedSnippet,
+                senderName: senderName,
+                senderEmail: senderEmail,
                 subject: subject
             )
         )

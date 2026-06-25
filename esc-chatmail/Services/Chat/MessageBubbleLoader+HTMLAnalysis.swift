@@ -44,6 +44,8 @@ extension MessageBubbleLoader {
             isLikelyCalendarInvite: request.isLikelyCalendarInvite,
             bodyText: request.bodyText,
             cleanedSnippet: request.cleanedSnippet,
+            senderName: request.senderName,
+            senderEmail: request.effectiveSenderEmail,
             subject: request.subject,
             attachmentSnapshots: request.attachmentSnapshots
         )
