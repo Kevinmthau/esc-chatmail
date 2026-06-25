@@ -749,6 +749,40 @@ final class HTMLContentLoaderTests: XCTestCase {
         XCTAssertEqual(html.components(separatedBy: "href=").count - 1, 2)
     }
 
+    func testPrepareOriginalHTML_preservesTrackedHrefQueryParameters() async {
+        let messageId = "html-loader-original-tracked-href-\(UUID().uuidString)"
+        let trackedURL = "https://example.us4.list-manage.com/track/click?u=abc&id=def&e=ghi"
+        let escapedTrackedURL = "https://example.us4.list-manage.com/track/click?u=abc&amp;id=def&amp;e=ghi"
+        let originalHTML = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <a href="\(trackedURL)" target="_blank">Read more</a>
+          <p>Reader body text</p>
+        </body>
+        </html>
+        """
+
+        let prepared = await loader.prepareOriginalHTML(
+            fromCanonicalHTML: originalHTML,
+            messageId: messageId,
+            sourceLocation: .messageFile,
+            plainText: nil,
+            senderEmail: "sender@example.com",
+            subject: "Subject",
+            isDarkMode: false
+        )
+
+        guard let html = prepared else {
+            XCTFail("Expected prepared original HTML")
+            return
+        }
+
+        XCTAssertTrue(html.contains(#"href="\#(escapedTrackedURL)""#))
+        XCTAssertTrue(html.contains("id=def"))
+        XCTAssertTrue(html.contains("e=ghi"))
+    }
+
     func testPrepareOriginalHTMLForCachingDoesNotWarmOrdinaryDynamicRemoteImages() async {
         let messageId = "html-loader-original-dynamic-image-\(UUID().uuidString)"
         let recorder = RequestRecorder()

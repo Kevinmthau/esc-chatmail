@@ -111,7 +111,11 @@ struct HTMLURLSanitizer {
 
             if isHrefAttribute(attribute.lowercasedName) {
                 guard sanitizeHrefs else { return nil }
-                return isURLSafe(url) ? nil : (attribute.fullRange, "")
+                guard isURLSafe(url) else {
+                    return (attribute.fullRange, "")
+                }
+                let escapedURL = htmlAttributeEscapedHrefValue(url)
+                return escapedURL == url ? nil : (attribute.valueRange, escapedURL)
             }
 
             switch attribute.lowercasedName {
@@ -552,6 +556,70 @@ struct HTMLURLSanitizer {
         value
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "\"", with: "&quot;")
+    }
+
+    private func htmlAttributeEscapedHrefValue(_ value: String) -> String {
+        var result = ""
+        var index = value.startIndex
+
+        while index < value.endIndex {
+            let character = value[index]
+            switch character {
+            case "&":
+                if startsHTMLCharacterReference(in: value, at: index) {
+                    result.append(character)
+                } else {
+                    result.append("&amp;")
+                }
+            case "\"":
+                result.append("&quot;")
+            default:
+                result.append(character)
+            }
+            index = value.index(after: index)
+        }
+
+        return result
+    }
+
+    private func startsHTMLCharacterReference(in value: String, at ampersandIndex: String.Index) -> Bool {
+        let entityStart = value.index(after: ampersandIndex)
+        guard entityStart < value.endIndex else {
+            return false
+        }
+
+        var index = entityStart
+        if value[index] == "#" {
+            index = value.index(after: index)
+            guard index < value.endIndex else {
+                return false
+            }
+
+            if value[index] == "x" || value[index] == "X" {
+                index = value.index(after: index)
+                let digitsStart = index
+                while index < value.endIndex, value[index].isHexDigit {
+                    index = value.index(after: index)
+                }
+                return digitsStart < index && index < value.endIndex && value[index] == ";"
+            }
+
+            let digitsStart = index
+            while index < value.endIndex, value[index].isNumber {
+                index = value.index(after: index)
+            }
+            return digitsStart < index && index < value.endIndex && value[index] == ";"
+        }
+
+        guard value[index].isLetter else {
+            return false
+        }
+
+        index = value.index(after: index)
+        while index < value.endIndex, value[index].isLetter || value[index].isNumber {
+            index = value.index(after: index)
+        }
+        return index < value.endIndex && value[index] == ";"
     }
 
     /// Rewrites Cloudflare cdn-cgi image URLs to use JPEG format instead of auto
