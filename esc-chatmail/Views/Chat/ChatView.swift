@@ -10,7 +10,6 @@ struct ChatView: View {
     private let chatDependencies: ChatDependencies
     private let makeForwardComposeView: @MainActor (ComposeForwardModeContext) -> ComposeView
 
-    @FetchRequest private var messages: FetchedResults<Message>
     @FocusState private var isTextFieldFocused: Bool
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
@@ -29,14 +28,6 @@ struct ChatView: View {
         self._viewModel = StateObject(
             wrappedValue: ChatViewModel(conversation: conversation, chatDependencies: chatDependencies)
         )
-
-        let request = NSFetchRequest<Message>(entityName: "Message")
-        request.sortDescriptors = [NSSortDescriptor(keyPath: \Message.internalDate, ascending: true)]
-        request.predicate = MessagePredicates.visibleInChat(conversation: conversation)
-        request.fetchBatchSize = CoreDataConfig.fetchBatchSize
-        request.relationshipKeyPathsForPrefetching = ["participants", "participants.person", "attachments", "labels"]
-        request.includesPendingChanges = true
-        self._messages = FetchRequest(fetchRequest: request)
     }
 
     var body: some View {
@@ -53,7 +44,6 @@ struct ChatView: View {
     private var content: some View {
         ChatMessagesView(
             conversation: conversation,
-            messages: messages,
             viewModel: viewModel,
             chatDependencies: chatDependencies,
             isTextFieldFocused: $isTextFieldFocused,

@@ -112,6 +112,16 @@ final class ChatViewModel: ObservableObject {
         markConversationAsRead(messageObjectIDs: unreadMessageIDs)
     }
 
+    func latestVisibleMessage() -> Message? {
+        let request = NSFetchRequest<Message>(entityName: "Message")
+        request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: false)]
+        request.predicate = MessagePredicates.visibleInChat(conversation: conversation)
+        request.fetchLimit = 1
+        request.fetchBatchSize = 1
+        request.includesPendingChanges = true
+        return try? viewContext.fetch(request).first
+    }
+
     func toggleMessageRead(_ message: Message) {
         let messageID = message.objectID
         taskManager.run("toggleRead-\(messageID)") { [weak self] in

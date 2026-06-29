@@ -41,6 +41,7 @@ final class VirtualScrollState: ObservableObject {
     // Cache only lightweight row snapshots for the current window. Background
     // contexts fetch IDs, and the UI never stores `Message` instances here.
     private var resolvedRowsByID: [NSManagedObjectID: ChatMessageRowModel] = [:]
+    private var resolvedRowsByAbsoluteIndex: [Int: ChatMessageRowModel] = [:]
     private var viewContextChangesCancellable: AnyCancellable?
 
     // Task tracking to prevent orphaned tasks during rapid scrolling
@@ -476,14 +477,13 @@ final class VirtualScrollState: ObservableObject {
     }
 
     private func handleViewContextChange(_ notification: Notification) {
-        guard let window = messageWindow,
-              !window.messageIDs.isEmpty else { return }
+        guard let window = messageWindow else { return }
 
+        let knownTotalCount = estimatedTotalCountAfterLocalMessageMutation(in: notification)
         if shouldRefreshLatestWindowForLocalMessageMutation(
             in: notification,
             currentWindow: window
         ) {
-            let knownTotalCount = estimatedTotalCountAfterLocalMessageMutation(in: notification)
             Log.diagnostic(
                 .chatView,
                 level: .info,
@@ -494,37 +494,48 @@ final class VirtualScrollState: ObservableObject {
                 guard let self = self else { return }
                 await self.refreshLatestWindowForLocalMutation(knownTotalCount: knownTotalCount)
             }
+        } else if knownTotalCount > totalMessageCount {
+            resolvedRowsByAbsoluteIndex.removeAll()
+            totalMessageCount = knownTotalCount
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "VirtualScroll local message mutation count updated conv=\(conversationId) knownTotal=\(knownTotalCount)",
+                category: .ui
+            )
         }
 
-        let affectedMessageIDs = refreshedVisibleMessageIDs(
+        let boundaryMessageIDs = Set(resolvedRowsByAbsoluteIndex.values.map(\.objectID))
+        let cachedMessageIDs = Set(window.messageIDs).union(boundaryMessageIDs)
+        guard !cachedMessageIDs.isEmpty else { return }
+
+        let affectedMessageIDs = refreshedCachedMessageIDs(
             in: notification,
-            visibleMessageIDs: window.messageIDs
+            cachedMessageIDs: cachedMessageIDs
         )
 
         guard !affectedMessageIDs.isEmpty else { return }
 
-        for objectID in affectedMessageIDs {
-            resolvedRowsByID.removeValue(forKey: objectID)
-        }
+        let didInvalidateBoundaryRow = !boundaryMessageIDs.isDisjoint(with: affectedMessageIDs)
+        invalidateCachedRows(for: affectedMessageIDs)
 
         let refreshedRows = resolveCachedRows(for: window.messageIDs)
-        guard refreshedRows != visibleMessages else { return }
+        guard didInvalidateBoundaryRow || refreshedRows != visibleMessages else { return }
         visibleMessages = refreshedRows
     }
 
-    private func refreshedVisibleMessageIDs(
+    private func refreshedCachedMessageIDs(
         in notification: Notification,
-        visibleMessageIDs: [NSManagedObjectID]
+        cachedMessageIDs: Set<NSManagedObjectID>
     ) -> Set<NSManagedObjectID> {
         var affectedMessageIDs = Set<NSManagedObjectID>()
-        let visibleMessageIDSet = Set(visibleMessageIDs)
 
         for object in contextObjects(
-            forKeys: [NSUpdatedObjectsKey, NSRefreshedObjectsKey],
+            forKeys: [NSUpdatedObjectsKey, NSRefreshedObjectsKey, NSDeletedObjectsKey],
             in: notification
         ) {
             guard let message = object as? Message,
-                  visibleMessageIDSet.contains(message.objectID) else {
+                  cachedMessageIDs.contains(message.objectID) else {
                 continue
             }
 
@@ -537,7 +548,7 @@ final class VirtualScrollState: ObservableObject {
         ) {
             guard let attachment = object as? Attachment,
                   let messageID = attachment.message?.objectID,
-                  visibleMessageIDSet.contains(messageID) else {
+                  cachedMessageIDs.contains(messageID) else {
                 continue
             }
 
@@ -554,7 +565,7 @@ final class VirtualScrollState: ObservableObject {
         })
 
         if !changedPersonEmails.isEmpty {
-            for messageID in visibleMessageIDs {
+            for messageID in cachedMessageIDs {
                 guard let row = resolveCachedRow(for: messageID),
                       row.matchesSenderEmail(in: changedPersonEmails) else {
                     continue
@@ -631,9 +642,22 @@ final class VirtualScrollState: ObservableObject {
 
     private func setMessageWindow(_ window: MessageWindow) {
         messageWindow = window
+        resolvedRowsByAbsoluteIndex.removeAll()
 
         let allowedIDs = Set(window.messageIDs)
         resolvedRowsByID = resolvedRowsByID.filter { allowedIDs.contains($0.key) }
+    }
+
+    private func invalidateCachedRows(for objectIDs: Set<NSManagedObjectID>) {
+        guard !objectIDs.isEmpty else { return }
+
+        for objectID in objectIDs {
+            resolvedRowsByID.removeValue(forKey: objectID)
+        }
+
+        resolvedRowsByAbsoluteIndex = resolvedRowsByAbsoluteIndex.filter { _, row in
+            !objectIDs.contains(row.objectID)
+        }
     }
 
     // The original bug was caused by fetching `Message` instances in a background
@@ -681,6 +705,37 @@ final class VirtualScrollState: ObservableObject {
         }
 
         return resolveCachedRow(for: window.messageIDs[relativeIndex])
+    }
+
+    func rowForGrouping(atAbsoluteIndex index: Int) -> ChatMessageRowModel? {
+        if let row = row(atAbsoluteIndex: index) {
+            return row
+        }
+
+        guard index >= 0, index < totalMessageCount else { return nil }
+        if let cached = resolvedRowsByAbsoluteIndex[index] {
+            return cached
+        }
+        guard let conversationUUID = UUID(uuidString: conversationId) else { return nil }
+
+        let request = NSFetchRequest<Message>(entityName: "Message")
+        request.predicate = MessagePredicates.visibleInChat(conversationId: conversationUUID)
+        request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: true)]
+        request.fetchOffset = index
+        request.fetchLimit = 1
+        request.fetchBatchSize = 1
+        request.includesPendingChanges = true
+        request.relationshipKeyPathsForPrefetching = ["participants", "participants.person", "attachments"]
+
+        guard let message = try? viewContext.fetch(request).first,
+              !message.isDeleted else {
+            return nil
+        }
+
+        let row = ChatMessageRowModelMapper.map(message)
+        resolvedRowsByID[message.objectID] = row
+        resolvedRowsByAbsoluteIndex[index] = row
+        return row
     }
 
     private func resolveCachedRows(for messageIDs: [NSManagedObjectID]) -> [ChatMessageRowModel] {

@@ -1,5 +1,6 @@
 import XCTest
 import CoreData
+import Combine
 @testable import esc_chatmail
 
 @MainActor
@@ -414,6 +415,74 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertEqual(state.visibleMessages.map(\.objectID), expectedIDs)
     }
 
+    func testRowForGroupingFetchesNextRowOutsideVisibleWindow() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        let initialIDs = Array(messages.prefix(4)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
+        }
+
+        XCTAssertNil(state.row(atAbsoluteIndex: 4))
+        XCTAssertEqual(state.rowForGrouping(atAbsoluteIndex: 4)?.objectID, messages[4].objectID)
+    }
+
+    func testRowForGroupingInvalidatesCachedBoundaryRowOutsideVisibleWindow() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        let initialIDs = Array(messages.prefix(4)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
+        }
+
+        XCTAssertEqual(state.rowForGrouping(atAbsoluteIndex: 4)?.senderEmail, "sender@example.com")
+
+        var visibleMessagesPublishCount = 0
+        let cancellable = state.$visibleMessages.dropFirst().sink { _ in
+            visibleMessagesPublishCount += 1
+        }
+        defer { cancellable.cancel() }
+
+        messages[4].senderEmail = "boundary@example.com"
+        try viewContext.save()
+
+        await waitUntil {
+            visibleMessagesPublishCount > 0 &&
+                state.visibleMessages.map(\.objectID) == initialIDs &&
+                state.rowForGrouping(atAbsoluteIndex: 4)?.senderEmail == "boundary@example.com"
+        }
+    }
+
     func testRapidOverlappingWindowLoads_keepPublishedMessagesOnViewContext() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 24)
         let configuration = VirtualScrollConfiguration(
@@ -542,6 +611,49 @@ final class VirtualScrollStateTests: XCTestCase {
         }
     }
 
+    func testInsertedPendingMessageRefreshesEmptyLatestWindow() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .recentlyActive()
+            .build(in: viewContext)
+        try viewContext.save()
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil {
+            state.isInitialLoadComplete &&
+                state.visibleMessages.isEmpty &&
+                state.totalMessageCount == 0 &&
+                !state.isLoadingMore
+        }
+
+        let pendingMessage = try makePendingMessage(
+            id: "virtual-scroll-empty-inserted-pending",
+            date: Date(timeIntervalSince1970: 1),
+            conversation: conversation
+        )
+
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == [pendingMessage.objectID] &&
+                state.totalMessageCount == 1 &&
+                !state.isLoadingMore
+        }
+    }
+
     func testInsertedExcludedPendingMessageDoesNotChangeLatestWindow() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 3)
         let excludedLabels = makeExcludedLabels()
@@ -582,6 +694,44 @@ final class VirtualScrollStateTests: XCTestCase {
 
         XCTAssertEqual(state.visibleMessages.map(\.objectID), initialIDs)
         XCTAssertEqual(state.totalMessageCount, 3)
+    }
+
+    func testInsertedPendingMessageUpdatesCountWhenWindowIsNotLatest() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 8)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        let initialIDs = Array(messages.prefix(4)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs &&
+                state.totalMessageCount == 8 &&
+                !state.isLoadingMore
+        }
+
+        _ = try makePendingMessage(
+            id: "virtual-scroll-inserted-pending-away-from-latest",
+            date: Date(timeIntervalSince1970: 8),
+            conversation: conversation
+        )
+
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs &&
+                state.totalMessageCount == 9 &&
+                !state.isLoadingMore
+        }
     }
 
     func testLoadLatestWindowIfNeeded_refreshesWhenKnownTotalCountIsAhead() async throws {

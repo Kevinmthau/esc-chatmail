@@ -4,48 +4,40 @@ import UIKit
 import Contacts
 import Combine
 
-/// Extracted from ChatView to keep SwiftUI type-checking manageable.
 struct ChatMessagesView: View {
     let conversation: Conversation
-    let messages: FetchedResults<Message>
-
     @ObservedObject var viewModel: ChatViewModel
     let chatDependencies: ChatDependencies
     var isTextFieldFocused: FocusState<Bool>.Binding
     let onOpenFullMessage: (NSManagedObjectID, EmailReaderOpenSource) -> Void
+
     @StateObject private var scrollState: VirtualScrollState
     @StateObject private var coordinator: ChatMessagesCoordinator
     @State private var replyBarHeight: CGFloat = 0
-
     @ObservedObject private var keyboard = KeyboardResponder.shared
-
     @Namespace private var bottomID
 
     @MainActor
     init(
         conversation: Conversation,
-        messages: FetchedResults<Message>,
         viewModel: ChatViewModel,
         chatDependencies: ChatDependencies,
         isTextFieldFocused: FocusState<Bool>.Binding,
         onOpenFullMessage: @escaping (NSManagedObjectID, EmailReaderOpenSource) -> Void
     ) {
         self.conversation = conversation
-        self.messages = messages
         self.viewModel = viewModel
         self.chatDependencies = chatDependencies
         self.isTextFieldFocused = isTextFieldFocused
         self.onOpenFullMessage = onOpenFullMessage
-        let viewContext = chatDependencies.storage.viewContext
+
         let scrollState = VirtualScrollState(
             conversationId: conversation.id.uuidString,
             initialWindowPosition: .end,
-            viewContext: viewContext,
+            viewContext: chatDependencies.storage.viewContext,
             makeBackgroundContext: chatDependencies.storage.makeBackgroundContext
         )
-        _scrollState = StateObject(
-            wrappedValue: scrollState
-        )
+        _scrollState = StateObject(wrappedValue: scrollState)
         _coordinator = StateObject(
             wrappedValue: ChatMessagesCoordinator(
                 scrollState: scrollState,
@@ -60,67 +52,17 @@ struct ChatMessagesView: View {
             let displayedMessages = scrollState.visibleMessages
             let keyboardOffset = keyboardAvoidanceOffset()
             let bottomContentInset = max(1, replyBarHeight + keyboardOffset)
-            let isWaitingForInitialWindow = messages.count > 0 && !scrollState.isInitialLoadComplete
+            let isWaitingForInitialWindow = !scrollState.isInitialLoadComplete
             let isHidingInitialContent = !coordinator.isReadyToShow && !displayedMessages.isEmpty
-            let showsInitialPlaceholder = isWaitingForInitialWindow || isHidingInitialContent
 
             ZStack(alignment: .bottom) {
                 ZStack {
                     if !isWaitingForInitialWindow {
-                        ScrollView {
-                            LazyVStack(spacing: 8) {
-                                ForEach(Array(displayedMessages.enumerated()), id: \.element.objectID) { index, message in
-                                    let absoluteIndex = scrollState.absoluteIndex(forVisibleIndex: index) ?? index
-                                    let nextMessage = messageRow(atAbsoluteIndex: absoluteIndex + 1)
-                                    let isLastFromSender = ChatMessageRowGrouping.isLastFromSender(
-                                        current: message,
-                                        next: nextMessage,
-                                        senderRunKey: senderRunKey(for:)
-                                    )
-
-                                    MessageBubble(
-                                        message: message,
-                                        messageBubbleLoader: chatDependencies.content.makeMessageBubbleLoader(),
-                                        htmlContentHandler: chatDependencies.content.htmlContentHandler,
-                                        fullEmailOpener: chatDependencies.fullEmailOpener,
-                                        originalEmailSourceWarmer: chatDependencies.content.originalEmailSourceWarmer,
-                                        isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
-                                        contactRefreshToken: coordinator.contactRefreshToken,
-                                        isLastFromSender: isLastFromSender,
-                                        onOpenFullMessage: onOpenFullMessage
-                                    )
-                                    .id(message.objectID)
-                                    .contentShape(Rectangle())
-                                    .contextMenu {
-                                        messageContextMenu(for: message)
-                                    } preview: {
-                                        // Lightweight preview - just show the text content without triggering loads
-                                        MessageContextMenuPreview(message: message)
-                                    }
-                                    .onAppear {
-                                        scrollState.markIndexVisible(absoluteIndex)
-                                    }
-                                }
-
-                                Color.clear
-                                    .frame(height: bottomContentInset)
-                                    .id(bottomID)
-                            }
-                            .padding(.horizontal)
-                            .padding(.top, 8)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                isTextFieldFocused.wrappedValue = false
-                            }
-                        }
-                        // Keep short conversations top-aligned; explicit scrollTo calls still
-                        // move longer threads to the newest message when needed.
-                        .defaultScrollAnchor(.top)
-                        .scrollDismissesKeyboard(.interactively)
-                        .opacity(isHidingInitialContent ? 0 : 1)
+                        messagesScrollView(displayedMessages: displayedMessages, bottomContentInset: bottomContentInset)
+                            .opacity(isHidingInitialContent ? 0 : 1)
                     }
 
-                    if showsInitialPlaceholder {
+                    if isWaitingForInitialWindow || isHidingInitialContent {
                         initialLoadPlaceholder(bottomInset: bottomContentInset)
                     }
                 }
@@ -129,110 +71,153 @@ struct ChatMessagesView: View {
                     .padding(.bottom, keyboardOffset)
             }
             .ignoresSafeArea(.keyboard, edges: .bottom)
-            .onAppear {
-                if let first = messages.first, let last = messages.last {
-                    Log.diagnostic(
-                        .chatView,
-                        level: .info,
-                        "ChatView appear conv=\(conversation.id.uuidString) messages=\(messages.count) first=\(first.id) \(first.internalDate) last=\(last.id) \(last.internalDate)",
-                        category: .ui
-                    )
-                } else {
-                    Log.diagnostic(
-                        .chatView,
-                        level: .info,
-                        "ChatView appear conv=\(conversation.id.uuidString) messages=\(messages.count) (empty)",
-                        category: .ui
-                    )
-                }
-                coordinator.handleAppear(
-                    messageCount: messages.count,
-                    lastMessage: messages.last,
-                    visibleMessages: scrollState.visibleMessages,
-                    senderGroupingMessages: senderGroupingMessages(for: scrollState.visibleMessages),
-                    totalMessageCount: scrollState.totalMessageCount,
-                    isInitialWindowLoaded: scrollState.isInitialLoadComplete || messages.count == 0
-                ) { step in
-                    performBottomAnchor(step, proxy: proxy)
-                }
-            }
-            .onDisappear {
-                coordinator.handleDisappear()
-            }
+            .onAppear { handleAppear(proxy: proxy, displayedMessages: displayedMessages) }
+            .onDisappear { coordinator.handleDisappear() }
             .onChange(of: senderGroupingMessages(for: displayedMessages).map(\.objectID)) { oldIDs, newIDs in
-                coordinator.handleDisplayedMessagesChange(
-                    oldIDs: oldIDs,
-                    newIDs: newIDs,
-                    visibleMessages: displayedMessages,
-                    senderGroupingMessages: senderGroupingMessages(for: displayedMessages),
-                    messageCount: messages.count,
-                    totalMessageCount: scrollState.totalMessageCount,
-                    isInitialWindowLoaded: scrollState.isInitialLoadComplete
-                ) { step in
-                    performBottomAnchor(step, proxy: proxy)
-                }
+                handleDisplayedMessagesChange(oldIDs: oldIDs, newIDs: newIDs, displayedMessages: displayedMessages, proxy: proxy)
             }
             .onChange(of: scrollState.isInitialLoadComplete) { _, isComplete in
-                guard isComplete else { return }
-
-                let visibleMessages = scrollState.visibleMessages
-                coordinator.handleInitialWindowLoaded(
-                    messageCount: messages.count,
-                    visibleMessages: visibleMessages,
-                    senderGroupingMessages: senderGroupingMessages(for: visibleMessages),
-                    totalMessageCount: scrollState.totalMessageCount
-                ) { step in
-                    performBottomAnchor(step, proxy: proxy)
-                }
+                handleInitialWindowLoaded(isComplete: isComplete, proxy: proxy)
             }
-            .onChange(of: messages.count) { oldCount, newCount in
+            .onChange(of: scrollState.totalMessageCount) { oldCount, newCount in
                 coordinator.handleMessageCountChange(
                     oldCount: oldCount,
                     newCount: newCount,
-                    lastMessage: messages.last,
+                    lastMessage: latestMessageForCoordinator(),
                     visibleMessages: scrollState.visibleMessages,
-                    totalMessageCount: scrollState.totalMessageCount,
+                    totalMessageCount: newCount,
                     stabilizeBottomAnchor: keyboard.currentHeight > 0 || isTextFieldFocused.wrappedValue,
-                    isInitialWindowLoaded: scrollState.isInitialLoadComplete
-                ) { step in
-                    performBottomAnchor(step, proxy: proxy)
-                }
+                    isInitialWindowLoaded: scrollState.isInitialLoadComplete,
+                    isShowingLatestWindow: scrollState.isShowingLatestWindow
+                ) { performBottomAnchor($0, proxy: proxy) }
             }
             .onChange(of: keyboard.currentHeight) { oldHeight, newHeight in
                 coordinator.handleKeyboardHeightChange(
                     oldHeight: oldHeight,
                     newHeight: newHeight,
-                    messageCount: messages.count,
+                    messageCount: totalMessageCountForCoordinator(),
                     isInitialWindowLoaded: scrollState.isInitialLoadComplete
-                ) { step in
-                    performBottomAnchor(step, proxy: proxy)
-                }
+                ) { performBottomAnchor($0, proxy: proxy) }
             }
             .onChange(of: isTextFieldFocused.wrappedValue) { _, isFocused in
                 coordinator.handleTextFieldFocusChange(
                     isFocused: isFocused,
-                    messageCount: messages.count,
+                    messageCount: totalMessageCountForCoordinator(),
                     isInitialWindowLoaded: scrollState.isInitialLoadComplete
-                ) { step in
-                    performBottomAnchor(step, proxy: proxy)
-                }
+                ) { performBottomAnchor($0, proxy: proxy) }
             }
             .onReceive(NotificationCenter.default.publisher(for: .CNContactStoreDidChange)) { _ in
-                coordinator.handleContactStoreDidChange(
-                    senderGroupingMessages: senderGroupingMessages(for: scrollState.visibleMessages)
-                )
+                coordinator.handleContactStoreDidChange(senderGroupingMessages: senderGroupingMessages(for: scrollState.visibleMessages))
             }
             .onReceive(NotificationCenter.default.publisher(for: .personDisplayInfoDidChange).receive(on: DispatchQueue.main)) { notification in
                 let groupingMessages = senderGroupingMessages(for: scrollState.visibleMessages)
-                guard shouldRefreshForPersonDisplayInfoChange(notification, messages: groupingMessages) else {
-                    return
-                }
-
-                coordinator.handlePersonDisplayInfoDidChange(
-                    senderGroupingMessages: groupingMessages
-                )
+                guard shouldRefreshForPersonDisplayInfoChange(notification, messages: groupingMessages) else { return }
+                coordinator.handlePersonDisplayInfoDidChange(senderGroupingMessages: groupingMessages)
             }
         }
+    }
+
+    private func messagesScrollView(displayedMessages: [ChatMessageRowModel], bottomContentInset: CGFloat) -> some View {
+        ScrollView {
+            LazyVStack(spacing: 8) {
+                ForEach(Array(displayedMessages.enumerated()), id: \.element.objectID) { index, message in
+                    let absoluteIndex = scrollState.absoluteIndex(forVisibleIndex: index) ?? index
+                    let nextMessage = messageRow(atAbsoluteIndex: absoluteIndex + 1)
+                    let isLastFromSender = ChatMessageRowGrouping.isLastFromSender(
+                        current: message,
+                        next: nextMessage,
+                        senderRunKey: senderRunKey(for:)
+                    )
+
+                    MessageBubble(
+                        message: message,
+                        messageBubbleLoader: chatDependencies.content.makeMessageBubbleLoader(),
+                        htmlContentHandler: chatDependencies.content.htmlContentHandler,
+                        fullEmailOpener: chatDependencies.fullEmailOpener,
+                        originalEmailSourceWarmer: chatDependencies.content.originalEmailSourceWarmer,
+                        isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
+                        contactRefreshToken: coordinator.contactRefreshToken,
+                        isLastFromSender: isLastFromSender,
+                        onOpenFullMessage: onOpenFullMessage
+                    )
+                    .id(message.objectID)
+                    .contentShape(Rectangle())
+                    .contextMenu { messageContextMenu(for: message) } preview: {
+                        MessageContextMenuPreview(message: message)
+                    }
+                    .onAppear { scrollState.markIndexVisible(absoluteIndex) }
+                }
+
+                Color.clear.frame(height: bottomContentInset).id(bottomID)
+            }
+            .padding(.horizontal)
+            .padding(.top, 8)
+            .contentShape(Rectangle())
+            .onTapGesture { isTextFieldFocused.wrappedValue = false }
+        }
+        .defaultScrollAnchor(.top)
+        .scrollDismissesKeyboard(.interactively)
+    }
+
+    private func handleAppear(proxy: ScrollViewProxy, displayedMessages: [ChatMessageRowModel]) {
+        let messageCount = totalMessageCountForCoordinator()
+        if let first = displayedMessages.first, let last = displayedMessages.last {
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView appear conv=\(conversation.id.uuidString) messages=\(messageCount) visible=\(displayedMessages.count) first=\(first.id) \(first.internalDate) last=\(last.id) \(last.internalDate)",
+                category: .ui
+            )
+        } else {
+            Log.diagnostic(
+                .chatView,
+                level: .info,
+                "ChatView appear conv=\(conversation.id.uuidString) messages=\(messageCount) visible=0 initialLoaded=\(scrollState.isInitialLoadComplete)",
+                category: .ui
+            )
+        }
+
+        coordinator.handleAppear(
+            messageCount: messageCount,
+            lastMessage: latestMessageForCoordinator(),
+            visibleMessages: scrollState.visibleMessages,
+            senderGroupingMessages: senderGroupingMessages(for: scrollState.visibleMessages),
+            totalMessageCount: scrollState.totalMessageCount,
+            isInitialWindowLoaded: scrollState.isInitialLoadComplete
+        ) { performBottomAnchor($0, proxy: proxy) }
+    }
+
+    private func handleDisplayedMessagesChange(
+        oldIDs: [NSManagedObjectID],
+        newIDs: [NSManagedObjectID],
+        displayedMessages: [ChatMessageRowModel],
+        proxy: ScrollViewProxy
+    ) {
+        coordinator.handleDisplayedMessagesChange(
+            oldIDs: oldIDs,
+            newIDs: newIDs,
+            visibleMessages: displayedMessages,
+            senderGroupingMessages: senderGroupingMessages(for: displayedMessages),
+            messageCount: totalMessageCountForCoordinator(),
+            totalMessageCount: scrollState.totalMessageCount,
+            isInitialWindowLoaded: scrollState.isInitialLoadComplete
+        ) { performBottomAnchor($0, proxy: proxy) }
+
+        if oldIDs.last != newIDs.last, scrollState.isShowingLatestWindow {
+            updateReplyTargetIfNewLatestMessageIsVisible()
+        }
+    }
+
+    private func handleInitialWindowLoaded(isComplete: Bool, proxy: ScrollViewProxy) {
+        guard isComplete else { return }
+        let visibleMessages = scrollState.visibleMessages
+        viewModel.initializeReplyingTo(lastMessage: latestMessageForCoordinator())
+        coordinator.handleInitialWindowLoaded(
+            messageCount: totalMessageCountForCoordinator(),
+            visibleMessages: visibleMessages,
+            senderGroupingMessages: senderGroupingMessages(for: visibleMessages),
+            totalMessageCount: scrollState.totalMessageCount
+        ) { performBottomAnchor($0, proxy: proxy) }
     }
 
     private func replyBarOverlay(proxy: ScrollViewProxy) -> some View {
@@ -246,12 +231,10 @@ struct ChatMessagesView: View {
                     let didSend = await viewModel.sendReply(with: attachments)
                     if didSend {
                         coordinator.handleReplySendCompleted(
-                            messageCount: messages.count,
+                            messageCount: totalMessageCountForCoordinator(),
                             totalMessageCount: scrollState.totalMessageCount,
                             isInitialWindowLoaded: scrollState.isInitialLoadComplete
-                        ) { step in
-                            performBottomAnchor(step, proxy: proxy)
-                        }
+                        ) { performBottomAnchor($0, proxy: proxy) }
                     }
                     return didSend
                 },
@@ -262,12 +245,8 @@ struct ChatMessagesView: View {
         .background(
             GeometryReader { geometry in
                 Color.clear
-                    .onAppear {
-                        replyBarHeight = geometry.size.height
-                    }
-                    .onChange(of: geometry.size.height) { _, newHeight in
-                        replyBarHeight = newHeight
-                    }
+                    .onAppear { replyBarHeight = geometry.size.height }
+                    .onChange(of: geometry.size.height) { _, newHeight in replyBarHeight = newHeight }
             }
         )
     }
@@ -280,122 +259,105 @@ struct ChatMessagesView: View {
     }
 
     private func keyboardAvoidanceOffset() -> CGFloat {
-        guard keyboard.isKeyboardVisible else {
-            return 0
-        }
-
+        guard keyboard.isKeyboardVisible else { return 0 }
         return max(0, keyboard.currentHeight - currentBottomSafeAreaInset)
     }
 
     private var currentBottomSafeAreaInset: CGFloat {
-        let windowScenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        let activeScene = windowScenes.first { $0.activationState == .foregroundActive } ?? windowScenes.first
-        let activeWindow = activeScene?.windows.first { $0.isKeyWindow } ?? activeScene?.windows.first
-        return activeWindow?.safeAreaInsets.bottom ?? 0
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let activeScene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+        let window = activeScene?.windows.first { $0.isKeyWindow } ?? activeScene?.windows.first
+        return window?.safeAreaInsets.bottom ?? 0
+    }
+
+    private func totalMessageCountForCoordinator() -> Int {
+        let loadedCount = max(scrollState.totalMessageCount, scrollState.visibleMessages.count)
+        return scrollState.isInitialLoadComplete ? loadedCount : max(loadedCount, 1)
+    }
+
+    private func latestMessageForCoordinator() -> Message? {
+        if let latestVisibleMessage = resolvedMessage(for: scrollState.visibleMessages.last) {
+            return latestVisibleMessage
+        }
+
+        return viewModel.latestVisibleMessage()
+    }
+
+    private func updateReplyTargetIfNewLatestMessageIsVisible() {
+        guard let latestMessage = latestMessageForCoordinator() else { return }
+        viewModel.updateReplyingToIfNewSubject(lastMessage: latestMessage)
+    }
+
+    private func resolvedMessage(for row: ChatMessageRowModel?) -> Message? {
+        guard let row else { return nil }
+        let context = chatDependencies.storage.viewContext
+        if let registered = context.registeredObject(for: row.messageObjectID) as? Message, !registered.isDeleted {
+            return registered
+        }
+        guard let resolved = try? context.existingObject(with: row.messageObjectID) as? Message, !resolved.isDeleted else {
+            return nil
+        }
+        return resolved
     }
 
     @ViewBuilder
     private func messageContextMenu(for message: ChatMessageRowModel) -> some View {
-        Button(action: {
-            viewModel.setReplyingTo(messageObjectID: message.messageObjectID)
-        }) {
+        Button(action: { viewModel.setReplyingTo(messageObjectID: message.messageObjectID) }) {
             SwiftUI.Label("Reply", systemImage: "arrow.turn.up.left")
         }
-
-        Button(action: {
-            viewModel.setMessageToForward(messageObjectID: message.messageObjectID)
-        }) {
+        Button(action: { viewModel.setMessageToForward(messageObjectID: message.messageObjectID) }) {
             SwiftUI.Label("Forward", systemImage: "arrow.turn.up.right")
         }
-
         if message.hasOriginalEmailContent {
-            Button(action: {
-                onOpenFullMessage(message.messageObjectID, .contextMenu)
-            }) {
+            Button(action: { onOpenFullMessage(message.messageObjectID, .contextMenu) }) {
                 SwiftUI.Label("View original email", systemImage: "doc.richtext")
             }
         }
     }
 
     private func senderRunKey(for message: ChatMessageRowModel?) -> String? {
-        coordinator.senderRunKey(
-            for: message,
-            isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation
-        )
+        coordinator.senderRunKey(for: message, isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation)
     }
 
-    private func senderGroupingMessages(
-        for displayedMessages: [ChatMessageRowModel]
-    ) -> [ChatMessageRowModel] {
-        guard !displayedMessages.isEmpty else {
-            return displayedMessages
-        }
-
+    private func senderGroupingMessages(for displayedMessages: [ChatMessageRowModel]) -> [ChatMessageRowModel] {
+        guard !displayedMessages.isEmpty else { return displayedMessages }
         guard let boundaryMessage = messageRow(atAbsoluteIndex: visibleRangeEndIndex(for: displayedMessages) + 1) else {
             return displayedMessages
         }
-
-        guard displayedMessages.last?.objectID != boundaryMessage.objectID else {
-            return displayedMessages
-        }
-
+        guard displayedMessages.last?.objectID != boundaryMessage.objectID else { return displayedMessages }
         return displayedMessages + [boundaryMessage]
     }
 
-    private func visibleRangeEndIndex(
-        for displayedMessages: [ChatMessageRowModel]
-    ) -> Int {
-        guard !displayedMessages.isEmpty else {
-            return -1
-        }
-
+    private func visibleRangeEndIndex(for displayedMessages: [ChatMessageRowModel]) -> Int {
+        guard !displayedMessages.isEmpty else { return -1 }
         return scrollState.visibleRangeStartIndex + displayedMessages.count - 1
     }
 
     private func messageRow(atAbsoluteIndex index: Int) -> ChatMessageRowModel? {
-        guard index >= 0, index < messages.count else {
-            return nil
-        }
-
-        return scrollState.row(atAbsoluteIndex: index) ?? ChatMessageRowModelMapper.map(messages[index])
+        guard index >= 0 else { return nil }
+        return scrollState.rowForGrouping(atAbsoluteIndex: index)
     }
 
-    private func shouldRefreshForPersonDisplayInfoChange(
-        _ notification: Notification,
-        messages: [ChatMessageRowModel]
-    ) -> Bool {
+    private func shouldRefreshForPersonDisplayInfoChange(_ notification: Notification, messages: [ChatMessageRowModel]) -> Bool {
         let changedEmails = PersonDisplayInfoChangeNotification.emails(from: notification)
         guard !changedEmails.isEmpty else { return true }
-
-        if !conversationParticipantEmails().isDisjoint(with: changedEmails) {
-            return true
-        }
-
+        if !conversationParticipantEmails().isDisjoint(with: changedEmails) { return true }
         return messages.contains { message in
-            [
-                message.senderInfoEmail,
-                message.effectiveSenderEmail,
-                message.senderEmail
-            ]
-            .compactMap { $0 }
-            .map(EmailNormalizer.normalize)
-            .contains { changedEmails.contains($0) }
+            [message.senderInfoEmail, message.effectiveSenderEmail, message.senderEmail]
+                .compactMap { $0 }
+                .map(EmailNormalizer.normalize)
+                .contains { changedEmails.contains($0) }
         }
     }
 
     private func conversationParticipantEmails() -> Set<String> {
-        Set(
-            (conversation.participants ?? [])
-                .compactMap { $0.person?.email }
-                .map(EmailNormalizer.normalize)
-                .filter { !$0.isEmpty }
-        )
+        Set((conversation.participants ?? [])
+            .compactMap { $0.person?.email }
+            .map(EmailNormalizer.normalize)
+            .filter { !$0.isEmpty })
     }
 
-    private func performBottomAnchor(
-        _ step: ChatMessagesCoordinator.BottomAnchorStep,
-        proxy: ScrollViewProxy
-    ) {
+    private func performBottomAnchor(_ step: ChatMessagesCoordinator.BottomAnchorStep, proxy: ScrollViewProxy) {
         if step.animated {
             withAnimation(.easeOut(duration: UIConfig.scrollAnimationDuration)) {
                 Log.diagnostic(.chatView, level: .info, step.logMessage, category: .ui)

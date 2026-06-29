@@ -199,6 +199,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         totalMessageCount: Int,
         stabilizeBottomAnchor: Bool,
         isInitialWindowLoaded: Bool,
+        isShowingLatestWindow: Bool,
         scrollAction: @escaping BottomAnchorAction
     ) {
         if oldCount == 0 && newCount > 0 {
@@ -262,7 +263,7 @@ final class ChatMessagesCoordinator: ObservableObject {
                 "ChatView handling count-change before initial reveal completes messages=\(newCount)",
                 category: .ui
             )
-        } else if isReadyToShow && newCount > oldCount {
+        } else if isReadyToShow && newCount > oldCount && isShowingLatestWindow {
             updateReplyingToIfNewSubject(lastMessage)
             scrollToBottom(
                 messageCount: newCount,
