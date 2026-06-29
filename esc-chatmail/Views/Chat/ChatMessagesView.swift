@@ -87,7 +87,8 @@ struct ChatMessagesView: View {
                     visibleMessages: scrollState.visibleMessages,
                     totalMessageCount: newCount,
                     stabilizeBottomAnchor: keyboard.currentHeight > 0 || isTextFieldFocused.wrappedValue,
-                    isInitialWindowLoaded: scrollState.isInitialLoadComplete
+                    isInitialWindowLoaded: scrollState.isInitialLoadComplete,
+                    isShowingLatestWindow: scrollState.isShowingLatestWindow
                 ) { performBottomAnchor($0, proxy: proxy) }
             }
             .onChange(of: keyboard.currentHeight) { oldHeight, newHeight in
@@ -334,7 +335,7 @@ struct ChatMessagesView: View {
 
     private func messageRow(atAbsoluteIndex index: Int) -> ChatMessageRowModel? {
         guard index >= 0 else { return nil }
-        return scrollState.row(atAbsoluteIndex: index)
+        return scrollState.rowForGrouping(atAbsoluteIndex: index)
     }
 
     private func shouldRefreshForPersonDisplayInfoChange(_ notification: Notification, messages: [ChatMessageRowModel]) -> Bool {
