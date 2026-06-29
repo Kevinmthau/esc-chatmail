@@ -476,8 +476,7 @@ final class VirtualScrollState: ObservableObject {
     }
 
     private func handleViewContextChange(_ notification: Notification) {
-        guard let window = messageWindow,
-              !window.messageIDs.isEmpty else { return }
+        guard let window = messageWindow else { return }
 
         if shouldRefreshLatestWindowForLocalMessageMutation(
             in: notification,
@@ -495,6 +494,8 @@ final class VirtualScrollState: ObservableObject {
                 await self.refreshLatestWindowForLocalMutation(knownTotalCount: knownTotalCount)
             }
         }
+
+        guard !window.messageIDs.isEmpty else { return }
 
         let affectedMessageIDs = refreshedVisibleMessageIDs(
             in: notification,

@@ -542,6 +542,49 @@ final class VirtualScrollStateTests: XCTestCase {
         }
     }
 
+    func testInsertedPendingMessageRefreshesEmptyLatestWindow() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .recentlyActive()
+            .build(in: viewContext)
+        try viewContext.save()
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1
+        )
+        let stack = self.stack!
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil {
+            state.isInitialLoadComplete &&
+                state.visibleMessages.isEmpty &&
+                state.totalMessageCount == 0 &&
+                !state.isLoadingMore
+        }
+
+        let pendingMessage = try makePendingMessage(
+            id: "virtual-scroll-empty-inserted-pending",
+            date: Date(timeIntervalSince1970: 1),
+            conversation: conversation
+        )
+
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == [pendingMessage.objectID] &&
+                state.totalMessageCount == 1 &&
+                !state.isLoadingMore
+        }
+    }
+
     func testInsertedExcludedPendingMessageDoesNotChangeLatestWindow() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 3)
         let excludedLabels = makeExcludedLabels()

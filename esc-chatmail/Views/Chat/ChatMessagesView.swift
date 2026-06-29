@@ -275,7 +275,11 @@ struct ChatMessagesView: View {
     }
 
     private func latestMessageForCoordinator() -> Message? {
-        resolvedMessage(for: scrollState.visibleMessages.last)
+        if let latestVisibleMessage = resolvedMessage(for: scrollState.visibleMessages.last) {
+            return latestVisibleMessage
+        }
+
+        return viewModel.latestVisibleMessage()
     }
 
     private func updateReplyTargetIfNewLatestMessageIsVisible() {
