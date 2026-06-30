@@ -507,4 +507,79 @@ final class MessageBubbleSignatureImageTests: XCTestCase {
         XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image007.png@01dc96af.8c2488c0"))
         XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image007.png@01dc96af.8c2488c0"))
     }
+
+    func testHTMLAnalysisSuppressesLogoOnlySignatureAfterStandaloneThanks() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks,<br>Sam</p>
+          <p><img src="cid:image013.png@01DC96AF.8C2488C0" alt="Company logo"></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image013.png@01DC96AF.8C2488C0",
+                    filename: "image013.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image013.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image013.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisKeepsGeneratedLogoMockupAfterCasualThanksPhrase() {
+        let html = """
+        <html>
+        <body>
+          <p>Thanks, here is the logo mockup for review.</p>
+          <p><img src="cid:image012.png@01DC96AF.8C2488C0" alt="Logo mockup"></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Thanks, here is the logo mockup for review.",
+            subject: "Logo mockup",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image012.png@01DC96AF.8C2488C0",
+                    filename: "image012.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image012.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image012.png@01dc96af.8c2488c0"))
+    }
 }

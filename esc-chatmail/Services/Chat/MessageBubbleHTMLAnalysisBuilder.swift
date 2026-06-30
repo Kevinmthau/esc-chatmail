@@ -254,8 +254,19 @@ enum MessageBubbleHTMLAnalysisBuilder {
             (
                 signatureContactMarkers.contains { lowercasedHTML.contains($0) } ||
                 signatureRoleMarkers.contains { lowercasedHTML.contains($0) } ||
-                signatureBrandingMarkers.contains { lowercasedHTML.contains($0) }
+                hasStandaloneSignOffBrandingSignals(in: lowercasedHTML)
             )
+    }
+
+    private static func hasStandaloneSignOffBrandingSignals(in lowercasedHTML: String) -> Bool {
+        guard signatureBrandingMarkers.contains(where: { lowercasedHTML.contains($0) }) else {
+            return false
+        }
+
+        return lowercasedHTML.range(
+            of: standaloneSignOffBeforeBrandingPattern,
+            options: .regularExpression
+        ) != nil
     }
 
     private static func isLikelySignatureInlineAttachment(
@@ -438,6 +449,9 @@ enum MessageBubbleHTMLAnalysisBuilder {
         "cadence",
         "unleash imagination"
     ]
+
+    private static let standaloneSignOffBeforeBrandingPattern =
+        #"(?:^|[\r\n]|<[^>]+>)\s*(?:warmly|best regards|kind regards|regards|sincerely|thanks|thank you|cheers)[,.!]?\s*(?:<br\s*/?>|</(?:div|p|td|th|li)>|[\r\n]|$)[\s\S]{0,1200}(?:logo|badge|banner|fortune|best companies|cadence|unleash imagination)"#
 
     private static let signatureImageIdentityMarkers = [
         "logo",
