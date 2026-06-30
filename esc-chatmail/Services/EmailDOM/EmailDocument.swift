@@ -136,10 +136,59 @@ final class EmailDocument {
     /// raw inline HTML, normalized to lowercase identifiers without the `cid:`
     /// prefix.
     func referencedInlineContentIDs() -> Set<String> {
+        referencedInlineContentIDs(in: document)
+    }
+
+    /// Returns the subset of referenced `cid:` identifiers whose referencing
+    /// element is contained within an element matching one of
+    /// `containerSelectors`. Private building block for
+    /// ``inlineContentIDsReferencedOnlyInside(subtreesMatching:)`` — callers
+    /// want the exclusivity-guarded form, which never hides an image the live
+    /// body also references.
+    private func referencedInlineContentIDs(inSubtreesMatching containerSelectors: [String]) -> Set<String> {
+        var result = Set<String>()
+        for selector in containerSelectors {
+            let containers = (try? document.select(selector)) ?? Elements()
+            for container in containers.array() {
+                result.formUnion(referencedInlineContentIDs(in: container))
+            }
+        }
+        return result
+    }
+
+    /// Returns the referenced `cid:` identifiers that appear *only* inside
+    /// subtrees matching `containerSelectors` and nowhere in the displayable
+    /// remainder of the document. A CID also referenced outside those subtrees
+    /// (e.g. an image shown in the live body that the quoted history happens to
+    /// re-reference) is excluded, so this never hides a displayable image.
+    ///
+    /// - Important: this is destructive — it removes the matched subtrees to
+    ///   measure the remainder. Call it on a freshly parsed document that is
+    ///   not shared with other readers.
+    func inlineContentIDsReferencedOnlyInside(subtreesMatching containerSelectors: [String]) -> Set<String> {
+        let inside = referencedInlineContentIDs(inSubtreesMatching: containerSelectors)
+        guard !inside.isEmpty else { return [] }
+
+        for selector in containerSelectors {
+            let containers = (try? document.select(selector)) ?? Elements()
+            for container in containers.array() {
+                try? container.remove()
+            }
+        }
+
+        let referencedOutsideContainers = referencedInlineContentIDs()
+        return inside.subtracting(referencedOutsideContainers)
+    }
+
+    /// Collects normalized `cid:` references in `root`'s subtree (image/link
+    /// attributes and raw inline `url(cid:…)` styles). When `root` is the whole
+    /// document this reproduces the historical document-wide behavior; scoped to
+    /// a container element it yields only the references inside that subtree.
+    private func referencedInlineContentIDs(in root: Element) -> Set<String> {
         var result = Set<String>()
         let attributes = ["src", "background", "href", "xlink:href"]
         for attribute in attributes {
-            let elements = (try? document.select("[\(attribute)]")) ?? Elements()
+            let elements = (try? root.select("[\(attribute)]")) ?? Elements()
             for element in elements.array() {
                 let value = (try? element.attr(attribute)) ?? ""
                 guard !value.isEmpty,
@@ -149,16 +198,16 @@ final class EmailDocument {
                 result.insert(cid)
             }
         }
-        let srcsetElements = (try? document.select("[srcset]")) ?? Elements()
+        let srcsetElements = (try? root.select("[srcset]")) ?? Elements()
         for element in srcsetElements.array() {
             let value = (try? element.attr("srcset")) ?? ""
             result.formUnion(Self.cidIdentifiers(inSrcset: value))
         }
 
         // Also search inline style="...url(cid:...)" patterns. Doing this once
-        // against the rendered HTML is OK; the call is bounded by document
-        // size and avoids walking every node's style attribute.
-        result.formUnion(Self.referencedContentIDs(in: outerHTML(), terminators: CIDScanTerminators.css))
+        // against the rendered subtree HTML is OK; the call is bounded by the
+        // subtree size and avoids walking every node's style attribute.
+        result.formUnion(Self.referencedContentIDs(in: (try? root.outerHtml()) ?? "", terminators: CIDScanTerminators.css))
         return result
     }
 

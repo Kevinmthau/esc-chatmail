@@ -104,12 +104,39 @@ enum MessageBubbleHTMLAnalysisBuilder {
         let cleaned = cleanedHTMLForAttachmentFiltering(from: html)
         let cleanedReferenced = extractReferencedContentIDs(from: cleaned)
         let removedByHTMLCleanup = originalReferenced.subtracting(cleanedReferenced)
+
+        // Structural containment: an inline image referenced only from inside a
+        // quoted-history or signature container is a quoted/signature asset
+        // regardless of its dimensions or filename — the reliable altitude for
+        // the decision. The dimension/keyword heuristics below remain only as a
+        // fallback for container-less "loose sibling" signatures (a bare sign-off
+        // line followed by an image) that have no subtree to anchor to. Unlike
+        // `removedByHTMLCleanup`, containment does not depend on whether stripping
+        // the quote/signature leaves meaningful content, so it still fires on a
+        // message that is entirely a quoted reply. The "only inside" form keeps
+        // an image that the live body also references (which the quoted history
+        // re-references) displayable.
+        let insideQuotedOrSignatureContainer = inlineContentIDsReferencedOnlyInsideContainers(
+            from: html
+        )
+
         let likelySignatureInline = extractLikelySignatureInlineContentIDs(
             from: html,
             attachments: attachments
         )
 
-        return removedByHTMLCleanup.union(likelySignatureInline)
+        return removedByHTMLCleanup
+            .union(insideQuotedOrSignatureContainer)
+            .union(likelySignatureInline)
+    }
+
+    private static func inlineContentIDsReferencedOnlyInsideContainers(
+        from html: String
+    ) -> Set<String> {
+        guard let document = EmailDocument.tryParse(html) else { return [] }
+        return document.inlineContentIDsReferencedOnlyInside(
+            subtreesMatching: quotedOrSignatureContainerSelectors
+        )
     }
 
     private static func cleanedHTMLForAttachmentFiltering(from html: String) -> String {
@@ -919,6 +946,37 @@ enum MessageBubbleHTMLAnalysisBuilder {
             )
         )
     }
+
+    // DOM subtrees whose inline images are quoted/signature assets by
+    // containment alone. Limited to mail-client-generated, unambiguous
+    // containers that actually *wrap the asset*, so the structural check never
+    // depends on dimensions or filenames. Mirrors the high-confidence subset of
+    // EmailDOMQuoteRemover's signature/quote selectors. Deliberately excludes:
+    //   - the ambiguous author-authored `class="signature"` family (see
+    //     authoredSignatureWrapperMarkers) and the substring footer selectors
+    //     (`div[class*=sig]`), which would over-match a "Signature Collection"
+    //     marketing block;
+    //   - the bare/generic `blockquote`, which authors also use for visible
+    //     pull-quotes (the quote remover still strips those when other content
+    //     survives, so `removedByHTMLCleanup` covers the non-fallback case);
+    //   - the marker-only `gmail_attr` / `moz-cite-prefix` / `OutlookMessageHeader`
+    //     header divs, which hold the "On … wrote:" line but not the quoted
+    //     images.
+    private static let quotedOrSignatureContainerSelectors = [
+        // Signature wrappers (mail-client generated)
+        "div.gmail_signature",
+        "div.gmail_signature_prefix",
+        "div[data-smartmail=gmail_signature]",
+        "div[class*=moz-signature]",
+        "div[id*=ms-outlook-mobile-signature]",
+        "div[class*=ms-outlook-mobile-signature]",
+        "div.ms-outlook-signature",
+        "div.AppleMailSignature",
+        // Quoted-history containers that wrap the quoted body and its images
+        "div.gmail_quote",
+        "blockquote[type=cite]",
+        "[id*=mail-editor-reference-message-container]"
+    ]
 
     // Mail-client-generated signature wrappers — unambiguous, always a boundary.
     private static let trustedSignatureWrapperMarkers = [

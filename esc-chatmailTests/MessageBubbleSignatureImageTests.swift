@@ -1879,4 +1879,256 @@ final class MessageBubbleSignatureImageTests: XCTestCase {
         XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image012.png@01dc96af.8c2488c0"))
         XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image012.png@01dc96af.8c2488c0"))
     }
+
+    // MARK: - DOM structural containment
+
+    // The same generated-named, content-sized image is keep-or-drop purely on
+    // whether its DOM ancestor is a signature/quote container — not on its
+    // dimensions or filename.
+
+    func testHTMLAnalysisKeepsGeneratedContentImageNotInsideAnyContainer() {
+        let html = """
+        <html>
+        <body>
+          <p>Here is the latest mock for review.</p>
+          <p><img src="cid:image004.png@01DC96AF.8C2488C0" alt="Latest mock"></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Here is the latest mock for review.",
+            subject: "Latest mock",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image004.png@01DC96AF.8C2488C0",
+                    filename: "image004.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image004.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image004.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedImageInsideGmailSignatureContainer() {
+        let html = """
+        <html>
+        <body>
+          <p>Here is the latest mock for review.</p>
+          <div class="gmail_signature">
+            <img src="cid:image004.png@01DC96AF.8C2488C0" alt="Latest mock">
+          </div>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Here is the latest mock for review.",
+            subject: "Latest mock",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image004.png@01DC96AF.8C2488C0",
+                    filename: "image004.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image004.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image004.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesLargeImageInsideGmailSignatureContainerRegardlessOfDimensions() {
+        // A signature image larger than any dimension cap — only structural
+        // containment can classify it, which is the whole point of the DOM path.
+        let html = """
+        <html>
+        <body>
+          <p>Here is the latest mock for review.</p>
+          <div class="gmail_signature">
+            <img src="cid:banner-asset" alt="Wide corporate banner">
+          </div>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Here is the latest mock for review.",
+            subject: "Latest mock",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "banner-asset",
+                    filename: "banner.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 320_000,
+                    pageCount: 0,
+                    width: 1400,
+                    height: 1100
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("banner-asset"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("banner-asset"))
+    }
+
+    func testHTMLAnalysisKeepsImageReferencedInBodyEvenWhenAlsoInsideQuotedContainer() {
+        // The same attachment is shown in the live body AND re-referenced inside
+        // a quoted container. Containment must NOT hide it — the body
+        // legitimately displays it. (Without the "only inside" exclusivity guard
+        // the containment path would wrongly suppress the shared CID.) The
+        // blockquote carries no sign-off / "On … wrote:" text, so the
+        // text-boundary heuristic does not fire and this isolates the
+        // containment decision.
+        let html = """
+        <html>
+        <body>
+          <p>Here is the screenshot we discussed.</p>
+          <p><img src="cid:shared-shot" alt="Screenshot in body"></p>
+          <blockquote type="cite">
+            <p><img src="cid:shared-shot" alt="Screenshot quoted"></p>
+          </blockquote>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Here is the screenshot we discussed.",
+            subject: "Screenshot",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "shared-shot",
+                    filename: "screenshot.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("shared-shot"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("shared-shot"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedImageInsideQuotedBlockquote() {
+        let html = """
+        <html>
+        <body>
+          <p>See the quoted screenshot.</p>
+          <blockquote type="cite">
+            <p>On Monday, Alice wrote:</p>
+            <p><img src="cid:image004.png@01DC96AF.8C2488C0" alt="Quoted screenshot"></p>
+          </blockquote>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "See the quoted screenshot.",
+            subject: "Re: Screenshot",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image004.png@01DC96AF.8C2488C0",
+                    filename: "image004.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image004.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image004.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesQuotedInlineImageWhenWholeMessageIsQuoted() {
+        // No meaningful content remains after stripping the quote, so the
+        // `removedByHTMLCleanup` path falls back and keeps the image. Structural
+        // containment still classifies it as quoted.
+        let html = """
+        <html>
+        <body>
+          <blockquote type="cite">
+            <p>On Monday, Alice wrote:</p>
+            <p><img src="cid:image004.png@01DC96AF.8C2488C0" alt="Quoted screenshot"></p>
+          </blockquote>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: nil,
+            subject: "Re: Screenshot",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image004.png@01DC96AF.8C2488C0",
+                    filename: "image004.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image004.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image004.png@01dc96af.8c2488c0"))
+    }
 }
