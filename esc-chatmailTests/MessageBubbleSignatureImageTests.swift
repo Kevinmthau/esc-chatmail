@@ -127,8 +127,8 @@ final class MessageBubbleSignatureImageTests: XCTestCase {
             ]
         )
 
-        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image001.png@01DC96AF.8C2488C0"))
-        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image001.png@01DC96AF.8C2488C0"))
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image001.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image001.png@01dc96af.8c2488c0"))
     }
 
     func testHTMLAnalysisKeepsGeneratedBodyImageAfterPlainHeaderLikeText() {
@@ -166,7 +166,44 @@ final class MessageBubbleSignatureImageTests: XCTestCase {
             ]
         )
 
-        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image002.png@01DC96AF.8C2488C0"))
-        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image002.png@01DC96AF.8C2488C0"))
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image002.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image002.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisKeepsGeneratedBodyImageAfterCasualThanksPhrase() {
+        let html = """
+        <html>
+        <body>
+          <p>Thanks, here is the image for review.</p>
+          <p><img src="cid:image003.png@01DC96AF.8C2488C0" alt="Product photo"></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Thanks, here is the image for review.",
+            subject: "Product photo",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image003.png@01DC96AF.8C2488C0",
+                    filename: "image003.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image003.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image003.png@01dc96af.8c2488c0"))
     }
 }

@@ -155,7 +155,6 @@ enum MessageBubbleHTMLAnalysisBuilder {
         let trailingWindow = String(lowercasedHTML.suffix(8_000))
         let hasSignatureSectionSignals =
             signatureBoundaryOffset != nil ||
-            containsSignatureWrapper(in: lowercasedHTML) ||
             (
                 signatureSignOffMarkers.contains { trailingWindow.contains($0) } &&
                 (
@@ -194,15 +193,11 @@ enum MessageBubbleHTMLAnalysisBuilder {
     }
 
     private static func firstSignatureBoundaryOffset(in lowercasedHTML: String) -> Int? {
-        let candidates = signatureHTMLBoundaryMarkers.compactMap { marker -> Int? in
+        let candidates = signatureHardBoundaryMarkers.compactMap { marker -> Int? in
             guard let range = lowercasedHTML.range(of: marker) else { return nil }
             return lowercasedHTML.distance(from: lowercasedHTML.startIndex, to: range.lowerBound)
         }
         return candidates.min()
-    }
-
-    private static func containsSignatureWrapper(in lowercasedHTML: String) -> Bool {
-        signatureWrapperMarkers.contains { lowercasedHTML.contains($0) }
     }
 
     private static func isLikelySignatureInlineAttachment(
@@ -315,7 +310,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
         )
     }
 
-    private static let signatureHTMLBoundaryMarkers = [
+    private static let signatureHardBoundaryMarkers = [
         "gmail_signature",
         "moz-signature",
         "x-apple-signature",
@@ -324,27 +319,9 @@ enum MessageBubbleHTMLAnalysisBuilder {
         "class='signature",
         "id=\"signature",
         "id='signature",
-        "thanks,",
-        "thank you,",
-        "best regards",
-        "kind regards",
-        "regards,",
-        "sincerely",
-        "cheers,",
         " wrote:",
         "<b>from:</b>",
         "<strong>from:</strong>"
-    ]
-
-    private static let signatureWrapperMarkers = [
-        "gmail_signature",
-        "moz-signature",
-        "x-apple-signature",
-        "data-smartmail=\"gmail_signature\"",
-        "class=\"signature",
-        "class='signature",
-        "id=\"signature",
-        "id='signature"
     ]
 
     private static let signatureSignOffMarkers = [
