@@ -508,6 +508,155 @@ final class MessageBubbleSignatureImageTests: XCTestCase {
         XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image007.png@01dc96af.8c2488c0"))
     }
 
+    func testHTMLAnalysisKeepsGeneratedMobileAppScreenshotAfterCasualThanksPhrase() {
+        let html = """
+        <html>
+        <body>
+          <p>Thanks, please review the mobile app screenshot below.</p>
+          <p><img src="cid:image014.png@01DC96AF.8C2488C0" alt="Mobile app screenshot"></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Thanks, please review the mobile app screenshot below.",
+            subject: "Mobile app screenshot",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image014.png@01DC96AF.8C2488C0",
+                    filename: "image014.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image014.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image014.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisKeepsGeneratedMobileAppScreenshotAfterStandaloneThanksLine() {
+        let html = """
+        <html>
+        <body>
+          <p>Thanks,<br>Please review the mobile app screenshot below.</p>
+          <p><img src="cid:image016.png@01DC96AF.8C2488C0" alt="Mobile app screenshot"></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Thanks, please review the mobile app screenshot below.",
+            subject: "Mobile app screenshot",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image016.png@01DC96AF.8C2488C0",
+                    filename: "image016.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image016.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image016.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisKeepsGeneratedBodyImageWithEmailLikeCIDAfterStandaloneThanksLine() {
+        let html = """
+        <html>
+        <body>
+          <p>Thanks,</p>
+          <p><img src="cid:image034@example.com" alt="Current reply screenshot"></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Thanks.",
+            subject: "Current reply screenshot",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image034@example.com",
+                    filename: "image034.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image034@example.com"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image034@example.com"))
+    }
+
+    func testHTMLAnalysisKeepsGeneratedBodyImageBeforeLaterContactBodyTextAfterStandaloneThanksLine() {
+        let html = """
+        <html>
+        <body>
+          <p>Thanks,</p>
+          <p><img src="cid:image043.png@01DC96AF.8C2488C0" alt="Current reply screenshot"></p>
+          <p>Please email support@example.com if this still looks off.</p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Thanks. Please email support@example.com if this still looks off.",
+            subject: "Current reply screenshot",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image043.png@01DC96AF.8C2488C0",
+                    filename: "image043.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image043.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image043.png@01dc96af.8c2488c0"))
+    }
+
     func testHTMLAnalysisSuppressesLogoOnlySignatureAfterStandaloneThanks() {
         let html = """
         <html>
@@ -544,6 +693,1115 @@ final class MessageBubbleSignatureImageTests: XCTestCase {
 
         XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image013.png@01dc96af.8c2488c0"))
         XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image013.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeBeforeFollowingBrandingSignal() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks,<br>Sam<br><img src="cid:image035.png@01DC96AF.8C2488C0" alt=""><br>Cadence</p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image035.png@01DC96AF.8C2488C0",
+                    filename: "image035.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image035.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image035.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeBeforeDistantBrandingSignal() {
+        let markupSpacer = String(
+            repeating: #"<span style="display:none">&nbsp;</span>"#,
+            count: 40
+        )
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks,<br>Sam<br><img src="cid:image041.png@01DC96AF.8C2488C0" alt="">\(markupSpacer)<br>Cadence</p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image041.png@01DC96AF.8C2488C0",
+                    filename: "image041.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image041.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image041.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisKeepsGeneratedBodyFigureBeforeBrandingTextAfterStandaloneThanksLine() {
+        let html = """
+        <html>
+        <body>
+          <p>Thanks,</p>
+          <p>Figure</p>
+          <p><img src="cid:image036.png@01DC96AF.8C2488C0" alt="Cadence chart"></p>
+          <p>Cadence chart details</p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Thanks, figure, cadence chart details.",
+            subject: "Cadence chart",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image036.png@01DC96AF.8C2488C0",
+                    filename: "image036.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image036.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image036.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisKeepsGeneratedBodyImageAfterBrandingBodyTextAfterStandaloneThanksLine() {
+        let html = """
+        <html>
+        <body>
+          <p>Thanks,</p>
+          <p>Cadence chart below.</p>
+          <p><img src="cid:image046.png@01DC96AF.8C2488C0" alt="Cadence chart"></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Thanks. Cadence chart below.",
+            subject: "Cadence chart",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image046.png@01DC96AF.8C2488C0",
+                    filename: "image046.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image046.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image046.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeAfterStandaloneBrandingTextSignature() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks,<br>Sam<br>Cadence<br><img src="cid:image047.png@01DC96AF.8C2488C0" alt=""></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image047.png@01DC96AF.8C2488C0",
+                    filename: "image047.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image047.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image047.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeAfterStandaloneContactSignature() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks,<br>Sam</p>
+          <p>Mobile +1 555 0100</p>
+          <p><img src="cid:image015.png@01DC96AF.8C2488C0" alt=""></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image015.png@01DC96AF.8C2488C0",
+                    filename: "image015.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image015.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image015.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeAfterLinkedContactSignature() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks,<br>Sam</p>
+          <p><a href=mailto:sam@example.com>sam@example.com</a></p>
+          <p><img src="cid:image017.png@01DC96AF.8C2488C0" alt=""></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image017.png@01DC96AF.8C2488C0",
+                    filename: "image017.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image017.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image017.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeAfterSameLineSignOffName() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks, Sam<br><a href="mailto:sam@example.com">sam@example.com</a><br><img src="cid:image029.png@01DC96AF.8C2488C0" alt=""></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image029.png@01DC96AF.8C2488C0",
+                    filename: "image029.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image029.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image029.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeAfterSameLineSignOffNameWithEntitySpacing() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks,&nbsp;Sam<br><a href="mailto:sam@example.com">sam@example.com</a><br><img src="cid:image038.png@01DC96AF.8C2488C0" alt=""></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image038.png@01DC96AF.8C2488C0",
+                    filename: "image038.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image038.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image038.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeAfterSameLineSignOffNameWithEntityApostrophe() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks, O&#39;Connor<br><a href="mailto:sam@example.com">sam@example.com</a><br><img src="cid:image039.png@01DC96AF.8C2488C0" alt=""></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image039.png@01DC96AF.8C2488C0",
+                    filename: "image039.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image039.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image039.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeAfterRichMarkupSignatureSpacer() {
+        let markupSpacer = String(
+            repeating: #"<tr><td style="padding:0;border:0;color:#555">&nbsp;</td></tr>"#,
+            count: 26
+        )
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <table><tbody><tr><td>Thanks,<br>Sam</td></tr>\(markupSpacer)<tr><td><a href="mailto:sam@example.com">sam@example.com</a></td></tr><tr><td><img src="cid:image037.png@01DC96AF.8C2488C0" alt=""></td></tr></tbody></table>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image037.png@01DC96AF.8C2488C0",
+                    filename: "image037.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image037.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image037.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeAfterRichTextSameLineSignOffName() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks, <span>Sam</span><br><a href="mailto:sam@example.com">sam@example.com</a><br><img src="cid:image031.png@01DC96AF.8C2488C0" alt=""></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image031.png@01DC96AF.8C2488C0",
+                    filename: "image031.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image031.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image031.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeAfterBoldSameLineSignOffName() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p><b>Thanks,</b> Sam<br><a href="mailto:sam@example.com">sam@example.com</a><br><img src="cid:image032.png@01DC96AF.8C2488C0" alt=""></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image032.png@01DC96AF.8C2488C0",
+                    filename: "image032.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image032.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image032.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeAfterSameLineSignOffInitial() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks, J<br><a href="mailto:j@example.com">j@example.com</a><br><img src="cid:image030.png@01DC96AF.8C2488C0" alt=""></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image030.png@01DC96AF.8C2488C0",
+                    filename: "image030.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image030.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image030.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeAfterBlockedWordSameLineInitial() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks, A<br><a href="mailto:a@example.com">a@example.com</a><br><img src="cid:image040.png@01DC96AF.8C2488C0" alt=""></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image040.png@01DC96AF.8C2488C0",
+                    filename: "image040.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image040.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image040.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeAfterLaterStandaloneContactSignature() {
+        let currentReplyDetails = String(
+            repeating: "Current reply detail before the final signature. ",
+            count: 40
+        )
+        let html = """
+        <html>
+        <body>
+          <p>Thanks,</p>
+          <p>\(currentReplyDetails)</p>
+          <p>Regards,</p>
+          <p>Sam Example</p>
+          <p><a href="mailto:sam@example.com">sam@example.com</a></p>
+          <p><img src="cid:image018.png@01DC96AF.8C2488C0" alt=""></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Current reply detail before the final signature.",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image018.png@01DC96AF.8C2488C0",
+                    filename: "image018.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image018.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image018.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisKeepsGeneratedBodyImageBeforeLaterStandaloneContactSignature() {
+        let currentReplyDetails = String(
+            repeating: "Current reply detail before the real inline image. ",
+            count: 8
+        )
+        let html = """
+        <html>
+        <body>
+          <p>Thanks,</p>
+          <p>\(currentReplyDetails)</p>
+          <p><img src="cid:image020.png@01DC96AF.8C2488C0" alt="Current reply screenshot"></p>
+          <p>Regards,</p>
+          <p>Sam Example</p>
+          <p><a href="mailto:sam@example.com">sam@example.com</a></p>
+          <p><img src="cid:image021.png@01DC96AF.8C2488C0" alt=""></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Current reply detail before the real inline image.",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image020.png@01DC96AF.8C2488C0",
+                    filename: "image020.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                ),
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image021.png@01DC96AF.8C2488C0",
+                    filename: "image021.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image020.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image020.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image021.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisKeepsGeneratedBodyImageAfterEarlyThanksBeforeLaterStandaloneContactSignature() {
+        let leadIn = String(
+            repeating: "Current reply detail before the inline figure ",
+            count: 40
+        )
+        let html = """
+        <html>
+        <body>
+          <p>\(leadIn)</p>
+          <p>Thanks,</p>
+          <p>Figure</p>
+          <p><img src="cid:image026.png@01DC96AF.8C2488C0" alt="Current reply figure"></p>
+          <p>Regards,</p>
+          <p>Sam Example</p>
+          <p><a href="mailto:sam@example.com">sam@example.com</a></p>
+          <p><img src="cid:image027.png@01DC96AF.8C2488C0" alt=""></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Current reply detail before the inline figure.",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image026.png@01DC96AF.8C2488C0",
+                    filename: "image026.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                ),
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image027.png@01DC96AF.8C2488C0",
+                    filename: "image027.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image026.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image026.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image027.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeAfterUnsubscribeFooterSignature() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks,<br>Sam</p>
+          <p><a href="https://example.com/unsubscribe">Unsubscribe</a></p>
+          <p><img src="cid:image019.png@01DC96AF.8C2488C0" alt=""></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image019.png@01DC96AF.8C2488C0",
+                    filename: "image019.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image019.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image019.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeAfterLongUnsubscribeFooterURL() {
+        let token = String(repeating: "abcdef", count: 35)
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks,<br>Sam</p>
+          <p><a href="https://example.com/unsubscribe?token=\(token)&source=signature-footer">Unsubscribe</a></p>
+          <p><img src="cid:image042.png@01DC96AF.8C2488C0" alt=""></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image042.png@01DC96AF.8C2488C0",
+                    filename: "image042.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image042.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image042.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeAfterInlineWrappedSignOff() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p><span>Thanks,</span><br>Sam<br><a href="mailto:sam@example.com">sam@example.com</a></p>
+          <p><img src="cid:image022.png@01DC96AF.8C2488C0" alt=""></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image022.png@01DC96AF.8C2488C0",
+                    filename: "image022.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image022.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image022.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeWithAbbreviatedRoleBeforeContact() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks,<br>Sam<br>Sr. Director<br><img src="cid:image028.png@01DC96AF.8C2488C0" alt=""><br><a href="mailto:sam@example.com">sam@example.com</a></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image028.png@01DC96AF.8C2488C0",
+                    filename: "image028.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image028.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image028.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeAfterAbbreviatedRoleSignature() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks,<br>Sam<br>Sr. Director<br><img src="cid:image033.png@01DC96AF.8C2488C0" alt=""></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image033.png@01DC96AF.8C2488C0",
+                    filename: "image033.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image033.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image033.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeAfterSplitMobileContactSignature() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks,<br>Sam<br>Mobile<br>+1 555 0100</p>
+          <p><img src="cid:image023.png@01DC96AF.8C2488C0" alt=""></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image023.png@01DC96AF.8C2488C0",
+                    filename: "image023.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image023.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image023.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeBeforeFollowingSplitMobileContactSignature() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks,<br>Sam<br><img src="cid:image025.png@01DC96AF.8C2488C0" alt=""><br>Mobile<br>+1 555 0100</p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image025.png@01DC96AF.8C2488C0",
+                    filename: "image025.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image025.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image025.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedBadgeAfterSameLineSignOffBeforeFollowingSplitMobileContact() {
+        let html = """
+        <html>
+        <body>
+          <p>Can you take a look?</p>
+          <p>Thanks, Sam<br><img src="cid:image044.png@01DC96AF.8C2488C0" alt=""><br>Mobile<br>+1 555 0100</p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Can you take a look?",
+            subject: "Review",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image044.png@01DC96AF.8C2488C0",
+                    filename: "image044.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image044.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image044.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisKeepsGeneratedBodyImageAfterSameLineSignOffBeforeLaterContactBodyText() {
+        let html = """
+        <html>
+        <body>
+          <p>Thanks, Sam<br><img src="cid:image045.png@01DC96AF.8C2488C0" alt="Current reply screenshot"></p>
+          <p>Email support@example.com if this still looks off.</p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Thanks, Sam. Email support@example.com if this still looks off.",
+            subject: "Current reply screenshot",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image045.png@01DC96AF.8C2488C0",
+                    filename: "image045.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image045.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image045.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisKeepsGeneratedUnsubscribeSettingsScreenshotAfterStandaloneThanksLine() {
+        let html = """
+        <html>
+        <body>
+          <p>Thanks,<br>Please review the unsubscribe settings screenshot below.</p>
+          <p><img src="cid:image024.png@01DC96AF.8C2488C0" alt="Unsubscribe settings screenshot"></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Thanks, please review the unsubscribe settings screenshot below.",
+            subject: "Unsubscribe settings screenshot",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image024.png@01DC96AF.8C2488C0",
+                    filename: "image024.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image024.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image024.png@01dc96af.8c2488c0"))
     }
 
     func testHTMLAnalysisKeepsGeneratedLogoMockupAfterCasualThanksPhrase() {
