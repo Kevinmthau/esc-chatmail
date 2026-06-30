@@ -94,6 +94,45 @@ final class MessageBubbleSignatureImageTests: XCTestCase {
         XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("company-logo"))
     }
 
+    func testHTMLAnalysisKeepsGeneratedImageAfterUncorroboratedSignatureClass() {
+        let html = """
+        <html>
+        <body>
+          <div class="signature-collection-hero">
+            <p>Shop the new Signature Collection.</p>
+            <p><img src="cid:image050.png@01DC96AF.8C2488C0" alt="Signature Collection product"></p>
+          </div>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Shop the new Signature Collection.",
+            subject: "Signature Collection",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image050.png@01DC96AF.8C2488C0",
+                    filename: "image050.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image050.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image050.png@01dc96af.8c2488c0"))
+    }
+
     func testHTMLAnalysisKeepsGeneratedBodyImageAfterGenericOnPhrase() {
         let html = """
         <html>

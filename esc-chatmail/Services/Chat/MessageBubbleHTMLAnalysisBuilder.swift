@@ -201,10 +201,55 @@ enum MessageBubbleHTMLAnalysisBuilder {
     }
 
     private static func firstHardSignatureBoundaryOffset(in lowercasedHTML: String) -> Int? {
-        signatureHardBoundaryMarkers.compactMap { marker -> Int? in
+        let trustedOffsets = trustedSignatureWrapperMarkers.compactMap { marker -> Int? in
             guard let range = lowercasedHTML.range(of: marker) else { return nil }
             return lowercasedHTML.distance(from: lowercasedHTML.startIndex, to: range.lowerBound)
-        }.min()
+        }
+
+        let authoredOffsets = authoredSignatureWrapperMarkers.compactMap { marker in
+            firstCorroboratedAuthoredSignatureMarkerOffset(of: marker, in: lowercasedHTML)
+        }
+
+        return (trustedOffsets + authoredOffsets).min()
+    }
+
+    // `class="signature…"` / `id="signature…"` are author-authored and ambiguous
+    // (e.g. a "Signature Collection" marketing block near the top of a
+    // newsletter). Only treat such a marker as a hard boundary when a real
+    // signature signal — branding, a contact, or a role line — follows it within
+    // the trailing window, so a stray class name does not suppress every later
+    // inline image.
+    private static func firstCorroboratedAuthoredSignatureMarkerOffset(
+        of marker: String,
+        in lowercasedHTML: String
+    ) -> Int? {
+        var searchStart = lowercasedHTML.startIndex
+        while let range = lowercasedHTML.range(
+            of: marker,
+            range: searchStart..<lowercasedHTML.endIndex
+        ) {
+            let windowEnd = lowercasedHTML.index(
+                range.upperBound,
+                offsetBy: signatureSignalTrailingHTMLLimit,
+                limitedBy: lowercasedHTML.endIndex
+            ) ?? lowercasedHTML.endIndex
+            let trailingHTML = String(lowercasedHTML[range.upperBound..<windowEnd])
+            if authoredSignatureWrapperHasSignal(in: trailingHTML) {
+                return lowercasedHTML.distance(from: lowercasedHTML.startIndex, to: range.lowerBound)
+            }
+
+            searchStart = range.upperBound
+        }
+
+        return nil
+    }
+
+    private static func authoredSignatureWrapperHasSignal(in trailingHTML: String) -> Bool {
+        if signatureBrandingMarkers.contains(where: { trailingHTML.contains($0) }) {
+            return true
+        }
+
+        return hasSignatureContactOrRoleLine(in: signatureContactOrRoleLines(in: trailingHTML))
     }
 
     private static func firstReplyBoundaryOffset(in lowercasedHTML: String) -> Int? {
@@ -875,11 +920,17 @@ enum MessageBubbleHTMLAnalysisBuilder {
         )
     }
 
-    private static let signatureHardBoundaryMarkers = [
+    // Mail-client-generated signature wrappers — unambiguous, always a boundary.
+    private static let trustedSignatureWrapperMarkers = [
         "gmail_signature",
         "moz-signature",
         "x-apple-signature",
-        "data-smartmail=\"gmail_signature\"",
+        "data-smartmail=\"gmail_signature\""
+    ]
+
+    // Author-authored signature wrappers — only a boundary when corroborated by a
+    // nearby signature signal (see firstCorroboratedAuthoredSignatureMarkerOffset).
+    private static let authoredSignatureWrapperMarkers = [
         "class=\"signature",
         "class='signature",
         "id=\"signature",
