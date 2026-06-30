@@ -151,18 +151,17 @@ enum MessageBubbleHTMLAnalysisBuilder {
             return []
         }
 
-        let signatureBoundaryOffset = firstSignatureBoundaryOffset(in: lowercasedHTML)
-        let trailingWindow = String(lowercasedHTML.suffix(8_000))
+        let hardSignatureBoundaryOffset = firstHardSignatureBoundaryOffset(in: lowercasedHTML)
+        let replyBoundaryOffset = firstReplyBoundaryOffset(in: lowercasedHTML)
+        let signatureSignalHTML = signatureSignalWindow(
+            in: lowercasedHTML,
+            before: replyBoundaryOffset
+        )
+        let hasTrailingSignatureSignals = hasSignatureSignals(in: signatureSignalHTML)
         let hasSignatureSectionSignals =
-            signatureBoundaryOffset != nil ||
-            (
-                signatureSignOffMarkers.contains { trailingWindow.contains($0) } &&
-                (
-                    signatureContactMarkers.contains { trailingWindow.contains($0) } ||
-                    signatureRoleMarkers.contains { trailingWindow.contains($0) } ||
-                    signatureBrandingMarkers.contains { trailingWindow.contains($0) }
-                )
-            )
+            hardSignatureBoundaryOffset != nil ||
+            replyBoundaryOffset != nil ||
+            hasTrailingSignatureSignals
 
         guard hasSignatureSectionSignals else {
             return []
@@ -172,10 +171,18 @@ enum MessageBubbleHTMLAnalysisBuilder {
         EmailDocument.scanReferencedContentIDs(in: html) { normalizedCID, valueStart in
             let cidOffset = html.distance(from: html.startIndex, to: valueStart)
             let trailingThreshold = Int(Double(html.count) * 0.35)
-            let isAfterSignatureBoundary = signatureBoundaryOffset.map { cidOffset >= $0 } ?? false
-            let isTrailingInlineImage = cidOffset >= trailingThreshold
 
-            guard isAfterSignatureBoundary || isTrailingInlineImage else {
+            let isAfterHardSignatureBoundary = hardSignatureBoundaryOffset.map { cidOffset >= $0 } ?? false
+            let isAfterReplyBoundary = replyBoundaryOffset.map { cidOffset >= $0 } ?? false
+            let isBeforeReplyBoundary = replyBoundaryOffset.map { cidOffset < $0 } ?? true
+            let isTrailingSignatureInlineImage =
+                hasTrailingSignatureSignals &&
+                isBeforeReplyBoundary &&
+                cidOffset >= trailingThreshold
+
+            guard isAfterHardSignatureBoundary ||
+                    isAfterReplyBoundary ||
+                    isTrailingSignatureInlineImage else {
                 return
             }
 
@@ -192,12 +199,15 @@ enum MessageBubbleHTMLAnalysisBuilder {
         return nonDisplayable
     }
 
-    private static func firstSignatureBoundaryOffset(in lowercasedHTML: String) -> Int? {
-        var candidates = signatureHardBoundaryMarkers.compactMap { marker -> Int? in
+    private static func firstHardSignatureBoundaryOffset(in lowercasedHTML: String) -> Int? {
+        signatureHardBoundaryMarkers.compactMap { marker -> Int? in
             guard let range = lowercasedHTML.range(of: marker) else { return nil }
             return lowercasedHTML.distance(from: lowercasedHTML.startIndex, to: range.lowerBound)
-        }
+        }.min()
+    }
 
+    private static func firstReplyBoundaryOffset(in lowercasedHTML: String) -> Int? {
+        var candidates: [Int] = []
         for pattern in replyAttributionBoundaryPatterns {
             if let replyAttributionRange = lowercasedHTML.range(
                 of: pattern,
@@ -225,6 +235,27 @@ enum MessageBubbleHTMLAnalysisBuilder {
         }
 
         return candidates.min()
+    }
+
+    private static func signatureSignalWindow(in lowercasedHTML: String, before offset: Int?) -> String {
+        let searchHTML: Substring
+        if let offset {
+            let boundaryIndex = lowercasedHTML.index(lowercasedHTML.startIndex, offsetBy: offset)
+            searchHTML = lowercasedHTML[..<boundaryIndex]
+        } else {
+            searchHTML = lowercasedHTML[...]
+        }
+
+        return String(searchHTML.suffix(8_000))
+    }
+
+    private static func hasSignatureSignals(in lowercasedHTML: String) -> Bool {
+        signatureSignOffMarkers.contains { lowercasedHTML.contains($0) } &&
+            (
+                signatureContactMarkers.contains { lowercasedHTML.contains($0) } ||
+                signatureRoleMarkers.contains { lowercasedHTML.contains($0) } ||
+                signatureBrandingMarkers.contains { lowercasedHTML.contains($0) }
+            )
     }
 
     private static func isLikelySignatureInlineAttachment(

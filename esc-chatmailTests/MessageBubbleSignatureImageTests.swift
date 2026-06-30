@@ -248,6 +248,115 @@ final class MessageBubbleSignatureImageTests: XCTestCase {
         XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image008.png@01dc96af.8c2488c0"))
     }
 
+    func testHTMLAnalysisKeepsGeneratedBodyImageBeforeLaterReplyHeader() {
+        let currentReplyDetails = String(
+            repeating: "Current reply detail with enough text before the inline image. ",
+            count: 60
+        )
+        let html = """
+        <html>
+        <body>
+          <p>\(currentReplyDetails)</p>
+          <p><img src="cid:image009.png@01DC96AF.8C2488C0" alt="Current reply diagram"></p>
+          <p><b>From:</b> Alice Example &lt;alice@example.com&gt;</p>
+          <p><b>Sent:</b> Monday, January 1, 2026 9:00 AM</p>
+          <p><b>To:</b> Bob Example &lt;bob@example.com&gt;</p>
+          <p><b>Subject:</b> Re: Whiteboard photo</p>
+          <p>Older quoted content.</p>
+          <p><img src="cid:image010.png@01DC96AF.8C2488C0" alt="Quoted whiteboard photo"></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Current reply detail with enough text before the inline image.",
+            subject: "Re: Whiteboard photo",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image009.png@01DC96AF.8C2488C0",
+                    filename: "image009.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 218_112,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                ),
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image010.png@01DC96AF.8C2488C0",
+                    filename: "image010.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 218_112,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image009.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image009.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image010.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesCurrentSignatureImageBeforeLaterReplyHeader() {
+        let currentReplyDetails = String(
+            repeating: "Current reply detail before the signature block. ",
+            count: 60
+        )
+        let html = """
+        <html>
+        <body>
+          <p>\(currentReplyDetails)</p>
+          <p>Warmly,</p>
+          <p>Katherine</p>
+          <p><strong>Katherine Merwin</strong></p>
+          <p>Global Membership Manager</p>
+          <p><img src="cid:image011.png@01DC96AF.8C2488C0" alt="logo"></p>
+          <p><b>From:</b> Alice Example &lt;alice@example.com&gt;</p>
+          <p><b>Sent:</b> Monday, January 1, 2026 9:00 AM</p>
+          <p><b>To:</b> Bob Example &lt;bob@example.com&gt;</p>
+          <p><b>Subject:</b> Re: Whiteboard photo</p>
+          <p>Older quoted content.</p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Current reply detail before the signature block.",
+            subject: "Re: Whiteboard photo",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image011.png@01DC96AF.8C2488C0",
+                    filename: "image011.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 192_520,
+                    pageCount: 0,
+                    width: 134,
+                    height: 53
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image011.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image011.png@01dc96af.8c2488c0"))
+    }
+
     func testHTMLAnalysisKeepsGeneratedBodyImageAfterPlainHeaderLikeText() {
         let html = """
         <html>
