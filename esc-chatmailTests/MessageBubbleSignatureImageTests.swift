@@ -206,6 +206,48 @@ final class MessageBubbleSignatureImageTests: XCTestCase {
         XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image005.png@01dc96af.8c2488c0"))
     }
 
+    func testHTMLAnalysisSuppressesGeneratedInlineImageAfterBoldReplyHeaderSequence() {
+        let html = """
+        <html>
+        <body>
+          <p>Latest reply.</p>
+          <p><b>From:</b> Alice Example &lt;alice@example.com&gt;</p>
+          <p><b>Sent:</b> Monday, January 1, 2026 9:00 AM</p>
+          <p><b>To:</b> Bob Example &lt;bob@example.com&gt;</p>
+          <p><b>Subject:</b> Re: Whiteboard photo</p>
+          <p>Older quoted content.</p>
+          <p><img src="cid:image008.png@01DC96AF.8C2488C0" alt="Quoted whiteboard photo"></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Latest reply.",
+            subject: "Re: Whiteboard photo",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image008.png@01DC96AF.8C2488C0",
+                    filename: "image008.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 218_112,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image008.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image008.png@01dc96af.8c2488c0"))
+    }
+
     func testHTMLAnalysisKeepsGeneratedBodyImageAfterPlainHeaderLikeText() {
         let html = """
         <html>
@@ -245,6 +287,44 @@ final class MessageBubbleSignatureImageTests: XCTestCase {
         XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image002.png@01dc96af.8c2488c0"))
     }
 
+    func testHTMLAnalysisKeepsGeneratedBodyImageAfterBoldBodyFromLabel() {
+        let html = """
+        <html>
+        <body>
+          <p><b>From:</b> the prototype table.</p>
+          <p><strong>Subject:</strong> board photo for review.</p>
+          <p><img src="cid:image006.png@01DC96AF.8C2488C0" alt="Board photo"></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Board photo for review.",
+            subject: "Board photo",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image006.png@01DC96AF.8C2488C0",
+                    filename: "image006.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 221_184,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image006.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image006.png@01dc96af.8c2488c0"))
+    }
+
     func testHTMLAnalysisKeepsGeneratedBodyImageAfterCasualThanksPhrase() {
         let html = """
         <html>
@@ -280,5 +360,42 @@ final class MessageBubbleSignatureImageTests: XCTestCase {
 
         XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image003.png@01dc96af.8c2488c0"))
         XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image003.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisKeepsGeneratedEngineeringDiagramAfterCasualThanksPhrase() {
+        let html = """
+        <html>
+        <body>
+          <p>Thanks, please review the engineering diagram below.</p>
+          <p><img src="cid:image007.png@01DC96AF.8C2488C0" alt="Engineering diagram"></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Thanks, please review the engineering diagram below.",
+            subject: "Engineering diagram",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image007.png@01DC96AF.8C2488C0",
+                    filename: "image007.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 214_400,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image007.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image007.png@01dc96af.8c2488c0"))
     }
 }

@@ -211,6 +211,19 @@ enum MessageBubbleHTMLAnalysisBuilder {
             }
         }
 
+        for pattern in replyHeaderBoundaryPatterns {
+            if let replyHeaderRange = lowercasedHTML.range(
+                of: pattern,
+                options: .regularExpression
+            ) {
+                let replyHeaderOffset = lowercasedHTML.distance(
+                    from: lowercasedHTML.startIndex,
+                    to: replyHeaderRange.lowerBound
+                )
+                candidates.append(replyHeaderOffset)
+            }
+        }
+
         return candidates.min()
     }
 
@@ -332,9 +345,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
         "class=\"signature",
         "class='signature",
         "id=\"signature",
-        "id='signature",
-        "<b>from:</b>",
-        "<strong>from:</strong>"
+        "id='signature"
     ]
 
     // Match standalone reply headers without treating body prose like
@@ -342,6 +353,12 @@ enum MessageBubbleHTMLAnalysisBuilder {
     private static let replyAttributionBoundaryPatterns = [
         #"(?:^|[\r\n]|<[^>]+>)\s*(?:&gt;\s*)?on (?:(?!</?(?:div|p|td|th|li|blockquote|body|html)\b).){1,800}? wrote:\s*(?:<br\s*/?>|</(?:div|p|td|th|li|blockquote)>|[\r\n]|$)"#,
         #"(?:^|[\r\n]|<[^>]+>)\s*(?:&gt;\s*)?(?!(?:here|there|this|that|what|when|where|why|how|following|follow|i|we|you|he|she|they|it|someone|everyone|please|thanks|thank)\b)(?:[a-z][a-z0-9._%+\-']{0,60}\s+){0,2}[a-z][a-z0-9._%+\-']{0,60}(?:\s+&lt;[^&]{1,200}&gt;)?\s+wrote:\s*(?:<br\s*/?>|</(?:div|p|td|th|li|blockquote)>|[\r\n]|$)"#
+    ]
+
+    // Match complete rich-text reply headers without treating isolated body
+    // labels such as "<b>From:</b> the prototype table" as quote boundaries.
+    private static let replyHeaderBoundaryPatterns = [
+        #"<(?:b|strong)>\s*from:\s*</(?:b|strong)>[\s\S]{0,2400}<(?:b|strong)>\s*(?:sent|date):\s*</(?:b|strong)>[\s\S]{0,2400}<(?:b|strong)>\s*to:\s*</(?:b|strong)>[\s\S]{0,2400}<(?:b|strong)>\s*subject:\s*</(?:b|strong)>"#
     ]
 
     private static let signatureSignOffMarkers = [
@@ -378,8 +395,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
         "realtor",
         "membership",
         "business development",
-        "customer engineering",
-        "engineering"
+        "customer engineering"
     ]
 
     private static let signatureBrandingMarkers = [
