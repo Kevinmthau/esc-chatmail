@@ -331,13 +331,9 @@ enum MessageBubbleHTMLAnalysisBuilder {
         "regards,",
         "sincerely",
         "cheers,",
-        "on ",
         " wrote:",
         "<b>from:</b>",
-        "<strong>from:</strong>",
-        "from:",
-        "sent:",
-        "subject:"
+        "<strong>from:</strong>"
     ]
 
     private static let signatureWrapperMarkers = [

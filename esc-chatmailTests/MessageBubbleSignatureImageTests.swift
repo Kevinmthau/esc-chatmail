@@ -93,4 +93,80 @@ final class MessageBubbleSignatureImageTests: XCTestCase {
         XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("board-photo"))
         XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("company-logo"))
     }
+
+    func testHTMLAnalysisKeepsGeneratedBodyImageAfterGenericOnPhrase() {
+        let html = """
+        <html>
+        <body>
+          <p>Let's review this on Tuesday.</p>
+          <p><img src="cid:image001.png@01DC96AF.8C2488C0" alt="Prototype photo"></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Let's review this on Tuesday.",
+            subject: "Prototype photo",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image001.png@01DC96AF.8C2488C0",
+                    filename: "image001.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 192_520,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image001.png@01DC96AF.8C2488C0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image001.png@01DC96AF.8C2488C0"))
+    }
+
+    func testHTMLAnalysisKeepsGeneratedBodyImageAfterPlainHeaderLikeText() {
+        let html = """
+        <html>
+        <body>
+          <p>From: the prototype table.</p>
+          <p>Sent: after the firmware update.</p>
+          <p>Subject: board photo for review.</p>
+          <p><img src="cid:image002.png@01DC96AF.8C2488C0" alt="Board photo"></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Board photo for review.",
+            subject: "Board photo",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image002.png@01DC96AF.8C2488C0",
+                    filename: "image002.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 221_184,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image002.png@01DC96AF.8C2488C0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image002.png@01DC96AF.8C2488C0"))
+    }
 }
