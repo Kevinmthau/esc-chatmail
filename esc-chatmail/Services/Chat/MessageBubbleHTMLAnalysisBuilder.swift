@@ -151,12 +151,18 @@ enum MessageBubbleHTMLAnalysisBuilder {
             return []
         }
 
-        let trailingWindow = String(lowercasedHTML.suffix(6_000))
+        let signatureBoundaryOffset = firstSignatureBoundaryOffset(in: lowercasedHTML)
+        let trailingWindow = String(lowercasedHTML.suffix(8_000))
         let hasSignatureSectionSignals =
-            signatureSignOffMarkers.contains { trailingWindow.contains($0) } &&
+            signatureBoundaryOffset != nil ||
+            containsSignatureWrapper(in: lowercasedHTML) ||
             (
-                signatureContactMarkers.contains { trailingWindow.contains($0) } ||
-                signatureRoleMarkers.contains { trailingWindow.contains($0) }
+                signatureSignOffMarkers.contains { trailingWindow.contains($0) } &&
+                (
+                    signatureContactMarkers.contains { trailingWindow.contains($0) } ||
+                    signatureRoleMarkers.contains { trailingWindow.contains($0) } ||
+                    signatureBrandingMarkers.contains { trailingWindow.contains($0) }
+                )
             )
 
         guard hasSignatureSectionSignals else {
@@ -166,8 +172,11 @@ enum MessageBubbleHTMLAnalysisBuilder {
         var nonDisplayable = Set<String>()
         EmailDocument.scanReferencedContentIDs(in: html) { normalizedCID, valueStart in
             let cidOffset = html.distance(from: html.startIndex, to: valueStart)
-            let trailingThreshold = Int(Double(html.count) * 0.45)
-            guard cidOffset >= trailingThreshold else {
+            let trailingThreshold = Int(Double(html.count) * 0.35)
+            let isAfterSignatureBoundary = signatureBoundaryOffset.map { cidOffset >= $0 } ?? false
+            let isTrailingInlineImage = cidOffset >= trailingThreshold
+
+            guard isAfterSignatureBoundary || isTrailingInlineImage else {
                 return
             }
 
@@ -184,6 +193,18 @@ enum MessageBubbleHTMLAnalysisBuilder {
         return nonDisplayable
     }
 
+    private static func firstSignatureBoundaryOffset(in lowercasedHTML: String) -> Int? {
+        let candidates = signatureHTMLBoundaryMarkers.compactMap { marker -> Int? in
+            guard let range = lowercasedHTML.range(of: marker) else { return nil }
+            return lowercasedHTML.distance(from: lowercasedHTML.startIndex, to: range.lowerBound)
+        }
+        return candidates.min()
+    }
+
+    private static func containsSignatureWrapper(in lowercasedHTML: String) -> Bool {
+        signatureWrapperMarkers.contains { lowercasedHTML.contains($0) }
+    }
+
     private static func isLikelySignatureInlineAttachment(
         contentID: String,
         attachments: [MessageBubbleAttachmentSnapshot]
@@ -197,34 +218,38 @@ enum MessageBubbleHTMLAnalysisBuilder {
         }
 
         let filename = attachment.filename.lowercased()
-        let hasSignatureKeyword =
-            filename.contains("logo") ||
-            filename.contains("signature") ||
-            filename.contains("footer")
-
-        let isGeneratedInlineName = filename.range(
-            of: #"^(?:image|img)\d{2,}(?:[_-]\d+)?\.[a-z0-9]{2,5}$"#,
-            options: .regularExpression
-        ) != nil
-
         let contentIDLocalPart = contentID
             .split(separator: "@", maxSplits: 1, omittingEmptySubsequences: true)
             .first
             .map(String.init) ?? contentID
-        let isGeneratedInlineContentID = contentIDLocalPart.range(
-            of: #"^(?:image|img)\d{2,}(?:[_-]\d+)?(?:\.[a-z0-9]{2,5})?$"#,
+        let searchableIdentity = [filename, contentID, contentIDLocalPart].joined(separator: " ")
+        let hasSignatureKeyword = signatureImageIdentityMarkers.contains { searchableIdentity.contains($0) }
+
+        let isGeneratedInlineName = filename.range(
+            of: #"^(?:image|img|inline|cid)[0-9a-f_-]{2,}(?:\.[a-z0-9]{2,5})?$"#,
             options: .regularExpression
         ) != nil
 
-        let hasLogoLikeDimensions =
+        let isGeneratedInlineContentID = contentIDLocalPart.range(
+            of: #"^(?:image|img|inline|cid)[0-9a-f_-]{2,}(?:\.[a-z0-9]{2,5})?$"#,
+            options: .regularExpression
+        ) != nil
+
+        let hasSmallLogoLikeDimensions =
             attachment.width > 0 &&
             attachment.height > 0 &&
             attachment.width >= attachment.height &&
-            attachment.width <= 320 &&
-            attachment.height <= 120
+            attachment.width <= 420 &&
+            attachment.height <= 160
+
+        let hasBadgeLikeDimensions =
+            attachment.width > 0 &&
+            attachment.height > 0 &&
+            attachment.width <= 900 &&
+            attachment.height <= 900
 
         let looksLikeGeneratedInlineAsset = isGeneratedInlineName || isGeneratedInlineContentID
-        return hasSignatureKeyword || (looksLikeGeneratedInlineAsset && hasLogoLikeDimensions)
+        return hasSignatureKeyword || (looksLikeGeneratedInlineAsset && (hasSmallLogoLikeDimensions || hasBadgeLikeDimensions))
     }
 
     private static func supportsCalendarInvitePreviewCard(
@@ -290,6 +315,42 @@ enum MessageBubbleHTMLAnalysisBuilder {
         )
     }
 
+    private static let signatureHTMLBoundaryMarkers = [
+        "gmail_signature",
+        "moz-signature",
+        "x-apple-signature",
+        "data-smartmail=\"gmail_signature\"",
+        "class=\"signature",
+        "class='signature",
+        "id=\"signature",
+        "id='signature",
+        "thanks,",
+        "thank you,",
+        "best regards",
+        "kind regards",
+        "regards,",
+        "sincerely",
+        "cheers,",
+        "on ",
+        " wrote:",
+        "<b>from:</b>",
+        "<strong>from:</strong>",
+        "from:",
+        "sent:",
+        "subject:"
+    ]
+
+    private static let signatureWrapperMarkers = [
+        "gmail_signature",
+        "moz-signature",
+        "x-apple-signature",
+        "data-smartmail=\"gmail_signature\"",
+        "class=\"signature",
+        "class='signature",
+        "id=\"signature",
+        "id='signature"
+    ]
+
     private static let signatureSignOffMarkers = [
         "warmly",
         "best regards",
@@ -309,7 +370,9 @@ enum MessageBubbleHTMLAnalysisBuilder {
         "www.",
         "linkedin",
         "instagram",
-        "twitter"
+        "twitter",
+        "address",
+        "unsubscribe"
     ]
 
     private static let signatureRoleMarkers = [
@@ -320,6 +383,38 @@ enum MessageBubbleHTMLAnalysisBuilder {
         "advisor",
         "broker",
         "realtor",
-        "membership"
+        "membership",
+        "business development",
+        "customer engineering",
+        "engineering"
+    ]
+
+    private static let signatureBrandingMarkers = [
+        "logo",
+        "badge",
+        "banner",
+        "fortune",
+        "best companies",
+        "cadence",
+        "unleash imagination"
+    ]
+
+    private static let signatureImageIdentityMarkers = [
+        "logo",
+        "signature",
+        "footer",
+        "banner",
+        "badge",
+        "award",
+        "fortune",
+        "best-companies",
+        "bestcompanies",
+        "cadence",
+        "linkedin",
+        "twitter",
+        "facebook",
+        "instagram",
+        "social",
+        "unsubscribe"
     ]
 }
