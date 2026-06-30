@@ -171,17 +171,10 @@ enum MessageBubbleHTMLAnalysisBuilder {
         var nonDisplayable = Set<String>()
         EmailDocument.scanReferencedContentIDs(in: html) { normalizedCID, valueStart in
             let cidOffset = html.distance(from: html.startIndex, to: valueStart)
-            let trailingThreshold = Int(Double(html.count) * 0.35)
 
             let isAfterHardSignatureBoundary = hardSignatureBoundaryOffset.map { cidOffset >= $0 } ?? false
             let isAfterReplyBoundary = replyBoundaryOffset.map { cidOffset >= $0 } ?? false
-            let isBeforeReplyBoundary = replyBoundaryOffset.map { cidOffset < $0 } ?? true
             let isAfterStandaloneSignatureBoundary = trailingSignatureStartOffsets.contains { cidOffset >= $0 }
-            let isTrailingSignatureInlineImage =
-                hasTrailingSignatureSignals &&
-                isBeforeReplyBoundary &&
-                cidOffset >= trailingThreshold &&
-                isAfterStandaloneSignatureBoundary
             let hasStrongGeneratedBadgeContext =
                 isAfterHardSignatureBoundary ||
                 isAfterReplyBoundary ||
@@ -189,7 +182,6 @@ enum MessageBubbleHTMLAnalysisBuilder {
 
             guard isAfterHardSignatureBoundary ||
                     isAfterReplyBoundary ||
-                    isTrailingSignatureInlineImage ||
                     isAfterStandaloneSignatureBoundary else {
                 return
             }
@@ -787,12 +779,12 @@ enum MessageBubbleHTMLAnalysisBuilder {
         let hasSignatureKeyword = signatureImageIdentityMarkers.contains { searchableIdentity.contains($0) }
 
         let isGeneratedInlineName = filename.range(
-            of: #"^(?:image|img|inline|cid)[0-9a-f_-]{2,}(?:\.[a-z0-9]{2,5})?$"#,
+            of: generatedInlineAssetPattern,
             options: .regularExpression
         ) != nil
 
         let isGeneratedInlineContentID = contentIDLocalPart.range(
-            of: #"^(?:image|img|inline|cid)[0-9a-f_-]{2,}(?:\.[a-z0-9]{2,5})?$"#,
+            of: generatedInlineAssetPattern,
             options: .regularExpression
         ) != nil
 
@@ -907,30 +899,6 @@ enum MessageBubbleHTMLAnalysisBuilder {
         #"<(?:b|strong)>\s*from:\s*</(?:b|strong)>[\s\S]{0,2400}<(?:b|strong)>\s*(?:sent|date):\s*</(?:b|strong)>[\s\S]{0,2400}<(?:b|strong)>\s*to:\s*</(?:b|strong)>[\s\S]{0,2400}<(?:b|strong)>\s*subject:\s*</(?:b|strong)>"#
     ]
 
-    private static let signatureSignOffMarkers = [
-        "warmly",
-        "best regards",
-        "kind regards",
-        "regards,",
-        "sincerely",
-        "thanks,",
-        "thank you,",
-        "cheers,"
-    ]
-
-    private static let signatureContactMarkers = [
-        "mailto:",
-        "tel:",
-        "mobile",
-        "phone",
-        "www.",
-        "linkedin",
-        "instagram",
-        "twitter",
-        "address",
-        "unsubscribe"
-    ]
-
     private static let signatureRoleMarkers = [
         "manager",
         "director",
@@ -991,6 +959,12 @@ enum MessageBubbleHTMLAnalysisBuilder {
 
     private static let standaloneSignOffPattern =
         #"(?:^|[\r\n]|<[^>]+>)\s*(?:warmly|best regards|kind regards|regards|sincerely|thanks|thank you|cheers)\#(standaloneSignOffTailPattern)"#
+
+    // Generated inline asset names (Outlook/Word image001.png, hex content-IDs).
+    // Require at least one digit so hex-letter words like "imageface.png" are
+    // not misread as generated assets.
+    private static let generatedInlineAssetPattern =
+        #"^(?:image|img|inline|cid)(?=[0-9a-f_-]*[0-9])[0-9a-f_-]{2,}(?:\.[a-z0-9]{2,5})?$"#
 
     private static let signatureImageIdentityMarkers = [
         "logo",
