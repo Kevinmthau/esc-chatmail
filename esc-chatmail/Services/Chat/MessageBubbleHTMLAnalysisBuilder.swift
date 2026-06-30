@@ -193,10 +193,24 @@ enum MessageBubbleHTMLAnalysisBuilder {
     }
 
     private static func firstSignatureBoundaryOffset(in lowercasedHTML: String) -> Int? {
-        let candidates = signatureHardBoundaryMarkers.compactMap { marker -> Int? in
+        var candidates = signatureHardBoundaryMarkers.compactMap { marker -> Int? in
             guard let range = lowercasedHTML.range(of: marker) else { return nil }
             return lowercasedHTML.distance(from: lowercasedHTML.startIndex, to: range.lowerBound)
         }
+
+        for pattern in replyAttributionBoundaryPatterns {
+            if let replyAttributionRange = lowercasedHTML.range(
+                of: pattern,
+                options: .regularExpression
+            ) {
+                let replyAttributionOffset = lowercasedHTML.distance(
+                    from: lowercasedHTML.startIndex,
+                    to: replyAttributionRange.lowerBound
+                )
+                candidates.append(replyAttributionOffset)
+            }
+        }
+
         return candidates.min()
     }
 
@@ -319,9 +333,15 @@ enum MessageBubbleHTMLAnalysisBuilder {
         "class='signature",
         "id=\"signature",
         "id='signature",
-        " wrote:",
         "<b>from:</b>",
         "<strong>from:</strong>"
+    ]
+
+    // Match standalone reply headers without treating body prose like
+    // "here is what I wrote:" as a hard attachment-hiding boundary.
+    private static let replyAttributionBoundaryPatterns = [
+        #"(?:^|[\r\n]|<[^>]+>)\s*(?:&gt;\s*)?on (?:(?!</?(?:div|p|td|th|li|blockquote|body|html)\b).){1,800}? wrote:\s*(?:<br\s*/?>|</(?:div|p|td|th|li|blockquote)>|[\r\n]|$)"#,
+        #"(?:^|[\r\n]|<[^>]+>)\s*(?:&gt;\s*)?(?!(?:here|there|this|that|what|when|where|why|how|following|follow|i|we|you|he|she|they|it|someone|everyone|please|thanks|thank)\b)(?:[a-z][a-z0-9._%+\-']{0,60}\s+){0,2}[a-z][a-z0-9._%+\-']{0,60}(?:\s+&lt;[^&]{1,200}&gt;)?\s+wrote:\s*(?:<br\s*/?>|</(?:div|p|td|th|li|blockquote)>|[\r\n]|$)"#
     ]
 
     private static let signatureSignOffMarkers = [

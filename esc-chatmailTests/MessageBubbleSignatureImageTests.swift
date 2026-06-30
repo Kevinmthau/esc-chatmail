@@ -131,6 +131,81 @@ final class MessageBubbleSignatureImageTests: XCTestCase {
         XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image001.png@01dc96af.8c2488c0"))
     }
 
+    func testHTMLAnalysisKeepsGeneratedBodyImageAfterGenericWrotePhrase() {
+        let html = """
+        <html>
+        <body>
+          <p>Here is what I wrote:</p>
+          <p><img src="cid:image004.png@01DC96AF.8C2488C0" alt="Whiteboard photo"></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Here is what I wrote:",
+            subject: "Whiteboard photo",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image004.png@01DC96AF.8C2488C0",
+                    filename: "image004.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 216_512,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image004.png@01dc96af.8c2488c0"))
+        XCTAssertFalse(analysis.nonDisplayableInlineContentIDs.contains("image004.png@01dc96af.8c2488c0"))
+    }
+
+    func testHTMLAnalysisSuppressesGeneratedInlineImageAfterStandaloneWroteAttribution() {
+        let html = """
+        <html>
+        <body>
+          <p>Latest reply.</p>
+          <p>John wrote:</p>
+          <p><img src="cid:image005.png@01DC96AF.8C2488C0" alt="Quoted whiteboard photo"></p>
+        </body>
+        </html>
+        """
+
+        let analysis = MessageBubbleHTMLAnalysisBuilder.build(
+            canonicalHTML: html,
+            hasHTMLSourceHint: true,
+            isForwardedEmail: false,
+            isLikelyCalendarInvite: false,
+            bodyText: nil,
+            cleanedSnippet: "Latest reply.",
+            subject: "Re: Whiteboard photo",
+            attachmentSnapshots: [
+                MessageBubbleAttachmentSnapshot(
+                    contentId: "image005.png@01DC96AF.8C2488C0",
+                    filename: "image005.png",
+                    mimeType: "image/png",
+                    stateRaw: Attachment.State.downloaded.rawValue,
+                    localURL: nil,
+                    byteSize: 218_112,
+                    pageCount: 0,
+                    width: 512,
+                    height: 512
+                )
+            ]
+        )
+
+        XCTAssertTrue(analysis.referencedInlineContentIDs.contains("image005.png@01dc96af.8c2488c0"))
+        XCTAssertTrue(analysis.nonDisplayableInlineContentIDs.contains("image005.png@01dc96af.8c2488c0"))
+    }
+
     func testHTMLAnalysisKeepsGeneratedBodyImageAfterPlainHeaderLikeText() {
         let html = """
         <html>
