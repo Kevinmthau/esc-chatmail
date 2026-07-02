@@ -739,7 +739,7 @@ final class MessageBubbleSignatureImageTests: XCTestCase {
         <html>
         <body>
           <p>Can you take a look?</p>
-          <p>Thanks,<br>Sam<br><img src="cid:image035.png@01DC96AF.8C2488C0" alt=""><br>Cadence</p>
+          <p>Thanks,<br>Sam<br><img src="cid:image035.png@01DC96AF.8C2488C0" alt=""><br>Acme logo</p>
         </body>
         </html>
         """
@@ -780,7 +780,7 @@ final class MessageBubbleSignatureImageTests: XCTestCase {
         <html>
         <body>
           <p>Can you take a look?</p>
-          <p>Thanks,<br>Sam<br><img src="cid:image041.png@01DC96AF.8C2488C0" alt="">\(markupSpacer)<br>Cadence</p>
+          <p>Thanks,<br>Sam<br><img src="cid:image041.png@01DC96AF.8C2488C0" alt="">\(markupSpacer)<br>Acme logo</p>
         </body>
         </html>
         """
@@ -894,7 +894,7 @@ final class MessageBubbleSignatureImageTests: XCTestCase {
         <html>
         <body>
           <p>Can you take a look?</p>
-          <p>Thanks,<br>Sam<br>Cadence<br><img src="cid:image047.png@01DC96AF.8C2488C0" alt=""></p>
+          <p>Thanks,<br>Sam<br>Acme logo<br><img src="cid:image047.png@01DC96AF.8C2488C0" alt=""></p>
         </body>
         </html>
         """

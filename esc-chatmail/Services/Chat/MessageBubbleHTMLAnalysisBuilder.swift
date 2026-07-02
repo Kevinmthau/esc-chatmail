@@ -1021,14 +1021,12 @@ enum MessageBubbleHTMLAnalysisBuilder {
         "customer engineering"
     ]
 
+    // Generic branding vocabulary only. Company-specific names (e.g. "cadence",
+    // "fortune") over-match ordinary prose and must not be added here.
     private static let signatureBrandingMarkers = [
         "logo",
         "badge",
-        "banner",
-        "fortune",
-        "best companies",
-        "cadence",
-        "unleash imagination"
+        "banner"
     ]
 
     private static let signatureSignalTrailingHTMLLimit = 8_000
@@ -1061,7 +1059,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
         #"(?:[,.!]?\#(htmlSignatureWhitespacePattern)\#(standaloneSignOffInlineClosingTagsPattern)\#(htmlSignatureWhitespacePattern)\#(standaloneSignOffBoundaryPattern)|[,.!]\#(htmlSignatureWhitespacePattern)\#(standaloneSignOffInlineClosingTagsPattern)\#(htmlSignatureWhitespacePattern)\#(inlineSignOffNamePattern)\#(htmlSignatureWhitespacePattern)\#(standaloneSignOffInlineClosingTagsPattern)\#(htmlSignatureWhitespacePattern)\#(standaloneSignOffBoundaryPattern))"#
 
     private static let standaloneSignOffBeforeBrandingPattern =
-        #"(?:^|[\r\n]|<[^>]+>)\s*(?:warmly|best regards|kind regards|regards|sincerely|thanks|thank you|cheers)\#(standaloneSignOffTailPattern)[\s\S]{0,\#(signatureSignalTrailingHTMLLimit)}(?:logo|badge|banner|fortune|best companies|cadence|unleash imagination)"#
+        #"(?:^|[\r\n]|<[^>]+>)\s*(?:warmly|best regards|kind regards|regards|sincerely|thanks|thank you|cheers)\#(standaloneSignOffTailPattern)[\s\S]{0,\#(signatureSignalTrailingHTMLLimit)}(?:\#(signatureBrandingMarkers.joined(separator: "|")))"#
 
     private static let standaloneSignOffWithInlineNamePattern =
         #"(?:warmly|best regards|kind regards|regards|sincerely|thanks|thank you|cheers)[,.!]\#(htmlSignatureWhitespacePattern)\#(standaloneSignOffInlineClosingTagsPattern)\#(htmlSignatureWhitespacePattern)\#(inlineSignOffNamePattern)"#
@@ -1082,10 +1080,6 @@ enum MessageBubbleHTMLAnalysisBuilder {
         "banner",
         "badge",
         "award",
-        "fortune",
-        "best-companies",
-        "bestcompanies",
-        "cadence",
         "linkedin",
         "twitter",
         "facebook",

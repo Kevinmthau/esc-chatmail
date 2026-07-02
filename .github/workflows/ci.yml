@@ -1,0 +1,57 @@
+name: CI
+
+# Runs the default test plan (PerformanceRegressionTests excluded) on every PR
+# and push to main, plus an advisory SwiftLint pass. Mirrors the local
+# Scripts/ wrappers so CI and local runs stay in sync.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build & Test (iOS Simulator)
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain and simulators
+        run: |
+          xcodebuild -version
+          xcrun simctl list devices available | grep -m 5 iPhone || true
+
+      # DESTINATION is left unset on purpose: Scripts/run-tests.sh picks the
+      # first available iPhone simulator by ID, which tolerates runner-image
+      # differences in device names/runtimes.
+      - name: Run tests (default test plan)
+        run: bash Scripts/run-tests.sh -resultBundlePath TestResults.xcresult
+
+      - name: Upload result bundle on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TestResults.xcresult
+          path: TestResults.xcresult
+          retention-days: 7
+
+  lint:
+    name: SwiftLint (advisory)
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # Scripts/lint.sh is advisory by design (never fails the caller); this
+      # job surfaces violations in the log without blocking the PR.
+      - name: Run SwiftLint
+        run: bash Scripts/lint.sh --reporter github-actions-logging
