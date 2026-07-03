@@ -64,7 +64,6 @@ For example:
 ### Main Views
 
 - `esc-chatmail/Views/Main/ConversationListView.swift`
-- `esc-chatmail/Views/Main/InboxListView.swift`
 - `esc-chatmail/Views/Chat/ChatView.swift`
 - `esc-chatmail/Views/Compose/ComposeView.swift`
 

@@ -583,6 +583,49 @@ final class AttachmentDownloaderTests: XCTestCase {
         XCTAssertEqual(previewAttachments.compactMap { $0.id }.sorted(), ["att-calendar", "att-notes"])
     }
 
+    func testMessage_displayableAttachments_htmlLessInvite_keepsCalendarFileVisible() throws {
+        // Pins live behavior for plain-text calendar invites (no persisted
+        // HTML): the analysis is a placeholder with no preview-card support,
+        // so nothing hides the .ics — the attachment stays reachable instead
+        // of being hidden for a card that will never render. (The deleted
+        // Message-internal path conjured a card from bodyText alone.)
+        let message = MessageBuilder()
+            .withId("msg-calendar-htmlless-\(UUID().uuidString)")
+            .withSubject("Invitation: Standup @ Tue May 6, 2026 10:00am - 10:15am (EDT)")
+            .withSnippet("Invitation from Google Calendar")
+            .withBody(
+                """
+                Invitation from Google Calendar
+                Standup
+                When
+                Tuesday May 6, 2026 • 10:00am – 10:15am (Eastern Time - New York)
+                Guests
+                brynn@example.com
+                """
+            )
+            .withAttachments()
+            .build(in: context)
+
+        let _ = AttachmentBuilder()
+            .withId("att-calendar")
+            .withFilename("invite.ics")
+            .withMimeType("text/calendar")
+            .withByteSize(2_048)
+            .forMessage(message)
+            .build(in: context)
+
+        try testStack.saveViewContext()
+
+        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let analysis = builtHTMLAnalysis(for: fetchedMessage)
+
+        XCTAssertTrue(fetchedMessage.isLikelyCalendarInvite)
+        XCTAssertFalse(analysis.supportsCalendarInvitePreviewCard, "no HTML → placeholder analysis → no card")
+
+        let previewAttachments = fetchedMessage.displayableAttachments(using: analysis, hidingInlineReferencedInHTML: true)
+        XCTAssertEqual(previewAttachments.compactMap { $0.id }, ["att-calendar"])
+    }
+
     func testMessage_displayableAttachments_plainBubble_hidesSignatureOnlyCIDInlineImages() throws {
         let messageId = "msg-inline-signature-\(UUID().uuidString)"
         let message = MessageBuilder()

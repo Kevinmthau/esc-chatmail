@@ -854,9 +854,13 @@ actor ProcessedTextCache: MemoryWarningHandler {
         // Remove every `<div ... class="apple-rich-link" ...>...</div>` block
         // (including nested divs). Each scan resumes from the removal point —
         // restarting from index 0 made k blocks cost k full passes over the
-        // document (quadratic on crafted input). Nothing before the removal
-        // point can still contain a marker: the earliest marker's enclosing
-        // div starts at or before it and was just removed.
+        // document (quadratic on crafted input). No REAL block's marker can
+        // remain before the resume point (its enclosing div starts at or
+        // before it and was just removed); the one thing not re-scanned is a
+        // marker string fabricated by the removal joining surrounding text —
+        // deliberately left alone, since it is inert text for this analysis
+        // and the old restart-from-zero behavior would have deleted an
+        // unrelated legitimate block for it.
         while searchStart < result.endIndex,
               let markerRange = result.range(
                 of: "apple-rich-link",

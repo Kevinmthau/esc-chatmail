@@ -90,7 +90,6 @@ App flow:
 - `esc-chatmail/App/ContentView.swift` gates between sign-in and the main conversation UI.
 - Main user surfaces live in:
   - `esc-chatmail/Views/Main/ConversationListView.swift`
-  - `esc-chatmail/Views/Main/InboxListView.swift`
   - `esc-chatmail/Views/Chat/ChatView.swift`
   - `esc-chatmail/Views/Compose/ComposeView.swift`
 

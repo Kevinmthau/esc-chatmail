@@ -18,7 +18,7 @@ Find the smallest safe change or the highest-signal review findings without dest
 1. Start in the real entry points.
    - App bootstrap: `esc-chatmail/App/esc_chatmailApp.swift`
    - Auth gate: `esc-chatmail/App/ContentView.swift`
-   - Chats/inbox: `esc-chatmail/Views/Main/ConversationListView.swift`, `esc-chatmail/Views/Main/InboxListView.swift`
+   - Chats/inbox: `esc-chatmail/Views/Main/ConversationListView.swift`
    - Thread: `esc-chatmail/Views/Chat/ChatView.swift`, `esc-chatmail/Views/Chat/ChatMessagesView.swift`, `esc-chatmail/Views/Chat/MessageBubble.swift`
    - Compose: `esc-chatmail/Views/Compose/ComposeView.swift`
 

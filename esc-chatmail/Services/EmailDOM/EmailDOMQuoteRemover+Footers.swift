@@ -33,7 +33,12 @@ extension EmailDOMQuoteRemover {
     /// visible text is the message, not a footer — remove it and the bubble
     /// is wiped (the downstream empty-content degradation chain exists in
     /// three copies precisely because of that). Skipping removal here fixes
-    /// the wipeout at the source. Tunable; conservative majority.
+    /// the whole-bubble wipeout at the source. Scope: each element is judged
+    /// individually against the fixed original-document baseline — a minority
+    /// container nested inside a protected majority wrapper is still removed
+    /// (compositional accounting would reintroduce the baseline ambiguity a
+    /// content-loss ratio guard was rejected for). Tunable; conservative
+    /// majority.
     static let majorityTextGuardRatio = 0.6
 
     static func removeFooterContainers(in document: Document) throws {
