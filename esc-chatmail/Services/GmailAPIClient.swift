@@ -29,10 +29,16 @@ actor RateLimitTracker {
 
     /// Resets tracking after successful request
     func recordSuccess() {
-        // Reduce cumulative backoff on success to allow recovery
-        // Using 30s reduction allows faster recovery after hitting circuit breaker (120s max)
-        // This means ~4 successful requests recover from a fully tripped breaker
-        cumulativeBackoffTime = max(0, cumulativeBackoffTime - 30)
+        // Mitigation, not a fix: this credit-per-success accounting is
+        // structurally wrong for a concurrent client — credit scales with
+        // request concurrency while debit doesn't, and a success is causally
+        // unrelated to 429 recovery. At the previous 30s credit, 4 interleaved
+        // successes (out of 15 concurrent requests) wiped a fully tripped
+        // 120s breaker. 2s keeps recovery possible on genuinely healthy
+        // traffic without letting one concurrent batch erase the breaker.
+        // A structural rewrite (time-decay/leaky bucket) is tracked as
+        // deferred work in the performance plan (C4).
+        cumulativeBackoffTime = max(0, cumulativeBackoffTime - 2)
     }
 
     /// Returns current cumulative backoff for monitoring
