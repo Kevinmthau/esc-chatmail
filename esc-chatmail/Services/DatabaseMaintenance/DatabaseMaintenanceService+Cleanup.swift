@@ -9,6 +9,12 @@ extension DatabaseMaintenanceService {
         let context = coreDataStack.newBackgroundContext()
         let cleanupService = DataCleanupService(coreDataStack: coreDataStack)
 
+        // Best-effort, isolated from the rest of cleanup: a purge failure must
+        // not abort attachment cleanup below (which bails on the first false).
+        await context.perform {
+            _ = PersistentHistoryPurger.purgeHistory(in: context)
+        }
+
         let succeeded = await context.perform {
             do {
                 // Cleanup orphaned attachments that may remain from older bugs or interrupted deletes.

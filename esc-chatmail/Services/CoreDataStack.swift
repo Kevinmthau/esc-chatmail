@@ -130,9 +130,12 @@ final class CoreDataStack: @unchecked Sendable {
         description?.shouldMigrateStoreAutomatically = true
         description?.shouldInferMappingModelAutomatically = true
 
-        // Set up options for better error recovery
+        // History tracking stays on (turning it off after a store has opened
+        // with it logs a fault) even though nothing consumes history tokens;
+        // DatabaseMaintenanceService purges old transactions during cleanup.
+        // Remote-change notifications are NOT requested: nothing in the app
+        // observes .NSPersistentStoreRemoteChange.
         description?.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
-        description?.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
 
         loadPersistentStores(for: container)
 
