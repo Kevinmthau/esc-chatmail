@@ -9,8 +9,10 @@ import CoreData
 /// Lookups go through a context-scoped `[normalized email: Person]` cache in
 /// `context.userInfo` (precedent: InlineCIDAttachmentPrefetchScheduler), so a
 /// batch `prefetch` turns the per-participant find-or-create fetches into
-/// dictionary hits. Sync contexts are created fresh per run and never reset,
-/// so cached objects stay registered for the cache's lifetime. All entry
+/// dictionary hits. Hits are validated against the context — rollback and
+/// reset deregister objects without touching userInfo — and store-teardown
+/// paths must call `resetCache(in:)` (destroying the store invalidates
+/// registered objects in a way per-hit validation cannot see). All entry
 /// points must be called on the context's queue (inside `perform`), which is
 /// also what `context.fetch` already required.
 struct PersonFactory {
@@ -24,6 +26,32 @@ struct PersonFactory {
         let fresh = NSMutableDictionary()
         context.userInfo[cacheUserInfoKey] = fresh
         return fresh
+    }
+
+    private static func validCachedPerson(
+        forEmail email: String,
+        in cache: NSMutableDictionary,
+        context: NSManagedObjectContext
+    ) -> Person? {
+        guard let person = cache[email] as? Person else { return nil }
+        // A hit is only trustworthy while the instance is still registered
+        // with this context: rollback() discards unsaved inserts and reset()
+        // deregisters everything, both without touching userInfo. Returning
+        // a stale entry would hand callers an unfulfillable fault to wire
+        // into new relationships (or crash faulting its properties).
+        guard person.managedObjectContext === context, !person.isDeleted else {
+            cache.removeObject(forKey: email)
+            return nil
+        }
+        return person
+    }
+
+    /// Drops the context's person cache wholesale. Store-teardown paths must
+    /// call this (CoreDataStack.resetStore does): destroying the backing
+    /// store invalidates every registered object without deregistering it,
+    /// so the per-hit staleness check cannot detect those zombies.
+    static func resetCache(in context: NSManagedObjectContext) {
+        context.userInfo.removeObject(forKey: cacheUserInfoKey)
     }
 
     private static func fetchPerson(email: String, in context: NSManagedObjectContext) -> Person? {
@@ -46,7 +74,7 @@ struct PersonFactory {
         let email = EmailNormalizer.normalize(rawEmail)
         let cache = cache(in: context)
 
-        let existing = cache[email] as? Person ?? {
+        let existing = validCachedPerson(forEmail: email, in: cache, context: context) ?? {
             let fetched = fetchPerson(email: email, in: context)
             if let fetched {
                 cache[email] = fetched
@@ -79,7 +107,7 @@ struct PersonFactory {
     static func lookup(email rawEmail: String, in context: NSManagedObjectContext) -> Person? {
         let email = EmailNormalizer.normalize(rawEmail)
         let cache = cache(in: context)
-        if let cached = cache[email] as? Person {
+        if let cached = validCachedPerson(forEmail: email, in: cache, context: context) {
             return cached
         }
         guard let fetched = fetchPerson(email: email, in: context) else { return nil }

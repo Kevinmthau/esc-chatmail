@@ -497,10 +497,31 @@ final class CoreDataStack: @unchecked Sendable {
         // Safely reset the store
         try destroyAllData()
 
+        // The viewContext outlives the store: drop its registered objects
+        // and context-scoped factory caches (destroyAndReloadAsync resets
+        // too). Skipping this left PersonFactory's userInfo cache holding
+        // Persons from the destroyed store, which the next sign-in's
+        // optimistic send resurrected as unfulfillable faults.
+        await resetViewContextState()
+
         // Reinitialize
         loadPersistentStores(for: persistentContainer)
 
         // Wait for store to be ready
         try await waitForStoreToLoad()
+
+        // Leave the context clean after reload as well, matching
+        // destroyAndReloadAsync's post-load reset.
+        await resetViewContextState()
+    }
+
+    private func resetViewContextState() async {
+        let viewContext = persistentContainer.viewContext
+        await viewContext.perform {
+            viewContext.reset()
+            // reset() deregisters objects but leaves userInfo intact, so the
+            // factory cache must be dropped explicitly.
+            PersonFactory.resetCache(in: viewContext)
+        }
     }
 }

@@ -153,4 +153,119 @@ final class PersonFactoryTests: XCTestCase {
             XCTAssertTrue(PersonFactory.lookup(email: "real@example.com", in: context) === existing)
         }
     }
+
+    // MARK: - Cache invalidation
+
+    func testFindOrCreate_afterRollback_recreatesInsteadOfReturningDetachedObject() throws {
+        try context.performAndWait {
+            let inserted = try PersonFactory.findOrCreate(
+                email: "roll@example.com",
+                displayName: nil,
+                in: context
+            )
+            // A failed-save recovery rolls the context back, discarding the
+            // unsaved insert; the cache must not resurrect the detached object.
+            context.rollback()
+            XCTAssertNil(inserted.managedObjectContext)
+
+            let recreated = try PersonFactory.findOrCreate(
+                email: "roll@example.com",
+                displayName: nil,
+                in: context
+            )
+            XCTAssertFalse(recreated === inserted)
+            XCTAssertTrue(recreated.managedObjectContext === context)
+        }
+    }
+
+    func testFindOrCreate_afterContextReset_refetchesLiveObject() throws {
+        try context.performAndWait {
+            let original = try PersonFactory.findOrCreate(
+                email: "reset@example.com",
+                displayName: "Original",
+                in: context
+            )
+            try context.save()
+
+            // Store-teardown paths reset the long-lived context; registered
+            // objects are deregistered but userInfo (the cache) survives.
+            context.reset()
+            XCTAssertNil(original.managedObjectContext)
+
+            let refetched = try PersonFactory.findOrCreate(
+                email: "reset@example.com",
+                displayName: nil,
+                in: context
+            )
+            XCTAssertFalse(refetched === original)
+            XCTAssertTrue(refetched.managedObjectContext === context)
+            // The saved row still exists; the miss must re-fetch, not duplicate.
+            XCTAssertEqual(try personCount(email: "reset@example.com"), 1)
+        }
+    }
+
+    func testLookup_afterDeleteAndSave_returnsNilInsteadOfDeletedObject() throws {
+        try context.performAndWait {
+            let person = try PersonFactory.findOrCreate(
+                email: "gone@example.com",
+                displayName: nil,
+                in: context
+            )
+            try context.save()
+
+            context.delete(person)
+            try context.save()
+
+            XCTAssertNil(PersonFactory.lookup(email: "gone@example.com", in: context))
+        }
+    }
+
+    func testResetCache_removesContextCacheStorage() throws {
+        try context.performAndWait {
+            _ = try PersonFactory.findOrCreate(
+                email: "drop@example.com",
+                displayName: nil,
+                in: context
+            )
+            XCTAssertNotNil(context.userInfo["PersonFactory.personsByEmail"])
+
+            PersonFactory.resetCache(in: context)
+
+            XCTAssertNil(context.userInfo["PersonFactory.personsByEmail"])
+        }
+    }
+
+    // MARK: - Store reset (sign-out)
+
+    func testResetStore_thenFindOrCreate_returnsLivePersonNotDestroyedStoreZombie() async throws {
+        // Sign-out calls CoreDataStack.resetStore(), which destroys the store
+        // while the container's viewContext (and its userInfo cache) lives
+        // on. A person cached by the optimistic-send path pre-sign-out must
+        // not be handed out post-sign-in as a fault against the old store.
+        let sqliteStack = TestCoreDataStack(storeKind: .sqlite)
+        let stack = CoreDataStack(persistentContainerForTesting: sqliteStack.persistentContainer)
+        let viewContext = sqliteStack.persistentContainer.viewContext
+
+        try viewContext.performAndWait {
+            _ = try PersonFactory.findOrCreate(
+                email: "signout@example.com",
+                displayName: "Old Account",
+                in: viewContext
+            )
+            try viewContext.save()
+        }
+
+        try await stack.resetStore()
+
+        try viewContext.performAndWait {
+            let person = try PersonFactory.findOrCreate(
+                email: "signout@example.com",
+                displayName: "New Account",
+                in: viewContext
+            )
+            XCTAssertTrue(person.managedObjectContext === viewContext)
+            XCTAssertTrue(person.isInserted, "the destroyed store's row is gone; this must be a fresh insert")
+            XCTAssertEqual(person.displayName, "New Account")
+        }
+    }
 }
