@@ -952,6 +952,123 @@ final class VirtualScrollStateTests: XCTestCase {
         }
     }
 
+    // MARK: - Window cap (back-trim while extending upward)
+
+    func testConfigurationDefaultsAndClampForMaxWindowSize() {
+        XCTAssertEqual(VirtualScrollConfiguration.default.maxWindowSize, 300, "default is max(200, pageSize·6)")
+
+        let clamped = VirtualScrollConfiguration(
+            visibleItemCount: 20,
+            bufferSize: 10,
+            pageSize: 50,
+            preloadThreshold: 5,
+            maxWindowSize: 10
+        )
+        // visible + 2·buffer + 2·page = 140: smaller caps cause
+        // window-replace/preload ping-pong.
+        XCTAssertEqual(clamped.maxWindowSize, 140)
+
+        let small = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1,
+            maxWindowSize: 12
+        )
+        XCTAssertEqual(small.maxWindowSize, 12, "requests at or above the viable minimum are honored")
+    }
+
+    func testMessageWindowBackTrim_capsAndPreservesRangeInvariant() throws {
+        let (_, messages) = try makeConversationWithMessages(count: 15)
+        let ids = messages.map(\.objectID)
+
+        // Window extended upward past the cap: rows 3..<15 prepended with 0..<3.
+        let window = MessageWindow(
+            startIndex: 0,
+            endIndex: 15,
+            messageIDs: ids,
+            isLoading: false
+        )
+
+        let trimmed = window.backTrimmed(to: 12)
+
+        XCTAssertEqual(trimmed.startIndex, 0)
+        XCTAssertEqual(trimmed.endIndex, 12)
+        XCTAssertEqual(trimmed.messageIDs, Array(ids.prefix(12)), "back-trim drops the largest absolute indices")
+        XCTAssertEqual(trimmed.endIndex - trimmed.startIndex, trimmed.messageIDs.count, "grouping/boundary math depends on this invariant")
+
+        // Under the cap: untouched.
+        let untouched = trimmed.backTrimmed(to: 12)
+        XCTAssertEqual(untouched.messageIDs.count, 12)
+        XCTAssertEqual(untouched.endIndex, 12)
+    }
+
+    func testUpwardScrollSweep_neverExceedsWindowCapAndRecovers() async throws {
+        // Property-style sweep: whatever mix of window replacements and
+        // preloads the scheduler produces, the published window never exceeds
+        // the cap and index math stays consistent; afterwards the latest
+        // window is recoverable. Deliberately tolerant of interleaving —
+        // the deterministic trim arithmetic is pinned by the MessageWindow
+        // unit test above.
+        let (conversation, messages) = try makeConversationWithMessages(count: 40)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 4,
+            bufferSize: 1,
+            pageSize: 3,
+            preloadThreshold: 1,
+            maxWindowSize: 12
+        )
+        let stack = self.stack!
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        let initialIDs = Array(messages.suffix(4)).map(\.objectID)
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
+        }
+
+        // Walk upward through the conversation in production-like steps.
+        var position = 36
+        while position >= 0 {
+            state.markIndexVisible(position)
+            try? await Task.sleep(nanoseconds: 40_000_000)
+
+            XCTAssertLessThanOrEqual(
+                state.visibleMessages.count,
+                configuration.maxWindowSize,
+                "window rows exceeded the cap at position \(position)"
+            )
+            if !state.visibleMessages.isEmpty {
+                XCTAssertEqual(
+                    state.absoluteIndex(forVisibleIndex: 0),
+                    state.visibleRangeStartIndex,
+                    "index math out of sync at position \(position)"
+                )
+                let lastVisible = state.visibleMessages.count - 1
+                XCTAssertEqual(
+                    state.absoluteIndex(forVisibleIndex: lastVisible),
+                    state.visibleRangeStartIndex + lastVisible
+                )
+            }
+
+            position -= 3
+        }
+
+        // Recovery: the latest window is reachable again after scrolling up.
+        await state.loadLatestWindowIfNeeded()
+        await waitUntil {
+            state.isShowingLatestWindow &&
+                state.visibleMessages.last?.objectID == messages.last?.objectID
+        }
+    }
+
     // MARK: - objectsDidChange relevance guard
 
     func testRelevanceGuard_conversationOnlyChanges_areIrrelevant() throws {
@@ -1125,3 +1242,4 @@ private actor FirstRequestPause {
         isReleased = true
     }
 }
+

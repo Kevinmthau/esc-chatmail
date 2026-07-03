@@ -19,4 +19,22 @@ struct MessageWindow {
     func contains(index: Int) -> Bool {
         range.contains(index)
     }
+
+    /// Returns a window whose row count is capped at `maxSize` by dropping
+    /// rows from the BACK (largest absolute indices). Used when the window
+    /// extends upward: the dropped rows are far below the viewport, so their
+    /// removal cannot shift visible content. Preserves the invariant
+    /// `endIndex - startIndex == messageIDs.count` that grouping and boundary
+    /// math depend on.
+    func backTrimmed(to maxSize: Int) -> MessageWindow {
+        guard maxSize > 0, messageIDs.count > maxSize else { return self }
+
+        let overflow = messageIDs.count - maxSize
+        return MessageWindow(
+            startIndex: startIndex,
+            endIndex: endIndex - overflow,
+            messageIDs: Array(messageIDs.dropLast(overflow)),
+            isLoading: isLoading
+        )
+    }
 }

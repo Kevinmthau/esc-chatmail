@@ -445,12 +445,20 @@ final class VirtualScrollState: ObservableObject {
             }
 
             currentWindow.messageIDs = page.messageIDs + currentWindow.messageIDs
+
+            // Back-trim against the window cap: the user is scrolling UP, so
+            // the trimmed rows are far below the viewport and their removal
+            // cannot shift visible content. Front-trim in preloadNext is
+            // deliberately absent — it removes rows above the viewport with
+            // no offset compensation (see the pruning note in
+            // updateVisibleMessages); out-of-window jumps already collapse
+            // the window naturally.
             currentWindow = MessageWindow(
                 startIndex: startIndex,
                 endIndex: currentWindow.endIndex,
                 messageIDs: currentWindow.messageIDs,
                 isLoading: false
-            )
+            ).backTrimmed(to: self.configuration.maxWindowSize)
 
             self.totalMessageCount = page.totalCount
             self.setMessageWindow(currentWindow)
