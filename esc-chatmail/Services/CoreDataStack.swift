@@ -343,8 +343,11 @@ final class CoreDataStack: @unchecked Sendable {
 
                     // Handle specific Core Data errors
                     if error.code == NSManagedObjectMergeError {
-                        // Resolve merge conflicts
+                        // Resolve merge conflicts, then give the conflicting
+                        // writer's transaction a moment before the bounded
+                        // re-save (attempts capped by retryCount).
                         handleMergeConflicts(in: context, error: error)
+                        Thread.sleep(forTimeInterval: 0.05 * Double(attempt + 1))
                     } else if error.code == NSValidationMultipleErrorsError {
                         // Handle validation errors
                         handleValidationErrors(in: context, error: error)
@@ -366,11 +369,15 @@ final class CoreDataStack: @unchecked Sendable {
     }
 
     private func handleMergeConflicts(in context: NSManagedObjectContext, error: NSError) {
-        // Refresh objects involved in merge conflict
+        // Refresh conflicted objects with mergeChanges: true — fresh store
+        // data is re-faulted UNDER the unsaved local edits so the retried
+        // save keeps them. The previous mergeChanges: false discarded the
+        // pending edits it was trying to save. (Near-unreachable with the
+        // trump merge policy everywhere, but recovery should not lose data.)
         if let conflicts = error.userInfo[NSPersistentStoreSaveConflictsErrorKey] as? [NSMergeConflict] {
             for conflict in conflicts {
                 let sourceObject = conflict.sourceObject
-                sourceObject.managedObjectContext?.refresh(sourceObject, mergeChanges: false)
+                sourceObject.managedObjectContext?.refresh(sourceObject, mergeChanges: true)
             }
         }
     }
