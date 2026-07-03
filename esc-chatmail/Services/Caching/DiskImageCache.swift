@@ -79,10 +79,14 @@ actor DiskImageCache: PeriodicCleanupHandler {
         return FileSystemErrorHandler.loadData(from: fileURL, category: .general)
     }
 
-    /// Gets cached image for a URL
+    /// Gets cached image for a URL, decoded with a bounded bitmap size.
+    /// Disk keeps the original bytes; only the decoded bitmap is capped
+    /// (consumers render at most full-screen width, and the downsampled
+    /// result being promoted to the memory cache is the desired behavior —
+    /// it is what keeps the memory cache's cost accounting meaningful).
     func getImage(for urlString: String) -> UIImage? {
         guard let data = getData(for: urlString) else { return nil }
-        return UIImage(data: data)
+        return ImageDownsampler.decode(data: data)
     }
 
     /// Saves image data to cache
