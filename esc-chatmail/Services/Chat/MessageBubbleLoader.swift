@@ -1,6 +1,12 @@
 import Foundation
 
-actor MessageBubbleLoader: MessageBubbleLoading {
+/// Deliberately a plain Sendable class, NOT an actor: the loader is stateless
+/// (all dependencies are lets; caches synchronize internally), and bubble
+/// loads are per-row CPU-bound work (HTML analysis) that must not serialize
+/// through a single executor while many bubbles are visible.
+/// @unchecked because dependency types predate Sendable annotations; safety
+/// holds as long as this class stays free of mutable stored state.
+final class MessageBubbleLoader: MessageBubbleLoading, @unchecked Sendable {
     private let contactsResolver: any ContactsResolving
     let processedTextCache: ProcessedTextCache
     let htmlContentHandler: HTMLContentHandler
