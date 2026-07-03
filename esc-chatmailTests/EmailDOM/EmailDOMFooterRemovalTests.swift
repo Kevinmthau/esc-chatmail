@@ -190,4 +190,48 @@ final class EmailDOMFooterRemovalTests: XCTestCase {
         XCTAssertTrue(text.contains("main message body"))
         XCTAssertFalse(text.contains("Sent from my tablet"))
     }
+
+    // MARK: - Majority-text guard
+    //
+    // A matched container holding the majority of the document's visible
+    // text is the message, not a footer; removing it wiped the bubble and
+    // triggered the downstream empty-content fallback chain.
+
+    func testFooterClassedElementHoldingMajorityOfTextSurvives() throws {
+        let longBody = String(repeating: "Meaningful message text that the reader needs. ", count: 10)
+        let html = "<p>Hi!</p><div class=\"footerContainer\">\(longBody)</div>"
+        let text = try visibleText(afterRemovingFootersFrom: html)
+        XCTAssertTrue(text.contains("Meaningful message text"))
+    }
+
+    func testSignatureTokenElementHoldingMajorityOfTextSurvives() throws {
+        let longBody = String(repeating: "Actual reply content the sender wrote for the reader. ", count: 10)
+        let html = "<p>Hey.</p><div class=\"sig\">\(longBody)</div>"
+        let text = try visibleText(afterRemovingFootersFrom: html)
+        XCTAssertTrue(text.contains("Actual reply content"))
+    }
+
+    func testFooterOnlyDocumentIsPreservedRatherThanWiped() throws {
+        let html = "<div class=\"footer\">The entire message lives inside a footer-classed wrapper.</div>"
+        let text = try visibleText(afterRemovingFootersFrom: html)
+        XCTAssertTrue(text.contains("entire message"))
+    }
+
+    func testHeroImageOnlyNewsletterFooterStillRemoved() throws {
+        // No visible text anywhere: the guard has nothing to protect and
+        // image-bearing footer blocks are still removed.
+        let html = "<div class=\"hero\"><img src=\"https://example.com/hero.png\"></div><div class=\"footer\"><img src=\"https://example.com/social.png\"></div>"
+        let document = try SwiftSoup.parse(html)
+        try EmailDOMQuoteRemover.removeFooterContainers(in: document)
+        XCTAssertEqual(try document.select("div.footer").array().count, 0)
+        XCTAssertEqual(try document.select("div.hero img").array().count, 1)
+    }
+
+    func testMinorityTrailingFooterStillRemovedNearBoundary() throws {
+        // Footer share ~33% — well under the guard's majority threshold.
+        let html = "<p>Sixty characters of real message body text goes right here.</p><div class=\"footer\">Unsubscribe · Preferences · Help</div>"
+        let text = try visibleText(afterRemovingFootersFrom: html)
+        XCTAssertTrue(text.contains("real message body"))
+        XCTAssertFalse(text.contains("Unsubscribe"))
+    }
 }
