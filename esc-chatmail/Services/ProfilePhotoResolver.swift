@@ -12,11 +12,14 @@ actor ProfilePhotoResolver: MemoryWarningHandler {
 
     private let contactsResolver = ContactsResolver.shared
     private let coreDataStack = CoreDataStack.shared
-    private let cache = NSCache<NSString, CachedPhoto>()
+    private let cache: NSCache<NSString, CachedPhoto>
     private let requestManager = InFlightRequestManager<String, ProfilePhoto>()
     private let memoryObserver = MemoryWarningObserver()
 
-    private init() {
+    /// The cache parameter is a testing seam (cost-recording spy); production
+    /// code uses `shared`.
+    init(cache: NSCache<NSString, CachedPhoto> = NSCache()) {
+        self.cache = cache
         cache.countLimit = CacheConfig.photoCacheSize
         // Set memory limit (assume ~50KB average per photo, allows ~25MB)
         cache.totalCostLimit = 25 * 1024 * 1024
@@ -54,9 +57,10 @@ actor ProfilePhotoResolver: MemoryWarningHandler {
             await fetchPhoto(for: normalizedEmail)
         }
 
-        // Cache the result (even if nil, to avoid repeated lookups)
+        // Cache the result (even if nil, to avoid repeated lookups).
+        // Cost is the compressed data size; nil negative-cache entries cost ~0.
         let cached = CachedPhoto(photo: photo, timestamp: Date())
-        cache.setObject(cached, forKey: normalizedEmail as NSString)
+        cache.setObject(cached, forKey: normalizedEmail as NSString, cost: cached.estimatedCacheCost)
 
         return photo
     }
@@ -105,7 +109,7 @@ actor ProfilePhotoResolver: MemoryWarningHandler {
             // Add to memory cache
             let photo = ProfilePhoto(source: .contacts, imageData: imageData, url: nil)
             let cached = CachedPhoto(photo: photo, timestamp: Date())
-            cache.setObject(cached, forKey: normalizedEmail as NSString)
+            cache.setObject(cached, forKey: normalizedEmail as NSString, cost: cached.estimatedCacheCost)
         }
 
         // For emails not found in contacts, check cache individually
@@ -240,7 +244,9 @@ struct ProfilePhoto {
     }
 }
 
-private class CachedPhoto {
+/// Internal (not private) and NSObject-backed so tests can construct the
+/// resolver's cache type and subclass NSCache with it (ObjC representability).
+final class CachedPhoto: NSObject {
     let photo: ProfilePhoto?
     let timestamp: Date
 
@@ -251,5 +257,11 @@ private class CachedPhoto {
 
     var isExpired: Bool {
         Date().timeIntervalSince(timestamp) > CacheConfig.photoCacheTTL
+    }
+
+    /// NSCache cost: size of the compressed photo bytes. URL-only and nil
+    /// (negative-cache) entries are effectively free.
+    var estimatedCacheCost: Int {
+        photo?.imageData?.count ?? 0
     }
 }

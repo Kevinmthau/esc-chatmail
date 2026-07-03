@@ -5,12 +5,15 @@ import UIKit
 actor EnhancedImageCache: MemoryWarningHandler {
     static let shared = EnhancedImageCache()
 
-    private let memoryCache = NSCache<NSString, UIImage>()
+    private let memoryCache: NSCache<NSString, UIImage>
     private let diskCache = DiskImageCache.shared
     private let requestManager = ImageRequestManager()
     private let memoryObserver = MemoryWarningObserver()
 
-    private init() {
+    /// The cache parameter is a testing seam (cost-recording spy); production
+    /// code uses `shared`.
+    init(memoryCache: NSCache<NSString, UIImage> = NSCache()) {
+        self.memoryCache = memoryCache
         memoryCache.countLimit = 100
         memoryCache.totalCostLimit = 50 * 1024 * 1024 // 50 MB
 
@@ -37,7 +40,7 @@ actor EnhancedImageCache: MemoryWarningHandler {
         // Check disk cache
         if let diskImage = await diskCache.getImage(for: key) {
             // Promote to memory cache
-            memoryCache.setObject(diskImage, forKey: key as NSString)
+            memoryCache.setObject(diskImage, forKey: key as NSString, cost: diskImage.estimatedCacheCost)
             return diskImage
         }
 
@@ -46,7 +49,7 @@ actor EnhancedImageCache: MemoryWarningHandler {
 
     /// Sets image in both caches
     func set(_ image: UIImage, for key: String) async {
-        memoryCache.setObject(image, forKey: key as NSString)
+        memoryCache.setObject(image, forKey: key as NSString, cost: image.estimatedCacheCost)
 
         // Save to disk
         await diskCache.save(image, for: key)
@@ -74,7 +77,7 @@ actor EnhancedImageCache: MemoryWarningHandler {
         if urlString.hasPrefix("file://") {
             if let data = await AvatarStorage.shared.loadAvatar(from: urlString),
                let image = UIImage(data: data) {
-                memoryCache.setObject(image, forKey: urlString as NSString)
+                memoryCache.setObject(image, forKey: urlString as NSString, cost: image.estimatedCacheCost)
                 return image
             }
             return nil
@@ -83,7 +86,7 @@ actor EnhancedImageCache: MemoryWarningHandler {
         // Handle data:// URLs (legacy base64)
         if urlString.hasPrefix("data:image") {
             if let image = await ImageDecoder.decodeBase64Async(urlString) {
-                memoryCache.setObject(image, forKey: urlString as NSString)
+                memoryCache.setObject(image, forKey: urlString as NSString, cost: image.estimatedCacheCost)
                 return image
             }
             return nil
