@@ -9,7 +9,10 @@ enum APIError: LocalizedError {
     case invalidData(String)
     case authenticationError
     case credentialsRevoked
-    case rateLimited
+    /// Server rejected with 429. `retryAfter` carries the (capped) server
+    /// Retry-After in seconds when the response provided one, so outer retry
+    /// owners can honor server pacing instead of synthetic backoff.
+    case rateLimited(retryAfter: TimeInterval?)
     case serverError(Int)
     case timeout
     case historyIdExpired
@@ -29,7 +32,10 @@ enum APIError: LocalizedError {
             return "Authentication failed"
         case .credentialsRevoked:
             return "Your credentials have been revoked. Please sign in again."
-        case .rateLimited:
+        case .rateLimited(let retryAfter):
+            if let retryAfter {
+                return "Rate limited by server (retry after \(Int(retryAfter))s)"
+            }
             return "Rate limited by server"
         case .serverError(let code):
             return "Server error: \(code)"

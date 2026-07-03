@@ -482,8 +482,8 @@ extension MockGmailAPIClient {
     /// Configures the mock to simulate rate limiting
     func simulateRateLimited() {
         withStateLock {
-            listMessagesError = APIError.rateLimited
-            getMessageError = APIError.rateLimited
+            listMessagesError = APIError.rateLimited(retryAfter: nil)
+            getMessageError = APIError.rateLimited(retryAfter: nil)
         }
     }
 

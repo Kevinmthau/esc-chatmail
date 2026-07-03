@@ -13,6 +13,9 @@ private struct BoundedFetchResult {
     /// Messages that failed with retriable errors but we've exhausted retries
     /// These might succeed on a future sync attempt
     let exhaustedRetryIds: [String]
+    /// Largest server-provided Retry-After (seconds, capped) among rate-limited
+    /// failures in this pass — the outer retry loop honors it over synthetic backoff.
+    let maxRetryAfterSeconds: TimeInterval?
 }
 
 /// Outcome of a single retry pass over previously abandoned messages
@@ -99,26 +102,34 @@ final class MessageFetcher: @unchecked Sendable {
         var permanentlyFailedIds: [String] = []
         var notFoundIds: [String] = []
         var exhaustedRetryIds: [String] = []
+        var maxRetryAfterSeconds: TimeInterval?
 
         await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
             var iterator = ids.makeIterator()
             var activeTasks = 0
             let maxConcurrent = SyncConfig.maxConcurrentMessageFetches
 
+            // Single retry owner: this class owns the retry policy, so the
+            // client gets a budget of ONE total attempt per call (a successful
+            // 401 token refresh grants its replacement attempt inside the
+            // client and never consumes the budget). The previous stack —
+            // client loop × 15s withTimeout wrapper × this class's loop —
+            // allowed up to 12 HTTP attempts per message, and the 15s wrapper
+            // amputated the client's backoff mid-sleep anyway (URLSession's
+            // per-request timeout is already forced ≥30s).
+            @Sendable func fetchOnce(_ id: String) async -> (String, Result<GmailMessage, Error>) {
+                do {
+                    try Task.checkCancellation()
+                    let message = try await self.apiClient.getMessage(id: id, format: "full", maxRetries: 1)
+                    return (id, .success(message))
+                } catch {
+                    return (id, .failure(error))
+                }
+            }
+
             // Start initial batch of concurrent tasks
             while activeTasks < maxConcurrent, let id = iterator.next() {
-                group.addTask { [apiClient] in
-                    // Check cancellation at start of child task to propagate cancellation quickly
-                    do {
-                        try Task.checkCancellation()
-                        let message = try await withTimeout(seconds: SyncConfig.messageFetchTimeout) {
-                            try await apiClient.getMessage(id: id)
-                        }
-                        return (id, .success(message))
-                    } catch {
-                        return (id, .failure(error))
-                    }
-                }
+                group.addTask { await fetchOnce(id) }
                 activeTasks += 1
             }
 
@@ -136,6 +147,9 @@ final class MessageFetcher: @unchecked Sendable {
                 case .success(let message):
                     successfulMessages.append(message)
                 case .failure(let error):
+                    if case APIError.rateLimited(let retryAfter) = error, let retryAfter {
+                        maxRetryAfterSeconds = max(maxRetryAfterSeconds ?? 0, retryAfter)
+                    }
                     if self.isRetriableError(error) {
                         // Transient error (timeout, network, 5xx)
                         if isFinalAttempt {
@@ -155,18 +169,7 @@ final class MessageFetcher: @unchecked Sendable {
 
                 // Start next task if there are more IDs
                 if let nextId = iterator.next() {
-                    group.addTask { [apiClient] in
-                        // Check cancellation at start of child task to propagate cancellation quickly
-                        do {
-                            try Task.checkCancellation()
-                            let message = try await withTimeout(seconds: SyncConfig.messageFetchTimeout) {
-                                try await apiClient.getMessage(id: nextId)
-                            }
-                            return (nextId, .success(message))
-                        } catch {
-                            return (nextId, .failure(error))
-                        }
-                    }
+                    group.addTask { await fetchOnce(nextId) }
                     activeTasks += 1
                 }
             }
@@ -177,7 +180,8 @@ final class MessageFetcher: @unchecked Sendable {
             retriableFailedIds: retriableFailedIds,
             permanentlyFailedIds: permanentlyFailedIds,
             notFoundIds: notFoundIds,
-            exhaustedRetryIds: exhaustedRetryIds
+            exhaustedRetryIds: exhaustedRetryIds,
+            maxRetryAfterSeconds: maxRetryAfterSeconds
         )
     }
 
@@ -251,6 +255,7 @@ final class MessageFetcher: @unchecked Sendable {
         await persistInChronologicalOrder(initialResult.successfulMessages, persist: persist)
 
         var currentFailedIds = initialResult.retriableFailedIds
+        var pendingRetryAfter = initialResult.maxRetryAfterSeconds
 
         // Retry loop with exponential backoff and jitter
         for attempt in 1...maxRetryAttempts {
@@ -258,8 +263,9 @@ final class MessageFetcher: @unchecked Sendable {
                 break
             }
 
-            // Exponential backoff with jitter to prevent thundering herd
-            let delay = calculateRetryDelay(attempt: attempt)
+            // Server-provided Retry-After (when the previous pass was rate
+            // limited) dominates the synthetic backoff.
+            let delay = calculateRetryDelay(attempt: attempt, retryAfter: pendingRetryAfter)
             Log.debug("Retry attempt \(attempt)/\(maxRetryAttempts) for \(currentFailedIds.count) failed messages after \(delay / 1_000_000)ms...", category: .sync)
 
             do {
@@ -288,6 +294,7 @@ final class MessageFetcher: @unchecked Sendable {
             await persistInChronologicalOrder(retryResult.successfulMessages, persist: persist)
 
             currentFailedIds = retryResult.retriableFailedIds
+            pendingRetryAfter = retryResult.maxRetryAfterSeconds
         }
 
         // Log exhausted retries separately - these might succeed on next sync
@@ -372,14 +379,25 @@ final class MessageFetcher: @unchecked Sendable {
 
     /// Calculates retry delay with exponential backoff and jitter to prevent thundering herd.
     ///
-    /// Jitter adds 0-25% randomness to the base delay, spreading out retry attempts
+    /// A server-provided Retry-After (already capped by the API client)
+    /// dominates the synthetic backoff — the 0.5/1/2s ladder used to ignore
+    /// it entirely, hammering a rate-limited server ahead of its own
+    /// schedule. Jitter adds 0-25% randomness either way, spreading retries
     /// when multiple operations fail simultaneously.
     ///
-    /// - Parameter attempt: The current retry attempt number (1-based)
+    /// - Parameters:
+    ///   - attempt: The current retry attempt number (1-based)
+    ///   - retryAfter: Server-requested pacing in seconds, if any
     /// - Returns: Delay in nanoseconds
-    private func calculateRetryDelay(attempt: Int) -> UInt64 {
+    private func calculateRetryDelay(attempt: Int, retryAfter: TimeInterval? = nil) -> UInt64 {
         // Base exponential backoff: 500ms, 1s, 2s, etc.
-        let baseDelay = baseRetryDelay * UInt64(1 << (attempt - 1))
+        let syntheticDelay = baseRetryDelay * UInt64(1 << (attempt - 1))
+        let baseDelay: UInt64
+        if let retryAfter, retryAfter > 0 {
+            baseDelay = max(syntheticDelay, UInt64(retryAfter * 1_000_000_000))
+        } else {
+            baseDelay = syntheticDelay
+        }
 
         // Add 0-25% jitter to prevent thundering herd
         let jitter = UInt64.random(in: 0...(baseDelay / 4))

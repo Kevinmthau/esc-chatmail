@@ -12,6 +12,19 @@ protocol GmailAPIClientProtocol: AnyObject, Sendable {
     /// Fetches a single message by ID.
     func getMessage(id: String, format: String) async throws -> GmailMessage
 
+    /// Fetches a single message by ID with an explicit retry budget.
+    ///
+    /// `maxRetries` means TOTAL attempts (the client's loop runs
+    /// `while attempt < allowedAttempts`), not retries after the first try;
+    /// nil uses the client's configured strategy. A successful 401 token
+    /// refresh grants a replacement attempt and never consumes the budget.
+    ///
+    /// A protocol requirement (not extension-only) deliberately: an
+    /// extension method would be statically dispatched through
+    /// `any GmailAPIClientProtocol` and the budget would silently no-op
+    /// for the real client.
+    func getMessage(id: String, format: String, maxRetries: Int?) async throws -> GmailMessage
+
     /// Modifies a message's labels.
     func modifyMessage(id: String, addLabelIds: [String]?, removeLabelIds: [String]?) async throws -> GmailMessage
 
@@ -54,6 +67,12 @@ extension GmailAPIClientProtocol {
     }
 
     func getMessage(id: String, format: String = "full") async throws -> GmailMessage {
+        try await getMessage(id: id, format: format)
+    }
+
+    /// Default witness for conformers without retry budgets (mocks, fakes):
+    /// forwards to the 2-arg fetch, ignoring `maxRetries`.
+    func getMessage(id: String, format: String, maxRetries: Int?) async throws -> GmailMessage {
         try await getMessage(id: id, format: format)
     }
 

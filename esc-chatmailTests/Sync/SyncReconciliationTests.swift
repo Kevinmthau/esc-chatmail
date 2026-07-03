@@ -256,7 +256,7 @@ final class SyncReconciliationTests: XCTestCase {
                 resultSizeEstimate: 1
             )
         ]
-        mockAPI.listMessagesErrorsByPageToken["old-page-2"] = APIError.rateLimited
+        mockAPI.listMessagesErrorsByPageToken["old-page-2"] = APIError.rateLimited(retryAfter: nil)
         try setPersistedMissedMessageCursors([
             persistedCursor(query: "after:0 -label:spam -label:drafts -label:trash", pageToken: "old-page-2")
         ])
@@ -294,7 +294,7 @@ final class SyncReconciliationTests: XCTestCase {
                 resultSizeEstimate: 1
             )
         ]
-        mockAPI.listMessagesErrorsByPageToken["old-b-page-2"] = APIError.rateLimited
+        mockAPI.listMessagesErrorsByPageToken["old-b-page-2"] = APIError.rateLimited(retryAfter: nil)
         try setPersistedMissedMessageCursors([
             persistedCursor(query: "after:0 -label:spam -label:drafts -label:trash", pageToken: "old-a-page-2"),
             persistedCursor(query: "after:1 -label:spam -label:drafts -label:trash", pageToken: "old-b-page-2")

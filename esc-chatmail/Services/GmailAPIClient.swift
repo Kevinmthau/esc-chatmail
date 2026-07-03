@@ -215,39 +215,44 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                     let statusCode = httpResponse.statusCode
                     switch httpResponse.statusCode {
                     case 429:
-                        // Respect Retry-After header if present, but cap it
-                        var delay: TimeInterval
-                        if let retryAfter = httpResponse.value(forHTTPHeaderField: "Retry-After"),
-                           let retryAfterSeconds = TimeInterval(retryAfter) {
-                            delay = min(retryAfterSeconds, NetworkConfig.maxRetryAfterSeconds)
-                            if retryAfterSeconds > NetworkConfig.maxRetryAfterSeconds {
-                                Log.warning("Rate limited, Retry-After (\(retryAfterSeconds)s) capped to \(delay)s", category: .api)
-                            } else {
-                                Log.warning("Rate limited, Retry-After header requests \(delay) seconds", category: .api)
-                            }
+                        // Respect Retry-After header if present, but cap it.
+                        // The (capped) header value rides on the thrown error
+                        // so outer retry owners can honor server pacing.
+                        let headerRetryAfter: TimeInterval? = httpResponse
+                            .value(forHTTPHeaderField: "Retry-After")
+                            .flatMap(TimeInterval.init)
+                            .map { min($0, NetworkConfig.maxRetryAfterSeconds) }
+
+                        let delay: TimeInterval
+                        if let headerRetryAfter {
+                            Log.warning("Rate limited, Retry-After requests \(headerRetryAfter)s (capped)", category: .api)
+                            delay = headerRetryAfter
                         } else {
                             delay = retryDelay * 2
                             Log.warning("Rate limited, using exponential backoff: \(delay) seconds", category: .api)
                         }
 
-                        // Track cumulative backoff to prevent API exhaustion
-                        await rateLimitTracker.recordBackoff(delay)
+                        // Breaker/budget checks precede recordBackoff so only
+                        // delays actually slept are recorded — otherwise N
+                        // concurrent 429s at maxRetries 1 would trip the 120s
+                        // breaker without anyone waiting at all.
                         if await rateLimitTracker.shouldAbort() {
                             Log.warning("Circuit breaker: excessive cumulative rate limiting, aborting", category: .api)
-                            throw APIError.rateLimited
+                            throw APIError.rateLimited(retryAfter: headerRetryAfter)
                         }
 
                         // Check if delay would exceed remaining time budget
                         let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
                         if delay > remainingTime {
                             Log.warning("Circuit breaker: delay (\(delay)s) exceeds remaining time budget (\(remainingTime)s)", category: .api)
-                            throw APIError.rateLimited
+                            throw APIError.rateLimited(retryAfter: headerRetryAfter)
                         }
 
                         if attempt >= allowedAttempts {
-                            throw APIError.rateLimited
+                            throw APIError.rateLimited(retryAfter: headerRetryAfter)
                         }
 
+                        await rateLimitTracker.recordBackoff(delay)
                         try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                         retryDelay = min(delay * 2, retryStrategy.maxDelay)
                         continue

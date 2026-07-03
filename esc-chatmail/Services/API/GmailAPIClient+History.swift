@@ -90,21 +90,21 @@ extension GmailAPIClient {
                     await rateLimitTracker.recordBackoff(delay)
                     if await rateLimitTracker.shouldAbort() {
                         Log.warning("Circuit breaker: excessive cumulative rate limiting, aborting", category: .api)
-                        throw APIError.rateLimited
+                        throw APIError.rateLimited(retryAfter: nil)
                     }
 
                     // Check if delay would exceed remaining time budget
                     let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
                     if delay > remainingTime {
                         Log.warning("Circuit breaker: delay (\(delay)s) exceeds remaining time budget (\(remainingTime)s)", category: .api)
-                        throw APIError.rateLimited
+                        throw APIError.rateLimited(retryAfter: nil)
                     }
 
                     // Final-attempt guard (previously missing here): without it
                     // the loop slept the full Retry-After and then fell out as
                     // URLError(.unknown) instead of rateLimited.
                     if attempt >= allowedAttempts {
-                        throw APIError.rateLimited
+                        throw APIError.rateLimited(retryAfter: nil)
                     }
 
                     try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
