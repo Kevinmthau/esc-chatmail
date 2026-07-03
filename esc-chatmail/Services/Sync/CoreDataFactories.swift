@@ -5,22 +5,58 @@ import CoreData
 
 /// Factory for creating and finding Person entities
 /// Centralizes Person creation logic for reuse across services
+///
+/// Lookups go through a context-scoped `[normalized email: Person]` cache in
+/// `context.userInfo` (precedent: InlineCIDAttachmentPrefetchScheduler), so a
+/// batch `prefetch` turns the per-participant find-or-create fetches into
+/// dictionary hits. Sync contexts are created fresh per run and never reset,
+/// so cached objects stay registered for the cache's lifetime. All entry
+/// points must be called on the context's queue (inside `perform`), which is
+/// also what `context.fetch` already required.
 struct PersonFactory {
 
-    /// Finds an existing person by email or creates a new one
-    /// - Throws: CoreDataError.entityCreationFailed if entity creation fails
-    static func findOrCreate(
-        email: String,
-        displayName: String?,
-        in context: NSManagedObjectContext
-    ) throws -> Person {
+    private static let cacheUserInfoKey = "PersonFactory.personsByEmail"
+
+    private static func cache(in context: NSManagedObjectContext) -> NSMutableDictionary {
+        if let existing = context.userInfo[cacheUserInfoKey] as? NSMutableDictionary {
+            return existing
+        }
+        let fresh = NSMutableDictionary()
+        context.userInfo[cacheUserInfoKey] = fresh
+        return fresh
+    }
+
+    private static func fetchPerson(email: String, in context: NSManagedObjectContext) -> Person? {
         let request = Person.fetchRequest()
         request.predicate = NSPredicate(format: "email == %@", email)
         request.fetchLimit = 1
         request.fetchBatchSize = 1
+        return try? context.fetch(request).first
+    }
 
-        if let existing = try? context.fetch(request).first {
-            // Update display name if the new one is better for this email.
+    /// Finds an existing person by email or creates a new one.
+    /// The email is normalized so cache keys and Person rows stay consistent
+    /// regardless of caller (live callers already pass normalized emails).
+    /// - Throws: CoreDataError.entityCreationFailed if entity creation fails
+    static func findOrCreate(
+        email rawEmail: String,
+        displayName: String?,
+        in context: NSManagedObjectContext
+    ) throws -> Person {
+        let email = EmailNormalizer.normalize(rawEmail)
+        let cache = cache(in: context)
+
+        let existing = cache[email] as? Person ?? {
+            let fetched = fetchPerson(email: email, in: context)
+            if let fetched {
+                cache[email] = fetched
+            }
+            return fetched
+        }()
+
+        if let existing {
+            // Update display name if the new one is better for this email —
+            // on cache hits too, so batches keep improving names.
             if EmailNormalizer.isBetterDisplayName(displayName, than: existing.displayName, forEmail: email) {
                 existing.displayName = displayName
                 PersonDisplayInfoChangeNotification.invalidatePersonCacheAndPostLater(emails: [email])
@@ -34,20 +70,47 @@ struct PersonFactory {
         person.id = UUID()
         person.email = email
         person.displayName = displayName
+        cache[email] = person
         return person
     }
 
-    /// Batch prefetch persons by email for efficient lookups
+    /// Cache-aware lookup that never creates. Returns nil when no Person row
+    /// exists for the (normalized) email.
+    static func lookup(email rawEmail: String, in context: NSManagedObjectContext) -> Person? {
+        let email = EmailNormalizer.normalize(rawEmail)
+        let cache = cache(in: context)
+        if let cached = cache[email] as? Person {
+            return cached
+        }
+        guard let fetched = fetchPerson(email: email, in: context) else { return nil }
+        cache[email] = fetched
+        return fetched
+    }
+
+    /// Batch-fetches persons by email and primes the context cache so the
+    /// per-participant lookups in a save batch stop hitting SQLite (N+1).
+    @discardableResult
     static func prefetch(emails: [String], in context: NSManagedObjectContext) -> [String: Person] {
-        guard !emails.isEmpty else { return [:] }
+        let normalized = Set(emails.map(EmailNormalizer.normalize)).filter { !$0.isEmpty }
+        guard !normalized.isEmpty else { return [:] }
 
         let request = Person.fetchRequest()
-        request.predicate = NSPredicate(format: "email IN %@", emails)
+        request.predicate = NSPredicate(format: "email IN %@", Array(normalized))
         request.fetchBatchSize = 100
 
         guard let persons = try? context.fetch(request) else { return [:] }
 
-        return Dictionary(uniqueKeysWithValues: persons.map { ($0.email, $0) })
+        // Duplicate-email Person rows are legal (Person.email has no
+        // uniqueness constraint), so collapse duplicates instead of trapping;
+        // findOrCreate's fetchLimit-1 lookup is equally arbitrary about which
+        // duplicate wins.
+        let byEmail = Dictionary(persons.map { ($0.email, $0) }, uniquingKeysWith: { first, _ in first })
+
+        let cache = cache(in: context)
+        for (email, person) in byEmail {
+            cache[email] = person
+        }
+        return byEmail
     }
 }
 
