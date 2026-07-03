@@ -25,7 +25,10 @@ extension TokenManager {
 
                 // Ensure memory cache is updated before returning so concurrent
                 // callers to getCurrentToken() see the fresh token immediately
-                await self.updateMemoryCache(accessToken: tokens.accessToken)
+                await self.updateMemoryCache(
+                    accessToken: tokens.accessToken,
+                    expirationDate: tokens.expirationDate
+                )
 
                 await refreshBackoff.reset()
                 return tokens.accessToken

@@ -93,6 +93,34 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
     // Token refresh configuration
     let maxRetryAttempts = 3
 
+    // MARK: - In-memory token cache
+
+    /// Validated (token, expiry) pair for the request fast path.
+    private struct CachedToken {
+        let accessToken: String
+        let expirationDate: Date
+
+        var isExpiringSoon: Bool {
+            Date().addingTimeInterval(300) >= expirationDate
+        }
+    }
+
+    /// Lock-protected so getCurrentToken serves requests without a keychain
+    /// round-trip or a MainActor hop (the previous fast path stored only the
+    /// token in @MainActor AuthSession and re-read the keychain per request
+    /// to validate expiry). Every writer either supplies the expiry or clears
+    /// the cache (unvalidated → keychain fallback).
+    private let cacheLock = NSLock()
+    private var _cachedToken: CachedToken?
+
+    private func cachedToken() -> CachedToken? {
+        cacheLock.withLock { _cachedToken }
+    }
+
+    private func setCachedToken(_ token: CachedToken?) {
+        cacheLock.withLock { _cachedToken = token }
+    }
+
     // MARK: - Initialization
 
     init(keychainService: KeychainServiceProtocol,
@@ -108,9 +136,16 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
         self.init(keychainService: KeychainService.shared, authSession: .shared)
     }
 
-    /// Updates the in-memory token cache on the main actor.
-    /// Accessible to extension files (unlike private authSession).
-    func updateMemoryCache(accessToken: String) async {
+    /// Updates the in-memory caches: the lock-protected (token, expiry) pair
+    /// that serves the request fast path, and AuthSession's @Published token
+    /// for UI consumers. A nil expiry marks the cache unvalidated so
+    /// getCurrentToken falls back to the keychain.
+    func updateMemoryCache(accessToken: String, expirationDate: Date?) async {
+        if let expirationDate {
+            setCachedToken(CachedToken(accessToken: accessToken, expirationDate: expirationDate))
+        } else {
+            setCachedToken(nil)
+        }
         await MainActor.run {
             authSession.accessToken = accessToken
         }
@@ -119,26 +154,21 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
     // MARK: - Public Methods
 
     nonisolated func getCurrentToken() async throws -> String {
-        // First, try to get token from memory (AuthSession)
-        let memoryToken = await MainActor.run { authSession.accessToken }
-        if let memoryToken = memoryToken {
-            // Verify it's still valid
-            do {
-                let tokenInfo = try loadTokenInfo()
-                if !tokenInfo.isExpiringSoon {
-                    return memoryToken
-                }
-            } catch {
-                // Memory token exists but keychain read failed - log and continue to refresh
-                Log.warning("Keychain read failed while validating memory token", category: .auth)
-            }
+        // Fast path: validated in-memory (token, expiry) — no keychain read,
+        // no MainActor hop.
+        if let cached = cachedToken(), !cached.isExpiringSoon {
+            return cached.accessToken
         }
 
         // Try to load from keychain
         do {
             let tokenInfo = try loadTokenInfo()
             if !tokenInfo.isExpiringSoon {
-                // Update memory cache
+                // Update memory caches
+                setCachedToken(CachedToken(
+                    accessToken: tokenInfo.accessToken,
+                    expirationDate: tokenInfo.expirationDate
+                ))
                 await MainActor.run {
                     authSession.accessToken = tokenInfo.accessToken
                 }
@@ -207,11 +237,12 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
             try keychainService.saveString(refresh, for: KeychainService.Key.googleRefreshToken.rawValue, withAccess: .afterFirstUnlockThisDeviceOnly)
         }
 
-        // Update memory cache asynchronously
-        // Note: This is fire-and-forget by design. The keychain is the source of truth,
-        // and getCurrentToken() will load from keychain if memory cache is stale.
-        // Making this synchronous would require blocking on MainActor, which could
-        // cause deadlocks when called from background contexts.
+        // Validate the lock-protected cache synchronously — this is what
+        // getCurrentToken's fast path reads. The AuthSession publish below
+        // stays fire-and-forget by design: it only feeds UI observers, and
+        // making it synchronous would require blocking on MainActor, which
+        // could deadlock when called from background contexts.
+        setCachedToken(CachedToken(accessToken: access, expirationDate: expirationDate))
         Task { @MainActor in
             authSession.accessToken = access
         }
@@ -224,6 +255,10 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
     }
 
     nonisolated func clearTokens() throws {
+        // Invalidate the request fast path FIRST so no request can win a
+        // stale token between the keychain deletes and the cache clear.
+        setCachedToken(nil)
+
         // Clear from keychain
         try keychainService.delete(for: KeychainService.Key.googleAccessToken.rawValue)
         try keychainService.delete(for: KeychainService.Key.googleRefreshToken.rawValue)
