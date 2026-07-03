@@ -2,32 +2,32 @@ import CoreGraphics
 import XCTest
 @testable import esc_chatmail
 
+/// Guards the live chat/list surfaces against reintroducing message-driven
+/// sheet state (`selectedMessage` + `showingWebView` style), which re-presents
+/// sheets when the message object mutates mid-display. Previously targeted
+/// VirtualScrollChatView and InboxListView; those views were production-dead
+/// and are deleted — ChatView routes presentation through ChatDestination and
+/// ConversationListView owns no message-driven sheet state.
 @MainActor
 final class FullEmailEntryPointPresentationTests: XCTestCase {
-    func testInboxListViewStoresOpenSessionInsteadOfMessageDrivenSheetState() {
+    func testConversationListViewDoesNotStoreMessageDrivenSheetState() {
         let deps = makeDependencies()
-        let view = InboxListView(
-            deps: deps,
-            fullEmailReaderCoordinator: FullEmailReaderCoordinator(
-                fullEmailOpener: MockEntryPointFullEmailOpener(preparedArtifact: nil)
-            )
-        )
+        let view = ConversationListView(deps: deps)
 
         let labels = storedPropertyLabels(of: view)
 
-        XCTAssertTrue(labels.contains("_fullEmailOpenSession"))
         XCTAssertFalse(labels.contains("_selectedMessage"))
         XCTAssertFalse(labels.contains("_showingWebView"))
     }
 
-    func testVirtualScrollChatViewStoresOpenSessionInsteadOfMessageDrivenSheetState() {
+    func testChatViewUsesDestinationBasedSheetPresentation() {
         let deps = makeDependencies()
         let conversation = ConversationBuilder()
-            .withDisplayName("Virtual Scroll")
+            .withDisplayName("Live Chat")
             .visible()
             .recentlyActive()
             .build(in: deps.viewContext)
-        let view = VirtualScrollChatView(
+        let view = ChatView(
             conversation: conversation,
             chatDependencies: deps.makeChatDependencies(
                 fullEmailOpener: MockEntryPointFullEmailOpener(preparedArtifact: nil)
@@ -36,7 +36,9 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
 
         let labels = storedPropertyLabels(of: view)
 
-        XCTAssertTrue(labels.contains("_fullEmailOpenSession"))
+        XCTAssertTrue(labels.contains("_presentedSheetDestination"))
+        XCTAssertFalse(labels.contains("_selectedMessage"))
+        XCTAssertFalse(labels.contains("_showingWebView"))
         XCTAssertFalse(labels.contains("_messageToViewInFull"))
     }
 
