@@ -145,4 +145,45 @@ final class MessageExtensionsTests: XCTestCase {
             "Looking forward to seeing you there."
         )
     }
+
+    // MARK: - isLikelyCalendarInvite memoization
+
+    func testIsLikelyCalendarInvite_memoRecomputesWhenContentBecomesInvite() throws {
+        let message = MessageBuilder()
+            .withId("memo-invite-\(UUID().uuidString)")
+            .withSubject("Lunch?")
+            .withBody("Want to grab food later?")
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        // Prime the memo with the non-invite result.
+        XCTAssertFalse(message.isLikelyCalendarInvite)
+
+        // Changing the signal inputs must invalidate the memo (fingerprint),
+        // not return the stale cached value.
+        message.subject = "Invitation: Board sync @ Mon May 5, 2026 9:00am - 9:30am (EDT)"
+        message.bodyText = """
+        Invitation from Google Calendar
+        Board sync
+        When
+        Monday May 5, 2026 • 9:00am – 9:30am (Eastern Time - New York)
+        Guests
+        brynn@example.com
+        """
+        XCTAssertTrue(message.isLikelyCalendarInvite)
+    }
+
+    func testIsLikelyCalendarInvite_memoIsStableAcrossRepeatedReads() throws {
+        let message = MessageBuilder()
+            .withId("memo-stable-\(UUID().uuidString)")
+            .withSubject("Invitation: Standup @ Tue May 6, 2026 10:00am - 10:15am (EDT)")
+            .withBody("Invitation from Google Calendar\nStandup\nWhen\nTuesday May 6, 2026 10:00am")
+            .build(in: context)
+        try testStack.saveViewContext()
+
+        let first = message.isLikelyCalendarInvite
+        let second = message.isLikelyCalendarInvite
+        XCTAssertEqual(first, second)
+        XCTAssertTrue(first)
+    }
 }

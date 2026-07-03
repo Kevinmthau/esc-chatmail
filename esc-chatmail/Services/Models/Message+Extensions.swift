@@ -7,6 +7,17 @@ private enum AttachmentDeduplicationKey: Hashable {
     case objectID(NSManagedObjectID)
 }
 
+/// NSCache entry for the memoized calendar-invite likelihood.
+private final class CalendarInviteLikelihoodEntry {
+    let fingerprint: Int
+    let value: Bool
+
+    init(fingerprint: Int, value: Bool) {
+        self.fingerprint = fingerprint
+        self.value = value
+    }
+}
+
 extension Message {
     @nonobjc public class func fetchRequest() -> NSFetchRequest<Message> {
         return NSFetchRequest<Message>(entityName: "Message")
@@ -74,7 +85,42 @@ extension Message {
         }
     }
 
+    /// Memoized: the signal evaluation (raw-source sanitizer pass plus three
+    /// text normalizations and regex scans) runs once per row-model mapping
+    /// on the main actor, so repeated window resolutions re-paid it for every
+    /// message. Keyed by objectID and invalidated by a fingerprint of the
+    /// inputs; CalendarInviteSignals stays the single source of truth.
     var isLikelyCalendarInvite: Bool {
+        let fingerprint = calendarInviteSignalFingerprint
+        if let cached = Self.calendarInviteLikelihoodCache.object(forKey: objectID),
+           cached.fingerprint == fingerprint {
+            return cached.value
+        }
+
+        let value = computeIsLikelyCalendarInvite()
+        Self.calendarInviteLikelihoodCache.setObject(
+            CalendarInviteLikelihoodEntry(fingerprint: fingerprint, value: value),
+            forKey: objectID
+        )
+        return value
+    }
+
+    private static let calendarInviteLikelihoodCache: NSCache<NSManagedObjectID, CalendarInviteLikelihoodEntry> = {
+        let cache = NSCache<NSManagedObjectID, CalendarInviteLikelihoodEntry>()
+        cache.countLimit = 512
+        return cache
+    }()
+
+    private var calendarInviteSignalFingerprint: Int {
+        var hasher = Hasher()
+        hasher.combine(subject)
+        hasher.combine(cleanedSnippet ?? snippet)
+        hasher.combine(bodyText)
+        hasher.combine(attachmentsArray.contains { $0.isCalendarInviteAttachment })
+        return hasher.finalize()
+    }
+
+    private func computeIsLikelyCalendarInvite() -> Bool {
         let normalizedSubject = CalendarInviteSignals.normalizedSignalText(subject).lowercased()
         let normalizedSnippet = CalendarInviteSignals.normalizedSignalText(cleanedSnippet ?? snippet).lowercased()
         let normalizedBody = CalendarInviteSignals.normalizedSignalText(
