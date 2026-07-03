@@ -105,6 +105,12 @@ extension GmailAPIClient {
                             let newToken = try await tokenManager.getCurrentToken()
                             currentRequest.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
                             continue
+                        } catch TokenManagerError.invalidCredentials {
+                            // Mirrors performRequestWithRetry: a revoked refresh
+                            // token must abort (credentialsRevoked → abortNoRetry),
+                            // not loop through tokenRefreshAndRetry.
+                            Log.error("Refresh token revoked, user must re-authenticate", category: .api)
+                            throw APIError.credentialsRevoked
                         } catch {
                             Log.error("Token refresh failed during 401 recovery: \(error.localizedDescription)", category: .api)
                             throw APIError.authenticationError
@@ -125,6 +131,15 @@ extension GmailAPIClient {
                         continue
                     }
                     throw APIError.serverError(httpResponse.statusCode)
+
+                case 400...499:
+                    // Remaining client errors (403 quota/scope, 400 bad request …)
+                    // are non-retriable; mirrors performRequestWithRetry. Placed
+                    // after the specific 404/429/401 cases so their retry and
+                    // conversion behavior is untouched.
+                    let errorMessage = gmailErrorMessage(from: data)
+                        ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
+                    throw APIError.invalidData("Gmail API \(httpResponse.statusCode): \(errorMessage)")
 
                 default:
                     throw APIError.serverError(httpResponse.statusCode)

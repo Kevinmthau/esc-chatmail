@@ -12,9 +12,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         super.setUp()
         StubURLProtocol.reset()
 
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [StubURLProtocol.self]
-        let session = URLSession(configuration: configuration)
+        let session = StubURLProtocol.makeSession()
 
         tokenManager = MockTokenManager()
         client = GmailAPIClient(
@@ -152,79 +150,5 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
 
         XCTAssertEqual(message.id, "m1")
         XCTAssertEqual(StubURLProtocol.requestCount, 2, "Idempotent requests must keep retrying timeouts")
-    }
-}
-
-// MARK: - Stub URL Protocol
-
-/// Serves a scripted sequence of responses; the last entry repeats once the
-/// script is exhausted. State is static (URLProtocol instances are created by
-/// the URL loading system) and lock-guarded.
-private final class StubURLProtocol: URLProtocol {
-    enum Response {
-        case status(Int)
-        case data(Int, Data)
-        case error(URLError)
-    }
-
-    private static let lock = NSLock()
-    private static var _script: [Response] = []
-    private static var _requestCount = 0
-
-    static var script: [Response] {
-        get { lock.withLock { _script } }
-        set { lock.withLock { _script = newValue } }
-    }
-
-    static var requestCount: Int {
-        lock.withLock { _requestCount }
-    }
-
-    static func reset() {
-        lock.withLock {
-            _script = []
-            _requestCount = 0
-        }
-    }
-
-    private static func nextResponse() -> Response? {
-        lock.withLock {
-            _requestCount += 1
-            guard !_script.isEmpty else { return nil }
-            return _script.count > 1 ? _script.removeFirst() : _script[0]
-        }
-    }
-
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-
-    override func startLoading() {
-        guard let url = request.url, let response = Self.nextResponse() else {
-            client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
-            return
-        }
-
-        switch response {
-        case .status(let code):
-            send(url: url, statusCode: code, body: Data())
-        case .data(let code, let body):
-            send(url: url, statusCode: code, body: body)
-        case .error(let error):
-            client?.urlProtocol(self, didFailWithError: error)
-        }
-    }
-
-    override func stopLoading() {}
-
-    private func send(url: URL, statusCode: Int, body: Data) {
-        let httpResponse = HTTPURLResponse(
-            url: url,
-            statusCode: statusCode,
-            httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": "application/json"]
-        )!
-        client?.urlProtocol(self, didReceive: httpResponse, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: body)
-        client?.urlProtocolDidFinishLoading(self)
     }
 }

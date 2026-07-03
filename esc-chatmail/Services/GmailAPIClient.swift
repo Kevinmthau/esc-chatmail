@@ -349,7 +349,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         return (try? JSONDecoder().decode(GmailErrorResponse.self, from: data))?.error
     }
 
-    private nonisolated func gmailErrorMessage(from data: Data) -> String? {
+    nonisolated func gmailErrorMessage(from data: Data) -> String? {
         if let detail = gmailErrorDetail(from: data) {
             if let status = detail.status, !status.isEmpty {
                 return "\(detail.message) (\(status))"
