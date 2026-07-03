@@ -112,13 +112,37 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
     /// the cache (unvalidated → keychain fallback).
     private let cacheLock = NSLock()
     private var _cachedToken: CachedToken?
+    /// Bumped by every cache clear. getCurrentToken snapshots it before its
+    /// keychain read and re-checks it when populating, so a read that raced
+    /// clearTokens (sign-out) cannot resurrect the cleared token in memory.
+    private var _cacheEpoch: UInt64 = 0
 
     private func cachedToken() -> CachedToken? {
         cacheLock.withLock { _cachedToken }
     }
 
+    private func cacheEpoch() -> UInt64 {
+        cacheLock.withLock { _cacheEpoch }
+    }
+
     private func setCachedToken(_ token: CachedToken?) {
-        cacheLock.withLock { _cachedToken = token }
+        cacheLock.withLock {
+            if token == nil {
+                _cacheEpoch &+= 1
+            }
+            _cachedToken = token
+        }
+    }
+
+    /// Populates the cache only if no clear happened since `epoch` was
+    /// snapshotted. Returns whether the write was applied.
+    @discardableResult
+    private func setCachedToken(_ token: CachedToken, ifEpochMatches epoch: UInt64) -> Bool {
+        cacheLock.withLock {
+            guard _cacheEpoch == epoch else { return false }
+            _cachedToken = token
+            return true
+        }
     }
 
     // MARK: - Initialization
@@ -160,17 +184,23 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
             return cached.accessToken
         }
 
-        // Try to load from keychain
+        // Try to load from keychain. Snapshot the cache epoch first: if
+        // clearTokens runs while the read is in flight, the populate below is
+        // dropped instead of caching the signed-out account's token until
+        // expiry (matching the pre-cache bound, where staleness was limited
+        // to the one request that raced the clear).
+        let epoch = cacheEpoch()
         do {
             let tokenInfo = try loadTokenInfo()
             if !tokenInfo.isExpiringSoon {
-                // Update memory caches
-                setCachedToken(CachedToken(
+                // Update memory caches, unless a clear raced the keychain read
+                if setCachedToken(CachedToken(
                     accessToken: tokenInfo.accessToken,
                     expirationDate: tokenInfo.expirationDate
-                ))
-                await MainActor.run {
-                    authSession.accessToken = tokenInfo.accessToken
+                ), ifEpochMatches: epoch) {
+                    await MainActor.run {
+                        authSession.accessToken = tokenInfo.accessToken
+                    }
                 }
                 return tokenInfo.accessToken
             }
@@ -255,8 +285,10 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
     }
 
     nonisolated func clearTokens() throws {
-        // Invalidate the request fast path FIRST so no request can win a
-        // stale token between the keychain deletes and the cache clear.
+        // Invalidate the request fast path FIRST (bumping the cache epoch) so
+        // no request can win a stale token: a getCurrentToken that already
+        // read the keychain before the deletes below fails the epoch check
+        // and cannot repopulate the cache with the signed-out token.
         setCachedToken(nil)
 
         // Clear from keychain

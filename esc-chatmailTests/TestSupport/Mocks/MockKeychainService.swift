@@ -17,6 +17,11 @@ final class MockKeychainService: KeychainServiceProtocol {
     /// Optional error to throw on next operation (resets after throwing)
     var errorToThrow: Error?
 
+    /// Interleave hook: runs after `load(for:)` has read the stored value but
+    /// before it returns, letting tests deterministically emulate mutations
+    /// (e.g. clearTokens) that land while a keychain read is in flight.
+    var onLoad: (() -> Void)?
+
     /// Clears all stored data and resets call counts
     func reset() {
         storage.removeAll()
@@ -25,6 +30,7 @@ final class MockKeychainService: KeychainServiceProtocol {
         loadCallCount = 0
         deleteCallCount = 0
         errorToThrow = nil
+        onLoad = nil
     }
 
     // MARK: - KeychainServiceProtocol
@@ -48,6 +54,9 @@ final class MockKeychainService: KeychainServiceProtocol {
         guard let data = storage[key] else {
             throw KeychainError.itemNotFound
         }
+        // Fires after the value was read so the caller receives a snapshot
+        // that any mutation made by the hook did not see (TOCTOU window).
+        onLoad?()
         return data
     }
 

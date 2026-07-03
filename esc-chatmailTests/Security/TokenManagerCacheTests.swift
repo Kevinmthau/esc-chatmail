@@ -85,6 +85,39 @@ final class TokenManagerCacheTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(refresher.callCount, 1)
     }
 
+    func testClearTokensRacingKeychainRead_doesNotRepopulateCache() async throws {
+        // Sign-out race: getCurrentToken misses the cache and reads the
+        // keychain; clearTokens lands after the read returned the old value
+        // but before the cache populate. The racing request may still see
+        // the old token once (the pre-existing one-request bound), but the
+        // cache must stay empty — otherwise the signed-out account's token
+        // is served from memory until expiry (~55 minutes).
+        try manager.saveTokens(access: "old-token", refresh: "r", expirationDate: Date().addingTimeInterval(3600))
+        let coldManager = TokenManager(
+            keychainService: keychain,
+            authSession: authSession,
+            tokenRefresher: refresher
+        )
+        keychain.onLoad = { [weak keychain, weak coldManager] in
+            keychain?.onLoad = nil
+            try? coldManager?.clearTokens()
+        }
+
+        let raced = try await coldManager.getCurrentToken()
+        XCTAssertEqual(raced, "old-token", "the racing request itself may serve the pre-clear token once")
+
+        // Post-clear requests must fall through to refresh (keychain is
+        // empty), not the memory cache; a repopulated cache serves old-token.
+        refresher.errorToThrow = TokenManagerError.invalidCredentials
+        do {
+            let leaked = try await coldManager.getCurrentToken()
+            XCTFail("cache served the signed-out account's token: \(leaked)")
+        } catch {
+            // Expected: no cached token, no keychain entry, refresh fails.
+        }
+        XCTAssertEqual(refresher.callCount, 1, "second request must reach the refresher, not the memory cache")
+    }
+
     func testExpiringSoonCachedToken_triggersRefreshInsteadOfServingStale() async throws {
         // Inside the 5-minute expiring-soon window: the cache must not serve it.
         try manager.saveTokens(access: "stale-token", refresh: "r", expirationDate: Date().addingTimeInterval(60))
