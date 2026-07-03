@@ -44,30 +44,80 @@ final class TestCoreDataStack: @unchecked Sendable {
 
     let persistentContainer: NSPersistentContainer
 
-    /// Creates a new in-memory Core Data stack.
+    /// Backing store flavor for a test stack.
+    enum StoreKind {
+        /// Fast, default. Does NOT support persistent history tracking.
+        case inMemory
+        /// Per-instance temp-file SQLite store. Mirrors the production store
+        /// options (persistent history tracking ON) for tests that exercise
+        /// history-dependent behavior. Divergence from production: the shared
+        /// test model is constraint-free (the app skips
+        /// `enforceUniquenessConstraints` under XCTest), so `Message.id` has
+        /// no uniqueness constraint here even though production applies one.
+        ///
+        /// Cleanup: stale store files from PREVIOUS runs are swept on first
+        /// use. Per-instance unlink at teardown is deliberately avoided — the
+        /// graveyard keeps retired store connections open, and unlinking an
+        /// in-use vnode is a libsqlite3 API violation that invalidates the
+        /// open file descriptors under every retired stack.
+        case sqlite
+    }
+
+    /// One-time, best-effort sweep of temp-store files left by previous test
+    /// runs. Age-gated so a concurrently running sibling test process (Xcode
+    /// parallel testing) never loses its live stores.
+    private static let staleStoreSweep: Void = {
+        let fileManager = FileManager.default
+        let cutoff = Date().addingTimeInterval(-3600)
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: fileManager.temporaryDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        ) else { return }
+        for url in entries where url.lastPathComponent.hasPrefix("TestCoreDataStack-") {
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            if modified < cutoff {
+                try? fileManager.removeItem(at: url)
+            }
+        }
+    }()
+
+    /// Creates a new isolated Core Data stack.
     /// Each instance has its own isolated storage (stores are per-container;
     /// only the immutable model object is shared).
     ///
-    /// - Parameter automaticallyMergesChanges: Opt-in automerge for the test
-    ///   view context. Default is OFF because automerge applies sibling saves
-    ///   as async blocks on the view context's queue, racing the test body's
-    ///   direct access from the cooperative thread. Enable only for tests that
-    ///   specifically verify merge-driven behavior (e.g. view-model refresh on
-    ///   background saves) and tolerate that window.
-    init(automaticallyMergesChanges: Bool = false) {
+    /// - Parameters:
+    ///   - automaticallyMergesChanges: Opt-in automerge for the test
+    ///     view context. Default is OFF because automerge applies sibling saves
+    ///     as async blocks on the view context's queue, racing the test body's
+    ///     direct access from the cooperative thread. Enable only for tests that
+    ///     specifically verify merge-driven behavior (e.g. view-model refresh on
+    ///     background saves) and tolerate that window.
+    ///   - storeKind: `.inMemory` (default) or `.sqlite` for tests needing
+    ///     store features the in-memory type lacks (persistent history).
+    init(automaticallyMergesChanges: Bool = false, storeKind: StoreKind = .inMemory) {
         Self.creationLock.lock()
         let container = NSPersistentContainer(name: "ESCChatmail", managedObjectModel: Self.sharedModel)
         Self.creationLock.unlock()
 
-        // Use in-memory store for fast, isolated tests
         let description = NSPersistentStoreDescription()
-        description.type = NSInMemoryStoreType
+        switch storeKind {
+        case .inMemory:
+            description.type = NSInMemoryStoreType
+        case .sqlite:
+            _ = Self.staleStoreSweep
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("TestCoreDataStack-\(UUID().uuidString)")
+                .appendingPathExtension("sqlite")
+            description.type = NSSQLiteStoreType
+            description.url = url
+            description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
+        }
         description.shouldAddStoreAsynchronously = false
         container.persistentStoreDescriptions = [description]
 
         container.loadPersistentStores { storeDescription, error in
             if let error = error as NSError? {
-                fatalError("Failed to load in-memory Core Data store: \(error)")
+                fatalError("Failed to load test Core Data store: \(error)")
             }
         }
 
