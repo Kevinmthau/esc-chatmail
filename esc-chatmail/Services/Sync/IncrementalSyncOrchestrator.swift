@@ -207,10 +207,17 @@ final class IncrementalSyncOrchestrator {
             }
 
             // Phase 4: Reconciliation
-            // Skip label reconciliation when history reported no changes (saves ~2.5s per sync)
-            // BUT run reconciliation periodically (every hour) to catch label drift
+            // The missed-message check inside the phase stays per-sync by
+            // design: it is the cheap (single list call) safety net against
+            // dropped history/push events. Label reconciliation is the
+            // expensive half (~1 metadata GET per recent message) and is
+            // TTL-gated below.
             let noHistoryChanges = historyResult.records.isEmpty && historyResult.newMessageIds.isEmpty
-            let shouldSkipReconciliation = noHistoryChanges && !shouldForceReconciliation()
+            let shouldSkipReconciliation = Self.shouldSkipLabelReconciliation(
+                noHistoryChanges: noHistoryChanges,
+                lastReconciliation: UserDefaults.standard.double(forKey: SyncConfig.lastReconciliationTimeKey),
+                now: Date().timeIntervalSince1970
+            )
             let reconciliationTimer = timing.start("reconciliation")
             let reconciliationDiagnostics = try await reconciliationPhase.execute(
                 input: ReconciliationInput(skipLabelReconciliation: shouldSkipReconciliation),
@@ -505,16 +512,26 @@ final class IncrementalSyncOrchestrator {
         return min(checkpoint.isComplete ? 1.0 : 0.98, progress)
     }
 
-    /// Checks if forced label reconciliation is needed based on time since last reconciliation
-    private func shouldForceReconciliation() -> Bool {
-        let defaults = UserDefaults.standard
-        let lastReconciliation = defaults.double(forKey: SyncConfig.lastReconciliationTimeKey)
-
-        // Force reconciliation if we've never done one or it's been too long
-        guard lastReconciliation > 0 else { return true }
-
-        let timeSinceLastReconciliation = Date().timeIntervalSince1970 - lastReconciliation
-        return timeSinceLastReconciliation >= SyncConfig.reconciliationInterval
+    /// Decides whether to skip label reconciliation for this sync.
+    ///
+    /// Label reconciliation is the largest steady-state API consumer (one
+    /// list call plus one metadata GET per recent message, up to ~100), so it
+    /// runs on a TTL rather than on every push-triggered sync:
+    /// - never reconciled: run
+    /// - history reported changes: run only when `ttl` has lapsed
+    /// - quiet sync (no history changes): run only on the hourly force
+    ///   interval that catches label drift without history churn
+    nonisolated static func shouldSkipLabelReconciliation(
+        noHistoryChanges: Bool,
+        lastReconciliation: TimeInterval,
+        now: TimeInterval,
+        ttl: TimeInterval = SyncConfig.labelReconciliationTTL,
+        forceInterval: TimeInterval = SyncConfig.reconciliationInterval
+    ) -> Bool {
+        guard lastReconciliation > 0 else { return false }
+        let elapsed = now - lastReconciliation
+        let requiredInterval = noHistoryChanges ? forceInterval : ttl
+        return elapsed < requiredInterval
     }
 
     private func refreshSendAsAliases(

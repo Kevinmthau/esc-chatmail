@@ -148,6 +148,13 @@ struct SyncConfig {
     /// Running reconciliation hourly ensures label drift is caught even without history changes
     static let reconciliationInterval: TimeInterval = 3600 // 1 hour
 
+    /// Minimum interval between label reconciliations when history DID report
+    /// changes (in seconds). Label reconciliation costs one list call plus one
+    /// metadata GET per recent message (up to ~100 at 10-way concurrency), so
+    /// running it on every push-triggered sync dominates steady-state quota
+    /// usage and feeds 429s. Label drift repair tolerates this latency.
+    static let labelReconciliationTTL: TimeInterval = 20 * 60 // 20 minutes
+
     // MARK: - Time Buffer Constants
 
     /// Buffer subtracted from timestamps to ensure we don't miss messages due to clock drift (5 minutes)
