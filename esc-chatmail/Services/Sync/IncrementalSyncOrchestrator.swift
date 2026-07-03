@@ -29,6 +29,7 @@ final class IncrementalSyncOrchestrator {
     private let reconciliation: SyncReconciliation
     private let coreDataStack: CoreDataStack
     private let failureTracker: SyncFailureTracker
+    private let aliasRefreshPolicy: SendAsAliasRefreshPolicy
     private let log = LogCategory.sync.logger
 
     private var myAliases: Set<String> = []
@@ -70,7 +71,8 @@ final class IncrementalSyncOrchestrator {
         dataCleanupService: DataCleanupService,
         reconciliation: SyncReconciliation,
         coreDataStack: CoreDataStack,
-        failureTracker: SyncFailureTracker = .shared
+        failureTracker: SyncFailureTracker = .shared,
+        aliasRefreshPolicy: SendAsAliasRefreshPolicy = SendAsAliasRefreshPolicy()
     ) {
         self.messageFetcher = messageFetcher
         self.messagePersister = messagePersister
@@ -80,6 +82,7 @@ final class IncrementalSyncOrchestrator {
         self.reconciliation = reconciliation
         self.coreDataStack = coreDataStack
         self.failureTracker = failureTracker
+        self.aliasRefreshPolicy = aliasRefreshPolicy
     }
 
     // MARK: - Public API
@@ -538,6 +541,20 @@ final class IncrementalSyncOrchestrator {
         accountEmail: String,
         in context: NSManagedObjectContext
     ) async -> [SendAsAlias] {
+        guard aliasRefreshPolicy.shouldRefresh(accountEmail: accountEmail) else {
+            // Inside the TTL: skip the network call but still hydrate the
+            // in-memory managers, which are otherwise only populated on the
+            // network path. The persisted aliases come from the last
+            // successful refresh (initial sync populates them via saveAccount).
+            let cachedAliases = await SendAsAliasManager.shared.getAliases(from: context)
+            if !cachedAliases.isEmpty {
+                _ = await AliasManager.shared.setAliases(
+                    Set([accountEmail] + cachedAliases.map(\.emailAddress))
+                )
+            }
+            return cachedAliases
+        }
+
         do {
             let aliases = SendAsAlias.validAliases(
                 from: try await messageFetcher.listSendAs(),
@@ -550,6 +567,7 @@ final class IncrementalSyncOrchestrator {
             )
             await SendAsAliasManager.shared.setAliases(aliases)
             _ = await AliasManager.shared.setAliases(Set([accountEmail] + aliases.map(\.emailAddress)))
+            aliasRefreshPolicy.recordSuccessfulRefresh(accountEmail: accountEmail)
             return aliases
         } catch {
             Log.warning("Failed to refresh send-as aliases; using cached aliases: \(error.localizedDescription)", category: .sync)
