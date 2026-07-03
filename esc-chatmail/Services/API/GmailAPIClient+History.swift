@@ -28,7 +28,16 @@ extension GmailAPIClient {
         var currentRequest = request
         var hasAttemptedTokenRefresh = false
 
-        for attempt in 0..<retries {
+        // Same attempt accounting as performRequestWithRetry: 1-based counter
+        // incremented at the top so every `continue` advances it, and one
+        // extra attempt granted after a successful 401 token refresh (bounded
+        // by hasAttemptedTokenRefresh) so the refreshed token is always tried.
+        var attempt = 0
+        var allowedAttempts = retries
+
+        while attempt < allowedAttempts {
+            attempt += 1
+
             // Circuit breaker: check if we've exceeded max total retry time
             let elapsedTime = Date().timeIntervalSince(startTime)
             if elapsedTime >= NetworkConfig.maxTotalRetryTime {
@@ -91,6 +100,13 @@ extension GmailAPIClient {
                         throw APIError.rateLimited
                     }
 
+                    // Final-attempt guard (previously missing here): without it
+                    // the loop slept the full Retry-After and then fell out as
+                    // URLError(.unknown) instead of rateLimited.
+                    if attempt >= allowedAttempts {
+                        throw APIError.rateLimited
+                    }
+
                     try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                     retryDelay = min(delay * 2, retryStrategy.maxDelay)
                     continue
@@ -104,6 +120,9 @@ extension GmailAPIClient {
                             _ = try await tokenManager.refreshToken()
                             let newToken = try await tokenManager.getCurrentToken()
                             currentRequest.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
+                            // The refresh consumed this attempt; grant one more so
+                            // the refreshed token always gets its request.
+                            allowedAttempts += 1
                             continue
                         } catch TokenManagerError.invalidCredentials {
                             // Mirrors performRequestWithRetry: a revoked refresh
@@ -119,8 +138,8 @@ extension GmailAPIClient {
                     throw APIError.authenticationError
 
                 case 500...599:
-                    Log.warning("Server error \(httpResponse.statusCode), attempt \(attempt + 1)/\(retries)", category: .api)
-                    if attempt < retries - 1 {
+                    Log.warning("Server error \(httpResponse.statusCode), attempt \(attempt)/\(allowedAttempts)", category: .api)
+                    if attempt < allowedAttempts {
                         let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
                         if retryDelay > remainingTime {
                             Log.warning("Circuit breaker: retry delay exceeds remaining time budget", category: .api)
@@ -150,13 +169,13 @@ extension GmailAPIClient {
                 throw error
             } catch {
                 lastError = error
-                Log.error("History request failed (attempt \(attempt + 1)/\(retries)): \(error.localizedDescription)", category: .api)
+                Log.error("History request failed (attempt \(attempt)/\(allowedAttempts)): \(error.localizedDescription)", category: .api)
 
-                if !retryStrategy.shouldRetry(error: error, attempt: attempt) {
+                if !retryStrategy.shouldRetry(error: error, attempt: attempt - 1) {
                     throw error
                 }
 
-                if attempt < retries - 1 {
+                if attempt < allowedAttempts {
                     let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
                     if retryDelay > remainingTime {
                         Log.warning("Circuit breaker: retry delay exceeds remaining time budget", category: .api)

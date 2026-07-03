@@ -189,7 +189,18 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         var currentRequest = request
         var hasAttemptedTokenRefresh = false
 
-        for attempt in 0..<retries {
+        // 1-based attempt counter, incremented at the TOP of the loop body so
+        // every `continue` (429/5xx/401 paths) advances it. `allowedAttempts`
+        // grows by one on a successful 401 token refresh: the refresh consumed
+        // that attempt's request slot, and without the grant a refresh on the
+        // final attempt would exit the loop as `URLError(.unknown)` — a
+        // non-retriable error — even though the new token was never tried.
+        var attempt = 0
+        var allowedAttempts = retries
+
+        while attempt < allowedAttempts {
+            attempt += 1
+
             // Circuit breaker: check if we've exceeded max total retry time
             let elapsedTime = Date().timeIntervalSince(startTime)
             if elapsedTime >= NetworkConfig.maxTotalRetryTime {
@@ -233,7 +244,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                             throw APIError.rateLimited
                         }
 
-                        if attempt >= retries - 1 {
+                        if attempt >= allowedAttempts {
                             throw APIError.rateLimited
                         }
 
@@ -242,10 +253,10 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                         continue
 
                     case 500...599:
-                        Log.warning("Server error \(httpResponse.statusCode), attempt \(attempt + 1)/\(retries)", category: .api)
+                        Log.warning("Server error \(httpResponse.statusCode), attempt \(attempt)/\(allowedAttempts)", category: .api)
                         // A 5xx is ambiguous for non-idempotent requests: the server may
                         // have processed the request before failing. Never resend.
-                        if allowsRetransmission, attempt < retries - 1 {
+                        if allowsRetransmission, attempt < allowedAttempts {
                             // Check time budget before sleeping
                             let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
                             if retryDelay > remainingTime {
@@ -269,7 +280,10 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                                 // Update request with refreshed token
                                 let newToken = try await tokenManager.getCurrentToken()
                                 currentRequest.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
-                                // Retry with new token
+                                // The refresh consumed this attempt; grant one more so
+                                // the refreshed token always gets its request (bounded:
+                                // hasAttemptedTokenRefresh makes this once-only).
+                                allowedAttempts += 1
                                 continue
                             } catch TokenManagerError.invalidCredentials {
                                 Log.error("Refresh token revoked, user must re-authenticate", category: .api)
@@ -313,21 +327,21 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
             } catch {
                 lastError = error
-                Log.error("Request failed (attempt \(attempt + 1)/\(retries)): \(error.localizedDescription)", category: .api)
+                Log.error("Request failed (attempt \(attempt)/\(allowedAttempts)): \(error.localizedDescription)", category: .api)
 
                 // Non-idempotent requests may only be resent when the error proves the
                 // request never reached the server (DNS/connect/TLS failures). Timeouts
                 // and dropped connections are ambiguous — the send may have gone through.
                 let blocksRetransmission = !allowsRetransmission
                     && !ConnectionErrorDetector.isPreTransmissionError(error)
-                if blocksRetransmission || !retryStrategy.shouldRetry(error: error, attempt: attempt) {
+                if blocksRetransmission || !retryStrategy.shouldRetry(error: error, attempt: attempt - 1) {
                     if error is DecodingError {
                         throw APIError.decodingError(error)
                     }
                     throw error
                 }
 
-                if attempt < retries - 1 {
+                if attempt < allowedAttempts {
                     // Check time budget before sleeping
                     let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
                     if retryDelay > remainingTime {
