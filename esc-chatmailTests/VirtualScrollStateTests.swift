@@ -952,6 +952,44 @@ final class VirtualScrollStateTests: XCTestCase {
         }
     }
 
+    // MARK: - objectsDidChange relevance guard
+
+    func testRelevanceGuard_conversationOnlyChanges_areIrrelevant() throws {
+        let conversation = ConversationBuilder().visible().build(in: viewContext)
+        try viewContext.save()
+
+        let userInfo: [AnyHashable: Any] = [NSUpdatedObjectsKey: Set<NSManagedObject>([conversation])]
+        XCTAssertFalse(VirtualScrollState.isRelevantChatContextChange(userInfo))
+    }
+
+    func testRelevanceGuard_messageAndAttachmentChanges_areRelevant() throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 1)
+        _ = conversation
+        let message = messages[0]
+        let attachment = AttachmentBuilder().forMessage(message).build(in: viewContext)
+        try viewContext.save()
+
+        XCTAssertTrue(VirtualScrollState.isRelevantChatContextChange(
+            [NSInsertedObjectsKey: Set<NSManagedObject>([message])]
+        ))
+        XCTAssertTrue(VirtualScrollState.isRelevantChatContextChange(
+            [NSUpdatedObjectsKey: Set<NSManagedObject>([attachment])]
+        ))
+    }
+
+    func testRelevanceGuard_personChanges_relevantOnlyWhenUpdatedOrRefreshed() throws {
+        let person = PersonBuilder().build(in: viewContext)
+        try viewContext.save()
+
+        XCTAssertTrue(VirtualScrollState.isRelevantChatContextChange(
+            [NSRefreshedObjectsKey: Set<NSManagedObject>([person])]
+        ))
+        XCTAssertFalse(VirtualScrollState.isRelevantChatContextChange(
+            [NSInsertedObjectsKey: Set<NSManagedObject>([person])]
+        ))
+        XCTAssertFalse(VirtualScrollState.isRelevantChatContextChange(nil))
+    }
+
     private func makeConversationWithMessages(count: Int) throws -> (Conversation, [Message]) {
         let conversation = ConversationBuilder()
             .visible()
