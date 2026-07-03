@@ -1,40 +1,9 @@
 import Foundation
 import CoreData
 
-// MARK: - Statistics & Denormalization
+// MARK: - Statistics
 
 extension DatabaseMaintenanceService {
-
-    func updateDenormalizedFields() async {
-        let context = coreDataStack.newBackgroundContext()
-
-        await context.perform {
-            // Update conversation message counts
-            let conversationRequest = Conversation.fetchRequest()
-            conversationRequest.fetchBatchSize = 50
-
-            let conversations: [Conversation]
-            do {
-                conversations = try context.fetch(conversationRequest)
-            } catch {
-                Log.error("Failed to fetch conversations for denormalization", category: .coreData, error: error)
-                return
-            }
-
-            for conversation in conversations {
-                // Update unread count
-                let unreadMessages = (conversation.messages as? NSSet)?
-                    .compactMap { $0 as? Message }
-                    .filter { $0.isUnread }
-                    .count ?? 0
-                conversation.inboxUnreadCount = Int32(unreadMessages)
-            }
-
-            // Save denormalized data
-            self.coreDataStack.saveIfNeeded(context: context)
-            Log.info("Denormalized fields updated successfully", category: .coreData)
-        }
-    }
 
     func getDatabaseStatistics() async -> DatabaseStatistics {
         let context = coreDataStack.newBackgroundContext()
