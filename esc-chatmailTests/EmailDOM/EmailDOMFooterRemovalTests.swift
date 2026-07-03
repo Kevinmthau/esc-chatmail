@@ -144,34 +144,50 @@ final class EmailDOMFooterRemovalTests: XCTestCase {
         XCTAssertTrue(text.contains("Weekly digest"))
     }
 
-    // MARK: - Current false positives of `div[class*=sig]`
+    // MARK: - `sig` false positives fixed by token matching
     //
-    // These classes contain the substring "sig" but are not signatures.
-    // Today's substring matching removes them — content loss for design/
-    // signup/insights/assignment layouts. Pinned here as current behavior;
-    // CP1a (token-anchoring the sig selector) flips these to survivals.
+    // These classes contain the substring "sig" but are not signatures
+    // (de[sig]n, [sig]nup, in[sig]hts, as[sig]nment). The old substring
+    // selector removed them — real content loss; token-anchored matching
+    // must let them survive.
 
-    func testCurrentBehavior_designClassIsRemoved_falsePositive() throws {
+    func testDesignClassSurvives() throws {
         let html = "<p>Intro text.</p><div class=\"design-column\">\(mainBody)</div>"
         let text = try visibleText(afterRemovingFootersFrom: html)
-        XCTAssertFalse(text.contains("main message body"), "current substring matching treats de[sig]n as a signature")
+        XCTAssertTrue(text.contains("main message body"))
     }
 
-    func testCurrentBehavior_signupFormIsRemoved_falsePositive() throws {
+    func testSignupFormSurvives() throws {
         let html = "<p>Intro text.</p><div class=\"signup-form\">Join our newsletter for weekly updates</div>"
         let text = try visibleText(afterRemovingFootersFrom: html)
-        XCTAssertFalse(text.contains("Join our newsletter"), "current substring matching treats [sig]nup as a signature")
+        XCTAssertTrue(text.contains("Join our newsletter"))
     }
 
-    func testCurrentBehavior_insightsClassIsRemoved_falsePositive() throws {
+    func testInsightsClassSurvives() throws {
         let html = "<p>Intro text.</p><div class=\"insights\">Market analysis and key takeaways</div>"
         let text = try visibleText(afterRemovingFootersFrom: html)
-        XCTAssertFalse(text.contains("Market analysis"), "current substring matching treats in[sig]hts as a signature")
+        XCTAssertTrue(text.contains("Market analysis"))
     }
 
-    func testCurrentBehavior_assignmentListIsRemoved_falsePositive() throws {
+    func testAssignmentListSurvives() throws {
         let html = "<p>Intro text.</p><div class=\"assignment-list\">Homework due Friday</div>"
         let text = try visibleText(afterRemovingFootersFrom: html)
-        XCTAssertFalse(text.contains("Homework due Friday"), "current substring matching treats as[sig]nment as a signature")
+        XCTAssertTrue(text.contains("Homework due Friday"))
+    }
+
+    // MARK: - Token-anchored signature matching still removes real signatures
+
+    func testRemovesSignatureTokenAmongMultipleClasses() throws {
+        let html = "<p>\(mainBody)</p><div class=\"wrapper email signature compact\">Jane Doe · 555-1234</div>"
+        let text = try visibleText(afterRemovingFootersFrom: html)
+        XCTAssertTrue(text.contains("main message body"))
+        XCTAssertFalse(text.contains("Jane Doe"))
+    }
+
+    func testRemovesUnderscoreSeparatedSigToken() throws {
+        let html = "<p>\(mainBody)</p><div class=\"mail_sig\">Sent from my tablet</div>"
+        let text = try visibleText(afterRemovingFootersFrom: html)
+        XCTAssertTrue(text.contains("main message body"))
+        XCTAssertFalse(text.contains("Sent from my tablet"))
     }
 }
