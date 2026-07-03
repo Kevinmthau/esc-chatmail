@@ -169,7 +169,7 @@ extension GmailAPIClient {
                 throw error
             } catch {
                 lastError = error
-                Log.error("History request failed (attempt \(attempt)/\(allowedAttempts)): \(error.localizedDescription)", category: .api)
+                Log.error("History request failed (attempt \(attempt)/\(allowedAttempts)): \(Log.redact(error: error))", category: .api)
 
                 if !retryStrategy.shouldRetry(error: error, attempt: attempt - 1) {
                     throw error

@@ -327,7 +327,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
             } catch {
                 lastError = error
-                Log.error("Request failed (attempt \(attempt)/\(allowedAttempts)): \(error.localizedDescription)", category: .api)
+                Log.error("Request failed (attempt \(attempt)/\(allowedAttempts)): \(Log.redact(error: error))", category: .api)
 
                 // Non-idempotent requests may only be resent when the error proves the
                 // request never reached the server (DNS/connect/TLS failures). Timeouts
