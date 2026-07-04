@@ -89,27 +89,20 @@ extension MessagePersister {
             let email = EmailNormalizer.normalize(rawEmail)
             guard !email.isEmpty else { return }
 
-            let request = Person.fetchRequest()
-            request.predicate = NSPredicate(format: "email == %@", email)
-            request.fetchLimit = 1
-            request.fetchBatchSize = 1
+            // Cache-aware lookup: shares the context's Person cache with the
+            // batch prefetch in saveMessages, avoiding a per-email fetch here.
+            guard let person = PersonFactory.lookup(email: email, in: context),
+                  EmailNormalizer.isBetterDisplayName(displayName, than: person.displayName, forEmail: email),
+                  person.displayName != displayName else {
+                return
+            }
 
-            do {
-                guard let person = try context.fetch(request).first,
-                      EmailNormalizer.isBetterDisplayName(displayName, than: person.displayName, forEmail: email),
-                      person.displayName != displayName else {
-                    return
+            person.displayName = displayName
+            invalidatedEmails.insert(email)
+            for participation in person.conversationParticipations ?? [] {
+                if let conversationID = participation.conversation?.objectID {
+                    invalidatedConversationIDs.insert(conversationID)
                 }
-
-                person.displayName = displayName
-                invalidatedEmails.insert(email)
-                for participation in person.conversationParticipations ?? [] {
-                    if let conversationID = participation.conversation?.objectID {
-                        invalidatedConversationIDs.insert(conversationID)
-                    }
-                }
-            } catch {
-                Log.error("Failed to update participant display name for \(Log.redact(email: email))", category: .coreData, error: error)
             }
         }
 

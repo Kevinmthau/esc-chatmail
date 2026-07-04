@@ -289,6 +289,37 @@ final class ProcessedTextCacheTests: XCTestCase {
         handler.deleteHTML(for: messageId)
     }
 
+    func testProcessMessage_multipleAppleRichLinkPreviews_allStripped() {
+        // Several rich-link blocks in one message: the strip resumes scanning
+        // from each removal point (rather than restarting at index 0) and
+        // must still remove every block.
+        let messageId = "test-apple-rich-link-multi-\(UUID().uuidString)"
+        let handler = HTMLContentHandler.shared
+        let substantialText = String(repeating: "Personal message text. ", count: 30)
+        let richLinkBlock = """
+        <div class="apple-rich-link" role="link">
+            <div><table><tr><td><img src="cid:IMG"></td></tr></table></div>
+            <a href="https://example.com" role="button">Preview</a>
+        </div>
+        """
+        let html = """
+        <html><body>
+        <div>\(substantialText)</div>
+        \(richLinkBlock)
+        <div>More personal text between previews.</div>
+        \(richLinkBlock)
+        \(richLinkBlock)
+        </body></html>
+        """
+
+        _ = handler.saveHTML(html, for: messageId)
+        let result = ProcessedTextCache.processMessage(messageId: messageId, handler: handler)
+
+        XCTAssertFalse(result.hasRichContent)
+
+        handler.deleteHTML(for: messageId)
+    }
+
     func testProcessMessage_outlookGrayDividerQuoteBoundary_removesQuotedThread() {
         let messageId = "test-outlook-divider-\(UUID().uuidString)"
         let handler = HTMLContentHandler.shared

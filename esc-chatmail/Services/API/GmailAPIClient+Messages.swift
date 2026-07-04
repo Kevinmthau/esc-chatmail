@@ -18,10 +18,19 @@ extension GmailAPIClient {
 
     /// Fetches a single message by ID.
     nonisolated func getMessage(id: String, format: String = "full") async throws -> GmailMessage {
-        try await performGET(
+        try await getMessage(id: id, format: format, maxRetries: nil)
+    }
+
+    /// Retry-budgeted fetch: threads `maxRetries` (total attempts; nil = the
+    /// configured strategy) into the retry loop so callers owning their own
+    /// retry policy (MessageFetcher) can collapse the stacked loops.
+    nonisolated func getMessage(id: String, format: String, maxRetries: Int?) async throws -> GmailMessage {
+        let url = try buildURL(
             endpoint: APIEndpoints.message(id: id),
             queryItems: [URLQueryItem(name: "format", value: format)]
         )
+        let request = try await authenticatedRequest(url: url)
+        return try await performRequestWithRetry(request, maxRetries: maxRetries)
     }
 
     /// Modifies a message's labels.

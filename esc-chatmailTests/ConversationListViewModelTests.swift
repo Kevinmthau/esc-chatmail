@@ -516,4 +516,48 @@ final class ConversationListViewModelTests: XCTestCase {
     private func filteredConversationIDs(in viewModel: ConversationListViewModel) -> [NSManagedObjectID] {
         viewModel.filteredConversationItems.map(\.id)
     }
+
+    // MARK: - objectsDidChange relevance guard
+
+    func testRelevanceGuard_messageOnlyChanges_areIrrelevant() throws {
+        let conversation = ConversationBuilder().visible().build(in: context)
+        let message = MessageBuilder().inConversation(conversation).build(in: context)
+        try context.save()
+
+        let userInfo: [AnyHashable: Any] = [NSUpdatedObjectsKey: Set<NSManagedObject>([message])]
+        XCTAssertFalse(ConversationListViewModel.isRelevantConversationListChange(userInfo))
+    }
+
+    func testRelevanceGuard_conversationChanges_areRelevantInEverySet() throws {
+        let conversation = ConversationBuilder().visible().build(in: context)
+        try context.save()
+
+        for key in [NSInsertedObjectsKey, NSUpdatedObjectsKey, NSRefreshedObjectsKey, NSDeletedObjectsKey, NSInvalidatedObjectsKey] {
+            let userInfo: [AnyHashable: Any] = [key: Set<NSManagedObject>([conversation])]
+            XCTAssertTrue(
+                ConversationListViewModel.isRelevantConversationListChange(userInfo),
+                "conversation change in \(key) must be relevant"
+            )
+        }
+    }
+
+    func testRelevanceGuard_personChanges_relevantOnlyWhenUpdatedOrRefreshed() throws {
+        let person = PersonBuilder().build(in: context)
+        try context.save()
+
+        XCTAssertTrue(ConversationListViewModel.isRelevantConversationListChange(
+            [NSUpdatedObjectsKey: Set<NSManagedObject>([person])]
+        ))
+        XCTAssertTrue(ConversationListViewModel.isRelevantConversationListChange(
+            [NSRefreshedObjectsKey: Set<NSManagedObject>([person])]
+        ))
+        XCTAssertFalse(ConversationListViewModel.isRelevantConversationListChange(
+            [NSInsertedObjectsKey: Set<NSManagedObject>([person])]
+        ))
+    }
+
+    func testRelevanceGuard_emptyOrNilUserInfo_isIrrelevant() {
+        XCTAssertFalse(ConversationListViewModel.isRelevantConversationListChange(nil))
+        XCTAssertFalse(ConversationListViewModel.isRelevantConversationListChange([:]))
+    }
 }

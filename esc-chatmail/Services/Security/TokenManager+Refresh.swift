@@ -5,6 +5,13 @@ extension TokenManager {
     func performTokenRefresh() async throws -> String {
         var lastError: Error?
 
+        // Snapshot the sign-in generation before the network round-trip. If a
+        // sign-out retires it while the refresh is in flight, the gated
+        // saveTokens below writes nothing (keychain or cache), so a refresh
+        // that completes after sign-out cannot resurrect the account — not
+        // even across relaunch via isAuthenticated()'s keychain read.
+        let epochAtStart = cacheEpoch()
+
         for attempt in 0..<maxRetryAttempts {
             do {
                 // Use exponential backoff for retries
@@ -16,16 +23,19 @@ extension TokenManager {
                 // Attempt to refresh using the token refresher
                 let tokens = try await tokenRefresher.refreshTokens()
 
-                // Save the new tokens
-                try saveTokens(
+                // Save the new tokens (drops silently if sign-out raced the
+                // refresh). The cache is populated synchronously inside
+                // saveTokens, so concurrent getCurrentToken callers see the
+                // fresh token immediately without a separate publish step.
+                let saved = try saveTokens(
                     access: tokens.accessToken,
                     refresh: tokens.refreshToken,
-                    expirationDate: tokens.expirationDate
+                    expirationDate: tokens.expirationDate,
+                    ifCacheEpochMatches: epochAtStart
                 )
-
-                // Ensure memory cache is updated before returning so concurrent
-                // callers to getCurrentToken() see the fresh token immediately
-                await self.updateMemoryCache(accessToken: tokens.accessToken)
+                if !saved {
+                    Log.info("Token refresh completed after sign-out; discarding tokens", category: .auth)
+                }
 
                 await refreshBackoff.reset()
                 return tokens.accessToken

@@ -327,7 +327,26 @@ final class AttachmentDownloaderTests: XCTestCase {
         XCTAssertFalse(pdfAttachment.isLikelySignatureImage, "Non-image attachment should not be detected as signature")
     }
 
+
     // MARK: - displayableAttachments Tests
+
+    /// Builds the same analysis the live render path computes (ChatMessageRowModel
+    /// carries the snapshot equivalent); the legacy Message-internal HTML loading
+    /// paths were deleted in favor of this.
+    private func builtHTMLAnalysis(for message: Message) -> MessageBubbleHTMLAnalysis {
+        MessageBubbleHTMLAnalysisBuilder.build(
+            messageID: message.id,
+            bodyStorageURI: message.bodyStorageURI,
+            hasHTMLSourceHint: message.hasHTMLSource,
+            isForwardedEmail: message.isForwardedEmail,
+            isLikelyCalendarInvite: message.isLikelyCalendarInvite,
+            bodyText: message.bodyText,
+            cleanedSnippet: message.cleanedSnippet,
+            subject: message.subject,
+            attachmentSnapshots: message.attachmentsArray.map(\.bubbleSnapshot),
+            handler: HTMLContentHandler.shared
+        )
+    }
 
     func testMessage_displayableAttachments_filtersSignatureImages() throws {
         let message = MessageBuilder()
@@ -356,7 +375,9 @@ final class AttachmentDownloaderTests: XCTestCase {
         // Fetch fresh message
         let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
 
-        let displayable = fetchedMessage?.displayableAttachments ?? []
+        let displayable = fetchedMessage.map {
+            $0.displayableAttachments(using: builtHTMLAnalysis(for: $0), hidingInlineReferencedInHTML: true)
+        } ?? []
 
         // Should only include the normal image, not the signature
         XCTAssertEqual(displayable.count, 1)
@@ -395,11 +416,12 @@ final class AttachmentDownloaderTests: XCTestCase {
 
         try testStack.saveViewContext()
 
-        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
-        let hiddenInline = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: true) ?? []
+        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let analysis = builtHTMLAnalysis(for: fetchedMessage)
+        let hiddenInline = fetchedMessage.displayableAttachments(using: analysis, hidingInlineReferencedInHTML: true)
         XCTAssertEqual(hiddenInline.compactMap { $0.id }.sorted(), ["att-regular"])
 
-        let showAll = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: false) ?? []
+        let showAll = fetchedMessage.displayableAttachments(using: analysis, hidingInlineReferencedInHTML: false)
         XCTAssertEqual(showAll.compactMap { $0.id }.sorted(), ["att-inline", "att-regular"])
 
         handler.deleteHTML(for: messageId)
@@ -461,7 +483,9 @@ final class AttachmentDownloaderTests: XCTestCase {
     }
 
     func testMessage_displayableAttachments_hidesCalendarInviteFilesOnlyInPreviewMode() throws {
+        let messageId = "msg-calendar-preview-\(UUID().uuidString)"
         let message = MessageBuilder()
+            .withId(messageId)
             .withSubject("Invitation: Board sync @ Mon May 5, 2026 9:00am - 9:30am (EDT)")
             .withSnippet("Invitation from Google Calendar")
             .withBody(
@@ -477,6 +501,17 @@ final class AttachmentDownloaderTests: XCTestCase {
             )
             .withAttachments()
             .build(in: context)
+
+        // The live analysis only reports calendar-card support for messages
+        // that actually have HTML (no HTML → placeholder analysis → nothing
+        // hidden); the deleted Message-internal path conjured a card from
+        // bodyText alone.
+        let handler = HTMLContentHandler.shared
+        _ = handler.saveHTML(
+            "<html><body><div>Invitation from Google Calendar</div><div>Board sync</div></body></html>",
+            for: messageId
+        )
+        defer { handler.deleteHTML(for: messageId) }
 
         let _ = AttachmentBuilder()
             .withId("att-calendar")
@@ -496,12 +531,13 @@ final class AttachmentDownloaderTests: XCTestCase {
 
         try testStack.saveViewContext()
 
-        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
+        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let analysis = builtHTMLAnalysis(for: fetchedMessage)
 
-        let previewAttachments = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: true) ?? []
+        let previewAttachments = fetchedMessage.displayableAttachments(using: analysis, hidingInlineReferencedInHTML: true)
         XCTAssertEqual(previewAttachments.compactMap { $0.id }, ["att-notes"])
 
-        let bubbleAttachments = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: false) ?? []
+        let bubbleAttachments = fetchedMessage.displayableAttachments(using: analysis, hidingInlineReferencedInHTML: false)
         XCTAssertEqual(bubbleAttachments.compactMap { $0.id }.sorted(), ["att-calendar", "att-notes"])
     }
 
@@ -537,13 +573,57 @@ final class AttachmentDownloaderTests: XCTestCase {
 
         try testStack.saveViewContext()
 
-        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
+        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let analysis = builtHTMLAnalysis(for: fetchedMessage)
 
-        XCTAssertEqual(fetchedMessage?.isLikelyCalendarInvite, true)
-        XCTAssertEqual(fetchedMessage?.supportsCalendarInvitePreviewCard, false)
+        XCTAssertEqual(fetchedMessage.isLikelyCalendarInvite, true)
+        XCTAssertEqual(analysis.supportsCalendarInvitePreviewCard, false)
 
-        let previewAttachments = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: true) ?? []
+        let previewAttachments = fetchedMessage.displayableAttachments(using: analysis, hidingInlineReferencedInHTML: true)
         XCTAssertEqual(previewAttachments.compactMap { $0.id }.sorted(), ["att-calendar", "att-notes"])
+    }
+
+    func testMessage_displayableAttachments_htmlLessInvite_keepsCalendarFileVisible() throws {
+        // Pins live behavior for plain-text calendar invites (no persisted
+        // HTML): the analysis is a placeholder with no preview-card support,
+        // so nothing hides the .ics — the attachment stays reachable instead
+        // of being hidden for a card that will never render. (The deleted
+        // Message-internal path conjured a card from bodyText alone.)
+        let message = MessageBuilder()
+            .withId("msg-calendar-htmlless-\(UUID().uuidString)")
+            .withSubject("Invitation: Standup @ Tue May 6, 2026 10:00am - 10:15am (EDT)")
+            .withSnippet("Invitation from Google Calendar")
+            .withBody(
+                """
+                Invitation from Google Calendar
+                Standup
+                When
+                Tuesday May 6, 2026 • 10:00am – 10:15am (Eastern Time - New York)
+                Guests
+                brynn@example.com
+                """
+            )
+            .withAttachments()
+            .build(in: context)
+
+        let _ = AttachmentBuilder()
+            .withId("att-calendar")
+            .withFilename("invite.ics")
+            .withMimeType("text/calendar")
+            .withByteSize(2_048)
+            .forMessage(message)
+            .build(in: context)
+
+        try testStack.saveViewContext()
+
+        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let analysis = builtHTMLAnalysis(for: fetchedMessage)
+
+        XCTAssertTrue(fetchedMessage.isLikelyCalendarInvite)
+        XCTAssertFalse(analysis.supportsCalendarInvitePreviewCard, "no HTML → placeholder analysis → no card")
+
+        let previewAttachments = fetchedMessage.displayableAttachments(using: analysis, hidingInlineReferencedInHTML: true)
+        XCTAssertEqual(previewAttachments.compactMap { $0.id }, ["att-calendar"])
     }
 
     func testMessage_displayableAttachments_plainBubble_hidesSignatureOnlyCIDInlineImages() throws {
@@ -599,8 +679,11 @@ final class AttachmentDownloaderTests: XCTestCase {
 
         try testStack.saveViewContext()
 
-        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
-        let displayable = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: false) ?? []
+        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let displayable = fetchedMessage.displayableAttachments(
+            using: builtHTMLAnalysis(for: fetchedMessage),
+            hidingInlineReferencedInHTML: false
+        )
 
         XCTAssertEqual(displayable.compactMap { $0.id }.sorted(), ["att-body-inline", "att-regular-file"])
 
@@ -651,8 +734,11 @@ final class AttachmentDownloaderTests: XCTestCase {
 
         try testStack.saveViewContext()
 
-        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
-        let displayable = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: false) ?? []
+        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let displayable = fetchedMessage.displayableAttachments(
+            using: builtHTMLAnalysis(for: fetchedMessage),
+            hidingInlineReferencedInHTML: false
+        )
 
         XCTAssertEqual(displayable.compactMap { $0.id }.sorted(), ["att-real-file"])
 
@@ -705,8 +791,11 @@ final class AttachmentDownloaderTests: XCTestCase {
 
         try testStack.saveViewContext()
 
-        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
-        let displayable = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: false) ?? []
+        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let displayable = fetchedMessage.displayableAttachments(
+            using: builtHTMLAnalysis(for: fetchedMessage),
+            hidingInlineReferencedInHTML: false
+        )
 
         XCTAssertEqual(displayable.compactMap { $0.id }.sorted(), ["att-real-uri-file"])
 
@@ -743,8 +832,11 @@ final class AttachmentDownloaderTests: XCTestCase {
 
         try testStack.saveViewContext()
 
-        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
-        let displayable = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: false) ?? []
+        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let displayable = fetchedMessage.displayableAttachments(
+            using: builtHTMLAnalysis(for: fetchedMessage),
+            hidingInlineReferencedInHTML: false
+        )
 
         XCTAssertEqual(displayable.compactMap { $0.id }.sorted(), ["att-inline-body-image"])
 
@@ -783,8 +875,11 @@ final class AttachmentDownloaderTests: XCTestCase {
 
         try testStack.saveViewContext()
 
-        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
-        let displayable = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: false) ?? []
+        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let displayable = fetchedMessage.displayableAttachments(
+            using: builtHTMLAnalysis(for: fetchedMessage),
+            hidingInlineReferencedInHTML: false
+        )
 
         XCTAssertEqual(displayable.count, 1)
         XCTAssertEqual(displayable.first?.contentId, "6AFCA8C9-D2EF-4407-BD15-8D9F042220E9")
@@ -820,8 +915,11 @@ final class AttachmentDownloaderTests: XCTestCase {
 
         try testStack.saveViewContext()
 
-        let fetchedMessage = try context.existingObject(with: message.objectID) as? Message
-        let displayable = fetchedMessage?.displayableAttachments(hidingInlineReferencedInHTML: false) ?? []
+        let fetchedMessage = try XCTUnwrap(context.existingObject(with: message.objectID) as? Message)
+        let displayable = fetchedMessage.displayableAttachments(
+            using: builtHTMLAnalysis(for: fetchedMessage),
+            hidingInlineReferencedInHTML: false
+        )
 
         XCTAssertEqual(displayable.count, 2)
         XCTAssertEqual(displayable.map(\.filename).sorted(), [

@@ -29,10 +29,16 @@ actor RateLimitTracker {
 
     /// Resets tracking after successful request
     func recordSuccess() {
-        // Reduce cumulative backoff on success to allow recovery
-        // Using 30s reduction allows faster recovery after hitting circuit breaker (120s max)
-        // This means ~4 successful requests recover from a fully tripped breaker
-        cumulativeBackoffTime = max(0, cumulativeBackoffTime - 30)
+        // Mitigation, not a fix: this credit-per-success accounting is
+        // structurally wrong for a concurrent client — credit scales with
+        // request concurrency while debit doesn't, and a success is causally
+        // unrelated to 429 recovery. At the previous 30s credit, 4 interleaved
+        // successes (out of 15 concurrent requests) wiped a fully tripped
+        // 120s breaker. 2s keeps recovery possible on genuinely healthy
+        // traffic without letting one concurrent batch erase the breaker.
+        // A structural rewrite (time-decay/leaky bucket) is tracked as
+        // deferred work in the performance plan (C4).
+        cumulativeBackoffTime = max(0, cumulativeBackoffTime - 2)
     }
 
     /// Returns current cumulative backoff for monitoring
@@ -183,7 +189,18 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         var currentRequest = request
         var hasAttemptedTokenRefresh = false
 
-        for attempt in 0..<retries {
+        // 1-based attempt counter, incremented at the TOP of the loop body so
+        // every `continue` (429/5xx/401 paths) advances it. `allowedAttempts`
+        // grows by one on a successful 401 token refresh: the refresh consumed
+        // that attempt's request slot, and without the grant a refresh on the
+        // final attempt would exit the loop as `URLError(.unknown)` — a
+        // non-retriable error — even though the new token was never tried.
+        var attempt = 0
+        var allowedAttempts = retries
+
+        while attempt < allowedAttempts {
+            attempt += 1
+
             // Circuit breaker: check if we've exceeded max total retry time
             let elapsedTime = Date().timeIntervalSince(startTime)
             if elapsedTime >= NetworkConfig.maxTotalRetryTime {
@@ -198,48 +215,53 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                     let statusCode = httpResponse.statusCode
                     switch httpResponse.statusCode {
                     case 429:
-                        // Respect Retry-After header if present, but cap it
-                        var delay: TimeInterval
-                        if let retryAfter = httpResponse.value(forHTTPHeaderField: "Retry-After"),
-                           let retryAfterSeconds = TimeInterval(retryAfter) {
-                            delay = min(retryAfterSeconds, NetworkConfig.maxRetryAfterSeconds)
-                            if retryAfterSeconds > NetworkConfig.maxRetryAfterSeconds {
-                                Log.warning("Rate limited, Retry-After (\(retryAfterSeconds)s) capped to \(delay)s", category: .api)
-                            } else {
-                                Log.warning("Rate limited, Retry-After header requests \(delay) seconds", category: .api)
-                            }
+                        // Respect Retry-After header if present, but cap it.
+                        // The (capped) header value rides on the thrown error
+                        // so outer retry owners can honor server pacing.
+                        let headerRetryAfter: TimeInterval? = httpResponse
+                            .value(forHTTPHeaderField: "Retry-After")
+                            .flatMap(TimeInterval.init)
+                            .map { min($0, NetworkConfig.maxRetryAfterSeconds) }
+
+                        let delay: TimeInterval
+                        if let headerRetryAfter {
+                            Log.warning("Rate limited, Retry-After requests \(headerRetryAfter)s (capped)", category: .api)
+                            delay = headerRetryAfter
                         } else {
                             delay = retryDelay * 2
                             Log.warning("Rate limited, using exponential backoff: \(delay) seconds", category: .api)
                         }
 
-                        // Track cumulative backoff to prevent API exhaustion
-                        await rateLimitTracker.recordBackoff(delay)
+                        // Breaker/budget checks precede recordBackoff so only
+                        // delays actually slept are recorded — otherwise N
+                        // concurrent 429s at maxRetries 1 would trip the 120s
+                        // breaker without anyone waiting at all.
                         if await rateLimitTracker.shouldAbort() {
                             Log.warning("Circuit breaker: excessive cumulative rate limiting, aborting", category: .api)
-                            throw APIError.rateLimited
+                            throw APIError.rateLimited(retryAfter: headerRetryAfter)
                         }
 
                         // Check if delay would exceed remaining time budget
                         let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
                         if delay > remainingTime {
                             Log.warning("Circuit breaker: delay (\(delay)s) exceeds remaining time budget (\(remainingTime)s)", category: .api)
-                            throw APIError.rateLimited
+                            throw APIError.rateLimited(retryAfter: headerRetryAfter)
                         }
 
-                        if attempt >= retries - 1 {
-                            throw APIError.rateLimited
+                        if attempt >= allowedAttempts {
+                            throw APIError.rateLimited(retryAfter: headerRetryAfter)
                         }
 
+                        await rateLimitTracker.recordBackoff(delay)
                         try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                         retryDelay = min(delay * 2, retryStrategy.maxDelay)
                         continue
 
                     case 500...599:
-                        Log.warning("Server error \(httpResponse.statusCode), attempt \(attempt + 1)/\(retries)", category: .api)
+                        Log.warning("Server error \(httpResponse.statusCode), attempt \(attempt)/\(allowedAttempts)", category: .api)
                         // A 5xx is ambiguous for non-idempotent requests: the server may
                         // have processed the request before failing. Never resend.
-                        if allowsRetransmission, attempt < retries - 1 {
+                        if allowsRetransmission, attempt < allowedAttempts {
                             // Check time budget before sleeping
                             let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
                             if retryDelay > remainingTime {
@@ -263,7 +285,10 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                                 // Update request with refreshed token
                                 let newToken = try await tokenManager.getCurrentToken()
                                 currentRequest.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
-                                // Retry with new token
+                                // The refresh consumed this attempt; grant one more so
+                                // the refreshed token always gets its request (bounded:
+                                // hasAttemptedTokenRefresh makes this once-only).
+                                allowedAttempts += 1
                                 continue
                             } catch TokenManagerError.invalidCredentials {
                                 Log.error("Refresh token revoked, user must re-authenticate", category: .api)
@@ -307,21 +332,21 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
             } catch {
                 lastError = error
-                Log.error("Request failed (attempt \(attempt + 1)/\(retries)): \(error.localizedDescription)", category: .api)
+                Log.error("Request failed (attempt \(attempt)/\(allowedAttempts)): \(Log.redact(error: error))", category: .api)
 
                 // Non-idempotent requests may only be resent when the error proves the
                 // request never reached the server (DNS/connect/TLS failures). Timeouts
                 // and dropped connections are ambiguous — the send may have gone through.
                 let blocksRetransmission = !allowsRetransmission
                     && !ConnectionErrorDetector.isPreTransmissionError(error)
-                if blocksRetransmission || !retryStrategy.shouldRetry(error: error, attempt: attempt) {
+                if blocksRetransmission || !retryStrategy.shouldRetry(error: error, attempt: attempt - 1) {
                     if error is DecodingError {
                         throw APIError.decodingError(error)
                     }
                     throw error
                 }
 
-                if attempt < retries - 1 {
+                if attempt < allowedAttempts {
                     // Check time budget before sleeping
                     let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
                     if retryDelay > remainingTime {
@@ -343,7 +368,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         return (try? JSONDecoder().decode(GmailErrorResponse.self, from: data))?.error
     }
 
-    private nonisolated func gmailErrorMessage(from data: Data) -> String? {
+    nonisolated func gmailErrorMessage(from data: Data) -> String? {
         if let detail = gmailErrorDetail(from: data) {
             if let status = detail.status, !status.isEmpty {
                 return "\(detail.message) (\(status))"

@@ -228,8 +228,13 @@ final class InitialSyncOrchestrator {
     }
 
     private func fetchProfileAndAliases() async throws -> (GmailProfile, [String], [SendAsAlias]) {
-        let profile = try await messageFetcher.getProfile()
-        let sendAsList = try await messageFetcher.listSendAs()
+        // Independent requests — run them concurrently. The fetcher is bound
+        // to a local first so the async lets capture a constant rather than
+        // self (strict-concurrency robustness).
+        let fetcher = messageFetcher
+        async let profileRequest = fetcher.getProfile()
+        async let sendAsRequest = fetcher.listSendAs()
+        let (profile, sendAsList) = try await (profileRequest, sendAsRequest)
         let sendAsAliases = SendAsAlias.validAliases(
             from: sendAsList,
             accountEmail: profile.emailAddress

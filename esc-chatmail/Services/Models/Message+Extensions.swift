@@ -7,6 +7,17 @@ private enum AttachmentDeduplicationKey: Hashable {
     case objectID(NSManagedObjectID)
 }
 
+/// NSCache entry for the memoized calendar-invite likelihood.
+private final class CalendarInviteLikelihoodEntry {
+    let fingerprint: Int
+    let value: Bool
+
+    init(fingerprint: Int, value: Bool) {
+        self.fingerprint = fingerprint
+        self.value = value
+    }
+}
+
 extension Message {
     @nonobjc public class func fetchRequest() -> NSFetchRequest<Message> {
         return NSFetchRequest<Message>(entityName: "Message")
@@ -74,7 +85,42 @@ extension Message {
         }
     }
 
+    /// Memoized: the signal evaluation (raw-source sanitizer pass plus three
+    /// text normalizations and regex scans) runs once per row-model mapping
+    /// on the main actor, so repeated window resolutions re-paid it for every
+    /// message. Keyed by objectID and invalidated by a fingerprint of the
+    /// inputs; CalendarInviteSignals stays the single source of truth.
     var isLikelyCalendarInvite: Bool {
+        let fingerprint = calendarInviteSignalFingerprint
+        if let cached = Self.calendarInviteLikelihoodCache.object(forKey: objectID),
+           cached.fingerprint == fingerprint {
+            return cached.value
+        }
+
+        let value = computeIsLikelyCalendarInvite()
+        Self.calendarInviteLikelihoodCache.setObject(
+            CalendarInviteLikelihoodEntry(fingerprint: fingerprint, value: value),
+            forKey: objectID
+        )
+        return value
+    }
+
+    private static let calendarInviteLikelihoodCache: NSCache<NSManagedObjectID, CalendarInviteLikelihoodEntry> = {
+        let cache = NSCache<NSManagedObjectID, CalendarInviteLikelihoodEntry>()
+        cache.countLimit = 512
+        return cache
+    }()
+
+    private var calendarInviteSignalFingerprint: Int {
+        var hasher = Hasher()
+        hasher.combine(subject)
+        hasher.combine(cleanedSnippet ?? snippet)
+        hasher.combine(bodyText)
+        hasher.combine(attachmentsArray.contains { $0.isCalendarInviteAttachment })
+        return hasher.finalize()
+    }
+
+    private func computeIsLikelyCalendarInvite() -> Bool {
         let normalizedSubject = CalendarInviteSignals.normalizedSignalText(subject).lowercased()
         let normalizedSnippet = CalendarInviteSignals.normalizedSignalText(cleanedSnippet ?? snippet).lowercased()
         let normalizedBody = CalendarInviteSignals.normalizedSignalText(
@@ -102,76 +148,10 @@ extension Message {
         return hasInviteSubjectPrefix && hasCalendarStructure && hasDateSignal
     }
 
-    /// Attachments suitable for display (excludes signature images and inline images already shown in HTML)
-    var displayableAttachments: [Attachment] {
-        displayableAttachments(
-            hidingInlineReferencedInHTML: true,
-            hidingCalendarInviteAttachments: supportsCalendarInvitePreviewCard
-        )
-    }
-
-    var supportsCalendarInvitePreviewCard: Bool {
-        supportsCalendarInvitePreviewCard(canonicalHTML: loadHTMLSource())
-    }
-
-    /// Attachments suitable for display in the chat UI.
-    /// - Parameters:
-    ///   - hidingInlineReferencedInHTML: When true, hides inline `cid:` images that are referenced by the message HTML
-    ///     (to avoid duplicating what the HTML renderer already shows). When false, keeps plain-text bubble behavior
-    ///     but still hides signature/quoted-history inline images removed by HTML cleanup.
-    func displayableAttachments(
-        hidingInlineReferencedInHTML: Bool,
-        hidingCalendarInviteAttachments: Bool? = nil
-    ) -> [Attachment] {
-        let html = loadHTMLSource()
-        let nonDisplayableInlineContentIDs = extractNonDisplayableInlineContentIDs(from: html)
-        let allAttachments = deduplicatedAttachments(in: attachmentsArray.filter { attachment in
-            guard !attachment.isLikelySignatureImage else { return false }
-
-            guard let contentId = EmailDocument.normalizedContentID(attachment.contentId) else {
-                return true
-            }
-
-            // Hide inline images that only appear in signature/quoted sections removed by cleanup.
-            return !nonDisplayableInlineContentIDs.contains(contentId)
-        })
-
-        guard hidingInlineReferencedInHTML else {
-            return allAttachments
-        }
-
-        // Only filter inline images for received messages that will display HTML.
-        // Messages from the user (isFromMe) display as plain text, so their inline images
-        // need to show in the attachment grid.
-        guard !isFromMe else {
-            return allAttachments
-        }
-
-        // If message has HTML content, filter out attachments that are displayed inline via cid: URLs.
-        let referencedCIDs = extractReferencedContentIDs(from: html)
-        let cidFilteredAttachments: [Attachment]
-        if referencedCIDs.isEmpty {
-            cidFilteredAttachments = allAttachments
-        } else {
-            cidFilteredAttachments = allAttachments.filter { attachment in
-                guard let contentId = EmailDocument.normalizedContentID(attachment.contentId) else {
-                    return true // No Content-ID, always show
-                }
-                // Hide if this Content-ID is referenced in the HTML body.
-                return !referencedCIDs.contains(contentId)
-            }
-        }
-
-        let shouldHideCalendarInviteAttachments =
-            hidingCalendarInviteAttachments ?? supportsCalendarInvitePreviewCard(canonicalHTML: html)
-
-        guard shouldHideCalendarInviteAttachments else {
-            return cidFilteredAttachments
-        }
-
-        return cidFilteredAttachments.filter { !$0.isCalendarInviteAttachment }
-    }
-
+    /// Attachments suitable for display in the chat UI, filtered against a
+    /// precomputed HTML analysis (the live render path builds the analysis via
+    /// MessageBubbleHTMLAnalysisBuilder; ChatMessageRowModel carries the
+    /// snapshot equivalent for bubbles).
     func displayableAttachments(
         using htmlAnalysis: MessageBubbleHTMLAnalysis,
         hidingInlineReferencedInHTML: Bool,
@@ -245,189 +225,6 @@ extension Message {
     var attachmentsForForwarding: [Attachment] {
         deduplicatedAttachments(in: attachmentsArray)
     }
-
-    /// Hides inline images that appear only in sections removed by quote/signature cleanup.
-    /// This keeps signature logos out of plain-text chat bubbles while preserving genuine inline content.
-    private func extractNonDisplayableInlineContentIDs(from html: String?) -> Set<String> {
-        guard let html else { return [] }
-
-        let originalReferenced = extractReferencedContentIDs(from: html)
-        guard !originalReferenced.isEmpty else { return [] }
-
-        let cleaned = cleanedHTMLForAttachmentFiltering(from: html)
-        let cleanedReferenced = extractReferencedContentIDs(from: cleaned)
-        let removedByHTMLCleanup = originalReferenced.subtracting(cleanedReferenced)
-        let likelySignatureInline = extractLikelySignatureInlineContentIDs(from: html)
-
-        return removedByHTMLCleanup.union(likelySignatureInline)
-    }
-
-    private func loadHTMLSource() -> String? {
-        let handler = HTMLContentHandler.shared
-        if let html = handler.loadHTML(for: id) {
-            return html
-        }
-
-        guard let bodyStorageURI else {
-            return nil
-        }
-
-        // Migrate legacy absolute file URLs (e.g. older app container paths) into
-        // the canonical Messages/<messageId>.html location when possible.
-        if handler.migrateIfNeeded(from: bodyStorageURI),
-           let migratedHTML = handler.loadHTML(for: id) {
-            return migratedHTML
-        }
-
-        guard let resolvedURL = StorageURIResolver.resolve(bodyStorageURI),
-              FileManager.default.fileExists(atPath: resolvedURL.path) else {
-            return nil
-        }
-
-        return handler.loadHTML(from: resolvedURL)
-    }
-
-    private func supportsCalendarInvitePreviewCard(canonicalHTML: String?) -> Bool {
-        guard !isForwardedEmail, isLikelyCalendarInvite else {
-            return false
-        }
-
-        return CalendarInvitePreviewBuilder().canBuildPreview(
-            canonicalHTML: canonicalHTML ?? "",
-            bodyText: bodyText,
-            cleanedSnippet: cleanedSnippet,
-            subject: subject
-        )
-    }
-
-    private func cleanedHTMLForAttachmentFiltering(from html: String) -> String {
-        let quotedAndSignature = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
-        if HTMLMeaningfulContentChecker.hasMeaningfulContent(quotedAndSignature) {
-            return quotedAndSignature
-        }
-
-        // Signature cleanup can be over-aggressive for some templates; keep quote-only cleanup as fallback.
-        let quotedOnly = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedOnly) ?? html
-        if HTMLMeaningfulContentChecker.hasMeaningfulContent(quotedOnly) {
-            return quotedOnly
-        }
-
-        return html
-    }
-
-    /// Extracts Content-IDs referenced via cid: URLs in HTML.
-    private func extractReferencedContentIDs(from html: String?) -> Set<String> {
-        guard let html else { return [] }
-        return EmailDocument.referencedContentIDs(in: html)
-    }
-
-    /// Extra fallback for Outlook/Word signatures where HTML signature wrappers are inconsistent.
-    /// We only hide CIDs when the nearby HTML looks like a trailing sign-off/contact block
-    /// and the attachment itself looks like a logo-style inline signature asset.
-    private func extractLikelySignatureInlineContentIDs(from html: String) -> Set<String> {
-        let lowercasedHTML = html.lowercased()
-        guard lowercasedHTML.contains("cid:") else {
-            return []
-        }
-
-        // Restrict detection to trailing markup where signatures normally live to avoid
-        // global false positives from sender text that mentions role/contact words.
-        let trailingWindow = String(lowercasedHTML.suffix(6_000))
-        let hasSignatureSectionSignals =
-            Self.signatureSignOffMarkers.contains { trailingWindow.contains($0) } &&
-            (
-                Self.signatureContactMarkers.contains { trailingWindow.contains($0) } ||
-                Self.signatureRoleMarkers.contains { trailingWindow.contains($0) }
-            )
-
-        guard hasSignatureSectionSignals else {
-            return []
-        }
-
-        var nonDisplayable = Set<String>()
-        EmailDocument.scanReferencedContentIDs(in: html) { normalizedCID, valueStart in
-            // Heuristic-only fallback: only treat trailing CIDs as likely signature assets.
-            let cidOffset = html.distance(from: html.startIndex, to: valueStart)
-            let trailingThreshold = Int(Double(html.count) * 0.45)
-            guard cidOffset >= trailingThreshold else {
-                return
-            }
-
-            guard isLikelySignatureInlineAttachment(contentID: normalizedCID) else {
-                return
-            }
-            nonDisplayable.insert(normalizedCID)
-        }
-
-        return nonDisplayable
-    }
-
-    private func isLikelySignatureInlineAttachment(contentID: String) -> Bool {
-        guard let attachment = attachmentsArray.first(where: { EmailDocument.normalizedContentID($0.contentId) == contentID }) else {
-            return false
-        }
-
-        guard attachment.mimeType.hasPrefix("image/") else {
-            return false
-        }
-
-        let filename = attachment.filename.lowercased()
-        let hasSignatureKeyword = filename.contains("logo") || filename.contains("signature") || filename.contains("footer")
-
-        let isGeneratedInlineName = filename.range(
-            of: #"^(?:image|img)\d{2,}(?:[_-]\d+)?\.[a-z0-9]{2,5}$"#,
-            options: .regularExpression
-        ) != nil
-
-        let contentIDLocalPart = contentID.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? contentID
-        let isGeneratedInlineContentID = contentIDLocalPart.range(
-            of: #"^(?:image|img)\d{2,}(?:[_-]\d+)?(?:\.[a-z0-9]{2,5})?$"#,
-            options: .regularExpression
-        ) != nil
-
-        let hasLogoLikeDimensions =
-            attachment.width > 0 &&
-            attachment.height > 0 &&
-            attachment.width >= attachment.height &&
-            attachment.width <= 320 &&
-            attachment.height <= 120
-
-        let looksLikeGeneratedInlineAsset = isGeneratedInlineName || isGeneratedInlineContentID
-        return hasSignatureKeyword || (looksLikeGeneratedInlineAsset && hasLogoLikeDimensions)
-    }
-
-    private static let signatureSignOffMarkers = [
-        "warmly",
-        "best regards",
-        "kind regards",
-        "regards,",
-        "sincerely",
-        "thanks,",
-        "thank you,",
-        "cheers,"
-    ]
-
-    private static let signatureContactMarkers = [
-        "mailto:",
-        "tel:",
-        "mobile",
-        "phone",
-        "www.",
-        "linkedin",
-        "instagram",
-        "twitter"
-    ]
-
-    private static let signatureRoleMarkers = [
-        "manager",
-        "director",
-        "president",
-        "founder",
-        "advisor",
-        "broker",
-        "realtor",
-        "membership"
-    ]
 
     private func attachmentDeduplicationKey(for attachment: Attachment) -> AttachmentDeduplicationKey {
         if let contentId = EmailDocument.normalizedContentID(attachment.contentId) {

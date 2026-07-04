@@ -63,6 +63,12 @@ struct BackgroundSyncErrorHandler {
             }
             return .abort
 
+        case .invalidData(let message):
+            // The client maps non-retriable 4xx responses (403 quota/scope,
+            // 400 bad request) to invalidData; retrying repeats the failure.
+            Log.error("Non-retriable API error during background sync: \(message)", category: .background)
+            return .abort
+
         default:
             Log.error("API error during background sync: \(apiError)", category: .background)
             return .retry

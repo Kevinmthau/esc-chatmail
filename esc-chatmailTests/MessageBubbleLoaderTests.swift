@@ -2,6 +2,40 @@ import XCTest
 @testable import esc_chatmail
 
 final class MessageBubbleLoaderTests: XCTestCase {
+
+    /// The loader is a Sendable class (not an actor) precisely so concurrent
+    /// per-row loads don't serialize; this pins that concurrent use from many
+    /// tasks stays correct (races would surface here under the sanitizer).
+    func testLoadSenderInfo_isSafeUnderConcurrentUse() async {
+        let loader = MessageBubbleLoader(
+            contactsResolver: MockBubbleContactsResolver(contactMap: [:])
+        )
+
+        let names = await withTaskGroup(of: String.self) { group in
+            for index in 0..<32 {
+                group.addTask {
+                    let result = await loader.loadSenderInfo(
+                        from: MessageBubbleSenderRequest(
+                            email: "sender\(index)@example.com",
+                            personDisplayName: nil,
+                            personAvatarURL: nil,
+                            headerDisplayName: "Sender \(index)"
+                        )
+                    )
+                    return result.name ?? "<nil>"
+                }
+            }
+            var collected: [String] = []
+            for await name in group {
+                collected.append(name)
+            }
+            return collected
+        }
+
+        XCTAssertEqual(names.count, 32)
+        XCTAssertEqual(Set(names).count, 32, "each request should resolve its own sender name")
+    }
+
     func testLoadSenderInfo_noDisplayNameOrContactUsesUnknownSender() async {
         let loader = MessageBubbleLoader(
             contactsResolver: MockBubbleContactsResolver(contactMap: [:])

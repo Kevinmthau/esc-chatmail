@@ -43,6 +43,7 @@ final class VirtualScrollState: ObservableObject {
     private var resolvedRowsByID: [NSManagedObjectID: ChatMessageRowModel] = [:]
     private var resolvedRowsByAbsoluteIndex: [Int: ChatMessageRowModel] = [:]
     private var viewContextChangesCancellable: AnyCancellable?
+    private var cachedConversationObjectID: NSManagedObjectID?
 
     // Task tracking to prevent orphaned tasks during rapid scrolling
     private let taskManager = ViewModelTaskManager()
@@ -406,7 +407,7 @@ final class VirtualScrollState: ObservableObject {
                 endIndex: startIndex + page.messageIDs.count,
                 messageIDs: currentWindow.messageIDs,
                 isLoading: false
-            )
+            ).frontTrimmed(to: self.configuration.maxWindowSize)
 
             self.totalMessageCount = page.totalCount
             self.setMessageWindow(currentWindow)
@@ -444,12 +445,16 @@ final class VirtualScrollState: ObservableObject {
             }
 
             currentWindow.messageIDs = page.messageIDs + currentWindow.messageIDs
+
+            // Back-trim against the window cap: the user is scrolling UP, so
+            // the trimmed rows are far below the viewport and their removal
+            // cannot shift visible content.
             currentWindow = MessageWindow(
                 startIndex: startIndex,
                 endIndex: currentWindow.endIndex,
                 messageIDs: currentWindow.messageIDs,
                 isLoading: false
-            )
+            ).backTrimmed(to: self.configuration.maxWindowSize)
 
             self.totalMessageCount = page.totalCount
             self.setMessageWindow(currentWindow)
@@ -478,6 +483,12 @@ final class VirtualScrollState: ObservableObject {
 
     private func handleViewContextChange(_ notification: Notification) {
         guard let window = messageWindow else { return }
+
+        // objectsDidChange fires for every merged sync save while a chat is
+        // open. Bail out on type checks alone before any pass below faults
+        // objects: only Message/Attachment changes and Person display-name
+        // updates can affect this window.
+        guard Self.isRelevantChatContextChange(notification.userInfo) else { return }
 
         let knownTotalCount = estimatedTotalCountAfterLocalMessageMutation(in: notification)
         if shouldRefreshLatestWindowForLocalMessageMutation(
@@ -589,13 +600,71 @@ final class VirtualScrollState: ObservableObject {
         return hasVisibleInsertedMessageForCurrentConversation(in: notification)
     }
 
-    private func hasVisibleInsertedMessageForCurrentConversation(in notification: Notification) -> Bool {
-        guard let conversationUUID = UUID(uuidString: conversationId) else { return false }
+    /// Type-check-only relevance scan for objectsDidChange payloads. Nothing
+    /// here faults an object; the expensive relationship checks below only
+    /// run for notifications that pass this.
+    nonisolated static func isRelevantChatContextChange(_ userInfo: [AnyHashable: Any]?) -> Bool {
+        guard let userInfo else { return false }
 
-        return contextObjects(forKeys: [NSInsertedObjectsKey], in: notification)
+        let keys = [
+            NSInsertedObjectsKey,
+            NSUpdatedObjectsKey,
+            NSRefreshedObjectsKey,
+            NSDeletedObjectsKey
+        ]
+        let personKeys: Set<String> = [NSUpdatedObjectsKey, NSRefreshedObjectsKey]
+
+        for key in keys {
+            guard let objects = userInfo[key] as? Set<NSManagedObject> else { continue }
+            let includesPersons = personKeys.contains(key)
+            for object in objects {
+                if object is Message || object is Attachment {
+                    return true
+                }
+                if includesPersons, object is Person {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    /// Resolved once (objectID-only fetch) so conversation membership checks
+    /// compare objectIDs instead of faulting each inserted message's
+    /// Conversation row for its UUID. Temporary IDs (optimistic unsaved
+    /// conversations) are not cached — they change identity on save.
+    private func currentConversationObjectID() -> NSManagedObjectID? {
+        if let cachedConversationObjectID {
+            return cachedConversationObjectID
+        }
+        guard let conversationUUID = UUID(uuidString: conversationId) else { return nil }
+
+        let request = NSFetchRequest<NSManagedObjectID>(entityName: "Conversation")
+        request.predicate = NSPredicate(format: "id == %@", conversationUUID as CVarArg)
+        request.resultType = .managedObjectIDResultType
+        request.fetchLimit = 1
+
+        let objectID = (try? viewContext.fetch(request))?.first
+        if let objectID, !objectID.isTemporaryID {
+            cachedConversationObjectID = objectID
+        }
+        return objectID
+    }
+
+    /// Membership check that faults at most the message row: the destination
+    /// objectID of the to-one relationship is available without firing the
+    /// Conversation's own fault (the previous UUID comparison loaded the
+    /// Conversation row for every inserted message in every merge).
+    private func belongsToCurrentConversation(_ message: Message) -> Bool {
+        guard let conversationObjectID = currentConversationObjectID() else { return false }
+        return message.conversation?.objectID == conversationObjectID
+    }
+
+    private func hasVisibleInsertedMessageForCurrentConversation(in notification: Notification) -> Bool {
+        contextObjects(forKeys: [NSInsertedObjectsKey], in: notification)
             .contains { object in
                 guard let message = object as? Message,
-                      message.conversation?.id == conversationUUID else {
+                      belongsToCurrentConversation(message) else {
                     return false
                 }
 
@@ -610,12 +679,10 @@ final class VirtualScrollState: ObservableObject {
     }
 
     private func visibleInsertedMessageCountForCurrentConversation(in notification: Notification) -> Int {
-        guard let conversationUUID = UUID(uuidString: conversationId) else { return 0 }
-
-        return contextObjects(forKeys: [NSInsertedObjectsKey], in: notification)
+        contextObjects(forKeys: [NSInsertedObjectsKey], in: notification)
             .reduce(into: 0) { count, object in
                 guard let message = object as? Message,
-                      message.conversation?.id == conversationUUID,
+                      belongsToCurrentConversation(message),
                       isVisibleInChat(message) else {
                     return
                 }

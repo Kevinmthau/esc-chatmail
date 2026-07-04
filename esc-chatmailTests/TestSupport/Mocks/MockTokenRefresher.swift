@@ -42,18 +42,32 @@ final class MockTokenRefresher: TokenRefresherProtocol, @unchecked Sendable {
         set { lock.withLock { _artificialDelay = newValue } }
     }
 
+    /// Fires after the refreshed tokens are produced but before they are
+    /// returned to the caller, letting a test emulate an event (e.g.
+    /// sign-out) landing mid-refresh — after the caller snapshotted its
+    /// generation, before it persists the result. Runs outside the mock's
+    /// lock so the hook may re-enter the token manager.
+    private var _onRefresh: (() -> Void)?
+    var onRefresh: (() -> Void)? {
+        get { lock.withLock { _onRefresh } }
+        set { lock.withLock { _onRefresh = newValue } }
+    }
+
     func refreshTokens() async throws -> (accessToken: String, refreshToken: String?, expirationDate: Date) {
         let delay = artificialDelay
         if delay > 0 {
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
 
-        return try lock.withLock {
+        let result: (accessToken: String, refreshToken: String?, expirationDate: Date) = try lock.withLock {
             _callCount += 1
             if let error = _error {
                 throw error
             }
             return (_accessToken, _refreshToken, _expirationDate)
         }
+
+        onRefresh?()
+        return result
     }
 }

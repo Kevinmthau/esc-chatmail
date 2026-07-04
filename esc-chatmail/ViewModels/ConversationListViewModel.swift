@@ -481,6 +481,14 @@ final class ConversationListViewModel: ObservableObject {
             return
         }
 
+        // objectsDidChange fires for every merged sync save; most merges carry
+        // only Message/Attachment/Label churn the list doesn't render, yet the
+        // passes below re-scan every changed set. Bail out early unless the
+        // change can actually affect the list.
+        guard Self.isRelevantConversationListChange(notification.userInfo) else {
+            return
+        }
+
         let inserted = conversationObjects(forKey: NSInsertedObjectsKey, in: notification)
         let updated = conversationObjects(forKey: NSUpdatedObjectsKey, in: notification)
         let refreshed = conversationObjects(forKey: NSRefreshedObjectsKey, in: notification)
@@ -491,6 +499,40 @@ final class ConversationListViewModel: ObservableObject {
         let removedIDs = deletedIDs.union(invalidatedIDs)
 
         applyConversationChanges(updatedConversations: updatedConversations, deletedIDs: removedIDs)
+    }
+
+    /// Single-pass early-return relevance scan for objectsDidChange payloads:
+    /// relevant when any Conversation appears in {inserted, updated,
+    /// refreshed, deleted, invalidated} or any Person in {updated, refreshed}
+    /// (display-name enrichment). The refreshed set is mandatory — merged
+    /// background rollup updates surface as Conversation *refreshes*, so
+    /// omitting it would break live list updates. Type checks only; nothing
+    /// here faults an object.
+    nonisolated static func isRelevantConversationListChange(_ userInfo: [AnyHashable: Any]?) -> Bool {
+        guard let userInfo else { return false }
+
+        let keys = [
+            NSInsertedObjectsKey,
+            NSUpdatedObjectsKey,
+            NSRefreshedObjectsKey,
+            NSDeletedObjectsKey,
+            NSInvalidatedObjectsKey
+        ]
+        let personKeys: Set<String> = [NSUpdatedObjectsKey, NSRefreshedObjectsKey]
+
+        for key in keys {
+            guard let objects = userInfo[key] as? Set<NSManagedObject> else { continue }
+            let includesPersons = personKeys.contains(key)
+            for object in objects {
+                if object is Conversation {
+                    return true
+                }
+                if includesPersons, object is Person {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     private func conversationObjects(forKey key: String, in notification: Notification) -> [Conversation] {

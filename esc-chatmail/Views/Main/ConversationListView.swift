@@ -2,7 +2,6 @@ import SwiftUI
 import CoreData
 
 struct ConversationListView: View {
-    @FetchRequest private var conversations: FetchedResults<Conversation>
     @Environment(\.managedObjectContext) private var viewContext
     @EnvironmentObject private var deps: Dependencies
     @StateObject private var viewModel: ConversationListViewModel
@@ -15,6 +14,14 @@ struct ConversationListView: View {
                 dependencies: resolvedDeps.makeConversationListDependencies()
             )
         )
+    }
+
+    /// One-shot fetch that seeds the view model on appear. Deliberately not a
+    /// live @FetchRequest: the view model's objectsDidChange pipeline owns
+    /// live updates, and an always-on FRC re-diffed the full result set and
+    /// invalidated this view's body on every merged sync save — duplicate
+    /// work in parallel with the VM.
+    private static func activeConversationsRequest() -> NSFetchRequest<Conversation> {
         let request = NSFetchRequest<Conversation>(entityName: "Conversation")
         request.sortDescriptors = [
             NSSortDescriptor(keyPath: \Conversation.pinned, ascending: false),
@@ -26,7 +33,7 @@ struct ConversationListView: View {
         request.fetchBatchSize = 20
         request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
         request.includesPendingChanges = true
-        _conversations = FetchRequest(fetchRequest: request)
+        return request
     }
 
     var body: some View {
@@ -118,6 +125,7 @@ struct ConversationListView: View {
         }
         .onAppear {
             AppPrewarmer.prewarmAll()  // Safe to call repeatedly; each prewarm runs only once per launch.
+            let conversations = (try? viewContext.fetch(Self.activeConversationsRequest())) ?? []
             viewModel.onAppear(conversations: conversations, in: viewContext)
         }
         .onDisappear {
@@ -330,12 +338,6 @@ struct ConversationListView: View {
         isSearchFieldFocused = false
         guard let objectID = conversationReference.resolveObjectID(in: viewContext) else {
             pendingConversationReference = conversationReference
-            return
-        }
-
-        if let conversation = conversations.first(where: { $0.objectID == objectID }) {
-            selectedConversation = conversation
-            pendingConversationReference = nil
             return
         }
 

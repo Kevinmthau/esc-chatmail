@@ -130,9 +130,12 @@ final class CoreDataStack: @unchecked Sendable {
         description?.shouldMigrateStoreAutomatically = true
         description?.shouldInferMappingModelAutomatically = true
 
-        // Set up options for better error recovery
+        // History tracking stays on (turning it off after a store has opened
+        // with it logs a fault) even though nothing consumes history tokens;
+        // DatabaseMaintenanceService purges old transactions during cleanup.
+        // Remote-change notifications are NOT requested: nothing in the app
+        // observes .NSPersistentStoreRemoteChange.
         description?.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
-        description?.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
 
         loadPersistentStores(for: container)
 
@@ -340,8 +343,11 @@ final class CoreDataStack: @unchecked Sendable {
 
                     // Handle specific Core Data errors
                     if error.code == NSManagedObjectMergeError {
-                        // Resolve merge conflicts
+                        // Resolve merge conflicts, then give the conflicting
+                        // writer's transaction a moment before the bounded
+                        // re-save (attempts capped by retryCount).
                         handleMergeConflicts(in: context, error: error)
+                        Thread.sleep(forTimeInterval: 0.05 * Double(attempt + 1))
                     } else if error.code == NSValidationMultipleErrorsError {
                         // Handle validation errors
                         handleValidationErrors(in: context, error: error)
@@ -363,11 +369,15 @@ final class CoreDataStack: @unchecked Sendable {
     }
 
     private func handleMergeConflicts(in context: NSManagedObjectContext, error: NSError) {
-        // Refresh objects involved in merge conflict
+        // Refresh conflicted objects with mergeChanges: true — fresh store
+        // data is re-faulted UNDER the unsaved local edits so the retried
+        // save keeps them. The previous mergeChanges: false discarded the
+        // pending edits it was trying to save. (Near-unreachable with the
+        // trump merge policy everywhere, but recovery should not lose data.)
         if let conflicts = error.userInfo[NSPersistentStoreSaveConflictsErrorKey] as? [NSMergeConflict] {
             for conflict in conflicts {
                 let sourceObject = conflict.sourceObject
-                sourceObject.managedObjectContext?.refresh(sourceObject, mergeChanges: false)
+                sourceObject.managedObjectContext?.refresh(sourceObject, mergeChanges: true)
             }
         }
     }
@@ -492,5 +502,27 @@ final class CoreDataStack: @unchecked Sendable {
 
         // Wait for store to be ready
         try await waitForStoreToLoad()
+
+        // The container's viewContext outlives the store swap, so it still
+        // holds objects registered against the destroyed store plus a
+        // PersonFactory userInfo cache pointing at them. Drop both on the
+        // fresh store; without this, the next sign-in's optimistic send
+        // resurrected cached Persons as unfulfillable faults. Deliberately
+        // done AFTER the store is back — placing this main-queue hop between
+        // destroyAllData and the reload would widen the window in which the
+        // coordinator has no stores, which un-quiesced background sync work
+        // (IncrementalSyncOrchestrator fetches without gating on readiness)
+        // could fetch/save into and trap on "no persistent stores".
+        await resetViewContextState()
+    }
+
+    private func resetViewContextState() async {
+        let viewContext = persistentContainer.viewContext
+        await viewContext.perform {
+            viewContext.reset()
+            // reset() deregisters objects but leaves userInfo intact, so the
+            // factory cache must be dropped explicitly.
+            PersonFactory.resetCache(in: viewContext)
+        }
     }
 }

@@ -91,4 +91,45 @@ final class IncrementalSyncOrchestratorTests: XCTestCase {
             IncrementalSyncOrchestrator.allowsIntermediateContextSaves(for: [record])
         )
     }
+
+    // MARK: - Label reconciliation gating
+
+    private let ttl: TimeInterval = 20 * 60
+    private let forceInterval: TimeInterval = 3600
+    private let now: TimeInterval = 1_750_000_000
+
+    func testLabelReconciliation_runsWhenNeverReconciled() {
+        XCTAssertFalse(IncrementalSyncOrchestrator.shouldSkipLabelReconciliation(
+            noHistoryChanges: false, lastReconciliation: 0, now: now, ttl: ttl, forceInterval: forceInterval
+        ))
+        XCTAssertFalse(IncrementalSyncOrchestrator.shouldSkipLabelReconciliation(
+            noHistoryChanges: true, lastReconciliation: 0, now: now, ttl: ttl, forceInterval: forceInterval
+        ))
+    }
+
+    func testLabelReconciliation_withHistoryChanges_skipsInsideTTL() {
+        XCTAssertTrue(IncrementalSyncOrchestrator.shouldSkipLabelReconciliation(
+            noHistoryChanges: false, lastReconciliation: now - ttl + 1, now: now, ttl: ttl, forceInterval: forceInterval
+        ))
+    }
+
+    func testLabelReconciliation_withHistoryChanges_runsOnceTTLLapses() {
+        XCTAssertFalse(IncrementalSyncOrchestrator.shouldSkipLabelReconciliation(
+            noHistoryChanges: false, lastReconciliation: now - ttl, now: now, ttl: ttl, forceInterval: forceInterval
+        ))
+    }
+
+    func testLabelReconciliation_quietSync_skipsInsideForceInterval() {
+        // Between the TTL and the hourly force interval, a quiet sync still skips:
+        // the force timer exists for drift, not for every sync.
+        XCTAssertTrue(IncrementalSyncOrchestrator.shouldSkipLabelReconciliation(
+            noHistoryChanges: true, lastReconciliation: now - ttl - 60, now: now, ttl: ttl, forceInterval: forceInterval
+        ))
+    }
+
+    func testLabelReconciliation_quietSync_runsOnceForceIntervalLapses() {
+        XCTAssertFalse(IncrementalSyncOrchestrator.shouldSkipLabelReconciliation(
+            noHistoryChanges: true, lastReconciliation: now - forceInterval, now: now, ttl: ttl, forceInterval: forceInterval
+        ))
+    }
 }

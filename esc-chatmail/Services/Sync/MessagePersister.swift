@@ -116,6 +116,16 @@ actor MessagePersister {
             sendAsAliases: sendAsAliases
         )
 
+        // One batch fetch primes the context's Person cache so the
+        // per-participant find-or-create calls during persistence become
+        // dictionary hits instead of individual SQLite fetches.
+        let participantEmails = Self.participantEmails(in: prepared)
+        if !participantEmails.isEmpty {
+            await context.perform {
+                _ = PersonFactory.prefetch(emails: participantEmails, in: context)
+            }
+        }
+
         for outcome in prepared {
             await persist(
                 outcome,
@@ -125,6 +135,25 @@ actor MessagePersister {
                 in: context
             )
         }
+    }
+
+    /// Collects every participant email that persistence will look up for the
+    /// prepared batch (sender plus to/cc/bcc recipients), normalized to match
+    /// PersonFactory's cache keys.
+    nonisolated static func participantEmails(in prepared: [PreparedMessage]) -> [String] {
+        var emails = Set<String>()
+        for outcome in prepared {
+            guard case .processed(let processedMessage) = outcome else { continue }
+            let headers = processedMessage.headers
+            if let from = headers.from, let email = EmailNormalizer.extractEmail(from: from) {
+                emails.insert(EmailNormalizer.normalize(email))
+            }
+            for recipient in headers.to + headers.cc + headers.bcc {
+                emails.insert(EmailNormalizer.normalize(recipient.email))
+            }
+        }
+        emails.remove("")
+        return Array(emails)
     }
 
     // MARK: - Preparation (concurrency-safe, no Core Data writes)

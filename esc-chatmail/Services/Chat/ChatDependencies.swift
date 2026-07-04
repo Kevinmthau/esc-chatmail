@@ -18,7 +18,9 @@ struct ChatContentDependencies {
     let htmlContentHandler: HTMLContentHandler
     let processedTextCache: ProcessedTextCache
     let originalEmailSourceWarmer: any OriginalEmailSourceWarming
-    /// Use a factory so visible bubbles do not serialize through one shared actor.
+    /// Factory retained for API stability. The loader is a stateless Sendable
+    /// class (no longer an actor), so bubble loads never serialize through a
+    /// shared executor regardless of how many rows share an instance.
     let makeMessageBubbleLoader: () -> MessageBubbleLoader
 }
 

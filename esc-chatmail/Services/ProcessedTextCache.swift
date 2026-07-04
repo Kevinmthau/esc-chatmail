@@ -849,9 +849,24 @@ actor ProcessedTextCache: MemoryWarningHandler {
     /// This is common in personal messages that include a URL and should not trigger HTML preview cards.
     nonisolated private static func stripAppleRichLinkPreviews(from html: String) -> String {
         var result = html
+        var searchStart = result.startIndex
 
-        // Remove every `<div ... class="apple-rich-link" ...>...</div>` block (including nested divs).
-        while let markerRange = result.range(of: "apple-rich-link", options: .caseInsensitive) {
+        // Remove every `<div ... class="apple-rich-link" ...>...</div>` block
+        // (including nested divs). Each scan resumes from the removal point —
+        // restarting from index 0 made k blocks cost k full passes over the
+        // document (quadratic on crafted input). No REAL block's marker can
+        // remain before the resume point (its enclosing div starts at or
+        // before it and was just removed); the one thing not re-scanned is a
+        // marker string fabricated by the removal joining surrounding text —
+        // deliberately left alone, since it is inert text for this analysis
+        // and the old restart-from-zero behavior would have deleted an
+        // unrelated legitimate block for it.
+        while searchStart < result.endIndex,
+              let markerRange = result.range(
+                of: "apple-rich-link",
+                options: .caseInsensitive,
+                range: searchStart..<result.endIndex
+              ) {
             // Find the opening `<div` tag that contains the marker (class attribute is inside the tag).
             guard let divStart = result[..<markerRange.lowerBound]
                 .range(of: "<div", options: [.caseInsensitive, .backwards])?
@@ -861,7 +876,11 @@ actor ProcessedTextCache: MemoryWarningHandler {
             guard let endIndex = findMatchingClosingDiv(in: result, from: divStart) else {
                 break
             }
+            // String indices are invalidated by mutation; carry the resume
+            // point across the removal as an offset.
+            let resumeOffset = result.distance(from: result.startIndex, to: divStart)
             result.removeSubrange(divStart..<endIndex)
+            searchStart = result.index(result.startIndex, offsetBy: resumeOffset)
         }
 
         return result

@@ -28,7 +28,16 @@ extension GmailAPIClient {
         var currentRequest = request
         var hasAttemptedTokenRefresh = false
 
-        for attempt in 0..<retries {
+        // Same attempt accounting as performRequestWithRetry: 1-based counter
+        // incremented at the top so every `continue` advances it, and one
+        // extra attempt granted after a successful 401 token refresh (bounded
+        // by hasAttemptedTokenRefresh) so the refreshed token is always tried.
+        var attempt = 0
+        var allowedAttempts = retries
+
+        while attempt < allowedAttempts {
+            attempt += 1
+
             // Circuit breaker: check if we've exceeded max total retry time
             let elapsedTime = Date().timeIntervalSince(startTime)
             if elapsedTime >= NetworkConfig.maxTotalRetryTime {
@@ -81,14 +90,21 @@ extension GmailAPIClient {
                     await rateLimitTracker.recordBackoff(delay)
                     if await rateLimitTracker.shouldAbort() {
                         Log.warning("Circuit breaker: excessive cumulative rate limiting, aborting", category: .api)
-                        throw APIError.rateLimited
+                        throw APIError.rateLimited(retryAfter: nil)
                     }
 
                     // Check if delay would exceed remaining time budget
                     let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
                     if delay > remainingTime {
                         Log.warning("Circuit breaker: delay (\(delay)s) exceeds remaining time budget (\(remainingTime)s)", category: .api)
-                        throw APIError.rateLimited
+                        throw APIError.rateLimited(retryAfter: nil)
+                    }
+
+                    // Final-attempt guard (previously missing here): without it
+                    // the loop slept the full Retry-After and then fell out as
+                    // URLError(.unknown) instead of rateLimited.
+                    if attempt >= allowedAttempts {
+                        throw APIError.rateLimited(retryAfter: nil)
                     }
 
                     try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -104,7 +120,16 @@ extension GmailAPIClient {
                             _ = try await tokenManager.refreshToken()
                             let newToken = try await tokenManager.getCurrentToken()
                             currentRequest.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
+                            // The refresh consumed this attempt; grant one more so
+                            // the refreshed token always gets its request.
+                            allowedAttempts += 1
                             continue
+                        } catch TokenManagerError.invalidCredentials {
+                            // Mirrors performRequestWithRetry: a revoked refresh
+                            // token must abort (credentialsRevoked → abortNoRetry),
+                            // not loop through tokenRefreshAndRetry.
+                            Log.error("Refresh token revoked, user must re-authenticate", category: .api)
+                            throw APIError.credentialsRevoked
                         } catch {
                             Log.error("Token refresh failed during 401 recovery: \(error.localizedDescription)", category: .api)
                             throw APIError.authenticationError
@@ -113,8 +138,8 @@ extension GmailAPIClient {
                     throw APIError.authenticationError
 
                 case 500...599:
-                    Log.warning("Server error \(httpResponse.statusCode), attempt \(attempt + 1)/\(retries)", category: .api)
-                    if attempt < retries - 1 {
+                    Log.warning("Server error \(httpResponse.statusCode), attempt \(attempt)/\(allowedAttempts)", category: .api)
+                    if attempt < allowedAttempts {
                         let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
                         if retryDelay > remainingTime {
                             Log.warning("Circuit breaker: retry delay exceeds remaining time budget", category: .api)
@@ -126,6 +151,15 @@ extension GmailAPIClient {
                     }
                     throw APIError.serverError(httpResponse.statusCode)
 
+                case 400...499:
+                    // Remaining client errors (403 quota/scope, 400 bad request …)
+                    // are non-retriable; mirrors performRequestWithRetry. Placed
+                    // after the specific 404/429/401 cases so their retry and
+                    // conversion behavior is untouched.
+                    let errorMessage = gmailErrorMessage(from: data)
+                        ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
+                    throw APIError.invalidData("Gmail API \(httpResponse.statusCode): \(errorMessage)")
+
                 default:
                     throw APIError.serverError(httpResponse.statusCode)
                 }
@@ -135,13 +169,13 @@ extension GmailAPIClient {
                 throw error
             } catch {
                 lastError = error
-                Log.error("History request failed (attempt \(attempt + 1)/\(retries)): \(error.localizedDescription)", category: .api)
+                Log.error("History request failed (attempt \(attempt)/\(allowedAttempts)): \(Log.redact(error: error))", category: .api)
 
-                if !retryStrategy.shouldRetry(error: error, attempt: attempt) {
+                if !retryStrategy.shouldRetry(error: error, attempt: attempt - 1) {
                     throw error
                 }
 
-                if attempt < retries - 1 {
+                if attempt < allowedAttempts {
                     let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
                     if retryDelay > remainingTime {
                         Log.warning("Circuit breaker: retry delay exceeds remaining time budget", category: .api)

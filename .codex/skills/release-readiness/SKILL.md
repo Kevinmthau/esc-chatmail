@@ -23,8 +23,7 @@ Produce a concrete ship/no-ship readout for this app with the top risks and the 
    - Use `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`
 
 2. Review the core user flows.
-   - Inbox: `esc-chatmail/Views/Main/InboxListView.swift`
-   - Chat list: `esc-chatmail/Views/Main/ConversationListView.swift`
+   - Chat list (inbox): `esc-chatmail/Views/Main/ConversationListView.swift`
    - Thread view: `esc-chatmail/Views/Chat/ChatView.swift`, `ChatMessagesView.swift`, `MessageBubble.swift`
    - Full email rendering: `esc-chatmail/Views/Chat/HTMLMessageView.swift`
    - Compose: `esc-chatmail/Views/Compose/ComposeView.swift`, `esc-chatmail/ViewModels/ComposeViewModel.swift`
