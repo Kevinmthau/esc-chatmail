@@ -952,7 +952,7 @@ final class VirtualScrollStateTests: XCTestCase {
         }
     }
 
-    // MARK: - Window cap (back-trim while extending upward)
+    // MARK: - Window cap
 
     func testConfigurationDefaultsAndClampForMaxWindowSize() {
         XCTAssertEqual(VirtualScrollConfiguration.default.maxWindowSize, 300, "default is max(200, pageSize·6)")
@@ -1001,6 +1001,26 @@ final class VirtualScrollStateTests: XCTestCase {
         let untouched = trimmed.backTrimmed(to: 12)
         XCTAssertEqual(untouched.messageIDs.count, 12)
         XCTAssertEqual(untouched.endIndex, 12)
+    }
+
+    func testMessageWindowFrontTrim_capsAndPreservesRangeInvariant() throws {
+        let (_, messages) = try makeConversationWithMessages(count: 15)
+        let ids = messages.map(\.objectID)
+
+        // Window extended downward past the cap: rows 0..<12 appended with 12..<15.
+        let window = MessageWindow(
+            startIndex: 0,
+            endIndex: 15,
+            messageIDs: ids,
+            isLoading: false
+        )
+
+        let trimmed = window.frontTrimmed(to: 12)
+
+        XCTAssertEqual(trimmed.startIndex, 3)
+        XCTAssertEqual(trimmed.endIndex, 15)
+        XCTAssertEqual(trimmed.messageIDs, Array(ids.suffix(12)), "front-trim drops the smallest absolute indices")
+        XCTAssertEqual(trimmed.endIndex - trimmed.startIndex, trimmed.messageIDs.count, "grouping/boundary math depends on this invariant")
     }
 
     func testUpwardScrollSweep_neverExceedsWindowCapAndRecovers() async throws {
@@ -1067,6 +1087,62 @@ final class VirtualScrollStateTests: XCTestCase {
             state.isShowingLatestWindow &&
                 state.visibleMessages.last?.objectID == messages.last?.objectID
         }
+    }
+
+    func testDownwardPreloadAfterBackTrim_neverExceedsWindowCap() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 40)
+        let configuration = VirtualScrollConfiguration(
+            visibleItemCount: 1,
+            bufferSize: 0,
+            pageSize: 3,
+            preloadThreshold: 2,
+            maxWindowSize: 7
+        )
+        let stack = self.stack!
+
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: configuration,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil {
+            state.visibleMessages.map(\.objectID) == [messages[39].objectID] && !state.isLoadingMore
+        }
+
+        state.scrollPosition = 42
+        state.markIndexVisible(39)
+        await waitUntil {
+            state.visibleRangeStartIndex == 36 &&
+                state.visibleMessages.map(\.objectID) == Array(messages[36..<40]).map(\.objectID)
+        }
+
+        state.scrollPosition = 39
+        state.markIndexVisible(36)
+        await waitUntil {
+            state.visibleRangeStartIndex == 33 &&
+                state.visibleMessages.map(\.objectID) == Array(messages[33..<40]).map(\.objectID)
+        }
+
+        state.scrollPosition = 36
+        state.markIndexVisible(33)
+        await waitUntil {
+            state.visibleRangeStartIndex == 30 &&
+                state.visibleMessages.map(\.objectID) == Array(messages[30..<37]).map(\.objectID)
+        }
+
+        state.scrollPosition = 33
+        state.markIndexVisible(36)
+        await waitUntil {
+            state.visibleRangeStartIndex == 33 &&
+                state.visibleMessages.map(\.objectID) == Array(messages[33..<40]).map(\.objectID)
+        }
+
+        XCTAssertLessThanOrEqual(state.visibleMessages.count, configuration.maxWindowSize)
+        XCTAssertEqual(state.visibleMessages.last?.objectID, messages.last?.objectID)
     }
 
     // MARK: - objectsDidChange relevance guard
@@ -1242,4 +1318,3 @@ private actor FirstRequestPause {
         isReleased = true
     }
 }
-

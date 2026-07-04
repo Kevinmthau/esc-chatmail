@@ -37,4 +37,21 @@ struct MessageWindow {
             isLoading: isLoading
         )
     }
+
+    /// Returns a window whose row count is capped at `maxSize` by dropping
+    /// rows from the FRONT (smallest absolute indices). Used while extending
+    /// downward: the user's scroll position is near the back edge, so the
+    /// removed rows are above the buffered viewport. Preserves the invariant
+    /// `endIndex - startIndex == messageIDs.count`.
+    func frontTrimmed(to maxSize: Int) -> MessageWindow {
+        guard maxSize > 0, messageIDs.count > maxSize else { return self }
+
+        let overflow = messageIDs.count - maxSize
+        return MessageWindow(
+            startIndex: startIndex + overflow,
+            endIndex: endIndex,
+            messageIDs: Array(messageIDs.dropFirst(overflow)),
+            isLoading: isLoading
+        )
+    }
 }
