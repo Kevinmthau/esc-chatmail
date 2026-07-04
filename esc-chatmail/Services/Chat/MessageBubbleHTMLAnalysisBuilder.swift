@@ -233,26 +233,27 @@ enum MessageBubbleHTMLAnalysisBuilder {
             return lowercasedHTML.distance(from: lowercasedHTML.startIndex, to: range.lowerBound)
         }
 
-        let authoredOffsets = authoredSignatureWrapperMarkers.compactMap { marker in
-            firstCorroboratedAuthoredSignatureMarkerOffset(of: marker, in: lowercasedHTML)
+        let authoredOffsets = authoredSignatureWrapperPatterns.compactMap { pattern in
+            firstCorroboratedAuthoredSignatureMarkerOffset(matching: pattern, in: lowercasedHTML)
         }
 
         return (trustedOffsets + authoredOffsets).min()
     }
 
-    // `class="signature…"` / `id="signature…"` are author-authored and ambiguous
-    // (e.g. a "Signature Collection" marketing block near the top of a
-    // newsletter). Only treat such a marker as a hard boundary when a real
+    // Exact `signature` class/id tokens are author-authored and ambiguous (e.g.
+    // a "Signature Collection" marketing block near the top of a newsletter).
+    // Only treat such a marker as a hard boundary when a real
     // signature signal — branding, a contact, or a role line — follows it within
     // the trailing window, so a stray class name does not suppress every later
     // inline image.
     private static func firstCorroboratedAuthoredSignatureMarkerOffset(
-        of marker: String,
+        matching pattern: String,
         in lowercasedHTML: String
     ) -> Int? {
         var searchStart = lowercasedHTML.startIndex
         while let range = lowercasedHTML.range(
-            of: marker,
+            of: pattern,
+            options: .regularExpression,
             range: searchStart..<lowercasedHTML.endIndex
         ) {
             let windowEnd = lowercasedHTML.index(
@@ -281,16 +282,26 @@ enum MessageBubbleHTMLAnalysisBuilder {
 
     private static func firstReplyBoundaryOffset(in lowercasedHTML: String) -> Int? {
         var candidates: [Int] = []
-        for pattern in replyAttributionBoundaryPatterns {
-            if let replyAttributionRange = lowercasedHTML.range(
-                of: pattern,
-                options: .regularExpression
-            ) {
-                let replyAttributionOffset = lowercasedHTML.distance(
-                    from: lowercasedHTML.startIndex,
-                    to: replyAttributionRange.lowerBound
+        for pattern in replyOnAttributionBoundaryPatterns {
+            for replyAttributionRange in regexRanges(of: pattern, in: lowercasedHTML)
+                where replyOnAttributionHasDateOrEmailSignal(in: lowercasedHTML[replyAttributionRange]) {
+                candidates.append(
+                    lowercasedHTML.distance(
+                        from: lowercasedHTML.startIndex,
+                        to: replyAttributionRange.lowerBound
+                    )
                 )
-                candidates.append(replyAttributionOffset)
+            }
+        }
+
+        for pattern in standaloneReplyAttributionBoundaryPatterns {
+            for replyAttributionRange in regexRanges(of: pattern, in: lowercasedHTML) {
+                candidates.append(
+                    lowercasedHTML.distance(
+                        from: lowercasedHTML.startIndex,
+                        to: replyAttributionRange.lowerBound
+                    )
+                )
             }
         }
 
@@ -308,6 +319,13 @@ enum MessageBubbleHTMLAnalysisBuilder {
         }
 
         return candidates.min()
+    }
+
+    private static func replyOnAttributionHasDateOrEmailSignal(in attributionHTML: Substring) -> Bool {
+        attributionHTML.range(
+            of: replyAttributionDateOrEmailSignalPattern,
+            options: .regularExpression
+        ) != nil
     }
 
     private static func signatureSignalSearchRange(
@@ -953,7 +971,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
     // depends on dimensions or filenames. Mirrors the high-confidence subset of
     // EmailDOMQuoteRemover's signature/quote selectors. Deliberately excludes:
     //   - the ambiguous author-authored `class="signature"` family (see
-    //     authoredSignatureWrapperMarkers) and the substring footer selectors
+    //     authoredSignatureWrapperPatterns) and the substring footer selectors
     //     (`div[class*=sig]`), which would over-match a "Signature Collection"
     //     marketing block;
     //   - the bare/generic `blockquote`, which authors also use for visible
@@ -986,21 +1004,29 @@ enum MessageBubbleHTMLAnalysisBuilder {
         "data-smartmail=\"gmail_signature\""
     ]
 
-    // Author-authored signature wrappers — only a boundary when corroborated by a
-    // nearby signature signal (see firstCorroboratedAuthoredSignatureMarkerOffset).
-    private static let authoredSignatureWrapperMarkers = [
-        "class=\"signature",
-        "class='signature",
-        "id=\"signature",
-        "id='signature"
+    // Author-authored signature wrappers — exact `signature` class/id tokens only,
+    // and only a boundary when corroborated by a nearby signature signal (see
+    // firstCorroboratedAuthoredSignatureMarkerOffset).
+    private static let authoredSignatureWrapperPatterns = [
+        #"\bclass\s*=\s*"(?:signature(?=\s|")|[^"]*\ssignature(?=\s|"))"#,
+        #"\bclass\s*=\s*'(?:signature(?=\s|')|[^']*\ssignature(?=\s|'))"#,
+        #"\bid\s*=\s*"signature""#,
+        #"\bid\s*=\s*'signature'"#
     ]
 
-    // Match standalone reply headers without treating body prose like
-    // "here is what I wrote:" as a hard attachment-hiding boundary.
-    private static let replyAttributionBoundaryPatterns = [
+    // Match standalone reply headers without treating body prose like "here is
+    // what I wrote:" or "On the whiteboard, Alice wrote:" as a hard
+    // attachment-hiding boundary.
+    private static let replyOnAttributionBoundaryPatterns = [
         #"(?:^|[\r\n]|<[^>]+>)\s*(?:&gt;\s*)?on (?:(?!</?(?:div|p|td|th|li|blockquote|body|html)\b).){1,800}? wrote:\s*(?:<br\s*/?>|</(?:div|p|td|th|li|blockquote)>|[\r\n]|$)"#,
+    ]
+
+    private static let standaloneReplyAttributionBoundaryPatterns = [
         #"(?:^|[\r\n]|<[^>]+>)\s*(?:&gt;\s*)?(?!(?:here|there|this|that|what|when|where|why|how|following|follow|i|we|you|he|she|they|it|someone|everyone|please|thanks|thank)\b)(?:[a-z][a-z0-9._%+\-']{0,60}\s+){0,2}[a-z][a-z0-9._%+\-']{0,60}(?:\s+&lt;[^&]{1,200}&gt;)?\s+wrote:\s*(?:<br\s*/?>|</(?:div|p|td|th|li|blockquote)>|[\r\n]|$)"#
     ]
+
+    private static let replyAttributionDateOrEmailSignalPattern =
+        #"\b(?:mon|monday|tue|tues|tuesday|wed|wednesday|thu|thur|thurs|thursday|fri|friday|sat|saturday|sun|sunday|jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b|\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b|\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b|[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}"#
 
     // Match complete rich-text reply headers without treating isolated body
     // labels such as "<b>From:</b> the prototype table" as quote boundaries.
