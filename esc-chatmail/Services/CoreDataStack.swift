@@ -2,7 +2,6 @@ import Foundation
 import CoreData
 
 /// CoreDataStack uses @unchecked Sendable because:
-/// - destroyAndReloadSync() supports callers that require synchronous semaphore-based coordination
 /// - newBackgroundContext() and save() must remain synchronous for critical Core Data paths
 /// - DispatchQueue (isolationQueue) provides thread safety for mutable state (_loadAttempts, _isStoreLoaded, _storeLoadError)
 ///
@@ -256,35 +255,7 @@ final class CoreDataStack: @unchecked Sendable {
         }
     }
 
-    private func waitForStoreToLoadSync(timeout: TimeInterval = 10) throws {
-        let startTime = Date()
-
-        while true {
-            let state = storeLoadState
-            if state.isLoaded {
-                return
-            }
-
-            if let loadError = state.loadError {
-                throw CoreDataError.storeLoadFailed(loadError)
-            }
-
-            if Date().timeIntervalSince(startTime) > timeout {
-                throw CoreDataError.storeLoadFailed(
-                    NSError(
-                        domain: "CoreData",
-                        code: -1,
-                        userInfo: [NSLocalizedDescriptionKey: "Store load timeout"]
-                    )
-                )
-            }
-
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-    }
-
     /// Loads persistent stores asynchronously without blocking the main thread.
-    /// Use this instead of destroyAndReloadSync when async behavior is acceptable.
     func loadStoresAsync() async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             persistentContainer.loadPersistentStores { [weak self] storeDescription, error in
@@ -302,8 +273,8 @@ final class CoreDataStack: @unchecked Sendable {
         }
     }
 
-    /// Destroys all data and reloads stores asynchronously.
-    /// Preferred over destroyAndReloadSync when not on the main thread or when async is acceptable.
+    /// Destroys all data and reloads the persistent stores asynchronously without
+    /// blocking the calling thread.
     func destroyAndReloadAsync() async throws {
         _ = persistentContainer
         if !isStoreLoaded {
@@ -313,13 +284,13 @@ final class CoreDataStack: @unchecked Sendable {
         try destroyAllData()
 
         // Reset the viewContext to clear any stale managed objects
-        persistentContainer.viewContext.reset()
+        await resetViewContextState()
 
         // Reload stores asynchronously
         try await loadStoresAsync()
 
         // Reset viewContext again after stores are loaded to ensure clean state
-        persistentContainer.viewContext.reset()
+        await resetViewContextState()
     }
 
     func newBackgroundContext() -> NSManagedObjectContext {
@@ -421,62 +392,6 @@ final class CoreDataStack: @unchecked Sendable {
         }
     }
 
-    /// Destroys all data and reloads the persistent stores synchronously.
-    /// Use this only when the caller must block until the store is ready again.
-    ///
-    /// - Warning: This method uses a semaphore and will block the calling thread for up to 10 seconds.
-    ///   Do NOT call from the main thread as it will freeze the UI. Use `destroyAndReloadAsync()` instead
-    ///   when async behavior is acceptable.
-    func destroyAndReloadSync() throws {
-        // Assert we're not on the main thread to prevent UI freezes
-        #if DEBUG
-        assert(!Thread.isMainThread, "destroyAndReloadSync must not be called from the main thread - use destroyAndReloadAsync instead")
-        #endif
-        if Thread.isMainThread {
-            Log.error("destroyAndReloadSync called from main thread - this may freeze the UI", category: .coreData)
-        }
-
-        _ = persistentContainer
-        if !isStoreLoaded {
-            try waitForStoreToLoadSync()
-        }
-
-        try destroyAllData()
-
-        // Reset the viewContext to clear any stale managed objects
-        persistentContainer.viewContext.reset()
-
-        // Reload stores synchronously using a semaphore
-        let semaphore = DispatchSemaphore(value: 0)
-        var loadError: Error?
-
-        persistentContainer.loadPersistentStores { [weak self] storeDescription, error in
-            if let error = error {
-                self?.setStoreLoadError(error)
-                loadError = error
-                Log.error("Failed to reload Core Data store", category: .coreData, error: error)
-            } else {
-                self?.setStoreLoaded(true)
-                self?.loadAttempts = 0
-                Log.info("Core Data store reloaded successfully: \(storeDescription)", category: .coreData)
-            }
-            semaphore.signal()
-        }
-
-        // Wait for stores to load (with timeout)
-        let result = semaphore.wait(timeout: .now() + 10.0)
-        if result == .timedOut {
-            throw CoreDataError.storeLoadFailed(NSError(domain: "CoreDataStack", code: -1, userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for store to reload"]))
-        }
-
-        if let error = loadError {
-            throw CoreDataError.persistentFailure(error as NSError)
-        }
-
-        // Reset viewContext again after stores are loaded to ensure clean state
-        persistentContainer.viewContext.reset()
-    }
-
     func performBackgroundTask<T>(_ block: @escaping (NSManagedObjectContext) throws -> T) async throws -> T {
         try await waitForStoreToLoad()
 
@@ -516,6 +431,13 @@ final class CoreDataStack: @unchecked Sendable {
         await resetViewContextState()
     }
 
+    /// Resets `viewContext` on its own queue to clear stale managed objects.
+    ///
+    /// `viewContext` is a main-queue context, so mutating it from a caller running
+    /// off the main queue — e.g. `destroyAndReloadAsync()` invoked from
+    /// `FreshInstallHandler` on a global-executor thread — is an undefined-behavior
+    /// data race that traps under `-com.apple.CoreData.ConcurrencyDebug 1`. Routing
+    /// the reset through `perform` guarantees it runs on the context's own queue.
     private func resetViewContextState() async {
         let viewContext = persistentContainer.viewContext
         await viewContext.perform {
