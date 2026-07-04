@@ -144,6 +144,12 @@ final class ConversationManager: Sendable {
         )
     }
 
+    /// Repairs active conversations that have a date but no preview text.
+    @MainActor
+    func repairMissingConversationPreviews(in context: NSManagedObjectContext) async -> Int {
+        await rollupUpdater.repairMissingConversationPreviews(in: context)
+    }
+
     // MARK: - Duplicate Management (delegated to ConversationMerger)
 
     /// Removes duplicate conversations by keyHash.

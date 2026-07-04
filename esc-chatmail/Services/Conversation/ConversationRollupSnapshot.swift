@@ -69,7 +69,11 @@ struct ConversationRollupSnapshot: Sendable {
         routingPolicy: ConversationRoutingPolicy = ConversationRoutingPolicy()
     ) {
         conversation.lastMessageDate = lastMessageDate
-        conversation.snippet = snippet
+        if lastMessageDate == nil {
+            conversation.snippet = nil
+        } else if let previewText = MessagePreviewText.nonEmpty(snippet) {
+            conversation.snippet = previewText
+        }
         conversation.hasInbox = hasInbox
         conversation.inboxUnreadCount = inboxUnreadCount
         conversation.latestInboxDate = latestInboxDate

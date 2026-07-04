@@ -132,6 +132,57 @@ struct ConversationRollupUpdater: Sendable {
         }
     }
 
+    /// Repairs active conversations that have a last-message date but no stored
+    /// row preview by deriving the preview from their current visible messages.
+    @MainActor
+    func repairMissingConversationPreviews(
+        in context: NSManagedObjectContext,
+        limit: Int = 200
+    ) async -> Int {
+        guard limit > 0 else { return 0 }
+
+        return await context.perform {
+            let request = Conversation.fetchRequest()
+            request.predicate = NSPredicate(
+                format: "archivedAt == nil AND lastMessageDate != nil AND (snippet == nil OR snippet == '' OR snippet MATCHES %@)",
+                #"^\s+$"#
+            )
+            request.sortDescriptors = [
+                NSSortDescriptor(keyPath: \Conversation.lastMessageDate, ascending: false)
+            ]
+            request.fetchLimit = limit
+            request.fetchBatchSize = min(limit, 50)
+            request.relationshipKeyPathsForPrefetching = ["messages", "messages.labels"]
+
+            let conversations: [Conversation]
+            do {
+                conversations = try context.fetch(request)
+            } catch {
+                Log.error("Failed to fetch conversations for preview repair", category: .conversation, error: error)
+                return 0
+            }
+
+            var repairedCount = 0
+            for conversation in conversations {
+                guard MessagePreviewText.nonEmpty(conversation.snippet) == nil,
+                      let messages = conversation.messages else {
+                    continue
+                }
+
+                let snapshot = ConversationRollupSnapshot.make(from: messages)
+                guard snapshot.lastMessageDate != nil,
+                      let previewText = MessagePreviewText.nonEmpty(snapshot.snippet) else {
+                    continue
+                }
+
+                conversation.snippet = previewText
+                repairedCount += 1
+            }
+
+            return repairedCount
+        }
+    }
+
     /// Refreshes stored conversation display names without recomputing any other rollup fields.
     @MainActor
     func updateDisplayNamesForAllConversations(

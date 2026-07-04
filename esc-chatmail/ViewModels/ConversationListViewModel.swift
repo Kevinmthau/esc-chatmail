@@ -299,6 +299,18 @@ final class ConversationListViewModel: ObservableObject {
         }
     }
 
+    func repairMissingConversationPreviews() {
+        taskManager.run("repairMissingConversationPreviews", priority: .background) { [weak self] in
+            guard let self = self else { return }
+            let context = storage.makeBackgroundContext()
+            let repairedCount = await conversationManager.repairMissingConversationPreviews(in: context)
+            guard repairedCount > 0 else { return }
+            guard storage.saveIfNeeded(context) else { return }
+
+            Log.info("Repaired missing conversation previews: \(repairedCount)", category: .conversation)
+        }
+    }
+
     /// Called when view appears - performs initial setup
     func onAppear<C: Sequence>(conversations: C, in context: NSManagedObjectContext) where C.Element == Conversation {
         startObservingConversationChanges(in: context)
@@ -315,6 +327,7 @@ final class ConversationListViewModel: ObservableObject {
                 guard let self = self else { return }
                 self.loadContactsCache(requestAccessIfNeeded: false)
                 self.refreshConversationNames()
+                self.repairMissingConversationPreviews()
             }
         }
     }

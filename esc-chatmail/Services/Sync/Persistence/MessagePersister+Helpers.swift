@@ -137,11 +137,15 @@ extension MessagePersister {
         if let existingLastDate = conversation.lastMessageDate {
             if message.internalDate >= existingLastDate {
                 conversation.lastMessageDate = message.internalDate
-                conversation.snippet = message.conversationPreviewText
+                if let previewText = MessagePreviewText.nonEmpty(message.conversationPreviewText) {
+                    conversation.snippet = previewText
+                }
             }
         } else {
             conversation.lastMessageDate = message.internalDate
-            conversation.snippet = message.conversationPreviewText
+            if let previewText = MessagePreviewText.nonEmpty(message.conversationPreviewText) {
+                conversation.snippet = previewText
+            }
         }
 
         guard hasInboxLabel else { return }
@@ -209,11 +213,15 @@ extension MessagePersister {
         if let existingLastDate = conversation.lastMessageDate {
             if message.internalDate >= existingLastDate {
                 conversation.lastMessageDate = message.internalDate
-                conversation.snippet = message.conversationPreviewText
+                if let previewText = MessagePreviewText.nonEmpty(message.conversationPreviewText) {
+                    conversation.snippet = previewText
+                }
             }
         } else {
             conversation.lastMessageDate = message.internalDate
-            conversation.snippet = message.conversationPreviewText
+            if let previewText = MessagePreviewText.nonEmpty(message.conversationPreviewText) {
+                conversation.snippet = previewText
+            }
         }
     }
 
