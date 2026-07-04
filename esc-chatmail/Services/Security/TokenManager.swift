@@ -108,30 +108,31 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
     /// Lock-protected so getCurrentToken serves requests without a keychain
     /// round-trip or a MainActor hop (the previous fast path stored only the
     /// token in @MainActor AuthSession and re-read the keychain per request
-    /// to validate expiry). Every writer either supplies the expiry or clears
-    /// the cache (unvalidated → keychain fallback).
+    /// to validate expiry).
+    ///
+    /// Writer discipline (sign-out consistency):
+    /// - The lock guards the cached pair, a sign-out epoch, AND the keychain
+    ///   writes/deletes of the two writers (saveTokens, clearTokens), so a
+    ///   save and a clear can never interleave their keychain operations.
+    /// - clearTokens bumps the epoch under the lock. Cache populates are
+    ///   epoch-gated: getCurrentToken snapshots the epoch before its
+    ///   (unserialized) keychain read, and performTokenRefresh snapshots it
+    ///   before its network call, so a token obtained under a sign-in
+    ///   generation that a sign-out has since retired is dropped instead of
+    ///   cached — with the reader's populate serialized against the whole
+    ///   clear section, no interleaving can resurrect a cleared token.
     private let cacheLock = NSLock()
     private var _cachedToken: CachedToken?
-    /// Bumped by every cache clear. getCurrentToken snapshots it before its
-    /// keychain read and re-checks it when populating, so a read that raced
-    /// clearTokens (sign-out) cannot resurrect the cleared token in memory.
     private var _cacheEpoch: UInt64 = 0
 
     private func cachedToken() -> CachedToken? {
         cacheLock.withLock { _cachedToken }
     }
 
-    private func cacheEpoch() -> UInt64 {
+    /// Non-private so the refresh extension (TokenManager+Refresh) can
+    /// snapshot the sign-out generation before its network call.
+    func cacheEpoch() -> UInt64 {
         cacheLock.withLock { _cacheEpoch }
-    }
-
-    private func setCachedToken(_ token: CachedToken?) {
-        cacheLock.withLock {
-            if token == nil {
-                _cacheEpoch &+= 1
-            }
-            _cachedToken = token
-        }
     }
 
     /// Populates the cache only if no clear happened since `epoch` was
@@ -160,21 +161,6 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
         self.init(keychainService: KeychainService.shared, authSession: .shared)
     }
 
-    /// Updates the in-memory caches: the lock-protected (token, expiry) pair
-    /// that serves the request fast path, and AuthSession's @Published token
-    /// for UI consumers. A nil expiry marks the cache unvalidated so
-    /// getCurrentToken falls back to the keychain.
-    func updateMemoryCache(accessToken: String, expirationDate: Date?) async {
-        if let expirationDate {
-            setCachedToken(CachedToken(accessToken: accessToken, expirationDate: expirationDate))
-        } else {
-            setCachedToken(nil)
-        }
-        await MainActor.run {
-            authSession.accessToken = accessToken
-        }
-    }
-
     // MARK: - Public Methods
 
     nonisolated func getCurrentToken() async throws -> String {
@@ -199,7 +185,12 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
                     expirationDate: tokenInfo.expirationDate
                 ), ifEpochMatches: epoch) {
                     await MainActor.run {
-                        authSession.accessToken = tokenInfo.accessToken
+                        // Re-check under the MainActor hop: a clear that landed
+                        // after the populate must not have its nil-publish
+                        // overwritten with the retired token.
+                        if cachedToken() != nil {
+                            authSession.accessToken = tokenInfo.accessToken
+                        }
                     }
                 }
                 return tokenInfo.accessToken
@@ -253,6 +244,26 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
     }
 
     nonisolated func saveTokens(access: String, refresh: String?, expirationDate: Date) throws {
+        // Direct saves (sign-in flows) are ungated: they establish the new
+        // sign-in generation rather than racing an old one.
+        try saveTokens(access: access, refresh: refresh, expirationDate: expirationDate, ifCacheEpochMatches: nil)
+    }
+
+    /// Writer core. When `epoch` is non-nil and a clearTokens (sign-out) has
+    /// bumped the epoch since the caller snapshotted it, NOTHING is written —
+    /// no keychain entries, no cache, no AuthSession publish — and the method
+    /// returns false: the tokens belong to a retired sign-in generation, and
+    /// persisting them would resurrect the signed-out account (in the worst
+    /// case across relaunch, via isAuthenticated() reading the keychain).
+    /// Keychain writes happen inside the cache lock so they can never
+    /// interleave with clearTokens' deletes.
+    @discardableResult
+    nonisolated func saveTokens(
+        access: String,
+        refresh: String?,
+        expirationDate: Date,
+        ifCacheEpochMatches epoch: UInt64?
+    ) throws -> Bool {
         let tokenInfo = TokenInfo(
             accessToken: access,
             refreshToken: refresh,
@@ -260,21 +271,36 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
             scope: GoogleConfig.scopes.joined(separator: " ")
         )
 
-        // Save to keychain with afterFirstUnlock to allow background sync when device is locked
-        try keychainService.saveCodable(tokenInfo, for: KeychainService.Key.googleAccessToken.rawValue, withAccess: .afterFirstUnlockThisDeviceOnly)
+        let applied: Bool = try cacheLock.withLock {
+            if let epoch, _cacheEpoch != epoch {
+                return false
+            }
 
-        if let refresh = refresh {
-            try keychainService.saveString(refresh, for: KeychainService.Key.googleRefreshToken.rawValue, withAccess: .afterFirstUnlockThisDeviceOnly)
+            // Save to keychain with afterFirstUnlock to allow background sync
+            // when device is locked
+            try keychainService.saveCodable(tokenInfo, for: KeychainService.Key.googleAccessToken.rawValue, withAccess: .afterFirstUnlockThisDeviceOnly)
+
+            if let refresh = refresh {
+                try keychainService.saveString(refresh, for: KeychainService.Key.googleRefreshToken.rawValue, withAccess: .afterFirstUnlockThisDeviceOnly)
+            }
+
+            // Validate the cache synchronously — this is what getCurrentToken's
+            // fast path reads.
+            _cachedToken = CachedToken(accessToken: access, expirationDate: expirationDate)
+            return true
         }
 
-        // Validate the lock-protected cache synchronously — this is what
-        // getCurrentToken's fast path reads. The AuthSession publish below
-        // stays fire-and-forget by design: it only feeds UI observers, and
-        // making it synchronous would require blocking on MainActor, which
-        // could deadlock when called from background contexts.
-        setCachedToken(CachedToken(accessToken: access, expirationDate: expirationDate))
+        guard applied else { return false }
+
+        // The AuthSession publish stays fire-and-forget by design: it only
+        // feeds UI observers, and making it synchronous would require
+        // blocking on MainActor, which could deadlock when called from
+        // background contexts. It re-reads the cache so a clear that lands
+        // before the hop is not overwritten with the stale token.
         Task { @MainActor in
-            authSession.accessToken = access
+            if self.cachedToken() != nil {
+                self.authSession.accessToken = access
+            }
         }
 
         // Reset backoff on successful save
@@ -282,18 +308,24 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
         Task {
             await refreshBackoff.reset()
         }
+        return true
     }
 
     nonisolated func clearTokens() throws {
-        // Invalidate the request fast path FIRST (bumping the cache epoch) so
-        // no request can win a stale token: a getCurrentToken that already
-        // read the keychain before the deletes below fails the epoch check
-        // and cannot repopulate the cache with the signed-out token.
-        setCachedToken(nil)
+        // One critical section retires the sign-in generation: bump the
+        // epoch (dropping every in-flight epoch-gated populate), clear the
+        // fast path, and delete the keychain entries before any other writer
+        // or reader-populate can run. getCurrentToken's keychain READ is not
+        // serialized with this, but its populate is epoch-gated and cannot
+        // land mid-section, so a read that saw the pre-delete keychain can
+        // never re-cache the signed-out token.
+        try cacheLock.withLock {
+            _cacheEpoch &+= 1
+            _cachedToken = nil
 
-        // Clear from keychain
-        try keychainService.delete(for: KeychainService.Key.googleAccessToken.rawValue)
-        try keychainService.delete(for: KeychainService.Key.googleRefreshToken.rawValue)
+            try keychainService.delete(for: KeychainService.Key.googleAccessToken.rawValue)
+            try keychainService.delete(for: KeychainService.Key.googleRefreshToken.rawValue)
+        }
 
         // Clear from memory
         Task { @MainActor in

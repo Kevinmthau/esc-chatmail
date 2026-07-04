@@ -118,6 +118,51 @@ final class TokenManagerCacheTests: XCTestCase {
         XCTAssertEqual(refresher.callCount, 1, "second request must reach the refresher, not the memory cache")
     }
 
+    func testSaveTokensGatedOnRetiredEpoch_writesNothing() throws {
+        // A refresh that finishes after sign-out carries the retired
+        // generation's epoch; its save must write neither cache nor keychain,
+        // or isAuthenticated() would report the signed-out account back true
+        // (surviving relaunch via the keychain).
+        try manager.saveTokens(access: "old", refresh: "old-r", expirationDate: Date().addingTimeInterval(3600))
+        let epoch = manager.cacheEpoch()
+        try manager.clearTokens() // bumps the epoch, deletes the keychain
+
+        let applied = try manager.saveTokens(
+            access: "refreshed",
+            refresh: "refreshed-r",
+            expirationDate: Date().addingTimeInterval(3600),
+            ifCacheEpochMatches: epoch
+        )
+
+        XCTAssertFalse(applied, "a save gated on a retired sign-in generation must not apply")
+        XCTAssertFalse(manager.isAuthenticated())
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.googleAccessToken.rawValue))
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.googleRefreshToken.rawValue))
+    }
+
+    func testRefreshCompletingAfterSignOut_doesNotResurrectAccount() async throws {
+        // getCurrentToken must refresh (seeded token is inside the 5-min
+        // window), and sign-out lands mid-refresh — after performTokenRefresh
+        // snapshots the epoch, before it saves. The triggering request may
+        // still receive the token once, but nothing is written back.
+        try manager.saveTokens(access: "old", refresh: "old-r", expirationDate: Date().addingTimeInterval(60))
+        refresher.accessToken = "refreshed"
+        refresher.refreshToken = "refreshed-r"
+        refresher.expirationDate = Date().addingTimeInterval(3600)
+        refresher.onRefresh = { [weak manager] in
+            try? manager?.clearTokens()
+        }
+
+        let returned = try await manager.getCurrentToken()
+        XCTAssertEqual(returned, "refreshed", "the request that triggered the refresh still gets its token once")
+
+        // The refresh's saveTokens saw the bumped epoch and dropped: keychain
+        // empty, not authenticated, so no BGTask relaunch resurrects the account.
+        XCTAssertFalse(manager.isAuthenticated())
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.googleAccessToken.rawValue))
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.googleRefreshToken.rawValue))
+    }
+
     func testExpiringSoonCachedToken_triggersRefreshInsteadOfServingStale() async throws {
         // Inside the 5-minute expiring-soon window: the cache must not serve it.
         try manager.saveTokens(access: "stale-token", refresh: "r", expirationDate: Date().addingTimeInterval(60))
