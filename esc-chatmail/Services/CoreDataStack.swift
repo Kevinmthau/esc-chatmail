@@ -497,21 +497,22 @@ final class CoreDataStack: @unchecked Sendable {
         // Safely reset the store
         try destroyAllData()
 
-        // The viewContext outlives the store: drop its registered objects
-        // and context-scoped factory caches (destroyAndReloadAsync resets
-        // too). Skipping this left PersonFactory's userInfo cache holding
-        // Persons from the destroyed store, which the next sign-in's
-        // optimistic send resurrected as unfulfillable faults.
-        await resetViewContextState()
-
         // Reinitialize
         loadPersistentStores(for: persistentContainer)
 
         // Wait for store to be ready
         try await waitForStoreToLoad()
 
-        // Leave the context clean after reload as well, matching
-        // destroyAndReloadAsync's post-load reset.
+        // The container's viewContext outlives the store swap, so it still
+        // holds objects registered against the destroyed store plus a
+        // PersonFactory userInfo cache pointing at them. Drop both on the
+        // fresh store; without this, the next sign-in's optimistic send
+        // resurrected cached Persons as unfulfillable faults. Deliberately
+        // done AFTER the store is back — placing this main-queue hop between
+        // destroyAllData and the reload would widen the window in which the
+        // coordinator has no stores, which un-quiesced background sync work
+        // (IncrementalSyncOrchestrator fetches without gating on readiness)
+        // could fetch/save into and trap on "no persistent stores".
         await resetViewContextState()
     }
 

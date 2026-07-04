@@ -9,12 +9,16 @@ import CoreData
 /// Lookups go through a context-scoped `[normalized email: Person]` cache in
 /// `context.userInfo` (precedent: InlineCIDAttachmentPrefetchScheduler), so a
 /// batch `prefetch` turns the per-participant find-or-create fetches into
-/// dictionary hits. Hits are validated against the context — rollback and
-/// reset deregister objects without touching userInfo — and store-teardown
-/// paths must call `resetCache(in:)` (destroying the store invalidates
-/// registered objects in a way per-hit validation cannot see). All entry
-/// points must be called on the context's queue (inside `perform`), which is
-/// also what `context.fetch` already required.
+/// dictionary hits. Each hit is validated against the context before use:
+/// rollback() and reset() deregister objects (nil `managedObjectContext`)
+/// without touching userInfo, so a stale entry is evicted and re-fetched on
+/// next access — this validation is the primary guard. Destroying the backing
+/// store is the one case validation can't see alone (objects stay registered
+/// but turn invalid), so teardown that destroys the store must reset the
+/// context — which deregisters those objects — and drops the cache eagerly
+/// via `resetCache(in:)`; `resetStore` does both. All entry points must be
+/// called on the context's queue (inside `perform`), which is also what
+/// `context.fetch` already required.
 struct PersonFactory {
 
     private static let cacheUserInfoKey = "PersonFactory.personsByEmail"
@@ -46,10 +50,12 @@ struct PersonFactory {
         return person
     }
 
-    /// Drops the context's person cache wholesale. Store-teardown paths must
-    /// call this (CoreDataStack.resetStore does): destroying the backing
-    /// store invalidates every registered object without deregistering it,
-    /// so the per-hit staleness check cannot detect those zombies.
+    /// Drops the context's person cache wholesale. Store-teardown that
+    /// destroys and reloads the backing store calls this (via
+    /// CoreDataStack.resetStore) so the cache never hands out an object from
+    /// the destroyed store. The paired `context.reset()` is what actually
+    /// deregisters those objects; this clears the userInfo entry, which
+    /// reset() leaves untouched.
     static func resetCache(in context: NSManagedObjectContext) {
         context.userInfo.removeObject(forKey: cacheUserInfoKey)
     }
