@@ -308,14 +308,31 @@ final class ConversationListViewModel: ObservableObject {
             guard let self = self else { return }
             let context = storage.makeBackgroundContext()
             context.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
-            let result = await conversationManager.repairMissingConversationPreviews(in: context)
-            if result.repairedCount > 0 {
-                guard storage.saveIfNeeded(context) else { return }
-                Log.info("Repaired missing conversation previews: \(result.repairedCount)", category: .conversation)
-            }
 
-            if result.didDrain {
-                UserDefaults.standard.set(true, forKey: hasRepairedKey)
+            var totalRepairedCount = 0
+            while !Task.isCancelled {
+                let result = await conversationManager.repairMissingConversationPreviews(in: context)
+                if result.repairedCount > 0 {
+                    guard storage.saveIfNeeded(context) else { return }
+                    totalRepairedCount += result.repairedCount
+                }
+
+                if result.didDrain {
+                    if totalRepairedCount > 0 {
+                        Log.info("Repaired missing conversation previews: \(totalRepairedCount)", category: .conversation)
+                    }
+                    UserDefaults.standard.set(true, forKey: hasRepairedKey)
+                    return
+                }
+
+                guard result.repairedCount > 0 else {
+                    if totalRepairedCount > 0 {
+                        Log.info("Repaired missing conversation previews: \(totalRepairedCount)", category: .conversation)
+                    }
+                    return
+                }
+
+                await Task.yield()
             }
         }
     }

@@ -147,6 +147,43 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         )
     }
 
+    func testRepairMissingConversationPreviewsContinuesBatchesUntilDrained() async throws {
+        var createdConversations: [(conversation: Conversation, expectedSnippet: String)] = []
+
+        for index in 0..<201 {
+            let date = Date(timeIntervalSince1970: TimeInterval(1_700_000_000 + index))
+            let conversation = ConversationBuilder()
+                .withLastMessageDate(date)
+                .visible()
+                .build(in: context)
+            MessageBuilder()
+                .withId("preview-repair-batch-\(index)")
+                .withDate(date)
+                .withSnippet("Repair preview \(index)")
+                .inConversation(conversation)
+                .build(in: context)
+
+            createdConversations.append((conversation, "Repair preview \(index)"))
+        }
+
+        try context.save()
+        let expectedSnippets = createdConversations.map { ($0.conversation.objectID, $0.expectedSnippet) }
+        let viewModel = makeViewModel()
+
+        viewModel.repairMissingConversationPreviews()
+
+        await waitUntil(timeout: 5.0) {
+            UserDefaults.standard.bool(
+                forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
+            )
+        }
+
+        for (objectID, expectedSnippet) in expectedSnippets {
+            let repaired = try fetchConversation(objectID)
+            XCTAssertEqual(repaired.snippet, expectedSnippet)
+        }
+    }
+
     func testUpdateAllConversationDisplayNames_onlyTouchesDisplayNameFields() async throws {
         let lastMessageDate = Date(timeIntervalSince1970: 123)
         let latestInboxDate = Date(timeIntervalSince1970: 120)
