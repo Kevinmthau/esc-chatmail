@@ -1,6 +1,11 @@
 import Foundation
 import CoreData
 
+struct ConversationPreviewRepairResult: Sendable {
+    let repairedCount: Int
+    let didDrain: Bool
+}
+
 /// Handles updating conversation rollup data (lastMessageDate, snippet, hasInbox, etc.)
 /// Extracted from ConversationManager for focused responsibility.
 /// Struct is naturally Sendable since it only holds immutable references.
@@ -130,6 +135,134 @@ struct ConversationRollupUpdater: Sendable {
                 self.updateRollups(for: conversation, myEmail: myEmail)
             }
         }
+    }
+
+    /// Repairs active conversations that have a last-message date but no stored
+    /// row preview by deriving the preview from their current visible messages.
+    @MainActor
+    func repairMissingConversationPreviews(
+        in context: NSManagedObjectContext,
+        limit: Int = 200
+    ) async -> ConversationPreviewRepairResult {
+        guard limit > 0 else {
+            return ConversationPreviewRepairResult(repairedCount: 0, didDrain: false)
+        }
+
+        return await context.perform {
+            var repairedCount = 0
+            let chunkSize = 50
+            var fetchOffset = 0
+
+            while repairedCount < limit {
+                let candidateIDs: [NSManagedObjectID]
+                do {
+                    candidateIDs = try self.fetchConversationPreviewRepairCandidateIDs(
+                        in: context,
+                        fetchLimit: chunkSize,
+                        fetchOffset: fetchOffset
+                    )
+                } catch {
+                    Log.error("Failed to fetch conversations for preview repair", category: .conversation, error: error)
+                    return ConversationPreviewRepairResult(repairedCount: repairedCount, didDrain: false)
+                }
+
+                guard !candidateIDs.isEmpty else {
+                    return ConversationPreviewRepairResult(repairedCount: repairedCount, didDrain: true)
+                }
+                fetchOffset += candidateIDs.count
+
+                let conversations: [Conversation]
+                do {
+                    conversations = try self.fetchConversationPreviewRepairCandidates(
+                        objectIDs: candidateIDs,
+                        in: context
+                    )
+                } catch {
+                    Log.error("Failed to fetch conversation repair chunk", category: .conversation, error: error)
+                    return ConversationPreviewRepairResult(repairedCount: repairedCount, didDrain: false)
+                }
+
+                let conversationsByID = Dictionary(uniqueKeysWithValues: conversations.map { ($0.objectID, $0) })
+                for objectID in candidateIDs {
+                    guard repairedCount < limit else { break }
+                    guard let conversation = conversationsByID[objectID] else { continue }
+                    context.refresh(conversation, mergeChanges: false)
+
+                    guard MessagePreviewText.nonEmpty(conversation.snippet) == nil,
+                          let messages = conversation.messages else {
+                        continue
+                    }
+
+                    let snapshot = ConversationRollupSnapshot.make(from: messages)
+                    guard snapshot.lastMessageDate != nil,
+                          let previewText = MessagePreviewText.nonEmpty(snapshot.snippet) else {
+                        continue
+                    }
+
+                    conversation.snippet = previewText
+                    repairedCount += 1
+                }
+            }
+
+            return ConversationPreviewRepairResult(repairedCount: repairedCount, didDrain: false)
+        }
+    }
+
+    private func fetchConversationPreviewRepairCandidateIDs(
+        in context: NSManagedObjectContext,
+        fetchLimit: Int,
+        fetchOffset: Int
+    ) throws -> [NSManagedObjectID] {
+        let whitespacePattern = #"^\s+$"#
+        let forwardedSubjectPattern = #"(?i)^\s*(?:fwd|fw)\s*:.*\S.*$"#
+        let request = NSFetchRequest<NSManagedObjectID>(entityName: "Conversation")
+        request.resultType = .managedObjectIDResultType
+        request.includesPendingChanges = false
+        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            NSPredicate(
+                format: "archivedAt == nil AND lastMessageDate != nil AND (snippet == nil OR snippet == '' OR snippet MATCHES %@)",
+                whitespacePattern
+            ),
+            NSPredicate(
+                format: """
+                SUBQUERY(messages, $message,
+                    SUBQUERY($message.labels, $label, $label.id IN %@).@count == 0 AND (
+                        ($message.cleanedSnippet != nil AND $message.cleanedSnippet != '' AND NOT ($message.cleanedSnippet MATCHES %@)) OR
+                        ($message.snippet != nil AND $message.snippet != '' AND NOT ($message.snippet MATCHES %@)) OR
+                        ($message.isNewsletter == YES AND $message.subject != nil AND $message.subject != '' AND NOT ($message.subject MATCHES %@)) OR
+                        ($message.subject MATCHES %@)
+                    )
+                ).@count > 0
+                """,
+                Array(MessagePersister.excludedMailboxLabelIDs),
+                whitespacePattern,
+                whitespacePattern,
+                whitespacePattern,
+                forwardedSubjectPattern
+            )
+        ])
+        request.sortDescriptors = [
+            NSSortDescriptor(keyPath: \Conversation.lastMessageDate, ascending: false)
+        ]
+        request.fetchLimit = fetchLimit
+        request.fetchOffset = fetchOffset
+        request.fetchBatchSize = fetchLimit
+
+        return try context.fetch(request)
+    }
+
+    private func fetchConversationPreviewRepairCandidates(
+        objectIDs: [NSManagedObjectID],
+        in context: NSManagedObjectContext
+    ) throws -> [Conversation] {
+        guard !objectIDs.isEmpty else { return [] }
+
+        let request = Conversation.fetchRequest()
+        request.predicate = NSPredicate(format: "SELF IN %@", objectIDs)
+        request.fetchBatchSize = objectIDs.count
+        request.relationshipKeyPathsForPrefetching = ["messages", "messages.labels"]
+
+        return try context.fetch(request)
     }
 
     /// Refreshes stored conversation display names without recomputing any other rollup fields.

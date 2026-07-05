@@ -188,6 +188,112 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(existingMessage.cleanedSnippet, "Updated preview.")
     }
 
+    func testUpdateExistingMessage_preservesStoredPreviewFieldsWhenIncomingPreviewIsBlank() async throws {
+        let messageDate = Date(timeIntervalSince1970: 1_700_010_000)
+        let conversation = ConversationBuilder()
+            .withSnippet("Existing row preview")
+            .withLastMessageDate(messageDate)
+            .visible()
+            .build(in: context)
+        let existingMessage = MessageBuilder()
+            .withId("message-blank-preview-update")
+            .withSubject("Stored subject")
+            .withSnippet("Stored raw preview")
+            .withDate(messageDate)
+            .inConversation(conversation)
+            .build(in: context)
+        existingMessage.cleanedSnippet = "Stored clean preview"
+        existingMessage.chatPreviewText = "Stored chat preview"
+
+        var headers = ProcessedHeaders()
+        headers.from = "Sender <sender@example.com>"
+        headers.to = [EmailAddress(email: "recipient@example.com", displayName: nil)]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: existingMessage.id,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: " \n\t ",
+            cleanedSnippet: nil,
+            chatPreviewText: " \n\t ",
+            internalDate: messageDate,
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: nil,
+            labelIds: [],
+            isUnread: false,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertEqual(existingMessage.subject, "Stored subject")
+        XCTAssertEqual(existingMessage.snippet, "Stored raw preview")
+        XCTAssertEqual(existingMessage.cleanedSnippet, "Stored clean preview")
+        XCTAssertEqual(existingMessage.chatPreviewText, "Stored chat preview")
+        XCTAssertEqual(conversation.snippet, "Stored clean preview")
+    }
+
+    func testUpdateExistingMessage_clearsStaleHigherPriorityPreviewsWhenIncomingFallbackExists() async throws {
+        let messageDate = Date(timeIntervalSince1970: 1_700_010_000)
+        let conversation = ConversationBuilder()
+            .withSnippet("Old row preview")
+            .withLastMessageDate(messageDate)
+            .visible()
+            .build(in: context)
+        let existingMessage = MessageBuilder()
+            .withId("message-stale-preview-update")
+            .withSubject("Stored subject")
+            .withSnippet("Old raw preview")
+            .withDate(messageDate)
+            .inConversation(conversation)
+            .build(in: context)
+        existingMessage.cleanedSnippet = "Old clean preview"
+        existingMessage.chatPreviewText = "Old chat preview"
+
+        var headers = ProcessedHeaders()
+        headers.subject = existingMessage.subject
+        headers.from = "Sender <sender@example.com>"
+        headers.to = [EmailAddress(email: "recipient@example.com", displayName: nil)]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: existingMessage.id,
+            gmThreadId: existingMessage.gmThreadId,
+            snippet: "Fresh raw preview",
+            cleanedSnippet: nil,
+            chatPreviewText: nil,
+            internalDate: messageDate,
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: nil,
+            labelIds: [],
+            isUnread: false,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        let didUpdate = await persister.updateExistingMessage(
+            processedMessage,
+            labelIds: nil,
+            in: context
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertEqual(existingMessage.snippet, "Fresh raw preview")
+        XCTAssertNil(existingMessage.cleanedSnippet)
+        XCTAssertNil(existingMessage.chatPreviewText)
+        XCTAssertEqual(conversation.snippet, "Fresh raw preview")
+    }
+
     func testUpdateExistingMessage_invalidatesCachesWhenStoredHTMLChangesWithSameURIAndText() async throws {
         let contentHandler = HTMLContentHandler.shared
         let messageId = "message-html-source-update-\(UUID().uuidString)"
@@ -1700,6 +1806,57 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(existingConversation.snippet, "Clean incoming snippet")
         XCTAssertNil(existingConversation.archivedAt)
         XCTAssertFalse(existingConversation.hidden)
+    }
+
+    func testCreateNewMessage_doesNotClearExistingConversationSnippetWhenPreviewIsMissing() async throws {
+        let threadId = "thread-fast-list-missing-preview"
+        let oldDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let newDate = oldDate.addingTimeInterval(120)
+
+        let existingConversation = ConversationBuilder()
+            .withSnippet("Old row preview")
+            .withLastMessageDate(oldDate)
+            .visible()
+            .build(in: context)
+
+        _ = MessageBuilder()
+            .withId("existing-missing-preview-seed")
+            .withThreadId(threadId)
+            .withDate(oldDate)
+            .inConversation(existingConversation)
+            .build(in: context)
+
+        var headers = ProcessedHeaders()
+        headers.from = "Sender <sender@example.com>"
+        headers.to = [EmailAddress(email: "recipient@example.com", displayName: nil)]
+        headers.isFromMe = false
+
+        let processedMessage = ProcessedMessage(
+            id: "incoming-missing-preview-message",
+            gmThreadId: threadId,
+            snippet: nil,
+            cleanedSnippet: nil,
+            chatPreviewText: nil,
+            internalDate: newDate,
+            headers: headers,
+            htmlBody: nil,
+            plainTextBody: nil,
+            labelIds: [],
+            isUnread: false,
+            isNewsletter: false,
+            hasAttachments: false,
+            attachmentInfo: []
+        )
+
+        try await persister.createNewMessage(
+            processedMessage,
+            labelIds: nil,
+            myAliases: [normalizedEmail("recipient@example.com")],
+            in: context
+        )
+
+        XCTAssertEqual(existingConversation.lastMessageDate, newDate)
+        XCTAssertEqual(existingConversation.snippet, "Old row preview")
     }
 
     func testUpdateExistingMessage_preservesPendingLocalMailboxStateWhileRefreshingCanonicalMetadata() async throws {

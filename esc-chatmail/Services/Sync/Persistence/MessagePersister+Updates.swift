@@ -83,13 +83,26 @@ extension MessagePersister {
             }
 
             existingMessage.gmThreadId = processedMessage.gmThreadId
-            existingMessage.subject = processedMessage.headers.subject
+            existingMessage.subject = MessagePreviewText.preservingExisting(
+                incoming: processedMessage.headers.subject,
+                existing: existingMessage.subject
+            )
             existingMessage.isFromMe = processedMessage.headers.isFromMe
             existingMessage.isNewsletter = processedMessage.isNewsletter
             existingMessage.hasAttachments = processedMessage.hasAttachments
-            existingMessage.snippet = processedMessage.snippet
-            existingMessage.cleanedSnippet = processedMessage.cleanedSnippet
-            existingMessage.chatPreviewText = processedMessage.chatPreviewText
+            if MessagePreviewText.firstNonEmpty(
+                processedMessage.chatPreviewText,
+                processedMessage.cleanedSnippet,
+                processedMessage.snippet
+            ) == nil {
+                existingMessage.snippet = MessagePreviewText.nonEmpty(existingMessage.snippet)
+                existingMessage.cleanedSnippet = MessagePreviewText.nonEmpty(existingMessage.cleanedSnippet)
+                existingMessage.chatPreviewText = MessagePreviewText.nonEmpty(existingMessage.chatPreviewText)
+            } else {
+                existingMessage.snippet = MessagePreviewText.nonEmpty(processedMessage.snippet)
+                existingMessage.cleanedSnippet = MessagePreviewText.nonEmpty(processedMessage.cleanedSnippet)
+                existingMessage.chatPreviewText = MessagePreviewText.nonEmpty(processedMessage.chatPreviewText)
+            }
             existingMessage.deliveredToAddress = processedMessage.headers.deliveredToAddress
             existingMessage.replyFromAddress = processedMessage.headers.replyFromAddress
             existingMessage.setValue(processedMessage.headers.messageId, forKey: "messageId")

@@ -25,6 +25,7 @@ enum ConversationFilter: String, CaseIterable {
 @MainActor
 final class ConversationListViewModel: ObservableObject {
     static let conversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV5"
+    static let conversationPreviewRepairMigrationKey = "hasRepairedMissingConversationPreviewsV1"
 
     // MARK: - Composed Services
 
@@ -299,6 +300,43 @@ final class ConversationListViewModel: ObservableObject {
         }
     }
 
+    func repairMissingConversationPreviews() {
+        let hasRepairedKey = Self.conversationPreviewRepairMigrationKey
+        guard !UserDefaults.standard.bool(forKey: hasRepairedKey) else { return }
+
+        taskManager.run("repairMissingConversationPreviews", priority: .background) { [weak self] in
+            guard let self = self else { return }
+            let context = storage.makeBackgroundContext()
+            context.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
+
+            var totalRepairedCount = 0
+            while !Task.isCancelled {
+                let result = await conversationManager.repairMissingConversationPreviews(in: context)
+                if result.repairedCount > 0 {
+                    guard storage.saveIfNeeded(context) else { return }
+                    totalRepairedCount += result.repairedCount
+                }
+
+                if result.didDrain {
+                    if totalRepairedCount > 0 {
+                        Log.info("Repaired missing conversation previews: \(totalRepairedCount)", category: .conversation)
+                    }
+                    UserDefaults.standard.set(true, forKey: hasRepairedKey)
+                    return
+                }
+
+                guard result.repairedCount > 0 else {
+                    if totalRepairedCount > 0 {
+                        Log.info("Repaired missing conversation previews: \(totalRepairedCount)", category: .conversation)
+                    }
+                    return
+                }
+
+                await Task.yield()
+            }
+        }
+    }
+
     /// Called when view appears - performs initial setup
     func onAppear<C: Sequence>(conversations: C, in context: NSManagedObjectContext) where C.Element == Conversation {
         startObservingConversationChanges(in: context)
@@ -315,6 +353,7 @@ final class ConversationListViewModel: ObservableObject {
                 guard let self = self else { return }
                 self.loadContactsCache(requestAccessIfNeeded: false)
                 self.refreshConversationNames()
+                self.repairMissingConversationPreviews()
             }
         }
     }

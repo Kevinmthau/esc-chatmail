@@ -18,6 +18,28 @@ private final class CalendarInviteLikelihoodEntry {
     }
 }
 
+enum MessagePreviewText {
+    static func nonEmpty(_ text: String?) -> String? {
+        guard let text else { return nil }
+
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    static func firstNonEmpty(_ candidates: String?...) -> String? {
+        for candidate in candidates {
+            if let text = nonEmpty(candidate) {
+                return text
+            }
+        }
+        return nil
+    }
+
+    static func preservingExisting(incoming: String?, existing: String?) -> String? {
+        nonEmpty(incoming) ?? nonEmpty(existing)
+    }
+}
+
 extension Message {
     @nonobjc public class func fetchRequest() -> NSFetchRequest<Message> {
         return NSFetchRequest<Message>(entityName: "Message")
@@ -334,11 +356,11 @@ extension Message {
             return "Fwd: \"\(forwardedDisplaySubject)\""
         }
 
-        if isNewsletter, let subject = subject, !subject.isEmpty {
+        if isNewsletter, let subject = MessagePreviewText.nonEmpty(subject) {
             return subject
         }
 
-        return cleanedSnippet ?? snippet
+        return MessagePreviewText.firstNonEmpty(cleanedSnippet, snippet)
     }
 
     var forwardedDisplaySubject: String? {
