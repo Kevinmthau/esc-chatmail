@@ -19,6 +19,9 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         UserDefaults.standard.removeObject(
             forKey: ConversationListViewModel.conversationNameRefreshMigrationKey
         )
+        UserDefaults.standard.removeObject(
+            forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
+        )
     }
 
     override func tearDown() {
@@ -27,6 +30,9 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         )
         UserDefaults.standard.removeObject(
             forKey: ConversationListViewModel.conversationNameRefreshMigrationKey
+        )
+        UserDefaults.standard.removeObject(
+            forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
         )
         context = nil
         stack = nil

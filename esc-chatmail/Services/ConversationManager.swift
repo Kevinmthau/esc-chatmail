@@ -146,7 +146,7 @@ final class ConversationManager: Sendable {
 
     /// Repairs active conversations that have a date but no preview text.
     @MainActor
-    func repairMissingConversationPreviews(in context: NSManagedObjectContext) async -> Int {
+    func repairMissingConversationPreviews(in context: NSManagedObjectContext) async -> ConversationPreviewRepairResult {
         await rollupUpdater.repairMissingConversationPreviews(in: context)
     }
 

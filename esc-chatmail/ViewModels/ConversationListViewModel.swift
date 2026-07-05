@@ -25,6 +25,7 @@ enum ConversationFilter: String, CaseIterable {
 @MainActor
 final class ConversationListViewModel: ObservableObject {
     static let conversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV5"
+    static let conversationPreviewRepairMigrationKey = "hasRepairedMissingConversationPreviewsV1"
 
     // MARK: - Composed Services
 
@@ -300,14 +301,22 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     func repairMissingConversationPreviews() {
+        let hasRepairedKey = Self.conversationPreviewRepairMigrationKey
+        guard !UserDefaults.standard.bool(forKey: hasRepairedKey) else { return }
+
         taskManager.run("repairMissingConversationPreviews", priority: .background) { [weak self] in
             guard let self = self else { return }
             let context = storage.makeBackgroundContext()
-            let repairedCount = await conversationManager.repairMissingConversationPreviews(in: context)
-            guard repairedCount > 0 else { return }
-            guard storage.saveIfNeeded(context) else { return }
+            context.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
+            let result = await conversationManager.repairMissingConversationPreviews(in: context)
+            if result.repairedCount > 0 {
+                guard storage.saveIfNeeded(context) else { return }
+                Log.info("Repaired missing conversation previews: \(result.repairedCount)", category: .conversation)
+            }
 
-            Log.info("Repaired missing conversation previews: \(repairedCount)", category: .conversation)
+            if result.didDrain {
+                UserDefaults.standard.set(true, forKey: hasRepairedKey)
+            }
         }
     }
 

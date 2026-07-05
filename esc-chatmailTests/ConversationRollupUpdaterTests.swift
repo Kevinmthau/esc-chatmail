@@ -149,7 +149,7 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(conversation.snippet, "Clean newsletter preview")
     }
 
-    func testUpdateRollups_preservesExistingSnippetWhenLatestVisiblePreviewIsMissing() throws {
+    func testUpdateRollups_fallsBackToPreviousVisiblePreviewWhenLatestVisiblePreviewIsMissing() throws {
         let oldDate = Date(timeIntervalSince1970: 100)
         let latestDate = Date(timeIntervalSince1970: 200)
 
@@ -157,6 +157,12 @@ final class ConversationRollupUpdaterTests: XCTestCase {
             .withSnippet("Existing row preview")
             .withLastMessageDate(oldDate)
             .visible()
+            .build(in: context)
+        MessageBuilder()
+            .withId("older-visible-preview")
+            .withDate(oldDate)
+            .withSnippet("Existing row preview")
+            .inConversation(conversation)
             .build(in: context)
         let message = MessageBuilder()
             .withId("latest-visible-missing-preview")
@@ -173,6 +179,31 @@ final class ConversationRollupUpdaterTests: XCTestCase {
 
         XCTAssertEqual(conversation.lastMessageDate, latestDate)
         XCTAssertEqual(conversation.snippet, "Existing row preview")
+    }
+
+    func testUpdateRollupsClearsStaleSnippetWhenNoVisiblePreviewExists() throws {
+        let messageDate = Date(timeIntervalSince1970: 200)
+
+        let conversation = ConversationBuilder()
+            .withSnippet("Stale row preview")
+            .withLastMessageDate(messageDate)
+            .visible()
+            .build(in: context)
+        let message = MessageBuilder()
+            .withId("visible-missing-preview")
+            .withDate(messageDate)
+            .withSnippet(" \n\t ")
+            .inConversation(conversation)
+            .build(in: context)
+        message.subject = nil
+        message.cleanedSnippet = nil
+
+        try context.save()
+
+        updater.updateRollups(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.lastMessageDate, messageDate)
+        XCTAssertNil(conversation.snippet)
     }
 
     func testRepairMissingConversationPreviewsRestoresStoredMessagePreview() async throws {
@@ -192,9 +223,10 @@ final class ConversationRollupUpdaterTests: XCTestCase {
 
         try context.save()
 
-        let repairedCount = await updater.repairMissingConversationPreviews(in: context)
+        let result = await updater.repairMissingConversationPreviews(in: context)
 
-        XCTAssertEqual(repairedCount, 1)
+        XCTAssertEqual(result.repairedCount, 1)
+        XCTAssertTrue(result.didDrain)
         XCTAssertEqual(conversation.snippet, "Clean repair preview")
     }
 
@@ -218,10 +250,39 @@ final class ConversationRollupUpdaterTests: XCTestCase {
 
         try sqliteStack.saveViewContext()
 
-        let repairedCount = await updater.repairMissingConversationPreviews(in: sqliteContext)
+        let result = await updater.repairMissingConversationPreviews(in: sqliteContext)
 
-        XCTAssertEqual(repairedCount, 1)
+        XCTAssertEqual(result.repairedCount, 1)
+        XCTAssertTrue(result.didDrain)
         XCTAssertEqual(conversation.snippet, "Clean repair preview")
+    }
+
+    func testRepairMissingConversationPreviewsScansPastUnrepairableNewerRows() async throws {
+        for index in 0..<3 {
+            ConversationBuilder()
+                .withLastMessageDate(Date(timeIntervalSince1970: 300 + TimeInterval(index)))
+                .visible()
+                .build(in: context)
+        }
+
+        let repairableConversation = ConversationBuilder()
+            .withLastMessageDate(Date(timeIntervalSince1970: 100))
+            .visible()
+            .build(in: context)
+        MessageBuilder()
+            .withId("repair-older-conversation-preview")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .withSnippet("Older repair preview")
+            .inConversation(repairableConversation)
+            .build(in: context)
+
+        try context.save()
+
+        let result = await updater.repairMissingConversationPreviews(in: context, limit: 1)
+
+        XCTAssertEqual(result.repairedCount, 1)
+        XCTAssertFalse(result.didDrain)
+        XCTAssertEqual(repairableConversation.snippet, "Older repair preview")
     }
 
     func testUpdateDisplayNameOnly_noRealNameUsesEmailAddress() throws {

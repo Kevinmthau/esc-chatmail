@@ -17,6 +17,7 @@ struct ConversationRollupSnapshot: Sendable {
 
     static func make(from messages: Set<Message>) -> ConversationRollupSnapshot {
         var latestVisibleMessage: Message?
+        var latestVisiblePreviewMessage: Message?
         var latestInboxMessage: Message?
         var inboxUnreadCount: Int32 = 0
         var hasSentOrFromMeMessages = false
@@ -25,9 +26,14 @@ struct ConversationRollupSnapshot: Sendable {
         for message in messages {
             let labelIDs = Set(message.labels?.map(\.id) ?? [])
 
-            if isVisibleMessage(labelIDs: labelIDs),
-               latestVisibleMessage == nil || message.internalDate > latestVisibleMessage!.internalDate {
-                latestVisibleMessage = message
+            if isVisibleMessage(labelIDs: labelIDs) {
+                if latestVisibleMessage == nil || message.internalDate > latestVisibleMessage!.internalDate {
+                    latestVisibleMessage = message
+                }
+                if MessagePreviewText.nonEmpty(message.conversationPreviewText) != nil,
+                   latestVisiblePreviewMessage == nil || message.internalDate > latestVisiblePreviewMessage!.internalDate {
+                    latestVisiblePreviewMessage = message
+                }
             }
 
             if labelIDs.contains("INBOX") {
@@ -54,7 +60,7 @@ struct ConversationRollupSnapshot: Sendable {
 
         return ConversationRollupSnapshot(
             lastMessageDate: latestVisibleMessage?.internalDate,
-            snippet: latestVisibleMessage?.conversationPreviewText,
+            snippet: latestVisiblePreviewMessage?.conversationPreviewText,
             hasInbox: latestInboxMessage != nil,
             inboxUnreadCount: inboxUnreadCount,
             latestInboxDate: latestInboxMessage?.internalDate,
@@ -71,8 +77,8 @@ struct ConversationRollupSnapshot: Sendable {
         conversation.lastMessageDate = lastMessageDate
         if lastMessageDate == nil {
             conversation.snippet = nil
-        } else if let previewText = MessagePreviewText.nonEmpty(snippet) {
-            conversation.snippet = previewText
+        } else {
+            conversation.snippet = MessagePreviewText.nonEmpty(snippet)
         }
         conversation.hasInbox = hasInbox
         conversation.inboxUnreadCount = inboxUnreadCount
