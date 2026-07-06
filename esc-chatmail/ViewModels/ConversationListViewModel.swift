@@ -284,9 +284,10 @@ final class ConversationListViewModel: ObservableObject {
     func refreshConversationNames() {
         // V5: refresh stored conversation display names only. Rollup metadata stays sync-owned.
         let hasRefreshedKey = Self.conversationNameRefreshMigrationKey
-        guard !UserDefaults.standard.bool(forKey: hasRefreshedKey) else { return }
+        let migrationFlags = storage.migrationFlags
+        guard !migrationFlags.bool(forKey: hasRefreshedKey) else { return }
         guard hasExistingConversationsForNameRefresh() else {
-            UserDefaults.standard.set(true, forKey: hasRefreshedKey)
+            migrationFlags.set(true, forKey: hasRefreshedKey)
             return
         }
 
@@ -295,14 +296,15 @@ final class ConversationListViewModel: ObservableObject {
             let context = storage.makeBackgroundContext()
             await conversationManager.updateAllConversationDisplayNames(in: context)
             guard storage.saveIfNeeded(context) else { return }
-            UserDefaults.standard.set(true, forKey: hasRefreshedKey)
+            migrationFlags.set(true, forKey: hasRefreshedKey)
             Log.info("Refreshed conversation display names (V5)", category: .conversation)
         }
     }
 
     func repairMissingConversationPreviews() {
         let hasRepairedKey = Self.conversationPreviewRepairMigrationKey
-        guard !UserDefaults.standard.bool(forKey: hasRepairedKey) else { return }
+        let migrationFlags = storage.migrationFlags
+        guard !migrationFlags.bool(forKey: hasRepairedKey) else { return }
 
         taskManager.run("repairMissingConversationPreviews", priority: .background) { [weak self] in
             guard let self = self else { return }
@@ -321,7 +323,7 @@ final class ConversationListViewModel: ObservableObject {
                     if totalRepairedCount > 0 {
                         Log.info("Repaired missing conversation previews: \(totalRepairedCount)", category: .conversation)
                     }
-                    UserDefaults.standard.set(true, forKey: hasRepairedKey)
+                    migrationFlags.set(true, forKey: hasRepairedKey)
                     return
                 }
 

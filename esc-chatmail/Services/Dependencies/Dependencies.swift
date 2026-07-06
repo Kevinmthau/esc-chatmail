@@ -198,6 +198,7 @@ final class Dependencies: ObservableObject {
             saveIfNeeded: { [coreDataStack] context in
                 coreDataStack.saveIfNeeded(context: context)
             },
+            migrationFlags: UserDefaults.standard,
             personCache: personCache,
             profilePhotoResolver: profilePhotoResolver
         )
