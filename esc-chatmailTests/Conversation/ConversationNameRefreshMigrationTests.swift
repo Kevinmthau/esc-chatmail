@@ -5,6 +5,7 @@ import CoreData
 @MainActor
 final class ConversationNameRefreshMigrationTests: XCTestCase {
     private static let legacyConversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV4"
+    private static let legacyConversationPreviewRepairMigrationKey = "hasRepairedMissingConversationPreviewsV1"
 
     private var stack: TestCoreDataStack!
     private var context: NSManagedObjectContext!
@@ -177,6 +178,46 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
                 forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
             )
         }
+    }
+
+    func testRepairMissingConversationPreviewsRunsV2WhenLegacyV1Completed() async throws {
+        migrationFlags.set(
+            true,
+            forKey: Self.legacyConversationPreviewRepairMigrationKey
+        )
+
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let conversation = ConversationBuilder()
+            .withLastMessageDate(date)
+            .visible()
+            .build(in: context)
+        let message = MessageBuilder()
+            .withId("preview-repair-v2-chat-preview")
+            .withDate(date)
+            .withSubject("Subject fallback")
+            .withSnippet(" \n\t ")
+            .inConversation(conversation)
+            .build(in: context)
+        message.cleanedSnippet = nil
+        message.chatPreviewText = "Recovered chat preview.\n\nSecond line."
+
+        try context.save()
+
+        let viewModel = makeViewModel()
+        viewModel.repairMissingConversationPreviews()
+
+        await waitUntil {
+            try self.fetchConversation(conversation.objectID).snippet == "Recovered chat preview. Second line."
+        }
+        await waitUntil {
+            self.migrationFlags.bool(
+                forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
+            )
+        }
+
+        XCTAssertTrue(
+            migrationFlags.bool(forKey: Self.legacyConversationPreviewRepairMigrationKey)
+        )
     }
 
     func testUpdateAllConversationDisplayNames_onlyTouchesDisplayNameFields() async throws {

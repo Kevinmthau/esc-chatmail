@@ -23,6 +23,7 @@ final class MessageExtensionsTests: XCTestCase {
             .withSubject("Fwd: An exceptional chalet in Val d'Isere")
             .withSnippet("Body snippet")
             .build(in: context)
+        message.chatPreviewText = "Chat preview should not win"
 
         XCTAssertEqual(message.conversationPreviewText, "Fwd: \"An exceptional chalet in Val d'Isere\"")
     }
@@ -41,6 +42,7 @@ final class MessageExtensionsTests: XCTestCase {
             .withSubject("Big sale this weekend")
             .withSnippet("Snippet")
             .build(in: context)
+        message.chatPreviewText = "Chat preview should not win"
 
         XCTAssertEqual(message.conversationPreviewText, "Big sale this weekend")
     }
@@ -53,6 +55,39 @@ final class MessageExtensionsTests: XCTestCase {
         message.cleanedSnippet = "Clean snippet"
 
         XCTAssertEqual(message.conversationPreviewText, "Clean snippet")
+    }
+
+    func testConversationPreviewText_regularMessage_fallsBackToChatPreviewText() {
+        let message = MessageBuilder()
+            .withSubject("Subject fallback")
+            .withSnippet(" \n\t ")
+            .build(in: context)
+        message.cleanedSnippet = nil
+        message.chatPreviewText = "Canonical chat preview"
+
+        XCTAssertEqual(message.conversationPreviewText, "Canonical chat preview")
+    }
+
+    func testConversationPreviewText_regularMessage_compactsMultilineChatPreviewText() {
+        let message = MessageBuilder()
+            .withSubject("Subject fallback")
+            .withSnippet(" \n\t ")
+            .build(in: context)
+        message.cleanedSnippet = nil
+        message.chatPreviewText = "Line one.\n\nLine two."
+
+        XCTAssertEqual(message.conversationPreviewText, "Line one. Line two.")
+    }
+
+    func testConversationPreviewText_regularMessage_fallsBackToSubject() {
+        let message = MessageBuilder()
+            .withSubject("Subject fallback")
+            .withSnippet(" \n\t ")
+            .build(in: context)
+        message.cleanedSnippet = nil
+        message.chatPreviewText = " \n\t "
+
+        XCTAssertEqual(message.conversationPreviewText, "Subject fallback")
     }
 
     func testHTMLDisplayCleanupMode_forwardedMessage_defaultsToNone() {

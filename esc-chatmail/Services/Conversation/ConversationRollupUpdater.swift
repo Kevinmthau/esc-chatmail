@@ -214,7 +214,6 @@ struct ConversationRollupUpdater: Sendable {
         fetchOffset: Int
     ) throws -> [NSManagedObjectID] {
         let whitespacePattern = #"^\s+$"#
-        let forwardedSubjectPattern = #"(?i)^\s*(?:fwd|fw)\s*:.*\S.*$"#
         let request = NSFetchRequest<NSManagedObjectID>(entityName: "Conversation")
         request.resultType = .managedObjectIDResultType
         request.includesPendingChanges = false
@@ -228,9 +227,9 @@ struct ConversationRollupUpdater: Sendable {
                 SUBQUERY(messages, $message,
                     SUBQUERY($message.labels, $label, $label.id IN %@).@count == 0 AND (
                         ($message.cleanedSnippet != nil AND $message.cleanedSnippet != '' AND NOT ($message.cleanedSnippet MATCHES %@)) OR
+                        ($message.chatPreviewText != nil AND $message.chatPreviewText != '' AND NOT ($message.chatPreviewText MATCHES %@)) OR
                         ($message.snippet != nil AND $message.snippet != '' AND NOT ($message.snippet MATCHES %@)) OR
-                        ($message.isNewsletter == YES AND $message.subject != nil AND $message.subject != '' AND NOT ($message.subject MATCHES %@)) OR
-                        ($message.subject MATCHES %@)
+                        ($message.subject != nil AND $message.subject != '' AND NOT ($message.subject MATCHES %@))
                     )
                 ).@count > 0
                 """,
@@ -238,7 +237,7 @@ struct ConversationRollupUpdater: Sendable {
                 whitespacePattern,
                 whitespacePattern,
                 whitespacePattern,
-                forwardedSubjectPattern
+                whitespacePattern
             )
         ])
         request.sortDescriptors = [
