@@ -10,7 +10,7 @@ struct EmailPreviewSnapshotCacheEntry: Equatable, Sendable {
 }
 
 enum EmailPreviewSnapshotCacheKey {
-    static let rendererVersion = "snapshot-v4"
+    static let rendererVersion = CacheVersioning.previewSnapshotRendererVersion
 
     static func make(
         previewCacheKey: String,
