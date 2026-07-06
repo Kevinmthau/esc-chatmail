@@ -16,6 +16,32 @@ protocol ContactsResolving: Sendable {
     /// Pre-warms the cache by fetching contacts for multiple emails.
     /// - Parameter emails: The email addresses to look up
     func prewarm(emails: [String]) async
+
+    /// Resolves just the avatar data for an email.
+    func resolveAvatarData(for email: String) async -> Data?
+
+    /// Batch resolve avatar data for multiple emails, keyed by normalized email.
+    func resolveAvatarDataBatch(for emails: [String]) async -> [String: Data]
+}
+
+extension ContactsResolving {
+    // Defaults delegate to `lookup`. These are protocol requirements (not just
+    // extension conveniences) so ContactsResolver's batched CNContactStore
+    // implementation is reached through `any ContactsResolving`.
+
+    func resolveAvatarData(for email: String) async -> Data? {
+        await lookup(email: email)?.imageData
+    }
+
+    func resolveAvatarDataBatch(for emails: [String]) async -> [String: Data] {
+        var results: [String: Data] = [:]
+        for email in Set(emails.map { EmailNormalizer.normalize($0) }) {
+            if let data = await lookup(email: email)?.imageData {
+                results[email] = data
+            }
+        }
+        return results
+    }
 }
 
 // MARK: - Contact Match

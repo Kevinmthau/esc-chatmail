@@ -10,16 +10,20 @@ import UIKit
 actor ProfilePhotoResolver: MemoryWarningHandler {
     static let shared = ProfilePhotoResolver()
 
-    private let contactsResolver = ContactsResolver.shared
+    private let contactsResolver: any ContactsResolving
     private let coreDataStack = CoreDataStack.shared
     private let cache: NSCache<NSString, CachedPhoto>
     private let requestManager = InFlightRequestManager<String, ProfilePhoto>()
     private let memoryObserver = MemoryWarningObserver()
 
-    /// The cache parameter is a testing seam (cost-recording spy); production
-    /// code uses `shared`.
-    init(cache: NSCache<NSString, CachedPhoto> = NSCache()) {
+    /// The cache and contactsResolver parameters are testing seams (cost-recording
+    /// spy, hermetic contacts stub); production code uses `shared`.
+    init(
+        cache: NSCache<NSString, CachedPhoto> = NSCache(),
+        contactsResolver: any ContactsResolving = ContactsResolver.shared
+    ) {
         self.cache = cache
+        self.contactsResolver = contactsResolver
         cache.countLimit = CacheConfig.photoCacheSize
         // Set memory limit (assume ~50KB average per photo, allows ~25MB)
         cache.totalCostLimit = 25 * 1024 * 1024

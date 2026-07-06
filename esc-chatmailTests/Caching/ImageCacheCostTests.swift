@@ -55,6 +55,16 @@ final class ImageCacheCostTests: XCTestCase {
         }
     }
 
+    /// Hermetic stand-in for ContactsResolver.shared: never touches
+    /// CNContactStore, so the resolver test passes regardless of the
+    /// simulator's Contacts TCC state (.notDetermined would otherwise hang
+    /// awaiting a permission dialog on headless runners).
+    private struct StubContactsResolver: ContactsResolving {
+        func ensureAuthorization() async throws {}
+        func lookup(email: String) async -> ContactMatch? { nil }
+        func prewarm(emails: [String]) async {}
+    }
+
     private func makeImage(width: Int, height: Int, scale: CGFloat = 1) -> UIImage {
         let format = UIGraphicsImageRendererFormat()
         format.scale = scale
@@ -116,7 +126,7 @@ final class ImageCacheCostTests: XCTestCase {
 
     func testProfilePhotoResolver_negativeCacheEntryCostsZero() async {
         let spy = CostRecordingPhotoCache()
-        let resolver = ProfilePhotoResolver(cache: spy)
+        let resolver = ProfilePhotoResolver(cache: spy, contactsResolver: StubContactsResolver())
 
         // Unknown address: no contact, no cached URL → nil photo is cached
         // as a negative entry with zero cost.
