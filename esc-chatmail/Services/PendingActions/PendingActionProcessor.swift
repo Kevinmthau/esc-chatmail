@@ -240,19 +240,9 @@ extension PendingActionsManager {
         // Validation errors from our own code - never retry
         if error is PendingActionError { return false }
 
-        // API errors - check specific cases
+        // APIError decisions come from the canonical mapping on the type.
         if let apiError = error as? APIError {
-            switch apiError {
-            case .authenticationError, .credentialsRevoked, .notFound:
-                // 401/403/revoked and 404 - resource doesn't exist or no access, retrying won't help
-                return false
-            case .rateLimited, .serverError, .networkError, .timeout:
-                // Transient errors that may succeed on retry
-                return true
-            case .invalidURL, .decodingError, .invalidData, .historyIdExpired:
-                // These indicate bugs or state issues, not transient failures
-                return false
-            }
+            return apiError.isRetriableSameRequest
         }
 
         // For unknown errors, default to retry (conservative approach)

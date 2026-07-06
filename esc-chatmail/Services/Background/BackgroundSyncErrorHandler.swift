@@ -1,21 +1,19 @@
 import Foundation
 
-/// Defines recovery actions for background sync errors
-enum BackgroundSyncRecoveryAction {
-    case retry
-    case partialSync
-    case tokenRefreshAndRetry
-    case abort
-    case abortNoRetry
-}
-
-/// Handles error classification and recovery strategy determination
+/// Maps sync errors onto recovery actions. APIError classification is
+/// canonical on the error type (`APIError.recoveryAction`); this handler only
+/// adds the URLError/NSError legs for errors that never became APIErrors.
 struct BackgroundSyncErrorHandler {
     /// Analyzes an error and returns the appropriate recovery action
     func handleError(_ error: Error) -> BackgroundSyncRecoveryAction {
         // Check for API errors first
         if let apiError = error as? APIError {
-            return handleAPIError(apiError)
+            let action = apiError.recoveryAction
+            Log.warning(
+                "API error during background sync: \(apiError) → \(action)",
+                category: .background
+            )
+            return action
         }
 
         // Check for URLError before NSError — every Error bridges to NSError,
@@ -31,48 +29,6 @@ struct BackgroundSyncErrorHandler {
 
         Log.error("Unknown error during history sync", category: .background, error: error)
         return .retry
-    }
-
-    private func handleAPIError(_ apiError: APIError) -> BackgroundSyncRecoveryAction {
-        switch apiError {
-        case .historyIdExpired:
-            Log.info("History ID expired (APIError), falling back to partial sync", category: .background)
-            return .partialSync
-
-        case .authenticationError:
-            Log.warning("Authentication error during background sync, attempting token refresh", category: .background)
-            return .tokenRefreshAndRetry
-
-        case .credentialsRevoked:
-            Log.warning("Credentials revoked during background sync; re-authentication required", category: .background)
-            return .abortNoRetry
-
-        case .rateLimited:
-            Log.warning("Rate limited during background sync, will retry with backoff", category: .background)
-            return .retry
-
-        case .timeout, .networkError:
-            Log.warning("Network issue during background sync: \(apiError)", category: .background)
-            return .retry
-
-        case .serverError(let code):
-            Log.warning("Server error \(code) during background sync", category: .background)
-            if code >= 500 {
-                // Server errors are retriable
-                return .retry
-            }
-            return .abort
-
-        case .invalidData(let message):
-            // The client maps non-retriable 4xx responses (403 quota/scope,
-            // 400 bad request) to invalidData; retrying repeats the failure.
-            Log.error("Non-retriable API error during background sync: \(message)", category: .background)
-            return .abort
-
-        default:
-            Log.error("API error during background sync: \(apiError)", category: .background)
-            return .retry
-        }
     }
 
     private func handleNSError(_ nsError: NSError) -> BackgroundSyncRecoveryAction {

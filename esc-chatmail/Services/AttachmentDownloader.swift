@@ -137,8 +137,9 @@ final class AttachmentDownloader: ObservableObject {
                 return (mimeType: attachmentInContext.mimeType, filename: attachmentInContext.filename)
             }
 
-            // Download attachment data from Gmail with automatic retry
-            let data = try await downloadWithRetry(messageId: messageId, attachmentId: attachmentId)
+            // Download attachment data from Gmail. The API client's retry
+            // loop is the single retry owner — no second loop here.
+            let data = try await apiClient.getAttachment(messageId: messageId, attachmentId: attachmentId)
 
             downloadProgress[attachmentId] = 0.5
             
@@ -340,13 +341,6 @@ final class AttachmentDownloader: ObservableObject {
         await downloadAttachment(attachmentObjectID: attachmentObjectID, messageId: message.id, in: context)
     }
     
-    private func downloadWithRetry(messageId: String, attachmentId: String) async throws -> Data {
-        let executor = RetryExecutor<Data>.network(maxAttempts: 3, baseDelay: 1.0, maxDelay: 10.0)
-        return try await executor.execute { [apiClient] in
-            try await apiClient.getAttachment(messageId: messageId, attachmentId: attachmentId)
-        }
-    }
-
     /// Cleans up any partial download artifacts to prevent orphaned files.
     /// Called when a download fails to ensure clean state for retry.
     private func rollbackPartialDownload(attachmentId: String) {
