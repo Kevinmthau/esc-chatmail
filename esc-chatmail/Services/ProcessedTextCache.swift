@@ -1108,18 +1108,11 @@ actor ProcessedTextCache: MemoryWarningHandler {
     }
 
     nonisolated fileprivate static func cleanedHTMLForProcessing(_ html: String) -> HTMLProcessingCleanupResult {
-        let quotedAndSignature = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
-        if HTMLMeaningfulContentChecker.hasMeaningfulContent(quotedAndSignature) {
-            return HTMLProcessingCleanupResult(html: quotedAndSignature, applyPlainTextQuoteRemoval: false)
-        }
-
-        // Signature cleanup false-positive; try quote-only cleanup.
-        let quotedOnly = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedOnly) ?? html
-        if HTMLMeaningfulContentChecker.hasMeaningfulContent(quotedOnly) {
-            return HTMLProcessingCleanupResult(html: quotedOnly, applyPlainTextQuoteRemoval: false)
-        }
-
-        return HTMLProcessingCleanupResult(html: html, applyPlainTextQuoteRemoval: true)
+        let fallback = HTMLCleanupFallback.cleanedHTML(from: html, modes: [.quotedAndSignatures, .quotedOnly])
+        return HTMLProcessingCleanupResult(
+            html: fallback.html,
+            applyPlainTextQuoteRemoval: fallback.appliedMode == nil
+        )
     }
 
     nonisolated private static func approximateTextContent(from html: String) -> String {
