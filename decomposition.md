@@ -37,7 +37,7 @@ is behavior-preserving and anchored by characterization tests.
 | File | Lines | Shape | Disposition |
 |---|---|---|---|
 | `Services/Chat/FullEmailWebViewManager.swift` | 1452 | 17 types, 14 MARK | Already organized; lower priority |
-| `Services/ProcessedTextCache.swift` | 1259 | 5 types, 0 MARK | Legacy-compat cache; narrow/delete candidate (pending the data backfill noted in the phase-1 closeout) rather than decompose |
+| `Services/Caching/ProcessedTextCache.swift` | 1259 | 5 types, 0 MARK | Legacy-compat cache; narrow/delete candidate (pending the data backfill noted in the phase-1 closeout) rather than decompose |
 
 No remaining 1-type/0-MARK god-objects: the clear decomposition targets are
 done. The two files above are deliberately out of scope (one already

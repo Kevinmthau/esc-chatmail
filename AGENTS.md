@@ -94,7 +94,7 @@ App flow:
   - `esc-chatmail/Views/Compose/ComposeView.swift`
 
 State management:
-- Shared app services come from `esc-chatmail/Services/Dependencies.swift` via `@EnvironmentObject`.
+- Shared app services come from `esc-chatmail/Services/Dependencies/Dependencies.swift` via `@EnvironmentObject`.
 - Screen state is usually owned by `@StateObject` view models such as `ConversationListViewModel`, `ChatViewModel`, and `ComposeViewModel`.
 - View models compose smaller services instead of pushing logic into the view layer.
 - `ViewModelTaskManager` is the common pattern for cancelling or deduplicating async UI work.
@@ -113,8 +113,8 @@ Important rule:
 ## Repo-Specific Priorities
 
 Be especially careful in:
-- `esc-chatmail/Services/HTMLContentLoader.swift`
-- `esc-chatmail/Services/HTMLSanitizerService.swift`
+- `esc-chatmail/Services/HTMLContent/HTMLContentLoader.swift`
+- `esc-chatmail/Services/HTMLSanitization/HTMLSanitizerService.swift`
 - `esc-chatmail/Services/HTMLSanitization/HTMLDisplayWrapper.swift`
 - `esc-chatmail/Views/Components/EmailContent/BaseEmailWebView.swift`
 - preview rendering in chat/thread UI
