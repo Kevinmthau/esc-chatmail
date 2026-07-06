@@ -149,6 +149,31 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(conversation.snippet, "Clean newsletter preview")
     }
 
+    func testUpdateRollups_usesChatPreviewTextWhenListSnippetsAreMissing() throws {
+        let messageDate = Date(timeIntervalSince1970: 200)
+        let conversation = ConversationBuilder()
+            .withLastMessageDate(messageDate)
+            .visible()
+            .build(in: context)
+
+        let message = MessageBuilder()
+            .withId("rollup-chat-preview-only")
+            .withDate(messageDate)
+            .withSubject("Subject fallback")
+            .withSnippet(" \n\t ")
+            .inConversation(conversation)
+            .build(in: context)
+        message.cleanedSnippet = nil
+        message.chatPreviewText = "Chat preview line one.\n\nLine two."
+
+        try context.save()
+
+        updater.updateRollups(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.lastMessageDate, messageDate)
+        XCTAssertEqual(conversation.snippet, "Chat preview line one. Line two.")
+    }
+
     func testUpdateRollups_fallsBackToPreviousVisiblePreviewWhenLatestVisiblePreviewIsMissing() throws {
         let oldDate = Date(timeIntervalSince1970: 100)
         let latestDate = Date(timeIntervalSince1970: 200)
@@ -228,6 +253,58 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(result.repairedCount, 1)
         XCTAssertTrue(result.didDrain)
         XCTAssertEqual(conversation.snippet, "Clean repair preview")
+    }
+
+    func testRepairMissingConversationPreviewsRestoresChatPreviewOnlyMessagePreview() async throws {
+        let messageDate = Date(timeIntervalSince1970: 200)
+        let conversation = ConversationBuilder()
+            .withLastMessageDate(messageDate)
+            .visible()
+            .build(in: context)
+
+        let message = MessageBuilder()
+            .withId("repair-chat-preview-only")
+            .withDate(messageDate)
+            .withSubject("Subject fallback")
+            .withSnippet(" \n\t ")
+            .inConversation(conversation)
+            .build(in: context)
+        message.cleanedSnippet = nil
+        message.chatPreviewText = "Chat repair preview.\n\nSecond line."
+
+        try context.save()
+
+        let result = await updater.repairMissingConversationPreviews(in: context)
+
+        XCTAssertEqual(result.repairedCount, 1)
+        XCTAssertTrue(result.didDrain)
+        XCTAssertEqual(conversation.snippet, "Chat repair preview. Second line.")
+    }
+
+    func testRepairMissingConversationPreviewsRestoresSubjectOnlyMessagePreview() async throws {
+        let messageDate = Date(timeIntervalSince1970: 200)
+        let conversation = ConversationBuilder()
+            .withLastMessageDate(messageDate)
+            .visible()
+            .build(in: context)
+
+        let message = MessageBuilder()
+            .withId("repair-subject-only")
+            .withDate(messageDate)
+            .withSubject("Subject repair preview")
+            .withSnippet(" \n\t ")
+            .inConversation(conversation)
+            .build(in: context)
+        message.cleanedSnippet = nil
+        message.chatPreviewText = " \n\t "
+
+        try context.save()
+
+        let result = await updater.repairMissingConversationPreviews(in: context)
+
+        XCTAssertEqual(result.repairedCount, 1)
+        XCTAssertTrue(result.didDrain)
+        XCTAssertEqual(conversation.snippet, "Subject repair preview")
     }
 
     func testRepairMissingConversationPreviewsRestoresWhitespaceOnlyConversationPreviewInSQLiteStore() async throws {

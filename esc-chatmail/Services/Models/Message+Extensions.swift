@@ -20,6 +20,15 @@ enum MessagePreviewText {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    static func compactListText(_ text: String?) -> String? {
+        let snippet = TextSnippetCreator.createSnippet(
+            from: text,
+            maxLength: Int.max,
+            firstSentenceOnly: false
+        )
+        return nonEmpty(snippet)
+    }
+
     static func firstNonEmpty(_ candidates: String?...) -> String? {
         for candidate in candidates {
             if let text = nonEmpty(candidate) {
@@ -259,7 +268,12 @@ extension Message {
             return subject
         }
 
-        return MessagePreviewText.firstNonEmpty(cleanedSnippet, snippet)
+        return MessagePreviewText.firstNonEmpty(
+            cleanedSnippet,
+            MessagePreviewText.compactListText(chatPreviewText),
+            snippet,
+            subject
+        )
     }
 
     var forwardedDisplaySubject: String? {

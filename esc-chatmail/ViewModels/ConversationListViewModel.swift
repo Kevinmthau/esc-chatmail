@@ -25,7 +25,7 @@ enum ConversationFilter: String, CaseIterable {
 @MainActor
 final class ConversationListViewModel: ObservableObject {
     static let conversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV5"
-    static let conversationPreviewRepairMigrationKey = "hasRepairedMissingConversationPreviewsV1"
+    static let conversationPreviewRepairMigrationKey = "hasRepairedMissingConversationPreviewsV2"
 
     // MARK: - Composed Services
 
