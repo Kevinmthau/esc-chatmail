@@ -10,12 +10,14 @@ enum TextProcessing {
         )
     }()
 
-    private static let signatureDelimiterPattern: NSRegularExpression? = {
-        try? NSRegularExpression(
-            pattern: "^(--|--\\s|---|___|—|–|-)$|^[-_]{2,}$",
-            options: [.caseInsensitive]
-        )
-    }()
+    private static let signatureDelimiterPattern = SignaturePatterns.delimiterLine
+
+    /// Canonical CRLF/CR → LF normalization for the text-processing pipeline.
+    static func normalizeLineEndings(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+    }
 
     /// Checks if a line starts with a list item marker
     static func isListItem(_ line: String) -> Bool {
@@ -416,10 +418,7 @@ enum TextProcessing {
     /// Emails often contain hard line breaks at fixed widths for legacy compatibility.
     /// This function joins lines that were artificially wrapped while keeping intentional paragraph breaks.
     static func unwrapEmailLineBreaks(from text: String) -> String {
-        // Normalize line endings: CRLF → LF, CR → LF
-        var normalizedText = text
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
+        var normalizedText = normalizeLineEndings(text)
 
         // Normalize all special whitespace to regular space
         // This handles NBSP (U+00A0), thin space, em space, etc. that would otherwise

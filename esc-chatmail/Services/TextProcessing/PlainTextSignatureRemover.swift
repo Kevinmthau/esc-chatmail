@@ -111,9 +111,7 @@ enum PlainTextSignatureRemover {
         "all the best"
     ]
 
-    private static let delimiterLinePattern: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "^(--|--\\s|---|___|—|–|-)$|^[-_]{2,}$", options: [.caseInsensitive])
-    }()
+    private static let delimiterLinePattern = SignaturePatterns.delimiterLine
 
     private static let contactPrefixPattern: NSRegularExpression? = {
         try? NSRegularExpression(
@@ -122,24 +120,13 @@ enum PlainTextSignatureRemover {
         )
     }()
 
-    private static let standaloneContactLabelPattern: NSRegularExpression? = {
-        try? NSRegularExpression(
-            pattern: "^(m|c|o|f|d|t|p)[:.]?$",
-            options: [.caseInsensitive]
-        )
-    }()
+    private static let standaloneContactLabelPattern = SignaturePatterns.standaloneContactLabel
 
-    private static let emailPattern: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", options: [.caseInsensitive])
-    }()
+    private static let emailPattern = EmailPatterns.address
 
-    private static let urlPattern: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "\\bhttps?://\\S+|\\bwww\\.[^\\s]+", options: [.caseInsensitive])
-    }()
+    private static let urlPattern = URLPatterns.webURL
 
-    private static let phonePattern: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "\\b\\+?\\d[\\d\\s().-]{6,}\\b", options: [])
-    }()
+    private static let phonePattern = SignaturePatterns.phone
 
     private static let titleKeywords: [String] = [
         "director", "manager", "vp", "vice president", "president", "founder",
@@ -155,12 +142,7 @@ enum PlainTextSignatureRemover {
 
     /// Address keywords must be matched on word boundaries.
     /// Avoid substring false positives like matching "ave" inside "have".
-    private static let addressKeywordPattern: NSRegularExpression? = {
-        try? NSRegularExpression(
-            pattern: #"(?i)\b(?:street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|suite|ste|floor|fl)\b\.?"#,
-            options: []
-        )
-    }()
+    private static let addressKeywordPattern = SignaturePatterns.addressKeyword
 
     private static let organizationKeywords: [String] = [
         " inc", " inc.", " llc", " ltd", " corp", " corp.", " corporation",
@@ -177,7 +159,7 @@ enum PlainTextSignatureRemover {
     // MARK: - Public API
 
     static func removeSignature(from text: String) -> String {
-        let normalized = normalizeLineEndings(text)
+        let normalized = TextProcessing.normalizeLineEndings(text)
         let trimmed = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
 
@@ -885,11 +867,6 @@ enum PlainTextSignatureRemover {
     }
 
     // MARK: - Utilities
-
-    private static func normalizeLineEndings(_ text: String) -> String {
-        text.replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-    }
 
     private static func joinLines(_ lines: [String], upTo endLine: Int) -> String {
         let endIndex = max(0, min(endLine, lines.count))

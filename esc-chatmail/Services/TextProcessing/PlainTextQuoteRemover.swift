@@ -230,21 +230,13 @@ enum PlainTextQuoteRemover {
     ]
 
     // Header groups used for structural quote boundary detection.
-    private static let fromHeaderPrefixesLowercased: [String] = [
-        "from:", "von:", "de:", "de :", "da:", "van:"
-    ]
+    private static let fromHeaderPrefixesLowercased = QuoteHeaderPatterns.fromPrefixes
 
-    private static let toHeaderPrefixesLowercased: [String] = [
-        "to:", "an:", "à:", "à :", "para:", "aan:"
-    ]
+    private static let toHeaderPrefixesLowercased = QuoteHeaderPatterns.toPrefixes
 
-    private static let sentOrDateHeaderPrefixesLowercased: [String] = [
-        "sent:", "date:", "gesendet:", "datum:", "envoyé:", "envoyé :", "enviado:", "inviato:", "verzonden:"
-    ]
+    private static let sentOrDateHeaderPrefixesLowercased = QuoteHeaderPatterns.sentOrDatePrefixes
 
-    private static let subjectHeaderPrefixesLowercased: [String] = [
-        "subject:", "betreff:", "objet:", "objet :", "asunto:", "oggetto:", "assunto:", "onderwerp:"
-    ]
+    private static let subjectHeaderPrefixesLowercased = QuoteHeaderPatterns.subjectPrefixes
 
     // Pre-computed lowercased forward markers for efficient matching
     private static let forwardMarkersLowercased: [String] = [

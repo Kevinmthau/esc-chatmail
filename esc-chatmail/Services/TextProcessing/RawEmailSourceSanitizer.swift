@@ -6,15 +6,7 @@ import Foundation
 enum RawEmailSourceSanitizer {
     private static let minimumHeaderLinesForRawSource = 5
 
-    private static let mimeHeaderPrefixes: [String] = [
-        "content-type:",
-        "content-transfer-encoding:",
-        "content-disposition:",
-        "content-id:",
-        "content-description:",
-        "x-attachment-id:",
-        "mime-version:"
-    ]
+    private static let mimeHeaderPrefixes = MIMEPatterns.headerPrefixes
 
     private static let transportMarkers: [String] = [
         "delivered-to:",
@@ -28,12 +20,7 @@ enum RawEmailSourceSanitizer {
         "x-google-dkim-signature:"
     ]
 
-    private static let boundaryPattern: NSRegularExpression? = {
-        try? NSRegularExpression(
-            pattern: #"boundary\s*=\s*(?:"([^"]+)"|([^\s;]+))"#,
-            options: [.caseInsensitive]
-        )
-    }()
+    private static let boundaryPattern = MIMEPatterns.boundary
 
     static func extractDisplayText(from text: String) -> String {
         let normalized = normalizeLineEndings(text)
@@ -85,9 +72,7 @@ enum RawEmailSourceSanitizer {
     }
 
     private static func normalizeLineEndings(_ text: String) -> String {
-        text
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
+        TextProcessing.normalizeLineEndings(text)
     }
 
     private static func looksLikeRawEmailSource(_ text: String) -> Bool {

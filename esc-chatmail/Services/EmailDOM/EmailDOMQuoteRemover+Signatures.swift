@@ -178,24 +178,13 @@ extension EmailDOMQuoteRemover {
         }
     }
 
-    private static let signatureEmailPattern: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", options: [.caseInsensitive])
-    }()
+    private static let signatureEmailPattern = EmailPatterns.address
 
-    private static let signatureURLPattern: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "\\bhttps?://\\S+|\\bwww\\.[^\\s]+", options: [.caseInsensitive])
-    }()
+    private static let signatureURLPattern = URLPatterns.webURL
 
-    private static let signaturePhonePattern: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "\\b\\+?\\d[\\d\\s().-]{6,}\\b", options: [])
-    }()
+    private static let signaturePhonePattern = SignaturePatterns.phone
 
-    private static let signatureAddressPattern: NSRegularExpression? = {
-        try? NSRegularExpression(
-            pattern: #"(?i)\b(?:street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|suite|ste|floor|fl)\b\.?"#,
-            options: []
-        )
-    }()
+    private static let signatureAddressPattern = SignaturePatterns.addressKeyword
 
     private static let signatureCityStateZipPattern: NSRegularExpression? = {
         try? NSRegularExpression(
@@ -204,9 +193,7 @@ extension EmailDOMQuoteRemover {
         )
     }()
 
-    private static let signatureStandaloneContactLabelPattern: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "^(m|c|o|f|d|t|p)[:.]?$", options: [.caseInsensitive])
-    }()
+    private static let signatureStandaloneContactLabelPattern = SignaturePatterns.standaloneContactLabel
 
     private static let signatureTitleKeywords: [String] = [
         "director", "manager", "vp", "vice president", "president", "founder",
