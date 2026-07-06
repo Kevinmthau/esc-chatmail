@@ -2,12 +2,6 @@ import Foundation
 import CoreData
 import CryptoKit
 
-private enum ChatMessageAttachmentDeduplicationKey: Hashable {
-    case contentId(String)
-    case file(filename: String, mimeType: String, byteSize: Int64)
-    case objectID(NSManagedObjectID)
-}
-
 struct MessageBubbleLoadSignatureComponents: Equatable {
     let bodyStorageURI: String?
     private let bodyTextFingerprint: String
@@ -282,121 +276,13 @@ struct ChatMessageRowModel: Equatable {
         hidingInlineReferencedInHTML: Bool,
         hidingCalendarInviteAttachments: Bool? = nil
     ) -> [ChatMessageAttachmentModel] {
-        let allAttachments = deduplicatedAttachments(in: attachments.filter { attachment in
-            guard !attachment.isLikelySignatureImage else { return false }
-
-            guard let contentId = EmailDocument.normalizedContentID(attachment.contentId) else {
-                return true
-            }
-
-            return !htmlAnalysis.nonDisplayableInlineContentIDs.contains(contentId)
-        })
-
-        guard hidingInlineReferencedInHTML else {
-            return allAttachments
-        }
-
-        guard !isFromMe else {
-            return allAttachments
-        }
-
-        let cidFilteredAttachments: [ChatMessageAttachmentModel]
-        if htmlAnalysis.referencedInlineContentIDs.isEmpty {
-            cidFilteredAttachments = allAttachments
-        } else {
-            cidFilteredAttachments = allAttachments.filter { attachment in
-                guard let contentId = EmailDocument.normalizedContentID(attachment.contentId) else {
-                    return true
-                }
-                return !htmlAnalysis.referencedInlineContentIDs.contains(contentId)
-            }
-        }
-
-        let shouldHideCalendarInviteAttachments =
-            hidingCalendarInviteAttachments ?? htmlAnalysis.supportsCalendarInvitePreviewCard
-
-        guard shouldHideCalendarInviteAttachments else {
-            return cidFilteredAttachments
-        }
-
-        return cidFilteredAttachments.filter { !$0.isCalendarInviteAttachment }
-    }
-
-    private func deduplicatedAttachments(
-        in attachments: [ChatMessageAttachmentModel]
-    ) -> [ChatMessageAttachmentModel] {
-        var bestByKey: [ChatMessageAttachmentDeduplicationKey: (index: Int, attachment: ChatMessageAttachmentModel)] = [:]
-        var deduplicated: [ChatMessageAttachmentModel] = []
-
-        for attachment in attachments {
-            let key = attachmentDeduplicationKey(for: attachment)
-
-            if let existing = bestByKey[key] {
-                if shouldPreferDeduplicatedAttachment(attachment, over: existing.attachment) {
-                    deduplicated[existing.index] = attachment
-                    bestByKey[key] = (existing.index, attachment)
-                }
-                continue
-            }
-
-            bestByKey[key] = (deduplicated.count, attachment)
-            deduplicated.append(attachment)
-        }
-
-        return deduplicated
-    }
-
-    private func attachmentDeduplicationKey(
-        for attachment: ChatMessageAttachmentModel
-    ) -> ChatMessageAttachmentDeduplicationKey {
-        if let normalizedContentId = EmailDocument.normalizedContentID(attachment.contentId) {
-            return .contentId(normalizedContentId)
-        }
-
-        let normalizedFilename = attachment.filename
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        let normalizedMimeType = attachment.mimeType
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-
-        if !normalizedFilename.isEmpty || !normalizedMimeType.isEmpty || attachment.byteSize > 0 {
-            return .file(
-                filename: normalizedFilename,
-                mimeType: normalizedMimeType,
-                byteSize: attachment.byteSize
-            )
-        }
-
-        return .objectID(attachment.objectID)
-    }
-
-    private func shouldPreferDeduplicatedAttachment(
-        _ lhs: ChatMessageAttachmentModel,
-        over rhs: ChatMessageAttachmentModel
-    ) -> Bool {
-        deduplicatedAttachmentRetentionScore(lhs) > deduplicatedAttachmentRetentionScore(rhs)
-    }
-
-    private func deduplicatedAttachmentRetentionScore(
-        _ attachment: ChatMessageAttachmentModel
-    ) -> Int {
-        var score = 0
-
-        if attachment.isReady {
-            score += 4
-        }
-        if attachment.localURL != nil {
-            score += 2
-        }
-        if attachment.byteSize > 0 {
-            score += 1
-        }
-        if attachment.pageCount > 0 || attachment.width > 0 || attachment.height > 0 {
-            score += 1
-        }
-
-        return score
+        AttachmentDisplayFilter.displayableAttachments(
+            in: attachments,
+            using: htmlAnalysis,
+            isFromMe: isFromMe,
+            hidingInlineReferencedInHTML: hidingInlineReferencedInHTML,
+            hidingCalendarInviteAttachments: hidingCalendarInviteAttachments
+        )
     }
 }
 

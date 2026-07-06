@@ -1,12 +1,6 @@
 import Foundation
 import CoreData
 
-private enum AttachmentDeduplicationKey: Hashable {
-    case contentId(String)
-    case file(filename: String, mimeType: String, byteSize: Int64)
-    case objectID(NSManagedObjectID)
-}
-
 /// NSCache entry for the memoized calendar-invite likelihood.
 private final class CalendarInviteLikelihoodEntry {
     let fingerprint: Int
@@ -179,112 +173,17 @@ extension Message {
         hidingInlineReferencedInHTML: Bool,
         hidingCalendarInviteAttachments: Bool? = nil
     ) -> [Attachment] {
-        let allAttachments = deduplicatedAttachments(in: attachmentsArray.filter { attachment in
-            guard !attachment.isLikelySignatureImage else { return false }
-
-            guard let contentId = EmailDocument.normalizedContentID(attachment.contentId) else {
-                return true
-            }
-
-            return !htmlAnalysis.nonDisplayableInlineContentIDs.contains(contentId)
-        })
-
-        guard hidingInlineReferencedInHTML else {
-            return allAttachments
-        }
-
-        guard !isFromMe else {
-            return allAttachments
-        }
-
-        let cidFilteredAttachments: [Attachment]
-        if htmlAnalysis.referencedInlineContentIDs.isEmpty {
-            cidFilteredAttachments = allAttachments
-        } else {
-            cidFilteredAttachments = allAttachments.filter { attachment in
-                guard let contentId = EmailDocument.normalizedContentID(attachment.contentId) else {
-                    return true
-                }
-                return !htmlAnalysis.referencedInlineContentIDs.contains(contentId)
-            }
-        }
-
-        let shouldHideCalendarInviteAttachments =
-            hidingCalendarInviteAttachments ?? htmlAnalysis.supportsCalendarInvitePreviewCard
-
-        guard shouldHideCalendarInviteAttachments else {
-            return cidFilteredAttachments
-        }
-
-        return cidFilteredAttachments.filter { !$0.isCalendarInviteAttachment }
-    }
-
-    /// Returns one canonical attachment per repeated Content-ID or repeated file fingerprint.
-    /// This protects the UI and forward-compose flow from Gmail messages that repeat the same
-    /// attachment part multiple times.
-    func deduplicatedAttachments(in attachments: [Attachment]) -> [Attachment] {
-        var bestByKey: [AttachmentDeduplicationKey: (index: Int, attachment: Attachment)] = [:]
-        var deduplicated: [Attachment] = []
-
-        for attachment in attachments {
-            let key = attachmentDeduplicationKey(for: attachment)
-
-            if let existing = bestByKey[key] {
-                if shouldPreferDeduplicatedAttachment(attachment, over: existing.attachment) {
-                    deduplicated[existing.index] = attachment
-                    bestByKey[key] = (existing.index, attachment)
-                }
-                continue
-            }
-
-            bestByKey[key] = (deduplicated.count, attachment)
-            deduplicated.append(attachment)
-        }
-
-        return deduplicated
+        AttachmentDisplayFilter.displayableAttachments(
+            in: attachmentsArray,
+            using: htmlAnalysis,
+            isFromMe: isFromMe,
+            hidingInlineReferencedInHTML: hidingInlineReferencedInHTML,
+            hidingCalendarInviteAttachments: hidingCalendarInviteAttachments
+        )
     }
 
     var attachmentsForForwarding: [Attachment] {
-        deduplicatedAttachments(in: attachmentsArray)
-    }
-
-    private func attachmentDeduplicationKey(for attachment: Attachment) -> AttachmentDeduplicationKey {
-        if let contentId = EmailDocument.normalizedContentID(attachment.contentId) {
-            return .contentId(contentId)
-        }
-
-        let filename = attachment.filename.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let mimeType = attachment.mimeType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let byteSize = attachment.byteSize
-
-        if !filename.isEmpty || !mimeType.isEmpty || byteSize > 0 {
-            return .file(filename: filename, mimeType: mimeType, byteSize: byteSize)
-        }
-
-        return .objectID(attachment.objectID)
-    }
-
-    private func shouldPreferDeduplicatedAttachment(_ lhs: Attachment, over rhs: Attachment) -> Bool {
-        deduplicatedAttachmentRetentionScore(lhs) > deduplicatedAttachmentRetentionScore(rhs)
-    }
-
-    private func deduplicatedAttachmentRetentionScore(_ attachment: Attachment) -> Int {
-        var score = 0
-
-        if attachment.isReady {
-            score += 4
-        }
-        if attachment.localURL != nil {
-            score += 2
-        }
-        if attachment.byteSize > 0 {
-            score += 1
-        }
-        if attachment.pageCount > 0 || attachment.width > 0 || attachment.height > 0 {
-            score += 1
-        }
-
-        return score
+        AttachmentDisplayFilter.deduplicatedAttachments(in: attachmentsArray)
     }
 
     /// Type-safe accessor for bodyText (alias for consistency)
