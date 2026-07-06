@@ -1033,21 +1033,13 @@ actor ProcessedTextCache: MemoryWarningHandler {
         return String(text[..<matchRange.lowerBound])
     }
 
-    private static let htmlTextFromHeaderPrefixesLowercased: [String] = [
-        "from:", "von:", "de:", "de :", "da:", "van:"
-    ]
+    private static let htmlTextFromHeaderPrefixesLowercased = QuoteHeaderPatterns.fromPrefixes
 
-    private static let htmlTextToHeaderPrefixesLowercased: [String] = [
-        "to:", "an:", "à:", "à :", "para:", "aan:"
-    ]
+    private static let htmlTextToHeaderPrefixesLowercased = QuoteHeaderPatterns.toPrefixes
 
-    private static let htmlTextSentOrDateHeaderPrefixesLowercased: [String] = [
-        "sent:", "date:", "gesendet:", "datum:", "envoyé:", "envoyé :", "enviado:", "inviato:", "verzonden:"
-    ]
+    private static let htmlTextSentOrDateHeaderPrefixesLowercased = QuoteHeaderPatterns.sentOrDatePrefixes
 
-    private static let htmlTextEmailPattern: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", options: [.caseInsensitive])
-    }()
+    private static let htmlTextEmailPattern = EmailPatterns.address
 
     nonisolated private static func removePlainTextHeaderQuoteBlocks(from text: String) -> String {
         let lines = text.components(separatedBy: .newlines)
