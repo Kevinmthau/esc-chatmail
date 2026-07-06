@@ -60,17 +60,9 @@ final class MessageFetcher: @unchecked Sendable {
             }
         }
 
-        // API errors that are retriable
+        // APIError decisions come from the canonical mapping on the type.
         if let apiError = error as? APIError {
-            switch apiError {
-            case .rateLimited, .timeout, .serverError:
-                return true
-            case .authenticationError, .historyIdExpired, .notFound:
-                return false
-            default:
-                // Default to non-retriable for unknown API errors to avoid infinite retry loops
-                return false
-            }
+            return apiError.isRetriableSameRequest
         }
 
         // NSError timeout codes using URLError constants for clarity

@@ -41,16 +41,9 @@ struct NetworkRetryStrategy: RetryStrategy {
     func shouldRetry(error: Error, attempt: Int) -> Bool {
         guard attempt < maxRetries else { return false }
 
-        // Don't retry authentication errors
+        // APIError decisions come from the canonical mapping on the type.
         if let apiError = error as? APIError {
-            switch apiError {
-            case .authenticationError, .credentialsRevoked, .decodingError, .invalidURL, .invalidData:
-                return false
-            case .rateLimited, .serverError, .timeout, .networkError:
-                return true
-            case .historyIdExpired, .notFound:
-                return false
-            }
+            return apiError.isRetriableSameRequest
         }
 
         // Retry connection-level errors
