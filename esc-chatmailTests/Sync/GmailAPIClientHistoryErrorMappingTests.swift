@@ -29,6 +29,38 @@ final class GmailAPIClientHistoryErrorMappingTests: XCTestCase {
 
     private static let historyResponseBody = Data(#"{"historyId":"99"}"#.utf8)
 
+    // MARK: - Unified 429 semantics (CX4)
+
+    func testHistoryFinalAttempt429_carriesRetryAfterWithoutSleepingOrRecordingBackoff() async {
+        // CX4 decision: the history path adopts the message path's 429
+        // semantics — the capped Retry-After rides on the thrown error, and
+        // backoff is recorded only for delays actually slept (History
+        // previously recorded before its breaker checks and threw
+        // rateLimited(retryAfter: nil)).
+        StubURLProtocol.script = [
+            .dataWithHeaders(429, Data(), ["Retry-After": "7"])
+        ]
+        let singleAttemptClient = GmailAPIClient(
+            tokenManager: tokenManager,
+            retryStrategy: NetworkRetryStrategy(maxRetries: 1, initialDelay: 0.01, maxDelay: 0.02),
+            session: StubURLProtocol.makeSession()
+        )
+
+        let start = Date()
+        do {
+            _ = try await singleAttemptClient.listHistory(startHistoryId: "1")
+            XCTFail("Expected rateLimited")
+        } catch let APIError.rateLimited(retryAfter) {
+            XCTAssertEqual(retryAfter, 7)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2.0)
+        let recorded = await singleAttemptClient.rateLimitTracker.currentCumulativeBackoff
+        XCTAssertEqual(recorded, 0, accuracy: 0.001)
+    }
+
     // MARK: - Revoked credentials during 401 recovery
 
     func testHistory401_refreshRevoked_mapsToCredentialsRevoked() async {

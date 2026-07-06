@@ -182,6 +182,86 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         maxRetries: Int? = nil,
         allowsRetransmission: Bool = true
     ) async throws -> T {
+        try await performRetryingRequest(
+            request,
+            maxRetries: maxRetries,
+            behavior: GmailRetryPathBehavior(
+                allowsRetransmission: allowsRetransmission,
+                thrownAPIErrorsAbortImmediately: false,
+                wrapsDecodingErrors: true,
+                logContext: "Request"
+            )
+        ) { statusCode, data in
+            if let statusCode {
+                switch statusCode {
+                case 403:
+                    let errorMessage = self.gmailErrorMessage(from: data) ?? "Missing required OAuth permissions"
+                    throw APIError.invalidData("Gmail API 403: \(errorMessage)")
+
+                case 404:
+                    throw APIError.notFound(self.gmailErrorMessage(from: data) ?? "resource")
+
+                case 400...499:
+                    let errorMessage = self.gmailErrorMessage(from: data) ?? HTTPURLResponse.localizedString(forStatusCode: statusCode)
+                    throw APIError.invalidData("Gmail API \(statusCode): \(errorMessage)")
+
+                case 200...299 where data.isEmpty:
+                    if let empty = EmptyResponse() as? T {
+                        return empty
+                    }
+
+                case 200...299:
+                    if let detail = self.gmailErrorDetail(from: data) {
+                        throw APIError.invalidData("Gmail API error \(detail.code): \(detail.message)")
+                    }
+
+                default:
+                    break
+                }
+            }
+
+            // Record success to help recover from rate limiting
+            await self.rateLimitTracker.recordSuccess()
+            return try JSONDecoder().decode(T.self, from: data)
+        }
+    }
+
+    // MARK: - Shared Retry Engine
+
+    /// Per-path parameterization of `performRetryingRequest`. The message and
+    /// history paths share one engine; these knobs hold their intentional
+    /// divergences (everything else — attempt accounting, the once-only 401
+    /// refresh grant, 429 pacing with capped Retry-After, 5xx backoff, and the
+    /// time-budget circuit breaker — is engine-owned and identical).
+    struct GmailRetryPathBehavior {
+        /// Non-idempotent sends set false: the request is never resent after
+        /// an ambiguous failure (5xx, timeout, dropped connection).
+        var allowsRetransmission = true
+        /// History aborts immediately on any APIError thrown by status
+        /// handling; the message path lets `RetryStrategy.shouldRetry`
+        /// mediate (so a breaker-tripped `rateLimited` keeps consuming
+        /// attempts with synthetic backoff instead of aborting outright).
+        var thrownAPIErrorsAbortImmediately = false
+        /// The message path wraps DecodingError into APIError.decodingError
+        /// when aborting; history propagates it raw.
+        var wrapsDecodingErrors = false
+        /// Prefix for retry-failure log lines ("Request" / "History request").
+        var logContext = "Request"
+    }
+
+    /// One retry engine for both Gmail request paths.
+    ///
+    /// `handleStatus` receives every status the engine does not own (anything
+    /// other than 429/401/5xx, plus `nil` for non-HTTP responses) and either
+    /// returns the decoded value or throws the path's error mapping — this is
+    /// where the intentional 404 divergence lives (`notFound` for messages,
+    /// `historyIdExpired` for history).
+    nonisolated func performRetryingRequest<T>(
+        _ request: URLRequest,
+        maxRetries: Int? = nil,
+        behavior: GmailRetryPathBehavior,
+        handleStatus: (Int?, Data) async throws -> T
+    ) async throws -> T {
         let retries = maxRetries ?? retryStrategy.maxRetries
         let startTime = Date()
         var lastError: Error?
@@ -210,137 +290,116 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
             do {
                 let (data, response) = try await session.data(for: currentRequest)
-
-                if let httpResponse = response as? HTTPURLResponse {
-                    let statusCode = httpResponse.statusCode
-                    switch httpResponse.statusCode {
-                    case 429:
-                        // Respect Retry-After header if present, but cap it.
-                        // The (capped) header value rides on the thrown error
-                        // so outer retry owners can honor server pacing.
-                        let headerRetryAfter: TimeInterval? = httpResponse
-                            .value(forHTTPHeaderField: "Retry-After")
-                            .flatMap(TimeInterval.init)
-                            .map { min($0, NetworkConfig.maxRetryAfterSeconds) }
-
-                        let delay: TimeInterval
-                        if let headerRetryAfter {
-                            Log.warning("Rate limited, Retry-After requests \(headerRetryAfter)s (capped)", category: .api)
-                            delay = headerRetryAfter
-                        } else {
-                            delay = retryDelay * 2
-                            Log.warning("Rate limited, using exponential backoff: \(delay) seconds", category: .api)
-                        }
-
-                        // Breaker/budget checks precede recordBackoff so only
-                        // delays actually slept are recorded — otherwise N
-                        // concurrent 429s at maxRetries 1 would trip the 120s
-                        // breaker without anyone waiting at all.
-                        if await rateLimitTracker.shouldAbort() {
-                            Log.warning("Circuit breaker: excessive cumulative rate limiting, aborting", category: .api)
-                            throw APIError.rateLimited(retryAfter: headerRetryAfter)
-                        }
-
-                        // Check if delay would exceed remaining time budget
-                        let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
-                        if delay > remainingTime {
-                            Log.warning("Circuit breaker: delay (\(delay)s) exceeds remaining time budget (\(remainingTime)s)", category: .api)
-                            throw APIError.rateLimited(retryAfter: headerRetryAfter)
-                        }
-
-                        if attempt >= allowedAttempts {
-                            throw APIError.rateLimited(retryAfter: headerRetryAfter)
-                        }
-
-                        await rateLimitTracker.recordBackoff(delay)
-                        try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                        retryDelay = min(delay * 2, retryStrategy.maxDelay)
-                        continue
-
-                    case 500...599:
-                        Log.warning("Server error \(httpResponse.statusCode), attempt \(attempt)/\(allowedAttempts)", category: .api)
-                        // A 5xx is ambiguous for non-idempotent requests: the server may
-                        // have processed the request before failing. Never resend.
-                        if allowsRetransmission, attempt < allowedAttempts {
-                            // Check time budget before sleeping
-                            let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
-                            if retryDelay > remainingTime {
-                                Log.warning("Circuit breaker: retry delay exceeds remaining time budget", category: .api)
-                                throw APIError.serverError(httpResponse.statusCode)
-                            }
-                            try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
-                            retryDelay = min(retryDelay * 2, retryStrategy.maxDelay)
-                            continue
-                        }
-                        throw APIError.serverError(statusCode)
-
-                    case 401:
-                        // Attempt reactive token refresh on 401
-                        // Only retry once to avoid infinite loops if refresh also fails
-                        if !hasAttemptedTokenRefresh {
-                            hasAttemptedTokenRefresh = true
-                            Log.info("Received 401, attempting token refresh", category: .api)
-                            do {
-                                _ = try await tokenManager.refreshToken()
-                                // Update request with refreshed token
-                                let newToken = try await tokenManager.getCurrentToken()
-                                currentRequest.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
-                                // The refresh consumed this attempt; grant one more so
-                                // the refreshed token always gets its request (bounded:
-                                // hasAttemptedTokenRefresh makes this once-only).
-                                allowedAttempts += 1
-                                continue
-                            } catch TokenManagerError.invalidCredentials {
-                                Log.error("Refresh token revoked, user must re-authenticate", category: .api)
-                                throw APIError.credentialsRevoked
-                            } catch {
-                                Log.error("Token refresh failed during 401 recovery: \(error.localizedDescription)", category: .api)
-                                throw APIError.authenticationError
-                            }
-                        }
-                        throw APIError.authenticationError
-
-                    case 403:
-                        let errorMessage = gmailErrorMessage(from: data) ?? "Missing required OAuth permissions"
-                        throw APIError.invalidData("Gmail API 403: \(errorMessage)")
-
-                    case 404:
-                        throw APIError.notFound(gmailErrorMessage(from: data) ?? "resource")
-
-                    case 400...499:
-                        let errorMessage = gmailErrorMessage(from: data) ?? HTTPURLResponse.localizedString(forStatusCode: statusCode)
-                        throw APIError.invalidData("Gmail API \(statusCode): \(errorMessage)")
-
-                    case 200...299 where data.isEmpty:
-                        if let empty = EmptyResponse() as? T {
-                            return empty
-                        }
-
-                    case 200...299:
-                        if let detail = gmailErrorDetail(from: data) {
-                            throw APIError.invalidData("Gmail API error \(detail.code): \(detail.message)")
-                        }
-
-                    default:
-                        break
-                    }
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    return try await handleStatus(nil, data)
                 }
 
-                // Record success to help recover from rate limiting
-                await rateLimitTracker.recordSuccess()
-                return try JSONDecoder().decode(T.self, from: data)
+                switch httpResponse.statusCode {
+                case 429:
+                    // Respect Retry-After header if present, but cap it.
+                    // The (capped) header value rides on the thrown error
+                    // so outer retry owners can honor server pacing.
+                    let headerRetryAfter: TimeInterval? = httpResponse
+                        .value(forHTTPHeaderField: "Retry-After")
+                        .flatMap(TimeInterval.init)
+                        .map { min($0, NetworkConfig.maxRetryAfterSeconds) }
+
+                    let delay: TimeInterval
+                    if let headerRetryAfter {
+                        Log.warning("Rate limited, Retry-After requests \(headerRetryAfter)s (capped)", category: .api)
+                        delay = headerRetryAfter
+                    } else {
+                        delay = retryDelay * 2
+                        Log.warning("Rate limited, using exponential backoff: \(delay) seconds", category: .api)
+                    }
+
+                    // Breaker/budget checks precede recordBackoff so only
+                    // delays actually slept are recorded — otherwise N
+                    // concurrent 429s at maxRetries 1 would trip the 120s
+                    // breaker without anyone waiting at all.
+                    if await rateLimitTracker.shouldAbort() {
+                        Log.warning("Circuit breaker: excessive cumulative rate limiting, aborting", category: .api)
+                        throw APIError.rateLimited(retryAfter: headerRetryAfter)
+                    }
+
+                    // Check if delay would exceed remaining time budget
+                    let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
+                    if delay > remainingTime {
+                        Log.warning("Circuit breaker: delay (\(delay)s) exceeds remaining time budget (\(remainingTime)s)", category: .api)
+                        throw APIError.rateLimited(retryAfter: headerRetryAfter)
+                    }
+
+                    if attempt >= allowedAttempts {
+                        throw APIError.rateLimited(retryAfter: headerRetryAfter)
+                    }
+
+                    await rateLimitTracker.recordBackoff(delay)
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    retryDelay = min(delay * 2, retryStrategy.maxDelay)
+                    continue
+
+                case 500...599:
+                    Log.warning("Server error \(httpResponse.statusCode), attempt \(attempt)/\(allowedAttempts)", category: .api)
+                    // A 5xx is ambiguous for non-idempotent requests: the server may
+                    // have processed the request before failing. Never resend.
+                    if behavior.allowsRetransmission, attempt < allowedAttempts {
+                        // Check time budget before sleeping
+                        let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
+                        if retryDelay > remainingTime {
+                            Log.warning("Circuit breaker: retry delay exceeds remaining time budget", category: .api)
+                            throw APIError.serverError(httpResponse.statusCode)
+                        }
+                        try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
+                        retryDelay = min(retryDelay * 2, retryStrategy.maxDelay)
+                        continue
+                    }
+                    throw APIError.serverError(httpResponse.statusCode)
+
+                case 401:
+                    // Attempt reactive token refresh on 401
+                    // Only retry once to avoid infinite loops if refresh also fails
+                    if !hasAttemptedTokenRefresh {
+                        hasAttemptedTokenRefresh = true
+                        Log.info("Received 401, attempting token refresh", category: .api)
+                        do {
+                            _ = try await tokenManager.refreshToken()
+                            // Update request with refreshed token
+                            let newToken = try await tokenManager.getCurrentToken()
+                            currentRequest.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
+                            // The refresh consumed this attempt; grant one more so
+                            // the refreshed token always gets its request (bounded:
+                            // hasAttemptedTokenRefresh makes this once-only).
+                            allowedAttempts += 1
+                            continue
+                        } catch TokenManagerError.invalidCredentials {
+                            Log.error("Refresh token revoked, user must re-authenticate", category: .api)
+                            throw APIError.credentialsRevoked
+                        } catch {
+                            Log.error("Token refresh failed during 401 recovery: \(error.localizedDescription)", category: .api)
+                            throw APIError.authenticationError
+                        }
+                    }
+                    throw APIError.authenticationError
+
+                default:
+                    return try await handleStatus(httpResponse.statusCode, data)
+                }
 
             } catch {
+                if behavior.thrownAPIErrorsAbortImmediately, let apiError = error as? APIError {
+                    throw apiError
+                }
+
                 lastError = error
-                Log.error("Request failed (attempt \(attempt)/\(allowedAttempts)): \(Log.redact(error: error))", category: .api)
+                Log.error("\(behavior.logContext) failed (attempt \(attempt)/\(allowedAttempts)): \(Log.redact(error: error))", category: .api)
 
                 // Non-idempotent requests may only be resent when the error proves the
                 // request never reached the server (DNS/connect/TLS failures). Timeouts
                 // and dropped connections are ambiguous — the send may have gone through.
-                let blocksRetransmission = !allowsRetransmission
+                let blocksRetransmission = !behavior.allowsRetransmission
                     && !ConnectionErrorDetector.isPreTransmissionError(error)
                 if blocksRetransmission || !retryStrategy.shouldRetry(error: error, attempt: attempt - 1) {
-                    if error is DecodingError {
+                    if behavior.wrapsDecodingErrors, error is DecodingError {
                         throw APIError.decodingError(error)
                     }
                     throw error

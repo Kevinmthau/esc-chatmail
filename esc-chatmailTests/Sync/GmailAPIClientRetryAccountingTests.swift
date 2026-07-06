@@ -167,4 +167,41 @@ final class GmailAPIClientRetryAccountingTests: XCTestCase {
 
         XCTAssertEqual(StubURLProtocol.requestCount, 3)
     }
+
+    // CX4 parity: the doc's canonical sequences must behave identically for
+    // the message and history paths. [401,401] and [401,500,200] were pinned
+    // for messages only; these pin the history side.
+
+    func testHistorySecond401AfterRefresh_failsAsAuthenticationError() async {
+        StubURLProtocol.script = [.status(401), .status(401)]
+        let client = makeClient(maxRetries: 3)
+
+        do {
+            _ = try await client.listHistory(startHistoryId: "1")
+            XCTFail("Expected authenticationError")
+        } catch let error as APIError {
+            guard case .authenticationError = error else {
+                return XCTFail("Expected authenticationError, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(StubURLProtocol.requestCount, 2)
+        XCTAssertEqual(tokenManager.refreshTokenCallCount, 1, "refresh must be once-only")
+    }
+
+    func testHistoryRefreshThenServerErrorThenSuccess() async throws {
+        StubURLProtocol.script = [
+            .status(401),
+            .status(500),
+            .data(200, Self.historyBody)
+        ]
+        let client = makeClient(maxRetries: 3)
+
+        let response = try await client.listHistory(startHistoryId: "1")
+
+        XCTAssertEqual(response.historyId, "99")
+        XCTAssertEqual(StubURLProtocol.requestCount, 3)
+    }
 }
