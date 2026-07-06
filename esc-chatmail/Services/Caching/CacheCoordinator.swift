@@ -40,6 +40,15 @@ final class CacheCoordinator {
         var shouldClearPersonCache = false
     }
 
+    /// Message-keyed caches invalidated when a Message entity is deleted,
+    /// through the shared `MessageKeyedCache` contract. ProcessedTextCache
+    /// chains RenderedMessageCache internally, and HTMLContentLoader chains
+    /// RenderedMessageCache and the parsed-email provider — those chains stay
+    /// with the caches; only the routing lives here.
+    private static var messageKeyedCaches: [any MessageKeyedCache] {
+        [ProcessedTextCache.shared, HTMLContentLoader.shared]
+    }
+
     private init() {}
 
     /// Starts listening for Core Data changes. Call once at app startup.
@@ -225,8 +234,9 @@ final class CacheCoordinator {
 
             Task {
                 for messageId in messageIds {
-                    await ProcessedTextCache.shared.invalidate(messageId: messageId)
-                    HTMLContentLoader.shared.invalidate(messageId: messageId)
+                    for cache in CacheCoordinator.messageKeyedCaches {
+                        await cache.invalidate(messageId: messageId, reason: .messageDeleted)
+                    }
                 }
 
                 for artifact in deletedHTMLArtifacts {

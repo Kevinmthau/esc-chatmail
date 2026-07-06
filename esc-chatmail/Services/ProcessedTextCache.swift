@@ -223,7 +223,7 @@ fileprivate struct HTMLProcessingCleanupResult {
 actor ProcessedTextCache: MemoryWarningHandler {
     static let shared = ProcessedTextCache()
     // Bump to invalidate cached entries when processing logic changes.
-    private static let processingVersion = "2026-05-30-chat-preview-primary-v2"
+    private static let processingVersion = CacheVersioning.processedTextProcessingVersion
     static let chatBubblePreviewMode = "chat-bubble-preview"
     static let richContentAnalysisMode = "rich-content-analysis"
 
