@@ -335,6 +335,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.esc.inboxchat;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = minimal;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -370,6 +371,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.esc.inboxchat;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = minimal;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -517,6 +519,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.mushpot.esc-chatmailTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_STRICT_CONCURRENCY = minimal;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/esc-chatmail.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/esc-chatmail";
@@ -538,6 +541,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.mushpot.esc-chatmailTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_STRICT_CONCURRENCY = minimal;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/esc-chatmail.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/esc-chatmail";
@@ -557,6 +561,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.mushpot.esc-chatmailUITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_STRICT_CONCURRENCY = minimal;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_TARGET_NAME = "esc-chatmail";
@@ -576,6 +581,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.mushpot.esc-chatmailUITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_STRICT_CONCURRENCY = minimal;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_TARGET_NAME = "esc-chatmail";
