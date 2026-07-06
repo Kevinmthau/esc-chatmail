@@ -8,32 +8,17 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
 
     private var stack: TestCoreDataStack!
     private var context: NSManagedObjectContext!
+    private var migrationFlags: InMemoryMigrationFlagStore!
 
     override func setUp() {
         super.setUp()
         stack = TestCoreDataStack()
         context = stack.viewContext
-        UserDefaults.standard.removeObject(
-            forKey: Self.legacyConversationNameRefreshMigrationKey
-        )
-        UserDefaults.standard.removeObject(
-            forKey: ConversationListViewModel.conversationNameRefreshMigrationKey
-        )
-        UserDefaults.standard.removeObject(
-            forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
-        )
+        migrationFlags = InMemoryMigrationFlagStore()
     }
 
     override func tearDown() {
-        UserDefaults.standard.removeObject(
-            forKey: Self.legacyConversationNameRefreshMigrationKey
-        )
-        UserDefaults.standard.removeObject(
-            forKey: ConversationListViewModel.conversationNameRefreshMigrationKey
-        )
-        UserDefaults.standard.removeObject(
-            forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
-        )
+        migrationFlags = nil
         context = nil
         stack = nil
         super.tearDown()
@@ -80,7 +65,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [bob.objectID, alice.objectID])
 
         await waitUntil {
-            UserDefaults.standard.bool(
+            self.migrationFlags.bool(
                 forKey: ConversationListViewModel.conversationNameRefreshMigrationKey
             )
         }
@@ -108,7 +93,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
     }
 
     func testRefreshConversationNames_runsWhenLegacyV4MigrationCompleted() async throws {
-        UserDefaults.standard.set(
+        migrationFlags.set(
             true,
             forKey: Self.legacyConversationNameRefreshMigrationKey
         )
@@ -123,7 +108,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         viewModel.refreshConversationNames()
 
         await waitUntil {
-            UserDefaults.standard.bool(
+            self.migrationFlags.bool(
                 forKey: ConversationListViewModel.conversationNameRefreshMigrationKey
             )
         }
@@ -141,7 +126,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         viewModel.refreshConversationNames()
 
         XCTAssertTrue(
-            UserDefaults.standard.bool(
+            migrationFlags.bool(
                 forKey: ConversationListViewModel.conversationNameRefreshMigrationKey
             )
         )
@@ -170,20 +155,10 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         let expectedSnippets = createdConversations.map { ($0.conversation.objectID, $0.expectedSnippet) }
         let viewModel = makeViewModel()
 
-        // The repair-done flag lives in process-global UserDefaults, and other
-        // view models in this test process (the host app's, other tests')
-        // run the same repair against their own stores and set the same flag
-        // when they drain. Two consequences for this test:
-        // - clear the flag right before invoking, with no suspension point in
-        //   between, so a stale foreign flag-set cannot no-op the entry guard;
-        // - wait on this store's data, not the flag — a foreign drain's
-        //   flag-write mid-batch would otherwise release the wait while our
-        //   repair is still running (observed on slower CI runners).
-        UserDefaults.standard.removeObject(
-            forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
-        )
         viewModel.repairMissingConversationPreviews()
 
+        // Wait on this store's data first: it proves all repair batches landed
+        // before observing the test-local completion flag.
         await waitUntil(timeout: 15.0, pollIntervalNanoseconds: 50_000_000) {
             try expectedSnippets.allSatisfy { objectID, expectedSnippet in
                 try self.fetchConversation(objectID).snippet == expectedSnippet
@@ -198,7 +173,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         // Draining is what flips the flag; ours is the only repair started
         // with this store, and foreign writers only ever set it to true.
         await waitUntil(timeout: 5.0) {
-            UserDefaults.standard.bool(
+            self.migrationFlags.bool(
                 forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
             )
         }
@@ -308,6 +283,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
                 viewContext: context,
                 makeBackgroundContext: { stack.newBackgroundContext() },
                 saveIfNeeded: { stack.saveIfNeeded(context: $0) },
+                migrationFlags: migrationFlags,
                 personCache: Dependencies.shared.personCache,
                 profilePhotoResolver: Dependencies.shared.profilePhotoResolver
             ),

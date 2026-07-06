@@ -12,15 +12,9 @@ final class ConversationListViewModelTests: XCTestCase {
         super.setUp()
         stack = TestCoreDataStack()
         context = stack.viewContext
-        UserDefaults.standard.removeObject(
-            forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
-        )
     }
 
     override func tearDown() {
-        UserDefaults.standard.removeObject(
-            forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
-        )
         context = nil
         stack = nil
         super.tearDown()
