@@ -81,16 +81,13 @@ struct BaseEmailWebView: UIViewRepresentable {
     // MARK: - Coordinator
 
     class Coordinator: NSObject, WKNavigationDelegate {
-        enum LoadReadiness: Equatable {
-            case ready
-            case deferred(reason: String)
-        }
+        typealias LoadReadiness = EmailWebViewLoadCoordination.LoadReadiness
 
         var parent: BaseEmailWebView
-        var lastLoadedContent: String = ""
-        var lastLoadedReloadSignature: String = ""
+        /// Shared load-readiness/reload-signature core; preview WebViews
+        /// require a measured height before loading.
+        private let coordination = EmailWebViewLoadCoordination(requiresViewportHeight: true)
         private var isLoading = false
-        private var hasFinishedLoad = false
         private var shouldReloadAfterCurrentLoad = false
         private var lastDeliveredPreviewHeight: CGFloat = 0
         private var previewMeasurementGeneration = 0
@@ -101,8 +98,16 @@ struct BaseEmailWebView: UIViewRepresentable {
             self.parent = parent
         }
 
+        var lastLoadedContent: String {
+            coordination.lastLoadedContent
+        }
+
+        var lastLoadedReloadSignature: String {
+            coordination.lastLoadedReloadSignature
+        }
+
         var needsReload: Bool {
-            lastLoadedContent != parent.htmlContent || lastLoadedReloadSignature != reloadSignature()
+            coordination.needsReload(content: parent.htmlContent, reloadSignature: reloadSignature())
         }
 
         func updateParent(_ parent: BaseEmailWebView) {
@@ -159,27 +164,13 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
 
         func loadReadiness(windowPresent: Bool, width: CGFloat, height: CGFloat) -> LoadReadiness {
-            guard needsReload else {
-                return .deferred(reason: "no-pending-reload")
-            }
-
-            guard !isLoading else {
-                return .deferred(reason: "already-loading")
-            }
-
-            guard windowPresent else {
-                return .deferred(reason: "missing-window")
-            }
-
-            guard width > 1 else {
-                return .deferred(reason: "missing-width")
-            }
-
-            guard height > 1 else {
-                return .deferred(reason: "missing-height")
-            }
-
-            return .ready
+            coordination.loadReadiness(
+                needsReload: needsReload,
+                isLoading: isLoading,
+                windowPresent: windowPresent,
+                width: width,
+                height: height
+            )
         }
 
         private func logDeferredLoad(
@@ -201,39 +192,22 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
 
         func recordLoadedSignature() {
-            lastLoadedContent = parent.htmlContent
-            lastLoadedReloadSignature = reloadSignature()
-            hasFinishedLoad = false
+            coordination.recordLoadedSignature(
+                content: parent.htmlContent,
+                reloadSignature: reloadSignature()
+            )
         }
 
         func recordFinishedLoad() {
-            hasFinishedLoad = true
+            coordination.recordFinishedLoad()
         }
 
         func resetLoadedSignatureAfterFailure() {
-            lastLoadedContent = ""
-            lastLoadedReloadSignature = ""
-            hasFinishedLoad = false
+            coordination.resetLoadedSignatureAfterFailure()
         }
 
         func resetLoadedSignatureAfterFailure(for error: Error) {
-            if isCancelledNavigationError(error), hasFinishedLoad {
-                return
-            }
-            resetLoadedSignatureAfterFailure()
-        }
-
-        private func isCancelledNavigationError(_ error: Error) -> Bool {
-            let nsError = error as NSError
-            if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
-                return true
-            }
-
-            if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? Error {
-                return isCancelledNavigationError(underlyingError)
-            }
-
-            return false
+            coordination.resetLoadedSignatureAfterFailure(for: error)
         }
 
         func applyBackgroundAppearance(to webView: WKWebView) {
@@ -250,10 +224,7 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
 
         private func messageIdentitySignature() -> String {
-            guard let message = parent.message else {
-                return "message:none"
-            }
-            return "message:\(message.id)"
+            EmailWebViewLoadCoordination.messageIdentitySignature(messageId: parent.message?.id)
         }
 
         private func modeSignature(for mode: EmailWebViewMode) -> String {

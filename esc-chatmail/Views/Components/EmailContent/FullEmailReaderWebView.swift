@@ -88,16 +88,19 @@ struct FullEmailReaderWebView: UIViewRepresentable {
     // MARK: - Coordinator
 
     class Coordinator: NSObject, WKNavigationDelegate {
-        enum LoadReadiness: Equatable {
-            case ready
-            case deferred(reason: String)
-        }
+        typealias LoadReadiness = EmailWebViewLoadCoordination.LoadReadiness
 
         var parent: FullEmailReaderWebView
-        var lastLoadedContent: String = ""
-        var lastLoadedReloadSignature: String = ""
+        /// Shared load-readiness/reload-signature core; the full reader loads
+        /// without a measured height and invalidates its pending paint
+        /// confirmation whenever the recorded signature changes.
+        private lazy var coordination = EmailWebViewLoadCoordination(
+            requiresViewportHeight: false,
+            onSignatureChange: { [weak self] in
+                self?.invalidatePendingPaintConfirmation()
+            }
+        )
         private var isLoading = false
-        private var hasFinishedLoad = false
         private var shouldReloadAfterCurrentLoad = false
         private let paintConfirmer: FullEmailReaderPaintConfirming
         private var paintConfirmationGeneration = 0
@@ -124,8 +127,16 @@ struct FullEmailReaderWebView: UIViewRepresentable {
             stopObservingAttachmentAvailabilityChanges()
         }
 
+        var lastLoadedContent: String {
+            coordination.lastLoadedContent
+        }
+
+        var lastLoadedReloadSignature: String {
+            coordination.lastLoadedReloadSignature
+        }
+
         var needsReload: Bool {
-            lastLoadedContent != parent.htmlContent || lastLoadedReloadSignature != reloadSignature()
+            coordination.needsReload(content: parent.htmlContent, reloadSignature: reloadSignature())
         }
 
         var hasAdoptedPrerenderedWebViewForTesting: Bool {
@@ -258,23 +269,13 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         }
 
         func loadReadiness(windowPresent: Bool, width: CGFloat, height: CGFloat) -> LoadReadiness {
-            guard needsReload else {
-                return .deferred(reason: "no-pending-reload")
-            }
-
-            guard !isLoading else {
-                return .deferred(reason: "already-loading")
-            }
-
-            guard windowPresent else {
-                return .deferred(reason: "missing-window")
-            }
-
-            guard width > 1 else {
-                return .deferred(reason: "missing-width")
-            }
-
-            return .ready
+            coordination.loadReadiness(
+                needsReload: needsReload,
+                isLoading: isLoading,
+                windowPresent: windowPresent,
+                width: width,
+                height: height
+            )
         }
 
         private func logDeferredLoad(
@@ -296,19 +297,19 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         }
 
         func recordLoadedSignature() {
-            invalidatePendingPaintConfirmation()
-            lastLoadedContent = parent.htmlContent
-            lastLoadedReloadSignature = reloadSignature()
-            hasFinishedLoad = false
+            coordination.recordLoadedSignature(
+                content: parent.htmlContent,
+                reloadSignature: reloadSignature()
+            )
         }
 
         /// Marks an adopted pre-rendered WebView's content as already loaded so `needsReload` is false
         /// and no live paint confirmation occurs at display time. The instance is already painted off-screen.
         func adoptAlreadyLoadedContent(_ html: String, messageId: String?) {
-            invalidatePendingPaintConfirmation()
-            lastLoadedContent = html
-            lastLoadedReloadSignature = reloadSignature()
-            hasFinishedLoad = true
+            coordination.adoptAlreadyLoadedContent(
+                content: html,
+                reloadSignature: reloadSignature()
+            )
             isLoading = false
             adoptedPrerenderedMessageId = messageId
         }
@@ -324,34 +325,15 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         }
 
         func recordFinishedLoad() {
-            hasFinishedLoad = true
+            coordination.recordFinishedLoad()
         }
 
         func resetLoadedSignatureAfterFailure() {
-            invalidatePendingPaintConfirmation()
-            lastLoadedContent = ""
-            lastLoadedReloadSignature = ""
-            hasFinishedLoad = false
+            coordination.resetLoadedSignatureAfterFailure()
         }
 
         func resetLoadedSignatureAfterFailure(for error: Error) {
-            if isCancelledNavigationError(error), hasFinishedLoad {
-                return
-            }
-            resetLoadedSignatureAfterFailure()
-        }
-
-        private func isCancelledNavigationError(_ error: Error) -> Bool {
-            let nsError = error as NSError
-            if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
-                return true
-            }
-
-            if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? Error {
-                return isCancelledNavigationError(underlyingError)
-            }
-
-            return false
+            coordination.resetLoadedSignatureAfterFailure(for: error)
         }
 
         private func reloadSignature() -> String {
@@ -359,10 +341,7 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         }
 
         private func messageIdentitySignature() -> String {
-            guard let message = parent.message else {
-                return "message:none"
-            }
-            return "message:\(message.id)"
+            EmailWebViewLoadCoordination.messageIdentitySignature(messageId: parent.message?.id)
         }
 
         private func sourceSignature() -> String {
