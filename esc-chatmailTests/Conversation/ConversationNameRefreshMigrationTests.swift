@@ -170,17 +170,37 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         let expectedSnippets = createdConversations.map { ($0.conversation.objectID, $0.expectedSnippet) }
         let viewModel = makeViewModel()
 
+        // The repair-done flag lives in process-global UserDefaults, and other
+        // view models in this test process (the host app's, other tests')
+        // run the same repair against their own stores and set the same flag
+        // when they drain. Two consequences for this test:
+        // - clear the flag right before invoking, with no suspension point in
+        //   between, so a stale foreign flag-set cannot no-op the entry guard;
+        // - wait on this store's data, not the flag — a foreign drain's
+        //   flag-write mid-batch would otherwise release the wait while our
+        //   repair is still running (observed on slower CI runners).
+        UserDefaults.standard.removeObject(
+            forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
+        )
         viewModel.repairMissingConversationPreviews()
 
-        await waitUntil(timeout: 5.0) {
-            UserDefaults.standard.bool(
-                forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
-            )
+        await waitUntil(timeout: 15.0, pollIntervalNanoseconds: 50_000_000) {
+            try expectedSnippets.allSatisfy { objectID, expectedSnippet in
+                try self.fetchConversation(objectID).snippet == expectedSnippet
+            }
         }
 
         for (objectID, expectedSnippet) in expectedSnippets {
             let repaired = try fetchConversation(objectID)
             XCTAssertEqual(repaired.snippet, expectedSnippet)
+        }
+
+        // Draining is what flips the flag; ours is the only repair started
+        // with this store, and foreign writers only ever set it to true.
+        await waitUntil(timeout: 5.0) {
+            UserDefaults.standard.bool(
+                forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
+            )
         }
     }
 
