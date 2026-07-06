@@ -140,17 +140,7 @@ enum MessageBubbleHTMLAnalysisBuilder {
     }
 
     private static func cleanedHTMLForAttachmentFiltering(from html: String) -> String {
-        let quotedAndSignature = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
-        if HTMLMeaningfulContentChecker.hasMeaningfulContent(quotedAndSignature) {
-            return quotedAndSignature
-        }
-
-        let quotedOnly = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedOnly) ?? html
-        if HTMLMeaningfulContentChecker.hasMeaningfulContent(quotedOnly) {
-            return quotedOnly
-        }
-
-        return html
+        HTMLCleanupFallback.cleanedHTML(from: html, modes: [.quotedAndSignatures, .quotedOnly]).html
     }
 
     private static func extractReferencedContentIDs(

@@ -76,24 +76,10 @@ extension HTMLContentLoader {
         case .none:
             return html
         case .quotedOnly:
-            let cleaned = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedOnly) ?? html
-            return fallbackToOriginalIfCleanedEmpty(cleaned: cleaned, original: html)
+            return HTMLCleanupFallback.cleanedHTML(from: html, modes: [.quotedOnly]).html
         case .quotedAndSignature:
-            let cleaned = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedAndSignatures) ?? html
-            if !HTMLMeaningfulContentChecker.hasMeaningfulContent(cleaned) {
-                // If signature removal was too aggressive, fall back to quote-only cleanup.
-                let quotedOnly = HTMLQuoteRemover.removeQuotes(from: html, mode: .quotedOnly) ?? html
-                return fallbackToOriginalIfCleanedEmpty(cleaned: quotedOnly, original: html)
-            }
-            return cleaned
+            return HTMLCleanupFallback.cleanedHTML(from: html, modes: [.quotedAndSignatures, .quotedOnly]).html
         }
-    }
-
-    private func fallbackToOriginalIfCleanedEmpty(cleaned: String, original: String) -> String {
-        if HTMLMeaningfulContentChecker.hasMeaningfulContent(cleaned) {
-            return cleaned
-        }
-        return original
     }
 
     func convertPlainTextToHTML(_ text: String) -> String {
