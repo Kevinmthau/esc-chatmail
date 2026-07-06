@@ -19,7 +19,10 @@ jobs:
   test:
     name: Build & Test (iOS Simulator)
     runs-on: macos-26
-    timeout-minutes: 90
+    # A clean run is ~15 minutes (build ~4m + tests ~8m); 40 leaves headroom
+    # for runner variance. Per-test allowances below keep a single hung test
+    # from consuming the whole window (macOS minutes bill at 10x).
+    timeout-minutes: 40
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
@@ -28,13 +31,27 @@ jobs:
       - name: Show toolchain and simulators
         run: |
           xcodebuild -version
+          sysctl -n hw.ncpu hw.memsize
           xcrun simctl list devices available | grep -m 5 iPhone || true
 
-      # DESTINATION is left unset on purpose: Scripts/run-tests.sh picks the
-      # first available iPhone simulator by ID, which tolerates runner-image
-      # differences in device names/runtimes.
+      # Boots the same simulator run-tests.sh would pick and pre-grants
+      # Contacts to the test host app, exporting DESTINATION so both steps
+      # use that device. Without the grant, the first test to reach
+      # ContactsResolver blocks forever on CNContactStore.requestAccess's
+      # permission dialog — the hang that timed out every earlier run.
+      - name: Prepare simulator (boot + grant permissions)
+        run: bash Scripts/prepare-simulator.sh >> "$GITHUB_ENV"
+
+      # Execution-time allowances turn any future hang into one failed test
+      # (named in the uploaded xcresult) instead of a cancelled job with no
+      # artifacts. The slowest known test is ~7s, so 120s is generous.
       - name: Run tests (default test plan)
-        run: bash Scripts/run-tests.sh -resultBundlePath TestResults.xcresult
+        run: |
+          bash Scripts/run-tests.sh \
+            -resultBundlePath TestResults.xcresult \
+            -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 120 \
+            -maximum-test-execution-time-allowance 300
 
       - name: Upload result bundle on failure
         if: failure()
