@@ -28,6 +28,7 @@ final class ConversationListViewModel: ObservableObject {
     /// Completion marker only — the preview repair re-runs every launch and no
     /// longer skips when this flag is already set.
     static let conversationPreviewRepairMigrationKey = "hasRepairedMissingConversationPreviewsV2"
+    private static let repairMissingConversationPreviewsTaskKey = "repairMissingConversationPreviews"
 
     // MARK: - Composed Services
 
@@ -56,7 +57,8 @@ final class ConversationListViewModel: ObservableObject {
     private let windowProvider: ConversationWindowProvider
     private var loadedConversationLimit: Int
     private var hasLoadedAllConversationWindow = false
-    private var hasScheduledConversationPreviewRepair = false
+    private var isConversationPreviewRepairRunning = false
+    private var hasCompletedConversationPreviewRepair = false
     private weak var observedConversationContext: NSManagedObjectContext?
 
     // MARK: - Initialization
@@ -309,14 +311,22 @@ final class ConversationListViewModel: ObservableObject {
         // re-create both broken states (missing previews and stranded
         // message-less shells) at any time, so a one-shot migration flag
         // leaves later breakage visible forever.
-        guard !hasScheduledConversationPreviewRepair else { return }
-        hasScheduledConversationPreviewRepair = true
+        guard !isConversationPreviewRepairRunning,
+              !hasCompletedConversationPreviewRepair else { return }
+        isConversationPreviewRepairRunning = true
 
         let hasRepairedKey = Self.conversationPreviewRepairMigrationKey
         let migrationFlags = storage.migrationFlags
 
-        taskManager.run("repairMissingConversationPreviews", priority: .background) { [weak self] in
+        taskManager.run(Self.repairMissingConversationPreviewsTaskKey, priority: .background) { [weak self] in
             guard let self = self else { return }
+            var didCompleteRepair = false
+            defer {
+                isConversationPreviewRepairRunning = false
+                if didCompleteRepair {
+                    hasCompletedConversationPreviewRepair = true
+                }
+            }
 
             // A running sync may have saved a conversation shell whose first
             // message has not persisted yet; sweeping shells mid-sync could
@@ -352,6 +362,7 @@ final class ConversationListViewModel: ObservableObject {
                         Log.info("Repaired missing conversation previews: \(totalRepairedCount)", category: .conversation)
                     }
                     migrationFlags.set(true, forKey: hasRepairedKey)
+                    didCompleteRepair = true
                     return
                 }
 
@@ -389,13 +400,19 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     /// Called when view disappears
-    func onDisappear() {
+    func onDisappear(preservePreviewRepair: Bool = true) {
         // Keep observing Core Data changes across transient SwiftUI disappearances
         // caused by sheets and navigation pushes so optimistic send updates are not missed.
         searchService.cleanup()
         selectionService.cancelTasks()
         filterService.cancelTasks()
-        taskManager.cancelAll()
+        if preservePreviewRepair {
+            // Let the launch repair finish across transient navigation; it owns its
+            // own per-launch guard and clears that guard if it exits incomplete.
+            taskManager.cancelAll(except: [Self.repairMissingConversationPreviewsTaskKey])
+        } else {
+            taskManager.cancelAll()
+        }
     }
 
     private func bindFiltering() {

@@ -86,11 +86,12 @@ final class ViewModelTaskManager {
     /// Cancels all managed tasks.
     ///
     /// Call this in view/ViewModel cleanup (e.g., onDisappear, deinit).
-    func cancelAll() {
-        for managedTask in tasks.values {
-            managedTask.task.cancel()
+    func cancelAll(except preservedKeys: Set<String> = []) {
+        let keysToCancel = tasks.keys.filter { !preservedKeys.contains($0) }
+        for key in keysToCancel {
+            tasks[key]?.task.cancel()
+            tasks[key] = nil
         }
-        tasks.removeAll()
     }
 
     private func clearTaskIfCurrent(key: String, id: UUID) {
