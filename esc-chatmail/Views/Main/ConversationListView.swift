@@ -130,7 +130,7 @@ struct ConversationListView: View {
         }
         .onDisappear {
             isSearchFieldFocused = false
-            viewModel.onDisappear()
+            viewModel.onDisappear(preservePreviewRepair: deps.authSession.isAuthenticated)
         }
     }
 

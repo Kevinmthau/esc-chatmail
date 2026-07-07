@@ -21,6 +21,63 @@ final class ViewModelTaskManagerTests: XCTestCase {
         }
     }
 
+    func testCancelAllExcept_preservesRequestedTask() async {
+        let manager = ViewModelTaskManager()
+        let recorder = TaskEventRecorder()
+        let preservedGate = AsyncGate()
+        let droppedGate = AsyncGate()
+
+        startTask(manager, key: "preserved", mode: .inherited) {
+            await withTaskCancellationHandler {
+                await recorder.record(.preservedWaiting)
+                await preservedGate.wait()
+            } onCancel: {
+                Task {
+                    await recorder.record(.preservedCancelled)
+                }
+            }
+        }
+
+        startTask(manager, key: "dropped", mode: .inherited) {
+            await withTaskCancellationHandler {
+                await recorder.record(.droppedWaiting)
+                await droppedGate.wait()
+            } onCancel: {
+                Task {
+                    await recorder.record(.droppedCancelled)
+                }
+            }
+        }
+
+        await waitUntil(
+            {
+                let preservedStarted = await recorder.contains(.preservedWaiting)
+                let droppedStarted = await recorder.contains(.droppedWaiting)
+                return preservedStarted && droppedStarted
+            },
+            "both tasks should start before cancellation"
+        )
+
+        manager.cancelAll(except: ["preserved"])
+
+        await waitUntil(
+            { await recorder.contains(.droppedCancelled) },
+            "non-preserved task should be cancelled"
+        )
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        let preservedWasCancelled = await recorder.contains(.preservedCancelled)
+        XCTAssertFalse(preservedWasCancelled)
+
+        manager.cancel("preserved")
+
+        await waitUntil(
+            { await recorder.contains(.preservedCancelled) },
+            "preserved task should remain managed and cancellable"
+        )
+        await preservedGate.open()
+        await droppedGate.open()
+    }
+
     private func assertOldCompletionDoesNotClearNewerTask(
         mode: RunMode,
         cancelCurrentTask: (ViewModelTaskManager, String) -> Void,
@@ -187,4 +244,8 @@ private enum TaskEvent: Equatable, Sendable {
     case secondWaiting
     case staleCleanupAttempted
     case secondCancelled
+    case preservedWaiting
+    case droppedWaiting
+    case preservedCancelled
+    case droppedCancelled
 }
