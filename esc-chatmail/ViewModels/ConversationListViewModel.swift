@@ -329,7 +329,13 @@ final class ConversationListViewModel: ObservableObject {
 
             let archivedCount = await conversationManager.archiveMessagelessConversations(in: context)
             if archivedCount > 0 {
-                guard storage.saveIfNeeded(context) else { return }
+                guard storage.saveIfNeeded(context) else {
+                    Log.error(
+                        "Failed to save \(archivedCount) archived message-less conversations; skipping preview repair",
+                        category: .conversation
+                    )
+                    return
+                }
                 Log.info("Archived \(archivedCount) stranded message-less conversations", category: .conversation)
             }
 

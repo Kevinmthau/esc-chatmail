@@ -137,12 +137,16 @@ struct ConversationRollupUpdater: Sendable {
         }
     }
 
-    /// How long an active conversation may advertise a lastMessageDate without any
-    /// persisted messages before the repair pass treats it as a stranded shell.
+    /// How long an active conversation may exist without any persisted messages
+    /// before the repair pass treats it as a stranded shell.
     /// Conversation rows are created and saved before their first message persists
     /// (ConversationCreationSerializer saves immediately to prevent duplicates), so a
     /// generous grace period shields shells whose message is still in flight — an
     /// optimistic send that has not committed yet, or a sync page that has not saved.
+    /// The grace is keyed to createdAt, not just lastMessageDate: sync-created shells
+    /// carry the message's historical internalDate as lastMessageDate, which can be
+    /// arbitrarily old the moment the shell is saved. Legacy rows without createdAt
+    /// fall back to the lastMessageDate cutoff alone.
     static let messagelessConversationGracePeriod: TimeInterval = 60 * 60
 
     /// Archives active conversations that advertise activity (lastMessageDate) but
@@ -159,12 +163,19 @@ struct ConversationRollupUpdater: Sendable {
     @MainActor
     func archiveMessagelessConversations(
         in context: NSManagedObjectContext,
-        lastActivityBefore cutoff: Date
+        olderThan cutoff: Date
     ) async -> Int {
         await context.perform {
             let request = Conversation.fetchRequest()
+            // createdAt shields shells created moments ago whose lastMessageDate is
+            // historical (sync sets it to the message's internalDate); rows predating
+            // the createdAt attribute rely on the lastMessageDate cutoff alone.
             request.predicate = NSPredicate(
-                format: "archivedAt == nil AND lastMessageDate != nil AND lastMessageDate < %@ AND messages.@count == 0",
+                format: """
+                archivedAt == nil AND lastMessageDate != nil AND lastMessageDate < %@ \
+                AND (createdAt == nil OR createdAt < %@) AND messages.@count == 0
+                """,
+                cutoff as NSDate,
                 cutoff as NSDate
             )
             request.fetchBatchSize = 50

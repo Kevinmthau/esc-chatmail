@@ -151,12 +151,12 @@ final class ConversationManager: Sendable {
     }
 
     /// Archives stranded conversation shells that have a date but no messages,
-    /// leaving alone anything active within the grace period.
+    /// leaving alone anything created or active within the grace period.
     @MainActor
     func archiveMessagelessConversations(in context: NSManagedObjectContext) async -> Int {
         await rollupUpdater.archiveMessagelessConversations(
             in: context,
-            lastActivityBefore: Date(timeIntervalSinceNow: -ConversationRollupUpdater.messagelessConversationGracePeriod)
+            olderThan: Date(timeIntervalSinceNow: -ConversationRollupUpdater.messagelessConversationGracePeriod)
         )
     }
 
