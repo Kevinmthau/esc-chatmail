@@ -137,6 +137,56 @@ struct ConversationRollupUpdater: Sendable {
         }
     }
 
+    /// How long an active conversation may advertise a lastMessageDate without any
+    /// persisted messages before the repair pass treats it as a stranded shell.
+    /// Conversation rows are created and saved before their first message persists
+    /// (ConversationCreationSerializer saves immediately to prevent duplicates), so a
+    /// generous grace period shields shells whose message is still in flight — an
+    /// optimistic send that has not committed yet, or a sync page that has not saved.
+    static let messagelessConversationGracePeriod: TimeInterval = 60 * 60
+
+    /// Archives active conversations that advertise activity (lastMessageDate) but
+    /// have no messages in the store — shells left behind when a conversation was
+    /// created and saved for a message that then failed to persist. These rows sit
+    /// in the list forever showing a timestamp with no preview: rollups never run
+    /// for them (only successful message writes track a conversation as modified),
+    /// the preview repair skips them (it requires a message with content), and the
+    /// user cannot archive them (archiveConversation early-returns on empty
+    /// conversations). Applying the empty rollup snapshot clears the stale metadata
+    /// and archives + hides the row, matching how rollups already treat a
+    /// conversation whose last message is deleted.
+    /// - Returns: The number of conversations archived.
+    @MainActor
+    func archiveMessagelessConversations(
+        in context: NSManagedObjectContext,
+        lastActivityBefore cutoff: Date
+    ) async -> Int {
+        await context.perform {
+            let request = Conversation.fetchRequest()
+            request.predicate = NSPredicate(
+                format: "archivedAt == nil AND lastMessageDate != nil AND lastMessageDate < %@ AND messages.@count == 0",
+                cutoff as NSDate
+            )
+            request.fetchBatchSize = 50
+
+            let conversations: [Conversation]
+            do {
+                conversations = try context.fetch(request)
+            } catch {
+                Log.error("Failed to fetch message-less conversations for repair", category: .conversation, error: error)
+                return 0
+            }
+
+            guard !conversations.isEmpty else { return 0 }
+
+            let emptySnapshot = ConversationRollupSnapshot.make(from: [])
+            for conversation in conversations {
+                emptySnapshot.apply(to: conversation)
+            }
+            return conversations.count
+        }
+    }
+
     /// Repairs active conversations that have a last-message date but no stored
     /// row preview by deriving the preview from their current visible messages.
     @MainActor
