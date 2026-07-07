@@ -188,4 +188,95 @@ final class PersonDisplayNameResolverTests: XCTestCase {
 
         XCTAssertNil(result)
     }
+
+    // MARK: - Group-title heuristic narrowing
+
+    func testSanitizedConversationDisplayNameHint_trustsOverflowSuffixedGroupTitles() {
+        // "Daisy +4" only comes from the real-names formatters; rejecting it
+        // because daisy@… shares the first name forces raw addresses onto the row.
+        let result = PersonDisplayNameResolver.sanitizedConversationDisplayNameHint(
+            "Daisy +4",
+            participantEmails: [
+                "ally@cv-partners.com",
+                "victoria@cv-partners.com",
+                "daisy@cv-partners.com",
+                "steven@cv-partners.com"
+            ]
+        )
+
+        XCTAssertEqual(result, "Daisy +4")
+    }
+
+    func testSanitizedConversationDisplayNameHint_keepsFullNamesThatShareFirstNamesWithLocalParts() {
+        let result = PersonDisplayNameResolver.sanitizedConversationDisplayNameHint(
+            "Ally Cheung, Daisy Wong",
+            participantEmails: ["ally@cv-partners.com", "daisy@cv-partners.com"]
+        )
+
+        XCTAssertEqual(result, "Ally Cheung, Daisy Wong")
+    }
+
+    func testSanitizedConversationDisplayNameHint_rejectsTitlesBuiltEntirelyFromLocalParts() {
+        let result = PersonDisplayNameResolver.sanitizedConversationDisplayNameHint(
+            "Ally & Daisy",
+            participantEmails: ["ally@cv-partners.com", "daisy@cv-partners.com"]
+        )
+
+        XCTAssertNil(result)
+    }
+
+    func testSanitizedConversationDisplayNameHint_keepsMixedRealAndDerivedSegments() {
+        // One real full name among derived segments is name evidence; only
+        // all-derived titles get rejected.
+        let result = PersonDisplayNameResolver.sanitizedConversationDisplayNameHint(
+            "Ally, Daisy Wong",
+            participantEmails: ["ally@cv-partners.com", "daisy@cv-partners.com"]
+        )
+
+        XCTAssertEqual(result, "Ally, Daisy Wong")
+    }
+
+    // MARK: - Display fallback preference
+
+    func testDisplayFallbackConversationName_prefersHeuristicRejectedHintOverRawAddresses() {
+        // "Ally & Daisy" fails the strict group heuristic (indistinguishable
+        // from local-part joins) but still reads better than joined addresses.
+        let result = PersonDisplayNameResolver.displayFallbackConversationName(
+            hint: "Ally & Daisy",
+            participantEmails: ["ally@cv-partners.com", "daisy@cv-partners.com"]
+        )
+
+        XCTAssertEqual(result, "Ally & Daisy")
+    }
+
+    func testDisplayFallbackConversationName_fallsBackToAddressesForAddressDerivedHint() {
+        let result = PersonDisplayNameResolver.displayFallbackConversationName(
+            hint: "ally",
+            participantEmails: ["ally@cv-partners.com", "daisy@cv-partners.com"]
+        )
+
+        XCTAssertEqual(result, "ally@cv-partners.com, daisy@cv-partners.com")
+    }
+
+    func testDisplayFallbackConversationName_fallsBackToAddressesForPlaceholderHint() {
+        let result = PersonDisplayNameResolver.displayFallbackConversationName(
+            hint: "2 Unknown Contacts",
+            participantEmails: ["bob@example.com", "alice@example.com"]
+        )
+
+        XCTAssertEqual(result, "alice@example.com, bob@example.com")
+    }
+
+    func testConversationDisplayName_keepsCleanStoredTitleWhenNoRealNamesResolve() {
+        // Writer path: a stored title whose only sin is the group-coincidence
+        // heuristic must not be downgraded to joined addresses.
+        let result = PersonDisplayNameResolver.conversationDisplayName(
+            realNames: [],
+            totalParticipantCount: 2,
+            fallback: "Ally & Daisy",
+            participantEmails: ["ally@cv-partners.com", "daisy@cv-partners.com"]
+        )
+
+        XCTAssertEqual(result, "Ally & Daisy")
+    }
 }

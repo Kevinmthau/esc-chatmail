@@ -587,9 +587,37 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(conversation.displayName, "Sarah Connor +1")
     }
 
-    func testUpdateDisplayNameOnly_groupWithNoRealNamesUsesEmailAddresses() throws {
+    func testUpdateDisplayNameOnly_groupWithNoRealNamesKeepsCleanStoredTitle() throws {
+        // Participant names here all resolve as address-derived (they mirror
+        // the local parts), leaving zero real names. The stored "John & Jane"
+        // is still a clean human-readable title — keeping it beats downgrading
+        // the row to joined addresses, which is what stranded real groups on
+        // "a@x.com, b@y.com" rows.
         let conversation = ConversationBuilder()
             .withDisplayName("John & Jane")
+            .build(in: context)
+        addConversationParticipant(
+            email: "john.smith@example.com",
+            displayName: "John Smith",
+            to: conversation
+        )
+        addConversationParticipant(
+            email: "jane.doe@example.com",
+            displayName: "Jane Doe",
+            to: conversation
+        )
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "John & Jane")
+    }
+
+    func testUpdateDisplayNameOnly_groupWithAddressStoredTitleRejoinsAddresses() throws {
+        // A stored title that is literally addresses still normalizes to the
+        // canonical joined-address fallback.
+        let conversation = ConversationBuilder()
+            .withDisplayName("john.smith@example.com, jane.doe@example.com")
             .build(in: context)
         addConversationParticipant(
             email: "john.smith@example.com",

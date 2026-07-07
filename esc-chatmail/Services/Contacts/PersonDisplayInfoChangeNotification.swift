@@ -24,6 +24,14 @@ enum PersonDisplayInfoChangeNotification {
         )
     }
 
+    /// Posts a display-info change with no email scope. Observers treat an
+    /// empty change-set as "refresh everything" — used when contacts
+    /// authorization changes and every resolved name/photo may be stale.
+    /// (`post(emails:)` refuses empty sets, so this is the only broadcast path.)
+    static func postAllChanged(notificationCenter: NotificationCenter = .default) {
+        notificationCenter.post(name: .personDisplayInfoDidChange, object: nil)
+    }
+
     static func invalidatePersonCacheAndPost(emails: some Sequence<String>) async {
         let normalizedEmails = normalizedEmailSet(from: emails)
         guard !normalizedEmails.isEmpty else { return }

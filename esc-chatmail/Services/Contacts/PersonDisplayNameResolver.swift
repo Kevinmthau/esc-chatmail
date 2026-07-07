@@ -94,8 +94,13 @@ enum PersonDisplayNameResolver {
     ) -> String {
         let names = uniqueNames(realNames)
         if names.isEmpty {
-            return sanitizedConversationDisplayNameHint(fallback, participantEmails: participantEmails)
-                ?? fallbackConversationName(participantEmails: participantEmails)
+            // Keeps an otherwise-clean existing title instead of downgrading
+            // it to joined addresses when the group heuristic is the only
+            // objection (writers pass the stored title as the fallback).
+            return displayFallbackConversationName(
+                hint: fallback,
+                participantEmails: participantEmails
+            )
         }
 
         let baseName = DisplayNameFormatter.formatGroupNames(names)
@@ -112,8 +117,10 @@ enum PersonDisplayNameResolver {
     ) -> String {
         let names = uniqueNames(realNames)
         if names.isEmpty {
-            return sanitizedConversationDisplayNameHint(fallback, participantEmails: participantEmails)
-                ?? fallbackConversationName(participantEmails: participantEmails)
+            return displayFallbackConversationName(
+                hint: fallback,
+                participantEmails: participantEmails
+            )
         }
 
         return DisplayNameFormatter.formatForRow(
@@ -121,6 +128,30 @@ enum PersonDisplayNameResolver {
             totalCount: totalParticipantCount,
             fallback: nil
         )
+    }
+
+    /// Row/header fallback title. Prefers a stored hint over raw joined
+    /// addresses even when the group heuristic can't prove the hint is
+    /// name-derived — a clean non-address string always reads better than
+    /// "a@x.com, b@y.com". Writer paths use the strict sanitizer via
+    /// `conversationDisplayName`, so a suspect title is display-preferred
+    /// here without being re-persisted as authoritative.
+    static func displayFallbackConversationName(
+        hint: String?,
+        participantEmails: [String]
+    ) -> String {
+        if let strictHint = sanitizedConversationDisplayNameHint(hint, participantEmails: participantEmails) {
+            return strictHint
+        }
+
+        if let candidate = normalizedCandidate(hint),
+           !participantEmails.contains(where: { email in
+               EmailNormalizer.isAddressDerivedDisplayName(candidate, forEmail: email)
+           }) {
+            return candidate
+        }
+
+        return fallbackConversationName(participantEmails: participantEmails)
     }
 
     static func sanitizedConversationDisplayNameHint(
@@ -247,36 +278,38 @@ enum PersonDisplayNameResolver {
         _ displayName: String,
         participantEmails: [String]
     ) -> Bool {
-        let derivedFirstNames = Set(participantEmails.compactMap { email -> String? in
-            let derivedName = EmailNormalizer.formatAsDisplayName(email: email)
-            return firstNameKey(derivedName)
-        })
-        guard !derivedFirstNames.isEmpty else { return false }
+        guard !participantEmails.isEmpty else { return false }
 
-        let displayFirstNames = displayName
+        // A "+N" overflow suffix only comes from the real-names formatters:
+        // address-joined fallbacks always contain "@" and never survive
+        // normalizedCandidate. Trust such titles as name-derived — otherwise
+        // every "Daisy +4" whose members use firstname@domain gets rejected.
+        let overflowStripped = displayName.replacingOccurrences(
+            of: #"\s*\+\d+\s*$"#,
+            with: "",
+            options: .regularExpression
+        )
+        if overflowStripped != displayName {
+            return false
+        }
+
+        let segments = displayName
             .replacingOccurrences(of: "&", with: ",")
             .replacingOccurrences(of: " and ", with: ",", options: .caseInsensitive)
             .components(separatedBy: ",")
-            .compactMap { segment -> String? in
-                let nameSegment = segment
-                    .replacingOccurrences(of: #"\+\d+$"#, with: "", options: .regularExpression)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                return firstNameKey(nameSegment)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard !segments.isEmpty else { return false }
+
+        // Only whole segments that equal an address-derived form (raw local
+        // part or formatted email) count. Full names that merely share a first
+        // name with a local part ("Daisy Wong" vs daisy@…) are real names.
+        return segments.allSatisfy { segment in
+            participantEmails.contains { email in
+                EmailNormalizer.isAddressDerivedDisplayName(segment, forEmail: email)
             }
-
-        return !displayFirstNames.isEmpty && displayFirstNames.allSatisfy(derivedFirstNames.contains)
-    }
-
-    private static func firstNameKey(_ value: String) -> String? {
-        let firstName = value
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .components(separatedBy: .whitespaces)
-            .first?
-            .trimmingCharacters(in: .punctuationCharacters)
-            .lowercased()
-
-        guard let firstName, !firstName.isEmpty else { return nil }
-        return firstName
+        }
     }
 
     private static func uniqueNames(_ names: [String]) -> [String] {

@@ -33,10 +33,8 @@ struct OptimizedConversationRow: View {
         let nonSelfParticipantEmails = snapshot.participantEmails.filter { email in
             EmailNormalizer.normalize(email) != EmailNormalizer.normalize(currentUserEmail)
         }
-        let fallbackDisplayName = PersonDisplayNameResolver.sanitizedConversationDisplayNameHint(
-            snapshot.displayNameHint,
-            participantEmails: nonSelfParticipantEmails
-        ) ?? PersonDisplayNameResolver.fallbackConversationName(
+        let fallbackDisplayName = PersonDisplayNameResolver.displayFallbackConversationName(
+            hint: snapshot.displayNameHint,
             participantEmails: nonSelfParticipantEmails
         )
         self.fallbackDisplayName = fallbackDisplayName

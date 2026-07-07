@@ -20,6 +20,40 @@ final class ParticipantLoaderTests: XCTestCase {
         super.tearDown()
     }
 
+    func testLoadParticipants_resolvesNamesWithContactsUnavailable() async throws {
+        // Fresh-install state: contacts lookups return nothing (permission not
+        // determined). Names must still resolve from stored person data instead
+        // of leaving the row on the raw-address fallback.
+        let conversation = ConversationBuilder()
+            .withDisplayName("Friend Name")
+            .withParticipantHash("hash-contactless-names")
+            .build(in: context)
+        let friend = PersonBuilder()
+            .withEmail("friend@example.com")
+            .withDisplayName("Friend Name")
+            .build(in: context)
+        addConversationParticipant(person: friend, to: conversation)
+        try context.save()
+
+        let loader = ParticipantLoader(
+            contactsResolver: MockContactsResolving(contactMap: [:]),
+            currentUserAliasesProvider: { _, _ in ["me@example.com"] },
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { _ in [] },
+            rollupDependencyTracker: ParticipantRollupDependencyTracker()
+        )
+
+        let info = await loader.loadParticipants(
+            from: conversation,
+            currentUserEmail: "me@example.com",
+            includePhotos: true
+        )
+
+        XCTAssertEqual(info.formattedDisplayName, "Friend Name")
+        XCTAssertTrue(info.photos.isEmpty)
+    }
+
     func testExtractNonMeParticipants_excludesHideMyEmailRelay() throws {
         let conversation = ConversationBuilder()
             .withDisplayName("San, Hide")

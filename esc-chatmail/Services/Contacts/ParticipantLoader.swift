@@ -356,6 +356,10 @@ final class ParticipantLoader {
             includePhotos: false
         )
 
+        // Photo resolution no longer suspends behind the Contacts permission
+        // (lookups fail fast at .notDetermined), so awaiting the photo upgrade
+        // here costs only thumbnail I/O and preserves the contract that
+        // includePhotos callers receive photo-complete info.
         let fullInfo: ParticipantInfo?
         if includePhotos {
             fullInfo = await resolver.upgradeParticipantInfoWithPhotos(baseInfo)

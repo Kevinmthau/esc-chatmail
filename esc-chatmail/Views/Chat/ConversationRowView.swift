@@ -228,10 +228,8 @@ struct ConversationRowView: View {
     }
 
     private var fallbackDisplayName: String {
-        PersonDisplayNameResolver.sanitizedConversationDisplayNameHint(
-            snapshot.displayNameHint,
-            participantEmails: nonSelfParticipantEmails
-        ) ?? PersonDisplayNameResolver.fallbackConversationName(
+        PersonDisplayNameResolver.displayFallbackConversationName(
+            hint: snapshot.displayNameHint,
             participantEmails: nonSelfParticipantEmails
         )
     }
