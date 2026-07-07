@@ -57,6 +57,13 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
             .withDate(Date(timeIntervalSince1970: 300))
             .inConversation(alice)
             .build(in: context)
+        // Bob needs a persisted message: the per-launch repair archives stale
+        // message-less conversation shells, and this test asserts bob stays active.
+        _ = MessageBuilder()
+            .withSnippet("Newest Bob message")
+            .withDate(bobDate)
+            .inConversation(bob)
+            .build(in: context)
 
         try context.save()
 
@@ -218,6 +225,66 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         XCTAssertTrue(
             migrationFlags.bool(forKey: Self.legacyConversationPreviewRepairMigrationKey)
         )
+    }
+
+    func testRepairMissingConversationPreviewsRunsAgainWhenCompletionFlagAlreadySet() async throws {
+        // The repair used to be a one-shot migration gated on this flag, which left
+        // previews broken forever once the flag was consumed. It now re-runs every launch.
+        migrationFlags.set(
+            true,
+            forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
+        )
+
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let conversation = ConversationBuilder()
+            .withLastMessageDate(date)
+            .visible()
+            .build(in: context)
+        MessageBuilder()
+            .withId("preview-repair-reruns-after-flag")
+            .withDate(date)
+            .withSnippet("Recovered preview")
+            .inConversation(conversation)
+            .build(in: context)
+
+        try context.save()
+
+        let viewModel = makeViewModel()
+        viewModel.repairMissingConversationPreviews()
+
+        await waitUntil {
+            try self.fetchConversation(conversation.objectID).snippet == "Recovered preview"
+        }
+
+        let repaired = try fetchConversation(conversation.objectID)
+        XCTAssertEqual(repaired.snippet, "Recovered preview")
+        XCTAssertNil(repaired.archivedAt)
+    }
+
+    func testRepairMissingConversationPreviewsArchivesStrandedMessagelessConversation() async throws {
+        // A conversation saved for a message that never persisted: it advertises a
+        // date but has no messages, so it renders as a timestamp with "No messages"
+        // and nothing else ever heals it.
+        let staleDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let shell = ConversationBuilder()
+            .withLastMessageDate(staleDate)
+            .visible()
+            .build(in: context)
+
+        try context.save()
+
+        let viewModel = makeViewModel()
+        viewModel.repairMissingConversationPreviews()
+
+        await waitUntil {
+            try self.fetchConversation(shell.objectID).archivedAt != nil
+        }
+
+        let archived = try fetchConversation(shell.objectID)
+        XCTAssertNotNil(archived.archivedAt)
+        XCTAssertTrue(archived.hidden)
+        XCTAssertNil(archived.lastMessageDate)
+        XCTAssertNil(archived.snippet)
     }
 
     func testUpdateAllConversationDisplayNames_onlyTouchesDisplayNameFields() async throws {

@@ -362,6 +362,118 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(repairableConversation.snippet, "Older repair preview")
     }
 
+    func testArchiveMessagelessConversationsArchivesStaleConversationShell() async throws {
+        // No createdAt: a legacy row from before the attribute existed, shielded
+        // only by the lastMessageDate cutoff.
+        let staleDate = Date(timeIntervalSince1970: 200)
+        let shell = ConversationBuilder()
+            .withLastMessageDate(staleDate)
+            .visible()
+            .build(in: context)
+
+        try context.save()
+
+        let archivedCount = await updater.archiveMessagelessConversations(
+            in: context,
+            olderThan: Date(timeIntervalSince1970: 1_000)
+        )
+
+        XCTAssertEqual(archivedCount, 1)
+        XCTAssertNotNil(shell.archivedAt)
+        XCTAssertTrue(shell.hidden)
+        XCTAssertNil(shell.lastMessageDate)
+        XCTAssertNil(shell.snippet)
+        XCTAssertFalse(shell.hasInbox)
+    }
+
+    func testArchiveMessagelessConversationsArchivesShellCreatedBeforeCutoff() async throws {
+        let staleDate = Date(timeIntervalSince1970: 200)
+        let shell = ConversationBuilder()
+            .withLastMessageDate(staleDate)
+            .withCreatedAt(Date(timeIntervalSince1970: 500))
+            .visible()
+            .build(in: context)
+
+        try context.save()
+
+        let archivedCount = await updater.archiveMessagelessConversations(
+            in: context,
+            olderThan: Date(timeIntervalSince1970: 1_000)
+        )
+
+        XCTAssertEqual(archivedCount, 1)
+        XCTAssertNotNil(shell.archivedAt)
+        XCTAssertTrue(shell.hidden)
+    }
+
+    func testArchiveMessagelessConversationsSkipsShellsWithinGracePeriod() async throws {
+        let recentDate = Date(timeIntervalSince1970: 2_000)
+        let shell = ConversationBuilder()
+            .withLastMessageDate(recentDate)
+            .visible()
+            .build(in: context)
+
+        try context.save()
+
+        let archivedCount = await updater.archiveMessagelessConversations(
+            in: context,
+            olderThan: Date(timeIntervalSince1970: 1_000)
+        )
+
+        XCTAssertEqual(archivedCount, 0)
+        XCTAssertNil(shell.archivedAt)
+        XCTAssertEqual(shell.lastMessageDate, recentDate)
+    }
+
+    func testArchiveMessagelessConversationsSkipsRecentlyCreatedShellWithHistoricalDate() async throws {
+        // A sync-created shell carries the message's historical internalDate as
+        // lastMessageDate, so a shell saved moments ago can look arbitrarily stale.
+        // Its fresh createdAt must shield it while the message is still in flight.
+        let historicalDate = Date(timeIntervalSince1970: 200)
+        let shell = ConversationBuilder()
+            .withLastMessageDate(historicalDate)
+            .withCreatedAt(Date(timeIntervalSince1970: 2_000))
+            .visible()
+            .build(in: context)
+
+        try context.save()
+
+        let archivedCount = await updater.archiveMessagelessConversations(
+            in: context,
+            olderThan: Date(timeIntervalSince1970: 1_000)
+        )
+
+        XCTAssertEqual(archivedCount, 0)
+        XCTAssertNil(shell.archivedAt)
+        XCTAssertFalse(shell.hidden)
+        XCTAssertEqual(shell.lastMessageDate, historicalDate)
+    }
+
+    func testArchiveMessagelessConversationsSkipsConversationsWithMessages() async throws {
+        let messageDate = Date(timeIntervalSince1970: 200)
+        let conversation = ConversationBuilder()
+            .withLastMessageDate(messageDate)
+            .visible()
+            .build(in: context)
+        MessageBuilder()
+            .withId("messageless-sweep-has-message")
+            .withDate(messageDate)
+            .withSnippet("Existing preview")
+            .inConversation(conversation)
+            .build(in: context)
+
+        try context.save()
+
+        let archivedCount = await updater.archiveMessagelessConversations(
+            in: context,
+            olderThan: Date(timeIntervalSince1970: 1_000)
+        )
+
+        XCTAssertEqual(archivedCount, 0)
+        XCTAssertNil(conversation.archivedAt)
+        XCTAssertEqual(conversation.lastMessageDate, messageDate)
+    }
+
     func testUpdateDisplayNameOnly_noRealNameUsesEmailAddress() throws {
         let conversation = ConversationBuilder()
             .withDisplayName("John Smith")

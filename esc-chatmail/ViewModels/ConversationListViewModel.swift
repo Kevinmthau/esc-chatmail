@@ -25,6 +25,8 @@ enum ConversationFilter: String, CaseIterable {
 @MainActor
 final class ConversationListViewModel: ObservableObject {
     static let conversationNameRefreshMigrationKey = "hasRefreshedConversationNamesV5"
+    /// Completion marker only — the preview repair re-runs every launch and no
+    /// longer skips when this flag is already set.
     static let conversationPreviewRepairMigrationKey = "hasRepairedMissingConversationPreviewsV2"
 
     // MARK: - Composed Services
@@ -54,6 +56,7 @@ final class ConversationListViewModel: ObservableObject {
     private let windowProvider: ConversationWindowProvider
     private var loadedConversationLimit: Int
     private var hasLoadedAllConversationWindow = false
+    private var hasScheduledConversationPreviewRepair = false
     private weak var observedConversationContext: NSManagedObjectContext?
 
     // MARK: - Initialization
@@ -302,14 +305,39 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     func repairMissingConversationPreviews() {
+        // Runs once per launch, not once per install: interrupted syncs can
+        // re-create both broken states (missing previews and stranded
+        // message-less shells) at any time, so a one-shot migration flag
+        // leaves later breakage visible forever.
+        guard !hasScheduledConversationPreviewRepair else { return }
+        hasScheduledConversationPreviewRepair = true
+
         let hasRepairedKey = Self.conversationPreviewRepairMigrationKey
         let migrationFlags = storage.migrationFlags
-        guard !migrationFlags.bool(forKey: hasRepairedKey) else { return }
 
         taskManager.run("repairMissingConversationPreviews", priority: .background) { [weak self] in
             guard let self = self else { return }
+
+            // A running sync may have saved a conversation shell whose first
+            // message has not persisted yet; sweeping shells mid-sync could
+            // archive a row that is about to receive its message.
+            await syncEngine.waitForCurrentSyncToComplete()
+            guard !Task.isCancelled else { return }
+
             let context = storage.makeBackgroundContext()
             context.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
+
+            let archivedCount = await conversationManager.archiveMessagelessConversations(in: context)
+            if archivedCount > 0 {
+                guard storage.saveIfNeeded(context) else {
+                    Log.error(
+                        "Failed to save \(archivedCount) archived message-less conversations; skipping preview repair",
+                        category: .conversation
+                    )
+                    return
+                }
+                Log.info("Archived \(archivedCount) stranded message-less conversations", category: .conversation)
+            }
 
             var totalRepairedCount = 0
             while !Task.isCancelled {

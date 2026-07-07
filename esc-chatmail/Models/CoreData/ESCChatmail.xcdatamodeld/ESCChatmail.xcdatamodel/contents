@@ -24,6 +24,7 @@
     </entity>
     <entity name="Conversation" representedClassName="Conversation" syncable="YES">
         <attribute name="archivedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="createdAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="displayName" optional="YES" attributeType="String"/>
         <attribute name="hasInbox" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="hidden" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>

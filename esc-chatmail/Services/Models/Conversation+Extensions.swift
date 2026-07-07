@@ -20,6 +20,9 @@ extension Conversation {
     @NSManaged public var latestInboxDate: Date?
     @NSManaged public var hidden: Bool
     @NSManaged public var archivedAt: Date?
+    /// When this conversation row was inserted locally. Optional because rows
+    /// created before this attribute existed have no value.
+    @NSManaged public var createdAt: Date?
     @NSManaged public var messages: Set<Message>?
     @NSManaged public var participants: Set<ConversationParticipant>?
 

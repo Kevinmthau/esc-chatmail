@@ -171,6 +171,10 @@ struct ConversationFactory {
             throw CoreDataError.entityCreationFailed("Conversation")
         }
         conversation.id = UUID()
+        // Stamp local creation time: lastMessageDate can be historical (a synced
+        // message's internalDate), so repair passes need createdAt to tell a
+        // freshly created shell from a long-stranded one
+        conversation.createdAt = Date()
         conversation.keyHash = identity.keyHash
         conversation.participantHash = identity.participantHash
         conversation.conversationType = identity.type

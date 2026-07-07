@@ -21,6 +21,7 @@ final class ConversationBuilder {
     private var lastMessageDate: Date?
     private var latestInboxDate: Date?
     private var archivedAt: Date?
+    private var createdAt: Date?
     private var hasInbox: Bool = true
     private var hidden: Bool = false
     private var muted: Bool = false
@@ -57,6 +58,11 @@ final class ConversationBuilder {
 
     func withLastMessageDate(_ date: Date) -> Self {
         self.lastMessageDate = date
+        return self
+    }
+
+    func withCreatedAt(_ date: Date) -> Self {
+        self.createdAt = date
         return self
     }
 
@@ -139,6 +145,7 @@ final class ConversationBuilder {
         conversation.lastMessageDate = lastMessageDate
         conversation.latestInboxDate = latestInboxDate
         conversation.archivedAt = archivedAt
+        conversation.createdAt = createdAt
         conversation.hasInbox = hasInbox
         conversation.hidden = hidden
         conversation.muted = muted

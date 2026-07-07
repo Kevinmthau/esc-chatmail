@@ -150,6 +150,16 @@ final class ConversationManager: Sendable {
         await rollupUpdater.repairMissingConversationPreviews(in: context)
     }
 
+    /// Archives stranded conversation shells that have a date but no messages,
+    /// leaving alone anything created or active within the grace period.
+    @MainActor
+    func archiveMessagelessConversations(in context: NSManagedObjectContext) async -> Int {
+        await rollupUpdater.archiveMessagelessConversations(
+            in: context,
+            olderThan: Date(timeIntervalSinceNow: -ConversationRollupUpdater.messagelessConversationGracePeriod)
+        )
+    }
+
     // MARK: - Duplicate Management (delegated to ConversationMerger)
 
     /// Removes duplicate conversations by keyHash.
