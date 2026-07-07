@@ -247,6 +247,11 @@ final class SyncEngine: ObservableObject {
         let finalStatus = result.hadWarnings ? "Sync completed with warnings" : "Sync complete"
         uiState.update(isSyncing: false, progress: 1.0, status: finalStatus)
 
+        // Incremental sync already posts this; initial sync must too so
+        // launch repairs that drained an empty store get re-armed once the
+        // first real data lands.
+        NotificationCenter.default.post(name: .syncCompleted, object: nil)
+
         log.info("Initial sync completed: \(result.messagesProcessed) messages, \(result.conversationCount) conversations in \(String(format: "%.1f", result.duration))s")
     }
 

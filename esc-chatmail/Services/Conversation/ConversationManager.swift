@@ -12,6 +12,7 @@ final class ConversationManager: Sendable {
     private let findOrCreateConversationHandler: @Sendable (
         ConversationIdentity,
         Date?,
+        String?,
         Bool,
         NSManagedObjectContext
     ) async throws -> NSManagedObjectID
@@ -23,12 +24,14 @@ final class ConversationManager: Sendable {
         findOrCreateConversationHandler: @escaping @Sendable (
             ConversationIdentity,
             Date?,
+            String?,
             Bool,
             NSManagedObjectContext
-        ) async throws -> NSManagedObjectID = { identity, initialLastMessageDate, reactivateArchivedIfNeeded, context in
+        ) async throws -> NSManagedObjectID = { identity, initialLastMessageDate, initialSnippet, reactivateArchivedIfNeeded, context in
             try await ConversationCreationSerializer.shared.findOrCreateConversationObjectID(
                 for: identity,
                 initialLastMessageDate: initialLastMessageDate,
+                initialSnippet: initialSnippet,
                 reactivateArchivedIfNeeded: reactivateArchivedIfNeeded,
                 in: context
             )
@@ -55,16 +58,19 @@ final class ConversationManager: Sendable {
     /// - Parameters:
     ///   - identity: The conversation identity containing participants and type
     ///   - initialLastMessageDate: Optional date to set as lastMessageDate when creating a new conversation (prevents UI flash where conversation appears at bottom before moving to top)
+    ///   - initialSnippet: Optional row preview to seed when creating a new conversation (prevents a "No messages" flash until the message and its rollup persist)
     ///   - context: The Core Data context to use
     func findOrCreateConversationObjectID(
         for identity: ConversationIdentity,
         initialLastMessageDate: Date? = nil,
+        initialSnippet: String? = nil,
         reactivateArchivedIfNeeded: Bool = true,
         in context: NSManagedObjectContext
     ) async throws -> NSManagedObjectID {
         try await findOrCreateConversationHandler(
             identity,
             initialLastMessageDate,
+            initialSnippet,
             reactivateArchivedIfNeeded,
             context
         )

@@ -446,7 +446,18 @@ final class IncrementalSyncOrchestrator {
                     modificationTransaction: modificationTransaction,
                     in: context
                 )
-            } pageCompletion: { [coreDataStack] in
+            } pageCompletion: { [conversationManager, coreDataStack] in
+                // Roll up each page's modified conversations before its save so messages
+                // and their derived state persist together (mirrors initial sync); an
+                // interrupted recovery keeps every saved page fully presentable.
+                let pageConversationIDs = await ModificationTracker.shared
+                    .claimPendingRollupConversations(in: modificationTransaction)
+                if !pageConversationIDs.isEmpty {
+                    await conversationManager.updateRollupsForModifiedConversations(
+                        conversationIDs: pageConversationIDs,
+                        in: context
+                    )
+                }
                 try await coreDataStack.saveAsync(context: context)
             }
 

@@ -128,16 +128,84 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         XCTAssertEqual(refreshed.displayName, "alice@example.com")
     }
 
-    func testRefreshConversationNames_marksMigrationCompleteWhenStoreIsEmpty() {
+    func testRefreshConversationNames_leavesMigrationArmedWhenStoreIsEmpty() async throws {
+        // A fresh install runs this before the initial sync lands anything;
+        // burning the flag on an empty store would skip the refresh forever.
         let viewModel = makeViewModel()
 
         viewModel.refreshConversationNames()
 
-        XCTAssertTrue(
+        XCTAssertFalse(
             migrationFlags.bool(
                 forKey: ConversationListViewModel.conversationNameRefreshMigrationKey
             )
         )
+
+        // Once conversations exist, the same launch can still run the refresh.
+        let conversation = ConversationBuilder()
+            .withDisplayName("Unknown Contact")
+            .visible()
+            .build(in: context)
+        addConversationParticipant(email: "alice@example.com", to: conversation)
+        try context.save()
+
+        viewModel.refreshConversationNames()
+
+        await waitUntil {
+            self.migrationFlags.bool(
+                forKey: ConversationListViewModel.conversationNameRefreshMigrationKey
+            )
+        }
+        let refreshed = try fetchConversation(conversation.objectID)
+        XCTAssertEqual(refreshed.displayName, "alice@example.com")
+    }
+
+    func testRepairMissingConversationPreviews_emptyStoreDrainDoesNotMarkComplete() async throws {
+        // On a fresh install the repair can drain before the first sync run
+        // registers; that empty drain must not count as completion.
+        let viewModel = makeViewModel()
+
+        viewModel.repairMissingConversationPreviews()
+
+        // Give the background drain time to finish; the flag must stay unset.
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertFalse(
+            migrationFlags.bool(
+                forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
+            )
+        )
+    }
+
+    func testRepairMissingConversationPreviews_rearmsOnSyncCompletedNotification() async throws {
+        // First pass drains an empty store and stays armed.
+        let viewModel = makeViewModel()
+        viewModel.repairMissingConversationPreviews()
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        // Sync lands a broken conversation (date set, snippet missing).
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let conversation = ConversationBuilder()
+            .withLastMessageDate(date)
+            .visible()
+            .build(in: context)
+        MessageBuilder()
+            .withId("preview-repair-rearm")
+            .withDate(date)
+            .withSnippet("Recovered after sync")
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        NotificationCenter.default.post(name: .syncCompleted, object: nil)
+
+        await waitUntil {
+            try self.fetchConversation(conversation.objectID).snippet == "Recovered after sync"
+        }
+        await waitUntil {
+            self.migrationFlags.bool(
+                forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
+            )
+        }
     }
 
     func testRepairMissingConversationPreviewsContinuesBatchesUntilDrained() async throws {

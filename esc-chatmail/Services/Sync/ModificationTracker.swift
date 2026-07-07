@@ -10,15 +10,19 @@ actor ModificationTracker {
 
     private struct ConversationModifications: Equatable {
         var rollupIDs: Set<NSManagedObjectID>
+        /// Rollup IDs already handed to a mid-run consumer (per-page rollups).
+        /// Kept separate so re-tracking a claimed conversation re-pends it.
+        var claimedRollupIDs: Set<NSManagedObjectID>
         var displayNameOnlyIDs: Set<NSManagedObjectID>
 
         static let empty = ConversationModifications(
             rollupIDs: [],
+            claimedRollupIDs: [],
             displayNameOnlyIDs: []
         )
 
         var trackedCount: Int {
-            rollupIDs.count + displayNameOnlyIDs.count
+            rollupIDs.union(claimedRollupIDs).count + displayNameOnlyIDs.count
         }
     }
 
@@ -57,6 +61,35 @@ actor ModificationTracker {
         }
 
         return state.modifications.rollupIDs
+    }
+
+    /// Moves the run's pending rollup IDs to the claimed set and returns them, so a
+    /// mid-run consumer (per-page rollups) can process each modification exactly once.
+    /// Tracking the same conversation again after a claim re-pends it for the next
+    /// claim, which keeps a conversation modified on a later page eligible for
+    /// another rollup. Valid only on active transactions.
+    func claimPendingRollupConversations(in transaction: Transaction) -> Set<NSManagedObjectID> {
+        guard let state = transactions[transaction.id] else {
+            Log.warning("Attempted to claim rollups for unknown transaction \(transaction.id)", category: .sync)
+            return []
+        }
+
+        switch state {
+        case .active(var modifications):
+            let claimed = modifications.rollupIDs
+            guard !claimed.isEmpty else { return [] }
+            modifications.claimedRollupIDs.formUnion(claimed)
+            modifications.rollupIDs = []
+            transactions[transaction.id] = .active(modifications)
+            Log.debug(
+                "Claimed \(claimed.count) pending rollup conversations in transaction \(transaction.id)",
+                category: .sync
+            )
+            return claimed
+        case .committed:
+            Log.warning("Attempted to claim rollups on committed transaction \(transaction.id)", category: .sync)
+            return []
+        }
     }
 
     /// Returns conversations that only need display-name refreshes.

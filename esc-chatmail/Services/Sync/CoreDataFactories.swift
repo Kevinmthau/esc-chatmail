@@ -157,11 +157,13 @@ struct ConversationFactory {
     /// - Parameters:
     ///   - identity: The conversation identity containing participants and type
     ///   - initialLastMessageDate: Optional date to set as lastMessageDate immediately (prevents UI flash where conversation appears at bottom)
+    ///   - initialSnippet: Optional row preview to set immediately (prevents a "No messages" flash until the first message and its rollup persist)
     ///   - context: The Core Data context to create the conversation in
     /// - Throws: CoreDataError.entityCreationFailed if entity creation fails
     static func create(
         for identity: ConversationIdentity,
         initialLastMessageDate: Date? = nil,
+        initialSnippet: String? = nil,
         in context: NSManagedObjectContext
     ) throws -> Conversation {
         guard let conversation = NSEntityDescription.insertNewObject(
@@ -182,6 +184,10 @@ struct ConversationFactory {
         conversation.archivedAt = nil
         // Set initial lastMessageDate if provided (ensures conversation sorts correctly before message is fully saved)
         conversation.lastMessageDate = initialLastMessageDate
+        // Seed the row preview alongside the date: this row is saved and visible
+        // before its first message persists, and a date with no snippet renders
+        // as a "No messages" row
+        conversation.snippet = MessagePreviewText.nonEmpty(initialSnippet)
 
         // Create participants with display names from email headers
         for email in identity.participants {

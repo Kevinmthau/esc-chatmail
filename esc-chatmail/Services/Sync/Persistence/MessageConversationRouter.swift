@@ -59,6 +59,7 @@ final class MessageConversationRouter {
         return try await conversationManager.findOrCreateConversationObjectID(
             for: identity,
             initialLastMessageDate: processedMessage.internalDate,
+            initialSnippet: processedMessage.conversationPreviewText,
             reactivateArchivedIfNeeded: shouldReactivateConversation,
             in: context
         )

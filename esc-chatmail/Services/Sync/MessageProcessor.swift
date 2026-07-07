@@ -1024,6 +1024,22 @@ struct ProcessedMessage: Sendable {
     var inlineCIDPrefetchAttachmentIDs: Set<String> = []
 }
 
+extension ProcessedMessage {
+    /// One-line conversation-list preview derived from the processed fields.
+    /// Mirrors Message.conversationPreviewText via the shared selector so the
+    /// conversation-shell seed matches what the persisted message will show.
+    var conversationPreviewText: String? {
+        MessagePreviewText.conversationPreview(
+            isForwarded: MessagePreviewText.isForwardedSubject(headers.subject),
+            isNewsletter: isNewsletter,
+            subject: headers.subject,
+            cleanedSnippet: cleanedSnippet,
+            chatPreviewText: chatPreviewText,
+            snippet: snippet
+        )
+    }
+}
+
 struct ProcessedHeaders: Sendable {
     var subject: String?
     var from: String?

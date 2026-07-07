@@ -126,6 +126,72 @@ final class ModificationTrackerTests: XCTestCase {
         XCTAssertEqual(secondRunIDs, Set([ids[2], ids[3]]))
     }
 
+    func testClaimMovesPendingRollupIDsAndEmptiesPendingSet() async throws {
+        let ids = try makeConversationIDs(count: 2)
+        let tracker = ModificationTracker.shared
+        let run = await tracker.beginTransaction()
+
+        await tracker.trackModifiedConversations([ids[0], ids[1]], in: run)
+
+        let claimed = await tracker.claimPendingRollupConversations(in: run)
+        let pendingAfterClaim = await tracker.modifiedConversations(in: run)
+        let secondClaim = await tracker.claimPendingRollupConversations(in: run)
+
+        XCTAssertEqual(claimed, Set([ids[0], ids[1]]))
+        XCTAssertEqual(pendingAfterClaim, [])
+        XCTAssertEqual(secondClaim, [])
+    }
+
+    func testRetrackingAfterClaimRependsConversationForNextClaim() async throws {
+        let ids = try makeConversationIDs(count: 2)
+        let tracker = ModificationTracker.shared
+        let run = await tracker.beginTransaction()
+
+        await tracker.trackModifiedConversation(ids[0], in: run)
+        let firstPageClaim = await tracker.claimPendingRollupConversations(in: run)
+
+        // The same conversation is modified again on a later page alongside a new one.
+        await tracker.trackModifiedConversations([ids[0], ids[1]], in: run)
+        let secondPageClaim = await tracker.claimPendingRollupConversations(in: run)
+
+        XCTAssertEqual(firstPageClaim, Set([ids[0]]))
+        XCTAssertEqual(secondPageClaim, Set([ids[0], ids[1]]))
+    }
+
+    func testClaimOnCommittedTransactionReturnsEmptyAndLeavesState() async throws {
+        let ids = try makeConversationIDs(count: 1)
+        let tracker = ModificationTracker.shared
+        let run = await tracker.beginTransaction()
+
+        await tracker.trackModifiedConversation(ids[0], in: run)
+        let committedIDs = await tracker.commitTransaction(run)
+
+        let claimAfterCommit = await tracker.claimPendingRollupConversations(in: run)
+        let transactionCountAfterClaim = await tracker.transactionCount
+
+        XCTAssertEqual(committedIDs, Set([ids[0]]))
+        XCTAssertEqual(claimAfterCommit, [])
+        XCTAssertEqual(transactionCountAfterClaim, 1)
+
+        await tracker.consumeCommittedTransaction(run)
+    }
+
+    func testCommitReturnsOnlyUnclaimedPendingIDs() async throws {
+        let ids = try makeConversationIDs(count: 2)
+        let tracker = ModificationTracker.shared
+        let run = await tracker.beginTransaction()
+
+        await tracker.trackModifiedConversation(ids[0], in: run)
+        _ = await tracker.claimPendingRollupConversations(in: run)
+        await tracker.trackModifiedConversation(ids[1], in: run)
+
+        let committedIDs = await tracker.commitTransaction(run)
+
+        XCTAssertEqual(committedIDs, Set([ids[1]]))
+
+        await tracker.consumeCommittedTransaction(run)
+    }
+
     private func makeConversationIDs(count: Int) throws -> [NSManagedObjectID] {
         let stack = TestCoreDataStack()
         let conversations = (0..<count).map { _ in
