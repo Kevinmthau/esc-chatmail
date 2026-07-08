@@ -127,6 +127,9 @@ struct ConversationListView: View {
             AppPrewarmer.prewarmAll()  // Safe to call repeatedly; each prewarm runs only once per launch.
             let conversations = (try? viewContext.fetch(Self.activeConversationsRequest())) ?? []
             viewModel.onAppear(conversations: conversations, in: viewContext)
+            // Lookups never prompt on their own, so this is the one deliberate
+            // Contacts permission request (no-op after first launch/answer).
+            ContactsAuthorizationCoordinator.shared.requestAccessOnFirstAuthenticatedLaunchIfNeeded()
         }
         .onDisappear {
             isSearchFieldFocused = false

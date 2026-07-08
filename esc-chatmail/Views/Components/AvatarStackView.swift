@@ -40,7 +40,11 @@ struct AvatarStackView: View {
             showsGroupAvatar: showsGroupAvatar
         ) == .group {
             // Group conversation - show multiple small avatars in a circle
-            GroupAvatarView(avatarPhotos: avatarPhotos, participants: participants)
+            GroupAvatarView(
+                avatarPhotos: avatarPhotos,
+                participants: participants,
+                fallbackDisplayText: fallbackDisplayText
+            )
         } else {
             // Single conversation - show single large avatar
             SingleAvatarView(
@@ -208,6 +212,17 @@ extension SingleAvatarView {
 struct GroupAvatarView: View {
     let avatarPhotos: [ProfilePhoto?]
     let participants: [String]
+    let fallbackDisplayText: String?
+
+    init(
+        avatarPhotos: [ProfilePhoto?],
+        participants: [String],
+        fallbackDisplayText: String? = nil
+    ) {
+        self.avatarPhotos = avatarPhotos
+        self.participants = participants
+        self.fallbackDisplayText = fallbackDisplayText
+    }
 
     private let mainSize: CGFloat = 44
     private let smallSize: CGFloat = 20
@@ -224,6 +239,15 @@ struct GroupAvatarView: View {
             Circle()
                 .fill(Color(UIColor.systemGray6))
                 .frame(width: mainSize, height: mainSize)
+
+            // No resolved participants (load pending or failed): monogram the
+            // fallback title like SingleAvatarView does, never a blank circle.
+            if participants.isEmpty,
+               case .initials(let initialsSource) = Self.resolvedEmptyContent(
+                    fallbackDisplayText: fallbackDisplayText
+               ) {
+                InitialsAvatarView(name: initialsSource, style: .standard)
+            }
 
             // Show up to 4 small avatars
             let maxAvatars = min(4, participants.count)
@@ -305,6 +329,29 @@ struct GroupAvatarView: View {
         default:
             return 0
         }
+    }
+}
+
+extension GroupAvatarView {
+    enum EmptyGroupContent: Equatable {
+        case initials(String)
+        case placeholderCircle
+    }
+
+    /// Monogram source for a group circle with no resolved participants —
+    /// parity with SingleAvatarView's fallback so a pending or failed
+    /// participant load degrades to initials instead of a blank gray circle.
+    static func resolvedEmptyContent(fallbackDisplayText: String?) -> EmptyGroupContent {
+        // "+N" overflow suffixes are counts, not names; drop them before monogramming.
+        let strippedOverflow = fallbackDisplayText?.replacingOccurrences(
+            of: #"\s*\+\d+\s*$"#,
+            with: "",
+            options: .regularExpression
+        )
+        guard let initialsSource = SingleAvatarView.usableIdentityText(from: strippedOverflow) else {
+            return .placeholderCircle
+        }
+        return .initials(initialsSource)
     }
 }
 

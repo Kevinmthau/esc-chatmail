@@ -5,7 +5,9 @@ import Foundation
 /// Protocol for contact resolution services.
 /// Enables dependency injection and testing.
 protocol ContactsResolving: Sendable {
-    /// Ensures the app has authorization to access contacts.
+    /// Verifies the app has authorization to access contacts. Must never
+    /// present the system permission dialog: `.notDetermined` throws so
+    /// callers degrade gracefully until an explicit request runs.
     func ensureAuthorization() async throws
 
     /// Looks up contact information for an email address.

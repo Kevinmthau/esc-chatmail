@@ -16,26 +16,47 @@ actor ContactsResolver: ContactsResolving {
 
     // MARK: - Dependencies (internal for extensions)
 
-    let contactStore = CNContactStore()
+    let contactStore: CNContactStore
     let coreDataStack: CoreDataStack
 
     // MARK: - State
 
     private let cache = NSCache<NSString, ContactMatch>()
     private var authorizationStatus: CNAuthorizationStatus
+    private let authorizationStatusProvider: () -> CNAuthorizationStatus
+    private let accessRequester: () async throws -> Bool
+    /// Deduplicates concurrent permission requests: CNContactStore misbehaves
+    /// when requestAccess is invoked multiple times in flight (the CI/on-device
+    /// hang class), so every caller awaits the one stored request.
+    private var accessRequestTask: Task<CNAuthorizationStatus, Never>?
 
     // MARK: - Initialization
 
-    private init() {
+    /// The status-provider and access-requester parameters are testing seams;
+    /// production code uses `shared`.
+    init(
+        authorizationStatusProvider: @escaping () -> CNAuthorizationStatus = {
+            CNContactStore.authorizationStatus(for: .contacts)
+        },
+        accessRequester: (() async throws -> Bool)? = nil
+    ) {
+        let store = CNContactStore()
+        self.contactStore = store
         self.coreDataStack = CoreDataStack.shared
         self.cache.countLimit = 500
-        self.authorizationStatus = CNContactStore.authorizationStatus(for: .contacts)
+        self.authorizationStatusProvider = authorizationStatusProvider
+        self.accessRequester = accessRequester ?? { try await store.requestAccess(for: .contacts) }
+        self.authorizationStatus = authorizationStatusProvider()
     }
 
     // MARK: - ContactsResolving Protocol
 
+    /// Verifies contacts access without ever presenting the permission dialog.
+    /// `.notDetermined` throws immediately so lookups degrade to header/stored
+    /// names instead of suspending behind the prompt; the deliberate prompt
+    /// lives in `requestAccessIfNeeded()`.
     public func ensureAuthorization() async throws {
-        let status = CNContactStore.authorizationStatus(for: .contacts)
+        let status = authorizationStatusProvider()
         authorizationStatus = status
 
         if status == .authorized {
@@ -48,23 +69,7 @@ actor ContactsResolver: ContactsResolving {
         }
 
         if status == .notDetermined {
-            _ = try await contactStore.requestAccess(for: .contacts)
-
-            let updatedStatus = CNContactStore.authorizationStatus(for: .contacts)
-            authorizationStatus = updatedStatus
-
-            if updatedStatus == .authorized {
-                return
-            }
-            if #available(iOS 18.0, *), updatedStatus == .limited {
-                // Limited access is treated as authorized for our purposes.
-                return
-            }
-            if updatedStatus == .restricted {
-                throw ContactsError.accessRestricted
-            }
-
-            throw ContactsError.accessDenied
+            throw ContactsError.accessNotDetermined
         }
 
         if status == .denied {
@@ -79,6 +84,48 @@ actor ContactsResolver: ContactsResolving {
         throw ContactsError.accessDenied
     }
 
+    /// The single deliberate permission entry point. Presents the system dialog
+    /// when status is `.notDetermined`, deduplicating concurrent callers onto
+    /// one CNContactStore request. On grant, drops cached negative matches so
+    /// resolution picks up address-book data immediately.
+    @discardableResult
+    public func requestAccessIfNeeded() async -> CNAuthorizationStatus {
+        if let accessRequestTask {
+            return await accessRequestTask.value
+        }
+
+        let status = authorizationStatusProvider()
+        authorizationStatus = status
+        guard status == .notDetermined else {
+            return status
+        }
+
+        let requestTask = Task<CNAuthorizationStatus, Never> { [accessRequester, authorizationStatusProvider] in
+            _ = try? await accessRequester()
+            return authorizationStatusProvider()
+        }
+        accessRequestTask = requestTask
+        let updatedStatus = await requestTask.value
+        accessRequestTask = nil
+        authorizationStatus = updatedStatus
+
+        if isUsableAuthorizationStatus(updatedStatus) {
+            invalidateAllCache()
+        }
+
+        return updatedStatus
+    }
+
+    private func isUsableAuthorizationStatus(_ status: CNAuthorizationStatus) -> Bool {
+        if status == .authorized {
+            return true
+        }
+        if #available(iOS 18.0, *), status == .limited {
+            return true
+        }
+        return false
+    }
+
     public func lookup(email: String) async -> ContactMatch? {
         let normalizedEmail = EmailNormalizer.normalize(email)
 
@@ -91,7 +138,7 @@ actor ContactsResolver: ContactsResolving {
         do {
             try await ensureAuthorization()
         } catch {
-            Log.warning("Contacts authorization failed: \(error)", category: .general)
+            logAuthorizationFailure(error, operation: "lookup")
             return nil
         }
 
@@ -114,7 +161,7 @@ actor ContactsResolver: ContactsResolving {
         do {
             try await ensureAuthorization()
         } catch {
-            Log.warning("Contacts authorization failed for prewarm: \(error)", category: .general)
+            logAuthorizationFailure(error, operation: "prewarm")
             return
         }
 
@@ -150,6 +197,16 @@ actor ContactsResolver: ContactsResolving {
         cache.removeAllObjects()
         ParticipantRollupDependencyTracker.shared.invalidateAll()
     }
+
+    private func logAuthorizationFailure(_ error: Error, operation: String) {
+        // Not-determined is the normal pre-prompt state on fresh installs and
+        // hits every lookup until the deliberate request runs; don't warn-spam.
+        if case ContactsError.accessNotDetermined = error {
+            Log.debug("Contacts \(operation) skipped: authorization not determined", category: .general)
+        } else {
+            Log.warning("Contacts authorization failed for \(operation): \(error)", category: .general)
+        }
+    }
 }
 
 // MARK: - Convenience Methods
@@ -181,7 +238,7 @@ extension ContactsResolver {
         do {
             try await ensureAuthorization()
         } catch {
-            Log.warning("Contacts authorization failed for batch lookup: \(error)", category: .general)
+            logAuthorizationFailure(error, operation: "batch lookup")
             return [:]
         }
 

@@ -161,10 +161,8 @@ struct ChatView: View {
                 )
             } ?? []
 
-        return PersonDisplayNameResolver.sanitizedConversationDisplayNameHint(
-            conversation.displayName,
-            participantEmails: participantEmails
-        ) ?? PersonDisplayNameResolver.fallbackConversationName(
+        return PersonDisplayNameResolver.displayFallbackConversationName(
+            hint: conversation.displayName,
             participantEmails: participantEmails
         )
     }

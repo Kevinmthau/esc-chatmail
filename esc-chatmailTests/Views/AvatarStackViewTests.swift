@@ -21,6 +21,42 @@ final class AvatarStackViewTests: XCTestCase {
         XCTAssertEqual(result, .single)
     }
 
+    func testResolvedEmptyContent_withUsableFallback_usesInitials() {
+        // A group circle with no resolved participants must monogram the
+        // fallback title instead of rendering a blank gray circle.
+        let result = GroupAvatarView.resolvedEmptyContent(
+            fallbackDisplayText: "Ally, Victoria, Daisy"
+        )
+
+        XCTAssertEqual(result, .initials("Ally, Victoria, Daisy"))
+    }
+
+    func testResolvedEmptyContent_stripsOverflowSuffixBeforeMonogramming() {
+        let result = GroupAvatarView.resolvedEmptyContent(
+            fallbackDisplayText: "Daisy +4"
+        )
+
+        XCTAssertEqual(result, .initials("Daisy"))
+    }
+
+    func testResolvedEmptyContent_withEmailFallback_usesInitials() {
+        let result = GroupAvatarView.resolvedEmptyContent(
+            fallbackDisplayText: "ally@cv-partners.com"
+        )
+
+        XCTAssertEqual(result, .initials("ally@cv-partners.com"))
+    }
+
+    func testResolvedEmptyContent_withPlaceholderFallback_keepsPlainCircle() {
+        let placeholderResult = GroupAvatarView.resolvedEmptyContent(
+            fallbackDisplayText: "3 Unknown Contacts"
+        )
+        let nilResult = GroupAvatarView.resolvedEmptyContent(fallbackDisplayText: nil)
+
+        XCTAssertEqual(placeholderResult, .placeholderCircle)
+        XCTAssertEqual(nilResult, .placeholderCircle)
+    }
+
     func testResolvedContent_withPhoto_prefersPhoto() {
         let photo = ProfilePhoto(
             source: .contacts,
