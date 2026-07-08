@@ -144,6 +144,8 @@ final class InitialSyncOrchestrator {
 
             // Phase 5: Keep historyId and rollup updates in the same save so later syncs
             // never advance past message changes without the derived conversation state.
+            // Per-page rollups claim as they go, so the pending set here holds only what
+            // the failed-message retries in Phase 4 touched after the last page save.
             let modifiedConversations = await ModificationTracker.shared.modifiedConversations(in: modificationTransaction)
             let trackedDisplayNameOnlyConversations = await ModificationTracker.shared
                 .displayNameOnlyConversations(in: modificationTransaction)
@@ -283,7 +285,18 @@ final class InitialSyncOrchestrator {
                 modificationTransaction: modificationTransaction,
                 in: context
             )
-        } pageCompletion: { [coreDataStack] in
+        } pageCompletion: { [conversationManager, coreDataStack] in
+            // Roll up each page's modified conversations before its save so messages
+            // and their derived state (snippet, displayName, counts) persist together;
+            // an interrupted run then keeps every saved page fully presentable.
+            let pageConversationIDs = await ModificationTracker.shared
+                .claimPendingRollupConversations(in: modificationTransaction)
+            if !pageConversationIDs.isEmpty {
+                await conversationManager.updateRollupsForModifiedConversations(
+                    conversationIDs: pageConversationIDs,
+                    in: context
+                )
+            }
             try await coreDataStack.saveAsync(context: context)
         }
     }

@@ -17,10 +17,12 @@ actor ConversationCreationSerializer {
     /// - Parameters:
     ///   - identity: The conversation identity containing participants and type
     ///   - initialLastMessageDate: Optional date to set as lastMessageDate when creating a new conversation (prevents UI flash)
+    ///   - initialSnippet: Optional row preview seeded at creation, since this save publishes the row before its first message persists
     ///   - context: The Core Data context to use
     func findOrCreateConversationObjectID(
         for identity: ConversationIdentity,
         initialLastMessageDate: Date? = nil,
+        initialSnippet: String? = nil,
         reactivateArchivedIfNeeded: Bool = true,
         in context: NSManagedObjectContext
     ) async throws -> NSManagedObjectID {
@@ -66,7 +68,12 @@ actor ConversationCreationSerializer {
             // Create new conversation
             let conversation: Conversation
             do {
-                conversation = try ConversationFactory.create(for: identity, initialLastMessageDate: initialLastMessageDate, in: context)
+                conversation = try ConversationFactory.create(
+                    for: identity,
+                    initialLastMessageDate: initialLastMessageDate,
+                    initialSnippet: initialSnippet,
+                    in: context
+                )
             } catch {
                 Log.error("Failed to create conversation: \(error)", category: .coreData)
                 return .failure(error)

@@ -41,6 +41,57 @@ enum MessagePreviewText {
     static func preservingExisting(incoming: String?, existing: String?) -> String? {
         nonEmpty(incoming) ?? nonEmpty(existing)
     }
+
+    /// Subject-prefix forward detection shared with ProcessedMessage.
+    /// Only the subject prefix is checked - body content can contain forward
+    /// indicators from quoted messages in reply threads (false positives).
+    static func isForwardedSubject(_ subject: String?) -> Bool {
+        guard let subject, !subject.isEmpty else { return false }
+
+        let subjectLower = subject.lowercased().trimmingCharacters(in: .whitespaces)
+        return subjectLower.hasPrefix("fwd:") || subjectLower.hasPrefix("fw:")
+    }
+
+    static func normalizedForwardSubject(from subject: String) -> String {
+        var normalized = subject
+        while true {
+            guard let regex = try? NSRegularExpression(pattern: #"^(?i)\s*(?:fwd|fw)\s*:\s*"#),
+                  let match = regex.firstMatch(in: normalized, range: NSRange(normalized.startIndex..., in: normalized)),
+                  let range = Range(match.range, in: normalized) else {
+                break
+            }
+            normalized.removeSubrange(range)
+        }
+        let trimmed = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? subject : trimmed
+    }
+
+    /// Chooses the one-line conversation-list preview from a message's fields.
+    /// Shared by Message.conversationPreviewText and ProcessedMessage so the
+    /// conversation-shell seed and the persisted message path cannot drift.
+    static func conversationPreview(
+        isForwarded: Bool,
+        isNewsletter: Bool,
+        subject: String?,
+        cleanedSnippet: String?,
+        chatPreviewText: String?,
+        snippet: String?
+    ) -> String? {
+        if isForwarded, let forwardedSubject = nonEmpty(subject) {
+            return "Fwd: \"\(normalizedForwardSubject(from: forwardedSubject))\""
+        }
+
+        if isNewsletter, let subject = nonEmpty(subject) {
+            return subject
+        }
+
+        return firstNonEmpty(
+            cleanedSnippet,
+            compactListText(chatPreviewText),
+            snippet,
+            subject
+        )
+    }
 }
 
 extension Message {
@@ -237,15 +288,7 @@ extension Message {
 
     /// Checks if the message is a forwarded email by looking for forward indicators in the subject
     var isForwardedEmail: Bool {
-        guard let subject = subject, !subject.isEmpty else {
-            return false
-        }
-
-        let subjectLower = subject.lowercased().trimmingCharacters(in: .whitespaces)
-
-        // Only check subject prefix - body content can contain forward indicators
-        // from quoted messages in reply threads, leading to false positives
-        return subjectLower.hasPrefix("fwd:") || subjectLower.hasPrefix("fw:")
+        MessagePreviewText.isForwardedSubject(subject)
     }
 
     /// Chooses how aggressively to clean HTML before rendering in previews/full views.
@@ -260,19 +303,13 @@ extension Message {
     /// Preferred one-line preview for conversation list rows.
     /// Forwarded messages use subject-based preview for better readability.
     var conversationPreviewText: String? {
-        if let forwardedDisplaySubject {
-            return "Fwd: \"\(forwardedDisplaySubject)\""
-        }
-
-        if isNewsletter, let subject = MessagePreviewText.nonEmpty(subject) {
-            return subject
-        }
-
-        return MessagePreviewText.firstNonEmpty(
-            cleanedSnippet,
-            MessagePreviewText.compactListText(chatPreviewText),
-            snippet,
-            subject
+        MessagePreviewText.conversationPreview(
+            isForwarded: isForwardedEmail,
+            isNewsletter: isNewsletter,
+            subject: subject,
+            cleanedSnippet: cleanedSnippet,
+            chatPreviewText: chatPreviewText,
+            snippet: snippet
         )
     }
 
@@ -297,16 +334,6 @@ extension Message {
     }
 
     private func normalizedForwardSubject(from subject: String) -> String {
-        var normalized = subject
-        while true {
-            guard let regex = try? NSRegularExpression(pattern: #"^(?i)\s*(?:fwd|fw)\s*:\s*"#),
-                  let match = regex.firstMatch(in: normalized, range: NSRange(normalized.startIndex..., in: normalized)),
-                  let range = Range(match.range, in: normalized) else {
-                break
-            }
-            normalized.removeSubrange(range)
-        }
-        let trimmed = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? subject : trimmed
+        MessagePreviewText.normalizedForwardSubject(from: subject)
     }
 }

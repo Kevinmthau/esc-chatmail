@@ -90,6 +90,54 @@ final class MessageExtensionsTests: XCTestCase {
         XCTAssertEqual(message.conversationPreviewText, "Subject fallback")
     }
 
+    func testConversationPreviewText_processedMessageParity() {
+        // The conversation-shell seed derives its preview from ProcessedMessage
+        // before the Message exists; the two selectors must agree or the seeded
+        // row preview will differ from what the persisted message shows.
+        struct Fixture {
+            var subject: String?
+            var snippet: String?
+            var cleanedSnippet: String?
+            var chatPreviewText: String?
+            var isNewsletter = false
+        }
+
+        let fixtures: [Fixture] = [
+            Fixture(subject: "FW: Fwd: Weekly update", snippet: "Quoted body"),
+            Fixture(subject: "Big sale this weekend", snippet: "Snippet", isNewsletter: true),
+            Fixture(subject: "Hello", snippet: "Raw snippet", cleanedSnippet: "Clean snippet"),
+            Fixture(subject: "Hello", snippet: nil, chatPreviewText: "Chat line one.\n\nLine two."),
+            Fixture(subject: "Subject only", snippet: "  \n ", cleanedSnippet: nil),
+            Fixture(subject: nil, snippet: nil)
+        ]
+
+        for (index, fixture) in fixtures.enumerated() {
+            // Assign fields directly: MessageBuilder seeds default subject and
+            // snippet values, which would break nil-field parity fixtures.
+            let message = MessageBuilder()
+                .withId("parity-\(index)")
+                .build(in: context)
+            message.subject = fixture.subject
+            message.snippet = fixture.snippet
+            message.cleanedSnippet = fixture.cleanedSnippet
+            message.chatPreviewText = fixture.chatPreviewText
+            message.isNewsletter = fixture.isNewsletter
+
+            var processed = ProcessedMessage()
+            processed.headers.subject = fixture.subject
+            processed.snippet = fixture.snippet
+            processed.cleanedSnippet = fixture.cleanedSnippet
+            processed.chatPreviewText = fixture.chatPreviewText
+            processed.isNewsletter = fixture.isNewsletter
+
+            XCTAssertEqual(
+                processed.conversationPreviewText,
+                message.conversationPreviewText,
+                "Fixture \(index) diverged between ProcessedMessage and Message"
+            )
+        }
+    }
+
     func testHTMLDisplayCleanupMode_forwardedMessage_defaultsToNone() {
         let message = MessageBuilder()
             .withSubject("Fwd: Proposal")
