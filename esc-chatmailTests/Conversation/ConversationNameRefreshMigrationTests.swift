@@ -208,6 +208,56 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         }
     }
 
+    func testRepairMissingConversationPreviews_completedRepairIgnoresLaterSyncCompletions() async throws {
+        // Incremental syncs post .syncCompleted on every run; once the launch
+        // repair has completed against real data, those must not re-trigger
+        // the sweep. Self-healing is once per launch — per-page rollups keep
+        // synced data presentable in between.
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let repaired = ConversationBuilder()
+            .withLastMessageDate(date)
+            .visible()
+            .build(in: context)
+        MessageBuilder()
+            .withId("preview-repair-completed-launch")
+            .withDate(date)
+            .withSnippet("Repaired at launch")
+            .inConversation(repaired)
+            .build(in: context)
+        try context.save()
+
+        let viewModel = makeViewModel()
+        viewModel.repairMissingConversationPreviews()
+
+        await waitUntil {
+            try self.fetchConversation(repaired.objectID).snippet == "Repaired at launch"
+        }
+        await waitUntil {
+            self.migrationFlags.bool(
+                forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
+            )
+        }
+
+        // Breakage that lands after the completed pass waits for next launch.
+        let brokenLater = ConversationBuilder()
+            .withLastMessageDate(date)
+            .visible()
+            .build(in: context)
+        MessageBuilder()
+            .withId("preview-repair-post-completion")
+            .withDate(date)
+            .withSnippet("Landed after completion")
+            .inConversation(brokenLater)
+            .build(in: context)
+        try context.save()
+
+        NotificationCenter.default.post(name: .syncCompleted, object: nil)
+
+        // Give a would-be sweep time to run; the row must stay untouched.
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertNil(try fetchConversation(brokenLater.objectID).snippet)
+    }
+
     func testRepairMissingConversationPreviewsContinuesBatchesUntilDrained() async throws {
         var createdConversations: [(conversation: Conversation, expectedSnippet: String)] = []
 

@@ -98,16 +98,19 @@ final class ConversationListViewModel: ObservableObject {
         bindSyncCompletionRepairRearm()
     }
 
-    /// Re-arms the launch preview repair whenever a sync run finishes: the
-    /// launch pass can legitimately drain an empty store before the first
-    /// sync registers (fresh install), so completed syncs get a fresh sweep.
+    /// Re-arms the launch preview repair when a sync run finishes before the
+    /// repair has completed: the launch pass can legitimately drain an empty
+    /// store before the first sync registers (fresh install), so the first
+    /// completed sync gets a fresh sweep. Once the repair completes it stays
+    /// done for the launch — incremental syncs post this notification on every
+    /// run, and re-sweeping each time would repeat the archive/repair fetches
+    /// forever; per-page rollups already keep synced pages presentable.
     private func bindSyncCompletionRepairRearm() {
         NotificationCenter.default.publisher(for: .syncCompleted)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self else { return }
                 self.hasObservedSyncCompletionThisLaunch = true
-                self.hasCompletedConversationPreviewRepair = false
                 self.repairMissingConversationPreviews()
             }
             .store(in: &cancellables)
