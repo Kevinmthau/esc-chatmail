@@ -828,6 +828,32 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
         XCTAssertEqual(startedKeys, ["queued-first"])
     }
 
+    // WebKit's content processes spawn lazily on the first full render in the
+    // test host, and on a loaded CI runner that cold start alone can exceed
+    // the renderer's 5s budget (PR #115's run lost
+    // testRendererKeepsShortPreviewAtDefaultHeight to it at 5.165s). Warm once
+    // per process so the assertion renders measure warm-path behavior only.
+    @MainActor
+    private static var hasWarmedRenderer = false
+
+    @MainActor
+    private static func warmUpRendererIfNeeded() async {
+        guard !hasWarmedRenderer else { return }
+        hasWarmedRenderer = true
+
+        let request = EmailPreviewSnapshotRequest(
+            html: "<html><body>warm-up</body></html>",
+            cacheKey: "renderer-warm-up",
+            containerWidth: 280,
+            isDarkMode: false,
+            senderEmail: nil,
+            message: nil
+        )
+        // Even if a cold spawn consumes this render's own 5s timeout, the
+        // spawn it forces leaves WebKit warm for the real renders below.
+        _ = try? await EmailPreviewSnapshotRenderer.shared.render(request: request)
+    }
+
     @MainActor
     func testRendererCancellationStopsSnapshotRender() async {
         let request = EmailPreviewSnapshotRequest(
@@ -858,6 +884,8 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
 
     @MainActor
     func testRendererKeepsShortPreviewAtDefaultHeight() async throws {
+        await Self.warmUpRendererIfNeeded()
+
         let request = EmailPreviewSnapshotRequest(
             html: """
             <html>
@@ -885,6 +913,8 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
 
     @MainActor
     func testRendererPaintsLowerRegionForTallPreview() async throws {
+        await Self.warmUpRendererIfNeeded()
+
         let request = EmailPreviewSnapshotRequest(
             html: """
             <div style="height: 420px; background: #ffffff;"></div>
