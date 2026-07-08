@@ -285,7 +285,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
 
         // Wait on this store's data first: it proves all repair batches landed
         // before observing the test-local completion flag.
-        await waitUntil(timeout: 15.0, pollIntervalNanoseconds: 50_000_000) {
+        await waitUntil {
             try expectedSnippets.allSatisfy { objectID, expectedSnippet in
                 try self.fetchConversation(objectID).snippet == expectedSnippet
             }
@@ -298,7 +298,7 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
 
         // Draining is what flips the flag; ours is the only repair started
         // with this store, and foreign writers only ever set it to true.
-        await waitUntil(timeout: 5.0) {
+        await waitUntil {
             self.migrationFlags.bool(
                 forKey: ConversationListViewModel.conversationPreviewRepairMigrationKey
             )
@@ -576,9 +576,15 @@ final class ConversationNameRefreshMigrationTests: XCTestCase {
         return conversation
     }
 
+    // The preview repair runs at .background priority and first awaits the
+    // shared SyncEngine going idle, so on a loaded CI runner the first poll
+    // success can take several seconds; the deadline is generous because a
+    // green run exits at the first successful poll anyway. The 50ms interval
+    // keeps this MainActor fetch-and-refresh poll from contending with the
+    // repair task's own MainActor hops.
     private func waitUntil(
-        timeout: TimeInterval = 2.0,
-        pollIntervalNanoseconds: UInt64 = 20_000_000,
+        timeout: TimeInterval = 15.0,
+        pollIntervalNanoseconds: UInt64 = 50_000_000,
         condition: @escaping @MainActor () throws -> Bool,
         file: StaticString = #filePath,
         line: UInt = #line
