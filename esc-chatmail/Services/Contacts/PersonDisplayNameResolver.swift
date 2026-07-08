@@ -130,12 +130,14 @@ enum PersonDisplayNameResolver {
         )
     }
 
-    /// Row/header fallback title. Prefers a stored hint over raw joined
-    /// addresses even when the group heuristic can't prove the hint is
-    /// name-derived — a clean non-address string always reads better than
-    /// "a@x.com, b@y.com". Writer paths use the strict sanitizer via
-    /// `conversationDisplayName`, so a suspect title is display-preferred
-    /// here without being re-persisted as authoritative.
+    /// Fallback title when no real names resolve — used by row/header display
+    /// and, via `conversationDisplayName`, by the rollup writers. Prefers a
+    /// stored hint over raw joined addresses even when the group heuristic
+    /// can't prove the hint is name-derived — a clean non-address string
+    /// always reads better than "a@x.com, b@y.com". Writers pass the
+    /// already-stored title as the hint, so at worst they keep a title that
+    /// was already persisted; a literal address join fails
+    /// `normalizedCandidate`, so addresses are never upgraded into a title.
     static func displayFallbackConversationName(
         hint: String?,
         participantEmails: [String]
