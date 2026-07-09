@@ -15,6 +15,9 @@ struct FullEmailReaderWebView: UIViewRepresentable {
     var webViewAdoptionProvider: (any FullEmailWebViewAdopting)? = nil
     /// Invoked after the live WebView confirms a render pass, so the reader can drop its placeholder.
     var onLoadFinished: (() -> Void)?
+    /// Invoked when a live navigation fails after starting, so a previously removed placeholder can
+    /// be restored instead of leaving a blank WebView exposed.
+    var onLoadFailed: (() -> Void)? = nil
     var onAdoptedPrerendered: (() -> Void)?
 
     func makeUIView(context: Context) -> WKWebView {
@@ -97,13 +100,16 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         private lazy var coordination = EmailWebViewLoadCoordination(
             requiresViewportHeight: false,
             onSignatureChange: { [weak self] in
-                self?.invalidatePendingPaintConfirmation()
+                self?.resetPaintConfirmationState()
             }
         )
         private var isLoading = false
         private var shouldReloadAfterCurrentLoad = false
         private let paintConfirmer: FullEmailReaderPaintConfirming
         private var paintConfirmationGeneration = 0
+        private var isPaintConfirmationInFlight = false
+        private var hasConfirmedPaintForCurrentLoad = false
+        private var paintConfirmationAttemptCount = 0
         private var attachmentAvailabilityObserver: NSObjectProtocol?
         private weak var observedContext: NSManagedObjectContext?
         private var observedMessageObjectID: NSManagedObjectID?
@@ -310,6 +316,7 @@ struct FullEmailReaderWebView: UIViewRepresentable {
                 content: html,
                 reloadSignature: reloadSignature()
             )
+            hasConfirmedPaintForCurrentLoad = true
             isLoading = false
             adoptedPrerenderedMessageId = messageId
         }
@@ -332,7 +339,8 @@ struct FullEmailReaderWebView: UIViewRepresentable {
             coordination.resetLoadedSignatureAfterFailure()
         }
 
-        func resetLoadedSignatureAfterFailure(for error: Error) {
+        @discardableResult
+        func resetLoadedSignatureAfterFailure(for error: Error) -> Bool {
             coordination.resetLoadedSignatureAfterFailure(for: error)
         }
 
@@ -401,24 +409,33 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             isLoading = false
             recordFinishedLoad()
-            let generation = paintConfirmationGeneration
-            confirmPaint(in: webView, generation: generation) { [weak self, weak webView] in
-                guard let self, let webView else { return }
-                self.parent.onLoadFinished?()
-                self.reloadAfterCurrentLoadIfNeeded(in: webView)
+            confirmPaintIfNeeded(in: webView)
+            if hasConfirmedPaintForCurrentLoad {
+                reloadAfterCurrentLoadIfNeeded(in: webView)
             }
+        }
+
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            // A committed navigation has not necessarily painted the new document. Keep the
+            // placeholder until didFinish starts a snapshot-backed paint confirmation.
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             isLoading = false
-            resetLoadedSignatureAfterFailure(for: error)
+            let didResetLoad = resetLoadedSignatureAfterFailure(for: error)
+            if didResetLoad {
+                parent.onLoadFailed?()
+            }
             Log.debug("WebView navigation failed: \(error)", category: .ui)
             reloadAfterCurrentLoadIfNeeded(in: webView)
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             isLoading = false
-            resetLoadedSignatureAfterFailure(for: error)
+            let didResetLoad = resetLoadedSignatureAfterFailure(for: error)
+            if didResetLoad {
+                parent.onLoadFailed?()
+            }
             Log.debug("WebView provisional navigation failed: \(error)", category: .ui)
             reloadAfterCurrentLoadIfNeeded(in: webView)
         }
@@ -432,41 +449,83 @@ struct FullEmailReaderWebView: UIViewRepresentable {
             loadContentIfReady(in: webView)
         }
 
-        private func invalidatePendingPaintConfirmation() {
-            paintConfirmationGeneration += 1
+        private func resetPaintConfirmationState() {
+            paintConfirmationGeneration &+= 1
+            isPaintConfirmationInFlight = false
+            hasConfirmedPaintForCurrentLoad = false
+            paintConfirmationAttemptCount = 0
         }
 
-        private func confirmPaint(
-            in webView: WKWebView,
-            generation: Int,
-            completion: @escaping () -> Void
-        ) {
-            paintConfirmer.confirmPaint(in: webView) { [weak self] in
+        private func confirmPaintIfNeeded(in webView: WKWebView) {
+            guard !hasConfirmedPaintForCurrentLoad, !isPaintConfirmationInFlight else {
+                return
+            }
+
+            isPaintConfirmationInFlight = true
+            paintConfirmationAttemptCount += 1
+            let generation = paintConfirmationGeneration
+            paintConfirmer.confirmPaint(in: webView) { [weak self] didPaint in
                 guard let self, generation == self.paintConfirmationGeneration else {
                     return
                 }
-                completion()
+                self.isPaintConfirmationInFlight = false
+
+                guard didPaint else {
+                    // Retry once after navigation has finished. A second failure uses the completed
+                    // navigation as a fallback rather than trapping the user behind a permanent
+                    // placeholder.
+                    guard self.coordination.hasFinishedLoad else {
+                        return
+                    }
+                    if self.paintConfirmationAttemptCount < 2 {
+                        self.confirmPaintIfNeeded(in: webView)
+                    } else {
+                        Log.warning(
+                            "Full reader paint confirmation failed after navigation finished; using finish fallback",
+                            category: .ui
+                        )
+                        self.completePaintGate(in: webView)
+                    }
+                    return
+                }
+
+                self.completePaintGate(in: webView)
             }
+        }
+
+        private func completePaintGate(in webView: WKWebView) {
+            guard !hasConfirmedPaintForCurrentLoad else {
+                return
+            }
+
+            hasConfirmedPaintForCurrentLoad = true
+            parent.onLoadFinished?()
+            reloadAfterCurrentLoadIfNeeded(in: webView)
         }
     }
 }
 
 protocol FullEmailReaderPaintConfirming {
-    func confirmPaint(in webView: WKWebView, completion: @escaping () -> Void)
+    func confirmPaint(in webView: WKWebView, completion: @escaping (Bool) -> Void)
 }
 
 /// Confirms first paint by taking a snapshot.
 ///
-/// `WKNavigationDelegate.didFinish` reports load completion, not paint completion, so the reader
-/// still needs a real paint signal before the placeholder is removed. `takeSnapshot` forces WebKit
-/// to rasterize the loaded content, so its completion is tied to a painted frame instead of an empty
-/// Core Animation transaction.
+/// Navigation finish reports load completion, not paint completion, so the reader still needs a real
+/// paint signal before the placeholder is removed. After finish, `takeSnapshot` forces WebKit to
+/// rasterize the loaded content instead of trusting a timer or an empty Core Animation transaction.
 struct FullEmailReaderSnapshotPaintConfirmer: FullEmailReaderPaintConfirming {
-    func confirmPaint(in webView: WKWebView, completion: @escaping () -> Void) {
-        webView.layoutIfNeeded()
-
-        webView.takeSnapshot(with: nil) { _, _ in
-            DispatchQueue.main.async(execute: completion)
+    func confirmPaint(in webView: WKWebView, completion: @escaping (Bool) -> Void) {
+        // Give the completed navigation one UI runloop turn before forcing its render pass. Snapshot
+        // completion remains the readiness signal; the tick itself never reveals the WebView.
+        DispatchQueue.main.async { [weak webView] in
+            guard let webView else { return }
+            webView.layoutIfNeeded()
+            webView.takeSnapshot(with: nil) { image, _ in
+                DispatchQueue.main.async {
+                    completion(image != nil)
+                }
+            }
         }
     }
 }

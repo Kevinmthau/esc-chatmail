@@ -99,6 +99,7 @@ struct FullEmailReaderView: View {
                 readerWidth: readerWidth,
                 webViewAdoptionProvider: session.webViewAdoptionProvider,
                 onLoadFinished: handleWebViewPainted,
+                onLoadFailed: handleWebViewLoadFailed,
                 onAdoptedPrerendered: handleAdoptedPrerendered
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -176,6 +177,10 @@ struct FullEmailReaderView: View {
         withAnimation(.easeOut(duration: 0.25)) {
             webViewPainted = true
         }
+    }
+
+    private func handleWebViewLoadFailed() {
+        webViewPainted = false
     }
 
     /// A pre-rendered WebView was adopted, so the email is already painted and no masking is needed.

@@ -10,6 +10,7 @@ struct HTMLMessageView: View {
     let readerWidth: CGFloat
     let webViewAdoptionProvider: (any FullEmailWebViewAdopting)?
     var onLoadFinished: (() -> Void)?
+    var onLoadFailed: (() -> Void)?
     var onAdoptedPrerendered: (() -> Void)?
 
     var body: some View {
@@ -21,6 +22,7 @@ struct HTMLMessageView: View {
             message: message,
             webViewAdoptionProvider: webViewAdoptionProvider,
             onLoadFinished: onLoadFinished,
+            onLoadFailed: onLoadFailed,
             onAdoptedPrerendered: onAdoptedPrerendered
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)

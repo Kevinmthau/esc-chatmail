@@ -94,11 +94,13 @@ final class EmailWebViewLoadCoordination {
         hasFinishedLoad = false
     }
 
-    func resetLoadedSignatureAfterFailure(for error: Error) {
+    @discardableResult
+    func resetLoadedSignatureAfterFailure(for error: Error) -> Bool {
         if Self.isCancelledNavigationError(error), hasFinishedLoad {
-            return
+            return false
         }
         resetLoadedSignatureAfterFailure()
+        return true
     }
 
     static func isCancelledNavigationError(_ error: Error) -> Bool {

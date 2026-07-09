@@ -12,6 +12,8 @@ struct HTMLWebView: View {
     var webViewAdoptionProvider: (any FullEmailWebViewAdopting)?
     /// Invoked when the WebView reports paint-confirmed readiness, so the reader can cross-fade its placeholder.
     var onLoadFinished: (() -> Void)? = nil
+    /// Invoked when the live navigation fails, so the reader can restore its placeholder.
+    var onLoadFailed: (() -> Void)? = nil
     /// Invoked when the guarded pre-render adoption path supplies an already-painted WebView, so the
     /// reader can drop its placeholder instantly.
     var onAdoptedPrerendered: (() -> Void)? = nil
@@ -24,6 +26,7 @@ struct HTMLWebView: View {
             message: message,
             webViewAdoptionProvider: webViewAdoptionProvider,
             onLoadFinished: onLoadFinished,
+            onLoadFailed: onLoadFailed,
             onAdoptedPrerendered: onAdoptedPrerendered
         )
     }

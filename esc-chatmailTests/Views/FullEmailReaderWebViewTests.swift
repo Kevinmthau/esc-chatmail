@@ -239,13 +239,40 @@ final class FullEmailReaderWebViewTests: XCTestCase {
         )
     }
 
-    func testLiveLoadFinishedWaitsForPaintConfirmation() {
+    func testLiveLoadCommitDoesNotStartPaintConfirmationBeforeFinish() {
         let paintConfirmer = DeferredPaintConfirmer()
         var loadFinishedCount = 0
         let coordinator = FullEmailReaderWebView.Coordinator(
-            makeReader(message: nil) {
+            makeReader(message: nil, onLoadFinished: {
                 loadFinishedCount += 1
-            },
+            }),
+            paintConfirmer: paintConfirmer
+        )
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+
+        coordinator.recordLoadedSignature()
+        coordinator.webView(webView, didCommit: nil)
+
+        XCTAssertEqual(loadFinishedCount, 0)
+        XCTAssertEqual(paintConfirmer.confirmPaintCallCount, 0)
+
+        coordinator.webView(webView, didFinish: nil)
+
+        XCTAssertEqual(loadFinishedCount, 0)
+        XCTAssertEqual(paintConfirmer.confirmPaintCallCount, 1)
+
+        paintConfirmer.completeNext()
+
+        XCTAssertEqual(loadFinishedCount, 1)
+    }
+
+    func testLiveLoadFinishStartsPaintConfirmation() {
+        let paintConfirmer = DeferredPaintConfirmer()
+        var loadFinishedCount = 0
+        let coordinator = FullEmailReaderWebView.Coordinator(
+            makeReader(message: nil, onLoadFinished: {
+                loadFinishedCount += 1
+            }),
             paintConfirmer: paintConfirmer
         )
         let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
@@ -261,13 +288,59 @@ final class FullEmailReaderWebViewTests: XCTestCase {
         XCTAssertEqual(loadFinishedCount, 1)
     }
 
+    func testFailedFinishPaintConfirmationRetriesOnce() {
+        let paintConfirmer = DeferredPaintConfirmer()
+        var loadFinishedCount = 0
+        let coordinator = FullEmailReaderWebView.Coordinator(
+            makeReader(message: nil, onLoadFinished: {
+                loadFinishedCount += 1
+            }),
+            paintConfirmer: paintConfirmer
+        )
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+
+        coordinator.recordLoadedSignature()
+        coordinator.webView(webView, didFinish: nil)
+
+        XCTAssertEqual(paintConfirmer.confirmPaintCallCount, 1)
+        paintConfirmer.completeNext(didPaint: false)
+
+        XCTAssertEqual(loadFinishedCount, 0)
+        XCTAssertEqual(paintConfirmer.confirmPaintCallCount, 2)
+        paintConfirmer.completeNext()
+        XCTAssertEqual(loadFinishedCount, 1)
+    }
+
+    func testTwoFailedPaintConfirmationsRevealOnlyAfterFinishFallback() {
+        let paintConfirmer = DeferredPaintConfirmer()
+        var loadFinishedCount = 0
+        let coordinator = FullEmailReaderWebView.Coordinator(
+            makeReader(message: nil, onLoadFinished: {
+                loadFinishedCount += 1
+            }),
+            paintConfirmer: paintConfirmer
+        )
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+
+        coordinator.recordLoadedSignature()
+        coordinator.webView(webView, didFinish: nil)
+        paintConfirmer.completeNext(didPaint: false)
+
+        XCTAssertEqual(loadFinishedCount, 0)
+        XCTAssertEqual(paintConfirmer.confirmPaintCallCount, 2)
+
+        paintConfirmer.completeNext(didPaint: false)
+
+        XCTAssertEqual(loadFinishedCount, 1)
+    }
+
     func testStalePaintConfirmationDoesNotFinishNewerLoad() {
         let paintConfirmer = DeferredPaintConfirmer()
         var loadFinishedCount = 0
         let coordinator = FullEmailReaderWebView.Coordinator(
-            makeReader(message: nil) {
+            makeReader(message: nil, onLoadFinished: {
                 loadFinishedCount += 1
-            },
+            }),
             paintConfirmer: paintConfirmer
         )
         let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
@@ -285,9 +358,9 @@ final class FullEmailReaderWebViewTests: XCTestCase {
         let paintConfirmer = DeferredPaintConfirmer()
         var loadFinishedCount = 0
         let coordinator = FullEmailReaderWebView.Coordinator(
-            makeReader(message: nil) {
+            makeReader(message: nil, onLoadFinished: {
                 loadFinishedCount += 1
-            },
+            }),
             paintConfirmer: paintConfirmer
         )
         let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
@@ -300,6 +373,50 @@ final class FullEmailReaderWebViewTests: XCTestCase {
 
         XCTAssertEqual(loadFinishedCount, 0)
         XCTAssertTrue(coordinator.needsReload)
+    }
+
+    func testFailureAfterConfirmedPaintRequestsPlaceholderRestore() {
+        let paintConfirmer = DeferredPaintConfirmer()
+        var loadFinishedCount = 0
+        var loadFailedCount = 0
+        let coordinator = FullEmailReaderWebView.Coordinator(
+            makeReader(
+                message: nil,
+                onLoadFinished: { loadFinishedCount += 1 },
+                onLoadFailed: { loadFailedCount += 1 }
+            ),
+            paintConfirmer: paintConfirmer
+        )
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotDecodeContentData)
+
+        coordinator.recordLoadedSignature()
+        coordinator.webView(webView, didFinish: nil)
+        paintConfirmer.completeNext()
+        coordinator.webView(webView, didFail: nil, withError: error)
+
+        XCTAssertEqual(loadFinishedCount, 1)
+        XCTAssertEqual(loadFailedCount, 1)
+        XCTAssertTrue(coordinator.needsReload)
+    }
+
+    func testCancelledFailureAfterFinishDoesNotRequestPlaceholderRestore() {
+        let paintConfirmer = DeferredPaintConfirmer()
+        var loadFailedCount = 0
+        let coordinator = FullEmailReaderWebView.Coordinator(
+            makeReader(message: nil, onLoadFailed: { loadFailedCount += 1 }),
+            paintConfirmer: paintConfirmer
+        )
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled)
+
+        coordinator.recordLoadedSignature()
+        coordinator.webView(webView, didFinish: nil)
+        paintConfirmer.completeNext()
+        coordinator.webView(webView, didFail: nil, withError: error)
+
+        XCTAssertEqual(loadFailedCount, 0)
+        XCTAssertFalse(coordinator.needsReload)
     }
 
     func testAdoptedPrerenderedContentMarksLoadedWithoutLivePaintConfirmation() {
@@ -337,13 +454,15 @@ final class FullEmailReaderWebViewTests: XCTestCase {
     private func makeReader(
         message: Message?,
         sourceSignature: String? = "sha256:source",
-        onLoadFinished: (() -> Void)? = nil
+        onLoadFinished: (() -> Void)? = nil,
+        onLoadFailed: (() -> Void)? = nil
     ) -> FullEmailReaderWebView {
         FullEmailReaderWebView(
             htmlContent: defaultReaderHTML,
             sourceSignature: sourceSignature,
             message: message,
-            onLoadFinished: onLoadFinished
+            onLoadFinished: onLoadFinished,
+            onLoadFailed: onLoadFailed
         )
     }
 
@@ -359,20 +478,20 @@ final class FullEmailReaderWebViewTests: XCTestCase {
 }
 
 private final class DeferredPaintConfirmer: FullEmailReaderPaintConfirming {
-    private var completions: [() -> Void] = []
+    private var completions: [(Bool) -> Void] = []
     private(set) var confirmPaintCallCount = 0
 
-    func confirmPaint(in webView: WKWebView, completion: @escaping () -> Void) {
+    func confirmPaint(in webView: WKWebView, completion: @escaping (Bool) -> Void) {
         confirmPaintCallCount += 1
         completions.append(completion)
     }
 
-    func completeNext() {
+    func completeNext(didPaint: Bool = true) {
         guard !completions.isEmpty else {
             XCTFail("Expected a pending paint confirmation")
             return
         }
 
-        completions.removeFirst()()
+        completions.removeFirst()(didPaint)
     }
 }
