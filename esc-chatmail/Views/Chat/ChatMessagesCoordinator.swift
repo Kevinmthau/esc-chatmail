@@ -30,6 +30,7 @@ final class ChatMessagesCoordinator: ObservableObject {
 
     private let loadLatestWindowIfNeeded: LatestWindowLoader
     private let markConversationAsReadIfNeeded: () -> Void
+    private let markUnreadInboxMessagesAsReadIfNeeded: ([NSManagedObjectID]) -> Void
     private let initializeReplyingTo: (Message?) -> Void
     private let updateReplyingToIfNewSubject: (Message?) -> Void
     private let loadResolvedDisplayName: () -> Void
@@ -59,6 +60,9 @@ final class ChatMessagesCoordinator: ObservableObject {
         self.markConversationAsReadIfNeeded = {
             viewModel.markConversationAsReadIfNeeded()
         }
+        self.markUnreadInboxMessagesAsReadIfNeeded = { messageObjectIDs in
+            viewModel.markUnreadInboxMessagesAsReadIfNeeded(messageObjectIDs: messageObjectIDs)
+        }
         self.initializeReplyingTo = { lastMessage in
             viewModel.initializeReplyingTo(lastMessage: lastMessage)
         }
@@ -85,6 +89,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     init(
         loadLatestWindowIfNeeded: @escaping LatestWindowLoader,
         markConversationAsReadIfNeeded: @escaping () -> Void,
+        markUnreadInboxMessagesAsReadIfNeeded: @escaping ([NSManagedObjectID]) -> Void = { _ in },
         initializeReplyingTo: @escaping (Message?) -> Void,
         updateReplyingToIfNewSubject: @escaping (Message?) -> Void,
         loadResolvedDisplayName: @escaping () -> Void,
@@ -97,6 +102,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     ) {
         self.loadLatestWindowIfNeeded = loadLatestWindowIfNeeded
         self.markConversationAsReadIfNeeded = markConversationAsReadIfNeeded
+        self.markUnreadInboxMessagesAsReadIfNeeded = markUnreadInboxMessagesAsReadIfNeeded
         self.initializeReplyingTo = initializeReplyingTo
         self.updateReplyingToIfNewSubject = updateReplyingToIfNewSubject
         self.loadResolvedDisplayName = loadResolvedDisplayName
@@ -198,6 +204,24 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
     }
 
+    func handleInsertedVisibleMessages(
+        messageObjectIDs: [NSManagedObjectID],
+        isChatActiveAndUncovered: Bool,
+        isShowingLatestWindow: Bool,
+        isBottomAnchorVisible: Bool
+    ) {
+        guard !messageObjectIDs.isEmpty,
+              isReadyToShow,
+              isVisible,
+              isChatActiveAndUncovered,
+              isShowingLatestWindow,
+              isBottomAnchorVisible else {
+            return
+        }
+
+        markUnreadInboxMessagesAsReadIfNeeded(messageObjectIDs)
+    }
+
     func handleMessageCountChange(
         oldCount: Int,
         newCount: Int,
@@ -209,14 +233,6 @@ final class ChatMessagesCoordinator: ObservableObject {
         isShowingLatestWindow: Bool,
         scrollAction: @escaping BottomAnchorAction
     ) {
-        if isReadyToShow,
-           isVisible,
-           isInitialWindowLoaded,
-           isShowingLatestWindow,
-           newCount > oldCount {
-            markConversationAsReadIfNeeded()
-        }
-
         if oldCount == 0 && newCount > 0 {
             updateReplyingToIfNewSubject(lastMessage)
             if hasStartedInitialAnchor && !initialAnchorWasForEmptyConversation {

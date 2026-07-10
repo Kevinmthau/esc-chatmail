@@ -204,6 +204,52 @@ final class MessageActionsTests: XCTestCase {
         XCTAssertEqual(queuedConversationActions.first?.messageIds, ["message-visible-at-open"])
     }
 
+    func testConcurrentReadBatchesSerializeRollupRecomputation() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .withUnreadCount(2)
+            .build(in: context)
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
+        let firstMessage = MessageBuilder()
+            .withId("first-concurrent-read")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        firstMessage.addToLabels(inboxLabel)
+        let secondMessage = MessageBuilder()
+            .withId("second-concurrent-read")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        secondMessage.addToLabels(inboxLabel)
+        try coreDataStack.saveViewContext()
+
+        let conversationObjectID = conversation.objectID
+        let firstMessageObjectID = firstMessage.objectID
+        let secondMessageObjectID = secondMessage.objectID
+        let firstTask = Task {
+            await messageActions.markMessagesAsReadBatch(
+                messageIDs: [firstMessageObjectID],
+                conversationID: conversationObjectID
+            )
+        }
+        let secondTask = Task {
+            await messageActions.markMessagesAsReadBatch(
+                messageIDs: [secondMessageObjectID],
+                conversationID: conversationObjectID
+            )
+        }
+        await firstTask.value
+        await secondTask.value
+
+        context.refreshAllObjects()
+        XCTAssertFalse(firstMessage.isUnread)
+        XCTAssertFalse(secondMessage.isUnread)
+        XCTAssertEqual(conversation.inboxUnreadCount, 0)
+        let queuedActions = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queuedActions.count, 2)
+    }
+
     func testMarkConversationAsRead_usesBatchUpdateAndSinglePendingAction() async throws {
         let conversation = ConversationBuilder()
             .visible()
@@ -270,6 +316,49 @@ final class MessageActionsTests: XCTestCase {
         XCTAssertEqual(conversation.inboxUnreadCount, 0)
         let queuedActions = await pendingActionsManager.queuedSingleActions
         XCTAssertTrue(queuedActions.isEmpty)
+    }
+
+    func testExactUnreadInboxSnapshotDoesNotIncludeUnrelatedOrNonInboxMessages() throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .withUnreadCount(2)
+            .build(in: context)
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
+        let eligibleArrival = MessageBuilder()
+            .withId("eligible-arrival")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        eligibleArrival.addToLabels(inboxLabel)
+        let unrelatedUnread = MessageBuilder()
+            .withId("preserved-unread")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        unrelatedUnread.addToLabels(inboxLabel)
+        let nonInboxArrival = MessageBuilder()
+            .withId("non-inbox-arrival")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        let readInboxArrival = MessageBuilder()
+            .withId("read-inbox-arrival")
+            .read()
+            .inConversation(conversation)
+            .build(in: context)
+        readInboxArrival.addToLabels(inboxLabel)
+        try coreDataStack.saveViewContext()
+
+        let snapshot = messageActions.snapshotUnreadInboxMessageObjectIDs(
+            messageObjectIDs: [
+                eligibleArrival.objectID,
+                nonInboxArrival.objectID,
+                readInboxArrival.objectID
+            ]
+        )
+
+        XCTAssertEqual(snapshot, [eligibleArrival.objectID])
+        XCTAssertTrue(unrelatedUnread.isUnread)
     }
 
     func testMarkMessagesAsReadBatch_rollsBackWhenUnreadInboxCountFails() async throws {

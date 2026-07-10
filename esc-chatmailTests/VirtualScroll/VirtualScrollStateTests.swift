@@ -605,9 +605,39 @@ final class VirtualScrollStateTests: XCTestCase {
 
         let expectedIDs = Array(messages.suffix(3)).map(\.objectID) + [pendingMessage.objectID]
         await waitUntil {
+            state.insertedVisibleMessageIDs == [pendingMessage.objectID] &&
             state.visibleMessages.map(\.objectID) == expectedIDs &&
                 state.totalMessageCount == 9 &&
                 !state.isLoadingMore
+        }
+    }
+
+    func testInsertedMessageEventPublishesExactIDWhenAggregateCountIsUnchanged() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 4)
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil {
+            state.isInitialLoadComplete && state.totalMessageCount == 4
+        }
+
+        let insertedMessage = MessageBuilder()
+            .withId("inserted-with-deletion")
+            .withDate(Date(timeIntervalSince1970: 4))
+            .inConversation(conversation)
+            .build(in: viewContext)
+        try viewContext.obtainPermanentIDs(for: [insertedMessage])
+        viewContext.delete(messages[0])
+        viewContext.processPendingChanges()
+
+        await waitUntil {
+            state.insertedVisibleMessageIDs == [insertedMessage.objectID]
         }
     }
 
@@ -692,6 +722,7 @@ final class VirtualScrollStateTests: XCTestCase {
 
         try? await Task.sleep(nanoseconds: 100_000_000)
 
+        XCTAssertTrue(state.insertedVisibleMessageIDs.isEmpty)
         XCTAssertEqual(state.visibleMessages.map(\.objectID), initialIDs)
         XCTAssertEqual(state.totalMessageCount, 3)
     }

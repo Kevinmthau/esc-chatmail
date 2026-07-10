@@ -13,6 +13,7 @@ struct ChatView: View {
     @FocusState private var isTextFieldFocused: Bool
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
 
     @MainActor
     init(
@@ -46,6 +47,7 @@ struct ChatView: View {
             conversation: conversation,
             viewModel: viewModel,
             chatDependencies: chatDependencies,
+            isChatActiveAndUncovered: isChatActiveAndUncovered,
             isTextFieldFocused: $isTextFieldFocused,
             onOpenFullMessage: { messageObjectID, source in
                 viewModel.openEmailReader(
@@ -165,6 +167,14 @@ struct ChatView: View {
             hint: conversation.displayName,
             participantEmails: participantEmails
         )
+    }
+
+    private var isChatActiveAndUncovered: Bool {
+        scenePhase == .active &&
+            activeDestination == nil &&
+            !viewModel.contactManager.showingContactAccessPicker &&
+            viewModel.contactManager.contactActionAlert == nil &&
+            viewModel.sendErrorAlert == nil
     }
 
     private var activeDestination: ChatDestination? {

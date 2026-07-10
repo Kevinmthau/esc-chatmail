@@ -241,74 +241,70 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
     func testTransientReappearanceDoesNotRecaptureUnreadOrConsumeHiddenArrival() {
         var markConversationAsReadCount = 0
-        let coordinator = makeUnreadCoordinator {
-            markConversationAsReadCount += 1
-        }
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: { markConversationAsReadCount += 1 },
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        let arrivalID = makeMessageObjectID("hidden-arrival")
 
         handleEmptyAppear(coordinator)
         coordinator.handleDisappear()
-        coordinator.handleMessageCountChange(
-            oldCount: 1,
-            newCount: 2,
-            lastMessage: nil,
-            visibleMessages: [],
-            totalMessageCount: 2,
-            stabilizeBottomAnchor: false,
-            isInitialWindowLoaded: true,
-            isShowingLatestWindow: true
-        ) { _ in }
+        coordinator.handleInsertedVisibleMessages(
+            messageObjectIDs: [arrivalID],
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
         handleEmptyAppear(coordinator)
 
         XCTAssertEqual(markConversationAsReadCount, 1)
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
     }
 
     func testArrivalAtLatestVisibleWindowAfterReadyMarksUnreadAsRead() {
-        var markConversationAsReadCount = 0
-        let coordinator = makeUnreadCoordinator {
-            markConversationAsReadCount += 1
-        }
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        let arrivalID = makeMessageObjectID("visible-arrival")
         handleEmptyAppear(coordinator)
 
-        coordinator.handleMessageCountChange(
-            oldCount: 1,
-            newCount: 2,
-            lastMessage: nil,
-            visibleMessages: [],
-            totalMessageCount: 2,
-            stabilizeBottomAnchor: false,
-            isInitialWindowLoaded: true,
-            isShowingLatestWindow: true
-        ) { _ in }
+        coordinator.handleInsertedVisibleMessages(
+            messageObjectIDs: [arrivalID],
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
 
-        XCTAssertEqual(markConversationAsReadCount, 2)
+        XCTAssertEqual(markedArrivalIDs, [[arrivalID]])
     }
 
     func testArrivalWhileScrolledUpDoesNotMarkUnreadAsRead() {
-        var markConversationAsReadCount = 0
-        let coordinator = makeUnreadCoordinator {
-            markConversationAsReadCount += 1
-        }
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
         handleEmptyAppear(coordinator)
 
-        coordinator.handleMessageCountChange(
-            oldCount: 1,
-            newCount: 2,
-            lastMessage: nil,
-            visibleMessages: [],
-            totalMessageCount: 2,
-            stabilizeBottomAnchor: false,
-            isInitialWindowLoaded: true,
-            isShowingLatestWindow: false
-        ) { _ in }
+        coordinator.handleInsertedVisibleMessages(
+            messageObjectIDs: [makeMessageObjectID("scrolled-arrival")],
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: false
+        )
 
-        XCTAssertEqual(markConversationAsReadCount, 1)
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
     }
 
     func testArrivalBeforeChatIsReadyDoesNotMarkUnreadAsRead() {
-        var markConversationAsReadCount = 0
-        let coordinator = makeUnreadCoordinator {
-            markConversationAsReadCount += 1
-        }
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
         coordinator.handleAppear(
             messageCount: 2,
             lastMessage: nil,
@@ -318,19 +314,33 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             isInitialWindowLoaded: false
         ) { _ in }
 
-        coordinator.handleMessageCountChange(
-            oldCount: 2,
-            newCount: 3,
-            lastMessage: nil,
-            visibleMessages: [],
-            totalMessageCount: 3,
-            stabilizeBottomAnchor: false,
-            isInitialWindowLoaded: false,
-            isShowingLatestWindow: true
-        ) { _ in }
+        coordinator.handleInsertedVisibleMessages(
+            messageObjectIDs: [makeMessageObjectID("pre-ready-arrival")],
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
 
         XCTAssertFalse(coordinator.isReadyToShow)
-        XCTAssertEqual(markConversationAsReadCount, 1)
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+    }
+
+    func testArrivalWhileChatIsCoveredOrInactiveDoesNotMarkUnreadAsRead() {
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        handleEmptyAppear(coordinator)
+
+        coordinator.handleInsertedVisibleMessages(
+            messageObjectIDs: [makeMessageObjectID("covered-arrival")],
+            isChatActiveAndUncovered: false,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
     }
 
     func testHandleDisplayedMessagesChange_prefetchesTrailingVisibleWindow() async throws {
@@ -1424,11 +1434,13 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
     }
 
     private func makeUnreadCoordinator(
-        markConversationAsReadIfNeeded: @escaping () -> Void
+        markConversationAsReadIfNeeded: @escaping () -> Void,
+        markUnreadInboxMessagesAsReadIfNeeded: @escaping ([NSManagedObjectID]) -> Void
     ) -> ChatMessagesCoordinator {
         ChatMessagesCoordinator(
             loadLatestWindowIfNeeded: { _ in },
             markConversationAsReadIfNeeded: markConversationAsReadIfNeeded,
+            markUnreadInboxMessagesAsReadIfNeeded: markUnreadInboxMessagesAsReadIfNeeded,
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
             loadResolvedDisplayName: {},
@@ -1439,6 +1451,13 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             clearPersonCache: {},
             sleep: { _ in }
         )
+    }
+
+    private func makeMessageObjectID(_ id: String) -> NSManagedObjectID {
+        MessageBuilder()
+            .withId(id)
+            .build(in: viewContext)
+            .objectID
     }
 
     private func handleEmptyAppear(_ coordinator: ChatMessagesCoordinator) {

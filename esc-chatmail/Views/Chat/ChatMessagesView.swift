@@ -8,12 +8,14 @@ struct ChatMessagesView: View {
     let conversation: Conversation
     @ObservedObject var viewModel: ChatViewModel
     let chatDependencies: ChatDependencies
+    let isChatActiveAndUncovered: Bool
     var isTextFieldFocused: FocusState<Bool>.Binding
     let onOpenFullMessage: (NSManagedObjectID, EmailReaderOpenSource) -> Void
 
     @StateObject private var scrollState: VirtualScrollState
     @StateObject private var coordinator: ChatMessagesCoordinator
     @State private var replyBarHeight: CGFloat = 0
+    @State private var isBottomAnchorVisible = false
     @ObservedObject private var keyboard = KeyboardResponder.shared
     @Namespace private var bottomID
 
@@ -22,12 +24,14 @@ struct ChatMessagesView: View {
         conversation: Conversation,
         viewModel: ChatViewModel,
         chatDependencies: ChatDependencies,
+        isChatActiveAndUncovered: Bool,
         isTextFieldFocused: FocusState<Bool>.Binding,
         onOpenFullMessage: @escaping (NSManagedObjectID, EmailReaderOpenSource) -> Void
     ) {
         self.conversation = conversation
         self.viewModel = viewModel
         self.chatDependencies = chatDependencies
+        self.isChatActiveAndUncovered = isChatActiveAndUncovered
         self.isTextFieldFocused = isTextFieldFocused
         self.onOpenFullMessage = onOpenFullMessage
 
@@ -78,6 +82,14 @@ struct ChatMessagesView: View {
             }
             .onChange(of: scrollState.isInitialLoadComplete) { _, isComplete in
                 handleInitialWindowLoaded(isComplete: isComplete, proxy: proxy)
+            }
+            .onChange(of: scrollState.insertedVisibleMessageIDs) { _, messageObjectIDs in
+                coordinator.handleInsertedVisibleMessages(
+                    messageObjectIDs: messageObjectIDs,
+                    isChatActiveAndUncovered: isChatActiveAndUncovered,
+                    isShowingLatestWindow: scrollState.isShowingLatestWindow,
+                    isBottomAnchorVisible: isBottomAnchorVisible
+                )
             }
             .onChange(of: scrollState.totalMessageCount) { oldCount, newCount in
                 coordinator.handleMessageCountChange(
@@ -148,7 +160,13 @@ struct ChatMessagesView: View {
                     .onAppear { scrollState.markIndexVisible(absoluteIndex) }
                 }
 
-                Color.clear.frame(height: bottomContentInset).id(bottomID)
+                Color.clear.frame(height: bottomContentInset)
+                Color.clear
+                    .frame(height: 1)
+                    .id(bottomID)
+                    .anchorPreference(key: ChatBottomAnchorBoundsPreferenceKey.self, value: .bounds) {
+                        $0
+                    }
             }
             .padding(.horizontal)
             .padding(.top, 8)
@@ -157,6 +175,22 @@ struct ChatMessagesView: View {
         }
         .defaultScrollAnchor(.top)
         .scrollDismissesKeyboard(.interactively)
+        .overlayPreferenceValue(ChatBottomAnchorBoundsPreferenceKey.self) { anchor in
+            GeometryReader { proxy in
+                let frame = anchor.map { proxy[$0] } ?? .null
+                Color.clear
+                    .onAppear {
+                        updateBottomAnchorVisibility(frame: frame, viewportSize: proxy.size)
+                    }
+                    .onChange(of: frame) { _, newFrame in
+                        updateBottomAnchorVisibility(frame: newFrame, viewportSize: proxy.size)
+                    }
+                    .onChange(of: proxy.size) { _, newSize in
+                        updateBottomAnchorVisibility(frame: frame, viewportSize: newSize)
+                    }
+            }
+            .allowsHitTesting(false)
+        }
     }
 
     private func handleAppear(proxy: ScrollViewProxy, displayedMessages: [ChatMessageRowModel]) {
@@ -263,6 +297,13 @@ struct ChatMessagesView: View {
         return max(0, keyboard.currentHeight - currentBottomSafeAreaInset)
     }
 
+    private func updateBottomAnchorVisibility(frame: CGRect, viewportSize: CGSize) {
+        let viewport = CGRect(origin: .zero, size: viewportSize)
+        let isVisible = !frame.isNull && !frame.isEmpty && viewport.intersects(frame)
+        guard isBottomAnchorVisible != isVisible else { return }
+        isBottomAnchorVisible = isVisible
+    }
+
     private var currentBottomSafeAreaInset: CGFloat {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let activeScene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
@@ -367,5 +408,16 @@ struct ChatMessagesView: View {
             Log.diagnostic(.chatView, level: .info, step.logMessage, category: .ui)
             proxy.scrollTo(bottomID, anchor: .bottom)
         }
+    }
+}
+
+private struct ChatBottomAnchorBoundsPreferenceKey: PreferenceKey {
+    static let defaultValue: Anchor<CGRect>? = nil
+
+    static func reduce(
+        value: inout Anchor<CGRect>?,
+        nextValue: () -> Anchor<CGRect>?
+    ) {
+        value = nextValue() ?? value
     }
 }

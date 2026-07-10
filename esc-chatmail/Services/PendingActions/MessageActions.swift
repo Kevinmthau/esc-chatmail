@@ -24,6 +24,8 @@ final class MessageActions: ObservableObject {
     private let coreDataStack: any MessageActionsCoreDataStacking
     private let pendingActionsManager: any PendingActionsManagerProtocol
     private let unreadInboxMessageCounter: UnreadInboxMessageCounter
+    private var readBatchTask: Task<Void, Never>?
+    private var readBatchTaskID: UUID?
 
     init(
         coreDataStack: any MessageActionsCoreDataStacking,
@@ -92,6 +94,26 @@ final class MessageActions: ObservableObject {
         return (try? coreDataStack.viewContext.fetch(request)) ?? []
     }
 
+    /// Filters an exact insertion set down to unread INBOX messages.
+    /// This prevents a later arrival from consuming unrelated unread mail.
+    func snapshotUnreadInboxMessageObjectIDs(
+        messageObjectIDs: [NSManagedObjectID]
+    ) -> [NSManagedObjectID] {
+        guard !messageObjectIDs.isEmpty else { return [] }
+
+        let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
+        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            NSPredicate(format: "SELF IN %@", messageObjectIDs),
+            NSPredicate(format: "isUnread == YES"),
+            NSPredicate(format: "ANY labels.id == %@", "INBOX")
+        ])
+        request.fetchBatchSize = messageObjectIDs.count
+        request.includesPendingChanges = false
+        request.resultType = .managedObjectIDResultType
+
+        return (try? coreDataStack.viewContext.fetch(request)) ?? []
+    }
+
     /// Core method for updating message read state - eliminates duplication between markAsRead/markAsUnread
     private func updateReadState(message: Message, isUnread: Bool, actionType: PendingAction.ActionType) async {
         // Skip if already in desired state
@@ -152,6 +174,31 @@ final class MessageActions: ObservableObject {
     /// Batch mark messages as read - prevents race condition with new messages
     /// Uses a single transaction to ensure atomic update of conversation unread count
     func markMessagesAsReadBatch(messageIDs: [NSManagedObjectID], conversationID: NSManagedObjectID) async {
+        let previousTask = readBatchTask
+        let taskID = UUID()
+        let task = Task { [weak self] in
+            await previousTask?.value
+            guard let self else { return }
+            await self.performMarkMessagesAsReadBatch(
+                messageIDs: messageIDs,
+                conversationID: conversationID
+            )
+        }
+        readBatchTask = task
+        readBatchTaskID = taskID
+
+        await task.value
+
+        if readBatchTaskID == taskID {
+            readBatchTask = nil
+            readBatchTaskID = nil
+        }
+    }
+
+    private func performMarkMessagesAsReadBatch(
+        messageIDs: [NSManagedObjectID],
+        conversationID: NSManagedObjectID
+    ) async {
         let context = coreDataStack.newBackgroundContext()
         let unreadInboxMessageCounter = self.unreadInboxMessageCounter
 

@@ -29,6 +29,7 @@ final class VirtualScrollState: ObservableObject {
     @Published var isLoadingMore = false
     @Published private(set) var isInitialLoadComplete = false
     @Published var placeholderIndices: Set<Int> = []
+    @Published private(set) var insertedVisibleMessageIDs: [NSManagedObjectID] = []
 
     private let configuration: VirtualScrollConfiguration
     private let initialWindowPosition: InitialWindowPosition
@@ -490,6 +491,11 @@ final class VirtualScrollState: ObservableObject {
         // updates can affect this window.
         guard Self.isRelevantChatContextChange(notification.userInfo) else { return }
 
+        let insertedMessageIDs = visibleInsertedMessageIDsForCurrentConversation(in: notification)
+        if !insertedMessageIDs.isEmpty {
+            insertedVisibleMessageIDs = insertedMessageIDs
+        }
+
         let knownTotalCount = estimatedTotalCountAfterLocalMessageMutation(in: notification)
         if shouldRefreshLatestWindowForLocalMessageMutation(
             in: notification,
@@ -679,15 +685,25 @@ final class VirtualScrollState: ObservableObject {
     }
 
     private func visibleInsertedMessageCountForCurrentConversation(in notification: Notification) -> Int {
+        visibleInsertedMessageIDsForCurrentConversation(in: notification).count
+    }
+
+    private func visibleInsertedMessageIDsForCurrentConversation(
+        in notification: Notification
+    ) -> [NSManagedObjectID] {
         contextObjects(forKeys: [NSInsertedObjectsKey], in: notification)
-            .reduce(into: 0) { count, object in
+            .compactMap { object -> NSManagedObjectID? in
                 guard let message = object as? Message,
+                      !message.objectID.isTemporaryID,
                       belongsToCurrentConversation(message),
                       isVisibleInChat(message) else {
-                    return
+                    return nil
                 }
 
-                count += 1
+                return message.objectID
+            }
+            .sorted {
+                $0.uriRepresentation().absoluteString < $1.uriRepresentation().absoluteString
             }
     }
 
