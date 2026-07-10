@@ -9,15 +9,18 @@ final class MessageActionsTests: XCTestCase {
     private var coreDataStack: TestCoreDataStack!
     private var pendingActionsManager: MockPendingActionsManager!
     private var messageActions: MessageActions!
+    private var rollupMutationSerializer: ConversationRollupMutationSerializer!
     private var context: NSManagedObjectContext!
 
     override func setUp() {
         super.setUp()
         coreDataStack = TestCoreDataStack()
         pendingActionsManager = MockPendingActionsManager()
+        rollupMutationSerializer = ConversationRollupMutationSerializer()
         messageActions = MessageActions(
             coreDataStack: coreDataStack,
-            pendingActionsManager: pendingActionsManager
+            pendingActionsManager: pendingActionsManager,
+            rollupMutationSerializer: rollupMutationSerializer
         )
         context = coreDataStack.viewContext
     }
@@ -25,6 +28,7 @@ final class MessageActionsTests: XCTestCase {
     override func tearDown() {
         context = nil
         messageActions = nil
+        rollupMutationSerializer = nil
         pendingActionsManager = nil
         coreDataStack = nil
         super.tearDown()
@@ -250,6 +254,88 @@ final class MessageActionsTests: XCTestCase {
         XCTAssertEqual(queuedActions.count, 2)
     }
 
+    func testReadBatchWaitsForInFlightSyncRollupAndWinsFinalCount() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .withUnreadCount(1)
+            .build(in: context)
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
+        let message = MessageBuilder()
+            .withId("read-during-sync-rollup")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        message.addToLabels(inboxLabel)
+        try coreDataStack.saveViewContext()
+
+        let conversationObjectID = conversation.objectID
+        let messageObjectID = message.objectID
+        let conversationKey = conversationObjectID.uriRepresentation().absoluteString
+        let syncContext = coreDataStack.newBackgroundContext()
+        await syncContext.perform {
+            let staleConversation = try? syncContext.existingObject(
+                with: conversationObjectID
+            ) as? Conversation
+            let staleMessage = try? syncContext.existingObject(with: messageObjectID) as? Message
+            _ = staleConversation?.inboxUnreadCount
+            _ = staleMessage?.isUnread
+        }
+
+        let syncStarted = RollupTestGate()
+        let syncCanSave = RollupTestGate()
+        let syncTask = Task {
+            await rollupMutationSerializer.perform(conversationKeys: [conversationKey]) {
+                await syncContext.perform {
+                    syncContext.refreshAllObjects()
+                    _ = (try? syncContext.existingObject(with: messageObjectID) as? Message)?.isUnread
+                }
+                await syncStarted.open()
+                await syncCanSave.wait()
+                await syncContext.perform {
+                    guard let staleConversation = try? syncContext.existingObject(
+                        with: conversationObjectID
+                    ) as? Conversation,
+                          let staleMessage = try? syncContext.existingObject(
+                            with: messageObjectID
+                          ) as? Message else {
+                        return
+                    }
+                    staleConversation.inboxUnreadCount = staleMessage.isUnread ? 1 : 0
+                    try? syncContext.save()
+                }
+            }
+        }
+
+        await syncStarted.wait()
+        let readTask = Task {
+            await messageActions.markMessagesAsReadBatch(
+                messageIDs: [messageObjectID],
+                conversationID: conversationObjectID
+            )
+        }
+
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        let pendingCountBeforeSyncSave = await pendingActionsManager.pendingActionCount()
+        XCTAssertEqual(pendingCountBeforeSyncSave, 0)
+
+        await syncCanSave.open()
+        await syncTask.value
+        await readTask.value
+
+        let verificationContext = coreDataStack.newBackgroundContext()
+        let durableState = await verificationContext.perform {
+            let durableConversation = try? verificationContext.existingObject(
+                with: conversationObjectID
+            ) as? Conversation
+            let durableMessage = try? verificationContext.existingObject(
+                with: messageObjectID
+            ) as? Message
+            return (durableMessage?.isUnread, durableConversation?.inboxUnreadCount)
+        }
+        XCTAssertEqual(durableState.0, false)
+        XCTAssertEqual(durableState.1, 0)
+    }
+
     func testMarkConversationAsRead_usesBatchUpdateAndSinglePendingAction() async throws {
         let conversation = ConversationBuilder()
             .visible()
@@ -415,6 +501,26 @@ final class MessageActionsTests: XCTestCase {
         }
 
         XCTFail("Timed out waiting for condition", file: file, line: line)
+    }
+}
+
+private actor RollupTestGate {
+    private var isOpen = false
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        let pendingContinuations = continuations
+        continuations.removeAll()
+        pendingContinuations.forEach { $0.resume() }
     }
 }
 

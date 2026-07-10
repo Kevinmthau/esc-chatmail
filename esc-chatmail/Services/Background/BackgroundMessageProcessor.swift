@@ -44,6 +44,7 @@ final class BackgroundMessageProcessor {
     private let saveContext: @Sendable (NSManagedObjectContext) -> Bool
     private let apiClientProvider: @MainActor @Sendable () -> GmailAPIClientProtocol
     private let syncCoordinatorProvider: @MainActor @Sendable () -> BackgroundSyncMessageCoordinating
+    private let rollupMutationSerializer: ConversationRollupMutationSerializer
 
     @MainActor private var apiClient: GmailAPIClientProtocol {
         apiClientProvider()
@@ -56,12 +57,14 @@ final class BackgroundMessageProcessor {
     init(
         coreDataStack: CoreDataStack = .shared,
         apiClient: GmailAPIClientProtocol? = nil,
-        syncCoordinator: BackgroundSyncMessageCoordinating? = nil
+        syncCoordinator: BackgroundSyncMessageCoordinating? = nil,
+        rollupMutationSerializer: ConversationRollupMutationSerializer = .shared
     ) {
         self.makeBackgroundContext = { coreDataStack.newBackgroundContext() }
         self.saveContext = { coreDataStack.saveIfNeeded(context: $0) }
         self.apiClientProvider = { apiClient ?? GmailAPIClient.shared }
         self.syncCoordinatorProvider = { syncCoordinator ?? SyncEngine.shared }
+        self.rollupMutationSerializer = rollupMutationSerializer
     }
 
     init(
@@ -69,24 +72,28 @@ final class BackgroundMessageProcessor {
         apiClientProvider: @escaping @MainActor @Sendable () -> GmailAPIClientProtocol,
         syncCoordinatorProvider: @escaping @MainActor @Sendable () -> BackgroundSyncMessageCoordinating = {
             SyncEngine.shared
-        }
+        },
+        rollupMutationSerializer: ConversationRollupMutationSerializer = .shared
     ) {
         self.makeBackgroundContext = { coreDataStack.newBackgroundContext() }
         self.saveContext = { coreDataStack.saveIfNeeded(context: $0) }
         self.apiClientProvider = apiClientProvider
         self.syncCoordinatorProvider = syncCoordinatorProvider
+        self.rollupMutationSerializer = rollupMutationSerializer
     }
 
     init(
         makeBackgroundContext: @escaping @Sendable () -> NSManagedObjectContext,
         saveContext: @escaping @Sendable (NSManagedObjectContext) -> Bool,
         apiClient: GmailAPIClientProtocol,
-        syncCoordinator: BackgroundSyncMessageCoordinating
+        syncCoordinator: BackgroundSyncMessageCoordinating,
+        rollupMutationSerializer: ConversationRollupMutationSerializer = .shared
     ) {
         self.makeBackgroundContext = makeBackgroundContext
         self.saveContext = saveContext
         self.apiClientProvider = { apiClient }
         self.syncCoordinatorProvider = { syncCoordinator }
+        self.rollupMutationSerializer = rollupMutationSerializer
     }
 
     /// Processes history changes and categorizes them
@@ -144,17 +151,13 @@ final class BackgroundMessageProcessor {
                 .displayNameOnlyConversations(in: modificationTransaction)
             let modifiedConversationIDs = await ModificationTracker.shared.commitTransaction(modificationTransaction)
             let displayNameOnlyConversationIDs = trackedDisplayNameOnlyConversationIDs.subtracting(modifiedConversationIDs)
-            await syncCoordinator.updateConversationRollups(
+            let savedRollups = await refreshUpdateAndSaveRollups(
                 conversationIDs: modifiedConversationIDs,
-                in: context
+                displayNameOnlyConversationIDs: displayNameOnlyConversationIDs,
+                in: context,
+                using: syncCoordinator
             )
-            if !displayNameOnlyConversationIDs.isEmpty {
-                await syncCoordinator.updateConversationDisplayNames(
-                    conversationIDs: displayNameOnlyConversationIDs,
-                    in: context
-                )
-            }
-            if saveContext(context) {
+            if savedRollups {
                 await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
             } else {
                 Log.error("Background history processing failed to save rollup updates", category: .background)
@@ -289,17 +292,13 @@ final class BackgroundMessageProcessor {
                 .displayNameOnlyConversations(in: ownedTransaction!)
             let modifiedConversationIDs = await ModificationTracker.shared.commitTransaction(ownedTransaction!)
             let displayNameOnlyConversationIDs = trackedDisplayNameOnlyConversationIDs.subtracting(modifiedConversationIDs)
-            await syncCoordinator.updateConversationRollups(
+            let savedRollups = await refreshUpdateAndSaveRollups(
                 conversationIDs: modifiedConversationIDs,
-                in: context
+                displayNameOnlyConversationIDs: displayNameOnlyConversationIDs,
+                in: context,
+                using: syncCoordinator
             )
-            if !displayNameOnlyConversationIDs.isEmpty {
-                await syncCoordinator.updateConversationDisplayNames(
-                    conversationIDs: displayNameOnlyConversationIDs,
-                    in: context
-                )
-            }
-            if saveContext(context) {
+            if savedRollups {
                 await ModificationTracker.shared.consumeCommittedTransaction(ownedTransaction!)
             } else {
                 Log.error("Background message fetch failed to save rollup updates", category: .background)
@@ -314,6 +313,39 @@ final class BackgroundMessageProcessor {
             fetchedCount: successCount,
             failedFetchCount: failedCount
         )
+    }
+
+    private func refreshUpdateAndSaveRollups(
+        conversationIDs: Set<NSManagedObjectID>,
+        displayNameOnlyConversationIDs: Set<NSManagedObjectID>,
+        in context: NSManagedObjectContext,
+        using syncCoordinator: BackgroundSyncMessageCoordinating
+    ) async -> Bool {
+        let conversationKeys = Set(
+            conversationIDs
+                .union(displayNameOnlyConversationIDs)
+                .map { $0.uriRepresentation().absoluteString }
+        )
+
+        return await rollupMutationSerializer.perform(conversationKeys: conversationKeys) {
+            await context.perform {
+                // The message save that precedes rollups can merge a concurrent
+                // read transaction into the store while this context still has
+                // stale registered objects. Refault before deriving rollups.
+                context.refreshAllObjects()
+            }
+            await syncCoordinator.updateConversationRollups(
+                conversationIDs: conversationIDs,
+                in: context
+            )
+            if !displayNameOnlyConversationIDs.isEmpty {
+                await syncCoordinator.updateConversationDisplayNames(
+                    conversationIDs: displayNameOnlyConversationIDs,
+                    in: context
+                )
+            }
+            return self.saveContext(context)
+        }
     }
 
     /// Deletes messages from Core Data

@@ -16,6 +16,7 @@ struct VirtualScrollInsertedMessageEvent: Equatable {
 
 struct VirtualScrollInsertedMessageRefresh: Equatable {
     let eventID: UUID
+    let layoutID: UUID
     let messageIDsInLatestWindow: [NSManagedObjectID]
 }
 
@@ -39,6 +40,7 @@ final class VirtualScrollState: ObservableObject {
     @Published var isLoadingMore = false
     @Published private(set) var isInitialLoadComplete = false
     @Published var placeholderIndices: Set<Int> = []
+    @Published private(set) var latestWindowLayoutID = UUID()
 
     let insertedVisibleMessageEvents = PassthroughSubject<VirtualScrollInsertedMessageEvent, Never>()
     let refreshedInsertedMessageEvents = PassthroughSubject<VirtualScrollInsertedMessageRefresh, Never>()
@@ -742,11 +744,14 @@ final class VirtualScrollState: ObservableObject {
 
         let events = pendingInsertedMessageEvents
         pendingInsertedMessageEvents.removeAll()
+        let layoutID = UUID()
+        latestWindowLayoutID = layoutID
 
         for event in events {
             refreshedInsertedMessageEvents.send(
                 VirtualScrollInsertedMessageRefresh(
                     eventID: event.id,
+                    layoutID: layoutID,
                     messageIDsInLatestWindow: event.messageIDs.filter {
                         latestWindowMessageIDs.contains($0)
                     }

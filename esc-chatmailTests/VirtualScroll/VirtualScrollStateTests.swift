@@ -620,6 +620,7 @@ final class VirtualScrollStateTests: XCTestCase {
         await waitUntil {
             insertedEvents.last?.messageIDs == [pendingMessage.objectID] &&
                 refreshedEvents.last?.eventID == insertedEvents.last?.id &&
+                refreshedEvents.last?.layoutID == state.latestWindowLayoutID &&
                 refreshedEvents.last?.messageIDsInLatestWindow == [pendingMessage.objectID] &&
                 state.visibleMessages.map(\.objectID) == expectedIDs &&
                 state.totalMessageCount == 9 &&
@@ -667,6 +668,7 @@ final class VirtualScrollStateTests: XCTestCase {
         await waitUntil {
             insertedEvents.last?.messageIDs == [insertedMessage.objectID] &&
                 refreshedEvents.last?.eventID == insertedEvents.last?.id &&
+                refreshedEvents.last?.layoutID == state.latestWindowLayoutID &&
                 refreshedEvents.last?.messageIDsInLatestWindow == [insertedMessage.objectID]
         }
     }
@@ -716,6 +718,7 @@ final class VirtualScrollStateTests: XCTestCase {
         }
 
         XCTAssertEqual(Set(refreshedEvents.map(\.eventID)), Set(insertedEvents.map(\.id)))
+        XCTAssertEqual(Set(refreshedEvents.map(\.layoutID)), [state.latestWindowLayoutID])
         XCTAssertEqual(
             refreshedEvents.map(\.messageIDsInLatestWindow),
             [[firstMessage.objectID], [secondMessage.objectID]]

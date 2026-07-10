@@ -24,15 +24,16 @@ final class MessageActions: ObservableObject {
     private let coreDataStack: any MessageActionsCoreDataStacking
     private let pendingActionsManager: any PendingActionsManagerProtocol
     private let unreadInboxMessageCounter: UnreadInboxMessageCounter
-    private var readBatchTask: Task<Void, Never>?
-    private var readBatchTaskID: UUID?
+    private let rollupMutationSerializer: ConversationRollupMutationSerializer
 
     init(
         coreDataStack: any MessageActionsCoreDataStacking,
-        pendingActionsManager: any PendingActionsManagerProtocol
+        pendingActionsManager: any PendingActionsManagerProtocol,
+        rollupMutationSerializer: ConversationRollupMutationSerializer = .shared
     ) {
         self.coreDataStack = coreDataStack
         self.pendingActionsManager = pendingActionsManager
+        self.rollupMutationSerializer = rollupMutationSerializer
         self.unreadInboxMessageCounter = { context, conversation in
             try Self.countUnreadInboxMessages(in: context, conversation: conversation)
         }
@@ -41,11 +42,13 @@ final class MessageActions: ObservableObject {
     init(
         coreDataStack: any MessageActionsCoreDataStacking,
         pendingActionsManager: any PendingActionsManagerProtocol,
-        unreadInboxMessageCounter: @escaping UnreadInboxMessageCounter
+        unreadInboxMessageCounter: @escaping UnreadInboxMessageCounter,
+        rollupMutationSerializer: ConversationRollupMutationSerializer = .shared
     ) {
         self.coreDataStack = coreDataStack
         self.pendingActionsManager = pendingActionsManager
         self.unreadInboxMessageCounter = unreadInboxMessageCounter
+        self.rollupMutationSerializer = rollupMutationSerializer
     }
 
     // MARK: - Mark Read/Unread
@@ -174,24 +177,12 @@ final class MessageActions: ObservableObject {
     /// Batch mark messages as read - prevents race condition with new messages
     /// Uses a single transaction to ensure atomic update of conversation unread count
     func markMessagesAsReadBatch(messageIDs: [NSManagedObjectID], conversationID: NSManagedObjectID) async {
-        let previousTask = readBatchTask
-        let taskID = UUID()
-        let task = Task { [weak self] in
-            await previousTask?.value
-            guard let self else { return }
-            await self.performMarkMessagesAsReadBatch(
+        let conversationKey = conversationID.uriRepresentation().absoluteString
+        await rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
+            await self?.performMarkMessagesAsReadBatch(
                 messageIDs: messageIDs,
                 conversationID: conversationID
             )
-        }
-        readBatchTask = task
-        readBatchTaskID = taskID
-
-        await task.value
-
-        if readBatchTaskID == taskID {
-            readBatchTask = nil
-            readBatchTaskID = nil
         }
     }
 

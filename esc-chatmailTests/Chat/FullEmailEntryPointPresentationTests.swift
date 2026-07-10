@@ -42,6 +42,29 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
         XCTAssertFalse(labels.contains("_messageToViewInFull"))
     }
 
+    func testChatVisibilityRemainsCoveredUntilPresentedSheetFinishesDismissing() {
+        XCTAssertFalse(
+            ChatView.isChatActiveAndUncovered(
+                sceneIsActive: true,
+                hasDesiredDestination: false,
+                hasPresentedSheet: true,
+                hasContactAccessPicker: false,
+                hasContactActionAlert: false,
+                hasSendErrorAlert: false
+            )
+        )
+        XCTAssertTrue(
+            ChatView.isChatActiveAndUncovered(
+                sceneIsActive: true,
+                hasDesiredDestination: false,
+                hasPresentedSheet: false,
+                hasContactAccessPicker: false,
+                hasContactActionAlert: false,
+                hasSendErrorAlert: false
+            )
+        )
+    }
+
     private func storedPropertyLabels<T>(of value: T) -> Set<String> {
         Set(Mirror(reflecting: value).children.compactMap(\.label))
     }

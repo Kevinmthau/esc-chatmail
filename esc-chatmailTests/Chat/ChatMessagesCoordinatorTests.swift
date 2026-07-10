@@ -257,11 +257,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             isShowingLatestWindow: true,
             isBottomAnchorVisible: true
         )
-        coordinator.handleRefreshedInsertedMessageEvent(
-            .init(eventID: event.id, messageIDsInLatestWindow: [arrivalID]),
-            isChatActiveAndUncovered: true,
-            isShowingLatestWindow: true,
-            isBottomAnchorVisible: true
+        handleRefreshAndLayout(
+            coordinator,
+            event: event,
+            messageIDsInLatestWindow: [arrivalID]
         )
         handleEmptyAppear(coordinator)
 
@@ -287,8 +286,20 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
         XCTAssertTrue(markedArrivalIDs.isEmpty)
 
+        let layoutID = UUID()
         coordinator.handleRefreshedInsertedMessageEvent(
-            .init(eventID: event.id, messageIDsInLatestWindow: [arrivalID]),
+            .init(
+                eventID: event.id,
+                layoutID: layoutID,
+                messageIDsInLatestWindow: [arrivalID]
+            ),
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true
+        )
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+
+        coordinator.handleLatestWindowLayout(
+            layoutID: layoutID,
             isChatActiveAndUncovered: true,
             isShowingLatestWindow: true,
             isBottomAnchorVisible: true
@@ -313,11 +324,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             isShowingLatestWindow: true,
             isBottomAnchorVisible: false
         )
-        coordinator.handleRefreshedInsertedMessageEvent(
-            .init(eventID: event.id, messageIDsInLatestWindow: [arrivalID]),
-            isChatActiveAndUncovered: true,
-            isShowingLatestWindow: true,
-            isBottomAnchorVisible: true
+        handleRefreshAndLayout(
+            coordinator,
+            event: event,
+            messageIDsInLatestWindow: [arrivalID]
         )
 
         XCTAssertTrue(markedArrivalIDs.isEmpty)
@@ -346,11 +356,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             isShowingLatestWindow: true,
             isBottomAnchorVisible: true
         )
-        coordinator.handleRefreshedInsertedMessageEvent(
-            .init(eventID: event.id, messageIDsInLatestWindow: [arrivalID]),
-            isChatActiveAndUncovered: true,
-            isShowingLatestWindow: true,
-            isBottomAnchorVisible: true
+        handleRefreshAndLayout(
+            coordinator,
+            event: event,
+            messageIDsInLatestWindow: [arrivalID]
         )
 
         XCTAssertFalse(coordinator.isReadyToShow)
@@ -373,11 +382,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             isShowingLatestWindow: true,
             isBottomAnchorVisible: true
         )
-        coordinator.handleRefreshedInsertedMessageEvent(
-            .init(eventID: event.id, messageIDsInLatestWindow: [arrivalID]),
-            isChatActiveAndUncovered: true,
-            isShowingLatestWindow: true,
-            isBottomAnchorVisible: true
+        handleRefreshAndLayout(
+            coordinator,
+            event: event,
+            messageIDsInLatestWindow: [arrivalID]
         )
 
         XCTAssertTrue(markedArrivalIDs.isEmpty)
@@ -401,11 +409,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             isShowingLatestWindow: true,
             isBottomAnchorVisible: true
         )
-        coordinator.handleRefreshedInsertedMessageEvent(
-            .init(eventID: event.id, messageIDsInLatestWindow: []),
-            isChatActiveAndUncovered: true,
-            isShowingLatestWindow: true,
-            isBottomAnchorVisible: true
+        handleRefreshAndLayout(
+            coordinator,
+            event: event,
+            messageIDsInLatestWindow: []
         )
 
         XCTAssertTrue(markedArrivalIDs.isEmpty)
@@ -427,8 +434,83 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             isShowingLatestWindow: true,
             isBottomAnchorVisible: true
         )
+        handleRefreshAndLayout(
+            coordinator,
+            event: event,
+            messageIDsInLatestWindow: [arrivalID],
+            isChatActiveAtRefresh: false
+        )
+
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+    }
+
+    func testArrivalThatPushesBottomAnchorOffscreenAfterRefreshDoesNotMarkUnreadAsRead() {
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        let arrivalID = makeMessageObjectID("offscreen-after-layout")
+        let event = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [arrivalID])
+        let layoutID = UUID()
+        handleEmptyAppear(coordinator)
+
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
         coordinator.handleRefreshedInsertedMessageEvent(
-            .init(eventID: event.id, messageIDsInLatestWindow: [arrivalID]),
+            .init(
+                eventID: event.id,
+                layoutID: layoutID,
+                messageIDsInLatestWindow: [arrivalID]
+            ),
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true
+        )
+
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+
+        coordinator.handleLatestWindowLayout(
+            layoutID: layoutID,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: false
+        )
+
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+    }
+
+    func testArrivalThatBecomesCoveredBeforeLayoutDoesNotMarkUnreadAsRead() {
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        let arrivalID = makeMessageObjectID("covered-before-layout")
+        let event = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [arrivalID])
+        let layoutID = UUID()
+        handleEmptyAppear(coordinator)
+
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+        coordinator.handleRefreshedInsertedMessageEvent(
+            .init(
+                eventID: event.id,
+                layoutID: layoutID,
+                messageIDsInLatestWindow: [arrivalID]
+            ),
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true
+        )
+        coordinator.handleLatestWindowLayout(
+            layoutID: layoutID,
             isChatActiveAndUncovered: false,
             isShowingLatestWindow: true,
             isBottomAnchorVisible: true
@@ -457,16 +539,26 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
                 isBottomAnchorVisible: true
             )
         }
+        let layoutID = UUID()
         for event in [firstEvent, secondEvent] {
             coordinator.handleRefreshedInsertedMessageEvent(
-                .init(eventID: event.id, messageIDsInLatestWindow: event.messageIDs),
+                .init(
+                    eventID: event.id,
+                    layoutID: layoutID,
+                    messageIDsInLatestWindow: event.messageIDs
+                ),
                 isChatActiveAndUncovered: true,
-                isShowingLatestWindow: true,
-                isBottomAnchorVisible: true
+                isShowingLatestWindow: true
             )
         }
+        coordinator.handleLatestWindowLayout(
+            layoutID: layoutID,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
 
-        XCTAssertEqual(markedArrivalIDs, [[firstID], [secondID]])
+        XCTAssertEqual(markedArrivalIDs, [[firstID, secondID]])
     }
 
     func testHandleDisplayedMessagesChange_prefetchesTrailingVisibleWindow() async throws {
@@ -1595,6 +1687,32 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             totalMessageCount: 0,
             isInitialWindowLoaded: true
         ) { _ in }
+    }
+
+    private func handleRefreshAndLayout(
+        _ coordinator: ChatMessagesCoordinator,
+        event: VirtualScrollInsertedMessageEvent,
+        messageIDsInLatestWindow: [NSManagedObjectID],
+        isChatActiveAtRefresh: Bool = true,
+        isChatActiveAtLayout: Bool = true,
+        isBottomAnchorVisible: Bool = true
+    ) {
+        let layoutID = UUID()
+        coordinator.handleRefreshedInsertedMessageEvent(
+            .init(
+                eventID: event.id,
+                layoutID: layoutID,
+                messageIDsInLatestWindow: messageIDsInLatestWindow
+            ),
+            isChatActiveAndUncovered: isChatActiveAtRefresh,
+            isShowingLatestWindow: true
+        )
+        coordinator.handleLatestWindowLayout(
+            layoutID: layoutID,
+            isChatActiveAndUncovered: isChatActiveAtLayout,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: isBottomAnchorVisible
+        )
     }
 
     private func waitUntil(

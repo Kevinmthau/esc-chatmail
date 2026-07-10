@@ -95,8 +95,7 @@ struct ChatMessagesView: View {
                 coordinator.handleRefreshedInsertedMessageEvent(
                     refresh,
                     isChatActiveAndUncovered: isChatActiveAndUncovered,
-                    isShowingLatestWindow: scrollState.isShowingLatestWindow,
-                    isBottomAnchorVisible: isBottomAnchorVisible
+                    isShowingLatestWindow: scrollState.isShowingLatestWindow
                 )
             }
             .onChange(of: scrollState.totalMessageCount) { oldCount, newCount in
@@ -187,8 +186,13 @@ struct ChatMessagesView: View {
             GeometryReader { proxy in
                 let frame = anchor.map { proxy[$0] } ?? .null
                 Color.clear
+                    .id(scrollState.latestWindowLayoutID)
                     .onAppear {
-                        updateBottomAnchorVisibility(frame: frame, viewportSize: proxy.size)
+                        handleLatestWindowLayout(
+                            frame: frame,
+                            viewportSize: proxy.size,
+                            layoutID: scrollState.latestWindowLayoutID
+                        )
                     }
                     .onChange(of: frame) { _, newFrame in
                         updateBottomAnchorVisibility(frame: newFrame, viewportSize: proxy.size)
@@ -306,10 +310,31 @@ struct ChatMessagesView: View {
     }
 
     private func updateBottomAnchorVisibility(frame: CGRect, viewportSize: CGSize) {
-        let viewport = CGRect(origin: .zero, size: viewportSize)
-        let isVisible = !frame.isNull && !frame.isEmpty && viewport.intersects(frame)
+        let isVisible = isBottomAnchorVisible(frame: frame, viewportSize: viewportSize)
         guard isBottomAnchorVisible != isVisible else { return }
         isBottomAnchorVisible = isVisible
+    }
+
+    private func handleLatestWindowLayout(
+        frame: CGRect,
+        viewportSize: CGSize,
+        layoutID: UUID
+    ) {
+        let isVisible = isBottomAnchorVisible(frame: frame, viewportSize: viewportSize)
+        if isBottomAnchorVisible != isVisible {
+            isBottomAnchorVisible = isVisible
+        }
+        coordinator.handleLatestWindowLayout(
+            layoutID: layoutID,
+            isChatActiveAndUncovered: isChatActiveAndUncovered,
+            isShowingLatestWindow: scrollState.isShowingLatestWindow,
+            isBottomAnchorVisible: isVisible
+        )
+    }
+
+    private func isBottomAnchorVisible(frame: CGRect, viewportSize: CGSize) -> Bool {
+        let viewport = CGRect(origin: .zero, size: viewportSize)
+        return !frame.isNull && !frame.isEmpty && viewport.intersects(frame)
     }
 
     private var currentBottomSafeAreaInset: CGFloat {
