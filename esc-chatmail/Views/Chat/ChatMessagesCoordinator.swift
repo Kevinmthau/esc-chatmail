@@ -42,6 +42,8 @@ final class ChatMessagesCoordinator: ObservableObject {
     private let taskManager = ViewModelTaskManager()
     private var hasStartedInitialAnchor = false
     private var initialAnchorWasForEmptyConversation = false
+    private var hasCapturedInitialUnreadSnapshot = false
+    private var isVisible = false
 
     init(
         scrollState: VirtualScrollState,
@@ -115,7 +117,11 @@ final class ChatMessagesCoordinator: ObservableObject {
         isInitialWindowLoaded: Bool,
         scrollAction: @escaping BottomAnchorAction
     ) {
-        markConversationAsReadIfNeeded()
+        isVisible = true
+        if !hasCapturedInitialUnreadSnapshot {
+            hasCapturedInitialUnreadSnapshot = true
+            markConversationAsReadIfNeeded()
+        }
         initializeReplyingTo(lastMessage)
 
         startInitialAnchorIfPossible(
@@ -158,6 +164,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     }
 
     func handleDisappear() {
+        isVisible = false
         taskManager.cancelAll()
         cancelPrefetch()
         if !isReadyToShow {
@@ -202,6 +209,14 @@ final class ChatMessagesCoordinator: ObservableObject {
         isShowingLatestWindow: Bool,
         scrollAction: @escaping BottomAnchorAction
     ) {
+        if isReadyToShow,
+           isVisible,
+           isInitialWindowLoaded,
+           isShowingLatestWindow,
+           newCount > oldCount {
+            markConversationAsReadIfNeeded()
+        }
+
         if oldCount == 0 && newCount > 0 {
             updateReplyingToIfNewSubject(lastMessage)
             if hasStartedInitialAnchor && !initialAnchorWasForEmptyConversation {

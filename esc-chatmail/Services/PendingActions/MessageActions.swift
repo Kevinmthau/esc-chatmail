@@ -19,8 +19,11 @@ extension CoreDataStack: MessageActionsCoreDataStacking {}
 
 @MainActor
 final class MessageActions: ObservableObject {
+    typealias UnreadInboxMessageCounter = @Sendable (NSManagedObjectContext, Conversation) throws -> Int
+
     private let coreDataStack: any MessageActionsCoreDataStacking
     private let pendingActionsManager: any PendingActionsManagerProtocol
+    private let unreadInboxMessageCounter: UnreadInboxMessageCounter
 
     init(
         coreDataStack: any MessageActionsCoreDataStacking,
@@ -28,6 +31,19 @@ final class MessageActions: ObservableObject {
     ) {
         self.coreDataStack = coreDataStack
         self.pendingActionsManager = pendingActionsManager
+        self.unreadInboxMessageCounter = { context, conversation in
+            try Self.countUnreadInboxMessages(in: context, conversation: conversation)
+        }
+    }
+
+    init(
+        coreDataStack: any MessageActionsCoreDataStacking,
+        pendingActionsManager: any PendingActionsManagerProtocol,
+        unreadInboxMessageCounter: @escaping UnreadInboxMessageCounter
+    ) {
+        self.coreDataStack = coreDataStack
+        self.pendingActionsManager = pendingActionsManager
+        self.unreadInboxMessageCounter = unreadInboxMessageCounter
     }
 
     // MARK: - Mark Read/Unread
@@ -46,10 +62,6 @@ final class MessageActions: ObservableObject {
 
         if let latestInboxMessage = inboxMessages.first { // Already sorted by internalDate descending
             await markAsUnread(message: latestInboxMessage)
-        } else if let messages = conversation.messages,
-                  let latestMessage = messages.max(by: { $0.internalDate < $1.internalDate }) {
-            // Fallback to latest message if no INBOX messages
-            await markAsUnread(message: latestMessage)
         }
     }
 
@@ -66,12 +78,12 @@ final class MessageActions: ObservableObject {
 
     /// Snapshots the unread message IDs that should be cleared when a chat opens.
     /// Capturing these IDs on the main context avoids racing newer arrivals.
-    func snapshotUnreadConversationMessageObjectIDs(conversationID: UUID) -> [NSManagedObjectID] {
+    func snapshotUnreadInboxMessageObjectIDs(conversationID: UUID) -> [NSManagedObjectID] {
         let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
         request.predicate = NSPredicate(
-            format: "conversation.id == %@ AND isUnread == YES AND NONE labels.id IN %@",
+            format: "conversation.id == %@ AND isUnread == YES AND ANY labels.id == %@",
             conversationID as CVarArg,
-            ["DRAFT", "SPAM", "TRASH"]
+            "INBOX"
         )
         request.fetchBatchSize = 50
         request.includesPendingChanges = false
@@ -141,6 +153,7 @@ final class MessageActions: ObservableObject {
     /// Uses a single transaction to ensure atomic update of conversation unread count
     func markMessagesAsReadBatch(messageIDs: [NSManagedObjectID], conversationID: NSManagedObjectID) async {
         let context = coreDataStack.newBackgroundContext()
+        let unreadInboxMessageCounter = self.unreadInboxMessageCounter
 
         let batchResult: (messageIds: [String], sourceConversationId: UUID?) = await context.perform {
             var markedIds: [String] = []
@@ -160,16 +173,24 @@ final class MessageActions: ObservableObject {
                 }
             }
 
-            // Update conversation unread count atomically
-            if let conv = try? context.existingObject(with: conversationID) as? Conversation {
-                sourceConversationId = sourceConversationId ?? conv.id
-                let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
-                countRequest.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
-                    NSPredicate(format: "conversation == %@", conv),
-                    NSPredicate(format: "ANY labels.id == %@", "INBOX"),
-                    NSPredicate(format: "isUnread == YES")
-                ])
-                conv.inboxUnreadCount = Int32((try? context.count(for: countRequest)) ?? 0)
+            guard let conversation = try? context.existingObject(with: conversationID) as? Conversation else {
+                context.rollback()
+                return ([], sourceConversationId)
+            }
+            sourceConversationId = sourceConversationId ?? conversation.id
+
+            do {
+                conversation.inboxUnreadCount = Int32(
+                    try unreadInboxMessageCounter(context, conversation)
+                )
+            } catch {
+                context.rollback()
+                Log.error(
+                    "Aborting batch mark as read because the unread INBOX count failed",
+                    category: .coreData,
+                    error: error
+                )
+                return ([], sourceConversationId)
             }
 
             // Don't sync to Gmail if the local batch update didn't persist.
@@ -501,6 +522,19 @@ final class MessageActions: ObservableObject {
         conversation.latestInboxDate = inboxMessages.first?.internalDate // Already sorted descending
 
         coreDataStack.saveIfNeeded(context: context)
+    }
+
+    nonisolated private static func countUnreadInboxMessages(
+        in context: NSManagedObjectContext,
+        conversation: Conversation
+    ) throws -> Int {
+        let request = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
+        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            NSPredicate(format: "conversation == %@", conversation),
+            NSPredicate(format: "ANY labels.id == %@", "INBOX"),
+            NSPredicate(format: "isUnread == YES")
+        ])
+        return try context.count(for: request)
     }
 
     private func fetchLabel(id: String, in context: NSManagedObjectContext, operation: String) -> Label? {

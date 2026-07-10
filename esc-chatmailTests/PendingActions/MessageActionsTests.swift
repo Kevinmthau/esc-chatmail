@@ -121,9 +121,14 @@ final class MessageActionsTests: XCTestCase {
             .build(in: context)
         let draftLabel = LabelBuilder().draft().build(in: context)
         excludedMessage.addToLabels(draftLabel)
-        try coreDataStack.saveViewContext()
 
-        let messageIDs = messageActions.snapshotUnreadConversationMessageObjectIDs(
+        let nonInboxMessage = MessageBuilder()
+            .withId("sent-message")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        try coreDataStack.saveViewContext()
+        let messageIDs = messageActions.snapshotUnreadInboxMessageObjectIDs(
             conversationID: conversation.id
         )
 
@@ -136,6 +141,7 @@ final class MessageActionsTests: XCTestCase {
             self.context.refreshAllObjects()
             return !includedMessage.isUnread &&
                 excludedMessage.isUnread &&
+                nonInboxMessage.isUnread &&
                 conversation.inboxUnreadCount == 0
         }
 
@@ -163,7 +169,7 @@ final class MessageActionsTests: XCTestCase {
         initialMessage.addToLabels(inboxLabel)
         try coreDataStack.saveViewContext()
 
-        let messageIDsAtOpen = messageActions.snapshotUnreadConversationMessageObjectIDs(
+        let messageIDsAtOpen = messageActions.snapshotUnreadInboxMessageObjectIDs(
             conversationID: conversation.id
         )
 
@@ -246,6 +252,63 @@ final class MessageActionsTests: XCTestCase {
         )
     }
 
+    func testMarkConversationAsUnread_doesNotFallBackToNonInboxMessage() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .withUnreadCount(0)
+            .build(in: context)
+        let nonInboxMessage = MessageBuilder()
+            .withId("sent-message")
+            .read()
+            .inConversation(conversation)
+            .build(in: context)
+        try coreDataStack.saveViewContext()
+
+        await messageActions.markConversationAsUnread(conversation: conversation)
+
+        XCTAssertFalse(nonInboxMessage.isUnread)
+        XCTAssertEqual(conversation.inboxUnreadCount, 0)
+        let queuedActions = await pendingActionsManager.queuedSingleActions
+        XCTAssertTrue(queuedActions.isEmpty)
+    }
+
+    func testMarkMessagesAsReadBatch_rollsBackWhenUnreadInboxCountFails() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .withUnreadCount(1)
+            .build(in: context)
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
+        let message = MessageBuilder()
+            .withId("message-to-keep-unread")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        message.addToLabels(inboxLabel)
+        try coreDataStack.saveViewContext()
+
+        let failingActions = MessageActions(
+            coreDataStack: coreDataStack,
+            pendingActionsManager: pendingActionsManager,
+            unreadInboxMessageCounter: { _, _ in
+                throw MessageActionsTestError.unreadCountFailed
+            }
+        )
+        let messageIDs = failingActions.snapshotUnreadInboxMessageObjectIDs(
+            conversationID: conversation.id
+        )
+
+        await failingActions.markMessagesAsReadBatch(
+            messageIDs: messageIDs,
+            conversationID: conversation.objectID
+        )
+
+        context.refreshAllObjects()
+        XCTAssertTrue(message.isUnread)
+        XCTAssertEqual(conversation.inboxUnreadCount, 1)
+        let queuedActions = await pendingActionsManager.queuedConversationActions
+        XCTAssertTrue(queuedActions.isEmpty)
+    }
+
     private func waitUntil(
         timeout: TimeInterval = 2.0,
         pollIntervalNanoseconds: UInt64 = 20_000_000,
@@ -264,6 +327,10 @@ final class MessageActionsTests: XCTestCase {
 
         XCTFail("Timed out waiting for condition", file: file, line: line)
     }
+}
+
+private enum MessageActionsTestError: Error {
+    case unreadCountFailed
 }
 
 /// Wraps a real test stack but reports every `saveIfNeeded` as failed, to exercise the

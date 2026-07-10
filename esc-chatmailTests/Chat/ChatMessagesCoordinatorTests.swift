@@ -239,6 +239,100 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
+    func testTransientReappearanceDoesNotRecaptureUnreadOrConsumeHiddenArrival() {
+        var markConversationAsReadCount = 0
+        let coordinator = makeUnreadCoordinator {
+            markConversationAsReadCount += 1
+        }
+
+        handleEmptyAppear(coordinator)
+        coordinator.handleDisappear()
+        coordinator.handleMessageCountChange(
+            oldCount: 1,
+            newCount: 2,
+            lastMessage: nil,
+            visibleMessages: [],
+            totalMessageCount: 2,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true
+        ) { _ in }
+        handleEmptyAppear(coordinator)
+
+        XCTAssertEqual(markConversationAsReadCount, 1)
+    }
+
+    func testArrivalAtLatestVisibleWindowAfterReadyMarksUnreadAsRead() {
+        var markConversationAsReadCount = 0
+        let coordinator = makeUnreadCoordinator {
+            markConversationAsReadCount += 1
+        }
+        handleEmptyAppear(coordinator)
+
+        coordinator.handleMessageCountChange(
+            oldCount: 1,
+            newCount: 2,
+            lastMessage: nil,
+            visibleMessages: [],
+            totalMessageCount: 2,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true
+        ) { _ in }
+
+        XCTAssertEqual(markConversationAsReadCount, 2)
+    }
+
+    func testArrivalWhileScrolledUpDoesNotMarkUnreadAsRead() {
+        var markConversationAsReadCount = 0
+        let coordinator = makeUnreadCoordinator {
+            markConversationAsReadCount += 1
+        }
+        handleEmptyAppear(coordinator)
+
+        coordinator.handleMessageCountChange(
+            oldCount: 1,
+            newCount: 2,
+            lastMessage: nil,
+            visibleMessages: [],
+            totalMessageCount: 2,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: false
+        ) { _ in }
+
+        XCTAssertEqual(markConversationAsReadCount, 1)
+    }
+
+    func testArrivalBeforeChatIsReadyDoesNotMarkUnreadAsRead() {
+        var markConversationAsReadCount = 0
+        let coordinator = makeUnreadCoordinator {
+            markConversationAsReadCount += 1
+        }
+        coordinator.handleAppear(
+            messageCount: 2,
+            lastMessage: nil,
+            visibleMessages: [],
+            senderGroupingMessages: [],
+            totalMessageCount: 2,
+            isInitialWindowLoaded: false
+        ) { _ in }
+
+        coordinator.handleMessageCountChange(
+            oldCount: 2,
+            newCount: 3,
+            lastMessage: nil,
+            visibleMessages: [],
+            totalMessageCount: 3,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: false,
+            isShowingLatestWindow: true
+        ) { _ in }
+
+        XCTAssertFalse(coordinator.isReadyToShow)
+        XCTAssertEqual(markConversationAsReadCount, 1)
+    }
+
     func testHandleDisplayedMessagesChange_prefetchesTrailingVisibleWindow() async throws {
         let senderEmails = (0..<35).map { index in
             "sender-\(index)@example.com"
@@ -1327,6 +1421,35 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
         try viewContext.save()
         return (conversation, messages)
+    }
+
+    private func makeUnreadCoordinator(
+        markConversationAsReadIfNeeded: @escaping () -> Void
+    ) -> ChatMessagesCoordinator {
+        ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { _ in },
+            markConversationAsReadIfNeeded: markConversationAsReadIfNeeded,
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+    }
+
+    private func handleEmptyAppear(_ coordinator: ChatMessagesCoordinator) {
+        coordinator.handleAppear(
+            messageCount: 0,
+            lastMessage: nil,
+            visibleMessages: [],
+            senderGroupingMessages: [],
+            totalMessageCount: 0,
+            isInitialWindowLoaded: true
+        ) { _ in }
     }
 
     private func waitUntil(

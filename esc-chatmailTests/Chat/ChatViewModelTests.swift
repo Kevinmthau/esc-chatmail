@@ -41,6 +41,92 @@ final class ChatViewModelTests: XCTestCase {
         return participant
     }
 
+    func testBackgroundReadLeavesLaterUnreadCountDurableForBlueDot() async throws {
+        let stack = TestCoreDataStack(automaticallyMergesChanges: true)
+        let context = stack.viewContext
+        let pendingActionsManager = MockPendingActionsManager()
+        let messageActions = MessageActions(
+            coreDataStack: stack,
+            pendingActionsManager: pendingActionsManager
+        )
+        let baseDependencies = makeDependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        ).makeChatDependencies()
+        let chatDependencies = ChatDependencies(
+            session: baseDependencies.session,
+            content: baseDependencies.content,
+            messaging: ChatMessagingDependencies(
+                messageActions: messageActions,
+                outboundMessageCoordinator: baseDependencies.messaging.outboundMessageCoordinator,
+                outboundAttachmentContextBuilder: baseDependencies.messaging.outboundAttachmentContextBuilder,
+                outboundReplyContextBuilder: baseDependencies.messaging.outboundReplyContextBuilder,
+                composeForwardModeContextBuilder: baseDependencies.messaging.composeForwardModeContextBuilder
+            ),
+            contacts: baseDependencies.contacts,
+            storage: ChatStorageDependencies(
+                viewContext: context,
+                makeBackgroundContext: { stack.newBackgroundContext() }
+            ),
+            fullEmailOpener: baseDependencies.fullEmailOpener
+        )
+
+        let conversation = ConversationBuilder()
+            .visible()
+            .withUnreadCount(1)
+            .build(in: context)
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
+        let initialMessage = MessageBuilder()
+            .withId("initial-unread")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        initialMessage.addToLabels(inboxLabel)
+        try stack.saveViewContext()
+
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: chatDependencies
+        )
+        let initialUnreadSnapshot = messageActions.snapshotUnreadInboxMessageObjectIDs(
+            conversationID: conversation.id
+        )
+
+        let laterMessage = MessageBuilder()
+            .withId("later-unread")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        laterMessage.addToLabels(inboxLabel)
+        conversation.inboxUnreadCount = 2
+        try stack.saveViewContext()
+
+        viewModel.markConversationAsRead(messageObjectIDs: initialUnreadSnapshot)
+        await waitUntil {
+            await pendingActionsManager.pendingActionCount() == 1
+        }
+
+        PendingActionBuilder()
+            .markAsRead()
+            .forMessage("pending-action-activity")
+            .build(in: context)
+        try stack.saveViewContext()
+
+        let verificationContext = stack.newBackgroundContext()
+        let conversationObjectID = conversation.objectID
+        let durableUnreadCount = await verificationContext.perform {
+            let durableConversation = try? verificationContext.existingObject(
+                with: conversationObjectID
+            ) as? Conversation
+            return durableConversation?.inboxUnreadCount
+        }
+        XCTAssertEqual(durableUnreadCount, 1)
+
+        context.refreshAllObjects()
+        XCTAssertFalse(initialMessage.isUnread)
+        XCTAssertTrue(laterMessage.isUnread)
+        XCTAssertEqual(ConversationSnapshot(from: conversation).inboxUnreadCount, 1)
+    }
+
     func testOpenEmailReaderFromBubbleAccessoryCreatesReaderRoute() throws {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let context = deps.viewContext
@@ -418,6 +504,25 @@ final class ChatViewModelTests: XCTestCase {
 
         XCTAssertFalse(didSend)
         XCTAssertEqual(viewModel.replyText, "Retryable reply")
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval = 2.0,
+        pollIntervalNanoseconds: UInt64 = 20_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping () async -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while Date() < deadline {
+            if await condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+
+        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 }
 
