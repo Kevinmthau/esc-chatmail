@@ -328,7 +328,6 @@ final class BackgroundMessageProcessor {
                 return false
             }
 
-            _ = await ModificationTracker.shared.commitTransaction(modificationTransaction)
             await context.perform {
                 // The message save that precedes rollups can merge a concurrent
                 // read transaction into the store while this context still has
@@ -345,7 +344,9 @@ final class BackgroundMessageProcessor {
                     in: context
                 )
             }
-            return self.saveContext(context)
+            guard self.saveContext(context) else { return false }
+            _ = await ModificationTracker.shared.commitTransaction(modificationTransaction)
+            return true
         }
     }
 
