@@ -743,8 +743,14 @@ final class VirtualScrollState: ObservableObject {
     private func newestVisibleInsertedMessageIDsForCurrentConversation(
         in notification: Notification
     ) -> [NSManagedObjectID] {
-        let latestWindowDate = messageWindow?.messageIDs.last.flatMap { id in
-            resolveCachedRow(for: id)?.internalDate
+        let latestWindowDate: Date?
+        if let latestWindowMessageID = messageWindow?.messageIDs.last {
+            guard let date = resolveCachedRow(for: latestWindowMessageID)?.internalDate else {
+                return []
+            }
+            latestWindowDate = date
+        } else {
+            latestWindowDate = nil
         }
 
         return contextObjects(forKeys: [NSInsertedObjectsKey], in: notification)

@@ -47,6 +47,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     private var isVisible = false
     private var pendingAutoReadMessageIDsByEventID: [UUID: [NSManagedObjectID]] = [:]
     private var pendingAutoReadMessageIDsByLayoutID: [UUID: [NSManagedObjectID]] = [:]
+    private var pendingAutoReadLayoutOrder: [UUID] = []
 
     init(
         scrollState: VirtualScrollState,
@@ -175,6 +176,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         isVisible = false
         pendingAutoReadMessageIDsByEventID.removeAll()
         pendingAutoReadMessageIDsByLayoutID.removeAll()
+        pendingAutoReadLayoutOrder.removeAll()
         taskManager.cancelAll()
         cancelPrefetch()
         if !isReadyToShow {
@@ -247,6 +249,9 @@ final class ChatMessagesCoordinator: ObservableObject {
             return
         }
 
+        if pendingAutoReadMessageIDsByLayoutID[refresh.layoutID] == nil {
+            pendingAutoReadLayoutOrder.append(refresh.layoutID)
+        }
         pendingAutoReadMessageIDsByLayoutID[refresh.layoutID, default: []]
             .append(contentsOf: verifiedMessageIDs)
     }
@@ -257,10 +262,14 @@ final class ChatMessagesCoordinator: ObservableObject {
         isShowingLatestWindow: Bool,
         isBottomAnchorVisible: Bool
     ) {
-        guard let pendingMessageIDs = pendingAutoReadMessageIDsByLayoutID.removeValue(
-            forKey: layoutID
-        ) else {
+        guard let targetIndex = pendingAutoReadLayoutOrder.firstIndex(of: layoutID) else {
             return
+        }
+
+        let layoutIDsToResolve = Array(pendingAutoReadLayoutOrder.prefix(targetIndex + 1))
+        pendingAutoReadLayoutOrder.removeFirst(targetIndex + 1)
+        let pendingMessageIDs = layoutIDsToResolve.flatMap {
+            pendingAutoReadMessageIDsByLayoutID.removeValue(forKey: $0) ?? []
         }
 
         guard isReadyToShow,

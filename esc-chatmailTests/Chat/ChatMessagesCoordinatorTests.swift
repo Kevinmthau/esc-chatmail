@@ -561,6 +561,49 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         XCTAssertEqual(markedArrivalIDs, [[firstID, secondID]])
     }
 
+    func testNewerLayoutResolvesEarlierPendingLayoutBatches() {
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        let firstID = makeMessageObjectID("first-layout-arrival")
+        let secondID = makeMessageObjectID("second-layout-arrival")
+        let firstEvent = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [firstID])
+        let secondEvent = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [secondID])
+        handleEmptyAppear(coordinator)
+
+        for event in [firstEvent, secondEvent] {
+            coordinator.handleInsertedVisibleMessageEvent(
+                event,
+                isChatActiveAndUncovered: true,
+                isShowingLatestWindow: true,
+                isBottomAnchorVisible: true
+            )
+        }
+        let firstLayoutID = UUID()
+        coordinator.handleRefreshedInsertedMessageEvent(
+            .init(eventID: firstEvent.id, layoutID: firstLayoutID, messageIDsInLatestWindow: [firstID]),
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true
+        )
+        let secondLayoutID = UUID()
+        coordinator.handleRefreshedInsertedMessageEvent(
+            .init(eventID: secondEvent.id, layoutID: secondLayoutID, messageIDsInLatestWindow: [secondID]),
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true
+        )
+
+        coordinator.handleLatestWindowLayout(
+            layoutID: secondLayoutID,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+
+        XCTAssertEqual(markedArrivalIDs, [[firstID, secondID]])
+    }
+
     func testHandleDisplayedMessagesChange_prefetchesTrailingVisibleWindow() async throws {
         let senderEmails = (0..<35).map { index in
             "sender-\(index)@example.com"
