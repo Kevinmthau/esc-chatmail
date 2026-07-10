@@ -113,13 +113,21 @@ final class BackgroundMessageProcessor {
                 modificationTransaction: modificationTransaction,
                 in: context
             )
-            if !deletedConversationIDs.isEmpty {
-                await syncCoordinator.updateConversationRollups(
-                    conversationIDs: deletedConversationIDs,
-                    in: context
-                )
+            let deletionConversationKeys = Set(
+                deletedConversationIDs.map { $0.uriRepresentation().absoluteString }
+            )
+            let deletionSaved = await rollupMutationSerializer.perform(
+                conversationKeys: deletionConversationKeys
+            ) {
+                if !deletedConversationIDs.isEmpty {
+                    await syncCoordinator.updateConversationRollups(
+                        conversationIDs: deletedConversationIDs,
+                        in: context
+                    )
+                }
+                return self.saveContext(context)
             }
-            guard saveContext(context) else {
+            guard deletionSaved else {
                 Log.error("Background history processing failed to save deletions", category: .background)
                 await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
                 return BackgroundMessageProcessingResult(
@@ -138,24 +146,17 @@ final class BackgroundMessageProcessor {
         }
 
         if !changeSet.messageIdsToDelete.isEmpty || !changeSet.messageIdsToFetch.isEmpty {
-            guard saveContext(context) else {
-                Log.error("Background history processing failed to save before rollups", category: .background)
-                await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
-                return BackgroundMessageProcessingResult(
-                    fetchedCount: fetchResult.fetchedCount,
-                    failedFetchCount: max(fetchResult.failedFetchCount, 1)
-                )
-            }
-
             let trackedDisplayNameOnlyConversationIDs = await ModificationTracker.shared
                 .displayNameOnlyConversations(in: modificationTransaction)
-            let modifiedConversationIDs = await ModificationTracker.shared.commitTransaction(modificationTransaction)
+            let modifiedConversationIDs = await ModificationTracker.shared
+                .modifiedConversations(in: modificationTransaction)
             let displayNameOnlyConversationIDs = trackedDisplayNameOnlyConversationIDs.subtracting(modifiedConversationIDs)
             let savedRollups = await refreshUpdateAndSaveRollups(
                 conversationIDs: modifiedConversationIDs,
                 displayNameOnlyConversationIDs: displayNameOnlyConversationIDs,
                 in: context,
-                using: syncCoordinator
+                using: syncCoordinator,
+                modificationTransaction: modificationTransaction
             )
             if savedRollups {
                 await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
@@ -277,26 +278,17 @@ final class BackgroundMessageProcessor {
         }
 
         if ownsContext {
-            guard saveContext(context) else {
-                if let ownedTransaction {
-                    Log.error("Background message fetch failed to save before rollups", category: .background)
-                    await ModificationTracker.shared.rollbackTransaction(ownedTransaction)
-                }
-                return BackgroundMessageProcessingResult(
-                    fetchedCount: successCount,
-                    failedFetchCount: max(failedCount, 1)
-                )
-            }
-
             let trackedDisplayNameOnlyConversationIDs = await ModificationTracker.shared
                 .displayNameOnlyConversations(in: ownedTransaction!)
-            let modifiedConversationIDs = await ModificationTracker.shared.commitTransaction(ownedTransaction!)
+            let modifiedConversationIDs = await ModificationTracker.shared
+                .modifiedConversations(in: ownedTransaction!)
             let displayNameOnlyConversationIDs = trackedDisplayNameOnlyConversationIDs.subtracting(modifiedConversationIDs)
             let savedRollups = await refreshUpdateAndSaveRollups(
                 conversationIDs: modifiedConversationIDs,
                 displayNameOnlyConversationIDs: displayNameOnlyConversationIDs,
                 in: context,
-                using: syncCoordinator
+                using: syncCoordinator,
+                modificationTransaction: ownedTransaction!
             )
             if savedRollups {
                 await ModificationTracker.shared.consumeCommittedTransaction(ownedTransaction!)
@@ -319,7 +311,8 @@ final class BackgroundMessageProcessor {
         conversationIDs: Set<NSManagedObjectID>,
         displayNameOnlyConversationIDs: Set<NSManagedObjectID>,
         in context: NSManagedObjectContext,
-        using syncCoordinator: BackgroundSyncMessageCoordinating
+        using syncCoordinator: BackgroundSyncMessageCoordinating,
+        modificationTransaction: ModificationTracker.Transaction
     ) async -> Bool {
         let conversationKeys = Set(
             conversationIDs
@@ -328,6 +321,12 @@ final class BackgroundMessageProcessor {
         )
 
         return await rollupMutationSerializer.perform(conversationKeys: conversationKeys) {
+            guard self.saveContext(context) else {
+                Log.error("Background message processing failed to save before rollups", category: .background)
+                return false
+            }
+
+            _ = await ModificationTracker.shared.commitTransaction(modificationTransaction)
             await context.perform {
                 // The message save that precedes rollups can merge a concurrent
                 // read transaction into the store while this context still has
