@@ -323,6 +323,7 @@ final class BackgroundMessageProcessor {
         )
 
         return await rollupMutationSerializer.perform(conversationKeys: conversationKeys) {
+            await self.preserveNewerLocalReadState(in: context)
             guard self.saveContext(context) else {
                 Log.error("Background message processing failed to save before rollups", category: .background)
                 return false
@@ -347,6 +348,46 @@ final class BackgroundMessageProcessor {
             guard self.saveContext(context) else { return false }
             _ = await ModificationTracker.shared.commitTransaction(modificationTransaction)
             return true
+        }
+    }
+
+    /// A sync context can prepare a message before a serialized read mutation
+    /// commits. Refresh only the mailbox state protected by localModifiedAt so
+    /// that the sync payload still wins for content while a newer local read
+    /// cannot be overwritten by the stale first save.
+    private func preserveNewerLocalReadState(in context: NSManagedObjectContext) async {
+        guard let persistentStoreCoordinator = context.persistentStoreCoordinator else { return }
+
+        let messageObjectIDs: [NSManagedObjectID] = await context.perform {
+            context.updatedObjects
+                .compactMap { $0 as? Message }
+                .map(\.objectID)
+                .filter { !$0.isTemporaryID }
+        }
+        guard !messageObjectIDs.isEmpty else { return }
+
+        let storeContext = NSManagedObjectContext(concurrencyType: .privateQueueConcurrencyType)
+        storeContext.persistentStoreCoordinator = persistentStoreCoordinator
+        let localStates: [(NSManagedObjectID, Date, Bool)] = await storeContext.perform {
+            messageObjectIDs.compactMap { objectID in
+                guard let message = try? storeContext.existingObject(with: objectID) as? Message,
+                      let localModifiedAt = message.localModifiedAt else {
+                    return nil
+                }
+                return (objectID, localModifiedAt, message.isUnread)
+            }
+        }
+        guard !localStates.isEmpty else { return }
+
+        await context.perform {
+            for (objectID, localModifiedAt, isUnread) in localStates {
+                guard let message = try? context.existingObject(with: objectID) as? Message,
+                      message.localModifiedAt.map({ $0 < localModifiedAt }) ?? true else {
+                    continue
+                }
+                message.isUnread = isUnread
+                message.localModifiedAt = localModifiedAt
+            }
         }
     }
 

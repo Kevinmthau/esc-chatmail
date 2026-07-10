@@ -411,6 +411,42 @@ final class MessageActionsTests: XCTestCase {
         XCTAssertEqual(durableState.1, 0)
     }
 
+    func testReadMutationWinsOverPreparedStaleSyncMessageSave() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .withUnreadCount(1)
+            .build(in: context)
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
+        let message = MessageBuilder()
+            .withId("read-before-stale-sync-save")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        message.addToLabels(inboxLabel)
+        try coreDataStack.saveViewContext()
+        let messageObjectID = message.objectID
+
+        let staleContext = coreDataStack.newBackgroundContext()
+        await staleContext.perform {
+            guard let staleMessage = try? staleContext.existingObject(with: messageObjectID) as? Message else {
+                return
+            }
+            staleMessage.isUnread = true
+            staleMessage.snippet = "stale sync body"
+        }
+
+        await messageActions.markAsRead(message: message)
+        await staleContext.perform {
+            try? staleContext.save()
+        }
+
+        let verificationContext = coreDataStack.newBackgroundContext()
+        let durableUnread = await verificationContext.perform {
+            (try? verificationContext.existingObject(with: messageObjectID) as? Message)?.isUnread
+        }
+        XCTAssertEqual(durableUnread, false)
+    }
+
     func testMarkConversationAsRead_usesBatchUpdateAndSinglePendingAction() async throws {
         let conversation = ConversationBuilder()
             .visible()
