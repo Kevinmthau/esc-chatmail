@@ -250,8 +250,15 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
         handleEmptyAppear(coordinator)
         coordinator.handleDisappear()
-        coordinator.handleInsertedVisibleMessages(
-            messageObjectIDs: [arrivalID],
+        let event = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [arrivalID])
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+        coordinator.handleRefreshedInsertedMessageEvent(
+            .init(eventID: event.id, messageIDsInLatestWindow: [arrivalID]),
             isChatActiveAndUncovered: true,
             isShowingLatestWindow: true,
             isBottomAnchorVisible: true
@@ -271,8 +278,17 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         let arrivalID = makeMessageObjectID("visible-arrival")
         handleEmptyAppear(coordinator)
 
-        coordinator.handleInsertedVisibleMessages(
-            messageObjectIDs: [arrivalID],
+        let event = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [arrivalID])
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+
+        coordinator.handleRefreshedInsertedMessageEvent(
+            .init(eventID: event.id, messageIDsInLatestWindow: [arrivalID]),
             isChatActiveAndUncovered: true,
             isShowingLatestWindow: true,
             isBottomAnchorVisible: true
@@ -289,11 +305,19 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
         handleEmptyAppear(coordinator)
 
-        coordinator.handleInsertedVisibleMessages(
-            messageObjectIDs: [makeMessageObjectID("scrolled-arrival")],
+        let arrivalID = makeMessageObjectID("scrolled-arrival")
+        let event = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [arrivalID])
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
             isChatActiveAndUncovered: true,
             isShowingLatestWindow: true,
             isBottomAnchorVisible: false
+        )
+        coordinator.handleRefreshedInsertedMessageEvent(
+            .init(eventID: event.id, messageIDsInLatestWindow: [arrivalID]),
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
         )
 
         XCTAssertTrue(markedArrivalIDs.isEmpty)
@@ -314,8 +338,16 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             isInitialWindowLoaded: false
         ) { _ in }
 
-        coordinator.handleInsertedVisibleMessages(
-            messageObjectIDs: [makeMessageObjectID("pre-ready-arrival")],
+        let arrivalID = makeMessageObjectID("pre-ready-arrival")
+        let event = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [arrivalID])
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+        coordinator.handleRefreshedInsertedMessageEvent(
+            .init(eventID: event.id, messageIDsInLatestWindow: [arrivalID]),
             isChatActiveAndUncovered: true,
             isShowingLatestWindow: true,
             isBottomAnchorVisible: true
@@ -333,14 +365,108 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
         handleEmptyAppear(coordinator)
 
-        coordinator.handleInsertedVisibleMessages(
-            messageObjectIDs: [makeMessageObjectID("covered-arrival")],
+        let arrivalID = makeMessageObjectID("covered-arrival")
+        let event = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [arrivalID])
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: false,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+        coordinator.handleRefreshedInsertedMessageEvent(
+            .init(eventID: event.id, messageIDsInLatestWindow: [arrivalID]),
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+    }
+
+    func testArrivalExcludedFromRefreshedLatestWindowDoesNotMarkUnreadAsRead() {
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        let event = VirtualScrollInsertedMessageEvent(
+            id: UUID(),
+            messageIDs: [makeMessageObjectID("historical-arrival")]
+        )
+        handleEmptyAppear(coordinator)
+
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+        coordinator.handleRefreshedInsertedMessageEvent(
+            .init(eventID: event.id, messageIDsInLatestWindow: []),
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+    }
+
+    func testArrivalThatBecomesCoveredBeforeRefreshDoesNotMarkUnreadAsRead() {
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        let arrivalID = makeMessageObjectID("covered-during-refresh")
+        let event = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [arrivalID])
+        handleEmptyAppear(coordinator)
+
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+        coordinator.handleRefreshedInsertedMessageEvent(
+            .init(eventID: event.id, messageIDsInLatestWindow: [arrivalID]),
             isChatActiveAndUncovered: false,
             isShowingLatestWindow: true,
             isBottomAnchorVisible: true
         )
 
         XCTAssertTrue(markedArrivalIDs.isEmpty)
+    }
+
+    func testRapidArrivalEventsAreResolvedIndependently() {
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        let firstID = makeMessageObjectID("first-rapid-arrival")
+        let secondID = makeMessageObjectID("second-rapid-arrival")
+        let firstEvent = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [firstID])
+        let secondEvent = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [secondID])
+        handleEmptyAppear(coordinator)
+
+        for event in [firstEvent, secondEvent] {
+            coordinator.handleInsertedVisibleMessageEvent(
+                event,
+                isChatActiveAndUncovered: true,
+                isShowingLatestWindow: true,
+                isBottomAnchorVisible: true
+            )
+        }
+        for event in [firstEvent, secondEvent] {
+            coordinator.handleRefreshedInsertedMessageEvent(
+                .init(eventID: event.id, messageIDsInLatestWindow: event.messageIDs),
+                isChatActiveAndUncovered: true,
+                isShowingLatestWindow: true,
+                isBottomAnchorVisible: true
+            )
+        }
+
+        XCTAssertEqual(markedArrivalIDs, [[firstID], [secondID]])
     }
 
     func testHandleDisplayedMessagesChange_prefetchesTrailingVisibleWindow() async throws {

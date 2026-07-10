@@ -45,6 +45,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     private var initialAnchorWasForEmptyConversation = false
     private var hasCapturedInitialUnreadSnapshot = false
     private var isVisible = false
+    private var pendingAutoReadMessageIDsByEventID: [UUID: [NSManagedObjectID]] = [:]
 
     init(
         scrollState: VirtualScrollState,
@@ -204,13 +205,13 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
     }
 
-    func handleInsertedVisibleMessages(
-        messageObjectIDs: [NSManagedObjectID],
+    func handleInsertedVisibleMessageEvent(
+        _ event: VirtualScrollInsertedMessageEvent,
         isChatActiveAndUncovered: Bool,
         isShowingLatestWindow: Bool,
         isBottomAnchorVisible: Bool
     ) {
-        guard !messageObjectIDs.isEmpty,
+        guard !event.messageIDs.isEmpty,
               isReadyToShow,
               isVisible,
               isChatActiveAndUncovered,
@@ -219,7 +220,33 @@ final class ChatMessagesCoordinator: ObservableObject {
             return
         }
 
-        markUnreadInboxMessagesAsReadIfNeeded(messageObjectIDs)
+        pendingAutoReadMessageIDsByEventID[event.id] = event.messageIDs
+    }
+
+    func handleRefreshedInsertedMessageEvent(
+        _ refresh: VirtualScrollInsertedMessageRefresh,
+        isChatActiveAndUncovered: Bool,
+        isShowingLatestWindow: Bool,
+        isBottomAnchorVisible: Bool
+    ) {
+        guard let pendingMessageIDs = pendingAutoReadMessageIDsByEventID.removeValue(
+            forKey: refresh.eventID
+        ) else {
+            return
+        }
+
+        let latestWindowMessageIDs = Set(refresh.messageIDsInLatestWindow)
+        let verifiedMessageIDs = pendingMessageIDs.filter(latestWindowMessageIDs.contains)
+        guard !verifiedMessageIDs.isEmpty,
+              isReadyToShow,
+              isVisible,
+              isChatActiveAndUncovered,
+              isShowingLatestWindow,
+              isBottomAnchorVisible else {
+            return
+        }
+
+        markUnreadInboxMessagesAsReadIfNeeded(verifiedMessageIDs)
     }
 
     func handleMessageCountChange(

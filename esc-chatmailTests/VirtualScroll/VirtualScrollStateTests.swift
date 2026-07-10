@@ -597,6 +597,19 @@ final class VirtualScrollStateTests: XCTestCase {
             state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
         }
 
+        var insertedEvents: [VirtualScrollInsertedMessageEvent] = []
+        var refreshedEvents: [VirtualScrollInsertedMessageRefresh] = []
+        let insertedEventsCancellable = state.insertedVisibleMessageEvents.sink {
+            insertedEvents.append($0)
+        }
+        let refreshedEventsCancellable = state.refreshedInsertedMessageEvents.sink {
+            refreshedEvents.append($0)
+        }
+        defer {
+            insertedEventsCancellable.cancel()
+            refreshedEventsCancellable.cancel()
+        }
+
         let pendingMessage = try makePendingMessage(
             id: "virtual-scroll-inserted-pending-latest",
             date: Date(timeIntervalSince1970: 8),
@@ -605,8 +618,10 @@ final class VirtualScrollStateTests: XCTestCase {
 
         let expectedIDs = Array(messages.suffix(3)).map(\.objectID) + [pendingMessage.objectID]
         await waitUntil {
-            state.insertedVisibleMessageIDs == [pendingMessage.objectID] &&
-            state.visibleMessages.map(\.objectID) == expectedIDs &&
+            insertedEvents.last?.messageIDs == [pendingMessage.objectID] &&
+                refreshedEvents.last?.eventID == insertedEvents.last?.id &&
+                refreshedEvents.last?.messageIDsInLatestWindow == [pendingMessage.objectID] &&
+                state.visibleMessages.map(\.objectID) == expectedIDs &&
                 state.totalMessageCount == 9 &&
                 !state.isLoadingMore
         }
@@ -627,6 +642,19 @@ final class VirtualScrollStateTests: XCTestCase {
             state.isInitialLoadComplete && state.totalMessageCount == 4
         }
 
+        var insertedEvents: [VirtualScrollInsertedMessageEvent] = []
+        var refreshedEvents: [VirtualScrollInsertedMessageRefresh] = []
+        let insertedEventsCancellable = state.insertedVisibleMessageEvents.sink {
+            insertedEvents.append($0)
+        }
+        let refreshedEventsCancellable = state.refreshedInsertedMessageEvents.sink {
+            refreshedEvents.append($0)
+        }
+        defer {
+            insertedEventsCancellable.cancel()
+            refreshedEventsCancellable.cancel()
+        }
+
         let insertedMessage = MessageBuilder()
             .withId("inserted-with-deletion")
             .withDate(Date(timeIntervalSince1970: 4))
@@ -637,8 +665,61 @@ final class VirtualScrollStateTests: XCTestCase {
         viewContext.processPendingChanges()
 
         await waitUntil {
-            state.insertedVisibleMessageIDs == [insertedMessage.objectID]
+            insertedEvents.last?.messageIDs == [insertedMessage.objectID] &&
+                refreshedEvents.last?.eventID == insertedEvents.last?.id &&
+                refreshedEvents.last?.messageIDsInLatestWindow == [insertedMessage.objectID]
         }
+    }
+
+    func testRapidInsertedMessageEventsAreDeliveredAndRefreshedIndependently() async throws {
+        let (conversation, _) = try makeConversationWithMessages(count: 2)
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil {
+            state.isInitialLoadComplete && state.totalMessageCount == 2
+        }
+
+        var insertedEvents: [VirtualScrollInsertedMessageEvent] = []
+        var refreshedEvents: [VirtualScrollInsertedMessageRefresh] = []
+        let insertedEventsCancellable = state.insertedVisibleMessageEvents.sink {
+            insertedEvents.append($0)
+        }
+        let refreshedEventsCancellable = state.refreshedInsertedMessageEvents.sink {
+            refreshedEvents.append($0)
+        }
+        defer {
+            insertedEventsCancellable.cancel()
+            refreshedEventsCancellable.cancel()
+        }
+
+        let firstMessage = try makePendingMessage(
+            id: "first-rapid-insert",
+            date: Date(timeIntervalSince1970: 2),
+            conversation: conversation
+        )
+        let secondMessage = try makePendingMessage(
+            id: "second-rapid-insert",
+            date: Date(timeIntervalSince1970: 3),
+            conversation: conversation
+        )
+
+        await waitUntil {
+            insertedEvents.map(\.messageIDs) == [[firstMessage.objectID], [secondMessage.objectID]] &&
+                refreshedEvents.count == 2
+        }
+
+        XCTAssertEqual(Set(refreshedEvents.map(\.eventID)), Set(insertedEvents.map(\.id)))
+        XCTAssertEqual(
+            refreshedEvents.map(\.messageIDsInLatestWindow),
+            [[firstMessage.objectID], [secondMessage.objectID]]
+        )
     }
 
     func testInsertedPendingMessageRefreshesEmptyLatestWindow() async throws {
@@ -710,6 +791,12 @@ final class VirtualScrollStateTests: XCTestCase {
             state.visibleMessages.map(\.objectID) == initialIDs && !state.isLoadingMore
         }
 
+        var insertedEvents: [VirtualScrollInsertedMessageEvent] = []
+        let insertedEventsCancellable = state.insertedVisibleMessageEvents.sink {
+            insertedEvents.append($0)
+        }
+        defer { insertedEventsCancellable.cancel() }
+
         let draftMessage = MessageBuilder()
             .withId("virtual-scroll-inserted-draft-pending")
             .withSubject("virtual-scroll-inserted-draft-pending")
@@ -722,7 +809,7 @@ final class VirtualScrollStateTests: XCTestCase {
 
         try? await Task.sleep(nanoseconds: 100_000_000)
 
-        XCTAssertTrue(state.insertedVisibleMessageIDs.isEmpty)
+        XCTAssertTrue(insertedEvents.isEmpty)
         XCTAssertEqual(state.visibleMessages.map(\.objectID), initialIDs)
         XCTAssertEqual(state.totalMessageCount, 3)
     }

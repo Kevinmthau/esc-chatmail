@@ -83,9 +83,17 @@ struct ChatMessagesView: View {
             .onChange(of: scrollState.isInitialLoadComplete) { _, isComplete in
                 handleInitialWindowLoaded(isComplete: isComplete, proxy: proxy)
             }
-            .onChange(of: scrollState.insertedVisibleMessageIDs) { _, messageObjectIDs in
-                coordinator.handleInsertedVisibleMessages(
-                    messageObjectIDs: messageObjectIDs,
+            .onReceive(scrollState.insertedVisibleMessageEvents) { event in
+                coordinator.handleInsertedVisibleMessageEvent(
+                    event,
+                    isChatActiveAndUncovered: isChatActiveAndUncovered,
+                    isShowingLatestWindow: scrollState.isShowingLatestWindow,
+                    isBottomAnchorVisible: isBottomAnchorVisible
+                )
+            }
+            .onReceive(scrollState.refreshedInsertedMessageEvents) { refresh in
+                coordinator.handleRefreshedInsertedMessageEvent(
+                    refresh,
                     isChatActiveAndUncovered: isChatActiveAndUncovered,
                     isShowingLatestWindow: scrollState.isShowingLatestWindow,
                     isBottomAnchorVisible: isBottomAnchorVisible
