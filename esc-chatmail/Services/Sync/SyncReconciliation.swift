@@ -833,16 +833,22 @@ final class SyncReconciliation: Sendable {
                         if let inboxLabel = inboxLabel {
                             localMessage.addToLabels(inboxLabel)
                             messageWasRepaired = true
+                            wasModified = true
+                        } else {
+                            stats.processingFailed = true
+                            stats.skippedChecks += 1
                         }
                     } else {
                         if let existingInbox = localLabels.first(where: { $0.id == "INBOX" }) {
                             localMessage.removeFromLabels(existingInbox)
                             messageWasRepaired = true
+                            wasModified = true
                         }
                     }
 
-                    wasModified = true
-                    stats.updatedMessages += 1
+                    if messageWasRepaired {
+                        stats.updatedMessages += 1
+                    }
                 }
 
                 // Check UNREAD status

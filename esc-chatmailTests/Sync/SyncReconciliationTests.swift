@@ -423,6 +423,48 @@ final class SyncReconciliationTests: XCTestCase {
         XCTAssertTrue(reconciledState.labelIds.contains("INBOX"))
     }
 
+    func testReconcileLabelStatesWithDiagnosticsIsIncompleteWhenInboxLabelIsMissing() async throws {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.setMessageList(["message-needs-inbox"])
+        mockAPI.addMessage(
+            GmailMessageBuilder()
+                .withId("message-needs-inbox")
+                .withLabels(["INBOX"])
+                .build()
+        )
+
+        let seedContext = stack.viewContext
+        let conversation = ConversationBuilder.simple(in: seedContext)
+        MessageBuilder()
+            .withId("message-needs-inbox")
+            .withThreadId("thread-needs-inbox")
+            .inConversation(conversation)
+            .build(in: seedContext)
+        try stack.saveViewContext()
+
+        let sut = SyncReconciliation(messageFetcher: MessageFetcher(apiClient: mockAPI))
+        let reconcileContext = stack.newBackgroundContext()
+        let result = await sut.reconcileLabelStatesWithDiagnostics(
+            in: reconcileContext,
+            labelIds: [],
+            modificationTransaction: nil
+        )
+
+        let hasInbox = try await reconcileContext.perform {
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", "message-needs-inbox")
+            request.fetchLimit = 1
+            let message = try XCTUnwrap(reconcileContext.fetch(request).first)
+            return (message.labels ?? []).contains { $0.id == "INBOX" }
+        }
+
+        XCTAssertEqual(result.outcome, .incomplete)
+        XCTAssertEqual(result.diagnostics.driftFound, 1)
+        XCTAssertEqual(result.diagnostics.driftRepaired, 0)
+        XCTAssertEqual(result.diagnostics.skippedChecks, 1)
+        XCTAssertFalse(hasInbox)
+    }
+
     func testReconcileLabelStatesWithDiagnosticsCompletesAfterSuccessfulEmptyList() async {
         let mockAPI = MockGmailAPIClient()
         mockAPI.setMessageList([])
