@@ -673,6 +673,52 @@ final class VirtualScrollStateTests: XCTestCase {
         }
     }
 
+    func testHistoricalInsertedMessageIsNotAnAutoReadCandidate() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 4)
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            initialWindowPosition: .end,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+
+        await waitUntil {
+            state.isInitialLoadComplete &&
+                state.visibleMessages.map(\.objectID) == messages.map(\.objectID) &&
+                !state.isLoadingMore
+        }
+
+        var insertedEvents: [VirtualScrollInsertedMessageEvent] = []
+        var refreshedEvents: [VirtualScrollInsertedMessageRefresh] = []
+        let insertedEventsCancellable = state.insertedVisibleMessageEvents.sink {
+            insertedEvents.append($0)
+        }
+        let refreshedEventsCancellable = state.refreshedInsertedMessageEvents.sink {
+            refreshedEvents.append($0)
+        }
+        defer {
+            insertedEventsCancellable.cancel()
+            refreshedEventsCancellable.cancel()
+        }
+
+        let historicalMessage = try makePendingMessage(
+            id: "historical-inserted-message",
+            date: Date(timeIntervalSince1970: 0.5),
+            conversation: conversation
+        )
+
+        await waitUntil {
+            guard let event = insertedEvents.last,
+                  event.messageIDs == [historicalMessage.objectID],
+                  let refresh = refreshedEvents.last else {
+                return false
+            }
+            return refresh.eventID == event.id && refresh.messageIDsInLatestWindow.isEmpty
+        }
+    }
+
     func testRapidInsertedMessageEventsAreDeliveredAndRefreshedIndependently() async throws {
         let (conversation, _) = try makeConversationWithMessages(count: 2)
         let stack = self.stack!

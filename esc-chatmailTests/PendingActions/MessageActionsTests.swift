@@ -159,6 +159,55 @@ final class MessageActionsTests: XCTestCase {
         XCTAssertEqual(queuedConversationActions.first?.messageIds, ["message-to-read"])
     }
 
+    func testMarkAsReadMessageRecomputesRollupInSerializedBackgroundContext() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .withUnreadCount(1)
+            .build(in: context)
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
+        let message = MessageBuilder()
+            .withId("serialized-single-read")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        message.addToLabels(inboxLabel)
+        try coreDataStack.saveViewContext()
+
+        await messageActions.markAsRead(message: message)
+
+        await waitUntil {
+            self.context.refreshAllObjects()
+            return !message.isUnread && conversation.inboxUnreadCount == 0
+        }
+
+        let queuedActions = await pendingActionsManager.queuedSingleActions
+        XCTAssertEqual(queuedActions.map(\.type), [.markRead])
+        XCTAssertEqual(queuedActions.first?.messageId, message.id)
+    }
+
+    func testMarkMessagesAsReadBatchRevalidatesInboxAndConversation() async throws {
+        let sourceConversation = ConversationBuilder().visible().build(in: context)
+        let otherConversation = ConversationBuilder().visible().build(in: context)
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
+        let message = MessageBuilder()
+            .withId("revalidate-read-target")
+            .unread()
+            .inConversation(sourceConversation)
+            .build(in: context)
+        message.addToLabels(inboxLabel)
+        try coreDataStack.saveViewContext()
+
+        await messageActions.markMessagesAsReadBatch(
+            messageIDs: [message.objectID],
+            conversationID: otherConversation.objectID
+        )
+
+        context.refreshAllObjects()
+        XCTAssertTrue(message.isUnread)
+        let queuedConversationActions = await pendingActionsManager.queuedConversationActions
+        XCTAssertTrue(queuedConversationActions.isEmpty)
+    }
+
     func testMarkMessagesAsReadBatch_keepsLaterUnreadInboxMessageUnreadAndCounted() async throws {
         let conversation = ConversationBuilder()
             .visible()

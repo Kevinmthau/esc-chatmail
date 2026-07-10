@@ -519,7 +519,15 @@ final class VirtualScrollState: ObservableObject {
             )
             insertedVisibleMessageEvents.send(event)
             if shouldRefreshLatestWindow {
-                pendingInsertedMessageEvents.append(event)
+                let autoReadMessageIDs = newestVisibleInsertedMessageIDsForCurrentConversation(
+                    in: notification
+                )
+                pendingInsertedMessageEvents.append(
+                    VirtualScrollInsertedMessageEvent(
+                        id: event.id,
+                        messageIDs: autoReadMessageIDs
+                    )
+                )
             }
         }
 
@@ -722,6 +730,30 @@ final class VirtualScrollState: ObservableObject {
                       !message.objectID.isTemporaryID,
                       belongsToCurrentConversation(message),
                       isVisibleInChat(message) else {
+                    return nil
+                }
+
+                return message.objectID
+            }
+            .sorted {
+                $0.uriRepresentation().absoluteString < $1.uriRepresentation().absoluteString
+            }
+    }
+
+    private func newestVisibleInsertedMessageIDsForCurrentConversation(
+        in notification: Notification
+    ) -> [NSManagedObjectID] {
+        let latestWindowDate = messageWindow?.messageIDs.last.flatMap { id in
+            resolveCachedRow(for: id)?.internalDate
+        }
+
+        return contextObjects(forKeys: [NSInsertedObjectsKey], in: notification)
+            .compactMap { object -> NSManagedObjectID? in
+                guard let message = object as? Message,
+                      !message.objectID.isTemporaryID,
+                      belongsToCurrentConversation(message),
+                      isVisibleInChat(message),
+                      latestWindowDate.map({ message.internalDate > $0 }) ?? true else {
                     return nil
                 }
 
