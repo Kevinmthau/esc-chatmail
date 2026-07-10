@@ -60,6 +60,17 @@ struct MissedMessageReconciliationResult: Sendable, Equatable {
     let diagnostics: SyncReconciliationDiagnostics
 }
 
+enum LabelReconciliationOutcome: Sendable, Equatable {
+    case notRequested
+    case completed
+    case incomplete
+}
+
+struct LabelReconciliationResult: Sendable, Equatable {
+    let diagnostics: SyncReconciliationDiagnostics
+    let outcome: LabelReconciliationOutcome
+}
+
 /// Handles reconciliation between Gmail and local state
 ///
 /// Responsibilities:
@@ -546,8 +557,12 @@ final class SyncReconciliation: Sendable {
         in context: NSManagedObjectContext,
         labelIds: Set<String>,
         modificationTransaction: ModificationTracker.Transaction?
-    ) async -> SyncReconciliationDiagnostics {
+    ) async -> LabelReconciliationResult {
         var diagnostics = SyncReconciliationDiagnostics()
+
+        guard !Task.isCancelled else {
+            return LabelReconciliationResult(diagnostics: diagnostics, outcome: .incomplete)
+        }
 
         do {
             // Query recent messages (last 24 hours)
@@ -562,7 +577,7 @@ final class SyncReconciliation: Sendable {
 
             guard !recentMessageIds.isEmpty else {
                 log.debug("No recent messages to reconcile labels for")
-                return diagnostics
+                return LabelReconciliationResult(diagnostics: diagnostics, outcome: .completed)
             }
 
             diagnostics.labelMessagesChecked = recentMessageIds.count
@@ -575,7 +590,7 @@ final class SyncReconciliation: Sendable {
             } catch let error as MetadataFetchFailure {
                 diagnostics.metadataFetchFailures = error.failureCount
                 log.error("Label reconciliation failed", error: error.underlyingError)
-                return diagnostics
+                return LabelReconciliationResult(diagnostics: diagnostics, outcome: .incomplete)
             }
             diagnostics.metadataFetchFailures = metadataSummary.failureCount
             diagnostics.skippedChecks += metadataSummary.deletedCount
@@ -597,10 +612,16 @@ final class SyncReconciliation: Sendable {
                 log.debug("Label reconciliation: no mismatches (checked \(recentMessageIds.count - stats.notInLocalDB) local messages)")
             }
 
-            return diagnostics
+            let outcome: LabelReconciliationOutcome =
+                metadataSummary.failureCount == 0 && !stats.processingFailed && !Task.isCancelled
+                ? .completed
+                : .incomplete
+            return LabelReconciliationResult(diagnostics: diagnostics, outcome: outcome)
+        } catch is CancellationError {
+            return LabelReconciliationResult(diagnostics: diagnostics, outcome: .incomplete)
         } catch {
             log.error("Label reconciliation failed", error: error)
-            return diagnostics
+            return LabelReconciliationResult(diagnostics: diagnostics, outcome: .incomplete)
         }
     }
 
@@ -742,6 +763,7 @@ final class SyncReconciliation: Sendable {
                 localMessages = try context.fetch(messageRequest)
             } catch {
                 Log.error("Failed to fetch local messages for label reconciliation", category: .sync, error: error)
+                stats.processingFailed = true
                 return (stats, modifiedConversationIDs)
             }
 
@@ -772,6 +794,7 @@ final class SyncReconciliation: Sendable {
                 inboxLabel = try context.fetch(labelRequest).first
             } catch {
                 Log.error("Failed to fetch INBOX label for reconciliation", category: .coreData, error: error)
+                stats.processingFailed = true
                 inboxLabel = nil
             }
 
@@ -810,16 +833,22 @@ final class SyncReconciliation: Sendable {
                         if let inboxLabel = inboxLabel {
                             localMessage.addToLabels(inboxLabel)
                             messageWasRepaired = true
+                            wasModified = true
+                        } else {
+                            stats.processingFailed = true
+                            stats.skippedChecks += 1
                         }
                     } else {
                         if let existingInbox = localLabels.first(where: { $0.id == "INBOX" }) {
                             localMessage.removeFromLabels(existingInbox)
                             messageWasRepaired = true
+                            wasModified = true
                         }
                     }
 
-                    wasModified = true
-                    stats.updatedMessages += 1
+                    if messageWasRepaired {
+                        stats.updatedMessages += 1
+                    }
                 }
 
                 // Check UNREAD status
@@ -866,4 +895,5 @@ private struct ReconciliationStats {
     var skippedChecks = 0
     var driftFound = 0
     var driftRepaired = 0
+    var processingFailed = false
 }
