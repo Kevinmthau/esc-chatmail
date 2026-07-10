@@ -162,6 +162,7 @@ final class BackgroundMessageProcessor {
                 await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
             } else {
                 Log.error("Background history processing failed to save rollup updates", category: .background)
+                await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
                 return BackgroundMessageProcessingResult(
                     fetchedCount: fetchResult.fetchedCount,
                     failedFetchCount: max(fetchResult.failedFetchCount, 1)
@@ -294,6 +295,7 @@ final class BackgroundMessageProcessor {
                 await ModificationTracker.shared.consumeCommittedTransaction(ownedTransaction!)
             } else {
                 Log.error("Background message fetch failed to save rollup updates", category: .background)
+                await ModificationTracker.shared.rollbackTransaction(ownedTransaction!)
                 return BackgroundMessageProcessingResult(
                     fetchedCount: successCount,
                     failedFetchCount: max(failedCount, 1)
