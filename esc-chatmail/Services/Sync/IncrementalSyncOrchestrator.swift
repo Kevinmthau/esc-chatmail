@@ -222,16 +222,13 @@ final class IncrementalSyncOrchestrator {
                 now: Date().timeIntervalSince1970
             )
             let reconciliationTimer = timing.start("reconciliation")
-            let reconciliationDiagnostics = try await reconciliationPhase.execute(
+            let reconciliationResult = try await reconciliationPhase.execute(
                 input: ReconciliationInput(skipLabelReconciliation: shouldSkipReconciliation),
                 context: phaseContext
             )
-            if !shouldSkipReconciliation {
-                recordReconciliationTime()
-            }
             timing.finish(
                 reconciliationTimer,
-                detail: "skipLabels=\(shouldSkipReconciliation) \(reconciliationDiagnostics.summary)"
+                detail: "labelOutcome=\(reconciliationResult.labelOutcome) \(reconciliationResult.diagnostics.summary)"
             )
 
             // Don't advance historyId if history collection was truncated - we need to
@@ -277,11 +274,21 @@ final class IncrementalSyncOrchestrator {
             )
             progressHandler(0.99, "Saving changes...")
             let saveTimer = timing.start("save")
-            try await coreDataStack.saveAsync(context: context)
+            try await Self.finalizePersistence(
+                labelReconciliationOutcome: reconciliationResult.labelOutcome,
+                save: {
+                    try await self.coreDataStack.saveAsync(context: context)
+                },
+                commit: {
+                    _ = await ModificationTracker.shared.commitTransaction(modificationTransaction)
+                    committedModificationTransaction = true
+                    await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
+                },
+                recordReconciliation: {
+                    self.recordReconciliationTime()
+                }
+            )
             timing.finish(saveTimer)
-            _ = await ModificationTracker.shared.commitTransaction(modificationTransaction)
-            committedModificationTransaction = true
-            await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
 
             // Only update abandoned-message tracking once the recovered messages are
             // durably saved; if the save had failed, the records must stay for retry.
@@ -546,6 +553,22 @@ final class IncrementalSyncOrchestrator {
         let elapsed = now - lastReconciliation
         let requiredInterval = noHistoryChanges ? forceInterval : ttl
         return elapsed < requiredInterval
+    }
+
+    static func finalizePersistence(
+        labelReconciliationOutcome: LabelReconciliationOutcome,
+        save: () async throws -> Void,
+        commit: () async throws -> Void,
+        recordReconciliation: () -> Void
+    ) async throws {
+        try Task.checkCancellation()
+        try await save()
+        try await commit()
+        try Task.checkCancellation()
+
+        if labelReconciliationOutcome == .completed {
+            recordReconciliation()
+        }
     }
 
     private func refreshSendAsAliases(

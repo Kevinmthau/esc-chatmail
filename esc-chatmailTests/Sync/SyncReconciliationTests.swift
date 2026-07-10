@@ -345,7 +345,7 @@ final class SyncReconciliationTests: XCTestCase {
         )
         let reconcileContext = stack.newBackgroundContext()
 
-        await sut.reconcileLabelStates(
+        let result = await sut.reconcileLabelStatesWithDiagnostics(
             in: reconcileContext,
             labelIds: ["INBOX"],
             modificationTransaction: nil
@@ -365,6 +365,7 @@ final class SyncReconciliationTests: XCTestCase {
         XCTAssertEqual(mockAPI.getMessageCallCount, 1)
         XCTAssertEqual(mockAPI.getMessageCalledIds, ["message-needs-inbox"])
         XCTAssertEqual(mockAPI.getMessageCalledFormats, ["metadata"])
+        XCTAssertEqual(result.outcome, .completed)
         XCTAssertTrue(reconciledState.isUnread)
         XCTAssertTrue(reconciledState.labelIds.contains("INBOX"))
     }
@@ -396,7 +397,7 @@ final class SyncReconciliationTests: XCTestCase {
         )
         let reconcileContext = stack.newBackgroundContext()
 
-        let diagnostics = await sut.reconcileLabelStatesWithDiagnostics(
+        let result = await sut.reconcileLabelStatesWithDiagnostics(
             in: reconcileContext,
             labelIds: ["INBOX"],
             modificationTransaction: nil
@@ -413,12 +414,89 @@ final class SyncReconciliationTests: XCTestCase {
         }
 
         XCTAssertEqual(mockAPI.getMessageCallCount, 2)
-        XCTAssertEqual(diagnostics.labelMessagesChecked, 2)
-        XCTAssertEqual(diagnostics.metadataFetchFailures, 1)
-        XCTAssertEqual(diagnostics.driftFound, 1)
-        XCTAssertEqual(diagnostics.driftRepaired, 1)
+        XCTAssertEqual(result.outcome, .incomplete)
+        XCTAssertEqual(result.diagnostics.labelMessagesChecked, 2)
+        XCTAssertEqual(result.diagnostics.metadataFetchFailures, 1)
+        XCTAssertEqual(result.diagnostics.driftFound, 1)
+        XCTAssertEqual(result.diagnostics.driftRepaired, 1)
         XCTAssertTrue(reconciledState.isUnread)
         XCTAssertTrue(reconciledState.labelIds.contains("INBOX"))
+    }
+
+    func testReconcileLabelStatesWithDiagnosticsCompletesAfterSuccessfulEmptyList() async {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.setMessageList([])
+        let sut = SyncReconciliation(messageFetcher: MessageFetcher(apiClient: mockAPI))
+
+        let result = await sut.reconcileLabelStatesWithDiagnostics(
+            in: stack.newBackgroundContext(),
+            labelIds: ["INBOX"],
+            modificationTransaction: nil
+        )
+
+        XCTAssertEqual(result.outcome, .completed)
+        XCTAssertEqual(result.diagnostics, SyncReconciliationDiagnostics())
+    }
+
+    func testReconcileLabelStatesWithDiagnosticsIsIncompleteWhenListRequestFails() async {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.listMessagesError = APIError.serverError(500)
+        let sut = SyncReconciliation(messageFetcher: MessageFetcher(apiClient: mockAPI))
+
+        let result = await sut.reconcileLabelStatesWithDiagnostics(
+            in: stack.newBackgroundContext(),
+            labelIds: ["INBOX"],
+            modificationTransaction: nil
+        )
+
+        XCTAssertEqual(result.outcome, .incomplete)
+        XCTAssertEqual(mockAPI.listMessagesCallCount, 1)
+    }
+
+    func testReconcileLabelStatesWithDiagnosticsIsIncompleteWhenAllMetadataRequestsFail() async {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.setMessageList(["message-1", "message-2"])
+        mockAPI.getMessageErrors = [
+            "message-1": APIError.serverError(500),
+            "message-2": APIError.serverError(500)
+        ]
+        let sut = SyncReconciliation(messageFetcher: MessageFetcher(apiClient: mockAPI))
+
+        let result = await sut.reconcileLabelStatesWithDiagnostics(
+            in: stack.newBackgroundContext(),
+            labelIds: ["INBOX"],
+            modificationTransaction: nil
+        )
+
+        XCTAssertEqual(result.outcome, .incomplete)
+        XCTAssertEqual(result.diagnostics.metadataFetchFailures, 2)
+    }
+
+    func testReconciliationPhaseReportsLabelsNotRequestedWhenSkipped() async throws {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.setMessageList([])
+        let messageFetcher = MessageFetcher(apiClient: mockAPI)
+        let phase = ReconciliationPhase(
+            reconciliation: SyncReconciliation(messageFetcher: messageFetcher),
+            messageFetcher: messageFetcher,
+            messagePersister: MessagePersister()
+        )
+        let context = SyncPhaseContext(
+            coreDataContext: stack.newBackgroundContext(),
+            labelIds: [],
+            myAliases: [],
+            syncStartTime: Date(),
+            progressHandler: { _, _ in },
+            failureTracker: .shared
+        )
+
+        let result = try await phase.execute(
+            input: ReconciliationInput(skipLabelReconciliation: true),
+            context: context
+        )
+
+        XCTAssertEqual(result.labelOutcome, .notRequested)
+        XCTAssertEqual(mockAPI.listMessagesCallCount, 1)
     }
 
     private func seedMessages(_ range: ClosedRange<Int>) throws {

@@ -132,4 +132,124 @@ final class IncrementalSyncOrchestratorTests: XCTestCase {
             noHistoryChanges: true, lastReconciliation: now - forceInterval, now: now, ttl: ttl, forceInterval: forceInterval
         ))
     }
+
+    @MainActor
+    func testFinalizePersistenceRecordsCheckpointAfterSaveAndCommit() async throws {
+        var events: [String] = []
+
+        try await IncrementalSyncOrchestrator.finalizePersistence(
+            labelReconciliationOutcome: .completed,
+            save: { events.append("save") },
+            commit: { events.append("commit") },
+            recordReconciliation: { events.append("record") }
+        )
+
+        XCTAssertEqual(events, ["save", "commit", "record"])
+    }
+
+    @MainActor
+    func testFinalizePersistenceDoesNotRecordSkippedReconciliation() async throws {
+        var didRecord = false
+
+        try await IncrementalSyncOrchestrator.finalizePersistence(
+            labelReconciliationOutcome: .notRequested,
+            save: {},
+            commit: {},
+            recordReconciliation: { didRecord = true }
+        )
+
+        XCTAssertFalse(didRecord)
+    }
+
+    @MainActor
+    func testFinalizePersistenceDoesNotRecordIncompleteReconciliation() async throws {
+        var didRecord = false
+
+        try await IncrementalSyncOrchestrator.finalizePersistence(
+            labelReconciliationOutcome: .incomplete,
+            save: {},
+            commit: {},
+            recordReconciliation: { didRecord = true }
+        )
+
+        XCTAssertFalse(didRecord)
+    }
+
+    @MainActor
+    func testFinalizePersistenceDoesNotCommitOrRecordWhenFinalSaveFails() async {
+        enum SaveError: Error { case injected }
+        var didCommit = false
+        var didRecord = false
+
+        do {
+            try await IncrementalSyncOrchestrator.finalizePersistence(
+                labelReconciliationOutcome: .completed,
+                save: { throw SaveError.injected },
+                commit: { didCommit = true },
+                recordReconciliation: { didRecord = true }
+            )
+            XCTFail("Expected injected save failure")
+        } catch SaveError.injected {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertFalse(didCommit)
+        XCTAssertFalse(didRecord)
+    }
+
+    @MainActor
+    func testFinalizePersistenceDoesNotRecordWhenCommitFails() async {
+        enum CommitError: Error { case injected }
+        var didSave = false
+        var didRecord = false
+
+        do {
+            try await IncrementalSyncOrchestrator.finalizePersistence(
+                labelReconciliationOutcome: .completed,
+                save: { didSave = true },
+                commit: { throw CommitError.injected },
+                recordReconciliation: { didRecord = true }
+            )
+            XCTFail("Expected injected commit failure")
+        } catch CommitError.injected {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertTrue(didSave)
+        XCTAssertFalse(didRecord)
+    }
+
+    @MainActor
+    func testFinalizePersistenceDoesNotAdvanceCheckpointWhenCancelled() async {
+        var didSave = false
+        var didCommit = false
+        var didRecord = false
+
+        let task = Task { @MainActor in
+            try await IncrementalSyncOrchestrator.finalizePersistence(
+                labelReconciliationOutcome: .completed,
+                save: { didSave = true },
+                commit: { didCommit = true },
+                recordReconciliation: { didRecord = true }
+            )
+        }
+        task.cancel()
+
+        do {
+            try await task.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertFalse(didSave)
+        XCTAssertFalse(didCommit)
+        XCTAssertFalse(didRecord)
+    }
 }
