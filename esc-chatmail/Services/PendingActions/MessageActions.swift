@@ -218,16 +218,23 @@ final class MessageActions: ObservableObject {
     /// Mark message as read using ObjectID - safe to call from background threads
     func markAsRead(messageID: NSManagedObjectID) async {
         let context = coreDataStack.newBackgroundContext()
+        let conversationID: NSManagedObjectID? = await context.perform {
+            context.refreshAllObjects()
+            guard let message = try? context.existingObject(with: messageID) as? Message else {
+                return nil
+            }
+            return message.conversation?.objectID
+        }
 
-        let gmailMessageId: String? = await context.perform {
-            guard let message = try? context.existingObject(with: messageID) as? Message else { return nil }
-            guard message.isUnread else { return nil }
-            message.isUnread = false
-            message.localModifiedAt = Date()
-            let messageId = message.id
-            // Only return the id (and thus queue a remote markRead) if the local change persisted.
-            guard context.saveOrLog(operation: "mark message as read") else { return nil }
-            return messageId
+        guard let conversationID else { return }
+        let conversationKey = conversationID.uriRepresentation().absoluteString
+        let gmailMessageId = await rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
+            await self?.performReadStateMutation(
+                messageID: messageID,
+                conversationID: conversationID,
+                isUnread: false,
+                actionType: .markRead
+            )
         }
 
         if let messageId = gmailMessageId, !messageId.isEmpty {

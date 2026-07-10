@@ -185,6 +185,32 @@ final class MessageActionsTests: XCTestCase {
         XCTAssertEqual(queuedActions.first?.messageId, message.id)
     }
 
+    func testMarkAsReadMessageIDRecomputesRollupInSerializedBackgroundContext() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .withUnreadCount(1)
+            .build(in: context)
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
+        let message = MessageBuilder()
+            .withId("serialized-object-id-read")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        message.addToLabels(inboxLabel)
+        try coreDataStack.saveViewContext()
+
+        await messageActions.markAsRead(messageID: message.objectID)
+
+        await waitUntil {
+            self.context.refreshAllObjects()
+            return !message.isUnread && conversation.inboxUnreadCount == 0
+        }
+
+        let queuedActions = await pendingActionsManager.queuedSingleActions
+        XCTAssertEqual(queuedActions.map(\.type), [.markRead])
+        XCTAssertEqual(queuedActions.first?.messageId, message.id)
+    }
+
     func testMarkMessagesAsReadBatchRevalidatesInboxAndConversation() async throws {
         let sourceConversation = ConversationBuilder().visible().build(in: context)
         let otherConversation = ConversationBuilder().visible().build(in: context)
