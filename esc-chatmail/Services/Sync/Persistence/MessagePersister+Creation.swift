@@ -83,7 +83,11 @@ extension MessagePersister {
             let messageLabelIds = Set(processedMessage.labelIds)
             let hasInboxLabel = messageLabelIds.contains("INBOX")
             var addedLabelIds: [String] = []
-            let availableLabelIds = labelIds.map { messageLabelIds.intersection($0) } ?? messageLabelIds
+            // An empty prefetched set means the label lookup failed, not that
+            // the store has no labels; treating it as authoritative would strip
+            // every label relationship and let the rollup recompute persist a
+            // durable zero unread count.
+            let availableLabelIds = labelIds.flatMap { $0.isEmpty ? nil : messageLabelIds.intersection($0) } ?? messageLabelIds
             let effectiveLabelCache = self.fetchLabelsByIds(availableLabelIds, in: context)
             for labelId in processedMessage.labelIds {
                 if let label = effectiveLabelCache[labelId] {

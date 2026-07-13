@@ -52,6 +52,7 @@ final class ConversationListViewModel: ObservableObject {
     private let storage: StorageDependencies
     private var cancellables = Set<AnyCancellable>()
     private var conversationChangesCancellable: AnyCancellable?
+    private var conversationSavesCancellable: AnyCancellable?
     private let taskManager = ViewModelTaskManager()
     private var listStore = ConversationListStore()
     private let windowProvider: ConversationWindowProvider
@@ -430,6 +431,10 @@ final class ConversationListViewModel: ObservableObject {
         // Defer non-critical work to avoid blocking initial render
         taskManager.runDetached("deferredSetup") { [weak self] in
             try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+            // Sleep returns early (not just late) when the task is cancelled;
+            // without this guard, onDisappear's cancel would run the deferred
+            // work immediately instead of never.
+            guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
                 guard let self = self else { return }
                 self.loadContactsCache(requestAccessIfNeeded: false)
@@ -585,11 +590,14 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     private func startObservingConversationChanges(in context: NSManagedObjectContext) {
-        guard observedConversationContext !== context || conversationChangesCancellable == nil else {
+        guard observedConversationContext !== context
+                || conversationChangesCancellable == nil
+                || conversationSavesCancellable == nil else {
             return
         }
 
         conversationChangesCancellable?.cancel()
+        conversationSavesCancellable?.cancel()
         observedConversationContext = context
         conversationChangesCancellable = NotificationCenter.default.publisher(
             for: .NSManagedObjectContextObjectsDidChange,
@@ -597,6 +605,36 @@ final class ConversationListViewModel: ObservableObject {
         )
         .sink { [weak self] notification in
             self?.handleConversationContextChange(notification)
+        }
+
+        // Registration-independent delivery for sibling-context saves. The
+        // automerge into the observed context only *refreshes* objects still
+        // registered there, and this list holds objectIDs + value snapshots,
+        // never the managed objects — so a background rollup save for a
+        // conversation whose object has deallocated (or that sits outside the
+        // loaded window) can produce no Conversation in objectsDidChange,
+        // leaving the row stale until relaunch. didSaveObjectIDs is posted by
+        // every saving context and carries only thread-safe NSManagedObjectIDs.
+        let coordinator = context.persistentStoreCoordinator
+        conversationSavesCancellable = NotificationCenter.default.publisher(
+            for: NSManagedObjectContext.didSaveObjectIDsNotification
+        )
+        .filter { [weak context] notification in
+            // Runs on the saving context's thread; objectID entity checks only,
+            // nothing faults. The coordinator check scopes delivery to our
+            // store, and the identity check skips the observed context's own
+            // saves, which already flowed through objectsDidChange.
+            guard let context,
+                  let sourceContext = notification.object as? NSManagedObjectContext,
+                  sourceContext !== context,
+                  sourceContext.persistentStoreCoordinator === coordinator else {
+                return false
+            }
+            return Self.isRelevantConversationSave(notification.userInfo)
+        }
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] notification in
+            self?.handleSiblingContextSave(notification)
         }
     }
 
@@ -660,6 +698,68 @@ final class ConversationListViewModel: ObservableObject {
             }
         }
         return false
+    }
+
+    /// Save-notification analog of `isRelevantConversationListChange`:
+    /// relevant when any inserted/updated/deleted objectID is a Conversation.
+    /// Most saves carry only Message/Attachment/Label churn; this gate runs on
+    /// the saving context's thread so those never cost a main-queue hop.
+    /// ObjectID entity checks only; nothing here faults an object.
+    nonisolated static func isRelevantConversationSave(_ userInfo: [AnyHashable: Any]?) -> Bool {
+        guard let userInfo else { return false }
+
+        for key in [NSInsertedObjectIDsKey, NSUpdatedObjectIDsKey, NSDeletedObjectIDsKey] {
+            guard let objectIDs = userInfo[key] as? Set<NSManagedObjectID> else { continue }
+            if objectIDs.contains(where: { $0.entity.name == "Conversation" }) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Applies a sibling context's saved Conversation changes to the list.
+    ///
+    /// Runs on the main queue. On the production viewContext (a main-queue
+    /// context) the `performAndWait` executes inline — identical to a direct
+    /// call. On a private-queue observed context (test stacks) it serializes
+    /// this pipeline with the automerge's merge blocks and the
+    /// objectsDidChange sink that fires inside them, so neither the context
+    /// nor the list store is ever touched from two threads at once.
+    /// Whichever pipeline lands first, `existingObject(with:)` reads the
+    /// saved row (faulted fresh from the store or refreshed by the merge),
+    /// and a duplicate pass rebuilds identical snapshots that
+    /// `publishVisibleItems`'s equality guard suppresses.
+    private func handleSiblingContextSave(_ notification: Notification) {
+        guard let context = observedConversationContext else { return }
+
+        let insertedIDs = conversationSaveObjectIDs(forKey: NSInsertedObjectIDsKey, in: notification)
+        let updatedIDs = conversationSaveObjectIDs(forKey: NSUpdatedObjectIDsKey, in: notification)
+        let deletedIDs = conversationSaveObjectIDs(forKey: NSDeletedObjectIDsKey, in: notification)
+
+        context.performAndWait {
+            // existingObject throws for rows a later save already deleted;
+            // dropping them is correct — the delete's own notification
+            // removes the row.
+            let updatedConversations = insertedIDs.union(updatedIDs).compactMap { objectID in
+                try? context.existingObject(with: objectID) as? Conversation
+            }
+
+            // performAndWait executes on the calling thread — main, per the
+            // .receive(on:) above — while holding the context's queue, so
+            // this is main-actor work serialized against merge blocks and
+            // the objectsDidChange sink that fires inside them.
+            MainActor.assumeIsolated {
+                applyConversationChanges(
+                    updatedConversations: updatedConversations,
+                    deletedIDs: deletedIDs
+                )
+            }
+        }
+    }
+
+    private func conversationSaveObjectIDs(forKey key: String, in notification: Notification) -> Set<NSManagedObjectID> {
+        let objectIDs = notification.userInfo?[key] as? Set<NSManagedObjectID> ?? []
+        return Set(objectIDs.filter { $0.entity.name == "Conversation" })
     }
 
     private func conversationObjects(forKey key: String, in notification: Notification) -> [Conversation] {

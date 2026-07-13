@@ -152,7 +152,13 @@ extension MessagePersister {
 
         conversation.hasInbox = true
         if message.isUnread {
-            conversation.inboxUnreadCount = min(Int32.max, conversation.inboxUnreadCount + 1)
+            // A sole first message was already counted by the creation-time
+            // ConversationInboxSeed; assign instead of incrementing so the
+            // fast path stays idempotent with that seed.
+            let isOnlyMessage = (conversation.messages?.count ?? 0) <= 1
+            conversation.inboxUnreadCount = isOnlyMessage
+                ? 1
+                : min(Int32.max, conversation.inboxUnreadCount + 1)
         }
 
         if let existingLatestInboxDate = conversation.latestInboxDate {
