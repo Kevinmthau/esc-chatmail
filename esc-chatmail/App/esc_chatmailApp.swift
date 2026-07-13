@@ -163,7 +163,7 @@ struct esc_chatmailApp: App {
         // 7. Prewarm WebKit after UI becomes available to avoid launch-path contention.
         if !isRunningUITests {
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard await Task.sleepUnlessCancelled(nanoseconds: 2_000_000_000) else { return }
                 AppPrewarmer.prewarmWebKitIfNeeded()
                 logStartupTiming("WebKit prewarm triggered (post-init)")
             }

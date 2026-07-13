@@ -185,7 +185,7 @@ final class CoreDataStack: @unchecked Sendable {
         switch result {
         case .retry(let delay):
             Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard await Task.sleepUnlessCancelled(nanoseconds: UInt64(delay * 1_000_000_000)) else { return }
                 self?.retryLoadingStore(for: container)
             }
 

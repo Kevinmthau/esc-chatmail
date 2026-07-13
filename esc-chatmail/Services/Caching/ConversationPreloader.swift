@@ -92,7 +92,7 @@ final class ConversationPreloader {
                 await loadConversation(conversation.id.uuidString)
 
                 // Rate limit warming
-                try? await Task.sleep(nanoseconds: 200_000_000) // 0.2 seconds
+                guard await Task.sleepUnlessCancelled(nanoseconds: 200_000_000) else { return } // 0.2 seconds
             }
         }
     }
@@ -111,8 +111,9 @@ final class ConversationPreloader {
             while !self.preloadQueue.isEmpty {
                 // Check in-flight limit to prevent resource exhaustion
                 guard self.inFlightCount < self.maxInFlightOperations else {
-                    // Wait before checking again
-                    try? await Task.sleep(nanoseconds: 50_000_000) // 0.05 seconds
+                    // Wait before checking again; a cancelled task must not
+                    // busy-spin here, so bail to the task-reference cleanup.
+                    guard await Task.sleepUnlessCancelled(nanoseconds: 50_000_000) else { break } // 0.05 seconds
                     continue
                 }
 
@@ -125,7 +126,7 @@ final class ConversationPreloader {
                 self.inFlightCount -= 1
 
                 // Small delay between loads to avoid blocking
-                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                guard await Task.sleepUnlessCancelled(nanoseconds: 100_000_000) else { break } // 0.1 seconds
             }
 
             // Only clear task reference if this is still the active task

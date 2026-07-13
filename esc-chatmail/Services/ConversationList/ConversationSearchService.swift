@@ -61,8 +61,7 @@ final class ConversationSearchService: ObservableObject {
         let debounceInterval = debounceInterval
 
         searchDebounceTask = Task.detached { [weak self] in
-            try? await Task.sleep(nanoseconds: debounceInterval)
-            guard !Task.isCancelled else { return }
+            guard await Task.sleepUnlessCancelled(nanoseconds: debounceInterval) else { return }
 
             await MainActor.run { [weak self] in
                 guard let self = self else { return }

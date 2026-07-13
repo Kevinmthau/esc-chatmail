@@ -31,6 +31,8 @@ struct CoreDataBatchOperations: Sendable {
     ///   - maxRetries: Maximum number of retry attempts
     /// - Note: Uses exponential backoff with async sleep to avoid blocking.
     ///         Special handling for SQLITE_BUSY errors with longer backoff.
+    ///         Throws `CancellationError` if the surrounding task is cancelled
+    ///         during a backoff delay instead of burning the remaining retries.
     func saveContextWithRetry(_ context: NSManagedObjectContext, maxRetries: Int = 3) async throws {
         var lastError: Error?
 
@@ -74,7 +76,9 @@ struct CoreDataBatchOperations: Sendable {
                         if attempt < maxRetries {
                             // Use longer backoff for SQLite busy errors: 500ms, 1s, 2s
                             let delayNanoseconds = UInt64(pow(2.0, Double(attempt - 1)) * 0.5 * 1_000_000_000)
-                            try? await Task.sleep(nanoseconds: delayNanoseconds)
+                            guard await Task.sleepUnlessCancelled(nanoseconds: delayNanoseconds) else {
+                                throw CancellationError()
+                            }
                             continue
                         }
                     }
@@ -83,7 +87,9 @@ struct CoreDataBatchOperations: Sendable {
                 // Standard retry with exponential backoff (non-blocking, outside perform block)
                 if attempt < maxRetries {
                     let delayNanoseconds = UInt64(pow(2.0, Double(attempt - 1)) * 0.1 * 1_000_000_000)
-                    try? await Task.sleep(nanoseconds: delayNanoseconds)
+                    guard await Task.sleepUnlessCancelled(nanoseconds: delayNanoseconds) else {
+                        throw CancellationError()
+                    }
                 }
             }
         }

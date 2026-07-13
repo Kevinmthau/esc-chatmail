@@ -222,8 +222,10 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
 
         let context = coreDataStack.newBackgroundContext()
 
-        // Process actions one by one (uses extension methods)
-        while let action = await fetchNextPendingAction(context: context) {
+        // Process actions one by one (uses extension methods). Stops on
+        // cancellation so a cancelled sync task doesn't burn through the
+        // remaining queue with backoff delays skipped.
+        while !Task.isCancelled, let action = await fetchNextPendingAction(context: context) {
             await processAction(action, context: context)
         }
 

@@ -156,8 +156,7 @@ struct EmailContentSection: View {
     /// manager bounds total warmed payloads, de-dupes already-warm content, and keeps active WebView
     /// warming disabled unless adoption is explicitly enabled.
     private func warmFullEmailWebViewIfNeeded() async {
-        try? await Task.sleep(nanoseconds: 200_000_000)
-        guard !Task.isCancelled else {
+        guard await Task.sleepUnlessCancelled(nanoseconds: 200_000_000) else {
             return
         }
         guard EmailReaderRenderingConfiguration.enablesPreparedHTMLWarmup else {
