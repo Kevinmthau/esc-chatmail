@@ -74,16 +74,14 @@ final class MessageActions: ObservableObject {
     func markConversationAsUnread(conversation: Conversation) async {
         let conversationID = conversation.objectID
         let conversationKey = conversationID.uriRepresentation().absoluteString
-        let messageId = await rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
-            await self?.performMarkConversationAsUnread(conversationID: conversationID)
-        }
-
-        if let messageId, !messageId.isEmpty {
-            await pendingActionsManager.queueAction(
-                type: .markUnread,
-                messageId: messageId,
-                payload: nil
-            )
+        await rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
+            guard let self,
+                  let messageId = await self.performMarkConversationAsUnread(
+                    conversationID: conversationID
+                  ) else {
+                return
+            }
+            await self.queueReadStateAction(type: .markUnread, messageId: messageId)
         }
     }
 
@@ -142,21 +140,17 @@ final class MessageActions: ObservableObject {
     ) async {
         guard let conversationID else { return }
         let conversationKey = conversationID.uriRepresentation().absoluteString
-        let messageId = await rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
-            await self?.performReadStateMutation(
-                messageID: messageID,
-                conversationID: conversationID,
-                isUnread: isUnread,
-                actionType: actionType
-            )
-        }
-
-        if let messageId, !messageId.isEmpty {
-            await pendingActionsManager.queueAction(
-                type: actionType,
-                messageId: messageId,
-                payload: nil
-            )
+        await rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
+            guard let self,
+                  let messageId = await self.performReadStateMutation(
+                    messageID: messageID,
+                    conversationID: conversationID,
+                    isUnread: isUnread,
+                    actionType: actionType
+                  ) else {
+                return
+            }
+            await self.queueReadStateAction(type: actionType, messageId: messageId)
         }
     }
 
@@ -228,21 +222,17 @@ final class MessageActions: ObservableObject {
 
         guard let conversationID else { return }
         let conversationKey = conversationID.uriRepresentation().absoluteString
-        let gmailMessageId = await rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
-            await self?.performReadStateMutation(
-                messageID: messageID,
-                conversationID: conversationID,
-                isUnread: false,
-                actionType: .markRead
-            )
-        }
-
-        if let messageId = gmailMessageId, !messageId.isEmpty {
-            await pendingActionsManager.queueAction(
-                type: .markRead,
-                messageId: messageId,
-                payload: nil
-            )
+        await rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
+            guard let self,
+                  let gmailMessageId = await self.performReadStateMutation(
+                    messageID: messageID,
+                    conversationID: conversationID,
+                    isUnread: false,
+                    actionType: .markRead
+                  ) else {
+                return
+            }
+            await self.queueReadStateAction(type: .markRead, messageId: gmailMessageId)
         }
     }
 
@@ -331,6 +321,18 @@ final class MessageActions: ObservableObject {
                 )
             }
         }
+    }
+
+    private func queueReadStateAction(
+        type: PendingAction.ActionType,
+        messageId: String
+    ) async {
+        guard !messageId.isEmpty else { return }
+        await pendingActionsManager.queueAction(
+            type: type,
+            messageId: messageId,
+            payload: nil
+        )
     }
 
     // MARK: - Archive

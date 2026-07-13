@@ -329,6 +329,64 @@ final class MessageActionsTests: XCTestCase {
         XCTAssertEqual(queuedActions.count, 2)
     }
 
+    func testSingleReadStateActionsQueueInSerializedMutationOrder() async throws {
+        let conversation = ConversationBuilder()
+            .visible()
+            .withUnreadCount(0)
+            .build(in: context)
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
+        let message = MessageBuilder()
+            .withId("serialized-pending-action-order")
+            .read()
+            .inConversation(conversation)
+            .build(in: context)
+        message.addToLabels(inboxLabel)
+        try coreDataStack.saveViewContext()
+
+        let orderingManager = BlockingReadStatePendingActionsManager()
+        let serializer = ConversationRollupMutationSerializer()
+        let actions = MessageActions(
+            coreDataStack: coreDataStack,
+            pendingActionsManager: orderingManager,
+            rollupMutationSerializer: serializer
+        )
+        let messageObjectID = message.objectID
+        let conversationObjectID = conversation.objectID
+
+        let markUnreadTask = Task {
+            await actions.markAsUnread(message: message)
+        }
+        await orderingManager.waitUntilMarkUnreadQueueStarts()
+
+        let markReadTask = Task {
+            await actions.markAsRead(messageID: messageObjectID)
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        let queuedTypesBeforeRelease = await orderingManager.queuedActionTypes()
+        XCTAssertTrue(queuedTypesBeforeRelease.isEmpty)
+
+        await orderingManager.releaseMarkUnreadQueue()
+        await markUnreadTask.value
+        await markReadTask.value
+
+        let queuedTypes = await orderingManager.queuedActionTypes()
+        XCTAssertEqual(queuedTypes, [.markUnread, .markRead])
+
+        let verificationContext = coreDataStack.newBackgroundContext()
+        let durableState = await verificationContext.perform {
+            let durableConversation = try? verificationContext.existingObject(
+                with: conversationObjectID
+            ) as? Conversation
+            let durableMessage = try? verificationContext.existingObject(
+                with: messageObjectID
+            ) as? Message
+            return (durableMessage?.isUnread, durableConversation?.inboxUnreadCount)
+        }
+        XCTAssertEqual(durableState.0, false)
+        XCTAssertEqual(durableState.1, 0)
+    }
+
     func testReadBatchWaitsForInFlightSyncRollupAndWinsFinalCount() async throws {
         let conversation = ConversationBuilder()
             .visible()
@@ -633,6 +691,58 @@ private actor RollupTestGate {
         continuations.removeAll()
         pendingContinuations.forEach { $0.resume() }
     }
+}
+
+private actor BlockingReadStatePendingActionsManager: PendingActionsManagerProtocol {
+    private let markUnreadQueueStarted = RollupTestGate()
+    private let allowMarkUnreadQueue = RollupTestGate()
+    private var actionTypes: [PendingAction.ActionType] = []
+
+    func waitUntilMarkUnreadQueueStarts() async {
+        await markUnreadQueueStarted.wait()
+    }
+
+    func releaseMarkUnreadQueue() async {
+        await allowMarkUnreadQueue.open()
+    }
+
+    func queuedActionTypes() -> [PendingAction.ActionType] {
+        actionTypes
+    }
+
+    func queueAction(
+        type: PendingAction.ActionType,
+        messageId: String,
+        payload: [String: Any]?
+    ) async {
+        if type == .markUnread {
+            await markUnreadQueueStarted.open()
+            await allowMarkUnreadQueue.wait()
+        }
+        actionTypes.append(type)
+    }
+
+    func queueConversationAction(
+        type: PendingAction.ActionType,
+        sourceConversationId: UUID,
+        messageIds: [String]
+    ) async {
+        actionTypes.append(type)
+    }
+
+    func processAllPendingActions() async {}
+    func pendingActionCount() async -> Int { actionTypes.count }
+    func hasPendingAction(forMessageId messageId: String, type: PendingAction.ActionType) async -> Bool {
+        actionTypes.contains(type)
+    }
+    func cancelPendingAction(forMessageId messageId: String, type: PendingAction.ActionType) async {}
+    func stopMonitoring() {}
+    func abandonedActionCount() async -> Int { 0 }
+    func fetchAbandonedActions() async -> [AbandonedActionInfo] { [] }
+    func retryAbandonedAction(objectID: NSManagedObjectID) async {}
+    func retryAllAbandonedActions() async {}
+    func dismissAbandonedAction(objectID: NSManagedObjectID) async {}
+    func dismissAllAbandonedActions() async {}
 }
 
 private enum MessageActionsTestError: Error {
