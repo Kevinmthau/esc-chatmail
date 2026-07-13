@@ -218,7 +218,7 @@ class ContactPresenter: NSObject, CNContactViewControllerDelegate {
                 return
             }
 
-            try? await Task.sleep(nanoseconds: 50_000_000)
+            guard await Task.sleepUnlessCancelled(nanoseconds: 50_000_000) else { return }
         }
 
         Log.error("Failed to find active presenter for contact UI", category: .ui)

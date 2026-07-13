@@ -411,8 +411,7 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
 
         let recoveringTask = Task { [weak self] in
             let nanoseconds = UInt64(max(0, self?.recoveringDelay ?? 0) * 1_000_000_000)
-            try? await Task.sleep(nanoseconds: nanoseconds)
-            guard !Task.isCancelled else {
+            guard await Task.sleepUnlessCancelled(nanoseconds: nanoseconds) else {
                 return
             }
             self?.markRecoveringIfCurrent(taskLoadKey: taskLoadKey)

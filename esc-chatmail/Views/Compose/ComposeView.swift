@@ -179,8 +179,7 @@ struct ComposeView: View {
 
             // Auto-focus recipient field after a brief delay
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
-                guard !Task.isCancelled else { return }
+                guard await Task.sleepUnlessCancelled(nanoseconds: 100_000_000) else { return } // 0.1 seconds
                 focusedField = .recipient
             }
         }

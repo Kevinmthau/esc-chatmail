@@ -199,7 +199,7 @@ extension PendingActionsManager {
                 // - After 2nd failure (retryCount was 1): 2^1 * base = 4s
                 // - After 3rd failure (retryCount was 2): 2^2 * base = 8s, etc.
                 let delay = baseRetryDelay * pow(2.0, Double(retryCount))
-                try? await Task.sleep(nanoseconds: UInt64(min(delay, 30.0) * 1_000_000_000))
+                guard await Task.sleepUnlessCancelled(nanoseconds: UInt64(min(delay, 30.0) * 1_000_000_000)) else { return }
             }
         }
     }

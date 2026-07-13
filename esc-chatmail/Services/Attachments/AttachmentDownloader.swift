@@ -249,8 +249,9 @@ final class AttachmentDownloader: ObservableObject {
                 let delay = baseRetryDelay * pow(2.0, Double(attempts - 1))
                 Log.debug("Retrying attachment \(attachmentId) in \(delay) seconds (attempt \(attempts)/\(maxRetryAttempts))", category: .attachment)
 
-                // Schedule retry
-                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                // Schedule retry; a cancelled task abandons the retry chain
+                // and unwinds into the outermost call's cleanup `defer`.
+                guard await Task.sleepUnlessCancelled(nanoseconds: UInt64(delay * 1_000_000_000)) else { return }
 
                 // Retry the download
                 await downloadAttachmentWithRetry(
