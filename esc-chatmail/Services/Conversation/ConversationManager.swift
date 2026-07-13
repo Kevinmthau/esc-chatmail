@@ -13,6 +13,7 @@ final class ConversationManager: Sendable {
         ConversationIdentity,
         Date?,
         String?,
+        ConversationInboxSeed?,
         Bool,
         NSManagedObjectContext
     ) async throws -> NSManagedObjectID
@@ -25,13 +26,15 @@ final class ConversationManager: Sendable {
             ConversationIdentity,
             Date?,
             String?,
+            ConversationInboxSeed?,
             Bool,
             NSManagedObjectContext
-        ) async throws -> NSManagedObjectID = { identity, initialLastMessageDate, initialSnippet, reactivateArchivedIfNeeded, context in
+        ) async throws -> NSManagedObjectID = { identity, initialLastMessageDate, initialSnippet, initialInboxSeed, reactivateArchivedIfNeeded, context in
             try await ConversationCreationSerializer.shared.findOrCreateConversationObjectID(
                 for: identity,
                 initialLastMessageDate: initialLastMessageDate,
                 initialSnippet: initialSnippet,
+                initialInboxSeed: initialInboxSeed,
                 reactivateArchivedIfNeeded: reactivateArchivedIfNeeded,
                 in: context
             )
@@ -59,11 +62,13 @@ final class ConversationManager: Sendable {
     ///   - identity: The conversation identity containing participants and type
     ///   - initialLastMessageDate: Optional date to set as lastMessageDate when creating a new conversation (prevents UI flash where conversation appears at bottom before moving to top)
     ///   - initialSnippet: Optional row preview to seed when creating a new conversation (prevents a "No messages" flash until the message and its rollup persist)
+    ///   - initialInboxSeed: Optional inbox indicators to seed when creating a new conversation (prevents the published row from missing its unread dot until the first rollup save)
     ///   - context: The Core Data context to use
     func findOrCreateConversationObjectID(
         for identity: ConversationIdentity,
         initialLastMessageDate: Date? = nil,
         initialSnippet: String? = nil,
+        initialInboxSeed: ConversationInboxSeed? = nil,
         reactivateArchivedIfNeeded: Bool = true,
         in context: NSManagedObjectContext
     ) async throws -> NSManagedObjectID {
@@ -71,6 +76,7 @@ final class ConversationManager: Sendable {
             identity,
             initialLastMessageDate,
             initialSnippet,
+            initialInboxSeed,
             reactivateArchivedIfNeeded,
             context
         )

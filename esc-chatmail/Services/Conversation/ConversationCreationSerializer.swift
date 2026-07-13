@@ -18,11 +18,13 @@ actor ConversationCreationSerializer {
     ///   - identity: The conversation identity containing participants and type
     ///   - initialLastMessageDate: Optional date to set as lastMessageDate when creating a new conversation (prevents UI flash)
     ///   - initialSnippet: Optional row preview seeded at creation, since this save publishes the row before its first message persists
+    ///   - initialInboxSeed: Optional inbox indicators seeded at creation, so the published row carries its unread dot alongside the preview
     ///   - context: The Core Data context to use
     func findOrCreateConversationObjectID(
         for identity: ConversationIdentity,
         initialLastMessageDate: Date? = nil,
         initialSnippet: String? = nil,
+        initialInboxSeed: ConversationInboxSeed? = nil,
         reactivateArchivedIfNeeded: Bool = true,
         in context: NSManagedObjectContext
     ) async throws -> NSManagedObjectID {
@@ -72,6 +74,7 @@ actor ConversationCreationSerializer {
                     for: identity,
                     initialLastMessageDate: initialLastMessageDate,
                     initialSnippet: initialSnippet,
+                    initialInboxSeed: initialInboxSeed,
                     in: context
                 )
             } catch {

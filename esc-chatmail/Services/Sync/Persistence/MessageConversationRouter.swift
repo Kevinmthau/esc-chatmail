@@ -60,6 +60,11 @@ final class MessageConversationRouter {
             for: identity,
             initialLastMessageDate: processedMessage.internalDate,
             initialSnippet: processedMessage.conversationPreviewText,
+            initialInboxSeed: ConversationInboxSeed(
+                isInboxArrival: processedMessage.labelIds.contains("INBOX"),
+                isUnread: processedMessage.isUnread,
+                messageDate: processedMessage.internalDate
+            ),
             reactivateArchivedIfNeeded: shouldReactivateConversation,
             in: context
         )

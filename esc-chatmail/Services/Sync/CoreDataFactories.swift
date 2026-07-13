@@ -150,6 +150,22 @@ struct PersonFactory {
 
 // MARK: - Conversation Factory
 
+/// Inbox rollup values seeded onto a brand-new conversation in the same save
+/// that first publishes its row. The conversation shell is saved before its
+/// first message persists, so unseeded indicators would render a previewed
+/// row with no unread dot until a later rollup save merges.
+struct ConversationInboxSeed: Sendable {
+    let hasInbox: Bool
+    let inboxUnreadCount: Int32
+    let latestInboxDate: Date?
+
+    init(isInboxArrival: Bool, isUnread: Bool, messageDate: Date) {
+        self.hasInbox = isInboxArrival
+        self.inboxUnreadCount = (isInboxArrival && isUnread) ? 1 : 0
+        self.latestInboxDate = isInboxArrival ? messageDate : nil
+    }
+}
+
 /// Factory for creating Conversation and ConversationParticipant entities
 struct ConversationFactory {
 
@@ -158,12 +174,14 @@ struct ConversationFactory {
     ///   - identity: The conversation identity containing participants and type
     ///   - initialLastMessageDate: Optional date to set as lastMessageDate immediately (prevents UI flash where conversation appears at bottom)
     ///   - initialSnippet: Optional row preview to set immediately (prevents a "No messages" flash until the first message and its rollup persist)
+    ///   - initialInboxSeed: Optional inbox rollup values to set immediately (prevents the published row from missing its unread indicators until the first rollup save)
     ///   - context: The Core Data context to create the conversation in
     /// - Throws: CoreDataError.entityCreationFailed if entity creation fails
     static func create(
         for identity: ConversationIdentity,
         initialLastMessageDate: Date? = nil,
         initialSnippet: String? = nil,
+        initialInboxSeed: ConversationInboxSeed? = nil,
         in context: NSManagedObjectContext
     ) throws -> Conversation {
         guard let conversation = NSEntityDescription.insertNewObject(
@@ -188,6 +206,13 @@ struct ConversationFactory {
         // before its first message persists, and a date with no snippet renders
         // as a "No messages" row
         conversation.snippet = MessagePreviewText.nonEmpty(initialSnippet)
+        // Seed the inbox indicators for the same reason: without them the row
+        // publishes with a preview but no unread dot
+        if let initialInboxSeed {
+            conversation.hasInbox = initialInboxSeed.hasInbox
+            conversation.inboxUnreadCount = initialInboxSeed.inboxUnreadCount
+            conversation.latestInboxDate = initialInboxSeed.latestInboxDate
+        }
 
         // Create participants with display names from email headers
         for email in identity.participants {
