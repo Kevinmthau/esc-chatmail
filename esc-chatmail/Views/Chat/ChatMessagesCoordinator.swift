@@ -30,6 +30,7 @@ final class ChatMessagesCoordinator: ObservableObject {
 
     private let loadLatestWindowIfNeeded: LatestWindowLoader
     private let markConversationAsReadIfNeeded: () -> Void
+    private let markUnreadInboxMessagesAsReadIfNeeded: ([NSManagedObjectID]) -> Void
     private let initializeReplyingTo: (Message?) -> Void
     private let updateReplyingToIfNewSubject: (Message?) -> Void
     private let loadResolvedDisplayName: () -> Void
@@ -42,6 +43,11 @@ final class ChatMessagesCoordinator: ObservableObject {
     private let taskManager = ViewModelTaskManager()
     private var hasStartedInitialAnchor = false
     private var initialAnchorWasForEmptyConversation = false
+    private var hasCapturedInitialUnreadSnapshot = false
+    private var isVisible = false
+    private var pendingAutoReadMessageIDsByEventID: [UUID: [NSManagedObjectID]] = [:]
+    private var pendingAutoReadMessageIDsByLayoutID: [UUID: [NSManagedObjectID]] = [:]
+    private var pendingAutoReadLayoutOrder: [UUID] = []
 
     init(
         scrollState: VirtualScrollState,
@@ -56,6 +62,9 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
         self.markConversationAsReadIfNeeded = {
             viewModel.markConversationAsReadIfNeeded()
+        }
+        self.markUnreadInboxMessagesAsReadIfNeeded = { messageObjectIDs in
+            viewModel.markUnreadInboxMessagesAsReadIfNeeded(messageObjectIDs: messageObjectIDs)
         }
         self.initializeReplyingTo = { lastMessage in
             viewModel.initializeReplyingTo(lastMessage: lastMessage)
@@ -83,6 +92,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     init(
         loadLatestWindowIfNeeded: @escaping LatestWindowLoader,
         markConversationAsReadIfNeeded: @escaping () -> Void,
+        markUnreadInboxMessagesAsReadIfNeeded: @escaping ([NSManagedObjectID]) -> Void = { _ in },
         initializeReplyingTo: @escaping (Message?) -> Void,
         updateReplyingToIfNewSubject: @escaping (Message?) -> Void,
         loadResolvedDisplayName: @escaping () -> Void,
@@ -95,6 +105,7 @@ final class ChatMessagesCoordinator: ObservableObject {
     ) {
         self.loadLatestWindowIfNeeded = loadLatestWindowIfNeeded
         self.markConversationAsReadIfNeeded = markConversationAsReadIfNeeded
+        self.markUnreadInboxMessagesAsReadIfNeeded = markUnreadInboxMessagesAsReadIfNeeded
         self.initializeReplyingTo = initializeReplyingTo
         self.updateReplyingToIfNewSubject = updateReplyingToIfNewSubject
         self.loadResolvedDisplayName = loadResolvedDisplayName
@@ -115,7 +126,11 @@ final class ChatMessagesCoordinator: ObservableObject {
         isInitialWindowLoaded: Bool,
         scrollAction: @escaping BottomAnchorAction
     ) {
-        markConversationAsReadIfNeeded()
+        isVisible = true
+        if !hasCapturedInitialUnreadSnapshot {
+            hasCapturedInitialUnreadSnapshot = true
+            markConversationAsReadIfNeeded()
+        }
         initializeReplyingTo(lastMessage)
 
         startInitialAnchorIfPossible(
@@ -158,6 +173,10 @@ final class ChatMessagesCoordinator: ObservableObject {
     }
 
     func handleDisappear() {
+        isVisible = false
+        pendingAutoReadMessageIDsByEventID.removeAll()
+        pendingAutoReadMessageIDsByLayoutID.removeAll()
+        pendingAutoReadLayoutOrder.removeAll()
         taskManager.cancelAll()
         cancelPrefetch()
         if !isReadyToShow {
@@ -189,6 +208,81 @@ final class ChatMessagesCoordinator: ObservableObject {
             prefetchVisibleContent(from: visibleMessages)
             refreshSenderGroupingKeys(using: senderGroupingMessages)
         }
+    }
+
+    func handleInsertedVisibleMessageEvent(
+        _ event: VirtualScrollInsertedMessageEvent,
+        isChatActiveAndUncovered: Bool,
+        isShowingLatestWindow: Bool,
+        isBottomAnchorVisible: Bool
+    ) {
+        guard !event.messageIDs.isEmpty,
+              isReadyToShow,
+              isVisible,
+              isChatActiveAndUncovered,
+              isShowingLatestWindow,
+              isBottomAnchorVisible else {
+            return
+        }
+
+        pendingAutoReadMessageIDsByEventID[event.id] = event.messageIDs
+    }
+
+    func handleRefreshedInsertedMessageEvent(
+        _ refresh: VirtualScrollInsertedMessageRefresh,
+        isChatActiveAndUncovered: Bool,
+        isShowingLatestWindow: Bool
+    ) {
+        guard let pendingMessageIDs = pendingAutoReadMessageIDsByEventID.removeValue(
+            forKey: refresh.eventID
+        ) else {
+            return
+        }
+
+        let latestWindowMessageIDs = Set(refresh.messageIDsInLatestWindow)
+        let verifiedMessageIDs = pendingMessageIDs.filter(latestWindowMessageIDs.contains)
+        guard !verifiedMessageIDs.isEmpty,
+              isReadyToShow,
+              isVisible,
+              isChatActiveAndUncovered,
+              isShowingLatestWindow else {
+            return
+        }
+
+        if pendingAutoReadMessageIDsByLayoutID[refresh.layoutID] == nil {
+            pendingAutoReadLayoutOrder.append(refresh.layoutID)
+        }
+        pendingAutoReadMessageIDsByLayoutID[refresh.layoutID, default: []]
+            .append(contentsOf: verifiedMessageIDs)
+    }
+
+    func handleLatestWindowLayout(
+        layoutID: UUID,
+        isChatActiveAndUncovered: Bool,
+        isShowingLatestWindow: Bool,
+        isBottomAnchorVisible: Bool
+    ) {
+        guard let targetIndex = pendingAutoReadLayoutOrder.firstIndex(of: layoutID) else {
+            return
+        }
+
+        let layoutIDsToResolve = Array(pendingAutoReadLayoutOrder.prefix(targetIndex + 1))
+        pendingAutoReadLayoutOrder.removeFirst(targetIndex + 1)
+        let pendingMessageIDs = layoutIDsToResolve.flatMap {
+            pendingAutoReadMessageIDsByLayoutID.removeValue(forKey: $0) ?? []
+        }
+
+        guard isReadyToShow,
+              isVisible,
+              isChatActiveAndUncovered,
+              isShowingLatestWindow,
+              isBottomAnchorVisible else {
+            return
+        }
+
+        var seenMessageIDs = Set<NSManagedObjectID>()
+        let verifiedMessageIDs = pendingMessageIDs.filter { seenMessageIDs.insert($0).inserted }
+        markUnreadInboxMessagesAsReadIfNeeded(verifiedMessageIDs)
     }
 
     func handleMessageCountChange(

@@ -92,23 +92,27 @@ final class ChatViewModel: ObservableObject {
     /// Marks all unread messages in the conversation as read
     /// Uses batch operation to prevent race condition with new messages arriving during marking
     func markConversationAsRead(messageObjectIDs: [NSManagedObjectID]) {
-        // Immediately clear the unread count in UI (optimistic update)
-        conversation.inboxUnreadCount = 0
-
         let messageActions = self.messageActions
         let conversationID = conversation.objectID
-        taskManager.runDetached("markConversationAsRead") {
+        taskManager.runDetached("markConversationAsRead-\(UUID().uuidString)") {
             // Use batch operation for atomic update - prevents race condition
             await messageActions.markMessagesAsReadBatch(messageIDs: messageObjectIDs, conversationID: conversationID)
         }
     }
 
     func markConversationAsReadIfNeeded() {
-        guard conversation.inboxUnreadCount > 0 else { return }
-
-        let unreadMessageIDs = messageActions.snapshotUnreadConversationMessageObjectIDs(
+        let unreadMessageIDs = messageActions.snapshotUnreadInboxMessageObjectIDs(
             conversationID: conversation.id
         )
+        guard !unreadMessageIDs.isEmpty else { return }
+        markConversationAsRead(messageObjectIDs: unreadMessageIDs)
+    }
+
+    func markUnreadInboxMessagesAsReadIfNeeded(messageObjectIDs: [NSManagedObjectID]) {
+        let unreadMessageIDs = messageActions.snapshotUnreadInboxMessageObjectIDs(
+            messageObjectIDs: messageObjectIDs
+        )
+        guard !unreadMessageIDs.isEmpty else { return }
         markConversationAsRead(messageObjectIDs: unreadMessageIDs)
     }
 

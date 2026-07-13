@@ -13,6 +13,7 @@ struct ChatView: View {
     @FocusState private var isTextFieldFocused: Bool
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
 
     @MainActor
     init(
@@ -46,6 +47,7 @@ struct ChatView: View {
             conversation: conversation,
             viewModel: viewModel,
             chatDependencies: chatDependencies,
+            isChatActiveAndUncovered: isChatActiveAndUncovered,
             isTextFieldFocused: $isTextFieldFocused,
             onOpenFullMessage: { messageObjectID, source in
                 viewModel.openEmailReader(
@@ -90,7 +92,7 @@ struct ChatView: View {
             }
         }
         .sheet(item: activeDestinationBinding, onDismiss: {
-            dismissActiveDestination()
+            dismissActiveDestination(presentationDidEnd: true)
         }) { destination in
             destinationSheet(destination)
                 .onAppear {
@@ -167,6 +169,33 @@ struct ChatView: View {
         )
     }
 
+    private var isChatActiveAndUncovered: Bool {
+        Self.isChatActiveAndUncovered(
+            sceneIsActive: scenePhase == .active,
+            hasDesiredDestination: activeDestination != nil,
+            hasPresentedSheet: presentedSheetDestination != nil,
+            hasContactAccessPicker: viewModel.contactManager.showingContactAccessPicker,
+            hasContactActionAlert: viewModel.contactManager.contactActionAlert != nil,
+            hasSendErrorAlert: viewModel.sendErrorAlert != nil
+        )
+    }
+
+    static func isChatActiveAndUncovered(
+        sceneIsActive: Bool,
+        hasDesiredDestination: Bool,
+        hasPresentedSheet: Bool,
+        hasContactAccessPicker: Bool,
+        hasContactActionAlert: Bool,
+        hasSendErrorAlert: Bool
+    ) -> Bool {
+        sceneIsActive &&
+            !hasDesiredDestination &&
+            !hasPresentedSheet &&
+            !hasContactAccessPicker &&
+            !hasContactActionAlert &&
+            !hasSendErrorAlert
+    }
+
     private var activeDestination: ChatDestination? {
         if let destination = viewModel.destination {
             return destination
@@ -192,7 +221,7 @@ struct ChatView: View {
             activeDestination
         } set: { newValue in
             if newValue == nil {
-                dismissActiveDestination()
+                dismissActiveDestination(presentationDidEnd: false)
             }
         }
     }
@@ -237,9 +266,11 @@ struct ChatView: View {
         }
     }
 
-    private func dismissActiveDestination() {
+    private func dismissActiveDestination(presentationDidEnd: Bool) {
         let dismissedDestination = presentedSheetDestination
-        presentedSheetDestination = nil
+        if presentationDidEnd {
+            presentedSheetDestination = nil
+        }
 
         // A different destination already pending means this dismissal is a sheet
         // replacement (e.g. participants -> add contact); the onDismiss belongs to

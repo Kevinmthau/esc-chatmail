@@ -239,6 +239,371 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         )
     }
 
+    func testTransientReappearanceDoesNotRecaptureUnreadOrConsumeHiddenArrival() {
+        var markConversationAsReadCount = 0
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: { markConversationAsReadCount += 1 },
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        let arrivalID = makeMessageObjectID("hidden-arrival")
+
+        handleEmptyAppear(coordinator)
+        coordinator.handleDisappear()
+        let event = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [arrivalID])
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+        handleRefreshAndLayout(
+            coordinator,
+            event: event,
+            messageIDsInLatestWindow: [arrivalID]
+        )
+        handleEmptyAppear(coordinator)
+
+        XCTAssertEqual(markConversationAsReadCount, 1)
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+    }
+
+    func testArrivalAtLatestVisibleWindowAfterReadyMarksUnreadAsRead() {
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        let arrivalID = makeMessageObjectID("visible-arrival")
+        handleEmptyAppear(coordinator)
+
+        let event = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [arrivalID])
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+
+        let layoutID = UUID()
+        coordinator.handleRefreshedInsertedMessageEvent(
+            .init(
+                eventID: event.id,
+                layoutID: layoutID,
+                messageIDsInLatestWindow: [arrivalID]
+            ),
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true
+        )
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+
+        coordinator.handleLatestWindowLayout(
+            layoutID: layoutID,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+
+        XCTAssertEqual(markedArrivalIDs, [[arrivalID]])
+    }
+
+    func testArrivalWhileScrolledUpDoesNotMarkUnreadAsRead() {
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        handleEmptyAppear(coordinator)
+
+        let arrivalID = makeMessageObjectID("scrolled-arrival")
+        let event = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [arrivalID])
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: false
+        )
+        handleRefreshAndLayout(
+            coordinator,
+            event: event,
+            messageIDsInLatestWindow: [arrivalID]
+        )
+
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+    }
+
+    func testArrivalBeforeChatIsReadyDoesNotMarkUnreadAsRead() {
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        coordinator.handleAppear(
+            messageCount: 2,
+            lastMessage: nil,
+            visibleMessages: [],
+            senderGroupingMessages: [],
+            totalMessageCount: 2,
+            isInitialWindowLoaded: false
+        ) { _ in }
+
+        let arrivalID = makeMessageObjectID("pre-ready-arrival")
+        let event = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [arrivalID])
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+        handleRefreshAndLayout(
+            coordinator,
+            event: event,
+            messageIDsInLatestWindow: [arrivalID]
+        )
+
+        XCTAssertFalse(coordinator.isReadyToShow)
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+    }
+
+    func testArrivalWhileChatIsCoveredOrInactiveDoesNotMarkUnreadAsRead() {
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        handleEmptyAppear(coordinator)
+
+        let arrivalID = makeMessageObjectID("covered-arrival")
+        let event = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [arrivalID])
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: false,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+        handleRefreshAndLayout(
+            coordinator,
+            event: event,
+            messageIDsInLatestWindow: [arrivalID]
+        )
+
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+    }
+
+    func testArrivalExcludedFromRefreshedLatestWindowDoesNotMarkUnreadAsRead() {
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        let event = VirtualScrollInsertedMessageEvent(
+            id: UUID(),
+            messageIDs: [makeMessageObjectID("historical-arrival")]
+        )
+        handleEmptyAppear(coordinator)
+
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+        handleRefreshAndLayout(
+            coordinator,
+            event: event,
+            messageIDsInLatestWindow: []
+        )
+
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+    }
+
+    func testArrivalThatBecomesCoveredBeforeRefreshDoesNotMarkUnreadAsRead() {
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        let arrivalID = makeMessageObjectID("covered-during-refresh")
+        let event = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [arrivalID])
+        handleEmptyAppear(coordinator)
+
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+        handleRefreshAndLayout(
+            coordinator,
+            event: event,
+            messageIDsInLatestWindow: [arrivalID],
+            isChatActiveAtRefresh: false
+        )
+
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+    }
+
+    func testArrivalThatPushesBottomAnchorOffscreenAfterRefreshDoesNotMarkUnreadAsRead() {
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        let arrivalID = makeMessageObjectID("offscreen-after-layout")
+        let event = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [arrivalID])
+        let layoutID = UUID()
+        handleEmptyAppear(coordinator)
+
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+        coordinator.handleRefreshedInsertedMessageEvent(
+            .init(
+                eventID: event.id,
+                layoutID: layoutID,
+                messageIDsInLatestWindow: [arrivalID]
+            ),
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true
+        )
+
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+
+        coordinator.handleLatestWindowLayout(
+            layoutID: layoutID,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: false
+        )
+
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+    }
+
+    func testArrivalThatBecomesCoveredBeforeLayoutDoesNotMarkUnreadAsRead() {
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        let arrivalID = makeMessageObjectID("covered-before-layout")
+        let event = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [arrivalID])
+        let layoutID = UUID()
+        handleEmptyAppear(coordinator)
+
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+        coordinator.handleRefreshedInsertedMessageEvent(
+            .init(
+                eventID: event.id,
+                layoutID: layoutID,
+                messageIDsInLatestWindow: [arrivalID]
+            ),
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true
+        )
+        coordinator.handleLatestWindowLayout(
+            layoutID: layoutID,
+            isChatActiveAndUncovered: false,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+
+        XCTAssertTrue(markedArrivalIDs.isEmpty)
+    }
+
+    func testRapidArrivalEventsAreResolvedIndependently() {
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        let firstID = makeMessageObjectID("first-rapid-arrival")
+        let secondID = makeMessageObjectID("second-rapid-arrival")
+        let firstEvent = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [firstID])
+        let secondEvent = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [secondID])
+        handleEmptyAppear(coordinator)
+
+        for event in [firstEvent, secondEvent] {
+            coordinator.handleInsertedVisibleMessageEvent(
+                event,
+                isChatActiveAndUncovered: true,
+                isShowingLatestWindow: true,
+                isBottomAnchorVisible: true
+            )
+        }
+        let layoutID = UUID()
+        for event in [firstEvent, secondEvent] {
+            coordinator.handleRefreshedInsertedMessageEvent(
+                .init(
+                    eventID: event.id,
+                    layoutID: layoutID,
+                    messageIDsInLatestWindow: event.messageIDs
+                ),
+                isChatActiveAndUncovered: true,
+                isShowingLatestWindow: true
+            )
+        }
+        coordinator.handleLatestWindowLayout(
+            layoutID: layoutID,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+
+        XCTAssertEqual(markedArrivalIDs, [[firstID, secondID]])
+    }
+
+    func testNewerLayoutResolvesEarlierPendingLayoutBatches() {
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) }
+        )
+        let firstID = makeMessageObjectID("first-layout-arrival")
+        let secondID = makeMessageObjectID("second-layout-arrival")
+        let firstEvent = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [firstID])
+        let secondEvent = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [secondID])
+        handleEmptyAppear(coordinator)
+
+        for event in [firstEvent, secondEvent] {
+            coordinator.handleInsertedVisibleMessageEvent(
+                event,
+                isChatActiveAndUncovered: true,
+                isShowingLatestWindow: true,
+                isBottomAnchorVisible: true
+            )
+        }
+        let firstLayoutID = UUID()
+        coordinator.handleRefreshedInsertedMessageEvent(
+            .init(eventID: firstEvent.id, layoutID: firstLayoutID, messageIDsInLatestWindow: [firstID]),
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true
+        )
+        let secondLayoutID = UUID()
+        coordinator.handleRefreshedInsertedMessageEvent(
+            .init(eventID: secondEvent.id, layoutID: secondLayoutID, messageIDsInLatestWindow: [secondID]),
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true
+        )
+
+        coordinator.handleLatestWindowLayout(
+            layoutID: secondLayoutID,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+
+        XCTAssertEqual(markedArrivalIDs, [[firstID, secondID]])
+    }
+
     func testHandleDisplayedMessagesChange_prefetchesTrailingVisibleWindow() async throws {
         let senderEmails = (0..<35).map { index in
             "sender-\(index)@example.com"
@@ -1327,6 +1692,70 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
         try viewContext.save()
         return (conversation, messages)
+    }
+
+    private func makeUnreadCoordinator(
+        markConversationAsReadIfNeeded: @escaping () -> Void,
+        markUnreadInboxMessagesAsReadIfNeeded: @escaping ([NSManagedObjectID]) -> Void
+    ) -> ChatMessagesCoordinator {
+        ChatMessagesCoordinator(
+            loadLatestWindowIfNeeded: { _ in },
+            markConversationAsReadIfNeeded: markConversationAsReadIfNeeded,
+            markUnreadInboxMessagesAsReadIfNeeded: markUnreadInboxMessagesAsReadIfNeeded,
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchRecentContent: { _, _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in }
+        )
+    }
+
+    private func makeMessageObjectID(_ id: String) -> NSManagedObjectID {
+        MessageBuilder()
+            .withId(id)
+            .build(in: viewContext)
+            .objectID
+    }
+
+    private func handleEmptyAppear(_ coordinator: ChatMessagesCoordinator) {
+        coordinator.handleAppear(
+            messageCount: 0,
+            lastMessage: nil,
+            visibleMessages: [],
+            senderGroupingMessages: [],
+            totalMessageCount: 0,
+            isInitialWindowLoaded: true
+        ) { _ in }
+    }
+
+    private func handleRefreshAndLayout(
+        _ coordinator: ChatMessagesCoordinator,
+        event: VirtualScrollInsertedMessageEvent,
+        messageIDsInLatestWindow: [NSManagedObjectID],
+        isChatActiveAtRefresh: Bool = true,
+        isChatActiveAtLayout: Bool = true,
+        isBottomAnchorVisible: Bool = true
+    ) {
+        let layoutID = UUID()
+        coordinator.handleRefreshedInsertedMessageEvent(
+            .init(
+                eventID: event.id,
+                layoutID: layoutID,
+                messageIDsInLatestWindow: messageIDsInLatestWindow
+            ),
+            isChatActiveAndUncovered: isChatActiveAtRefresh,
+            isShowingLatestWindow: true
+        )
+        coordinator.handleLatestWindowLayout(
+            layoutID: layoutID,
+            isChatActiveAndUncovered: isChatActiveAtLayout,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: isBottomAnchorVisible
+        )
     }
 
     private func waitUntil(

@@ -19,37 +19,69 @@ extension CoreDataStack: MessageActionsCoreDataStacking {}
 
 @MainActor
 final class MessageActions: ObservableObject {
+    typealias UnreadInboxMessageCounter = @Sendable (NSManagedObjectContext, Conversation) throws -> Int
+
     private let coreDataStack: any MessageActionsCoreDataStacking
     private let pendingActionsManager: any PendingActionsManagerProtocol
+    private let unreadInboxMessageCounter: UnreadInboxMessageCounter
+    private let rollupMutationSerializer: ConversationRollupMutationSerializer
 
     init(
         coreDataStack: any MessageActionsCoreDataStacking,
-        pendingActionsManager: any PendingActionsManagerProtocol
+        pendingActionsManager: any PendingActionsManagerProtocol,
+        rollupMutationSerializer: ConversationRollupMutationSerializer = .shared
     ) {
         self.coreDataStack = coreDataStack
         self.pendingActionsManager = pendingActionsManager
+        self.rollupMutationSerializer = rollupMutationSerializer
+        self.unreadInboxMessageCounter = { context, conversation in
+            try Self.countUnreadInboxMessages(in: context, conversation: conversation)
+        }
+    }
+
+    init(
+        coreDataStack: any MessageActionsCoreDataStacking,
+        pendingActionsManager: any PendingActionsManagerProtocol,
+        unreadInboxMessageCounter: @escaping UnreadInboxMessageCounter,
+        rollupMutationSerializer: ConversationRollupMutationSerializer = .shared
+    ) {
+        self.coreDataStack = coreDataStack
+        self.pendingActionsManager = pendingActionsManager
+        self.unreadInboxMessageCounter = unreadInboxMessageCounter
+        self.rollupMutationSerializer = rollupMutationSerializer
     }
 
     // MARK: - Mark Read/Unread
 
     func markAsRead(message: Message) async {
-        await updateReadState(message: message, isUnread: false, actionType: .markRead)
+        await updateReadState(
+            messageID: message.objectID,
+            conversationID: message.conversation?.objectID,
+            isUnread: false,
+            actionType: .markRead
+        )
     }
 
     func markAsUnread(message: Message) async {
-        await updateReadState(message: message, isUnread: true, actionType: .markUnread)
+        await updateReadState(
+            messageID: message.objectID,
+            conversationID: message.conversation?.objectID,
+            isUnread: true,
+            actionType: .markUnread
+        )
     }
 
     func markConversationAsUnread(conversation: Conversation) async {
-        let context = coreDataStack.viewContext
-        let inboxMessages = fetchInboxMessages(for: conversation, context: context)
-
-        if let latestInboxMessage = inboxMessages.first { // Already sorted by internalDate descending
-            await markAsUnread(message: latestInboxMessage)
-        } else if let messages = conversation.messages,
-                  let latestMessage = messages.max(by: { $0.internalDate < $1.internalDate }) {
-            // Fallback to latest message if no INBOX messages
-            await markAsUnread(message: latestMessage)
+        let conversationID = conversation.objectID
+        let conversationKey = conversationID.uriRepresentation().absoluteString
+        await rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
+            guard let self,
+                  let messageId = await self.performMarkConversationAsUnread(
+                    conversationID: conversationID
+                  ) else {
+                return
+            }
+            await self.queueReadStateAction(type: .markUnread, messageId: messageId)
         }
     }
 
@@ -66,12 +98,12 @@ final class MessageActions: ObservableObject {
 
     /// Snapshots the unread message IDs that should be cleared when a chat opens.
     /// Capturing these IDs on the main context avoids racing newer arrivals.
-    func snapshotUnreadConversationMessageObjectIDs(conversationID: UUID) -> [NSManagedObjectID] {
+    func snapshotUnreadInboxMessageObjectIDs(conversationID: UUID) -> [NSManagedObjectID] {
         let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
         request.predicate = NSPredicate(
-            format: "conversation.id == %@ AND isUnread == YES AND NONE labels.id IN %@",
+            format: "conversation.id == %@ AND isUnread == YES AND ANY labels.id == %@",
             conversationID as CVarArg,
-            ["DRAFT", "SPAM", "TRASH"]
+            "INBOX"
         )
         request.fetchBatchSize = 50
         request.includesPendingChanges = false
@@ -80,67 +112,148 @@ final class MessageActions: ObservableObject {
         return (try? coreDataStack.viewContext.fetch(request)) ?? []
     }
 
-    /// Core method for updating message read state - eliminates duplication between markAsRead/markAsUnread
-    private func updateReadState(message: Message, isUnread: Bool, actionType: PendingAction.ActionType) async {
-        // Skip if already in desired state
-        guard message.isUnread != isUnread else { return }
+    /// Filters an exact insertion set down to unread INBOX messages.
+    /// This prevents a later arrival from consuming unrelated unread mail.
+    func snapshotUnreadInboxMessageObjectIDs(
+        messageObjectIDs: [NSManagedObjectID]
+    ) -> [NSManagedObjectID] {
+        guard !messageObjectIDs.isEmpty else { return [] }
 
-        // Update local state and mark as locally modified for conflict detection
-        message.isUnread = isUnread
-        message.localModifiedAt = Date()
-        let saved = coreDataStack.saveIfNeeded(context: coreDataStack.viewContext)
+        let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
+        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            NSPredicate(format: "SELF IN %@", messageObjectIDs),
+            NSPredicate(format: "isUnread == YES"),
+            NSPredicate(format: "ANY labels.id == %@", "INBOX")
+        ])
+        request.fetchBatchSize = messageObjectIDs.count
+        request.includesPendingChanges = false
+        request.resultType = .managedObjectIDResultType
 
-        // Update conversation unread count
-        if let conversation = message.conversation {
-            updateConversationInboxStatus(conversation)
+        return (try? coreDataStack.viewContext.fetch(request)) ?? []
+    }
+
+    private func updateReadState(
+        messageID: NSManagedObjectID,
+        conversationID: NSManagedObjectID?,
+        isUnread: Bool,
+        actionType: PendingAction.ActionType
+    ) async {
+        guard let conversationID else { return }
+        let conversationKey = conversationID.uriRepresentation().absoluteString
+        await rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
+            guard let self,
+                  let messageId = await self.performReadStateMutation(
+                    messageID: messageID,
+                    conversationID: conversationID,
+                    isUnread: isUnread,
+                    actionType: actionType
+                  ) else {
+                return
+            }
+            await self.queueReadStateAction(type: actionType, messageId: messageId)
         }
+    }
 
-        // Only sync to Gmail if the optimistic change actually persisted locally.
-        // Pushing a remote mutation we failed to store would diverge Gmail from local state.
-        guard saved else {
-            Log.error("Not queuing \(actionType.rawValue) for message \(message.id): local save failed", category: .message)
-            return
+    private func performReadStateMutation(
+        messageID: NSManagedObjectID,
+        conversationID: NSManagedObjectID,
+        isUnread: Bool,
+        actionType: PendingAction.ActionType
+    ) async -> String? {
+        let context = coreDataStack.newBackgroundContext()
+        return await context.perform {
+            context.refreshAllObjects()
+            guard let message = try? context.existingObject(with: messageID) as? Message,
+                  let conversation = try? context.existingObject(with: conversationID) as? Conversation,
+                  message.conversation?.objectID == conversation.objectID,
+                  message.isUnread != isUnread else {
+                return nil
+            }
+
+            message.isUnread = isUnread
+            message.localModifiedAt = Date()
+            guard Self.recalculateConversationInboxStatus(conversation, in: context),
+                  context.saveOrLog(operation: "mark message as \(actionType.rawValue)") else {
+                context.rollback()
+                return nil
+            }
+
+            return message.id
         }
+    }
 
-        // Queue sync to Gmail
-        let messageId = message.id
-        if !messageId.isEmpty {
-            await pendingActionsManager.queueAction(
-                type: actionType,
-                messageId: messageId,
-                payload: nil
-            )
+    private func performMarkConversationAsUnread(
+        conversationID: NSManagedObjectID
+    ) async -> String? {
+        let context = coreDataStack.newBackgroundContext()
+        return await context.perform {
+            context.refreshAllObjects()
+            guard let conversation = try? context.existingObject(with: conversationID) as? Conversation,
+                  let latestInboxMessage = Self.fetchInboxMessagesForRollup(
+                      for: conversation,
+                      context: context
+                  )?.first,
+                  !latestInboxMessage.isUnread else {
+                return nil
+            }
+
+            latestInboxMessage.isUnread = true
+            latestInboxMessage.localModifiedAt = Date()
+            guard Self.recalculateConversationInboxStatus(conversation, in: context),
+                  context.saveOrLog(operation: "mark conversation as unread") else {
+                context.rollback()
+                return nil
+            }
+
+            return latestInboxMessage.id
         }
     }
 
     /// Mark message as read using ObjectID - safe to call from background threads
     func markAsRead(messageID: NSManagedObjectID) async {
         let context = coreDataStack.newBackgroundContext()
-
-        let gmailMessageId: String? = await context.perform {
-            guard let message = try? context.existingObject(with: messageID) as? Message else { return nil }
-            guard message.isUnread else { return nil }
-            message.isUnread = false
-            message.localModifiedAt = Date()
-            let messageId = message.id
-            // Only return the id (and thus queue a remote markRead) if the local change persisted.
-            guard context.saveOrLog(operation: "mark message as read") else { return nil }
-            return messageId
+        let conversationID: NSManagedObjectID? = await context.perform {
+            context.refreshAllObjects()
+            guard let message = try? context.existingObject(with: messageID) as? Message else {
+                return nil
+            }
+            return message.conversation?.objectID
         }
 
-        if let messageId = gmailMessageId, !messageId.isEmpty {
-            await pendingActionsManager.queueAction(
-                type: .markRead,
-                messageId: messageId,
-                payload: nil
-            )
+        guard let conversationID else { return }
+        let conversationKey = conversationID.uriRepresentation().absoluteString
+        await rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
+            guard let self,
+                  let gmailMessageId = await self.performReadStateMutation(
+                    messageID: messageID,
+                    conversationID: conversationID,
+                    isUnread: false,
+                    actionType: .markRead
+                  ) else {
+                return
+            }
+            await self.queueReadStateAction(type: .markRead, messageId: gmailMessageId)
         }
     }
 
     /// Batch mark messages as read - prevents race condition with new messages
     /// Uses a single transaction to ensure atomic update of conversation unread count
     func markMessagesAsReadBatch(messageIDs: [NSManagedObjectID], conversationID: NSManagedObjectID) async {
+        let conversationKey = conversationID.uriRepresentation().absoluteString
+        await rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
+            await self?.performMarkMessagesAsReadBatch(
+                messageIDs: messageIDs,
+                conversationID: conversationID
+            )
+        }
+    }
+
+    private func performMarkMessagesAsReadBatch(
+        messageIDs: [NSManagedObjectID],
+        conversationID: NSManagedObjectID
+    ) async {
         let context = coreDataStack.newBackgroundContext()
+        let unreadInboxMessageCounter = self.unreadInboxMessageCounter
 
         let batchResult: (messageIds: [String], sourceConversationId: UUID?) = await context.perform {
             var markedIds: [String] = []
@@ -149,7 +262,11 @@ final class MessageActions: ObservableObject {
 
             for messageID in messageIDs {
                 guard let message = try? context.existingObject(with: messageID) as? Message else { continue }
-                guard message.isUnread else { continue }
+                guard message.isUnread,
+                      message.conversation?.objectID == conversationID,
+                      message.labels?.contains(where: { $0.id == "INBOX" }) == true else {
+                    continue
+                }
 
                 message.isUnread = false
                 message.localModifiedAt = modificationDate
@@ -160,16 +277,24 @@ final class MessageActions: ObservableObject {
                 }
             }
 
-            // Update conversation unread count atomically
-            if let conv = try? context.existingObject(with: conversationID) as? Conversation {
-                sourceConversationId = sourceConversationId ?? conv.id
-                let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
-                countRequest.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
-                    NSPredicate(format: "conversation == %@", conv),
-                    NSPredicate(format: "ANY labels.id == %@", "INBOX"),
-                    NSPredicate(format: "isUnread == YES")
-                ])
-                conv.inboxUnreadCount = Int32((try? context.count(for: countRequest)) ?? 0)
+            guard let conversation = try? context.existingObject(with: conversationID) as? Conversation else {
+                context.rollback()
+                return ([], sourceConversationId)
+            }
+            sourceConversationId = sourceConversationId ?? conversation.id
+
+            do {
+                conversation.inboxUnreadCount = Int32(
+                    try unreadInboxMessageCounter(context, conversation)
+                )
+            } catch {
+                context.rollback()
+                Log.error(
+                    "Aborting batch mark as read because the unread INBOX count failed",
+                    category: .coreData,
+                    error: error
+                )
+                return ([], sourceConversationId)
             }
 
             // Don't sync to Gmail if the local batch update didn't persist.
@@ -196,6 +321,18 @@ final class MessageActions: ObservableObject {
                 )
             }
         }
+    }
+
+    private func queueReadStateAction(
+        type: PendingAction.ActionType,
+        messageId: String
+    ) async {
+        guard !messageId.isEmpty else { return }
+        await pendingActionsManager.queueAction(
+            type: type,
+            messageId: messageId,
+            payload: nil
+        )
     }
 
     // MARK: - Archive
@@ -501,6 +638,46 @@ final class MessageActions: ObservableObject {
         conversation.latestInboxDate = inboxMessages.first?.internalDate // Already sorted descending
 
         coreDataStack.saveIfNeeded(context: context)
+    }
+
+    nonisolated private static func recalculateConversationInboxStatus(
+        _ conversation: Conversation,
+        in context: NSManagedObjectContext
+    ) -> Bool {
+        guard let inboxMessages = fetchInboxMessagesForRollup(for: conversation, context: context) else {
+            return false
+        }
+
+        conversation.hasInbox = !inboxMessages.isEmpty
+        conversation.inboxUnreadCount = Int32(inboxMessages.filter(\.isUnread).count)
+        conversation.latestInboxDate = inboxMessages.first?.internalDate
+        return true
+    }
+
+    nonisolated private static func fetchInboxMessagesForRollup(
+        for conversation: Conversation,
+        context: NSManagedObjectContext
+    ) -> [Message]? {
+        let request = Message.fetchRequest()
+        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            NSPredicate(format: "conversation == %@", conversation),
+            NSPredicate(format: "ANY labels.id == %@", "INBOX")
+        ])
+        request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: false)]
+        return try? context.fetch(request)
+    }
+
+    nonisolated private static func countUnreadInboxMessages(
+        in context: NSManagedObjectContext,
+        conversation: Conversation
+    ) throws -> Int {
+        let request = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
+        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            NSPredicate(format: "conversation == %@", conversation),
+            NSPredicate(format: "ANY labels.id == %@", "INBOX"),
+            NSPredicate(format: "isUnread == YES")
+        ])
+        return try context.count(for: request)
     }
 
     private func fetchLabel(id: String, in context: NSManagedObjectContext, operation: String) -> Label? {

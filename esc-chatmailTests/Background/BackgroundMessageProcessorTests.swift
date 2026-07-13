@@ -488,6 +488,89 @@ final class BackgroundMessageProcessorTests: XCTestCase {
         )
         await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
     }
+
+    @MainActor
+    func testProcessHistoryChangesPreservesReadFirstAgainstPreparedStaleMessage() async throws {
+        await ModificationTracker.shared.reset()
+
+        let stack = TestCoreDataStack()
+        let conversation = ConversationBuilder()
+            .visible()
+            .withUnreadCount(0)
+            .build(in: stack.viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: stack.viewContext)
+        let message = MessageBuilder()
+            .withId("read-first-stale-sync")
+            .read()
+            .inConversation(conversation)
+            .build(in: stack.viewContext)
+        message.addToLabels(inboxLabel)
+        try stack.saveViewContext()
+        let messageObjectID = message.objectID
+
+        let backgroundContext = stack.newBackgroundContext()
+        await backgroundContext.perform {
+            _ = try? backgroundContext.existingObject(with: messageObjectID) as? Message
+        }
+
+        message.isUnread = true
+        conversation.inboxUnreadCount = 1
+        try stack.saveViewContext()
+
+        let coordinator = PreparedStaleMessageCoordinator(
+            conversationID: conversation.objectID,
+            messageID: messageObjectID
+        )
+        let apiClient = MockGmailAPIClient()
+        apiClient.addMessage(
+            GmailMessage(
+                id: message.id,
+                threadId: "thread-read-first-stale-sync",
+                labelIds: ["INBOX", "UNREAD"],
+                snippet: "sync",
+                historyId: "history-read-first-stale-sync",
+                internalDate: nil,
+                payload: nil,
+                sizeEstimate: nil
+            )
+        )
+        let serializer = ConversationRollupMutationSerializer()
+        let processor = BackgroundMessageProcessor(
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            saveContext: { stack.saveIfNeeded(context: $0) },
+            apiClient: apiClient,
+            syncCoordinator: coordinator,
+            rollupMutationSerializer: serializer
+        )
+        let actions = MessageActions(
+            coreDataStack: stack,
+            pendingActionsManager: MockPendingActionsManager(),
+            rollupMutationSerializer: serializer
+        )
+        let history = HistoryRecord(
+            id: "history-read-first-stale-sync",
+            messages: nil,
+            messagesAdded: [HistoryMessageAdded(message: apiClient.getMessageResponses[message.id]!)],
+            messagesDeleted: nil,
+            labelsAdded: nil,
+            labelsRemoved: nil
+        )
+
+        let processTask = Task {
+            await processor.processHistoryChanges(histories: [history], in: backgroundContext)
+        }
+        await coordinator.preparedMessage.wait()
+
+        await actions.markAsRead(message: message)
+        await coordinator.allowSave.open()
+        _ = await processTask.value
+
+        let verificationContext = stack.newBackgroundContext()
+        let durableUnread = await verificationContext.perform {
+            (try? verificationContext.existingObject(with: messageObjectID) as? Message)?.isUnread
+        }
+        XCTAssertEqual(durableUnread, false)
+    }
 }
 
 final class BackgroundSyncErrorHandlerTests: XCTestCase {
@@ -669,6 +752,86 @@ private final class MockBackgroundSyncCoordinator: @unchecked Sendable, Backgrou
         lock.lock()
         defer { lock.unlock() }
         displayNameConversationIDs.append(conversationIDs)
+    }
+}
+
+private final class PreparedStaleMessageCoordinator: @unchecked Sendable, BackgroundSyncMessageCoordinating {
+    let preparedMessage = BackgroundSyncTestGate()
+    let allowSave = BackgroundSyncTestGate()
+    private let conversationID: NSManagedObjectID
+    private let messageID: NSManagedObjectID
+
+    init(conversationID: NSManagedObjectID, messageID: NSManagedObjectID) {
+        self.conversationID = conversationID
+        self.messageID = messageID
+    }
+
+    func prefetchLabelIdsForBackground(in context: NSManagedObjectContext) async -> Set<String> {
+        ["INBOX"]
+    }
+
+    func saveMessage(
+        _ gmailMessage: GmailMessage,
+        labelIds: Set<String>?,
+        modificationTransaction: ModificationTracker.Transaction,
+        in context: NSManagedObjectContext
+    ) async {
+        await context.perform {
+            guard let message = try? context.existingObject(with: self.messageID) as? Message else {
+                return
+            }
+            message.isUnread = true
+            message.snippet = "prepared stale sync"
+        }
+        await ModificationTracker.shared.trackModifiedConversations(
+            [conversationID],
+            in: modificationTransaction
+        )
+        await preparedMessage.open()
+        await allowSave.wait()
+    }
+
+    func updateConversationRollups(
+        conversationIDs: Set<NSManagedObjectID>,
+        in context: NSManagedObjectContext
+    ) async {
+        await context.perform {
+            guard let conversation = try? context.existingObject(with: self.conversationID) as? Conversation else {
+                return
+            }
+            let request = Message.fetchRequest()
+            request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+                NSPredicate(format: "conversation == %@", conversation),
+                NSPredicate(format: "ANY labels.id == %@", "INBOX")
+            ])
+            let messages = (try? context.fetch(request)) ?? []
+            conversation.inboxUnreadCount = Int32(messages.filter(\.isUnread).count)
+        }
+    }
+
+    func updateConversationDisplayNames(
+        conversationIDs: Set<NSManagedObjectID>,
+        in context: NSManagedObjectContext
+    ) async {}
+}
+
+private actor BackgroundSyncTestGate {
+    private var isOpen = false
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        let pendingContinuations = continuations
+        continuations.removeAll()
+        pendingContinuations.forEach { $0.resume() }
     }
 }
 

@@ -30,6 +30,7 @@ final class IncrementalSyncOrchestrator {
     private let coreDataStack: CoreDataStack
     private let failureTracker: SyncFailureTracker
     private let aliasRefreshPolicy: SendAsAliasRefreshPolicy
+    private let rollupMutationSerializer: ConversationRollupMutationSerializer
     private let log = LogCategory.sync.logger
 
     private var myAliases: Set<String> = []
@@ -72,7 +73,8 @@ final class IncrementalSyncOrchestrator {
         reconciliation: SyncReconciliation,
         coreDataStack: CoreDataStack,
         failureTracker: SyncFailureTracker = .shared,
-        aliasRefreshPolicy: SendAsAliasRefreshPolicy = SendAsAliasRefreshPolicy()
+        aliasRefreshPolicy: SendAsAliasRefreshPolicy = SendAsAliasRefreshPolicy(),
+        rollupMutationSerializer: ConversationRollupMutationSerializer = .shared
     ) {
         self.messageFetcher = messageFetcher
         self.messagePersister = messagePersister
@@ -83,6 +85,7 @@ final class IncrementalSyncOrchestrator {
         self.coreDataStack = coreDataStack
         self.failureTracker = failureTracker
         self.aliasRefreshPolicy = aliasRefreshPolicy
+        self.rollupMutationSerializer = rollupMutationSerializer
     }
 
     // MARK: - Public API
@@ -200,10 +203,35 @@ final class IncrementalSyncOrchestrator {
             timing.finish(labelTimer, detail: "records=\(historyResult.records.count)")
             if phaseContext.allowsIntermediateContextSaves {
                 let flushTimer = timing.start("intermediateFlush")
-                try await flushUIVisibleChangesIfNeeded(
-                    in: context,
-                    stageDescription: "label processing"
-                )
+                let intermediateRollupConversationIDs = await ModificationTracker.shared
+                    .modifiedConversations(in: modificationTransaction)
+                let trackedIntermediateDisplayNameConversationIDs = await ModificationTracker.shared
+                    .displayNameOnlyConversations(in: modificationTransaction)
+                let intermediateDisplayNameConversationIDs = trackedIntermediateDisplayNameConversationIDs
+                    .subtracting(intermediateRollupConversationIDs)
+                let intermediateAffectedConversationIDs = intermediateRollupConversationIDs
+                    .union(intermediateDisplayNameConversationIDs)
+                let conversationManager = self.conversationManager
+                let coreDataStack = self.coreDataStack
+                try await rollupMutationSerializer.performThrowingSyncMutation(
+                    conversationIDs: intermediateAffectedConversationIDs,
+                    in: context
+                ) {
+                    if !intermediateRollupConversationIDs.isEmpty {
+                        await conversationManager.updateRollupsForModifiedConversations(
+                            conversationIDs: intermediateRollupConversationIDs,
+                            in: context
+                        )
+                    }
+                    if !intermediateDisplayNameConversationIDs.isEmpty {
+                        await conversationManager.updateConversationDisplayNames(
+                            conversationIDs: intermediateDisplayNameConversationIDs,
+                            in: context
+                        )
+                    }
+                    try await coreDataStack.saveAsync(context: context)
+                }
+                log.debug("Flushed sync changes after label processing")
                 timing.finish(flushTimer)
             } else {
                 log.debug("Deferring mid-sync flush because history includes destructive local changes")
@@ -255,29 +283,40 @@ final class IncrementalSyncOrchestrator {
             let trackedDisplayNameOnlyConversations = await ModificationTracker.shared
                 .displayNameOnlyConversations(in: modificationTransaction)
             let displayNameOnlyConversations = trackedDisplayNameOnlyConversations.subtracting(modifiedConversations)
+            let affectedConversationIDs = modifiedConversations.union(displayNameOnlyConversations)
 
             // Keep historyId advancement and rollup updates in the same durable save.
-            let conversationTimer = timing.start("conversationUpdates")
-            try await conversationUpdatePhase.execute(
-                input: modifiedConversations,
-                context: phaseContext
-            )
-            if !displayNameOnlyConversations.isEmpty {
-                await conversationManager.updateConversationDisplayNames(
-                    conversationIDs: displayNameOnlyConversations,
-                    in: context
-                )
-            }
-            timing.finish(
-                conversationTimer,
-                detail: "rollups=\(modifiedConversations.count) names=\(displayNameOnlyConversations.count)"
-            )
             progressHandler(0.99, "Saving changes...")
-            let saveTimer = timing.start("save")
+            let persistenceTimer = timing.start("conversationUpdatesAndSave")
+            let conversationUpdatePhase = self.conversationUpdatePhase
+            phaseContext.reportProgress(
+                0,
+                status: "Updating conversations...",
+                phase: conversationUpdatePhase
+            )
+            let conversationManager = self.conversationManager
+            let coreDataStack = self.coreDataStack
             try await Self.finalizePersistence(
                 labelReconciliationOutcome: reconciliationResult.labelOutcome,
                 save: {
-                    try await self.coreDataStack.saveAsync(context: context)
+                    try await self.rollupMutationSerializer.performThrowingSyncMutation(
+                        conversationIDs: affectedConversationIDs,
+                        in: context
+                    ) {
+                        if !modifiedConversations.isEmpty {
+                            await conversationManager.updateRollupsForModifiedConversations(
+                                conversationIDs: modifiedConversations,
+                                in: context
+                            )
+                        }
+                        if !displayNameOnlyConversations.isEmpty {
+                            await conversationManager.updateConversationDisplayNames(
+                                conversationIDs: displayNameOnlyConversations,
+                                in: context
+                            )
+                        }
+                        try await coreDataStack.saveAsync(context: context)
+                    }
                 },
                 commit: {
                     _ = await ModificationTracker.shared.commitTransaction(modificationTransaction)
@@ -288,7 +327,15 @@ final class IncrementalSyncOrchestrator {
                     self.recordReconciliationTime()
                 }
             )
-            timing.finish(saveTimer)
+            phaseContext.reportProgress(
+                1,
+                status: "Conversations updated",
+                phase: conversationUpdatePhase
+            )
+            timing.finish(
+                persistenceTimer,
+                detail: "rollups=\(modifiedConversations.count) names=\(displayNameOnlyConversations.count)"
+            )
 
             // Only update abandoned-message tracking once the recovered messages are
             // durably saved; if the save had failed, the records must stay for retry.
@@ -453,19 +500,24 @@ final class IncrementalSyncOrchestrator {
                     modificationTransaction: modificationTransaction,
                     in: context
                 )
-            } pageCompletion: { [conversationManager, coreDataStack] in
+            } pageCompletion: { [conversationManager, coreDataStack, rollupMutationSerializer] in
                 // Roll up each page's modified conversations before its save so messages
                 // and their derived state persist together (mirrors initial sync); an
                 // interrupted recovery keeps every saved page fully presentable.
                 let pageConversationIDs = await ModificationTracker.shared
                     .claimPendingRollupConversations(in: modificationTransaction)
-                if !pageConversationIDs.isEmpty {
-                    await conversationManager.updateRollupsForModifiedConversations(
-                        conversationIDs: pageConversationIDs,
-                        in: context
-                    )
+                try await rollupMutationSerializer.performThrowingSyncMutation(
+                    conversationIDs: pageConversationIDs,
+                    in: context
+                ) {
+                    if !pageConversationIDs.isEmpty {
+                        await conversationManager.updateRollupsForModifiedConversations(
+                            conversationIDs: pageConversationIDs,
+                            in: context
+                        )
+                    }
+                    try await coreDataStack.saveAsync(context: context)
                 }
-                try await coreDataStack.saveAsync(context: context)
             }
 
             log.info(
@@ -493,21 +545,28 @@ final class IncrementalSyncOrchestrator {
             let trackedDisplayNameOnlyConversations = await ModificationTracker.shared
                 .displayNameOnlyConversations(in: modificationTransaction)
             let displayNameOnlyConversations = trackedDisplayNameOnlyConversations.subtracting(modifiedConversations)
+            let affectedConversationIDs = modifiedConversations.union(displayNameOnlyConversations)
 
-            if !modifiedConversations.isEmpty {
-                await conversationManager.updateRollupsForModifiedConversations(
-                    conversationIDs: modifiedConversations,
-                    in: context
-                )
+            let conversationManager = self.conversationManager
+            let coreDataStack = self.coreDataStack
+            try await rollupMutationSerializer.performThrowingSyncMutation(
+                conversationIDs: affectedConversationIDs,
+                in: context
+            ) {
+                if !modifiedConversations.isEmpty {
+                    await conversationManager.updateRollupsForModifiedConversations(
+                        conversationIDs: modifiedConversations,
+                        in: context
+                    )
+                }
+                if !displayNameOnlyConversations.isEmpty {
+                    await conversationManager.updateConversationDisplayNames(
+                        conversationIDs: displayNameOnlyConversations,
+                        in: context
+                    )
+                }
+                try await coreDataStack.saveAsync(context: context)
             }
-            if !displayNameOnlyConversations.isEmpty {
-                await conversationManager.updateConversationDisplayNames(
-                    conversationIDs: displayNameOnlyConversations,
-                    in: context
-                )
-            }
-
-            try await coreDataStack.saveAsync(context: context)
             _ = await ModificationTracker.shared.commitTransaction(modificationTransaction)
             committedModificationTransaction = true
             await ModificationTracker.shared.consumeCommittedTransaction(modificationTransaction)
@@ -642,16 +701,4 @@ final class IncrementalSyncOrchestrator {
         allowsIntermediateContextSaves(for: records)
     }
 
-    /// Saves the sync context mid-run so conversation list updates (preview/unread) merge
-    /// into the view context immediately instead of waiting for final historyId persistence.
-    private func flushUIVisibleChangesIfNeeded(
-        in context: NSManagedObjectContext,
-        stageDescription: String
-    ) async throws {
-        try await context.perform {
-            guard context.hasChanges else { return }
-            try context.save()
-        }
-        log.debug("Flushed sync changes after \(stageDescription)")
-    }
 }

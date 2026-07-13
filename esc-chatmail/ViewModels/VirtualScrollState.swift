@@ -9,6 +9,17 @@ struct VirtualScrollMessagePage: @unchecked Sendable {
     let totalCount: Int
 }
 
+struct VirtualScrollInsertedMessageEvent: Equatable {
+    let id: UUID
+    let messageIDs: [NSManagedObjectID]
+}
+
+struct VirtualScrollInsertedMessageRefresh: Equatable {
+    let eventID: UUID
+    let layoutID: UUID
+    let messageIDsInLatestWindow: [NSManagedObjectID]
+}
+
 // MARK: - Virtual Scroll State
 @MainActor
 final class VirtualScrollState: ObservableObject {
@@ -29,6 +40,10 @@ final class VirtualScrollState: ObservableObject {
     @Published var isLoadingMore = false
     @Published private(set) var isInitialLoadComplete = false
     @Published var placeholderIndices: Set<Int> = []
+    @Published private(set) var latestWindowLayoutID = UUID()
+
+    let insertedVisibleMessageEvents = PassthroughSubject<VirtualScrollInsertedMessageEvent, Never>()
+    let refreshedInsertedMessageEvents = PassthroughSubject<VirtualScrollInsertedMessageRefresh, Never>()
 
     private let configuration: VirtualScrollConfiguration
     private let initialWindowPosition: InitialWindowPosition
@@ -44,6 +59,7 @@ final class VirtualScrollState: ObservableObject {
     private var resolvedRowsByAbsoluteIndex: [Int: ChatMessageRowModel] = [:]
     private var viewContextChangesCancellable: AnyCancellable?
     private var cachedConversationObjectID: NSManagedObjectID?
+    private var pendingInsertedMessageEvents: [VirtualScrollInsertedMessageEvent] = []
 
     // Task tracking to prevent orphaned tasks during rapid scrolling
     private let taskManager = ViewModelTaskManager()
@@ -491,10 +507,31 @@ final class VirtualScrollState: ObservableObject {
         guard Self.isRelevantChatContextChange(notification.userInfo) else { return }
 
         let knownTotalCount = estimatedTotalCountAfterLocalMessageMutation(in: notification)
-        if shouldRefreshLatestWindowForLocalMessageMutation(
+        let shouldRefreshLatestWindow = shouldRefreshLatestWindowForLocalMessageMutation(
             in: notification,
             currentWindow: window
-        ) {
+        )
+        let insertedMessageIDs = visibleInsertedMessageIDsForCurrentConversation(in: notification)
+        if !insertedMessageIDs.isEmpty {
+            let event = VirtualScrollInsertedMessageEvent(
+                id: UUID(),
+                messageIDs: insertedMessageIDs
+            )
+            insertedVisibleMessageEvents.send(event)
+            if shouldRefreshLatestWindow {
+                let autoReadMessageIDs = newestVisibleInsertedMessageIDsForCurrentConversation(
+                    in: notification
+                )
+                pendingInsertedMessageEvents.append(
+                    VirtualScrollInsertedMessageEvent(
+                        id: event.id,
+                        messageIDs: autoReadMessageIDs
+                    )
+                )
+            }
+        }
+
+        if shouldRefreshLatestWindow {
             Log.diagnostic(
                 .chatView,
                 level: .info,
@@ -504,6 +541,8 @@ final class VirtualScrollState: ObservableObject {
             taskManager.run(localMutationRefreshTaskKey) { [weak self] in
                 guard let self = self else { return }
                 await self.refreshLatestWindowForLocalMutation(knownTotalCount: knownTotalCount)
+                guard !Task.isCancelled else { return }
+                self.resolvePendingInsertedMessageEvents()
             }
         } else if knownTotalCount > totalMessageCount {
             resolvedRowsByAbsoluteIndex.removeAll()
@@ -679,16 +718,84 @@ final class VirtualScrollState: ObservableObject {
     }
 
     private func visibleInsertedMessageCountForCurrentConversation(in notification: Notification) -> Int {
+        visibleInsertedMessageIDsForCurrentConversation(in: notification).count
+    }
+
+    private func visibleInsertedMessageIDsForCurrentConversation(
+        in notification: Notification
+    ) -> [NSManagedObjectID] {
         contextObjects(forKeys: [NSInsertedObjectsKey], in: notification)
-            .reduce(into: 0) { count, object in
+            .compactMap { object -> NSManagedObjectID? in
                 guard let message = object as? Message,
+                      !message.objectID.isTemporaryID,
                       belongsToCurrentConversation(message),
                       isVisibleInChat(message) else {
-                    return
+                    return nil
                 }
 
-                count += 1
+                return message.objectID
             }
+            .sorted {
+                $0.uriRepresentation().absoluteString < $1.uriRepresentation().absoluteString
+            }
+    }
+
+    private func newestVisibleInsertedMessageIDsForCurrentConversation(
+        in notification: Notification
+    ) -> [NSManagedObjectID] {
+        let latestWindowDate: Date?
+        if let latestWindowMessageID = messageWindow?.messageIDs.last {
+            guard let date = resolveCachedRow(for: latestWindowMessageID)?.internalDate else {
+                return []
+            }
+            latestWindowDate = date
+        } else {
+            latestWindowDate = nil
+        }
+
+        return contextObjects(forKeys: [NSInsertedObjectsKey], in: notification)
+            .compactMap { object -> NSManagedObjectID? in
+                guard let message = object as? Message,
+                      !message.objectID.isTemporaryID,
+                      belongsToCurrentConversation(message),
+                      isVisibleInChat(message),
+                      latestWindowDate.map({ message.internalDate > $0 }) ?? true else {
+                    return nil
+                }
+
+                return message.objectID
+            }
+            .sorted {
+                $0.uriRepresentation().absoluteString < $1.uriRepresentation().absoluteString
+            }
+    }
+
+    private func resolvePendingInsertedMessageEvents() {
+        guard !pendingInsertedMessageEvents.isEmpty else { return }
+
+        let latestWindowMessageIDs: Set<NSManagedObjectID>
+        if isShowingLatestWindow, let messageWindow {
+            latestWindowMessageIDs = Set(messageWindow.messageIDs)
+        } else {
+            latestWindowMessageIDs = []
+        }
+
+        let events = pendingInsertedMessageEvents
+        pendingInsertedMessageEvents.removeAll()
+        let layoutID = UUID()
+        latestWindowLayoutID = layoutID
+
+        for event in events {
+            refreshedInsertedMessageEvents.send(
+                VirtualScrollInsertedMessageRefresh(
+                    eventID: event.id,
+                    layoutID: layoutID,
+                    messageIDsInLatestWindow: event.messageIDs.filter {
+                        latestWindowMessageIDs.contains($0)
+                    }
+                )
+            )
+        }
     }
 
     private func isVisibleInChat(_ message: Message) -> Bool {
