@@ -12,6 +12,20 @@ func calculateParticipantHash(from participants: [String]) -> String {
         .joined()
 }
 
+/// Calculates the conversation hash for a mailing-list identity.
+/// CANONICAL IMPLEMENTATION - use this everywhere, do not duplicate.
+/// The "l|" namespace keeps list hashes disjoint from every participant-set
+/// hash ("p|"), so both kinds share the Conversation.participantHash attribute
+/// without collisions.
+/// - Parameter listId: Normalized List-Id (see `ParsedListId.parse`)
+/// - Returns: SHA256 hex string of the list key
+func calculateListConversationHash(fromNormalizedListId listId: String) -> String {
+    let listKey = "l|\(listId)"
+    return SHA256.hash(data: Data(listKey.utf8))
+        .map { String(format: "%02x", $0) }
+        .joined()
+}
+
 struct ConversationIdentity {
     let key: String              // "p|alice@example.com" (one-to-one) OR "p|alice@x|bob@y" (group)
     let keyHash: String          // SHA256 hex of key (unique per conversation instance)
