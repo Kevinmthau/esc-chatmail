@@ -467,6 +467,18 @@ struct ConversationRollupUpdater: Sendable {
             names.append(resolvedName.name)
         }
 
+        // A list conversation's title comes from its List-Id display phrase at
+        // creation and has no relation to the (varying) participant rows. Keep
+        // a stored title that isn't address-derived; otherwise fall through so
+        // sender-derived names fill in and address-y placeholders self-correct.
+        if conversation.conversationType == .list,
+           PersonDisplayNameResolver.sanitizedConversationDisplayNameHint(
+               conversation.displayName,
+               participantEmails: participantEmails
+           ) != nil {
+            return
+        }
+
         let finalDisplayName = PersonDisplayNameResolver.conversationDisplayName(
             realNames: names,
             totalParticipantCount: participantEmails.count,

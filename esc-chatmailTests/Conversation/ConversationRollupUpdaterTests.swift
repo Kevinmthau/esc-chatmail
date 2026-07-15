@@ -636,6 +636,65 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(conversation.displayName, "jane.doe@example.com, john.smith@example.com")
     }
 
+    func testUpdateDisplayNameOnly_listKeepsStoredPhraseTitle() throws {
+        // The List-Id display phrase seeded at creation must not be replaced
+        // by sender-derived names — list senders vary per message.
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("swift-evolution.swift.org")
+            .withDisplayName("Swift Evolution")
+            .build(in: context)
+        addConversationParticipant(
+            email: "newsletter@thebrowser.com",
+            displayName: "The Browser Editors",
+            to: conversation
+        )
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "Swift Evolution")
+    }
+
+    func testUpdateDisplayNameOnly_listWithoutTitleComputesSenderDerivedName() throws {
+        // No List-Id phrase was available at creation: the normal participant
+        // computation must fill the title in.
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("thebrowser.substack.com")
+            .build(in: context)
+        addConversationParticipant(
+            email: "newsletter@thebrowser.com",
+            displayName: "The Browser Editors",
+            to: conversation
+        )
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "The Browser Editors")
+    }
+
+    func testUpdateDisplayNameOnly_listAddressDerivedStoredTitleUpgrades() throws {
+        // An address-y stored title must never freeze: the sanitizer rejects
+        // it and the computation upgrades to a real name.
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("thebrowser.substack.com")
+            .withDisplayName("newsletter@thebrowser.com")
+            .build(in: context)
+        addConversationParticipant(
+            email: "newsletter@thebrowser.com",
+            displayName: "The Browser Editors",
+            to: conversation
+        )
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "The Browser Editors")
+    }
+
     @discardableResult
     private func addConversationParticipant(
         email: String,

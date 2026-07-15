@@ -83,6 +83,12 @@ extension DataCleanupService {
             var byCorrectHash: [String: [Conversation]] = [:]
 
             for conv in conversations {
+                // List conversations are keyed by their "l|" List-Id hash, not
+                // by their participant rows. Recomputing a "p|" hash here would
+                // clobber the list key AND merge the list chat into any
+                // participant chat sharing the same row set.
+                if conv.conversationType == .list { continue }
+
                 // Calculate the correct participantHash by excluding user's aliases
                 let currentParticipants = conv.participantsArray
                 let correctParticipants = currentParticipants
