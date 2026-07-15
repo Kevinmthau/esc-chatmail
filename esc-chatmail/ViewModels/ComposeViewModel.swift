@@ -44,6 +44,11 @@ final class ComposeViewModel: ObservableObject {
     private var hasSetupMode = false
     private var forwardedPreviewIsDarkMode: Bool?
 
+    /// Self-alias snapshot for participant-hash computation. Compose-side hashes
+    /// must exclude the same alias set the sync router excludes, or a sent
+    /// message and its synced-back copy land in different chats.
+    private var cachedMyAliases: Set<String> = []
+
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Forward HTML Content
@@ -132,6 +137,15 @@ final class ComposeViewModel: ObservableObject {
         forwardChanges(from: autocompleteService, storing: &cancellables)
         forwardChanges(from: recipientManager, storing: &cancellables)
         forwardChanges(from: attachmentManager, storing: &cancellables)
+
+        Task { [weak self] in
+            // getAliases(from:) falls back to Core Data on a cold cache; a
+            // cached-only read would leave lookups without self-exclusion
+            // until the first sync primes AliasManager.
+            guard let context = self?.storage.viewContext else { return }
+            let aliases = await AliasManager.shared.getAliases(from: context)
+            self?.cachedMyAliases = aliases
+        }
     }
 
     func setupForMode() {
@@ -229,7 +243,7 @@ final class ComposeViewModel: ObservableObject {
 
     func findActiveConversation(forRecipients recipients: [String]) -> Conversation? {
         ConversationLookupService(context: storage.viewContext)
-            .findActiveConversation(forRecipients: recipients)
+            .findActiveConversation(forRecipients: recipients, myAliases: cachedMyAliases)
     }
 
     func addAttachment(_ attachment: Attachment) {
@@ -252,7 +266,9 @@ final class ComposeViewModel: ObservableObject {
         let result: OutboundMessageResult?
         do {
             let recipientEmails = recipients.map { $0.email }
-            let request = try makeOutboundSendRequest(recipientEmails: recipientEmails)
+            let myAliases = await AliasManager.shared.getAliases(from: storage.viewContext)
+            cachedMyAliases = myAliases
+            let request = try makeOutboundSendRequest(recipientEmails: recipientEmails, myAliases: myAliases)
             result = try await outboundMessageCoordinator.send(request)
         } catch {
             Log.error("Failed to create optimistic message", category: .message, error: error)
@@ -271,7 +287,7 @@ final class ComposeViewModel: ObservableObject {
         return true
     }
 
-    private func makeOutboundSendRequest(recipientEmails: [String]) throws -> OutboundMessageRequest {
+    private func makeOutboundSendRequest(recipientEmails: [String], myAliases: Set<String>) throws -> OutboundMessageRequest {
         switch mode {
         case .newMessage, .newEmail:
             return .compose(
@@ -280,7 +296,7 @@ final class ComposeViewModel: ObservableObject {
                     subject: subject,
                     body: body,
                     attachments: try outboundAttachmentContextBuilder.buildSendAttachments(from: attachments),
-                    optimisticConversation: makeOptimisticConversationReference(forRecipients: recipientEmails)
+                    optimisticConversation: makeOptimisticConversationReference(forRecipients: recipientEmails, myAliases: myAliases)
                 )
             )
 
@@ -294,7 +310,7 @@ final class ComposeViewModel: ObservableObject {
                     forwardedPlainTextBody: forwardedPlainTextBody,
                     forwardedHTMLBody: forwardedHTMLBody,
                     forwardedInlineAttachmentInfos: forwardedInlineAttachmentInfos,
-                    optimisticConversation: makeOptimisticConversationReference(forRecipients: recipientEmails)
+                    optimisticConversation: makeOptimisticConversationReference(forRecipients: recipientEmails, myAliases: myAliases)
                 )
             )
 
@@ -310,15 +326,14 @@ final class ComposeViewModel: ObservableObject {
     }
 
     private func makeOptimisticConversationReference(
-        forRecipients recipients: [String]
+        forRecipients recipients: [String],
+        myAliases: Set<String>
     ) -> OptimisticConversationReference? {
-        let normalizedParticipants = Array(
-            Set(recipients.map(EmailNormalizer.normalize).filter { !$0.isEmpty })
-        )
-        guard !normalizedParticipants.isEmpty else { return nil }
+        guard let identity = makeRecipientParticipantSetIdentity(
+            recipients: recipients,
+            myAliases: myAliases
+        ) else { return nil }
 
-        return .participantHash(
-            calculateParticipantHash(from: normalizedParticipants)
-        )
+        return .participantHash(identity.participantHash)
     }
 }

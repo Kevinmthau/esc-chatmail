@@ -35,15 +35,29 @@ struct DataCleanupService: Sendable {
 
     let coreDataStack: CoreDataStack
     let conversationManager: ConversationManager
+    // Both conformers are thread-safe (UserDefaults; the locked test store), but
+    // the protocol itself cannot require Sendable without breaking UserDefaults.
+    nonisolated(unsafe) let migrationFlags: MigrationFlagStore
+    /// Alias source for participant-identity recomputation. Must match what the
+    /// sync router excludes (AliasManager), or repair passes rewrite hashes with
+    /// a different self-exclusion set than routing uses and chats flip-flop.
+    /// Injected so tests avoid the process-global AliasManager/Contacts path.
+    let identityAliasProvider: @Sendable (NSManagedObjectContext) async -> Set<String>
 
     // MARK: - Initialization
 
     init(
         coreDataStack: CoreDataStack = .shared,
-        conversationManager: ConversationManager = ConversationManager()
+        conversationManager: ConversationManager = ConversationManager(),
+        migrationFlags: MigrationFlagStore = UserDefaults.standard,
+        identityAliasProvider: @escaping @Sendable (NSManagedObjectContext) async -> Set<String> = { context in
+            await AliasManager.shared.getAliases(from: context)
+        }
     ) {
         self.coreDataStack = coreDataStack
         self.conversationManager = conversationManager
+        self.migrationFlags = migrationFlags
+        self.identityAliasProvider = identityAliasProvider
     }
 
     // MARK: - Orchestration
@@ -52,6 +66,7 @@ struct DataCleanupService: Sendable {
     /// - Parameter context: The Core Data context
     func runFullCleanup(in context: NSManagedObjectContext) async {
         await migrateConversationsToArchiveModel(in: context)
+        await splitConversationsByParticipantSetIfNeeded(in: context)
         await removeDuplicateMessages(in: context)
         await removeDuplicateConversations(in: context)
         await mergeActiveConversationDuplicates(in: context)
@@ -60,7 +75,7 @@ struct DataCleanupService: Sendable {
     /// Runs incremental cleanup (no duplicate message check).
     /// - Parameter context: The Core Data context
     func runIncrementalCleanup(in context: NSManagedObjectContext) async {
-        await mergeConversationsSplitByGmThreadIdIfNeeded(in: context)
+        await splitConversationsByParticipantSetIfNeeded(in: context)
 
         guard IncrementalCleanupSchedule.isDue() else {
             Log.debug("Skipping incremental cleanup; cadence not due", category: .coreData)
@@ -86,7 +101,6 @@ struct DataCleanupService: Sendable {
         await removeDuplicateConversations(in: context)
         await mergeActiveConversationDuplicates(in: context)
         await fixAndMergeIncorrectParticipantHashes(in: context)
-        await mergeConversationsSplitByGmThreadIdIfNeeded(in: context)
         await removeEmptyConversations(in: context)
         await removeDraftMessages(in: context)
         await cleanupOrphanedData(in: context)

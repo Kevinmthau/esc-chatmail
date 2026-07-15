@@ -97,8 +97,8 @@ actor MessagePersister {
     /// The expensive, side-effect-free preparation (`processGmailMessage`: HTML/text
     /// extraction, classification, large-body fetches) runs concurrently across the
     /// batch. Persistence then runs sequentially in the supplied order so that
-    /// conversation routing (which reads already-persisted messages by `gmThreadId`)
-    /// remains deterministic. Callers should pass messages already sorted into the
+    /// conversation creation, inbox seeding, and rollup ordering remain
+    /// deterministic. Callers should pass messages already sorted into the
     /// desired persistence order (typically chronological).
     func saveMessages(
         _ gmailMessages: [GmailMessage],

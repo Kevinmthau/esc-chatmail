@@ -1282,7 +1282,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(notificationRecorder.notifiedEmails, [senderEmail])
     }
 
-    func testCreateNewMessage_sameGmThreadIdWithParticipantDrift_reusesExistingConversation() async throws {
+    func testCreateNewMessage_sameGmThreadIdWithParticipantDrift_createsNewConversation() async throws {
         let threadId = "thread-join-123"
         let existingConversation = ConversationBuilder()
             .withParticipantHash(calculateParticipantHash(from: ["rirc@advantagetennisclubs.com"]))
@@ -1328,16 +1328,27 @@ final class MessagePersisterUpdateTests: XCTestCase {
         )
 
         let conversationCount = try context.count(for: Conversation.fetchRequest())
-        XCTAssertEqual(conversationCount, 1, "Non-forwarded Gmail mail should stay attached to the existing same-thread conversation")
+        XCTAssertEqual(conversationCount, 2, "Participant drift on the same Gmail thread must route to its own participant-keyed conversation")
 
         let fetch = Message.fetchRequest()
         fetch.predicate = NSPredicate(format: "id == %@", "new-message")
         fetch.fetchLimit = 1
         let saved = try XCTUnwrap(context.fetch(fetch).first)
 
-        XCTAssertEqual(saved.conversation?.objectID, existingConversation.objectID)
+        XCTAssertNotEqual(saved.conversation?.objectID, existingConversation.objectID)
+        XCTAssertEqual(
+            saved.conversation?.participantHash,
+            calculateParticipantHash(from: [
+                "assistant@advantagetennisclubs.com",
+                "rirc@advantagetennisclubs.com"
+            ]),
+            "New conversation should be keyed by the drifted participant set"
+        )
     }
 
+    // Strict participant-set routing: the reply's exact set {friend} matches the
+    // one-to-one conversation's participantHash, so it lands there even though the
+    // group-split conversation is the newest one on the same Gmail thread.
     func testCreateNewMessage_nonForwardedReplyReusesRegularConversationWhenForwardedSplitIsNewest() async throws {
         let threadId = "thread-forwarded-split-newest"
         let regularConversation = ConversationBuilder()
@@ -1407,9 +1418,16 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(try context.count(for: Conversation.fetchRequest()), 2)
     }
 
-    func testCreateNewMessage_forwardedSubject_createsNewConversationEvenWhenThreadMatches() async throws {
+    // Forward heuristics no longer drive routing: this split happens purely because
+    // the forward's participant set {brynn, kristine} differs from the existing
+    // one-to-one {brynn} conversation on the same Gmail thread.
+    func testCreateNewMessage_forwardedSubjectWithDifferentParticipantSet_createsNewConversation() async throws {
         let threadId = "thread-forward-123"
-        let existingConversation = ConversationBuilder.simple(in: context)
+        let existingConversation = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: ["brynn@example.com"]))
+            .visible()
+            .recentlyActive()
+            .build(in: context)
         _ = MessageBuilder()
             .withId("existing-forward-message")
             .withThreadId(threadId)
@@ -1451,7 +1469,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
         )
 
         let conversationCount = try context.count(for: Conversation.fetchRequest())
-        XCTAssertEqual(conversationCount, 2, "Forwarded messages should create a new participant-based conversation")
+        XCTAssertEqual(conversationCount, 2, "A forward whose participant set differs should create a new participant-keyed conversation")
 
         let fetch = Message.fetchRequest()
         fetch.predicate = NSPredicate(format: "id == %@", "forwarded-message")
@@ -1462,13 +1480,20 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(
             saved?.conversation?.participantHash,
             calculateParticipantHash(from: ["brynn@example.com", "kristine@example.com"]),
-            "Forwarded conversation should use the forward recipient/sender participant set"
+            "New conversation should be keyed by the forward's sender+recipient participant set"
         )
     }
 
-    func testCreateNewMessage_forwardedMarkerInBody_createsNewConversationEvenWhenThreadMatches() async throws {
+    // Inverse of the old forward-marker split: forward markers in the body are
+    // ignored by routing. When the participant set is unchanged, the message joins
+    // the existing same-set conversation; a split only happens when the set differs.
+    func testCreateNewMessage_forwardedMarkerInBodyWithSameParticipantSet_joinsExistingConversation() async throws {
         let threadId = "thread-forward-body-marker-123"
-        let existingConversation = ConversationBuilder.simple(in: context)
+        let existingConversation = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: ["erin.hardy@adviceperiod.com"]))
+            .visible()
+            .recentlyActive()
+            .build(in: context)
         _ = MessageBuilder()
             .withId("existing-thread-message")
             .withThreadId(threadId)
@@ -1517,23 +1542,22 @@ final class MessagePersisterUpdateTests: XCTestCase {
         )
 
         let conversationCount = try context.count(for: Conversation.fetchRequest())
-        XCTAssertEqual(conversationCount, 2, "Forward markers in body should create a new participant-based conversation")
+        XCTAssertEqual(conversationCount, 1, "A forward-marker body with an unchanged participant set must join the existing same-set conversation")
 
         let fetch = Message.fetchRequest()
         fetch.predicate = NSPredicate(format: "id == %@", "forwarded-marker-reply-message")
         fetch.fetchLimit = 1
         let saved = try context.fetch(fetch).first
 
-        XCTAssertNotEqual(saved?.conversation?.objectID, existingConversation.objectID)
-        XCTAssertEqual(
-            saved?.conversation?.participantHash,
-            calculateParticipantHash(from: ["erin.hardy@adviceperiod.com"])
-        )
+        XCTAssertEqual(saved?.conversation?.objectID, existingConversation.objectID)
     }
 
     func testCreateNewMessage_sentOnlyMessageInArchivedThread_reactivatesConversation() async throws {
         let threadId = "thread-archived-sent-only"
+        // Strict routing matches by participantHash only, so the archived seed must
+        // carry the hash of the outgoing message's participant set {friend}.
         let archivedConversation = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: ["friend@example.com"]))
             .withSnippet("Old archived snippet")
             .withLastMessageDate(Date(timeIntervalSince1970: 1_700_100_000))
             .archived()
@@ -1545,6 +1569,8 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .withThreadId(threadId)
             .inConversation(archivedConversation)
             .build(in: context)
+
+        try testStack.saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.subject = "Re: Archived thread"
@@ -1577,20 +1603,30 @@ final class MessagePersisterUpdateTests: XCTestCase {
 
         XCTAssertNil(archivedConversation.archivedAt)
         XCTAssertFalse(archivedConversation.hidden)
+
+        let fetch = Message.fetchRequest()
+        fetch.predicate = NSPredicate(format: "id == %@", "sent-only-archived-thread-message")
+        fetch.fetchLimit = 1
+        let savedMessage = try XCTUnwrap(context.fetch(fetch).first)
+        XCTAssertEqual(savedMessage.conversation?.objectID, archivedConversation.objectID)
     }
 
-    func testCreateNewMessage_sameGmThreadIdBackfillsMissingParticipantHashAndReusesConversation() async throws {
-        let threadId = "thread-backfill-participant-hash"
+    func testCreateNewMessage_sameGmThreadIdWithNilParticipantHash_createsNewConversationWithoutBackfill() async throws {
+        let threadId = "thread-nil-participant-hash"
+        // Legacy conversation without a participantHash: strict routing never
+        // reuses it via the shared gmThreadId and never backfills the hash.
         let existingConversation = ConversationBuilder()
             .withSnippet("Old snippet")
             .withLastMessageDate(Date(timeIntervalSince1970: 1_700_150_000))
             .build(in: context)
 
         _ = MessageBuilder()
-            .withId("seed-backfill-message")
+            .withId("seed-nil-hash-message")
             .withThreadId(threadId)
             .inConversation(existingConversation)
             .build(in: context)
+
+        try testStack.saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.subject = "Re: Existing thread"
@@ -1599,7 +1635,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
         headers.isFromMe = false
 
         let processedMessage = ProcessedMessage(
-            id: "backfill-participant-hash-message",
+            id: "nil-participant-hash-message",
             gmThreadId: threadId,
             snippet: "Latest snippet",
             cleanedSnippet: "Latest snippet",
@@ -1622,15 +1658,24 @@ final class MessagePersisterUpdateTests: XCTestCase {
         )
 
         let fetch = Message.fetchRequest()
-        fetch.predicate = NSPredicate(format: "id == %@", "backfill-participant-hash-message")
+        fetch.predicate = NSPredicate(format: "id == %@", "nil-participant-hash-message")
         fetch.fetchLimit = 1
         let savedMessage = try XCTUnwrap(context.fetch(fetch).first)
 
-        XCTAssertEqual(savedMessage.conversation?.objectID, existingConversation.objectID)
+        XCTAssertNotEqual(
+            savedMessage.conversation?.objectID,
+            existingConversation.objectID,
+            "A nil-hash legacy conversation must not be reused just because the gmThreadId matches"
+        )
         XCTAssertEqual(
-            existingConversation.participantHash,
+            savedMessage.conversation?.participantHash,
             calculateParticipantHash(from: ["sender@example.com"])
         )
+        XCTAssertNil(
+            existingConversation.participantHash,
+            "The router must not backfill participantHash onto legacy conversations"
+        )
+        XCTAssertEqual(try context.count(for: Conversation.fetchRequest()), 2)
     }
 
     func testCreateNewMessage_sentOnlyMessageInParticipantFallback_reactivatesConversation() async throws {
@@ -1684,7 +1729,7 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(savedMessage.conversation?.objectID, archivedConversation.objectID)
     }
 
-    func testCreateNewMessage_sentOnlyMessageWithParticipantDrift_reusesExistingThreadConversation() async throws {
+    func testCreateNewMessage_sentOnlyMessageWithParticipantDrift_createsNewActiveConversation() async throws {
         let threadId = "thread-sent-participant-drift"
         let archivedConversation = ConversationBuilder()
             .withParticipantHash(calculateParticipantHash(from: ["friend@example.com"]))
@@ -1735,15 +1780,21 @@ final class MessagePersisterUpdateTests: XCTestCase {
         )
 
         let conversationCount = try context.count(for: Conversation.fetchRequest())
-        XCTAssertEqual(conversationCount, 1, "Sent-only sync should not spawn a new active conversation for the same Gmail thread")
-        XCTAssertNil(archivedConversation.archivedAt)
-        XCTAssertFalse(archivedConversation.hidden)
+        XCTAssertEqual(conversationCount, 2, "A sent message to a drifted participant set must start its own conversation, not reuse the same-thread one")
 
         let fetch = Message.fetchRequest()
         fetch.predicate = NSPredicate(format: "id == %@", "sent-participant-drift-message")
         fetch.fetchLimit = 1
         let savedMessage = try XCTUnwrap(context.fetch(fetch).first)
-        XCTAssertEqual(savedMessage.conversation?.objectID, archivedConversation.objectID)
+        XCTAssertNotEqual(savedMessage.conversation?.objectID, archivedConversation.objectID)
+        XCTAssertEqual(
+            savedMessage.conversation?.participantHash,
+            calculateParticipantHash(from: ["assistant@example.com", "friend@example.com"])
+        )
+        XCTAssertNil(savedMessage.conversation?.archivedAt, "The drifted-set conversation should start active")
+
+        XCTAssertNotNil(archivedConversation.archivedAt, "The archived single-participant conversation must keep archivedAt")
+        XCTAssertTrue(archivedConversation.hidden)
     }
 
     func testCreateNewMessage_updatesConversationListIndicatorsImmediately() async throws {
@@ -1754,7 +1805,10 @@ final class MessagePersisterUpdateTests: XCTestCase {
         let oldDate = Date(timeIntervalSince1970: 1_700_000_000)
         let newDate = oldDate.addingTimeInterval(120)
 
+        // Seed the participantHash of the incoming sender so strict routing
+        // resolves the incoming message into this conversation.
         let existingConversation = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: ["sender@example.com"]))
             .withSnippet("Old snippet")
             .withLastMessageDate(oldDate)
             .withUnreadCount(0)
@@ -1769,6 +1823,8 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .withDate(oldDate)
             .inConversation(existingConversation)
             .build(in: context)
+
+        try testStack.saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.subject = "Re: Fast list update"
@@ -1813,7 +1869,10 @@ final class MessagePersisterUpdateTests: XCTestCase {
         let oldDate = Date(timeIntervalSince1970: 1_700_000_000)
         let newDate = oldDate.addingTimeInterval(120)
 
+        // Seed the participantHash of the incoming sender so strict routing
+        // resolves the incoming message into this conversation.
         let existingConversation = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: ["sender@example.com"]))
             .withSnippet("Old row preview")
             .withLastMessageDate(oldDate)
             .visible()
@@ -1825,6 +1884,8 @@ final class MessagePersisterUpdateTests: XCTestCase {
             .withDate(oldDate)
             .inConversation(existingConversation)
             .build(in: context)
+
+        try testStack.saveViewContext()
 
         var headers = ProcessedHeaders()
         headers.from = "Sender <sender@example.com>"

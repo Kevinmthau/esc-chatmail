@@ -333,6 +333,41 @@ final class ConversationMergerTests: XCTestCase {
 
     // MARK: - Duplicate Detection Tests
 
+    func testMergeActiveDuplicates_skipsLoserReferencedByPendingSendRecord() async throws {
+        let hash = calculateParticipantHash(from: ["alice@example.com"])
+        let winner = ConversationBuilder()
+            .withKeyHash("winner-key")
+            .withParticipantHash(hash)
+            .withLastMessageDate(Date())
+            .build(in: context)
+        _ = MessageBuilder()
+            .withId("winner-msg")
+            .inConversation(winner)
+            .build(in: context)
+
+        // A freshly created optimistic-send conversation: zero saved messages
+        // (its optimistic message lives unsaved on the real view context) and a
+        // durable send record referencing it. Merging it away would orphan the
+        // optimistic message and dangle the record.
+        let pendingSendShell = ConversationBuilder()
+            .withKeyHash("pending-key")
+            .withParticipantHash(hash)
+            .withLastMessageDate(Date(timeIntervalSince1970: 1))
+            .build(in: context)
+        let pendingID = pendingSendShell.id
+        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = UUID().uuidString
+        record.createdAt = Date()
+        record.conversationId = pendingID
+        try testStack.saveViewContext()
+
+        await merger.mergeActiveConversationDuplicates(in: context)
+
+        let conversations = try context.fetch(Conversation.fetchRequest())
+        XCTAssertEqual(conversations.count, 2, "The pending-send conversation must not be merged away")
+        XCTAssertNotNil(conversations.first { $0.id == pendingID })
+    }
+
     func testRemoveDuplicates_detectsDuplicateKeyHashes() throws {
         let sharedKeyHash = "duplicate-keyhash-123"
 
@@ -364,278 +399,5 @@ final class ConversationMergerTests: XCTestCase {
         let beforeRequest = Conversation.fetchRequest()
         let beforeCount = try context.count(for: beforeRequest)
         XCTAssertEqual(beforeCount, 4)
-    }
-
-    func testMergeConversationsByGmThreadId_mergesConversationsSharingThread() async throws {
-        let threadId = "gm-thread-merge-123"
-
-        let loser = ConversationBuilder()
-            .withKeyHash("thread-loser")
-            .withLastMessageDate(Date(timeIntervalSince1970: 1))
-            .build(in: context)
-
-        let winner = ConversationBuilder()
-            .withKeyHash("thread-winner")
-            .withLastMessageDate(Date())
-            .build(in: context)
-
-        let msg1 = MessageBuilder()
-            .withId("msg-thread-1")
-            .withThreadId(threadId)
-            .inConversation(loser)
-            .build(in: context)
-
-        let msg2 = MessageBuilder()
-            .withId("msg-thread-2")
-            .withThreadId(threadId)
-            .inConversation(winner)
-            .build(in: context)
-
-        try testStack.saveViewContext()
-
-        let mergedCount = await merger.mergeConversationsByGmThreadId(in: context, mergeChangesInto: [])
-        XCTAssertEqual(mergedCount, 1, "Should merge exactly one loser conversation into the winner")
-
-        let conversationCount = try context.count(for: Conversation.fetchRequest())
-        XCTAssertEqual(conversationCount, 1, "After merge there should be a single conversation for the thread")
-
-        XCTAssertEqual(msg1.conversation?.objectID, msg2.conversation?.objectID, "Messages in the same thread should share a conversation after merge")
-    }
-
-    func testMergeConversationsByGmThreadId_prefersVisibleConversationOverArchivedConversation() async throws {
-        let threadId = "gm-thread-visible-winner"
-
-        let visibleConversation = ConversationBuilder()
-            .withKeyHash("thread-visible")
-            .withLastMessageDate(Date(timeIntervalSince1970: 1))
-            .visible()
-            .build(in: context)
-
-        let archivedConversation = ConversationBuilder()
-            .withKeyHash("thread-archived")
-            .withLastMessageDate(Date(timeIntervalSince1970: 2))
-            .archived()
-            .setHidden()
-            .build(in: context)
-
-        let visibleMessage = MessageBuilder()
-            .withId("msg-thread-visible")
-            .withThreadId(threadId)
-            .withSubject("Re: Project plan")
-            .inConversation(visibleConversation)
-            .build(in: context)
-        visibleMessage.addToLabels(LabelBuilder().inbox().build(in: context))
-
-        let archivedMessage1 = MessageBuilder()
-            .withId("msg-thread-archived-1")
-            .withThreadId(threadId)
-            .withSubject("Re: Project plan")
-            .inConversation(archivedConversation)
-            .build(in: context)
-
-        let archivedMessage2 = MessageBuilder()
-            .withId("msg-thread-archived-2")
-            .withThreadId(threadId)
-            .withSubject("Re: Project plan")
-            .inConversation(archivedConversation)
-            .build(in: context)
-
-        try testStack.saveViewContext()
-
-        let mergedCount = await merger.mergeConversationsByGmThreadId(in: context, mergeChangesInto: [])
-        XCTAssertEqual(mergedCount, 1)
-
-        XCTAssertEqual(visibleMessage.conversation?.objectID, visibleConversation.objectID)
-        XCTAssertEqual(archivedMessage1.conversation?.objectID, visibleConversation.objectID)
-        XCTAssertEqual(archivedMessage2.conversation?.objectID, visibleConversation.objectID)
-        XCTAssertNil(visibleConversation.archivedAt)
-        XCTAssertFalse(visibleConversation.hidden)
-        XCTAssertEqual(try context.count(for: Conversation.fetchRequest()), 1)
-    }
-
-    func testMergeConversationsByGmThreadId_mergesSameThreadWhenParticipantHashDiffers() async throws {
-        let threadId = "gm-thread-participant-split"
-
-        let directConversation = ConversationBuilder()
-            .withKeyHash("thread-direct")
-            .withParticipantHash(calculateParticipantHash(from: ["rirc@advantagetennisclubs.com"]))
-            .build(in: context)
-
-        let expandedConversation = ConversationBuilder()
-            .withKeyHash("thread-expanded")
-            .withParticipantHash(calculateParticipantHash(from: [
-                "assistant@advantagetennisclubs.com",
-                "rirc@advantagetennisclubs.com"
-            ]))
-            .build(in: context)
-
-        let directMessage = MessageBuilder()
-            .withId("msg-thread-direct")
-            .withThreadId(threadId)
-            .withSubject("Re: private lesson")
-            .inConversation(directConversation)
-            .build(in: context)
-
-        let expandedMessage = MessageBuilder()
-            .withId("msg-thread-expanded")
-            .withThreadId(threadId)
-            .withSubject("Re: private lesson")
-            .inConversation(expandedConversation)
-            .build(in: context)
-
-        try testStack.saveViewContext()
-
-        let mergedCount = await merger.mergeConversationsByGmThreadId(in: context, mergeChangesInto: [])
-        XCTAssertEqual(mergedCount, 1, "Cleanup merge should collapse non-forwarded Gmail thread splits even when participant hashes differ")
-
-        let conversationCount = try context.count(for: Conversation.fetchRequest())
-        XCTAssertEqual(conversationCount, 1)
-        XCTAssertEqual(directMessage.conversation?.objectID, expandedMessage.conversation?.objectID)
-    }
-
-    func testMergeConversationsByGmThreadId_preservesForwardedConversationSplit() async throws {
-        let threadId = "gm-thread-forward-preserve"
-
-        let regularConversation = ConversationBuilder()
-            .withKeyHash("regular-conversation")
-            .build(in: context)
-
-        let forwardedConversation = ConversationBuilder()
-            .withKeyHash("forwarded-conversation")
-            .build(in: context)
-
-        let regularMessage = MessageBuilder()
-            .withId("regular-message")
-            .withThreadId(threadId)
-            .withSubject("Re: Design review")
-            .inConversation(regularConversation)
-            .build(in: context)
-
-        let forwardedMessage = MessageBuilder()
-            .withId("forwarded-message")
-            .withThreadId(threadId)
-            .withSubject("Fwd: Design review")
-            .inConversation(forwardedConversation)
-            .build(in: context)
-
-        try testStack.saveViewContext()
-
-        let mergedCount = await merger.mergeConversationsByGmThreadId(in: context, mergeChangesInto: [])
-        XCTAssertEqual(mergedCount, 0, "Forwarded conversation split should be preserved")
-
-        let conversationCount = try context.count(for: Conversation.fetchRequest())
-        XCTAssertEqual(conversationCount, 2, "Cleanup merge should not collapse forwarded conversations")
-
-        XCTAssertNotEqual(
-            regularMessage.conversation?.objectID,
-            forwardedMessage.conversation?.objectID,
-            "Forwarded and non-forwarded messages in the same Gmail thread should remain split"
-        )
-    }
-
-    func testMergeConversationsByGmThreadId_preservesForwardedSplitDetectedFromBodyMarkers() async throws {
-        let threadId = "gm-thread-forward-body-marker-preserve"
-
-        let regularConversation = ConversationBuilder()
-            .withKeyHash("regular-conversation-body-marker")
-            .build(in: context)
-
-        let forwardedConversation = ConversationBuilder()
-            .withKeyHash("forwarded-conversation-body-marker")
-            .build(in: context)
-
-        let regularMessage = MessageBuilder()
-            .withId("regular-message-body-marker")
-            .withThreadId(threadId)
-            .withSubject("Re: Deposit Notification (Deposit Declined)")
-            .withBody("Can you help with this deposit?")
-            .inConversation(regularConversation)
-            .build(in: context)
-
-        let forwardedMarkerMessage = MessageBuilder()
-            .withId("forwarded-marker-message")
-            .withThreadId(threadId)
-            .withSubject("Re: Deposit Notification (Deposit Declined)")
-            .withBody("""
-                Hi Kevin,
-
-                --- original message ---
-                On February 23, 2026, 8:21 PM PST kmthau@gmail.com wrote:
-                ---------- Forwarded message ---------
-                """)
-            .inConversation(forwardedConversation)
-            .build(in: context)
-
-        try testStack.saveViewContext()
-
-        let mergedCount = await merger.mergeConversationsByGmThreadId(in: context, mergeChangesInto: [])
-        XCTAssertEqual(mergedCount, 0, "Forwarded markers in body should preserve conversation split")
-
-        let conversationCount = try context.count(for: Conversation.fetchRequest())
-        XCTAssertEqual(conversationCount, 2, "Cleanup merge should not collapse forwarded-body-marker conversations")
-
-        XCTAssertNotEqual(
-            regularMessage.conversation?.objectID,
-            forwardedMarkerMessage.conversation?.objectID
-        )
-    }
-
-    func testMergeConversationsByGmThreadId_mergesOnlyNonForwardedConversationsWhenForwardedExists() async throws {
-        let threadId = "gm-thread-mixed-forwarded"
-
-        let nonForwardedConversationA = ConversationBuilder()
-            .withKeyHash("non-forwarded-a")
-            .withLastMessageDate(Date(timeIntervalSince1970: 1))
-            .build(in: context)
-
-        let nonForwardedConversationB = ConversationBuilder()
-            .withKeyHash("non-forwarded-b")
-            .withLastMessageDate(Date(timeIntervalSince1970: 2))
-            .build(in: context)
-
-        let forwardedConversation = ConversationBuilder()
-            .withKeyHash("forwarded")
-            .withLastMessageDate(Date(timeIntervalSince1970: 3))
-            .build(in: context)
-
-        let nonForwardedMessageA = MessageBuilder()
-            .withId("non-forwarded-message-a")
-            .withThreadId(threadId)
-            .withSubject("Re: Team dinner")
-            .inConversation(nonForwardedConversationA)
-            .build(in: context)
-
-        let nonForwardedMessageB = MessageBuilder()
-            .withId("non-forwarded-message-b")
-            .withThreadId(threadId)
-            .withSubject("Re: Team dinner")
-            .inConversation(nonForwardedConversationB)
-            .build(in: context)
-
-        let forwardedMessage = MessageBuilder()
-            .withId("forwarded-message-in-mixed-thread")
-            .withThreadId(threadId)
-            .withSubject("Fw: Team dinner")
-            .inConversation(forwardedConversation)
-            .build(in: context)
-
-        try testStack.saveViewContext()
-
-        let mergedCount = await merger.mergeConversationsByGmThreadId(in: context, mergeChangesInto: [])
-        XCTAssertEqual(mergedCount, 1, "Should still merge duplicate non-forwarded conversations")
-
-        let conversationCount = try context.count(for: Conversation.fetchRequest())
-        XCTAssertEqual(conversationCount, 2, "Forwarded conversation should remain separate from merged non-forwarded conversation")
-
-        XCTAssertEqual(
-            nonForwardedMessageA.conversation?.objectID,
-            nonForwardedMessageB.conversation?.objectID,
-            "Non-forwarded messages should be merged together"
-        )
-        XCTAssertNotEqual(
-            nonForwardedMessageA.conversation?.objectID,
-            forwardedMessage.conversation?.objectID,
-            "Forwarded message should stay in its own conversation"
-        )
     }
 }

@@ -21,24 +21,61 @@ struct ConversationIdentity {
     let participantDisplayNames: [String: String]  // normalized email -> display name
 }
 
-func normalizedEmail(_ raw: String) -> String {
-    let s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    guard let at = s.firstIndex(of: "@") else { return s }
-    var local = String(s[..<at])
-    var domain = String(s[s.index(after: at)...])
+/// The participant-set core of a conversation identity: the sorted, self-excluded
+/// participant list and its canonical hash, without the per-instance keyHash/epoch parts.
+struct ParticipantSetIdentity {
+    let participants: [String]   // sorted, normalized, aliases removed (or self-fallback)
+    let participantHash: String
+    let type: ConversationType
+}
 
-    if domain == "googlemail.com" {
-        domain = "gmail.com"
-    }
+/// CANONICAL participant-set derivation shared by the sync router (via
+/// `makeConversationIdentity`), the compose/optimistic-send path, and the
+/// participant-set split migration. All paths must agree on this hash or the
+/// same set of people forks into duplicate chats.
+///
+/// - Parameter normalizedEmails: From+To+Cc addresses already normalized via
+///   `normalizedEmail(_:)`, with BCC and Hide-My-Email entries excluded.
+/// - Parameter myAliases: normalized self addresses to exclude from the set.
+func makeParticipantSetIdentity(normalizedEmails: Set<String>,
+                                myAliases: Set<String>) -> ParticipantSetIdentity {
+    let parts = normalizedEmails.filter { !myAliases.contains($0) }
 
-    if domain == "gmail.com" {
-        local = local.replacingOccurrences(of: ".", with: "")
-        if let plus = local.firstIndex(of: "+") {
-            local = String(local[..<plus])
+    let participants: [String]
+    if parts.isEmpty {
+        // Self-conversation: use deterministic alias selection (sorted order)
+        if let firstAlias = myAliases.sorted().first {
+            participants = [firstAlias]
+        } else if let firstEmail = normalizedEmails.sorted().first {
+            participants = [firstEmail]
+        } else {
+            participants = ["unknown@email.com"]
         }
+    } else {
+        participants = parts.sorted()
     }
 
-    return local + "@" + domain
+    return ParticipantSetIdentity(
+        participants: participants,
+        participantHash: calculateParticipantHash(from: participants),
+        type: participants.count <= 1 ? .oneToOne : .group
+    )
+}
+
+/// Compose-side participant-set identity for a raw recipient list.
+/// Returns nil when no recipient yields a usable normalized address.
+func makeRecipientParticipantSetIdentity(recipients: [String],
+                                         myAliases: Set<String>) -> ParticipantSetIdentity? {
+    let normalized = Set(recipients.map(normalizedEmail).filter { !$0.isEmpty })
+    guard !normalized.isEmpty else { return nil }
+    return makeParticipantSetIdentity(normalizedEmails: normalized, myAliases: myAliases)
+}
+
+/// Canonical email normalization for identity hashing. Delegates to
+/// `EmailNormalizer.normalize` so the app has exactly one normalizer — a
+/// second implementation drifting here would fork participant hashes.
+func normalizedEmail(_ raw: String) -> String {
+    EmailNormalizer.normalize(raw)
 }
 
 /// Creates a conversation identity using PARTICIPANT-BASED grouping (iMessage-style).
@@ -56,9 +93,9 @@ func normalizedEmail(_ raw: String) -> String {
 func makeConversationIdentity(from headers: [MessageHeader],
                               gmThreadId: String,
                               myAliases: Set<String>) -> ConversationIdentity {
-    // Extract all participants from From, To, Cc headers
+    // Extract all participant emails from From, To, Cc headers
     // BCC is explicitly excluded for both identity and display
-    func extractParticipantsWithDisplayNames() -> ([String], [String: String]) {
+    func extractEmailsWithDisplayNames() -> (Set<String>, [String: String]) {
         func values(_ h: String) -> [String] {
             headers.filter { $0.name.caseInsensitiveCompare(h) == .orderedSame }
                 .flatMap { $0.value.split(separator: ",").map(String.init) }
@@ -89,46 +126,38 @@ func makeConversationIdentity(from headers: [MessageHeader],
             allEmails.insert(normalized)
         }
 
-        // Remove current user's aliases from participants
-        let parts = allEmails.filter { !myAliases.contains($0) }
-
-        if parts.isEmpty {
-            // Self-conversation: use deterministic alias selection (sorted order)
-            if let firstAlias = myAliases.sorted().first {
-                return ([firstAlias], displayNames)
-            } else if let firstEmail = allEmails.sorted().first {
-                return ([firstEmail], displayNames)
-            } else {
-                return (["unknown@email.com"], displayNames)
-            }
-        } else {
-            return (parts.sorted(), displayNames)
-        }
+        return (allEmails, displayNames)
     }
 
-    let (participants, displayNames) = extractParticipantsWithDisplayNames()
-    let type: ConversationType = participants.count <= 1 ? .oneToOne : .group
+    let (allEmails, displayNames) = extractEmailsWithDisplayNames()
+    let setIdentity = makeParticipantSetIdentity(normalizedEmails: allEmails, myAliases: myAliases)
 
-    // Create participant-based key (used for looking up conversations by participants)
-    let participantKey = "p|\(participants.sorted().joined(separator: "|"))"
-    let participantHash = calculateParticipantHash(from: participants)
+    #if DEBUG
+    let fromHeader = headers.first(where: { $0.name.caseInsensitiveCompare("From") == .orderedSame })?.value ?? "unknown"
+    Log.debug("[ConversationIdentity] participants=\(setIdentity.participants) from=\(fromHeader.prefix(40))", category: .conversation)
+    #endif
+
+    return makeConversationIdentity(from: setIdentity, displayNames: displayNames)
+}
+
+/// Builds a full per-instance ConversationIdentity (fresh keyHash epoch) from a
+/// participant-set identity. Used by the header path above and by callers that
+/// derive the participant set without headers (the participant-set split migration).
+func makeConversationIdentity(from setIdentity: ParticipantSetIdentity,
+                              displayNames: [String: String] = [:]) -> ConversationIdentity {
+    let participantKey = "p|\(setIdentity.participants.joined(separator: "|"))"
 
     // Create unique key for this conversation instance (includes UUID for uniqueness)
     // This allows multiple conversations with the same participants (archived vs active)
     let uniqueKey = "\(participantKey)|\(UUID().uuidString)"
     let keyHash = SHA256.hash(data: Data(uniqueKey.utf8)).map { String(format:"%02x", $0) }.joined()
 
-    #if DEBUG
-    let fromHeader = headers.first(where: { $0.name.caseInsensitiveCompare("From") == .orderedSame })?.value ?? "unknown"
-    Log.debug("[ConversationIdentity] participants=\(participants) from=\(fromHeader.prefix(40))", category: .conversation)
-    #endif
-
     return ConversationIdentity(
         key: uniqueKey,
         keyHash: keyHash,
-        participantHash: participantHash,
-        type: type,
-        participants: participants,
+        participantHash: setIdentity.participantHash,
+        type: setIdentity.type,
+        participants: setIdentity.participants,
         participantDisplayNames: displayNames
     )
 }

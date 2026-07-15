@@ -199,7 +199,9 @@ final class InitialSyncOrchestratorPageDurabilityTests: XCTestCase {
             conversationManager: conversationManager,
             dataCleanupService: DataCleanupService(
                 coreDataStack: coreDataStack,
-                conversationManager: conversationManager
+                conversationManager: conversationManager,
+                migrationFlags: InMemoryMigrationFlagStore(),
+                identityAliasProvider: { _ in [normalizedEmail(Self.myEmail)] }
             ),
             attachmentDownloader: AttachmentDownloader(apiClient: apiClient),
             coreDataStack: coreDataStack,
@@ -299,7 +301,9 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
             conversationManager: conversationManager,
             dataCleanupService: DataCleanupService(
                 coreDataStack: coreDataStack,
-                conversationManager: conversationManager
+                conversationManager: conversationManager,
+                migrationFlags: InMemoryMigrationFlagStore(),
+                identityAliasProvider: { _ in [normalizedEmail(profile.emailAddress)] }
             ),
             attachmentDownloader: AttachmentDownloader.shared,
             coreDataStack: coreDataStack,
