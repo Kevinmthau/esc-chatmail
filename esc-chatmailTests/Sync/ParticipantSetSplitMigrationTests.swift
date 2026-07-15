@@ -586,6 +586,79 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
         )
     }
 
+    func testCorrectlyHomedListMessagesAreNotYankedByMigration() async throws {
+        // Fresh installs run this migration after list grouping is live: a
+        // list message's strict identity must match its conversation's "l|"
+        // hash, or Phase 1 yanks list mail back out into participant chats.
+        let listId = "announce.lists.example.com"
+        let listHash = calculateListConversationHash(fromNormalizedListId: listId)
+        let inbox = LabelBuilder().inbox().build(in: context)
+        let listConversation = ConversationBuilder()
+            .withParticipantHash(listHash)
+            .withListId(listId)
+            .asList()
+            .withLastMessageDate(Date(timeIntervalSince1970: 100))
+            .visible()
+            .build(in: context)
+        let listConversationID = listConversation.id
+
+        let message = try addMessage(
+            id: "msg-list", date: Date(timeIntervalSince1970: 100),
+            from: Self.alice, to: [Self.me],
+            labels: [inbox], in: listConversation
+        )
+        message.listId = listId
+        try context.save()
+
+        await runMigration()
+
+        XCTAssertTrue(migrationFlags.bool(forKey: DataCleanupService.participantSetSplitMigrationKey))
+        let states = try fetchConversationStates()
+        XCTAssertEqual(states.count, 1, "A correctly-homed list message must not be re-homed")
+        XCTAssertEqual(states.first?.id, listConversationID)
+        XCTAssertEqual(states.first?.messageIDs, ["msg-list"])
+        XCTAssertEqual(states.first?.participantHash, listHash)
+    }
+
+    func testMisHomedListMessageMintsListDestination() async throws {
+        // A list message stranded in a participant chat (the pre-flip shape on
+        // a fresh install mid-sync) must move to a freshly minted list
+        // conversation carrying the "l|" hash, .list type, and the listId.
+        let listId = "announce.lists.example.com"
+        let listHash = calculateListConversationHash(fromNormalizedListId: listId)
+        let inbox = LabelBuilder().inbox().build(in: context)
+        let lumped = ConversationBuilder()
+            .withParticipantHash(Self.hashAlice)
+            .withLastMessageDate(Date(timeIntervalSince1970: 200))
+            .visible()
+            .build(in: context)
+        let lumpedID = lumped.id
+
+        try addMessage(
+            id: "msg-a", date: Date(timeIntervalSince1970: 100),
+            from: Self.alice, to: [Self.me],
+            labels: [inbox], in: lumped
+        )
+        let listMessage = try addMessage(
+            id: "msg-list", date: Date(timeIntervalSince1970: 200),
+            from: Self.alice, to: [Self.me],
+            labels: [inbox], in: lumped
+        )
+        listMessage.listId = listId
+        try context.save()
+
+        await runMigration()
+
+        let states = try fetchConversationStates()
+        XCTAssertEqual(states.count, 2)
+        let aliceState = try XCTUnwrap(states.first { $0.id == lumpedID })
+        XCTAssertEqual(aliceState.messageIDs, ["msg-a"])
+        let listState = try state(listHash, in: states)
+        XCTAssertEqual(listState.messageIDs, ["msg-list"])
+        XCTAssertEqual(listState.typeRaw, ConversationType.list.rawValue)
+        XCTAssertEqual(listState.listId, listId)
+    }
+
     // MARK: - Fixture Helpers
 
     private func runMigration(
@@ -657,6 +730,7 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
     private struct ConversationState: Equatable {
         let id: UUID
         let participantHash: String?
+        let listId: String?
         let archivedAt: Date?
         let hasInbox: Bool
         let inboxUnreadCount: Int32
@@ -681,6 +755,7 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
                 ConversationState(
                     id: conversation.id,
                     participantHash: conversation.participantHash,
+                    listId: conversation.listId,
                     archivedAt: conversation.archivedAt,
                     hasInbox: conversation.hasInbox,
                     inboxUnreadCount: conversation.inboxUnreadCount,

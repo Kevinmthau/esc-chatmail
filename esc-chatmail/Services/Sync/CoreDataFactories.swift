@@ -198,6 +198,15 @@ struct ConversationFactory {
         conversation.keyHash = identity.keyHash
         conversation.participantHash = identity.participantHash
         conversation.conversationType = identity.type
+        conversation.listId = identity.listId
+        // Seed the list title from the List-Id display phrase: the rollup
+        // display-name pass keeps a clean stored title for .list rows instead
+        // of recomputing one from the (varying) participants
+        if identity.listId != nil,
+           let listTitle = identity.listTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !listTitle.isEmpty {
+            conversation.displayName = listTitle
+        }
         // New conversations start as active (not archived)
         conversation.archivedAt = nil
         // Set initial lastMessageDate if provided (ensures conversation sorts correctly before message is fully saved)
