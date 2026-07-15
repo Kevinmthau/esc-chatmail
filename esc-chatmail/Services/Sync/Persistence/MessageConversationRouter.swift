@@ -32,7 +32,6 @@ final class MessageConversationRouter {
 
         let identity = conversationManager.createConversationIdentity(
             from: processedMessage.headers,
-            gmThreadId: processedMessage.gmThreadId,
             myAliases: myAliases
         )
 

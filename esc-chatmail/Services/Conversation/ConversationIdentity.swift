@@ -91,7 +91,6 @@ func normalizedEmail(_ raw: String) -> String {
 ///
 /// Key format: "p|<sorted-participants>|<uuid>" where participants excludes the current user
 func makeConversationIdentity(from headers: [MessageHeader],
-                              gmThreadId: String,
                               myAliases: Set<String>) -> ConversationIdentity {
     // Extract all participant emails from From, To, Cc headers
     // BCC is explicitly excluded for both identity and display
@@ -160,10 +159,4 @@ func makeConversationIdentity(from setIdentity: ParticipantSetIdentity,
         participants: setIdentity.participants,
         participantDisplayNames: displayNames
     )
-}
-
-/// Legacy function for backward compatibility
-func makeConversationIdentity(from headers: [MessageHeader],
-                              myAliases: Set<String>) -> ConversationIdentity {
-    return makeConversationIdentity(from: headers, gmThreadId: "", myAliases: myAliases)
 }
