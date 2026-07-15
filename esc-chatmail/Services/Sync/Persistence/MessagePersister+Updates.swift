@@ -89,6 +89,11 @@ extension MessagePersister {
             )
             existingMessage.isFromMe = processedMessage.headers.isFromMe
             existingMessage.isNewsletter = processedMessage.isNewsletter
+            // Assign-only-when-parseable: refetch paths that omit headers must
+            // not clear a previously stored list id.
+            if let listId = ParsedListId.parse(processedMessage.headers.listId)?.id {
+                existingMessage.listId = listId
+            }
             existingMessage.hasAttachments = processedMessage.hasAttachments
             if MessagePreviewText.firstNonEmpty(
                 processedMessage.chatPreviewText,

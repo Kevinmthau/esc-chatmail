@@ -10,6 +10,10 @@ extension Conversation {
     @NSManaged public var type: String
     @NSManaged public var keyHash: String
     @NSManaged public var participantHash: String?
+    /// Normalized List-Id for mailing-list conversations (nil otherwise).
+    /// participantHash for these rows is the one-way "l|" hash; this attribute
+    /// keeps the grouping key recoverable for debugging and future backfill.
+    @NSManaged public var listId: String?
     @NSManaged public var displayName: String?
     @NSManaged public var lastMessageDate: Date?
     @NSManaged public var snippet: String?

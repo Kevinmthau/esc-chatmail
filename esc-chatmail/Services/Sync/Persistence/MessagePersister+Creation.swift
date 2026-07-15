@@ -59,6 +59,7 @@ extension MessagePersister {
             message.isFromMe = processedMessage.headers.isFromMe
             message.isUnread = processedMessage.isUnread
             message.isNewsletter = processedMessage.isNewsletter
+            message.listId = ParsedListId.parse(processedMessage.headers.listId)?.id
             message.hasAttachments = processedMessage.hasAttachments
 
             message.setValue(processedMessage.headers.messageId, forKey: "messageId")

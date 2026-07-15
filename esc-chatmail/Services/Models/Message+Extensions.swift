@@ -110,6 +110,9 @@ extension Message {
     @NSManaged public var isFromMe: Bool
     @NSManaged public var isUnread: Bool
     @NSManaged public var isNewsletter: Bool
+    /// Normalized List-Id header value (see `ParsedListId.parse`); nil for
+    /// non-list mail and for rows persisted before this attribute existed.
+    @NSManaged public var listId: String?
     @NSManaged public var hasAttachments: Bool
     @NSManaged public var bodyStorageURI: String?
     @NSManaged public var bodyText: String?

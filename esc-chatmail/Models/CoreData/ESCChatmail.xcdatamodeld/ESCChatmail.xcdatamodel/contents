@@ -33,6 +33,7 @@
         <attribute name="keyHash" attributeType="String"/>
         <attribute name="lastMessageDate" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="latestInboxDate" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="listId" optional="YES" attributeType="String"/>
         <attribute name="muted" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="participantHash" optional="YES" attributeType="String"/>
         <attribute name="pinned" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
@@ -119,6 +120,7 @@
         <attribute name="isFromMe" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="isNewsletter" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="isUnread" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="listId" optional="YES" attributeType="String"/>
         <attribute name="localModifiedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="messageId" optional="YES" attributeType="String"/>
         <attribute name="references" optional="YES" attributeType="String"/>
