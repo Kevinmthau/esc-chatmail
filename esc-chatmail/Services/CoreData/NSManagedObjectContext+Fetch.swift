@@ -205,10 +205,6 @@ enum MessagePredicates {
         NSPredicate(format: "id IN %@", ids)
     }
 
-    static func threadId(_ threadId: String) -> NSPredicate {
-        NSPredicate(format: "gmThreadId == %@", threadId)
-    }
-
     static func inConversation(_ conversation: Conversation) -> NSPredicate {
         NSPredicate(format: "conversation == %@", conversation)
     }

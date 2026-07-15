@@ -195,16 +195,11 @@ final class ConversationManager: Sendable {
         await merger.mergeActiveConversationDuplicates(in: context)
     }
 
-    /// Merges conversations when messages from the same Gmail thread (`gmThreadId`) have been split across
-    /// multiple conversations.
-    @discardableResult
-    func mergeConversationsByGmThreadId(in context: NSManagedObjectContext) async -> Int {
-        await merger.mergeConversationsByGmThreadId(in: context)
-    }
-
     // MARK: - Conversation Identity
 
-    /// Creates a conversation identity using Gmail threadId as the primary key.
+    /// Creates a participant-set conversation identity from message headers
+    /// (From+To+Cc minus the user's aliases). `gmThreadId` is vestigial and
+    /// unused by identity — chats are keyed strictly by participant set.
     func createConversationIdentity(
         from headers: ProcessedHeaders,
         gmThreadId: String,
@@ -212,15 +207,6 @@ final class ConversationManager: Sendable {
     ) -> ConversationIdentity {
         let messageHeaders = createMessageHeaders(from: headers)
         return makeConversationIdentity(from: messageHeaders, gmThreadId: gmThreadId, myAliases: myAliases)
-    }
-
-    /// Legacy function for backward compatibility.
-    /// @deprecated Use createConversationIdentity(from:gmThreadId:myAliases:) instead
-    func createConversationIdentity(
-        from headers: ProcessedHeaders,
-        myAliases: Set<String>
-    ) -> ConversationIdentity {
-        createConversationIdentity(from: headers, gmThreadId: "", myAliases: myAliases)
     }
 
     // MARK: - Private Helpers

@@ -6,16 +6,14 @@ import CoreData
 struct ConversationLookupService {
     let context: NSManagedObjectContext
 
-    func findActiveConversation(forRecipients recipients: [String]) -> Conversation? {
-        let normalizedParticipants = Array(
-            Set(recipients.map { EmailNormalizer.normalize($0) }.filter { !$0.isEmpty })
-        )
-        guard !normalizedParticipants.isEmpty else { return nil }
-
-        let participantHash = calculateParticipantHash(from: normalizedParticipants)
+    func findActiveConversation(forRecipients recipients: [String], myAliases: Set<String>) -> Conversation? {
+        guard let identity = makeRecipientParticipantSetIdentity(
+            recipients: recipients,
+            myAliases: myAliases
+        ) else { return nil }
 
         do {
-            return try context.fetchActiveConversation(byParticipantHash: participantHash)
+            return try context.fetchActiveConversation(byParticipantHash: identity.participantHash)
         } catch {
             Log.error("Failed to fetch active conversation by participant hash", category: .coreData, error: error)
             return nil

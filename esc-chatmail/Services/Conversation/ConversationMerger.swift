@@ -134,6 +134,15 @@ struct ConversationMerger: Sendable {
                 byHash[hash, default: []].append(conv)
             }
 
+            // Conversations referenced by in-flight optimistic sends must not be
+            // deleted as merge losers: their optimistic message can be unsaved on
+            // the view context (invisible here), and deleting the row would
+            // orphan it and dangle the send-reconciliation record.
+            let pendingSendConversationIds = Set(
+                ((try? context.fetch(OutboundSendMutationRecord.fetchRequest())) ?? [])
+                    .compactMap(\.conversationId)
+            )
+
             var mergedCount = 0
             var deletedObjectIDs = [NSManagedObjectID]()
 
@@ -144,7 +153,7 @@ struct ConversationMerger: Sendable {
                 guard let winner = self.selectWinner(from: group) else {
                     continue
                 }
-                let losers = group.filter { $0 != winner }
+                let losers = group.filter { $0 != winner && !pendingSendConversationIds.contains($0.id) }
 
                 for loser in losers {
                     self.merge(from: loser, into: winner)
@@ -163,110 +172,6 @@ struct ConversationMerger: Sendable {
                 Log.info("Merged \(mergedCount) duplicate active conversations in \(String(format: "%.3f", duration))s", category: .conversation)
             }
         }
-    }
-
-    // MARK: - Thread-Based Merge (Gmail)
-
-    /// Merges conversations when messages from the same Gmail thread (`gmThreadId`) have been split
-    /// across multiple Conversation rows.
-    ///
-    /// This can happen when participant-based identity differs between messages in the same thread
-    /// (common when `Reply-To` uses a different address than `From`).
-    ///
-    /// Forwarded-message splits are preserved: conversations containing explicit forwarding markers
-    /// (subject prefixes or body quote markers) are intentionally kept separate from thread-wide merges.
-    func mergeConversationsByGmThreadId(
-        in context: NSManagedObjectContext,
-        mergeChangesInto contextsToMerge: [NSManagedObjectContext]
-    ) async -> Int {
-        let startTime = CFAbsoluteTimeGetCurrent()
-
-        return await context.perform {
-            let request = Message.fetchRequest()
-            request.predicate = NSPredicate(format: "gmThreadId != '' AND conversation != nil")
-            request.fetchBatchSize = 500
-            request.returnsObjectsAsFaults = true
-            request.relationshipKeyPathsForPrefetching = ["conversation"]
-
-            let messages: [Message]
-            do {
-                messages = try context.fetch(request)
-            } catch {
-                Log.error("Failed to fetch messages for gmThreadId conversation merge", category: .coreData, error: error)
-                return 0
-            }
-
-            // Build a map of gmThreadId -> distinct conversation objectIDs.
-            var threadToConversationIDs: [String: Set<NSManagedObjectID>] = [:]
-            var threadToForwardedConversationIDs: [String: Set<NSManagedObjectID>] = [:]
-            threadToConversationIDs.reserveCapacity(256)
-            threadToForwardedConversationIDs.reserveCapacity(64)
-
-            for message in messages {
-                let threadId = message.gmThreadId
-                guard !threadId.isEmpty, let conversation = message.conversation else { continue }
-                threadToConversationIDs[threadId, default: []].insert(conversation.objectID)
-
-                if ForwardingHeuristics.indicatesForwarding(
-                    subject: message.subject,
-                    contentCandidates: [message.bodyText, message.cleanedSnippet, message.snippet]
-                ) {
-                    threadToForwardedConversationIDs[threadId, default: []].insert(conversation.objectID)
-                }
-            }
-
-            let duplicateThreads = threadToConversationIDs.filter { $0.value.count > 1 }
-            guard !duplicateThreads.isEmpty else {
-                return 0
-            }
-
-            var mergedCount = 0
-            var deletedObjectIDs: [NSManagedObjectID] = []
-
-            for (threadId, conversationIDs) in duplicateThreads {
-                let forwardedConversationIDs = threadToForwardedConversationIDs[threadId] ?? []
-                let mergeableConversationIDs = conversationIDs.subtracting(forwardedConversationIDs)
-
-                if !forwardedConversationIDs.isEmpty && mergeableConversationIDs.count <= 1 {
-                    Log.debug("Skipping gmThreadId merge for \(threadId.prefix(16))... to preserve forwarded conversation split", category: .conversation)
-                    continue
-                }
-
-                let conversations: [Conversation] = mergeableConversationIDs.compactMap { objectID in
-                    context.object(with: objectID) as? Conversation
-                }
-                guard conversations.count > 1 else { continue }
-
-                guard let winner = self.selectWinner(from: conversations) else { continue }
-                let losers = conversations.filter { $0 != winner }
-
-                Log.debug("Merging \(losers.count) conversation(s) for gmThreadId: \(threadId.prefix(16))...", category: .conversation)
-
-                for loser in losers {
-                    self.merge(from: loser, into: winner)
-                    deletedObjectIDs.append(loser.objectID)
-                    context.delete(loser)
-                    mergedCount += 1
-                }
-            }
-
-            if mergedCount > 0 {
-                self.coreDataStack.saveIfNeeded(context: context)
-
-                self.mergeDeletions(deletedObjectIDs, into: contextsToMerge, excluding: context)
-
-                let duration = CFAbsoluteTimeGetCurrent() - startTime
-                Log.info("Merged \(mergedCount) conversation(s) by gmThreadId in \(String(format: "%.3f", duration))s", category: .conversation)
-            }
-
-            return mergedCount
-        }
-    }
-
-    /// Convenience wrapper that merges changes into the app's `viewContext`.
-    @discardableResult
-    func mergeConversationsByGmThreadId(in context: NSManagedObjectContext) async -> Int {
-        await mergeConversationsByGmThreadId(in: context, mergeChangesInto: [coreDataStack.viewContext])
     }
 
     // MARK: - Winner Selection

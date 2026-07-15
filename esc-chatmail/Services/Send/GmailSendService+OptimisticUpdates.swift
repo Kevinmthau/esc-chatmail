@@ -59,10 +59,17 @@ extension GmailSendService {
                 throw SendError.conversationNotFound
             }
         } else {
+            // Use the same alias set the sync router excludes so the optimistic
+            // conversation and the synced-back copy of this send hash identically.
+            // getAliases(from:) falls back to Core Data when the cache is cold
+            // (fresh launch, post-invalidate) — a cached-only read would hash
+            // without self-exclusion exactly when parity is load-bearing.
+            let myAliases = await AliasManager.shared.getAliases(from: viewContext)
             conversation = try findOrCreateOptimisticConversation(
                 participantHash: optimisticConversation?.participantHashValue
-                    ?? makeOptimisticParticipantHash(from: recipients),
+                    ?? makeOptimisticParticipantHash(from: recipients, myAliases: myAliases),
                 recipients: recipients,
+                myAliases: myAliases,
                 in: viewContext
             )
         }
@@ -426,6 +433,7 @@ extension GmailSendService {
     func findOrCreateOptimisticConversation(
         participantHash: String,
         recipients: [String],
+        myAliases: Set<String>,
         in context: NSManagedObjectContext
     ) throws -> Conversation {
         let request = Conversation.fetchRequest()
@@ -454,10 +462,14 @@ extension GmailSendService {
             return existingConversation
         }
 
-        let identityHeaders = recipients.map { MessageHeader(name: "To", value: $0) }
-        let identity = makeConversationIdentity(from: identityHeaders, myAliases: [])
+        // Build the creation identity through the same recipient-list pipeline
+        // that produced the lookup hash — deriving it from synthetic To headers
+        // would let the created conversation's hash diverge from the hash the
+        // fetch above just missed on.
+        let setIdentity = makeRecipientParticipantSetIdentity(recipients: recipients, myAliases: myAliases)
+            ?? makeParticipantSetIdentity(normalizedEmails: [], myAliases: myAliases)
         let conversation = try ConversationFactory.create(
-            for: identity,
+            for: makeConversationIdentity(from: setIdentity),
             initialLastMessageDate: Date(),
             in: context
         )
@@ -514,11 +526,10 @@ extension GmailSendService {
         }
     }
 
-    private func makeOptimisticParticipantHash(from recipients: [String]) -> String {
-        let normalizedParticipants = Array(
-            Set(recipients.map(normalizedEmail).filter { !$0.isEmpty })
-        )
-        return calculateParticipantHash(from: normalizedParticipants)
+    private func makeOptimisticParticipantHash(from recipients: [String], myAliases: Set<String>) -> String {
+        let identity = makeRecipientParticipantSetIdentity(recipients: recipients, myAliases: myAliases)
+            ?? makeParticipantSetIdentity(normalizedEmails: [], myAliases: myAliases)
+        return identity.participantHash
     }
 
     @MainActor
