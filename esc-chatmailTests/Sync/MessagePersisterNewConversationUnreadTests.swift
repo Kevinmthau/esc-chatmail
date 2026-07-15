@@ -163,7 +163,6 @@ final class MessagePersisterNewConversationUnreadTests: XCTestCase {
                 MessageHeader(name: "From", value: "Daisy Wong <daisy@example.com>"),
                 MessageHeader(name: "To", value: "me@example.com")
             ],
-            gmThreadId: "thread-inbox-seed",
             myAliases: ["me@example.com"]
         )
         let context = stack.newBackgroundContext()

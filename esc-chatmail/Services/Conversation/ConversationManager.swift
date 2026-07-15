@@ -198,15 +198,13 @@ final class ConversationManager: Sendable {
     // MARK: - Conversation Identity
 
     /// Creates a participant-set conversation identity from message headers
-    /// (From+To+Cc minus the user's aliases). `gmThreadId` is vestigial and
-    /// unused by identity — chats are keyed strictly by participant set.
+    /// (From+To+Cc minus the user's aliases).
     func createConversationIdentity(
         from headers: ProcessedHeaders,
-        gmThreadId: String,
         myAliases: Set<String>
     ) -> ConversationIdentity {
         let messageHeaders = createMessageHeaders(from: headers)
-        return makeConversationIdentity(from: messageHeaders, gmThreadId: gmThreadId, myAliases: myAliases)
+        return makeConversationIdentity(from: messageHeaders, myAliases: myAliases)
     }
 
     // MARK: - Private Helpers

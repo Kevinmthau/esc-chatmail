@@ -24,7 +24,6 @@ final class ConversationCreationSerializerTests: XCTestCase {
                 MessageHeader(name: "From", value: "Daisy Wong <daisy@example.com>"),
                 MessageHeader(name: "To", value: "me@example.com")
             ],
-            gmThreadId: "thread-seed",
             myAliases: ["me@example.com"]
         )
         let messageDate = Date(timeIntervalSince1970: 1_700_000_000)
@@ -57,7 +56,6 @@ final class ConversationCreationSerializerTests: XCTestCase {
                 MessageHeader(name: "From", value: "blank@example.com"),
                 MessageHeader(name: "To", value: "me@example.com")
             ],
-            gmThreadId: "thread-blank-seed",
             myAliases: ["me@example.com"]
         )
         let context = stack.newBackgroundContext()

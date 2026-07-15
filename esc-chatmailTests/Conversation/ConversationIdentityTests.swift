@@ -12,7 +12,6 @@ final class ConversationIdentityTests: XCTestCase {
 
         let identity = makeConversationIdentity(
             from: headers,
-            gmThreadId: "thread-1",
             myAliases: ["kmthau@gmail.com"]
         )
 
@@ -28,7 +27,6 @@ final class ConversationIdentityTests: XCTestCase {
 
         let identity = makeConversationIdentity(
             from: headers,
-            gmThreadId: "thread-2",
             myAliases: ["kthau@me.com", "kmthau@gmail.com"]
         )
 
@@ -126,7 +124,6 @@ final class ConversationIdentityTests: XCTestCase {
 
             let headerIdentity = makeConversationIdentity(
                 from: headers,
-                gmThreadId: "",
                 myAliases: fixture.aliases
             )
 

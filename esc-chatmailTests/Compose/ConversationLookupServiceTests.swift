@@ -143,7 +143,7 @@ final class ConversationLookupServiceTests: XCTestCase {
 
         let headers = [MessageHeader(name: "From", value: "me@example.com")]
             + recipients.map { MessageHeader(name: "To", value: $0) }
-        let headerIdentity = makeConversationIdentity(from: headers, gmThreadId: "", myAliases: myAliases)
+        let headerIdentity = makeConversationIdentity(from: headers, myAliases: myAliases)
 
         let recipientIdentity = makeRecipientParticipantSetIdentity(
             recipients: recipients,
