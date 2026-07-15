@@ -451,6 +451,13 @@ extension DataCleanupService {
                       !conversation.isDeleted,
                       let conversationHash = conversation.participantHash else { continue }
 
+                // List conversations share their "l|" hash across messages
+                // whose participant sets differ, so no single message defines
+                // the expected rows — a rebuild would copy whichever message
+                // the unordered relationship yields first. Their rows seed
+                // once at creation and stay put.
+                if conversation.conversationType == .list { continue }
+
                 // Post re-home, every message with derivable identity in this
                 // conversation shares its hash; any of them defines the expected
                 // rows (lazy: one identity computation, not one per message).

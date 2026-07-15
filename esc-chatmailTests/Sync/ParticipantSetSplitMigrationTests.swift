@@ -659,6 +659,68 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
         XCTAssertEqual(listState.listId, listId)
     }
 
+    func testTouchedListConversationKeepsCreationSeededRows() async throws {
+        // Phase 2c rebuilds a touched conversation's rows from any one message
+        // sharing its hash — sound for "p|" chats, where one hash implies one
+        // participant set, but unsound for "l|" chats, whose members vary per
+        // message: the rebuild would copy whichever message the unordered
+        // relationship yields first. List rows seed once at creation and must
+        // survive the pass. The stored row here deliberately matches NEITHER
+        // member message, so a rebuild from any pick is observable.
+        let listId = "announce.lists.example.com"
+        let listHash = calculateListConversationHash(fromNormalizedListId: listId)
+        let inbox = LabelBuilder().inbox().build(in: context)
+
+        let listConversation = ConversationBuilder()
+            .withParticipantHash(listHash)
+            .withListId(listId)
+            .asList()
+            .withLastMessageDate(Date(timeIntervalSince1970: 100))
+            .visible()
+            .build(in: context)
+        addConversationParticipant(email: Self.carol, to: listConversation)
+        let homed = try addMessage(
+            id: "msg-list-1", date: Date(timeIntervalSince1970: 100),
+            from: Self.alice, to: [Self.me],
+            labels: [inbox], in: listConversation
+        )
+        homed.listId = listId
+
+        // A mis-homed list message moving in is what marks the list chat as
+        // touched and exposes it to the row-rebuild pass.
+        let lumped = ConversationBuilder()
+            .withParticipantHash(Self.hashBob)
+            .withLastMessageDate(Date(timeIntervalSince1970: 200))
+            .visible()
+            .build(in: context)
+        try addMessage(
+            id: "msg-b", date: Date(timeIntervalSince1970: 150),
+            from: Self.bob, to: [Self.me],
+            labels: [inbox], in: lumped
+        )
+        let misHomed = try addMessage(
+            id: "msg-list-2", date: Date(timeIntervalSince1970: 200),
+            from: Self.bob, to: [Self.me],
+            labels: [inbox], in: lumped
+        )
+        misHomed.listId = listId
+        try context.save()
+
+        await runMigration()
+
+        let states = try fetchConversationStates()
+        let listState = try state(listHash, in: states)
+        XCTAssertEqual(
+            listState.messageIDs, ["msg-list-1", "msg-list-2"],
+            "Fixture guard: the mis-homed list message must actually move in"
+        )
+        XCTAssertEqual(
+            listState.participantEmails, [Self.carol],
+            "Creation-seeded list rows must survive the row-rebuild pass"
+        )
+        XCTAssertEqual(listState.typeRaw, ConversationType.list.rawValue)
+    }
+
     // MARK: - Fixture Helpers
 
     private func runMigration(
